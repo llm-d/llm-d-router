@@ -13,6 +13,33 @@ import (
 	"github.com/neuralmagic/distributed-kv-cache/pkg/utils"
 )
 
+// TokenProcessorConfig holds the configuration for the token processor.
+type TokenProcessorConfig struct {
+	ChunkSize int
+	*TemporaryTokenProcessorConfig
+}
+
+// DefaultTokenProcessorConfig returns the default configuration for the token processor.
+func DefaultTokenProcessorConfig() *TokenProcessorConfig {
+	return &TokenProcessorConfig{
+		ChunkSize: 256,
+		TemporaryTokenProcessorConfig: &TemporaryTokenProcessorConfig{
+			Fmt:       "vllm",
+			WorldSize: 1,
+			WorkerID:  0,
+		},
+	}
+}
+
+// TemporaryTokenProcessorConfig is a temporary structure to hold
+// configuration to align with the current LMCache state.
+// TODO: remove after updating LMCacheEngine
+type TemporaryTokenProcessorConfig struct {
+	Fmt       string
+	WorldSize int
+	WorkerID  int
+}
+
 // TokenProcessor defines the interface for converting tokens to
 // KVBlockKeys.
 type TokenProcessor interface {
@@ -34,30 +61,22 @@ func (c KVBlockKey) String() string {
 	return fmt.Sprintf("%s@%s@%d@%d@%s", c.Fmt, c.ModelName, c.WorldSize, c.WorkerID, c.ChunkHash)
 }
 
-// LMCacheEngineConfig holds the configuration for the token database.
-type LMCacheEngineConfig struct {
-	ChunkSize int
-}
-
-// LMCacheEngineMetadata holds metadata used to populate the cache key.
-type LMCacheEngineMetadata struct {
-	Fmt       string
-	WorldSize int
-	WorkerID  int
-}
-
 // ChunkedTokenDatabase is a concrete implementation of TokenDatabase.
 // It mimics the ChunkedTokenDatabase in the Python code.
 type ChunkedTokenDatabase struct {
-	chunkSize int
-	metadata  LMCacheEngineMetadata
+	TokenProcessorConfig
 }
 
+var _ TokenProcessor = &ChunkedTokenDatabase{}
+
 // NewChunkedTokenDatabase creates a new instance with the given config and metadata.
-func NewChunkedTokenDatabase(config LMCacheEngineConfig, metadata LMCacheEngineMetadata) TokenProcessor {
+func NewChunkedTokenDatabase(config *TokenProcessorConfig) TokenProcessor {
+	if config == nil {
+		config = DefaultTokenProcessorConfig()
+	} // TODO: validate?
+
 	return &ChunkedTokenDatabase{
-		chunkSize: config.ChunkSize,
-		metadata:  metadata,
+		TokenProcessorConfig: *config,
 	}
 }
 
@@ -87,8 +106,8 @@ func (db *ChunkedTokenDatabase) hash(tokens []uint32, prefixHash string) string 
 // chunkTokens splits the input slice of tokens into chunks of size chunkSize.
 func (db *ChunkedTokenDatabase) chunkTokens(tokens []uint32) [][]uint32 {
 	var chunks [][]uint32
-	for i := 0; i < len(tokens); i += db.chunkSize {
-		end := i + db.chunkSize
+	for i := 0; i < len(tokens); i += db.ChunkSize {
+		end := i + db.ChunkSize
 		if end > len(tokens) {
 			end = len(tokens)
 		}
@@ -117,10 +136,10 @@ func (db *ChunkedTokenDatabase) TokensToKVBlockKeys(tokens []uint32, modelName s
 
 	return utils.SliceMap(prefixHashes, func(hashVal string) KVBlockKey {
 		return KVBlockKey{
-			Fmt:       db.metadata.Fmt,
+			Fmt:       db.Fmt,
 			ModelName: modelName,
-			WorldSize: db.metadata.WorldSize,
-			WorkerID:  db.metadata.WorkerID,
+			WorldSize: db.WorldSize,
+			WorkerID:  db.WorkerID,
 			ChunkHash: hashVal,
 		}
 	})

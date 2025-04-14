@@ -15,6 +15,8 @@ type ContainedTokenStore struct {
 	tries map[string]*containedTokenTrie // Key: modelName
 }
 
+var _ Indexer = &ContainedTokenStore{}
+
 // NewContainedTokenStore creates a new indexer.
 func NewContainedTokenStore() Indexer {
 	return &ContainedTokenStore{

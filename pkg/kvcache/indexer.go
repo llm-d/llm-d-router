@@ -3,27 +3,39 @@ package kvcache
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/neuralmagic/distributed-kv-cache/pkg/prefixstore"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"k8s.io/klog/v2"
 
 	"github.com/neuralmagic/distributed-kv-cache/pkg/tokenization"
-
-	"github.com/redis/go-redis/v9"
 )
 
-// Config holds the configuration for the KVCacheIndex.
+// Config holds the configuration for the Indexer module.
+// The configuration cover the different components found in the Indexer
+// module.
 type Config struct {
-	LMCacheEngineConfig
-	LMCacheEngineMetadata
-
-	ScoringStrategy KVScoringStrategy
+	PrefixStoreConfig    *prefixstore.Config
+	TokenProcessorConfig *TokenProcessorConfig
+	KVBlockIndexerConfig *KVBlockIndexerConfig
+	KVBLockScorerConfig  *KVBlockScorerConfig
+	TokenizersPoolConfig *tokenization.Config
 }
 
-// KVCacheIndexer is a concrete implementation of the KVCacheIndex interface.
-type KVCacheIndexer struct {
+// NewDefaultConfig returns a default configuration for the Indexer module.
+func NewDefaultConfig() *Config {
+	return &Config{
+		PrefixStoreConfig:    prefixstore.DefaultConfig(),
+		TokenProcessorConfig: DefaultTokenProcessorConfig(),
+		KVBlockIndexerConfig: DefaultKVBlockIndexerConfig(),
+		KVBLockScorerConfig:  DefaultKVBlockScorerConfig(),
+		TokenizersPoolConfig: tokenization.DefaultConfig(),
+	}
+}
+
+// Indexer is a concrete implementation of the KVCacheIndex interface.
+type Indexer struct {
 	tokensIndexer   prefixstore.Indexer // gets tokens for a prompt
 	tokensProcessor TokenProcessor      // turns tokens to kv block keys
 	kvBlockIndexer  KVBlockIndexer      // looks up pods for block keys
@@ -33,48 +45,52 @@ type KVCacheIndexer struct {
 }
 
 // NewKVCacheIndexer creates a KVCacheIndex given a Config.
-func NewKVCacheIndexer(cfg Config) (*KVCacheIndexer, error) {
-	scorer, err := NewKVBlockScorer(cfg.ScoringStrategy)
+func NewKVCacheIndexer(config *Config) (*Indexer, error) {
+	tokensIndexer, err := prefixstore.NewLRUTokenStore(config.PrefixStoreConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create prefixstore.Indexer: %w", err)
+	}
+
+	tokensProcessor := NewChunkedTokenDatabase(config.TokenProcessorConfig)
+
+	kvBlockIndexer, err := NewRedisKVBlockIndexer(config.KVBlockIndexerConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RedisKVBlockIndexer: %w", err)
+	}
+
+	scorer, err := NewKVBlockScorer(config.KVBLockScorerConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create KVBlockScorer: %w", err)
 	}
 
-	// TODO: move somewhere else
-	redisClient := redis.NewClient(&redis.Options{
-		Addr:     os.Getenv("REDIS_HOST"),
-		Password: os.Getenv("REDIS_PASSWORD"), // no password set
-		DB:       0,                           // use default DB
-	})
+	tokenizersPool := tokenization.NewTokenizationPool(config.TokenizersPoolConfig, tokensIndexer)
 
-	_, err = redisClient.Ping(context.Background()).Result()
-	if err != nil {
-		return nil, fmt.Errorf("could not connect to Redis: %w", err)
-	}
-
-	tokensIndexer, err := prefixstore.NewLRUTokenStore(&prefixstore.LRUStoreConfig{
-		BlockSize: prefixstore.DefaultBlockSize,
-		CacheSize: prefixstore.DefaultMaxCacheSize,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create token indexer: %w", err)
-	}
-
-	return &KVCacheIndexer{
+	return &Indexer{
 		tokensIndexer:   tokensIndexer,
-		tokensProcessor: NewChunkedTokenDatabase(cfg.LMCacheEngineConfig, cfg.LMCacheEngineMetadata),
-		kvBlockIndexer:  NewRedisKVBlockIndexer(redisClient),
+		tokensProcessor: tokensProcessor,
+		kvBlockIndexer:  kvBlockIndexer,
 		kvBlockScorer:   scorer,
-		tokenizersPool:  tokenization.NewTokenizationPool(5, tokensIndexer),
+		tokenizersPool:  tokenizersPool,
 	}, nil
 }
 
 // Run starts the indexer.
-func (k *KVCacheIndexer) Run(ctx context.Context) {
+func (k *Indexer) Run(ctx context.Context) {
 	k.tokenizersPool.Run(ctx)
 }
 
-func (k *KVCacheIndexer) GetPodScores(ctx context.Context, prompt, modelName string) ([]PodScore, error) {
-	logger := klog.FromContext(ctx).WithName("kvcache-indexer")
+// GetPodScores retrieves the pod scores for a given prompt and model name.
+// The function receives the mentioned information and a list of relevant pod
+// identifiers. A Pod identifier should be its address.
+// If the set of pod identifiers is empty, the function assumes all pods are
+// relevant.
+//
+// The function returns a slice of PodScores (pod identifier and score),
+// where the scores are calculated by the active scoring strategy.
+func (k *Indexer) GetPodScores(ctx context.Context, prompt, modelName string,
+	podIdentifiers []string,
+) ([]PodScore, error) {
+	logger := klog.FromContext(ctx)
 	// 0. add to tokenizers pool
 	k.tokenizersPool.AddTask(prompt, modelName)
 
@@ -89,7 +105,7 @@ func (k *KVCacheIndexer) GetPodScores(ctx context.Context, prompt, modelName str
 	logger.Info("made block keys", "blockKeys", blockKeys)
 
 	// 3. query kvblock indexer for pods
-	strBlockKeys, keyToPods, err := k.kvBlockIndexer.GetPodsForKeys(ctx, blockKeys)
+	strBlockKeys, keyToPods, err := k.kvBlockIndexer.GetPodsForKeys(ctx, blockKeys, sets.New[string](podIdentifiers...))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query kvblock indexer: %w", err)
 	}

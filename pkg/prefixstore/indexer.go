@@ -4,6 +4,18 @@ import (
 	"github.com/daulet/tokenizers"
 )
 
+// Config holds the configuration for the Indexer module.
+type Config struct {
+	*LRUStoreConfig
+}
+
+// DefaultConfig returns the default configuration for the Indexer module.
+func DefaultConfig() *Config {
+	return &Config{
+		LRUStoreConfig: defaultLRUStoreConfig(),
+	}
+}
+
 // Indexer interface defines the methods for managing tokenization data.
 // It allows looking up the longest tokenization prefix for a given
 // model-name and prompt.

@@ -10,16 +10,24 @@ import (
 )
 
 const (
-	// DefaultBlockSize defines how many tokens each block contains in the prefix cache.
-	DefaultBlockSize = 256
-	// DefaultMaxCacheSize sets the maximum number of blocks the LRU cache can store.
-	DefaultMaxCacheSize = 500000
+	// defaultBlockSize defines how many tokens each block contains in the prefix cache.
+	defaultBlockSize = 256
+	// defaultMaxCacheSize sets the maximum number of blocks the LRU cache can store.
+	defaultMaxCacheSize = 500000
 )
 
 // LRUStoreConfig contains initialization settings for LRUTokenStore (block size and cache size).
 type LRUStoreConfig struct {
 	CacheSize int
 	BlockSize int
+}
+
+// defaultLRUStoreConfig returns an LRUStoreConfig instance with default configuration.
+func defaultLRUStoreConfig() *LRUStoreConfig {
+	return &LRUStoreConfig{
+		CacheSize: defaultMaxCacheSize,
+		BlockSize: defaultBlockSize,
+	}
 }
 
 // Block holds the tokens contained in the block.
@@ -41,23 +49,17 @@ type LRUTokenStore struct {
 	store map[string]*lru.Cache[uint64, Block]
 }
 
-// NewLRUTokenStore initializes the LRUTokenStore with LRU cache.
-func NewLRUTokenStore(cfg *LRUStoreConfig) (Indexer, error) {
-	cacheSize := DefaultMaxCacheSize
-	blockSize := DefaultBlockSize
+var _ Indexer = &LRUTokenStore{}
 
-	if cfg != nil {
-		if cfg.CacheSize > 0 {
-			cacheSize = cfg.CacheSize
-		}
-		if cfg.BlockSize > 0 {
-			blockSize = cfg.BlockSize
-		}
-	}
+// NewLRUTokenStore initializes the LRUTokenStore with LRU cache.
+func NewLRUTokenStore(config *Config) (Indexer, error) {
+	if config == nil {
+		config = DefaultConfig()
+	} // TODO: add validation
 
 	return &LRUTokenStore{
-		cacheSize: cacheSize,
-		blockSize: blockSize,
+		cacheSize: config.CacheSize,
+		blockSize: config.BlockSize,
 		store:     make(map[string]*lru.Cache[uint64, Block]),
 	}, nil
 }

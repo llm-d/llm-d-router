@@ -22,6 +22,18 @@ const (
 	CoverageBasedMatching KVScoringStrategy = "CoverageBased"
 )
 
+// KVBlockScorerConfig holds the configuration for the KVBlockScorer.
+type KVBlockScorerConfig struct {
+	ScoringStrategy KVScoringStrategy
+}
+
+// DefaultKVBlockScorerConfig returns the default configuration for the KVBlockScorer.
+func DefaultKVBlockScorerConfig() *KVBlockScorerConfig {
+	return &KVBlockScorerConfig{
+		ScoringStrategy: LongestPrefixMatch,
+	}
+}
+
 // KVBlockScorer defines the interface for implementing a KV block scoring
 // strategy.
 type KVBlockScorer interface {
@@ -33,8 +45,8 @@ type KVBlockScorer interface {
 }
 
 // NewKVBlockScorer creates a new KVBlockScorer based on the provided strategy.
-func NewKVBlockScorer(strategy KVScoringStrategy) (KVBlockScorer, error) {
-	switch strategy {
+func NewKVBlockScorer(config *KVBlockScorerConfig) (KVBlockScorer, error) {
+	switch config.ScoringStrategy {
 	case LongestPrefixMatch:
 		return &LongestPrefixScorer{}, nil
 	case HighestBlockHit:
@@ -42,7 +54,7 @@ func NewKVBlockScorer(strategy KVScoringStrategy) (KVBlockScorer, error) {
 	case CoverageBasedMatching:
 		return &CoverageBasedScorer{}, nil
 	default:
-		return nil, fmt.Errorf("unsupported scoring strategy: %s", strategy)
+		return nil, fmt.Errorf("unsupported scoring strategy: %s", config.ScoringStrategy)
 	}
 }
 

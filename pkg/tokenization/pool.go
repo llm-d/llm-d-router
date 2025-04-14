@@ -10,6 +10,20 @@ import (
 	"k8s.io/client-go/util/workqueue"
 )
 
+const defaultWorkers = 5
+
+// Config holds the configuration for the TokenizationPool.
+type Config struct {
+	WorkersCount int
+}
+
+// DefaultConfig returns a default configuration for the TokenizationPool.
+func DefaultConfig() *Config {
+	return &Config{
+		WorkersCount: defaultWorkers,
+	}
+}
+
 // Task represents a unit of work for tokenizing a prompt.
 type Task struct {
 	Prompt    string
@@ -28,9 +42,13 @@ type Pool struct {
 
 // NewTokenizationPool initializes a TokenizationPool with the specified number
 // of workers and the provided Indexer.
-func NewTokenizationPool(workers int, store prefixstore.Indexer) *Pool {
+func NewTokenizationPool(config *Config, store prefixstore.Indexer) *Pool {
+	if config == nil {
+		config = DefaultConfig()
+	}
+
 	return &Pool{
-		workers:   workers,
+		workers:   config.WorkersCount,
 		queue:     workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[Task]()),
 		indexer:   store,
 		tokenizer: NewHFTokenizer(),

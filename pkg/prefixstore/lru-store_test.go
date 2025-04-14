@@ -8,7 +8,9 @@ import (
 )
 
 func TestLRUTokenStore_AddAndRetrieve(t *testing.T) {
-	store, err := NewLRUTokenStore(&LRUStoreConfig{CacheSize: DefaultMaxCacheSize, BlockSize: 4})
+	store, err := NewLRUTokenStore(&Config{
+		&LRUStoreConfig{CacheSize: defaultMaxCacheSize, BlockSize: 4},
+	})
 	assert.NoError(t, err)
 
 	modelName := "test-model"
@@ -29,7 +31,9 @@ func TestLRUTokenStore_AddAndRetrieve(t *testing.T) {
 }
 
 func TestLRUTokenStore_LRUEviction(t *testing.T) {
-	cfg := &LRUStoreConfig{CacheSize: 2, BlockSize: 18} // Small cache size for testing eviction
+	cfg := &Config{
+		&LRUStoreConfig{CacheSize: 2, BlockSize: 18}, // Small cache size for testing eviction
+	}
 	store, err := NewLRUTokenStore(cfg)
 	assert.NoError(t, err)
 
