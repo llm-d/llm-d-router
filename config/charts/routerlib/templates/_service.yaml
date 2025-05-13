@@ -1,4 +1,47 @@
 {{- define "llm-d-epp.service" -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- if $gkePB.enabled }}
+{{- $preferredReplicas := $gkePB.preferredReplicas | default 1 | int }}
+{{- $defaultReplicas := $gkePB.defaultReplicas | default 1 | int }}
+{{- $totalReplicas := add $preferredReplicas $defaultReplicas }}
+{{- range $i := untilStep 0 (int $totalReplicas) 1 }}
+{{- $serviceName := printf "%s-preferred-%d" (include "llm-d-router.name" $) (int $i) }}
+{{- if eq (int $i) 0 }}
+  {{- $serviceName = include "llm-d-router.name" $ }}
+{{- else if ge (int $i) (int $preferredReplicas) }}
+  {{- if eq (int $i) (int $preferredReplicas) }}
+    {{- $serviceName = printf "%s-backup" (include "llm-d-router.name" $) }}
+  {{- else }}
+    {{- $serviceName = printf "%s-backup-%d" (include "llm-d-router.name" $) (sub (int $i) (int $preferredReplicas)) }}
+  {{- end }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" $ | nindent 4 }}
+  annotations:
+    cloud.google.com/neg: '{"exposed_ports":{"{{ $.Values.router.epp.extProcPort | default 9002 }}":{}}}'
+spec:
+  selector:
+    statefulset.kubernetes.io/pod-name: {{ printf "%s-%d" (include "llm-d-router.name" $) (int $i) }}
+  ports:
+    - name: grpc-ext-proc
+      protocol: TCP
+      port: {{ $.Values.router.epp.extProcPort | default 9002 }}
+      appProtocol: kubernetes.io/h2c
+    - name: http-metrics
+      protocol: TCP
+      port: {{ $.Values.router.metricsPort | default 9090 }}
+    {{- with $.Values.router.extraServicePorts }}
+    {{- . | toYaml | nindent 4 }}
+    {{- end }}
+  type: ClusterIP
+---
+{{- end }}
+{{- else }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -13,6 +56,7 @@ spec:
     - name: grpc-ext-proc
       protocol: TCP
       port: {{ .Values.router.epp.extProcPort | default 9002 }}
+      appProtocol: kubernetes.io/h2c
     - name: http-metrics
       protocol: TCP
       port: {{ .Values.router.metricsPort | default 9090 }}
@@ -20,5 +64,5 @@ spec:
     {{- . | toYaml | nindent 4 }}
     {{- end }}
   type: ClusterIP
----
+{{- end }}
 {{- end }}
