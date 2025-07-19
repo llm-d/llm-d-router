@@ -18,7 +18,6 @@ package kvcache
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -26,7 +25,6 @@ import (
 
 	"github.com/llm-d/llm-d-kv-cache-manager/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache-manager/pkg/tokenization"
-	chattemplatego "github.com/llm-d/llm-d-kv-cache-manager/pkg/tokenization/chat_template_go"
 	"github.com/llm-d/llm-d-kv-cache-manager/pkg/tokenization/prefixstore"
 	"github.com/llm-d/llm-d-kv-cache-manager/pkg/utils/logging"
 )
@@ -117,50 +115,14 @@ func (k *Indexer) KVBlockIndex() kvblock.Index {
 //
 // The function returns a map of pod identifiers to scores.
 func (k *Indexer) GetPodScores(ctx context.Context, prompt, modelName string,
-	podIdentifiers []string, chatCompletion bool,
+	podIdentifiers []string,
 ) (map[string]int, error) {
 	traceLogger := klog.FromContext(ctx).V(logging.TRACE).WithName("kvcache.GetPodScores")
-
-	// Handle chat completion requests
-	if chatCompletion {
-		// Parse the prompt as a ChatTemplateRequest JSON
-		var req chattemplatego.ChatTemplateRequest
-		if err := json.Unmarshal([]byte(prompt), &req); err != nil {
-			return nil, fmt.Errorf("failed to parse chat template request: %w", err)
-		}
-
-		// Create or reuse the CGo wrapper (could be a singleton in production)
-		// TODO: cache, instance management
-		wrapper := chattemplatego.NewChatTemplateCGoWrapper()
-
-		// Fetch the chat template for the model (if not already set)
-		if req.ChatTemplate == "" {
-			getReq := chattemplatego.GetChatTemplateRequest{ModelName: modelName}
-			template, template_vars, err := wrapper.GetModelChatTemplate(getReq)
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch chat template: %w", err)
-			}
-			req.ChatTemplate = template
-			req.TemplateVars = template_vars
-		}
-
-		// Apply the template to the request
-		resp, err := wrapper.RenderChatTemplate(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to render chat template: %w", err)
-		}
-		if len(resp.RenderedChats) == 0 {
-			return nil, nil
-		}
-		prompt = resp.RenderedChats[0]
-	}
-
 	// 0. add to tokenizers pool
 	k.tokenizersPool.AddTask(prompt, modelName)
 
 	// 1. get available tokens of longest prefix
 	tokens := k.tokensIndexer.FindLongestContainedTokens(prompt, modelName)
-
 	if len(tokens) == 0 {
 		//nolint:nilnil // no need to return an error
 		return nil, nil
@@ -186,14 +148,6 @@ func (k *Indexer) GetPodScores(ctx context.Context, prompt, modelName string,
 	traceLogger.Info("found pod scores", "pod-scores", podScores)
 
 	return podScores, nil
-}
-
-// GetPodScoresDefault is a convenience function for backward compatibility
-// that calls GetPodScores with chatCompletion=false
-func (k *Indexer) GetPodScoresDefault(ctx context.Context, prompt, modelName string,
-	podIdentifiers []string,
-) (map[string]int, error) {
-	return k.GetPodScores(ctx, prompt, modelName, podIdentifiers, false)
 }
 
 // podsPerKeyPrintHelper formats a map of keys to pod names for printing.
