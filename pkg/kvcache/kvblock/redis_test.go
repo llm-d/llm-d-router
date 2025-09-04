@@ -20,23 +20,31 @@ import (
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/llm-d/llm-d-kv-cache-manager/pkg/kvcache/kvblock"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	. "github.com/llm-d/llm-d-kv-cache-manager/pkg/kvcache/kvblock"
 )
 
-func TestRedisAddBasic(t *testing.T) {
-	// Create index
+// createRedisIndexForTesting creates a new RedisIndex with a mock Redis server for testing.
+func createRedisIndexForTesting(t *testing.T) Index {
+	t.Helper()
 	server, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("failed to start miniredis: %v", err)
-	}
-	defer server.Close()
+	require.NoError(t, err)
 
-	redisConfig := &kvblock.RedisIndexConfig{
+	// Store server reference for cleanup
+	t.Cleanup(func() {
+		server.Close()
+	})
+
+	redisConfig := &RedisIndexConfig{
 		Address: server.Addr(),
 	}
-	index, err := kvblock.NewRedisIndex(redisConfig)
-	assert.NoError(t, err)
+	index, err := NewRedisIndex(redisConfig)
+	require.NoError(t, err)
+	return index
+}
 
-	testAddBasic(t, index)
+// TestRedisIndexBehavior tests the Redis index implementation using common test behaviors.
+func TestRedisIndexBehavior(t *testing.T) {
+	testCommonIndexBehavior(t, createRedisIndexForTesting)
 }

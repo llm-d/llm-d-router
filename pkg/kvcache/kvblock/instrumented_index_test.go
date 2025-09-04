@@ -19,29 +19,30 @@ package kvblock_test
 import (
 	"testing"
 
-	"github.com/llm-d/llm-d-kv-cache-manager/pkg/kvcache/kvblock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	. "github.com/llm-d/llm-d-kv-cache-manager/pkg/kvcache/kvblock"
 )
 
-func TestNewInstrumentedIndex(t *testing.T) {
-	// Create base index
-	baseIndex, err := kvblock.NewInMemoryIndex(nil)
-	assert.NoError(t, err)
-
-	// Wrap with instrumentation
-	instrumented := kvblock.NewInstrumentedIndex(baseIndex)
+func createInstrumentedIndexForTesting(t *testing.T) Index {
+	t.Helper()
+	cfg := DefaultInMemoryIndexConfig()
+	cfg.PodCacheSize = 100 // for testConcurrentOperations
+	index, err := NewInMemoryIndex(cfg)
+	require.NoError(t, err)
+	instrumented := NewInstrumentedIndex(index)
 	assert.NotNil(t, instrumented)
-
-	// Verify it implements Index interface
-	assert.Implements(t, (*kvblock.Index)(nil), instrumented)
+	return instrumented
 }
 
-func TestInstrumentedIndexBasicFunctionality(t *testing.T) {
-	// Create instrumented index
-	baseIndex, err := kvblock.NewInMemoryIndex(nil)
-	assert.NoError(t, err)
-	instrumented := kvblock.NewInstrumentedIndex(baseIndex)
+func TestNewInstrumentedIndex(t *testing.T) {
+	// Wrap with instrumentation
+	instrumented := createInstrumentedIndexForTesting(t)
+	// Verify it implements Index interface
+	assert.Implements(t, (*Index)(nil), instrumented)
+}
 
-	// Test that basic functionality still works through the wrapper
-	testAddBasic(t, instrumented)
+func TestInstrumentedIndexBehavior(t *testing.T) {
+	testCommonIndexBehavior(t, createInstrumentedIndexForTesting)
 }
