@@ -41,14 +41,19 @@ type Config struct {
 }
 
 // NewDefaultConfig returns a default configuration for the Indexer module.
-func NewDefaultConfig() *Config {
+func NewDefaultConfig() (*Config, error) {
+	tokenizerPoolConfig, err := tokenization.DefaultConfig()
+	if err != nil {
+		return &Config{}, fmt.Errorf("failed to get default tokenizer pool config: %w", err)
+	}
+
 	return &Config{
 		PrefixStoreConfig:    prefixstore.DefaultConfig(),
 		TokenProcessorConfig: kvblock.DefaultTokenProcessorConfig(),
 		KVBlockIndexConfig:   kvblock.DefaultIndexConfig(),
 		KVBlockScorerConfig:  DefaultKVBlockScorerConfig(),
-		TokenizersPoolConfig: tokenization.DefaultConfig(),
-	}
+		TokenizersPoolConfig: tokenizerPoolConfig,
+	}, nil
 }
 
 // Indexer is a concrete implementation of the KVCacheIndex interface.

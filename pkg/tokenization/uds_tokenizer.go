@@ -39,6 +39,10 @@ type UdsTokenizerConfig struct {
 	SocketFile string `json:"socketFile"`
 }
 
+func (cfg *UdsTokenizerConfig) IsEnabled() bool {
+	return cfg != nil && cfg.SocketFile != ""
+}
+
 // UdsTokenizer communicates with a Unix Domain Socket server for tokenization.
 type UdsTokenizer struct {
 	httpClient *http.Client
