@@ -55,9 +55,13 @@ func (m *instrumentedIndex) Lookup(
 	metrics.LookupRequests.Inc()
 
 	pods, err := m.next.Lookup(ctx, keys, podIdentifierSet)
+	if err != nil {
+		return nil, err
+	}
+
 	go recordHitMetrics(pods)
 
-	return pods, err
+	return pods, nil
 }
 
 func recordHitMetrics(keyToPods map[Key][]PodEntry) {
@@ -79,5 +83,6 @@ func recordHitMetrics(keyToPods map[Key][]PodEntry) {
 		}
 	}
 
+	metrics.MaxPodHitCount.Add(float64(maxHit))
 	metrics.LookupHits.Add(float64(maxHit))
 }

@@ -40,6 +40,11 @@ var (
 		Namespace: "kvcache", Subsystem: "index", Name: "lookup_requests_total",
 		Help: "Total number of lookup calls",
 	})
+	// MaxPodHitCount counts the maximum cache hits on a single pod on Lookup().
+	MaxPodHitCount = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "kvcache", Subsystem: "index", Name: "max_pod_hit_count_total",
+		Help: "Maximum cache hits on a single pod on Lookup()",
+	})
 	// LookupHits counts how many keys were found in the cache on Lookup().
 	LookupHits = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "kvcache", Subsystem: "index", Name: "lookup_hits_total",
