@@ -28,7 +28,7 @@ import (
 func createInstrumentedIndexForTesting(t *testing.T) Index {
 	t.Helper()
 	cfg := DefaultInMemoryIndexConfig()
-	cfg.PodCacheSize = 100 // for testConcurrentOperations
+	cfg.PodCacheSize = 1000 // for testConcurrentOperations
 	index, err := NewInMemoryIndex(cfg)
 	require.NoError(t, err)
 	instrumented := NewInstrumentedIndex(index)
