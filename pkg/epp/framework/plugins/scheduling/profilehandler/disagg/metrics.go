@@ -36,6 +36,16 @@ const (
 	DecisionTypeEncodeDecode = "encode-decode"
 	// DecisionTypeEncodePrefillDecode is for requests that are gone through E/P/D.
 	DecisionTypeEncodePrefillDecode = "encode-prefill-decode"
+
+	deciderReasonDisabled = "disabled"
+	// deciderReasonInputTooShort indicates the total input is shorter than the NonCachedTokens threshold.
+	deciderReasonInputTooShort = "input_too_short"
+	// deciderReasonSuffixCached indicates the non-cached suffix is below the threshold.
+	deciderReasonSuffixCached = "suffix_cached"
+	// deciderReasonError indicates disaggregation was skipped due to an error.
+	deciderReasonError = "error"
+	// deciderReasonDisaggregated indicates the decider chose to disaggregate.
+	deciderReasonDisaggregated = "disaggregated"
 )
 
 var (
@@ -85,6 +95,15 @@ var (
 		},
 		[]string{"plugin_name", "plugin_type", "model_name", "decision_type"},
 	)
+
+	llmdDeciderEvaluationCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "decider_evaluation_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of disaggregation decider evaluations by reason", compbasemetrics.ALPHA),
+		},
+		[]string{"model_name", "decider", "reason"},
+	)
 )
 
 func registerMetrics(registerer prometheus.Registerer) error {
@@ -96,6 +115,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		LlmdPDDecisionCount,
 		SchedulerDisaggDecisionCount,
 		LlmdDisaggDecisionCount,
+		llmdDeciderEvaluationCount,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -144,4 +164,11 @@ func DisaggDecisionType(encodeUsed, prefillUsed bool) string {
 	default:
 		return DecisionTypeDecodeOnly
 	}
+}
+
+func recordDeciderEvaluation(modelName, decider, reason string) {
+	if modelName == "" {
+		modelName = "unknown"
+	}
+	llmdDeciderEvaluationCount.WithLabelValues(modelName, decider, reason).Inc()
 }

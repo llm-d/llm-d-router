@@ -20,8 +20,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/require"
 )
+
+func TestRegisterMetrics(t *testing.T) {
+	registry := prometheus.NewRegistry()
+
+	require.NoError(t, registerMetrics(registry))
+	require.NoError(t, registerMetrics(registry))
+}
 
 func TestSchedulerPDDecisionCount(t *testing.T) {
 	SchedulerPDDecisionCount.Reset()
@@ -146,5 +155,53 @@ func TestDisaggDecisionType(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("DisaggDecisionType(%v, %v) = %q, want %q", tt.encodeUsed, tt.prefillUsed, got, tt.want)
 		}
+	}
+}
+
+func TestRecordDeciderEvaluation(t *testing.T) {
+	llmdDeciderEvaluationCount.Reset()
+
+	model := "test-model"
+	decider := "prefix-based-pd-decider"
+
+	recordDeciderEvaluation(model, decider, deciderReasonDisabled)
+	recordDeciderEvaluation(model, decider, deciderReasonInputTooShort)
+	recordDeciderEvaluation(model, decider, deciderReasonInputTooShort)
+	recordDeciderEvaluation(model, decider, deciderReasonSuffixCached)
+	recordDeciderEvaluation(model, decider, deciderReasonError)
+	recordDeciderEvaluation(model, decider, deciderReasonDisaggregated)
+	recordDeciderEvaluation(model, decider, deciderReasonDisaggregated)
+	recordDeciderEvaluation(model, decider, deciderReasonDisaggregated)
+
+	expected := `
+		# HELP llm_d_router_epp_decider_evaluation_total [ALPHA] Total number of disaggregation decider evaluations by reason
+		# TYPE llm_d_router_epp_decider_evaluation_total counter
+		llm_d_router_epp_decider_evaluation_total{decider="prefix-based-pd-decider",model_name="test-model",reason="disabled"} 1
+		llm_d_router_epp_decider_evaluation_total{decider="prefix-based-pd-decider",model_name="test-model",reason="disaggregated"} 3
+		llm_d_router_epp_decider_evaluation_total{decider="prefix-based-pd-decider",model_name="test-model",reason="error"} 1
+		llm_d_router_epp_decider_evaluation_total{decider="prefix-based-pd-decider",model_name="test-model",reason="input_too_short"} 2
+		llm_d_router_epp_decider_evaluation_total{decider="prefix-based-pd-decider",model_name="test-model",reason="suffix_cached"} 1
+	`
+
+	if err := testutil.CollectAndCompare(llmdDeciderEvaluationCount, strings.NewReader(expected),
+		"llm_d_router_epp_decider_evaluation_total"); err != nil {
+		t.Errorf("recordDeciderEvaluation() failed: %v", err)
+	}
+}
+
+func TestRecordDeciderEvaluationEmptyModel(t *testing.T) {
+	llmdDeciderEvaluationCount.Reset()
+
+	recordDeciderEvaluation("", "my-decider", deciderReasonDisaggregated)
+
+	expected := `
+		# HELP llm_d_router_epp_decider_evaluation_total [ALPHA] Total number of disaggregation decider evaluations by reason
+		# TYPE llm_d_router_epp_decider_evaluation_total counter
+		llm_d_router_epp_decider_evaluation_total{decider="my-decider",model_name="unknown",reason="disaggregated"} 1
+	`
+
+	if err := testutil.CollectAndCompare(llmdDeciderEvaluationCount, strings.NewReader(expected),
+		"llm_d_router_epp_decider_evaluation_total"); err != nil {
+		t.Errorf("recordDeciderEvaluation() with empty model failed: %v", err)
 	}
 }
