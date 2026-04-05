@@ -136,6 +136,10 @@ type Options struct {
 	fileConfiguration   string
 }
 
+const (
+	// defaultDecodeChunkSize is the default decode chunk size in tokens.
+	defaultDecodeChunkSize = 512
+)
 var (
 	// supportedKVConnectors defines all valid P/D KV connector types
 	supportedKVConnectors = map[string]struct{}{
@@ -178,6 +182,8 @@ func NewOptions() *Options {
 			PoolGroup:               DefaultPoolGroup,
 			InferencePoolNamespace:  os.Getenv(envInferencePoolNamespace),
 			InferencePoolName:       os.Getenv(envInferencePoolName),
+			EnableChunkedDecode:     false,
+			DecodeChunkSize:         defaultDecodeChunkSize,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
@@ -208,6 +214,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&opts.EnableSSRFProtection, enableSSRFProtection, opts.EnableSSRFProtection, "enable SSRF protection using InferencePool allowlisting")
 	fs.BoolVar(&opts.EnablePrefillerSampling, enablePrefillerSampling, opts.EnablePrefillerSampling, "if true, the target prefill instance will be selected randomly from among the provided prefill host values")
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
+	fs.BoolVar(&opts.EnableChunkedDecode, "enable-chunked-decode", opts.EnableChunkedDecode, "if true, enables chunked decode mode (default: false)")
+	fs.IntVar(&opts.DecodeChunkSize, "decode-chunk-size", opts.DecodeChunkSize, fmt.Sprintf("decode chunk size in tokens; for best performance should be a multiple of the block size (default: %d)", defaultDecodeChunkSize))
 
 	fs.StringSliceVar(&opts.enableTLS, enableTLS, opts.enableTLS, "stages to enable TLS for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
 	fs.StringSliceVar(&opts.tlsInsecureSkipVerify, tlsInsecureSkipVerify, opts.tlsInsecureSkipVerify, "stages to skip TLS verification for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
@@ -348,6 +356,11 @@ func (opts *Options) Validate() error {
 				return errors.New("--inference-pool cannot have empty namespace or name")
 			}
 		}
+	}
+
+	// Validate chunked decode
+	if opts.EnableChunkedDecode && opts.DecodeChunkSize <= 0 {
+		return fmt.Errorf("--decode-chunk-size must be a positive integer, got %d", opts.DecodeChunkSize)
 	}
 
 	// Validate SSRF protection requirements

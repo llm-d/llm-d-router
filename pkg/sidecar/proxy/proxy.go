@@ -42,19 +42,21 @@ const (
 
 	requestHeaderRequestID = "x-request-id"
 
-	requestFieldKVTransferParams    = "kv_transfer_params"
-	requestFieldMaxTokens           = "max_tokens"
-	requestFieldMaxCompletionTokens = "max_completion_tokens"
-	requestFieldMaxOutputTokens     = "max_output_tokens" // Used by Responses API
-	requestFieldDoRemotePrefill     = "do_remote_prefill"
-	requestFieldDoRemoteDecode      = "do_remote_decode"
-	requestFieldRemoteBlockIDs      = "remote_block_ids"
-	requestFieldRemoteEngineID      = "remote_engine_id"
-	requestFieldRemoteHost          = "remote_host"
-	requestFieldRemotePort          = "remote_port"
-	requestFieldStream              = "stream"
-	requestFieldStreamOptions       = "stream_options"
-	requestFieldCacheHitThreshold   = "cache_hit_threshold"
+	requestFieldKVTransferParams     = "kv_transfer_params"
+	requestFieldMaxTokens            = "max_tokens"
+	requestFieldMaxCompletionTokens  = "max_completion_tokens"
+	requestFieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
+	requestFieldDoRemotePrefill      = "do_remote_prefill"
+	requestFieldDoRemoteDecode       = "do_remote_decode"
+	requestFieldRemoteBlockIDs       = "remote_block_ids"
+	requestFieldRemoteEngineID       = "remote_engine_id"
+	requestFieldRemoteHost           = "remote_host"
+	requestFieldRemotePort           = "remote_port"
+	requestFieldStream               = "stream"
+	requestFieldStreamOptions        = "stream_options"
+	requestFieldCacheHitThreshold    = "cache_hit_threshold"
+	requestFieldContinueFinalMessage = "continue_final_message"
+	requestFieldAddGenerationPrompt  = "add_generation_prompt"
 
 	responseFieldChoices      = "choices"
 	responseFieldFinishReason = "finish_reason"
@@ -174,6 +176,11 @@ type Config struct {
 	InferencePoolName string
 	// PoolGroup is the API group of the InferencePool resource.
 	PoolGroup string
+
+	// EnableChunkedDecode enables chunked decode mode.
+	EnableChunkedDecode bool
+	// DecodeChunkSize is the decode chunk size in tokens.
+	DecodeChunkSize int
 }
 
 // MarshalJSON implements json.Marshaler for Config.
