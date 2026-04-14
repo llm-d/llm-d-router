@@ -58,11 +58,10 @@ func newChunkedTestSetup(chunkSize int, decodeResponses []string) *chunkedTestIn
 
 	decoderURL, _ := url.Parse(backend.URL)
 	cfg := Config{
-		Port:                "0",
-		DecoderURL:          decoderURL,
-		KVConnector:         KVConnectorNIXLV2,
-		EnableChunkedDecode: true,
-		DecodeChunkSize:     chunkSize,
+		Port:            "0",
+		DecoderURL:      decoderURL,
+		KVConnector:     KVConnectorNIXLV2,
+		DecodeChunkSize: chunkSize,
 	}
 	proxy := NewProxy(cfg)
 
@@ -210,7 +209,7 @@ var _ = Describe("Chunked Decode", func() {
 			DeferCleanup(backend.Close)
 
 			decoderURL, _ := url.Parse(backend.URL)
-			cfg := Config{Port: "0", DecoderURL: decoderURL, KVConnector: KVConnectorNIXLV2, EnableChunkedDecode: true, DecodeChunkSize: 5}
+			cfg := Config{Port: "0", DecoderURL: decoderURL, KVConnector: KVConnectorNIXLV2, DecodeChunkSize: 5}
 			proxy := NewProxy(cfg)
 
 			ctx := newTestContext()
@@ -248,7 +247,7 @@ var _ = Describe("Chunked Decode", func() {
 			DeferCleanup(backend.Close)
 
 			decoderURL, _ := url.Parse(backend.URL)
-			cfg := Config{Port: "0", DecoderURL: decoderURL, KVConnector: KVConnectorNIXLV2, EnableChunkedDecode: true, DecodeChunkSize: 5}
+			cfg := Config{Port: "0", DecoderURL: decoderURL, KVConnector: KVConnectorNIXLV2, DecodeChunkSize: 5}
 			proxy := NewProxy(cfg)
 
 			ctx := newTestContext()

@@ -60,11 +60,11 @@ const (
 )
 
 // dispatchDecode routes a fully-prepared decode request to either chunked
-// decode or the regular decoder proxy based on s.config.EnableChunkedDecode.
-// completionRequest is the already-parsed JSON map; callers that hold it
-// should use this instead of calling s.decoderProxy directly.
+// decode or the regular decoder proxy. Chunked decode is used when
+// s.config.DecodeChunkSize > 0. completionRequest is the already-parsed JSON
+// map; callers that hold it should use this instead of calling s.decoderProxy directly.
 func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) {
-	if s.config.EnableChunkedDecode {
+	if s.config.DecodeChunkSize > 0 {
 		s.runChunkedDecodeFromMap(w, r, completionRequest)
 		return
 	}

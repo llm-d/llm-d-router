@@ -177,9 +177,8 @@ type Config struct {
 	// PoolGroup is the API group of the InferencePool resource.
 	PoolGroup string
 
-	// EnableChunkedDecode enables chunked decode mode.
-	EnableChunkedDecode bool
-	// DecodeChunkSize is the decode chunk size in tokens.
+	// DecodeChunkSize is the token budget per decode chunk.
+	// Chunked decode is enabled when this value is > 0.
 	DecodeChunkSize int
 }
 

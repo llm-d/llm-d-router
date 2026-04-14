@@ -243,15 +243,14 @@ chunk continues seamlessly from where the previous one left off.
 
 ### Configuration
 
-Enable chunked decode via the pd-sidecar flags:
+Enable chunked decode via the pd-sidecar flag:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--enable-chunked-decode` | `false` | Enable chunked decode mode |
-| `--decode-chunk-size` | `512` | Chunk size in tokens; for best performance use a multiple of the KV cache block size |
+| `--decode-chunk-size` | `0` (disabled) | Token budget per chunk. Set to a positive integer to enable chunked decode. For best performance use a multiple of the KV cache block size. |
 
 > [!NOTE]
-> If the request's `max_tokens` / `max_completion_tokens` is less than or equal to `decode-chunk-size`,
+> If the request's `max_tokens` / `max_completion_tokens` is less than or equal to `--decode-chunk-size`,
 > the sidecar falls back to a single regular decode call without chunking.
 
 ---
