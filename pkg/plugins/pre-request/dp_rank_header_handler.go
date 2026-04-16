@@ -4,7 +4,7 @@ package prerequest
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"strconv"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -68,6 +68,14 @@ func (p *DPRankHeaderHandler) WithName(name string) *DPRankHeaderHandler {
 
 // PreRequest reads winning DP ranks from the internal header, resolves the selected
 // pod's rank, sets X-data-parallel-rank, and removes the internal header.
+//
+// The X-data-parallel-rank header is single-valued, so this plugin can only pin
+// the request to the rank associated with the primary target endpoint. The
+// framework routes each HTTP request to one pod (the primary target), so using
+// TargetEndpoints[0] matches the request's actual destination. If a profile
+// ever returns multiple TargetEndpoints (e.g. future fan-out), only the first
+// endpoint's rank is honored and the remainder are ignored with a log line so
+// the divergence is observable.
 func (p *DPRankHeaderHandler) PreRequest(ctx context.Context, request *scheduling.LLMRequest, schedulingResult *scheduling.SchedulingResult) {
 	logger := log.FromContext(ctx)
 	tracer := telemetry.Tracer()
@@ -88,7 +96,9 @@ func (p *DPRankHeaderHandler) PreRequest(ctx context.Context, request *schedulin
 
 	winningRanks, err := common.DecodeWinningRanks(encoded)
 	if err != nil {
-		logger.Error(err, "Failed to decode DP winning ranks header")
+		if !errors.Is(err, common.ErrEmptyWinningRanks) {
+			logger.Error(err, "Failed to decode DP winning ranks header")
+		}
 		span.SetAttributes(attribute.Bool("llm_d.epp.dp.rank_header_set", false))
 		return
 	}
@@ -98,11 +108,16 @@ func (p *DPRankHeaderHandler) PreRequest(ctx context.Context, request *schedulin
 		return
 	}
 
-	// Get the selected pod's address from the primary profile result.
 	primaryResult := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	if primaryResult == nil || len(primaryResult.TargetEndpoints) == 0 {
 		span.SetAttributes(attribute.Bool("llm_d.epp.dp.rank_header_set", false))
 		return
+	}
+
+	if len(primaryResult.TargetEndpoints) > 1 {
+		// Surface the divergence instead of silently dropping extra ranks.
+		logger.V(1).Info("multiple target endpoints in DP request; honoring rank for first only",
+			"count", len(primaryResult.TargetEndpoints))
 	}
 
 	targetPod := primaryResult.TargetEndpoints[0].GetMetadata()
@@ -111,10 +126,9 @@ func (p *DPRankHeaderHandler) PreRequest(ctx context.Context, request *schedulin
 		return
 	}
 
-	podAddress := fmt.Sprintf("%s:%s", targetPod.GetIPAddress(), targetPod.GetPort())
+	podAddress := common.PodAddress(targetPod.GetIPAddress(), targetPod.GetPort())
 	rank, found := winningRanks[podAddress]
 	if !found {
-		// Pod not in winning ranks (non-DP pod in a mixed environment).
 		span.SetAttributes(
 			attribute.Bool("llm_d.epp.dp.rank_header_set", false),
 			attribute.String("llm_d.epp.dp.pod_address", podAddress),

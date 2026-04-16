@@ -4,6 +4,29 @@
 // Package integration_test contains integration tests that require a running vLLM instance.
 //
 // Run with: go test -tags=integration_tests -v ./test/integration/... -vllm-url=http://localhost:8000
+//
+// DP mode coverage:
+//
+//   - Internal LB (default): start a single `vllm serve ... --data-parallel-size N`
+//     and run without -external-lb. Exercises the full @dpN key flow: KV events
+//     published with rank-qualified keys, scorer collapses them, PreRequest
+//     plugin injects `X-data-parallel-rank`, vLLM accepts ranks 0..N-1.
+//
+//   - External LB: start two standalone `vllm serve` processes on different
+//     ports/GPUs and run with `-external-lb=true -vllm-url-alt=...`. Exercises
+//     the non-DP path: indexer keys have no `@dpN` suffix, the scorer never
+//     emits the internal header, PreRequest MUST NOT set
+//     `X-data-parallel-rank`, and each server accepts requests with no rank
+//     header.
+//
+//   - Hybrid LB: multi-node topology where each node runs its own API server
+//     with a local subset of DP ranks. From the scheduler's perspective a
+//     Hybrid LB pod is indistinguishable from an Internal LB pod — both
+//     publish `ip:port@dpN` KV-event keys and both accept the
+//     `X-data-parallel-rank` header — so the Internal LB test suite is the
+//     authoritative coverage for the scheduler-side contract. Running the
+//     real multi-node topology requires separate physical nodes and is out of
+//     scope for this single-host test.
 package integration_test
 
 import (
@@ -30,7 +53,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var vllmURL = flag.String("vllm-url", "http://localhost:8000", "vLLM server URL")
+var (
+	vllmURL    = flag.String("vllm-url", "http://localhost:8000", "vLLM server URL")
+	vllmURLAlt = flag.String("vllm-url-alt", "http://localhost:8001", "Secondary vLLM server URL (for External LB mode)")
+	externalLB = flag.Bool("external-lb", false, "Enable External LB mode tests (requires two vLLM servers)")
+)
 
 // chatRequest sends a chat completion request to vLLM with optional headers.
 func chatRequest(t *testing.T, url, prompt string, headers map[string]string) (int, map[string]interface{}) {
@@ -251,7 +278,8 @@ func TestDPRankHeaderHandler_ToVLLM(t *testing.T) {
 	assert.Equal(t, 200, status, "vLLM should accept the request")
 	t.Logf("Step 6: vLLM response id=%v, status=%d", result["id"], status)
 
-	// Also test rank 1
+	// Also test rank 1 — but only for Internal LB mode.
+	// External LB servers are DP=1, so rank 1 does not exist and vLLM returns 400.
 	winningRanks1 := map[string]int{"127.0.0.1:8000": 1}
 	encoded1, _ := common.EncodeWinningRanks(winningRanks1)
 	request1 := &scheduling.LLMRequest{
@@ -265,7 +293,11 @@ func TestDPRankHeaderHandler_ToVLLM(t *testing.T) {
 	status1, result1 := chatRequest(t, *vllmURL, "Hello from rank 1 pipeline test", map[string]string{
 		common.DataParallelRankHeader: request1.Headers[common.DataParallelRankHeader],
 	})
-	assert.Equal(t, 200, status1)
+	wantStatus1 := 200
+	if *externalLB {
+		wantStatus1 = 400
+	}
+	assert.Equal(t, wantStatus1, status1)
 	t.Logf("Rank 1 test: vLLM response id=%v, status=%d", result1["id"], status1)
 }
 
@@ -362,13 +394,19 @@ func TestVLLMAcceptsSchedulerHeaders(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	// In External LB mode each vLLM server is DP=1, so only rank 0 is valid.
+	// In Internal LB mode the server is DP=N, so rank 0..N-1 are all valid.
+	rank1Status := 200
+	if *externalLB {
+		rank1Status = 400
+	}
 	tests := []struct {
 		name       string
 		rank       string
 		wantStatus int
 	}{
 		{"rank 0", "0", 200},
-		{"rank 1", "1", 200},
+		{"rank 1", "1", rank1Status},
 		{"no header (internal LB)", "", 200},
 		{"invalid rank 99", "99", 400},
 	}
@@ -557,4 +595,82 @@ func TestMultiplePods_CorrectRankSelection(t *testing.T) {
 	t.Logf("Pod 1 → rank %s, Pod 2 → rank %s, Pod 3 → no rank",
 		reqA.Headers[common.DataParallelRankHeader],
 		reqB.Headers[common.DataParallelRankHeader])
+}
+
+// ---------- Test 11: External LB mode (two standalone vLLM processes) ----------
+//
+// In External LB mode each vLLM pod is its own DP world (single rank), so the
+// KV cache indexer produces keys with NO "@dpN" suffix and the scheduler MUST
+// NOT inject the X-data-parallel-rank header.
+//
+// This test requires two vLLM servers (vllm-url and vllm-url-alt) and is gated
+// by -external-lb=true.
+func TestExternalLBMode_NoRankHeaderInjected(t *testing.T) {
+	if !*externalLB {
+		t.Skip("External LB mode disabled (pass -external-lb=true with two vLLM servers)")
+	}
+
+	for _, url := range []string{*vllmURL, *vllmURLAlt} {
+		resp, err := http.Get(url + "/health")
+		if err != nil {
+			t.Skipf("vLLM not available at %s: %v", url, err)
+		}
+		resp.Body.Close()
+		require.Equal(t, 200, resp.StatusCode, "vLLM unhealthy at %s", url)
+	}
+
+	// Raw scores from two external-LB pods — note: no @dpN suffix on keys.
+	rawScores := map[string]float64{
+		"127.0.0.1:8000": 6.0,
+		"127.0.0.1:8001": 9.0,
+	}
+
+	stripped := make(map[string]float64)
+	winningRanks := make(map[string]int)
+	for key, score := range rawScores {
+		baseKey, dpRank := common.ParseDPScoringKey(key)
+		stripped[baseKey] = score
+		if dpRank != common.NoDataParallelRank {
+			winningRanks[baseKey] = dpRank
+		}
+	}
+
+	assert.Equal(t, rawScores, stripped, "external-LB keys pass through unchanged")
+	assert.Empty(t, winningRanks, "no winning ranks in External LB mode")
+
+	// Encoding an empty map must return ErrEmptyWinningRanks so the scorer
+	// skips the internal header entirely.
+	_, err := common.EncodeWinningRanks(winningRanks)
+	require.ErrorIs(t, err, common.ErrEmptyWinningRanks)
+
+	// Simulate PreRequest: no internal header present.
+	endpoint := scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "ext-pod"},
+			Address:        "127.0.0.1",
+			Port:           "8001",
+		}, &fwkdl.Metrics{}, nil,
+	)
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"default": {TargetEndpoints: []scheduling.Endpoint{endpoint}},
+		},
+	}
+	request := &scheduling.LLMRequest{Headers: map[string]string{}}
+	handler := prerequest.NewDPRankHeaderHandler().WithName("ext-lb")
+	handler.PreRequest(context.Background(), request, result)
+
+	_, rankSet := request.Headers[common.DataParallelRankHeader]
+	assert.False(t, rankSet, "External LB: X-data-parallel-rank MUST NOT be injected")
+	_, leaked := request.Headers[common.DPWinningRanksHeader]
+	assert.False(t, leaked, "External LB: internal header MUST NOT be set")
+
+	// Actually round-trip to both vLLM servers without the rank header.
+	for _, url := range []string{*vllmURL, *vllmURLAlt} {
+		status, body := chatRequest(t, url, "External LB round-trip", nil)
+		assert.Equal(t, 200, status, "vLLM at %s should accept request with no rank header", url)
+		assert.Contains(t, body, "id")
+		t.Logf("External LB %s: id=%v", url, body["id"])
+	}
 }
