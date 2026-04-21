@@ -187,6 +187,69 @@ func TestScorer_NilExtraFeaturesForTextOnly(t *testing.T) {
 	assert.Nil(t, capturedExtraFeatures, "extraFeatures should be nil for text-only requests")
 }
 
+func TestScorer_MultiPromptTokenizedIndependentScoring(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	// Two prompts: tokens for "hello" and "world"
+	prompt1Tokens := []uint32{10, 20, 30}
+	prompt2Tokens := []uint32{40, 50, 60}
+
+	var scoreTokensCalls [][]uint32
+	scorer := &Scorer{
+		typedName:      plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: "test"},
+		kvEventsConfig: &kvevents.Config{},
+		pluginState:    plugin.NewPluginState(ctx),
+		kvCacheIndexer: &mockKVCacheIndexer{
+			scoreTokensFunc: func(_ context.Context, tokens []uint32, _ string, _ []string, _ []*kvblock.BlockExtraFeatures) (map[string]float64, error) {
+				tokensCopy := make([]uint32, len(tokens))
+				copy(tokensCopy, tokens)
+				scoreTokensCalls = append(scoreTokensCalls, tokensCopy)
+
+				// Pod A has "hello" cached, Pod B has "world" cached
+				if tokens[0] == 10 {
+					return map[string]float64{
+						"10.0.0.1:8080": 1.0,
+						"10.0.0.2:8080": 0.0,
+					}, nil
+				}
+				return map[string]float64{
+					"10.0.0.1:8080": 0.0,
+					"10.0.0.2:8080": 1.0,
+				}, nil
+			},
+		},
+	}
+
+	allFlat := append(append([]uint32{}, prompt1Tokens...), prompt2Tokens...)
+	request := &scheduling.InferenceRequest{
+		RequestID:   "test-multi-prompt",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				TokenIDs:        allFlat,
+				PerPromptTokens: [][]uint32{prompt1Tokens, prompt2Tokens},
+			},
+		},
+	}
+
+	scores := scorer.Score(ctx, scheduling.NewCycleState(), request, testEndpoints)
+
+	// ScoreTokens should have been called once per prompt
+	require.Len(t, scoreTokensCalls, 2, "ScoreTokens should be called once per prompt")
+	assert.Equal(t, prompt1Tokens, scoreTokensCalls[0])
+	assert.Equal(t, prompt2Tokens, scoreTokensCalls[1])
+
+	// Both pods should have score 1.0 (sum of independent scores)
+	gotByAddress := make(map[string]float64)
+	for ep, score := range scores {
+		if m := ep.GetMetadata(); m != nil {
+			gotByAddress[m.Address+":"+m.Port] = score
+		}
+	}
+	assert.Equal(t, 1.0, gotByAddress["10.0.0.1:8080"], "pod-a: 1.0 from prompt1 + 0.0 from prompt2")
+	assert.Equal(t, 1.0, gotByAddress["10.0.0.2:8080"], "pod-b: 0.0 from prompt1 + 1.0 from prompt2")
+}
+
 func TestScorer_SkipsTokenizedPromptWhenEmpty(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	fromTokensCalled := false

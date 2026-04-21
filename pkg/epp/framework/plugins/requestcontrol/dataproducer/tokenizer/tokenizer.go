@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
@@ -177,6 +178,9 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		return err
 	}
 
+	if tp == nil || len(tp.TokenIDs) == 0 {
+		return nil
+	}
 	request.Body.TokenizedPrompt = tp
 	return nil
 }
@@ -189,7 +193,7 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	traceLogger := logger.V(logging.TRACE)
 
-	if request.Body == nil {
+	if request == nil || request.Body == nil {
 		return nil, errors.New("request body is nil")
 	}
 
@@ -202,18 +206,41 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 		"hasCompletions", request.Body.Completions != nil,
 		"hasChatCompletions", request.Body.ChatCompletions != nil)
 
-	var tokenIDs []uint32
+	var allTokenIDs [][]uint32
 	var mmFeatures *tokenization.MultiModalFeatures
 	var err error
 
 	switch {
 	case request.Body.Completions != nil:
-		traceLogger.Info("Calling Render for completions", "prompt", request.Body.Completions.Prompt)
-		tokenIDs, _, err = p.tokenizer.Render(ctx, request.Body.Completions.Prompt.Raw)
+		prompt := request.Body.Completions.Prompt
+		if len(prompt.Strings) > 0 {
+			allTokenIDs = make([][]uint32, 0, len(prompt.Strings))
+			for i, promptStr := range prompt.Strings {
+				traceLogger.Info("Calling Render for completions string", "promptIndex", i, "promptLength", len(promptStr))
+				sTokenIDs, _, renderErr := p.tokenizer.Render(ctx, promptStr)
+				if renderErr != nil {
+					logger.Error(renderErr, "String tokenization failed, skipping tokenized prompt",
+						"promptIndex", i, "promptLength", len(promptStr))
+					return nil, fmt.Errorf("tokenization failed: %w", renderErr)
+				}
+				allTokenIDs = append(allTokenIDs, sTokenIDs)
+			}
+		} else {
+			traceLogger.Info("Calling Render for completions", "prompt", prompt)
+			var tokenIDs []uint32
+			tokenIDs, _, err = p.tokenizer.Render(ctx, prompt.PlainText())
+			if err == nil {
+				allTokenIDs = [][]uint32{tokenIDs}
+			}
+		}
 	case request.Body.ChatCompletions != nil:
 		renderReq := ChatCompletionsToRenderChatRequest(request.Body.ChatCompletions)
 		traceLogger.Info("Calling RenderChat for chat completions", "messageCount", len(request.Body.ChatCompletions.Messages))
+		var tokenIDs []uint32
 		tokenIDs, mmFeatures, err = p.tokenizer.RenderChat(ctx, renderReq)
+		if err == nil {
+			allTokenIDs = [][]uint32{tokenIDs}
+		}
 	default:
 		return nil, errors.New("unsupported request body type, skipping tokenization")
 	}
@@ -222,11 +249,33 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 		return nil, fmt.Errorf("tokenization failed: %w", err)
 	}
 
-	traceLogger.Info("Tokenization succeeded", "tokenCount", len(tokenIDs))
-	return &fwkrh.TokenizedPrompt{
-		TokenIDs:           tokenIDs,
+	if !hasAnyTokenIDs(allTokenIDs) {
+		return nil, nil
+	}
+
+	totalTokens := 0
+	for _, ids := range allTokenIDs {
+		totalTokens += len(ids)
+	}
+	traceLogger.Info("Tokenization succeeded", "tokenCount", totalTokens, "promptCount", len(allTokenIDs))
+
+	tp := &fwkrh.TokenizedPrompt{
+		TokenIDs:           slices.Concat(allTokenIDs...),
 		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
-	}, nil
+	}
+	if len(allTokenIDs) > 1 {
+		tp.PerPromptTokens = allTokenIDs
+	}
+	return tp, nil
+}
+
+func hasAnyTokenIDs(tokenGroups [][]uint32) bool {
+	for _, tokens := range tokenGroups {
+		if len(tokens) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ChatCompletionsToRenderChatRequest converts a ChatCompletionsRequest to a

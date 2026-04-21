@@ -10,6 +10,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
@@ -71,6 +72,20 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 			name:    "chat completions",
 			req:     chatRequest(false, false, false),
 			wantMin: 1,
+		},
+		{
+			name: "completions string array prompt",
+			req: &scheduling.InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					Completions: &fwkrh.CompletionsRequest{
+						Prompt: fwkrh.Prompt{
+							Strings: []string{"hello world", "foo bar baz"},
+						},
+					},
+				},
+			},
+			// PlainText() = "hello world foo bar baz" = 23 chars / 4 = 5
+			wantMin: 5,
 		},
 		{
 			name:     "empty completions prompt",

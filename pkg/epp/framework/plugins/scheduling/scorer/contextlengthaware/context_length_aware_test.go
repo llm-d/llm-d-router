@@ -284,6 +284,52 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
 }
 
+func TestContextLengthAwareWithMultiPromptTokenizedOnRequest(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	// Two prompts: 20 + 22 = 42 total tokens
+	prompt1Tokens := make([]uint32, 20)
+	prompt2Tokens := make([]uint32, 22)
+	for i := range prompt1Tokens {
+		prompt1Tokens[i] = uint32(i + 1)
+	}
+	for i := range prompt2Tokens {
+		prompt2Tokens[i] = uint32(i + 100)
+	}
+	totalTokenCount := len(prompt1Tokens) + len(prompt2Tokens) // 42
+
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "tight-match"},
+			"10.0.0.1",
+			map[string]string{DefaultContextLengthLabel: fmt.Sprintf("0-%d", totalTokenCount+10)}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "no-match"},
+			"10.0.0.2",
+			map[string]string{DefaultContextLengthLabel: fmt.Sprintf("%d-%d", totalTokenCount+100, totalTokenCount+200)}),
+	}
+
+	params := &contextLengthAwareParameters{
+		Label:           DefaultContextLengthLabel,
+		EnableFiltering: true,
+	}
+	plugin := NewContextLengthAware("test-multi-prompt", params)
+
+	allFlat := append(append([]uint32{}, prompt1Tokens...), prompt2Tokens...)
+	request := &scheduling.InferenceRequest{
+		RequestID:   "test-request",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Strings: []string{"prompt one", "prompt two"}},
+			},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: allFlat},
+		},
+	}
+
+	filteredEndpoints := plugin.Filter(ctx, scheduling.NewCycleState(), request, endpoints)
+	assert.Equal(t, 1, len(filteredEndpoints))
+	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
+}
+
 func TestContextLengthAwareFallbackWithoutTokenizedPrompt(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
