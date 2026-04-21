@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -110,11 +111,7 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 		if ids := body.Completions.Prompt.TokenIDs; len(ids) > 0 {
 			return &fwkrh.TokenizedPrompt{TokenIDs: ids}, nil
 		}
-		tokenIDs, _, err := b.tk.Render(ctx, completionsPayload(body))
-		if err != nil {
-			return nil, fmt.Errorf("tokenization failed: %w", err)
-		}
-		return &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs}, nil
+		return b.renderCompletions(ctx, body)
 	case body.ChatCompletions != nil:
 		tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, chatPayload(body))
 		if err != nil {
@@ -180,4 +177,35 @@ func CacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
 	default:
 		return ""
 	}
+}
+
+// renderCompletions tokenizes a completions prompt. When the prompt is a
+// string array, each element is rendered independently and PerPromptTokens
+// is populated so downstream consumers can score per-prompt.
+func (b renderBackend) renderCompletions(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
+	prompt := body.Completions.Prompt
+	if len(prompt.Strings) <= 1 {
+		tokenIDs, _, err := b.tk.Render(ctx, completionsPayload(body))
+		if err != nil {
+			return nil, fmt.Errorf("tokenization failed: %w", err)
+		}
+		return &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs}, nil
+	}
+
+	allTokenIDs := make([][]uint32, 0, len(prompt.Strings))
+	for _, s := range prompt.Strings {
+		ids, _, err := b.tk.Render(ctx, fwkrh.PayloadMap{"prompt": s})
+		if err != nil {
+			return nil, fmt.Errorf("tokenization failed: %w", err)
+		}
+		allTokenIDs = append(allTokenIDs, ids)
+	}
+	flat := slices.Concat(allTokenIDs...)
+	if len(flat) == 0 {
+		return &fwkrh.TokenizedPrompt{}, nil
+	}
+	return &fwkrh.TokenizedPrompt{
+		TokenIDs:        flat,
+		PerPromptTokens: allTokenIDs,
+	}, nil
 }

@@ -110,6 +110,20 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 			wantMin: 1,
 		},
 		{
+			name: "completions string array prompt",
+			req: &scheduling.InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					Completions: &fwkrh.CompletionsRequest{
+						Prompt: fwkrh.Prompt{
+							Strings: []string{"hello world", "foo bar baz"},
+						},
+					},
+				},
+			},
+			// PlainText() = "hello world foo bar baz" = 23 chars / 4 = 5
+			wantMin: 5,
+		},
+		{
 			name:     "empty completions prompt",
 			req:      completionsRequest(""),
 			wantZero: true,

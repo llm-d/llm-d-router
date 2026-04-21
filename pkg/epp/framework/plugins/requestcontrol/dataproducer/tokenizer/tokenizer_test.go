@@ -220,21 +220,23 @@ func TestRenderBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 	assert.Equal(t, []uint32{5, 6, 7}, tp.TokenIDs)
 }
 
-func TestRenderBackend_CompletionsArrayUsesPlainText(t *testing.T) {
-	var got string
+func TestRenderBackend_CompletionsArrayRendersPerPrompt(t *testing.T) {
+	var prompts []string
 	tok := &mockTokenizer{
 		renderFunc: func(payload fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error) {
 			pm, ok := payload.AsMap()
 			require.True(t, ok)
-			got, _ = pm["prompt"].(string)
+			s, _ := pm["prompt"].(string)
+			prompts = append(prompts, s)
 			return []uint32{1}, nil, nil
 		},
 	}
-	_, err := renderBackend{tk: tok}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+	tp, err := renderBackend{tk: tok}.produce(context.Background(), &fwkrh.InferenceRequestBody{
 		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Strings: []string{"alpha", "beta"}}},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "alpha beta", got)
+	assert.Equal(t, []string{"alpha", "beta"}, prompts)
+	require.Len(t, tp.PerPromptTokens, 2)
 }
 
 func TestProduce_NilBody(t *testing.T) {
@@ -420,6 +422,58 @@ func TestChatCompletionsToRenderChatRequest(t *testing.T) {
 	assert.True(t, result.ReturnAssistantTokensMask)
 
 	assert.Equal(t, toolCalls, result.Conversation[1].ToolCalls)
+}
+
+func TestProduce_StringArrayPrompt(t *testing.T) {
+	tok := &mockTokenizer{
+		renderFunc: func(payload fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error) {
+			pm, _ := payload.AsMap()
+			switch pm["prompt"] {
+			case "hello":
+				return []uint32{10, 20, 30}, nil, nil
+			case "world":
+				return []uint32{40, 50}, nil, nil
+			default:
+				return nil, nil, nil
+			}
+		},
+	}
+	p := newTestPlugin(tok)
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Strings: []string{"hello", "world"}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{10, 20, 30, 40, 50}, req.Body.TokenizedPrompt.TokenIDs)
+	require.Len(t, req.Body.TokenizedPrompt.PerPromptTokens, 2)
+	assert.Equal(t, []uint32{10, 20, 30}, req.Body.TokenizedPrompt.PerPromptTokens[0])
+	assert.Equal(t, []uint32{40, 50}, req.Body.TokenizedPrompt.PerPromptTokens[1])
+}
+
+func TestProduce_SinglePromptNoPerPromptTokens(t *testing.T) {
+	tok := &mockTokenizer{
+		renderFunc: func(_ fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error) {
+			return []uint32{10, 20, 30}, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Raw: "hello"},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{10, 20, 30}, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Nil(t, req.Body.TokenizedPrompt.PerPromptTokens, "single prompt should not set PerPromptTokens")
 }
 
 func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {
