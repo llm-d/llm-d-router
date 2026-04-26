@@ -178,7 +178,7 @@ func NewOptions() *Options {
 			PoolGroup:               DefaultPoolGroup,
 			InferencePoolNamespace:  os.Getenv(envInferencePoolNamespace),
 			InferencePoolName:       os.Getenv(envInferencePoolName),
-			DecodeChunkSize:         0, // 0 disables chunked decode
+			DecodeChunkSize:         0,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),

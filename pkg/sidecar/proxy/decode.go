@@ -57,6 +57,8 @@ const (
 	requestFieldPrompt   = "prompt"
 	requestFieldRole     = "role"
 	requestFieldContent  = "content"
+
+	roleAssistant = "assistant"
 )
 
 // dispatchDecode routes a fully-prepared decode request to either chunked
@@ -267,11 +269,9 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 	// Fix usage: prompt_tokens from first chunk, completion_tokens summed across all chunks.
 	if usage, ok := lastResponse[responseFieldUsage].(map[string]any); ok {
-		usage = maps.Clone(usage)
 		usage[responseFieldPromptTokens] = originalPromptTokens
 		usage[responseFieldCompletionTokens] = totalTokens
 		usage[responseFieldTotalTokens] = originalPromptTokens + totalTokens
-		lastResponse[responseFieldUsage] = usage
 	}
 
 	if choices, ok := lastResponse[responseFieldChoices].([]any); ok && len(choices) > 0 {
@@ -378,7 +378,7 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any) error {
 				responseFieldFinishReason: choice[responseFieldFinishReason],
 			}
 			if _, isChatCompletion := choice[responseFieldMessage]; isChatCompletion {
-				streamChoice[responseFieldDelta] = map[string]any{requestFieldContent: text, requestFieldRole: "assistant"}
+				streamChoice[responseFieldDelta] = map[string]any{requestFieldContent: text, requestFieldRole: roleAssistant}
 			} else {
 				streamChoice[responseFieldText] = text
 				streamChoice[responseFieldLogprobs] = choice[responseFieldLogprobs]
@@ -435,7 +435,7 @@ func appendChunkToRequest(req map[string]any, text string) {
 	}
 	if messages, ok := req[requestFieldMessages].([]any); ok {
 		req[requestFieldMessages] = append(messages, map[string]any{
-			requestFieldRole:    "assistant",
+			requestFieldRole:    roleAssistant,
 			requestFieldContent: text,
 		})
 		return

@@ -26,7 +26,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
@@ -45,7 +44,7 @@ type chunkedTestInfo struct {
 // serves decodeResponses in order; any extra request gets a 500.
 func newChunkedTestSetup(chunkSize int, decodeResponses []string) *chunkedTestInfo {
 	var reqIdx int
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newChunkedTestSetupWithHandler(chunkSize, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if reqIdx >= len(decodeResponses) {
 			http.Error(w, "unexpected request", http.StatusInternalServerError)
 			return
@@ -54,6 +53,12 @@ func newChunkedTestSetup(chunkSize int, decodeResponses []string) *chunkedTestIn
 		fmt.Fprint(w, decodeResponses[reqIdx]) //nolint:errcheck
 		reqIdx++
 	}))
+}
+
+// newChunkedTestSetupWithHandler is like newChunkedTestSetup but accepts a
+// custom backend handler for tests that need to inspect or alter requests.
+func newChunkedTestSetupWithHandler(chunkSize int, handler http.Handler) *chunkedTestInfo {
+	backend := httptest.NewServer(handler)
 	DeferCleanup(backend.Close)
 
 	decoderURL, _ := url.Parse(backend.URL)
@@ -74,8 +79,7 @@ func newChunkedTestSetup(chunkSize int, decodeResponses []string) *chunkedTestIn
 		_ = proxy.Start(ctx)
 		stoppedCh <- struct{}{}
 	}()
-	time.Sleep(200 * time.Millisecond)
-	Expect(proxy.addr).ToNot(BeNil())
+	<-proxy.readyCh
 
 	return &chunkedTestInfo{
 		proxy:     proxy,
@@ -197,7 +201,7 @@ var _ = Describe("Chunked Decode", func() {
 				chatResponse("world", "stop", 9, 5),
 			}
 
-			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ti := newChunkedTestSetupWithHandler(5, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)
 				if reqIdx == 1 {
 					json.Unmarshal(b, &secondReqBody) //nolint:errcheck
@@ -206,25 +210,9 @@ var _ = Describe("Chunked Decode", func() {
 				fmt.Fprint(w, responses[reqIdx]) //nolint:errcheck
 				reqIdx++
 			}))
-			DeferCleanup(backend.Close)
+			defer ti.stop()
 
-			decoderURL, _ := url.Parse(backend.URL)
-			cfg := Config{Port: "0", DecoderURL: decoderURL, KVConnector: KVConnectorNIXLV2, DecodeChunkSize: 5}
-			proxy := NewProxy(cfg)
-
-			ctx := newTestContext()
-			ctx, cancelFn := context.WithCancel(ctx)
-			stoppedCh := make(chan struct{})
-			go func() {
-				defer GinkgoRecover()
-				_ = proxy.Start(ctx)
-				stoppedCh <- struct{}{}
-			}()
-			time.Sleep(200 * time.Millisecond)
-			Expect(proxy.addr).ToNot(BeNil())
-			proxyAddr := "http://" + proxy.addr.String()
-
-			resp := doPost(proxyAddr, ChatCompletionsPath,
+			resp := doPost(ti.addr, ChatCompletionsPath,
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
@@ -234,39 +222,18 @@ var _ = Describe("Chunked Decode", func() {
 			lastMsg := msgs[1].(map[string]any)
 			Expect(lastMsg[requestFieldRole]).To(Equal("assistant"))
 			Expect(lastMsg[requestFieldContent]).To(Equal("hello "))
-
-			cancelFn()
-			<-stoppedCh
 		})
 
 		It("propagates decode backend error to client", func() {
-			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ti := newChunkedTestSetupWithHandler(5, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusBadGateway)
 				fmt.Fprint(w, `{"error":"backend down"}`) //nolint:errcheck
 			}))
-			DeferCleanup(backend.Close)
+			defer ti.stop()
 
-			decoderURL, _ := url.Parse(backend.URL)
-			cfg := Config{Port: "0", DecoderURL: decoderURL, KVConnector: KVConnectorNIXLV2, DecodeChunkSize: 5}
-			proxy := NewProxy(cfg)
-
-			ctx := newTestContext()
-			ctx, cancelFn := context.WithCancel(ctx)
-			stoppedCh := make(chan struct{})
-			go func() {
-				defer GinkgoRecover()
-				_ = proxy.Start(ctx)
-				stoppedCh <- struct{}{}
-			}()
-			time.Sleep(200 * time.Millisecond)
-			Expect(proxy.addr).ToNot(BeNil())
-
-			resp := doPost("http://"+proxy.addr.String(), ChatCompletionsPath,
+			resp := doPost(ti.addr, ChatCompletionsPath,
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusBadGateway))
-
-			cancelFn()
-			<-stoppedCh
 		})
 	})
 
