@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -159,14 +160,28 @@ func (fi *FlowItem) finalizeInternal(outcome types.QueueOutcome, err error) {
 
 	duration := time.Since(fi.enqueueTime)
 	flowKey := fi.originalRequest.FlowKey()
+	outcomeStr := outcome.String()
 	metrics.RecordFlowControlRequestQueueDuration(
-		flowKey.ID, strconv.Itoa(flowKey.Priority), outcome.String(),
+		flowKey.ID, strconv.Itoa(flowKey.Priority), outcomeStr,
 		fi.originalRequest.InferencePoolName(),
 		fi.OriginalRequest().ModelName(), fi.OriginalRequest().TargetModelName(),
 		duration)
 
+	sloClass := metrics.ClassifySLO(extractHeader(fi.originalRequest, request.TTFTSLOMsHeaderKey))
+	metrics.RecordFlowControlSLORequestQueueDuration(
+		sloClass, outcomeStr, fi.originalRequest.InferencePoolName(),
+		duration)
+
 	fi.done <- finalState
 	close(fi.done)
+}
+
+func extractHeader(req flowcontrol.FlowControlRequest, name string) string {
+	infReq := req.InferenceRequest()
+	if infReq == nil || infReq.Headers == nil {
+		return ""
+	}
+	return request.GetHeader(infReq.Headers, name)
 }
 
 // inferOutcome determines the correct QueueOutcome and Error based on the cause of finalization and whether the item
