@@ -250,6 +250,7 @@ func TestDisaggregate(t *testing.T) {
 	tests := []struct {
 		name               string
 		nonCachedTokens    int
+		promptTokens       int
 		request            *scheduling.InferenceRequest
 		endpoint           scheduling.Endpoint
 		expectDisaggregate bool
@@ -276,11 +277,27 @@ func TestDisaggregate(t *testing.T) {
 			expectDisaggregate: false,
 		},
 		{
+			name:               "input shorter than promptTokens threshold",
+			nonCachedTokens:    5,
+			promptTokens:       20,
+			request:            makeRequestWithTokens(10),
+			endpoint:           makeTestEndpoint(0),
+			expectDisaggregate: false,
+		},
+		{
 			name:               "input shorter than threshold",
 			nonCachedTokens:    20,
 			request:            makeRequestWithTokens(10),
 			endpoint:           makeTestEndpoint(0),
 			expectDisaggregate: false,
+		},
+		{
+			name:               "input equals promptTokens threshold",
+			nonCachedTokens:    5,
+			promptTokens:       10,
+			request:            makeRequestWithTokens(10),
+			endpoint:           makeTestEndpoint(5),
+			expectDisaggregate: true,
 		},
 		{
 			name:               "non-cached suffix below threshold",
@@ -321,7 +338,10 @@ func TestDisaggregate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: tt.nonCachedTokens})
+			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{
+				NonCachedTokens: tt.nonCachedTokens,
+				PromptTokens:    tt.promptTokens,
+			})
 			require.NoError(t, err)
 
 			result := decider.disaggregate(ctx, tt.request, tt.endpoint)
