@@ -86,22 +86,38 @@ func (s *Scorer) Consumes() map[string]any {
 
 // Score scores endpoints by matched multimodal encoder-cache weight divided by
 // total multimodal request weight.
-func (s *Scorer) Score(ctx context.Context, _ *scheduling.CycleState, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *Scorer) Score(ctx context.Context, _ *scheduling.CycleState, req *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	logger := log.FromContext(ctx).V(logging.DEBUG)
+	requestID := ""
+	if req != nil {
+		requestID = req.RequestId
+	}
 	scores := make(map[scheduling.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
 		scores[endpoint] = 0
+		pod := ""
+		if meta := endpoint.GetMetadata(); meta != nil {
+			pod = meta.PodName
+		}
 		info, ok := endpoint.Get(attrmm.EncoderCacheMatchInfoKey)
 		if !ok {
-			logger.Info("Multimodal encoder-cache match info not found, assigning score 0", "endpoint", endpoint)
+			logger.Info("mm-cache-affinity: no match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
 			continue
 		}
 		matchInfo, ok := info.(*attrmm.EncoderCacheMatchInfo)
 		if !ok || matchInfo.TotalWeight() <= 0 {
-			logger.Info("Invalid multimodal encoder-cache match info, assigning score 0", "endpoint", endpoint)
+			logger.Info("mm-cache-affinity: invalid match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
 			continue
 		}
-		scores[endpoint] = float64(matchInfo.MatchedWeight()) / float64(matchInfo.TotalWeight())
+		score := float64(matchInfo.MatchedWeight()) / float64(matchInfo.TotalWeight())
+		scores[endpoint] = score
+		logger.Info("mm-cache-affinity: pod score",
+			"requestID", requestID,
+			"pod", pod,
+			"matchedWeight", matchInfo.MatchedWeight(),
+			"totalWeight", matchInfo.TotalWeight(),
+			"affinityScore", score,
+			"scorer", s.typedName)
 	}
 	return scores
 }

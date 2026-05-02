@@ -247,11 +247,7 @@ func hashesFromTokenizedPrompt(features []fwkrh.MultiModalFeature) map[string]in
 		if feature.Hash == "" {
 			continue
 		}
-		weight := feature.Length
-		if weight <= 0 {
-			weight = 1
-		}
-		addMaxWeight(hashToWeight, feature.Hash, weight)
+		addMaxWeight(hashToWeight, feature.Hash, 1)
 	}
 	return emptyToNil(hashToWeight)
 }

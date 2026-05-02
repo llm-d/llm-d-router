@@ -58,7 +58,7 @@ func TestExtractMMHashesWithWeightsFromTokenizedPrompt(t *testing.T) {
 		},
 	})
 
-	assert.Equal(t, map[string]int{"image-a": 576, "image-b": 1}, hashes)
+	assert.Equal(t, map[string]int{"image-a": 1, "image-b": 1}, hashes)
 }
 
 func TestExtractMMHashesWithWeightsFromStructuredChat(t *testing.T) {
@@ -97,9 +97,9 @@ func TestPrepareDataMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.
 
 	require.NoError(t, producer.PrepareRequestData(context.Background(), request, []scheduling.Endpoint{endpointA, endpointB, endpointC}))
 
-	assertMatchInfo(t, endpointA, 80, 100, map[string]int{"hash-a": 80})
-	assertMatchInfo(t, endpointB, 80, 100, map[string]int{"hash-a": 80})
-	assertMatchInfo(t, endpointC, 0, 100, map[string]int{})
+	assertMatchInfo(t, endpointA, 1, 2, map[string]int{"hash-a": 1})
+	assertMatchInfo(t, endpointB, 1, 2, map[string]int{"hash-a": 1})
+	assertMatchInfo(t, endpointC, 0, 2, map[string]int{})
 
 	producer.PreRequest(context.Background(), request, schedulingResult(endpointC))
 
