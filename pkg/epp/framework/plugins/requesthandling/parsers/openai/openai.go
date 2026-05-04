@@ -252,22 +252,36 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 		return nil, responseErr
 	}
 
-	if responseBody["usage"] != nil {
-		usg := responseBody["usage"].(map[string]any)
-		objectType, _ := responseBody["object"].(string)
-		usage := extractUsageByAPIType(usg, objectType)
-		if usg["prompt_token_details"] != nil {
-			detailsMap := usg["prompt_token_details"].(map[string]any)
-			if cachedTokens, ok := detailsMap["cached_tokens"]; ok {
+	rawUsage, ok := responseBody["usage"]
+	if !ok || rawUsage == nil {
+		return nil, nil
+	}
+	usg, ok := rawUsage.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type for usage field: got %T, want object", rawUsage)
+	}
+	objectType, _ := responseBody["object"].(string)
+	usage := extractUsageByAPIType(usg, objectType)
+	if rawDetails, ok := usg["prompt_token_details"]; ok && rawDetails != nil {
+		if detailsMap, ok := rawDetails.(map[string]any); ok {
+			if cached, ok := toInt(detailsMap["cached_tokens"]); ok {
 				usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
-					CachedTokens: int(cachedTokens.(float64)),
+					CachedTokens: cached,
 				}
 			}
 		}
-		return &usage, nil
 	}
-	// No usage data
-	return nil, nil //nolint:nilnil
+	return &usage, nil
+}
+
+// toInt safely converts a JSON-decoded numeric value (float64) to int.
+// Returns false if the value is not a float64 (e.g. nil, string, bool).
+func toInt(v any) (int, bool) {
+	f, ok := v.(float64)
+	if !ok {
+		return 0, false
+	}
+	return int(f), true
 }
 
 // extractUsageByAPIType extracts usage statistics using the appropriate field names
@@ -278,38 +292,38 @@ func extractUsageByAPIType(usg map[string]any, objectType string) fwkrh.Usage {
 	switch {
 	case strings.HasPrefix(objectType, objectTypeResponse) || strings.HasPrefix(objectType, objectTypeConversation):
 		// Responses/Conversations APIs use input_tokens/output_tokens
-		if usg["input_tokens"] != nil {
-			usage.PromptTokens = int(usg["input_tokens"].(float64))
+		if v, ok := toInt(usg["input_tokens"]); ok {
+			usage.PromptTokens = v
 		}
-		if usg["output_tokens"] != nil {
-			usage.CompletionTokens = int(usg["output_tokens"].(float64))
+		if v, ok := toInt(usg["output_tokens"]); ok {
+			usage.CompletionTokens = v
 		}
 	case objectType == objectTypeChatCompletion || objectType == objectTypeChatCompletionChunk || objectType == objectTypeTextCompletion:
 		// Traditional APIs use prompt_tokens/completion_tokens
-		if usg["prompt_tokens"] != nil {
-			usage.PromptTokens = int(usg["prompt_tokens"].(float64))
+		if v, ok := toInt(usg["prompt_tokens"]); ok {
+			usage.PromptTokens = v
 		}
-		if usg["completion_tokens"] != nil {
-			usage.CompletionTokens = int(usg["completion_tokens"].(float64))
+		if v, ok := toInt(usg["completion_tokens"]); ok {
+			usage.CompletionTokens = v
 		}
 	default:
 		// Fallback: try both field naming conventions
-		if usg["input_tokens"] != nil {
-			usage.PromptTokens = int(usg["input_tokens"].(float64))
-		} else if usg["prompt_tokens"] != nil {
-			usage.PromptTokens = int(usg["prompt_tokens"].(float64))
+		if v, ok := toInt(usg["input_tokens"]); ok {
+			usage.PromptTokens = v
+		} else if v, ok := toInt(usg["prompt_tokens"]); ok {
+			usage.PromptTokens = v
 		}
 
-		if usg["output_tokens"] != nil {
-			usage.CompletionTokens = int(usg["output_tokens"].(float64))
-		} else if usg["completion_tokens"] != nil {
-			usage.CompletionTokens = int(usg["completion_tokens"].(float64))
+		if v, ok := toInt(usg["output_tokens"]); ok {
+			usage.CompletionTokens = v
+		} else if v, ok := toInt(usg["completion_tokens"]); ok {
+			usage.CompletionTokens = v
 		}
 	}
 
 	// total_tokens field name is consistent across all API types
-	if usg["total_tokens"] != nil {
-		usage.TotalTokens = int(usg["total_tokens"].(float64))
+	if v, ok := toInt(usg["total_tokens"]); ok {
+		usage.TotalTokens = v
 	}
 
 	return usage

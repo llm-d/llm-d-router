@@ -919,6 +919,66 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 			body:    []byte(`{malformed`),
 			wantErr: true,
 		},
+		// Regression for #981: wrong-typed usage fields panicked the EPP
+		// because of unchecked type assertions. They must now return an
+		// error or fall through gracefully without panicking.
+		{
+			name:    "Wrong-typed usage (string) returns error, no panic",
+			body:    []byte(`{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":"oops"}`),
+			wantErr: true,
+		},
+		{
+			name: "Wrong-typed prompt_token_details (number) is ignored, no panic",
+			body: []byte(`{"object":"chat.completion","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,"prompt_token_details":0}}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     10,
+					CompletionTokens: 20,
+					TotalTokens:      30,
+				},
+			},
+		},
+		{
+			name: "Wrong-typed prompt_tokens (string) is ignored, no panic",
+			body: []byte(`{"object":"chat.completion","usage":{"prompt_tokens":"1024","completion_tokens":20,"total_tokens":30}}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					CompletionTokens: 20,
+					TotalTokens:      30,
+				},
+			},
+		},
+		{
+			name: "Wrong-typed input_tokens (string) is ignored, no panic",
+			body: []byte(`{"object":"response","usage":{"input_tokens":"1024","output_tokens":20,"total_tokens":30}}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					CompletionTokens: 20,
+					TotalTokens:      30,
+				},
+			},
+		},
+		{
+			name: "Wrong-typed cached_tokens (string) is ignored, no panic",
+			body: []byte(`{"object":"chat.completion","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,"prompt_token_details":{"cached_tokens":"40"}}}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     10,
+					CompletionTokens: 20,
+					TotalTokens:      30,
+				},
+			},
+		},
+		{
+			name: "Wrong-typed total_tokens (bool) is ignored, no panic",
+			body: []byte(`{"object":"chat.completion","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":true}}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     10,
+					CompletionTokens: 20,
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
