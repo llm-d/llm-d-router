@@ -39,22 +39,15 @@ const (
 	sseDataPrefix = "data: "
 	sseDone       = "data: [DONE]"
 
-	// legacyChunkPrefix is prepended to each chunk's generated text when
-	// appending to a legacy completions prompt for continuation.
-	legacyChunkPrefix = " Assistant: "
-
 	responseFieldUsage            = "usage"
 	responseFieldCompletionTokens = "completion_tokens"
 	responseFieldPromptTokens     = "prompt_tokens"
 	responseFieldTotalTokens      = "total_tokens"
 	responseFieldMessage          = "message"
-	responseFieldText             = "text"
-	responseFieldLogprobs         = "logprobs"
 	responseFieldIndex            = "index"
 	responseFieldDelta            = "delta"
 
 	requestFieldMessages = "messages"
-	requestFieldPrompt   = "prompt"
 	requestFieldRole     = "role"
 	requestFieldContent  = "content"
 
@@ -62,11 +55,12 @@ const (
 )
 
 // dispatchDecode routes a fully-prepared decode request to either chunked
-// decode or the regular decoder proxy. Chunked decode is used when
-// s.config.DecodeChunkSize > 0. completionRequest is the already-parsed JSON
-// map; callers that hold it should use this instead of calling s.decoderProxy directly.
+// decode or the regular decoder proxy. Chunked decode is only used for
+// chat completions requests when s.config.DecodeChunkSize > 0.
+// completionRequest is the already-parsed JSON map; callers that hold it
+// should use this instead of calling s.decoderProxy directly.
 func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) {
-	if s.config.DecodeChunkSize > 0 {
+	if s.config.DecodeChunkSize > 0 && r.URL.Path == ChatCompletionsPath {
 		s.runChunkedDecodeFromMap(w, r, completionRequest)
 		return
 	}
@@ -96,7 +90,6 @@ func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
 }
 
 // runChunkedDecodeFromMap executes chunked decode given an already-parsed completionRequest map.
-// Both chat completions and legacy completions APIs are supported.
 // Non-streaming: accumulated chunks are reassembled into a single JSON response.
 // Streaming: each chunk is re-emitted as an SSE event; [DONE] closes the stream.
 func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) {
@@ -141,6 +134,16 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	decodeStart := time.Now()
 
 	for {
+		if ctx.Err() != nil {
+			if streamingEnabled && chunkIndex > 0 {
+				fmt.Fprintf(w, "%s\n\n", sseDone) //nolint:errcheck
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+			}
+			return
+		}
+
 		remaining := remainingTokens(originalMaxTokens, totalTokens)
 		if remaining == 0 {
 			s.logger.V(4).Info("chunked decode: token budget exhausted", "totalTokens", totalTokens)
@@ -250,7 +253,25 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		attribute.Float64("llm_d.pd_proxy.chunked_decode.duration_ms", float64(time.Since(decodeStart).Milliseconds())),
 	)
 
+	// Corrected cumulative usage: prompt_tokens from first chunk, completion_tokens summed.
+	cumulativeUsage := map[string]any{
+		responseFieldPromptTokens:     originalPromptTokens,
+		responseFieldCompletionTokens: totalTokens,
+		responseFieldTotalTokens:      originalPromptTokens + totalTokens,
+	}
+
 	if streamingEnabled {
+		// Emit corrected cumulative usage as a final event before [DONE]
+		// when multiple chunks were produced (individual chunk usage is stripped).
+		if chunkIndex > 1 && lastResponse != nil {
+			usageEvent := map[string]any{
+				responseFieldUsage:   cumulativeUsage,
+				responseFieldChoices: []any{},
+			}
+			if data, err := json.Marshal(usageEvent); err == nil {
+				fmt.Fprintf(w, "%s%s\n\n", sseDataPrefix, data) //nolint:errcheck
+			}
+		}
 		fmt.Fprintf(w, "%s\n\n", sseDone) //nolint:errcheck
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
@@ -267,12 +288,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Fix usage: prompt_tokens from first chunk, completion_tokens summed across all chunks.
-	if usage, ok := lastResponse[responseFieldUsage].(map[string]any); ok {
-		usage[responseFieldPromptTokens] = originalPromptTokens
-		usage[responseFieldCompletionTokens] = totalTokens
-		usage[responseFieldTotalTokens] = originalPromptTokens + totalTokens
-	}
+	lastResponse[responseFieldUsage] = cumulativeUsage
 
 	if choices, ok := lastResponse[responseFieldChoices].([]any); ok && len(choices) > 0 {
 		choice := maps.Clone(choices[0].(map[string]any))
@@ -281,8 +297,6 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			msg = maps.Clone(msg)
 			msg[requestFieldContent] = fullText
 			choice[responseFieldMessage] = msg
-		} else {
-			choice[responseFieldText] = fullText
 		}
 		lastResponse[responseFieldChoices] = []any{choice}
 	}
@@ -377,12 +391,7 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any) error {
 				responseFieldIndex:        choice[responseFieldIndex],
 				responseFieldFinishReason: choice[responseFieldFinishReason],
 			}
-			if _, isChatCompletion := choice[responseFieldMessage]; isChatCompletion {
-				streamChoice[responseFieldDelta] = map[string]any{requestFieldContent: text, requestFieldRole: roleAssistant}
-			} else {
-				streamChoice[responseFieldText] = text
-				streamChoice[responseFieldLogprobs] = choice[responseFieldLogprobs]
-			}
+			streamChoice[responseFieldDelta] = map[string]any{requestFieldContent: text, requestFieldRole: roleAssistant}
 			streamChoices = append(streamChoices, streamChoice)
 		}
 		streamChunk[responseFieldChoices] = streamChoices
@@ -411,12 +420,8 @@ func firstChoice(response map[string]any) map[string]any {
 	return choice
 }
 
-// extractChoiceText returns the generated text from a choice object,
-// handling both chat completions (message.content) and legacy (text).
+// extractChoiceText returns the generated text from a choice's message.content.
 func extractChoiceText(choice map[string]any) string {
-	if text, ok := choice[responseFieldText].(string); ok {
-		return text
-	}
 	if msg, ok := choice[responseFieldMessage].(map[string]any); ok {
 		if content, ok := msg[requestFieldContent].(string); ok {
 			return content
@@ -427,23 +432,15 @@ func extractChoiceText(choice map[string]any) string {
 
 // appendChunkToRequest appends the generated text from a chunk to the request
 // so the next chunk continues from where this one left off.
-// For chat completions: appends {"role":"assistant","content":text} to messages.
-// For legacy completions: appends text to the prompt string.
 func appendChunkToRequest(req map[string]any, text string) {
 	if text == "" {
 		return
 	}
-	if messages, ok := req[requestFieldMessages].([]any); ok {
-		req[requestFieldMessages] = append(messages, map[string]any{
-			requestFieldRole:    roleAssistant,
-			requestFieldContent: text,
-		})
-		return
-	}
-	// Legacy completions: append generated text to prompt with assistant prefix.
-	if prompt, ok := req[requestFieldPrompt].(string); ok {
-		req[requestFieldPrompt] = prompt + legacyChunkPrefix + text
-	}
+	messages, _ := req[requestFieldMessages].([]any)
+	req[requestFieldMessages] = append(messages, map[string]any{
+		requestFieldRole:    roleAssistant,
+		requestFieldContent: text,
+	})
 }
 
 // toInt converts a JSON number value (float64, int, or json.Number) to int.

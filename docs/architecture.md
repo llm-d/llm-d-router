@@ -227,7 +227,7 @@ chunk continues seamlessly from where the previous one left off.
 
 ### How it works
 
-1. The sidecar receives a `/v1/chat/completions` or `/v1/completions` request at the decode stage.
+1. The sidecar receives a `/v1/chat/completions` request at the decode stage.
 2. Each chunk is dispatched as a separate request to the local decoder with `max_tokens` capped
    at `decode-chunk-size`.
 3. From the second chunk onward, `continue_final_message=true` and `add_generation_prompt=false` are

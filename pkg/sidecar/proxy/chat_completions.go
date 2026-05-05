@@ -180,7 +180,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 
 		s.logger.V(4).Info("no prefiller or encoder, using decoder only")
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
-			if s.config.DecodeChunkSize > 0 {
+			if s.config.DecodeChunkSize > 0 && r.URL.Path == ChatCompletionsPath {
 				s.runChunkedDecode(w, r)
 				return
 			}

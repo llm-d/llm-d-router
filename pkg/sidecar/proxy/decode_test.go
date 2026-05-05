@@ -259,14 +259,25 @@ var _ = Describe("Chunked Decode", func() {
 				}
 			}
 
-			// Two chunk data events + [DONE]
-			Expect(events).To(HaveLen(3))
-			Expect(events[2]).To(Equal(sseDone))
+			// Two chunk data events + usage event + [DONE]
+			Expect(events).To(HaveLen(4))
+			Expect(events[3]).To(Equal(sseDone))
 
 			var first map[string]any
 			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[0], sseDataPrefix)), &first)).To(Succeed())
 			delta := first["choices"].([]any)[0].(map[string]any)[responseFieldDelta].(map[string]any)
 			Expect(delta[requestFieldContent]).To(Equal("hello "))
+
+			// Verify cumulative usage in the final usage event.
+			var usageEvent map[string]any
+			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[2], sseDataPrefix)), &usageEvent)).To(Succeed())
+			usage := usageEvent["usage"].(map[string]any)
+			promptTokens, _ := toInt(usage["prompt_tokens"])
+			completionTokens, _ := toInt(usage["completion_tokens"])
+			totalTokens, _ := toInt(usage["total_tokens"])
+			Expect(promptTokens).To(Equal(5))
+			Expect(completionTokens).To(Equal(10))
+			Expect(totalTokens).To(Equal(15))
 		})
 	})
 
@@ -299,12 +310,6 @@ var _ = Describe("Chunked Decode", func() {
 			last := msgs[1].(map[string]any)
 			Expect(last[requestFieldRole]).To(Equal("assistant"))
 			Expect(last[requestFieldContent]).To(Equal("hello"))
-		})
-
-		It("appendChunkToRequest appends to legacy prompt with prefix", func() {
-			req := map[string]any{requestFieldPrompt: "Tell me a story"}
-			appendChunkToRequest(req, "Once upon a time")
-			Expect(req[requestFieldPrompt]).To(Equal("Tell me a story" + legacyChunkPrefix + "Once upon a time"))
 		})
 
 		It("appendChunkToRequest is a no-op for empty text", func() {
