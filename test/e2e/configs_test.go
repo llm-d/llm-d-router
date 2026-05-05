@@ -243,7 +243,7 @@ schedulingProfiles:
 const mmCacheAffinityConfig = `apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: multimodal-encoder-cache-data-producer
+- type: multimodal-encoder-producer
   parameters:
     cacheSize: 10000
 - type: tokenizer

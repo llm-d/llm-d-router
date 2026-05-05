@@ -46,7 +46,7 @@ import (
 
 const (
 	// ProducerType is the type name used to register the multimodal data producer.
-	ProducerType = "multimodal-encoder-cache-data-producer"
+	ProducerType = "multimodal-encoder-producer"
 
 	// ProducedKey is the data key emitted by this producer.
 	ProducedKey = attrmm.EncoderCacheMatchInfoKey
