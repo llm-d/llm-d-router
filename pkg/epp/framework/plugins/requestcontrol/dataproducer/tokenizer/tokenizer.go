@@ -250,9 +250,6 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 	}
 
 	tokenIDs := slices.Concat(allTokenIDs...)
-	if len(tokenIDs) == 0 {
-		return nil, nil
-	}
 
 	totalTokens := 0
 	for _, ids := range allTokenIDs {
