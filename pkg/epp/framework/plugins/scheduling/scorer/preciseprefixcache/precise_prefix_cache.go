@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -101,14 +102,18 @@ type speculativeEntries struct {
 // precisePluginState holds data shared between Produce, Score,
 // and PreRequest via PluginState.
 type precisePluginState struct {
-	blockKeys []kvblock.BlockHash
-	scores    map[string]float64 // pod addr → score
+	blockKeys [][]kvblock.BlockHash // per-prompt block keys; single prompt = one element
+	scores    map[string]float64    // pod addr → score
 }
 
 // Clone implements plugin.StateData.
 func (s *precisePluginState) Clone() plugin.StateData {
-	blockKeys := make([]kvblock.BlockHash, len(s.blockKeys))
-	copy(blockKeys, s.blockKeys)
+	blockKeys := make([][]kvblock.BlockHash, len(s.blockKeys))
+	for i, keys := range s.blockKeys {
+		cp := make([]kvblock.BlockHash, len(keys))
+		copy(cp, keys)
+		blockKeys[i] = cp
+	}
 	scores := make(map[string]float64, len(s.scores))
 	for k, v := range s.scores {
 		scores[k] = v
@@ -362,22 +367,21 @@ func (s *Scorer) Produce(ctx context.Context,
 
 	if request.Body.Completions != nil && len(request.Body.Completions.Prompt.Strings) > 0 {
 		aggregatedScores := make(map[string]float64)
-		var allBlockKeys []kvblock.BlockHash
+		var perPromptKeys [][]kvblock.BlockHash
 		totalBlocks := 0
 
 		for _, promptStr := range request.Body.Completions.Prompt.Strings {
-			// Compute block keys for this prompt
 			keys, err := s.kvCacheIndexer.ComputeBlockKeys(ctx, nil, promptStr, request.TargetModel)
 			if err != nil {
 				return fmt.Errorf("failed to compute block keys: %w", err)
 			}
+			perPromptKeys = append(perPromptKeys, keys)
+			totalBlocks += len(keys)
+
 			if len(keys) == 0 {
 				continue
 			}
-			allBlockKeys = append(allBlockKeys, keys...)
-			totalBlocks += len(keys)
 
-			// Lookup + score for this prompt independently
 			keyToPods, err := s.kvCacheIndexer.KVBlockIndex().Lookup(ctx, keys, podSet)
 			if err != nil {
 				return fmt.Errorf("failed to lookup block keys: %w", err)
@@ -391,7 +395,6 @@ func (s *Scorer) Produce(ctx context.Context,
 			}
 		}
 
-		// Store PrefixCacheMatchInfo with aggregated scores
 		blockSize := s.getBlockSizeTokens()
 		for _, ep := range endpoints {
 			md := ep.GetMetadata()
@@ -404,9 +407,8 @@ func (s *Scorer) Produce(ctx context.Context,
 				attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
 		}
 
-		// Save ALL block keys (concatenated) for PreRequest speculative insertion
 		s.pluginState.Write(request.RequestID, stateKey, &precisePluginState{
-			blockKeys: allBlockKeys,
+			blockKeys: perPromptKeys,
 			scores:    aggregatedScores,
 		})
 		return nil
@@ -447,7 +449,7 @@ func (s *Scorer) Produce(ctx context.Context,
 
 	// 6. Save to PluginState for Score() and PreRequest()
 	s.pluginState.Write(request.RequestID, stateKey, &precisePluginState{
-		blockKeys: blockKeys,
+		blockKeys: [][]kvblock.BlockHash{blockKeys},
 		scores:    scores,
 	})
 
@@ -622,9 +624,15 @@ func (s *Scorer) PreRequest(ctx context.Context,
 	index := s.kvCacheIndexer.KVBlockIndex()
 	// Pass nil engineKeys: speculative entries only need requestKey -> PodEntry mapping.
 	// Engine keys will be linked later when confirmed KV events arrive.
-	if err := index.Add(ctx, nil, state.blockKeys, []kvblock.PodEntry{speculativePod}); err != nil {
-		logger.Error(err, "Failed to add speculative entries to index",
-			"pod", speculativePod.PodIdentifier)
+	// Each prompt's block keys are added as an independent prefix chain.
+	for _, keys := range state.blockKeys {
+		if len(keys) == 0 {
+			continue
+		}
+		if err := index.Add(ctx, nil, keys, []kvblock.PodEntry{speculativePod}); err != nil {
+			logger.Error(err, "Failed to add speculative entries to index",
+				"pod", speculativePod.PodIdentifier)
+		}
 	}
 
 	// 4. Handle P/D disaggregation: also add speculative entry for prefill endpoint
@@ -634,23 +642,29 @@ func (s *Scorer) PreRequest(ctx context.Context,
 			PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
 			Speculative:   true,
 		}
-		if err := index.Add(ctx, nil, state.blockKeys, []kvblock.PodEntry{prefillPod}); err != nil {
-			logger.Error(err, "Failed to add speculative entries for prefill endpoint",
-				"pod", prefillPod.PodIdentifier)
+		for _, keys := range state.blockKeys {
+			if len(keys) == 0 {
+				continue
+			}
+			if err := index.Add(ctx, nil, keys, []kvblock.PodEntry{prefillPod}); err != nil {
+				logger.Error(err, "Failed to add speculative entries for prefill endpoint",
+					"pod", prefillPod.PodIdentifier)
+			}
 		}
 		allPodEntries = append(allPodEntries, prefillPod)
 	}
 
 	// 5. Register in TTL cache for automatic eviction
+	flatKeys := slices.Concat(state.blockKeys...)
 	s.speculativeCache.Set(request.RequestID, &speculativeEntries{
-		blockKeys:  state.blockKeys,
+		blockKeys:  flatKeys,
 		podEntries: allPodEntries,
 	}, s.speculativeTTL)
 
 	logger.V(logging.TRACE).Info("Added speculative entries",
 		"requestID", request.RequestID,
 		"pod", speculativePod.PodIdentifier,
-		"blockKeys", len(state.blockKeys),
+		"blockKeys", len(flatKeys),
 		"ttl", s.speculativeTTL)
 }
 
