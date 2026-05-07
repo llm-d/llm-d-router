@@ -153,15 +153,9 @@ func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) 
 	if request == nil || request.Body == nil {
 		return 0, errors.New("request or request body is nil")
 	}
-	if request.Body.Completions != nil {
-		return len(request.Body.Completions.Prompt.Raw) / AverageCharactersPerToken, nil
+
+	if tokenCountHint := request.Body.InputTokenCountHint(); tokenCountHint >= 0 {
+		return tokenCountHint, nil
 	}
-	if request.Body.ChatCompletions == nil {
-		return 0, errors.New("request has neither completions nor chat completions body")
-	}
-	prompt, err := json.Marshal(request.Body.ChatCompletions.Messages)
-	if err != nil {
-		return 0, err
-	}
-	return len(prompt) / AverageCharactersPerToken, nil
+	return len(request.Body.PromptText()) / AverageCharactersPerToken, nil
 }
