@@ -29,6 +29,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 func TestInFlightLoadProducer_Produce(t *testing.T) {
@@ -257,4 +258,201 @@ func makeTokenRequest(requestID, prompt string) *fwksched.InferenceRequest {
 			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
 		},
 	}
+}
+
+// TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease verifies that when
+// IncludeOutputTokens is false, token counters are released as soon as the first chunk
+// arrives (StartOfStream), while request counters are released only on EndOfStream.
+func TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease(t *testing.T) {
+	t.Parallel()
+
+	producer := &InFlightLoadProducer{
+		requestTracker:      newConcurrencyTracker(),
+		tokenTracker:        newConcurrencyTracker(),
+		tokenEstimator:      NewSimpleTokenEstimator(),
+		includeOutputTokens: false,
+	}
+	ctx := context.Background()
+	endpointName := "exclude-output-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	// 16 chars / 4 = 4 input tokens. Output tokens are excluded.
+	req := makeTokenRequest("req-no-output", "1234567890123456")
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(4), producer.tokenTracker.get(endpointID), "only input tokens should be tracked")
+
+	// First chunk arrives: tokens released, request still in flight.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID), "request counter should still be held")
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID), "tokens should be released at StartOfStream")
+
+	// EndOfStream releases the request counter.
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+}
+
+// TestInFlightLoadProducer_ExcludeOutputTokens_SingleChunk verifies that a single-chunk
+// response (StartOfStream && EndOfStream both true) releases both tokens and the request.
+func TestInFlightLoadProducer_ExcludeOutputTokens_SingleChunk(t *testing.T) {
+	t.Parallel()
+
+	producer := &InFlightLoadProducer{
+		requestTracker:      newConcurrencyTracker(),
+		tokenTracker:        newConcurrencyTracker(),
+		tokenEstimator:      NewSimpleTokenEstimator(),
+		includeOutputTokens: false,
+	}
+	ctx := context.Background()
+	endpointName := "single-chunk-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	req := makeTokenRequest("req-single", "1234567890123456")
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(4), producer.tokenTracker.get(endpointID))
+
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true, EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+}
+
+// TestInFlightLoadProducer_PrefixCacheDiscount verifies that when PrefixCacheMatchInfo
+// is published on the endpoint, the matched prefix is excluded from the tracked input
+// tokens, and that release subtracts the same (discounted) amount.
+func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
+	t.Parallel()
+
+	producer := &InFlightLoadProducer{
+		requestTracker:      newConcurrencyTracker(),
+		tokenTracker:        newConcurrencyTracker(),
+		tokenEstimator:      NewSimpleTokenEstimator(),
+		includeOutputTokens: true,
+	}
+	ctx := context.Background()
+	endpointName := "prefix-cache-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	// Prompt: 32 chars / 4 = 8 input tokens. Output = 8 * 1.5 = 12.
+	// With block_size=4, total=2 blocks, matched=1 block (4 tokens cached):
+	//   uncached_input = (2-1)*4 + max(0, 8-2*4) = 4
+	//   total tokens = 4 + 12 = 16
+	endpoint := newStubSchedulingEndpoint(endpointName)
+	endpoint.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+
+	req := makeTokenRequest("req-prefix", "12345678901234567890123456789012")
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	}
+
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(16), producer.tokenTracker.get(endpointID),
+		"only uncached input (4) plus output (12) should be tracked")
+
+	// Release uses the exact stored value, returning to zero.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID),
+		"release should subtract the same discounted amount that was added")
+}
+
+// TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint verifies that two profiles
+// targeting different endpoints with different prefix-cache match levels each get their
+// own discounted token amount, and that both counters return to zero after release.
+func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
+	t.Parallel()
+
+	producer := &InFlightLoadProducer{
+		requestTracker:      newConcurrencyTracker(),
+		tokenTracker:        newConcurrencyTracker(),
+		tokenEstimator:      NewSimpleTokenEstimator(),
+		includeOutputTokens: true,
+	}
+	ctx := context.Background()
+	podA := "pod-a-cached"
+	podB := "pod-b-uncached"
+	idA := fullEndpointName(podA)
+	idB := fullEndpointName(podB)
+
+	// 8 input tokens, output 12.
+	epA := newStubSchedulingEndpoint(podA)
+	epA.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(2, 2, 4)) // fully cached
+	epB := newStubSchedulingEndpoint(podB)
+	epB.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(0, 2, 4)) // none cached
+
+	req := makeTokenRequest("req-multi-cache", "12345678901234567890123456789012")
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "prefill",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{epA}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{epB}},
+		},
+	}
+
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(0+12), producer.tokenTracker.get(idA), "fully cached: only output tokens")
+	require.Equal(t, int64(8+12), producer.tokenTracker.get(idB), "uncached: input + output")
+
+	// Drive the response lifecycle: StartOfStream releases prefill, EndOfStream releases decode.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.tokenTracker.get(idA))
+	require.Equal(t, int64(0), producer.tokenTracker.get(idB))
+	require.Equal(t, int64(0), producer.requestTracker.get(idA))
+	require.Equal(t, int64(0), producer.requestTracker.get(idB))
+}
+
+// TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint verifies that
+// when multiple profiles target the same endpoint, each contributes to the counters
+// independently and each release subtracts the exact added amount, returning counters
+// to their pre-request baseline.
+func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t *testing.T) {
+	t.Parallel()
+
+	producer := &InFlightLoadProducer{
+		requestTracker:      newConcurrencyTracker(),
+		tokenTracker:        newConcurrencyTracker(),
+		tokenEstimator:      NewSimpleTokenEstimator(),
+		includeOutputTokens: true,
+	}
+	ctx := context.Background()
+	endpointName := "shared-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	// 16 chars / 4 = 4 input tokens, 6 output, total 10 tokens per profile.
+	// Two profiles both targeting the same endpoint => 2 requests, 20 tokens.
+	req := makeTokenRequest("req-shared", "1234567890123456")
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "prefill",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}},
+		},
+	}
+
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(2), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(20), producer.tokenTracker.get(endpointID))
+
+	// StartOfStream releases the prefill profile only (1 request, 10 tokens).
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+
+	// EndOfStream releases the remaining (decode) profile.
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID),
+		"counters must return to zero with no drift across profiles")
 }
