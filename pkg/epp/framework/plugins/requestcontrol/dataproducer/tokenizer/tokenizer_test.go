@@ -19,6 +19,7 @@ package tokenizer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
@@ -264,6 +265,53 @@ func TestProduce_StringArrayPrompt(t *testing.T) {
 	require.Len(t, req.Body.TokenizedPrompt.PerPromptTokens, 2)
 	assert.Equal(t, []uint32{10, 20, 30}, req.Body.TokenizedPrompt.PerPromptTokens[0])
 	assert.Equal(t, []uint32{40, 50}, req.Body.TokenizedPrompt.PerPromptTokens[1])
+}
+
+func TestProduce_StringArrayPromptFailsOpenOnPartialRenderError(t *testing.T) {
+	tok := &mockTokenizer{
+		renderFunc: func(prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
+			switch prompt {
+			case "hello":
+				return []uint32{10, 20, 30}, nil, nil
+			case "broken":
+				return nil, nil, errors.New("render failed")
+			default:
+				return []uint32{40, 50}, nil, nil
+			}
+		},
+	}
+	p := newTestPlugin(tok)
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Strings: []string{"hello", "broken", "world"}},
+			},
+		},
+	}
+	err := p.Produce(context.Background(), req, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tokenization failed")
+	assert.Nil(t, req.Body.TokenizedPrompt)
+}
+
+func TestProduce_StringArrayPromptDoesNotPublishEmptyTokenResult(t *testing.T) {
+	tok := &mockTokenizer{
+		renderFunc: func(_ string) ([]uint32, []tokenizerTypes.Offset, error) {
+			return nil, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Strings: []string{"", ""}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.Nil(t, req.Body.TokenizedPrompt)
 }
 
 func TestProduce_SinglePromptNoPerPromptTokens(t *testing.T) {

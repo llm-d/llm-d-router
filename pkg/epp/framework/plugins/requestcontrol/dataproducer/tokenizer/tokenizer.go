@@ -249,7 +249,8 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 		return nil, fmt.Errorf("tokenization failed: %w", err)
 	}
 
-	if !hasAnyTokenIDs(allTokenIDs) {
+	tokenIDs := slices.Concat(allTokenIDs...)
+	if len(tokenIDs) == 0 {
 		return nil, nil
 	}
 
@@ -260,22 +261,13 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 	traceLogger.Info("Tokenization succeeded", "tokenCount", totalTokens, "promptCount", len(allTokenIDs))
 
 	tp := &fwkrh.TokenizedPrompt{
-		TokenIDs:           slices.Concat(allTokenIDs...),
+		TokenIDs:           tokenIDs,
 		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 	}
 	if len(allTokenIDs) > 1 {
 		tp.PerPromptTokens = allTokenIDs
 	}
 	return tp, nil
-}
-
-func hasAnyTokenIDs(tokenGroups [][]uint32) bool {
-	for _, tokens := range tokenGroups {
-		if len(tokens) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 // ChatCompletionsToRenderChatRequest converts a ChatCompletionsRequest to a
