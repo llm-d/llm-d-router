@@ -33,7 +33,7 @@ const (
 	// defaultInterval is the default interval to check if a resource exists or ready conditions.
 	defaultInterval = time.Millisecond * 250
 	// xInferPoolManifest is the manifest for the inference pool CRD with 'inference.networking.x-k8s.io' group.
-	gieCrdsKustomize = "../../deploy/components/crds-gie"
+	gieCrdsKustomize = "../../config/crd"
 	// inferExtManifest is the manifest for the inference extension test resources.
 	inferExtManifest = "../../deploy/components/inference-gateway/inference-pools.yaml"
 	// simModelName is the test model name.

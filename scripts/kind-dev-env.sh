@@ -361,7 +361,7 @@ apply_crds() {
 }
 
 apply_crds ""               deploy/components/crds-gateway-api
-apply_crds ""               deploy/components/crds-gie
+apply_crds ""               config/crd
 apply_crds "--enable-helm"  deploy/components/crds-istio
 
 # ------------------------------------------------------------------------------
