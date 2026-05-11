@@ -221,6 +221,14 @@ func estimateContextLength(request *scheduling.InferenceRequest) int {
 		return 0
 	}
 
+	// Exact token count is available for pre-tokenized completion prompts;
+	// prefer it over character-based estimation when present.
+	if request.Body.Completions != nil {
+		if hint := request.Body.Completions.Prompt.TokenCountHint(); hint >= 0 {
+			return hint
+		}
+	}
+
 	totalChars := 0
 
 	// Handle chat completions
@@ -232,7 +240,7 @@ func estimateContextLength(request *scheduling.InferenceRequest) int {
 
 	// Handle regular completions
 	if request.Body.Completions != nil {
-		totalChars += len(request.Body.Completions.Prompt.Raw)
+		totalChars += len(request.Body.Completions.Prompt.PlainText())
 	}
 
 	// Convert characters to approximate token count

@@ -722,7 +722,7 @@ func (s *Scorer) computeBlockKeys(ctx context.Context,
 		keys, err = s.kvCacheIndexer.ComputeBlockKeys(ctx, renderReq, "", request.TargetModel)
 	case request.Body.Completions != nil:
 		//nolint:staticcheck // SA1019: legacy path retained for tokenizersPoolConfig configs.
-		keys, err = s.kvCacheIndexer.ComputeBlockKeys(ctx, nil, request.Body.Completions.Prompt.Raw, request.TargetModel)
+		keys, err = s.kvCacheIndexer.ComputeBlockKeys(ctx, nil, request.Body.Completions.Prompt.PlainText(), request.TargetModel)
 	default:
 		return nil, nil
 	}
@@ -809,7 +809,7 @@ func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, reques
 
 	// For regular completions, use the prompt directly
 	if request.Body != nil && request.Body.Completions != nil {
-		prompt := request.Body.Completions.Prompt.Raw
+		prompt := request.Body.Completions.Prompt.PlainText()
 		traceLogger.Info("Using completion prompt directly", "promptLength", len(prompt))
 
 		//nolint:staticcheck // SA1019: legacy path retained for tokenizersPoolConfig configs.
