@@ -120,7 +120,7 @@ func (lp *legacyProducer) tokenizeRequest(request *scheduling.InferenceRequest) 
 	case request.Body.ChatCompletions != nil:
 		renderReq = tokenizer.ChatCompletionsToRenderChatRequest(request.Body.ChatCompletions)
 	case request.Body.Completions != nil:
-		prompt = request.Body.Completions.Prompt.Raw
+		prompt = request.Body.Completions.Prompt.PlainText()
 	default:
 		return
 	}

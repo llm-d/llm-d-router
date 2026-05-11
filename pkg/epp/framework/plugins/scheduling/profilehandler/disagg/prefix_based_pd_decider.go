@@ -153,9 +153,11 @@ func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) 
 	if request == nil || request.Body == nil {
 		return 0, errors.New("request or request body is nil")
 	}
-
-	if tokenCountHint := request.Body.InputTokenCountHint(); tokenCountHint >= 0 {
-		return tokenCountHint, nil
+	if request.Body.Completions != nil {
+		if hint := request.Body.Completions.Prompt.TokenCountHint(); hint >= 0 {
+			return hint, nil
+		}
+		return len(request.Body.Completions.Prompt.PlainText()) / AverageCharactersPerToken, nil
 	}
 	return len(request.Body.PromptText()) / AverageCharactersPerToken, nil
 }
