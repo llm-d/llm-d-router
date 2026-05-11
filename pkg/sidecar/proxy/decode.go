@@ -261,9 +261,9 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	}
 
 	if streamingEnabled {
-		// Emit corrected cumulative usage as a final event before [DONE]
-		// when multiple chunks were produced (individual chunk usage is stripped).
-		if chunkIndex > 1 && lastResponse != nil {
+		// Emit corrected cumulative usage as a final event before [DONE].
+		// Individual chunk events have usage stripped by emitSSEChunk.
+		if lastResponse != nil {
 			usageEvent := map[string]any{
 				responseFieldUsage:   cumulativeUsage,
 				responseFieldChoices: []any{},
@@ -397,10 +397,7 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any) error {
 		streamChunk[responseFieldChoices] = streamChoices
 	}
 
-	// Omit usage on intermediate chunks (finish_reason == length or absent).
-	if fr := extractFinishReason(chunkResponse); fr == "" || fr == finishReasonLength {
-		delete(streamChunk, responseFieldUsage)
-	}
+	delete(streamChunk, responseFieldUsage)
 
 	data, err := json.Marshal(streamChunk)
 	if err != nil {
