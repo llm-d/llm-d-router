@@ -174,6 +174,139 @@ func TestProduce_TokenizerError(t *testing.T) {
 	assert.Nil(t, req.Body.TokenizedPrompt)
 }
 
+func TestProduce_CompletionsRaw(t *testing.T) {
+	var receivedPrompt string
+	tok := &mockTokenizer{
+		renderFunc: func(prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
+			receivedPrompt = prompt
+			return []uint32{7, 8, 9}, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Raw: "hello world"},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.Equal(t, "hello world", receivedPrompt)
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{7, 8, 9}, req.Body.TokenizedPrompt.TokenIDs)
+}
+
+func TestProduce_CompletionsStringsArray(t *testing.T) {
+	var receivedPrompt string
+	tok := &mockTokenizer{
+		renderFunc: func(prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
+			receivedPrompt = prompt
+			return []uint32{1, 2}, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Strings: []string{"hello", "world"}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.Equal(t, "hello world", receivedPrompt)
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{1, 2}, req.Body.TokenizedPrompt.TokenIDs)
+}
+
+func TestProduce_CompletionsTokenIDsShortCircuit(t *testing.T) {
+	renderCalled := false
+	tok := &mockTokenizer{
+		renderFunc: func(string) ([]uint32, []tokenizerTypes.Offset, error) {
+			renderCalled = true
+			return nil, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{TokenIDs: []uint32{10, 20, 30}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.False(t, renderCalled, "tokenizer.Render must not be called when TokenIDs are already provided")
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{10, 20, 30}, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Nil(t, req.Body.TokenizedPrompt.MultiModalFeatures)
+}
+
+func TestProduce_EmbeddingsRaw(t *testing.T) {
+	var receivedPrompt string
+	tok := &mockTokenizer{
+		renderFunc: func(prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
+			receivedPrompt = prompt
+			return []uint32{11, 12}, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Embeddings: &fwkrh.EmbeddingsRequest{
+				Input: fwkrh.EmbeddingsInput{Raw: "embed this"},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.Equal(t, "embed this", receivedPrompt)
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{11, 12}, req.Body.TokenizedPrompt.TokenIDs)
+}
+
+func TestProduce_EmbeddingsStrings(t *testing.T) {
+	var receivedPrompt string
+	tok := &mockTokenizer{
+		renderFunc: func(prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
+			receivedPrompt = prompt
+			return []uint32{13}, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Embeddings: &fwkrh.EmbeddingsRequest{
+				Input: fwkrh.EmbeddingsInput{Strings: []string{"foo", "bar"}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.Equal(t, "foo bar", receivedPrompt)
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{13}, req.Body.TokenizedPrompt.TokenIDs)
+}
+
+func TestProduce_EmbeddingsTokenIDs(t *testing.T) {
+	renderCalled := false
+	tok := &mockTokenizer{
+		renderFunc: func(string) ([]uint32, []tokenizerTypes.Offset, error) {
+			renderCalled = true
+			return nil, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Embeddings: &fwkrh.EmbeddingsRequest{
+				Input: fwkrh.EmbeddingsInput{TokenIDs: []uint32{5, 6}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.False(t, renderCalled, "tokenizer.Render must not be called when embeddings TokenIDs are already provided")
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{5, 6}, req.Body.TokenizedPrompt.TokenIDs)
+}
+
 func TestProduce_UnsupportedBodyType(t *testing.T) {
 	p := newTestPlugin(&mockTokenizer{})
 	req := &scheduling.InferenceRequest{

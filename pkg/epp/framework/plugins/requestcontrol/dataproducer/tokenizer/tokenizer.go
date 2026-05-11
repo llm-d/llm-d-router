@@ -204,7 +204,8 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 	traceLogger.Info("Request body present",
 		"hasCompletions", request.Body.Completions != nil,
 		"hasChatCompletions", request.Body.ChatCompletions != nil,
-		"hasGenerate", request.Body.Generate != nil)
+		"hasGenerate", request.Body.Generate != nil,
+		"hasEmbeddings", request.Body.Embeddings != nil)
 
 	var tokenIDs []uint32
 	var mmFeatures *tokenization.MultiModalFeatures
@@ -212,8 +213,13 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 
 	switch {
 	case request.Body.Completions != nil:
-		traceLogger.Info("Calling Render for completions", "prompt", request.Body.Completions.Prompt)
-		tokenIDs, _, err = p.tokenizer.Render(ctx, request.Body.Completions.Prompt.Raw)
+		prompt := request.Body.Completions.Prompt
+		if len(prompt.TokenIDs) > 0 {
+			traceLogger.Info("Using pre-tokenized completions prompt", "tokenCount", len(prompt.TokenIDs))
+			return &fwkrh.TokenizedPrompt{TokenIDs: prompt.TokenIDs}, nil
+		}
+		traceLogger.Info("Calling Render for completions", "prompt", prompt)
+		tokenIDs, _, err = p.tokenizer.Render(ctx, prompt.PlainText())
 	case request.Body.ChatCompletions != nil:
 		renderReq := ChatCompletionsToRenderChatRequest(request.Body.ChatCompletions)
 		traceLogger.Info("Calling RenderChat for chat completions", "messageCount", len(request.Body.ChatCompletions.Messages))
@@ -224,6 +230,14 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 			TokenIDs:           request.Body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(request.Body.Generate.Features),
 		}, nil
+	case request.Body.Embeddings != nil:
+		input := request.Body.Embeddings.Input
+		if len(input.TokenIDs) > 0 {
+			traceLogger.Info("Using pre-tokenized embeddings input", "tokenCount", len(input.TokenIDs))
+			return &fwkrh.TokenizedPrompt{TokenIDs: input.TokenIDs}, nil
+		}
+		traceLogger.Info("Calling Render for embeddings")
+		tokenIDs, _, err = p.tokenizer.Render(ctx, input.PlainText())
 	default:
 		return nil, errors.New("unsupported request body type, skipping tokenization")
 	}
