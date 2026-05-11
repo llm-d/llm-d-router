@@ -17,8 +17,6 @@ limitations under the License.
 package multimodal
 
 import (
-	"maps"
-
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
 )
 
@@ -28,36 +26,42 @@ const (
 	EncoderCacheMatchInfoKey = "MultiModalEncoderCacheMatchInfoKey"
 )
 
-// EncoderCacheMatchInfo summarizes how much of a request's multimodal encoder
-// work is likely already cached on one endpoint.
+// MatchItem describes one unique multimodal item involved in encoder-cache
+// affinity matching.
+type MatchItem struct {
+	Hash string
+	Size int
+}
+
+// EncoderCacheMatchInfo carries endpoint-local multimodal cache match data.
+// Consumers choose how to interpret item sizes and compute scores.
 type EncoderCacheMatchInfo struct {
-	matchedWeight int
-	totalWeight   int
-	matchedHashes map[string]int
+	matchedItems []MatchItem
+	requestItems []MatchItem
 }
 
 // NewEncoderCacheMatchInfo creates endpoint-local multimodal cache match data.
-func NewEncoderCacheMatchInfo(matchedWeight int, totalWeight int, matchedHashes map[string]int) *EncoderCacheMatchInfo {
+func NewEncoderCacheMatchInfo(matchedItems []MatchItem, requestItems []MatchItem) *EncoderCacheMatchInfo {
 	return &EncoderCacheMatchInfo{
-		matchedWeight: matchedWeight,
-		totalWeight:   totalWeight,
-		matchedHashes: maps.Clone(matchedHashes),
+		matchedItems: cloneMatchItems(matchedItems),
+		requestItems: cloneMatchItems(requestItems),
 	}
 }
 
-// MatchedWeight returns the weighted multimodal content already cached.
-func (m *EncoderCacheMatchInfo) MatchedWeight() int {
-	return m.matchedWeight
+// MatchedItems returns endpoint-local request items that are likely already cached.
+func (m *EncoderCacheMatchInfo) MatchedItems() []MatchItem {
+	if m == nil {
+		return nil
+	}
+	return cloneMatchItems(m.matchedItems)
 }
 
-// TotalWeight returns the total weighted multimodal content in the request.
-func (m *EncoderCacheMatchInfo) TotalWeight() int {
-	return m.totalWeight
-}
-
-// MatchedHashes returns a copy of the matched hash weights.
-func (m *EncoderCacheMatchInfo) MatchedHashes() map[string]int {
-	return maps.Clone(m.matchedHashes)
+// RequestItems returns all unique multimodal request items.
+func (m *EncoderCacheMatchInfo) RequestItems() []MatchItem {
+	if m == nil {
+		return nil
+	}
+	return cloneMatchItems(m.requestItems)
 }
 
 // Clone implements datalayer.Cloneable.
@@ -66,8 +70,16 @@ func (m *EncoderCacheMatchInfo) Clone() fwkdl.Cloneable {
 		return nil
 	}
 	return &EncoderCacheMatchInfo{
-		matchedWeight: m.matchedWeight,
-		totalWeight:   m.totalWeight,
-		matchedHashes: maps.Clone(m.matchedHashes),
+		matchedItems: cloneMatchItems(m.matchedItems),
+		requestItems: cloneMatchItems(m.requestItems),
 	}
+}
+
+func cloneMatchItems(items []MatchItem) []MatchItem {
+	if len(items) == 0 {
+		return nil
+	}
+	cloned := make([]MatchItem, len(items))
+	copy(cloned, items)
+	return cloned
 }

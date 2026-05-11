@@ -84,13 +84,13 @@ func (s *Scorer) Consumes() map[string]any {
 	return map[string]any{attrmm.EncoderCacheMatchInfoKey: attrmm.EncoderCacheMatchInfo{}}
 }
 
-// Score scores endpoints by matched multimodal encoder-cache weight divided by
-// total multimodal request weight.
+// Score scores endpoints by matched multimodal encoder-cache item size divided
+// by total multimodal request item size.
 func (s *Scorer) Score(ctx context.Context, _ *scheduling.CycleState, req *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	logger := log.FromContext(ctx).V(logging.DEBUG)
 	requestID := ""
 	if req != nil {
-		requestID = req.RequestId
+		requestID = req.RequestID
 	}
 	scores := make(map[scheduling.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
@@ -105,19 +105,33 @@ func (s *Scorer) Score(ctx context.Context, _ *scheduling.CycleState, req *sched
 			continue
 		}
 		matchInfo, ok := info.(*attrmm.EncoderCacheMatchInfo)
-		if !ok || matchInfo.TotalWeight() <= 0 {
+		if !ok {
 			logger.Info("mm-cache-affinity: invalid match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
 			continue
 		}
-		score := float64(matchInfo.MatchedWeight()) / float64(matchInfo.TotalWeight())
+		totalWeight := itemWeight(matchInfo.RequestItems())
+		if totalWeight <= 0 {
+			logger.Info("mm-cache-affinity: invalid match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
+			continue
+		}
+		matchedWeight := itemWeight(matchInfo.MatchedItems())
+		score := float64(matchedWeight) / float64(totalWeight)
 		scores[endpoint] = score
 		logger.Info("mm-cache-affinity: pod score",
 			"requestID", requestID,
 			"pod", pod,
-			"matchedWeight", matchInfo.MatchedWeight(),
-			"totalWeight", matchInfo.TotalWeight(),
+			"matchedWeight", matchedWeight,
+			"totalWeight", totalWeight,
 			"affinityScore", score,
 			"scorer", s.typedName)
 	}
 	return scores
+}
+
+func itemWeight(items []attrmm.MatchItem) int {
+	weight := 0
+	for _, item := range items {
+		weight += item.Size
+	}
+	return weight
 }

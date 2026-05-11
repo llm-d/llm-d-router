@@ -27,12 +27,9 @@ import (
 	"fmt"
 	"maps"
 	"sort"
-	"strings"
 	"sync"
-	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"github.com/jellydator/ttlcache/v3"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
@@ -51,8 +48,7 @@ const (
 	// ProducedKey is the data key emitted by this producer.
 	ProducedKey = attrmm.EncoderCacheMatchInfoKey
 
-	defaultCacheSize       = 10000
-	defaultRequestStateTTL = 30 * time.Second
+	defaultCacheSize = 10000
 )
 
 var (
@@ -85,12 +81,22 @@ func Factory(name string, rawParameters json.RawMessage, handle plugin.Handle) (
 // Producer tracks multimodal content hashes and the pods that likely hold their
 // encoder-cache entries.
 type Producer struct {
-	typedName       plugin.TypedName
-	cache           *lru.Cache[string, map[string]struct{}]
-	requestStates   *ttlcache.Cache[string, map[string]int]
-	requestStateTTL time.Duration
-	podList         func() []k8stypes.NamespacedName
-	mutex           sync.RWMutex
+	typedName   plugin.TypedName
+	cache       *lru.Cache[string, map[string]struct{}]
+	pluginState *plugin.PluginState
+	podList     func() []k8stypes.NamespacedName
+	mutex       sync.RWMutex
+}
+
+type requestState struct {
+	items []attrmm.MatchItem
+}
+
+func (s *requestState) Clone() plugin.StateData {
+	if s == nil {
+		return nil
+	}
+	return &requestState{items: cloneMatchItems(s.items)}
 }
 
 // New creates a Producer.
@@ -105,18 +111,11 @@ func New(ctx context.Context, params *Parameters, podList func() []k8stypes.Name
 		return nil, fmt.Errorf("failed to create multimodal encoder-cache LRU with size %d: %w", cacheSize, err)
 	}
 
-	requestStates := ttlcache.New[string, map[string]int](
-		ttlcache.WithTTL[string, map[string]int](defaultRequestStateTTL),
-		ttlcache.WithDisableTouchOnHit[string, map[string]int](),
-	)
-	go cleanRequestStates(ctx, requestStates, defaultRequestStateTTL)
-
 	return &Producer{
-		typedName:       plugin.TypedName{Type: ProducerType},
-		cache:           cache,
-		requestStates:   requestStates,
-		requestStateTTL: defaultRequestStateTTL,
-		podList:         podList,
+		typedName:   plugin.TypedName{Type: ProducerType},
+		cache:       cache,
+		pluginState: plugin.NewPluginState(ctx),
+		podList:     podList,
 	}, nil
 }
 
@@ -141,31 +140,34 @@ func (p *Producer) Consumes() map[string]any {
 	return nil
 }
 
+// PluginState returns request-scoped state shared between producer extension points.
+func (p *Producer) PluginState() *plugin.PluginState {
+	return p.pluginState
+}
+
 // PrepareRequestData attaches multimodal encoder-cache match data to endpoints.
 func (p *Producer) PrepareRequestData(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
 	logger := log.FromContext(ctx).V(logging.DEBUG)
-	hashToWeight := ExtractMMHashesWithWeights(request)
-	if len(hashToWeight) == 0 {
+	requestItems := ExtractMMItems(request)
+	if len(requestItems) == 0 {
 		logger.Info("No multimodal content found, skipping encoder-cache match data")
 		return nil
 	}
 
-	if request != nil && request.RequestId != "" {
-		p.requestStates.Set(request.RequestId, maps.Clone(hashToWeight), p.requestStateTTL)
+	if request != nil && request.RequestID != "" {
+		p.pluginState.Write(request.RequestID, plugin.StateKey(ProducerType), &requestState{items: requestItems})
 	}
 
 	p.removeStalePods()
-	total := totalWeight(hashToWeight)
 	for _, endpoint := range endpoints {
 		metadata := endpoint.GetMetadata()
 		if metadata == nil {
 			continue
 		}
-		matchedHashes := p.matchedHashesForPod(metadata.NamespacedName.String(), hashToWeight)
+		matchedItems := p.matchedItemsForPod(metadata.NamespacedName.String(), requestItems)
 		endpoint.Put(attrmm.EncoderCacheMatchInfoKey, attrmm.NewEncoderCacheMatchInfo(
-			totalWeight(matchedHashes),
-			total,
-			matchedHashes,
+			matchedItems,
+			requestItems,
 		))
 	}
 
@@ -175,13 +177,13 @@ func (p *Producer) PrepareRequestData(ctx context.Context, request *scheduling.I
 // PreRequest records the selected endpoint(s) for each hash in the current request.
 func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
 	logger := log.FromContext(ctx).V(logging.DEBUG)
-	if request == nil || request.RequestId == "" {
+	if request == nil || request.RequestID == "" {
 		return
 	}
+	defer p.pluginState.Delete(request.RequestID)
 
-	stateItem := p.requestStates.Get(request.RequestId)
-	p.requestStates.Delete(request.RequestId)
-	if stateItem == nil || len(stateItem.Value()) == 0 {
+	state, err := plugin.ReadPluginStateKey[*requestState](p.pluginState, request.RequestID, plugin.StateKey(ProducerType))
+	if err != nil || len(state.items) == 0 {
 		logger.Info("No multimodal request state found, skipping encoder-cache update")
 		return
 	}
@@ -194,9 +196,9 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
-	for hash := range stateItem.Value() {
+	for _, item := range state.items {
 		pods := map[string]struct{}{}
-		if existing, ok := p.cache.Get(hash); ok {
+		if existing, ok := p.cache.Get(item.Hash); ok {
 			pods = maps.Clone(existing)
 		}
 		for _, endpoint := range targets {
@@ -205,196 +207,101 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 			}
 		}
 		if len(pods) > 0 {
-			p.cache.Add(hash, pods)
+			p.cache.Add(item.Hash, pods)
 		}
 	}
 }
 
-// ExtractMMHashesWithWeights returns deterministic mm_hash -> encoder-work weight
-// pairs for a request. Parser-provided multimodal features are preferred; if
-// unavailable, structured media blocks are hashed from stable media identifiers.
-func ExtractMMHashesWithWeights(request *scheduling.InferenceRequest) map[string]int {
+// ExtractMMItems returns deterministic, unique multimodal encoder-cache items
+// for a request. Parser-provided multimodal features are preferred; if
+// unavailable, typed structured media blocks are hashed from stable identifiers.
+func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
 	if request == nil || request.Body == nil {
 		return nil
 	}
 
 	if request.Body.TokenizedPrompt != nil && len(request.Body.TokenizedPrompt.MultiModalFeatures) > 0 {
-		return hashesFromTokenizedPrompt(request.Body.TokenizedPrompt.MultiModalFeatures)
+		return itemsFromTokenizedPrompt(request.Body.TokenizedPrompt.MultiModalFeatures)
 	}
 
 	if request.Body.ChatCompletions != nil {
-		return hashesFromChat(request.Body.ChatCompletions)
-	}
-
-	if request.Body.Responses != nil {
-		return hashesFromAny(request.Body.Responses.Input)
-	}
-
-	if request.Body.Conversations != nil {
-		return hashesFromAny(request.Body.Conversations.Items)
-	}
-
-	if request.Body.Payload != nil && request.Body.Payload.IsParsed() {
-		return hashesFromAny(request.Body.Payload)
+		return itemsFromChat(request.Body.ChatCompletions)
 	}
 
 	return nil
 }
 
-func hashesFromTokenizedPrompt(features []fwkrh.MultiModalFeature) map[string]int {
-	hashToWeight := map[string]int{}
+func itemsFromTokenizedPrompt(features []fwkrh.MultiModalFeature) []attrmm.MatchItem {
+	itemsByHash := map[string]attrmm.MatchItem{}
 	for _, feature := range features {
 		if feature.Hash == "" {
 			continue
 		}
-		addMaxWeight(hashToWeight, feature.Hash, 1)
+		addItem(itemsByHash, feature.Hash, 1)
 	}
-	return emptyToNil(hashToWeight)
+	return sortedItems(itemsByHash)
 }
 
-func hashesFromChat(request *fwkrh.ChatCompletionsRequest) map[string]int {
-	hashToWeight := map[string]int{}
+func itemsFromChat(request *fwkrh.ChatCompletionsRequest) []attrmm.MatchItem {
+	itemsByHash := map[string]attrmm.MatchItem{}
 	for _, message := range request.Messages {
 		for _, block := range message.Content.Structured {
-			addBlockHash(hashToWeight, block)
+			addBlockItem(itemsByHash, block)
 		}
 	}
-	return emptyToNil(hashToWeight)
+	return sortedItems(itemsByHash)
 }
 
-func hashesFromAny(value any) map[string]int {
-	hashToWeight := map[string]int{}
-	walkAny(value, hashToWeight)
-	return emptyToNil(hashToWeight)
-}
-
-func addBlockHash(hashToWeight map[string]int, block fwkrh.ContentBlock) {
+func addBlockItem(itemsByHash map[string]attrmm.MatchItem, block fwkrh.ContentBlock) {
 	switch {
-	case block.ImageURL.Url != "":
-		addMaxWeight(hashToWeight, contentHash("image_url", block.ImageURL.Url), 1)
-	case block.VideoURL.Url != "":
-		addMaxWeight(hashToWeight, contentHash("video_url", block.VideoURL.Url), 1)
+	case block.ImageURL.URL != "":
+		addItem(itemsByHash, contentHash("image_url", block.ImageURL.URL), 1)
+	case block.VideoURL.URL != "":
+		addItem(itemsByHash, contentHash("video_url", block.VideoURL.URL), 1)
 	case block.InputAudio.Data != "":
-		addMaxWeight(hashToWeight, contentHash("input_audio", block.InputAudio.Format+":"+block.InputAudio.Data), 1)
+		addItem(itemsByHash, contentHash("input_audio", block.InputAudio.Format+":"+block.InputAudio.Data), 1)
 	}
-}
-
-func walkAny(value any, hashToWeight map[string]int) {
-	switch typed := value.(type) {
-	case fwkrh.PayloadMap:
-		for k, v := range typed {
-			walkNamedValue(k, v, hashToWeight)
-		}
-	case map[string]any:
-		for k, v := range typed {
-			walkNamedValue(k, v, hashToWeight)
-		}
-	case []any:
-		for _, item := range typed {
-			walkAny(item, hashToWeight)
-		}
-	case []fwkrh.ConversationItem:
-		for _, item := range typed {
-			walkAny(item.Content, hashToWeight)
-		}
-	case fwkrh.Content:
-		for _, block := range typed.Structured {
-			addBlockHash(hashToWeight, block)
-		}
-	case []fwkrh.ContentBlock:
-		for _, block := range typed {
-			addBlockHash(hashToWeight, block)
-		}
-	}
-}
-
-func walkNamedValue(name string, value any, hashToWeight map[string]int) {
-	normalized := strings.ToLower(name)
-	switch normalized {
-	case "image_url", "video_url":
-		if identifier := mediaIdentifier(value); identifier != "" {
-			addMaxWeight(hashToWeight, contentHash(normalized, identifier), 1)
-			return
-		}
-	case "input_audio":
-		if identifier := mediaIdentifier(value); identifier != "" {
-			addMaxWeight(hashToWeight, contentHash(normalized, identifier), 1)
-			return
-		}
-	}
-	walkAny(value, hashToWeight)
-}
-
-func mediaIdentifier(value any) string {
-	switch typed := value.(type) {
-	case string:
-		return typed
-	case map[string]any:
-		for _, key := range []string{"url", "data"} {
-			if raw, ok := typed[key].(string); ok {
-				return raw
-			}
-		}
-	default:
-		bytes, err := json.Marshal(typed)
-		if err == nil && string(bytes) != "null" {
-			return string(bytes)
-		}
-	}
-	return ""
 }
 
 func contentHash(kind, identifier string) string {
 	sum := sha256.Sum256([]byte(kind + "\x00" + identifier))
-	return kind + ":" + hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:])
 }
 
-func addMaxWeight(hashToWeight map[string]int, hash string, weight int) {
-	if hash == "" {
-		return
-	}
-	if weight <= 0 {
-		weight = 1
-	}
-	if current, ok := hashToWeight[hash]; !ok || weight > current {
-		hashToWeight[hash] = weight
-	}
+func addItem(itemsByHash map[string]attrmm.MatchItem, hash string, size int) {
+	itemsByHash[hash] = attrmm.MatchItem{Hash: hash, Size: size}
 }
 
-func emptyToNil(hashToWeight map[string]int) map[string]int {
-	if len(hashToWeight) == 0 {
+func sortedItems(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
+	if len(itemsByHash) == 0 {
 		return nil
 	}
-	return hashToWeight
-}
-
-func totalWeight(hashToWeight map[string]int) int {
-	total := 0
-	for _, weight := range hashToWeight {
-		total += weight
-	}
-	return total
-}
-
-func (p *Producer) matchedHashesForPod(pod string, hashToWeight map[string]int) map[string]int {
-	matched := map[string]int{}
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
-	hashes := make([]string, 0, len(hashToWeight))
-	for hash := range hashToWeight {
+	hashes := make([]string, 0, len(itemsByHash))
+	for hash := range itemsByHash {
 		hashes = append(hashes, hash)
 	}
 	sort.Strings(hashes)
+	items := make([]attrmm.MatchItem, 0, len(hashes))
 	for _, hash := range hashes {
-		pods, ok := p.cache.Get(hash)
+		items = append(items, itemsByHash[hash])
+	}
+	return items
+}
+
+func (p *Producer) matchedItemsForPod(pod string, requestItems []attrmm.MatchItem) []attrmm.MatchItem {
+	matchedItemsByHash := map[string]attrmm.MatchItem{}
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	for _, item := range requestItems {
+		pods, ok := p.cache.Get(item.Hash)
 		if !ok {
 			continue
 		}
 		if _, ok := pods[pod]; ok {
-			matched[hash] = hashToWeight[hash]
+			matchedItemsByHash[item.Hash] = item
 		}
 	}
-	return matched
+	return sortedItems(matchedItemsByHash)
 }
 
 func targetEndpoints(schedulingResult *scheduling.SchedulingResult) []scheduling.Endpoint {
@@ -441,19 +348,6 @@ func (p *Producer) removeStalePods() {
 	}
 }
 
-func cleanRequestStates(ctx context.Context, cache *ttlcache.Cache[string, map[string]int], interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			cache.DeleteExpired()
-		}
-	}
-}
-
 func (p *Producer) cacheSnapshot() map[string]map[string]struct{} {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
@@ -477,4 +371,13 @@ func (p *Producer) putCacheEntry(hash string, pods ...k8stypes.NamespacedName) {
 		podSet[pod.String()] = struct{}{}
 	}
 	p.cache.Add(hash, podSet)
+}
+
+func cloneMatchItems(items []attrmm.MatchItem) []attrmm.MatchItem {
+	if len(items) == 0 {
+		return nil
+	}
+	cloned := make([]attrmm.MatchItem, len(items))
+	copy(cloned, items)
+	return cloned
 }
