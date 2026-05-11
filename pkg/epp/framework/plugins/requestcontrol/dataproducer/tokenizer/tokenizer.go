@@ -245,8 +245,9 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 	conversation := make([]tokenizerTypes.Conversation, 0, len(chat.Messages))
 	for _, msg := range chat.Messages {
 		conv := tokenizerTypes.Conversation{
-			Role:    msg.Role,
-			Content: tokenizerTypes.Content{Raw: msg.Content.Raw},
+			Role:      msg.Role,
+			Content:   tokenizerTypes.Content{Raw: msg.Content.Raw},
+			ToolCalls: msg.ToolCalls,
 		}
 		for _, block := range msg.Content.Structured {
 			conv.Content.Structured = append(conv.Content.Structured, tokenizerTypes.ContentBlock{

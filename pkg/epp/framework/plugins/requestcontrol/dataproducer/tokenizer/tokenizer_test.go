@@ -288,10 +288,24 @@ func TestConvertMMFeaturesNil(t *testing.T) {
 }
 
 func TestChatCompletionsToRenderChatRequest(t *testing.T) {
+	toolCalls := []any{
+		map[string]any{
+			"id":   "chatcmpl-tool-1",
+			"type": "function",
+			"function": map[string]any{
+				"name":      "bash",
+				"arguments": `{"command":"ls -la"}`,
+			},
+		},
+	}
 	chat := &fwkrh.ChatCompletionsRequest{
 		Messages: []fwkrh.Message{
 			{Role: "system", Content: fwkrh.Content{Raw: "You are a helpful assistant."}},
-			{Role: "user", Content: fwkrh.Content{Raw: "Hello!"}},
+			{
+				Role:      "assistant",
+				Content:   fwkrh.Content{Raw: "Reflection."},
+				ToolCalls: toolCalls,
+			},
 		},
 		ChatTemplate:              "template",
 		AddGenerationPrompt:       true,
@@ -304,12 +318,14 @@ func TestChatCompletionsToRenderChatRequest(t *testing.T) {
 	require.Len(t, result.Conversation, 2)
 	assert.Equal(t, "system", result.Conversation[0].Role)
 	assert.Equal(t, tokenizerTypes.Content{Raw: "You are a helpful assistant."}, result.Conversation[0].Content)
-	assert.Equal(t, "user", result.Conversation[1].Role)
-	assert.Equal(t, tokenizerTypes.Content{Raw: "Hello!"}, result.Conversation[1].Content)
+	assert.Equal(t, "assistant", result.Conversation[1].Role)
+	assert.Equal(t, tokenizerTypes.Content{Raw: "Reflection."}, result.Conversation[1].Content)
 	assert.Equal(t, "template", result.ChatTemplate)
 	assert.True(t, result.AddGenerationPrompt)
 	assert.False(t, result.ContinueFinalMessage)
 	assert.True(t, result.ReturnAssistantTokensMask)
+
+	assert.Equal(t, toolCalls, result.Conversation[1].ToolCalls)
 }
 
 func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {

@@ -173,8 +173,9 @@ type chatRenderRequest struct {
 // chatMessage is one OpenAI-shaped message. Content is either a plain string
 // or an array of parts; chatContent's MarshalJSON picks the right wire form.
 type chatMessage struct {
-	Role    string      `json:"role"`
-	Content chatContent `json:"content"`
+	Role      string      `json:"role"`
+	Content   chatContent `json:"content"`
+	ToolCalls []any       `json:"tool_calls,omitempty"`
 }
 
 // chatContent serializes either Raw (string) or Parts (array of typed parts).
@@ -208,7 +209,11 @@ type chatImageURL struct {
 func buildChatRenderRequest(model string, req *tokenizerTypes.RenderChatRequest) chatRenderRequest {
 	msgs := make([]chatMessage, len(req.Conversation))
 	for idx, c := range req.Conversation {
-		msgs[idx] = chatMessage{Role: c.Role, Content: toChatContent(c.Content)}
+		msgs[idx] = chatMessage{
+			Role:      c.Role,
+			Content:   toChatContent(c.Content),
+			ToolCalls: c.ToolCalls,
+		}
 	}
 	return chatRenderRequest{
 		Model:                model,
