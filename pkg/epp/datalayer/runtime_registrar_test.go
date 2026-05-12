@@ -179,6 +179,55 @@ func TestConfigure_DedupByExtractorType(t *testing.T) {
 	assert.Equal(t, "config-ext", exts[0].TypedName().Name)
 }
 
+// TestConfigure_CrossVariantCollisionNoPending pins the behavior added by
+// validateNoCrossVariantCollisions: two sources sharing a SourceType across
+// different variants must fail Configure even when no pending extractor
+// references the colliding type. findSourceByType-driven detection only
+// fires on pending resolution; this fills the gap.
+func TestConfigure_CrossVariantCollisionNoPending(t *testing.T) {
+	const collidingType = "colliding-source-type"
+	gvk := schema.GroupVersionKind{Group: "test.io", Version: "v1", Kind: "Probe"}
+
+	cases := []struct {
+		name    string
+		sources []fwkdl.DataSource
+	}{
+		{
+			name: "polling+notification",
+			sources: []fwkdl.DataSource{
+				sourcemocks.NewDataSource(fwkplugin.TypedName{Type: collidingType, Name: "polling-src"}),
+				sourcemocks.NewNotificationSource(collidingType, "notif-src", gvk),
+			},
+		},
+		{
+			name: "polling+endpoint",
+			sources: []fwkdl.DataSource{
+				sourcemocks.NewDataSource(fwkplugin.TypedName{Type: collidingType, Name: "polling-src"}),
+				notifications.NewEndpointDataSource(collidingType, "endpoint-src"),
+			},
+		},
+		{
+			name: "notification+endpoint",
+			sources: []fwkdl.DataSource{
+				sourcemocks.NewNotificationSource(collidingType, "notif-src", gvk),
+				notifications.NewEndpointDataSource(collidingType, "endpoint-src"),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRuntime(0)
+			srcCfgs := make([]DataSourceConfig, len(tc.sources))
+			for i, s := range tc.sources {
+				srcCfgs[i] = DataSourceConfig{Plugin: s}
+			}
+			err := r.Configure(&Config{Sources: srcCfgs}, false, "", newTestLogger(t))
+			require.ErrorIs(t, err, ErrSourceTypeCollision)
+		})
+	}
+}
+
 func TestConfigure_CrossVariantSourceTypeCollisionRejected(t *testing.T) {
 	const collidingType = "colliding-source-type"
 	gvk := schema.GroupVersionKind{Group: "test.io", Version: "v1", Kind: "Probe"}

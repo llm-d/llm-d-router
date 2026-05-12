@@ -125,6 +125,10 @@ func (r *Runtime) Configure(cfg *Config, enableNewMetrics bool, disallowedExtrac
 		}
 	}
 
+	if err := r.validateNoCrossVariantCollisions(); err != nil {
+		return err
+	}
+
 	// Resolve code-registered pending registrations after processing user config.
 	for _, pending := range r.pendingRegistrations {
 		var gvkFilter *schema.GroupVersionKind
@@ -200,6 +204,58 @@ func (r *Runtime) registerSource(src fwkdl.DataSource, g *gvk) error {
 	default:
 		return fmt.Errorf("skipping unknown datasource plugin type %s", src.TypedName().String())
 	}
+}
+
+// validateNoCrossVariantCollisions errors if any SourceType is registered in
+// more than one variant manager. findSourceByType already catches this when
+// a pending extractor references the colliding type; this check fires
+// exhaustively at end of Configure for the no-pending case.
+func (r *Runtime) validateNoCrossVariantCollisions() error {
+	type seenSource struct {
+		variant sourceVariant
+		name    string
+	}
+	seen := make(map[string]seenSource)
+
+	check := func(name string, src fwkdl.DataSource, v sourceVariant) error {
+		t := src.TypedName().Type
+		if prior, ok := seen[t]; ok && prior.variant != v {
+			return fmt.Errorf("%w: %q in %s (%s) and %s (%s)",
+				ErrSourceTypeCollision, t, prior.variant, prior.name, v, name)
+		}
+		seen[t] = seenSource{variant: v, name: name}
+		return nil
+	}
+
+	var firstErr error
+	r.polling.Range(func(name string, src fwkdl.PollingDataSource) bool {
+		if err := check(name, src, variantPolling); err != nil {
+			firstErr = err
+			return false
+		}
+		return true
+	})
+	if firstErr != nil {
+		return firstErr
+	}
+	r.notification.Range(func(name string, src fwkdl.NotificationSource) bool {
+		if err := check(name, src, variantNotification); err != nil {
+			firstErr = err
+			return false
+		}
+		return true
+	})
+	if firstErr != nil {
+		return firstErr
+	}
+	r.endpoint.Range(func(name string, src fwkdl.EndpointSource) bool {
+		if err := check(name, src, variantEndpoint); err != nil {
+			firstErr = err
+			return false
+		}
+		return true
+	})
+	return firstErr
 }
 
 // findSourceByType walks every variant manager and returns the matching source.
