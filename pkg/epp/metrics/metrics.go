@@ -826,42 +826,8 @@ func RecordFlowControlRequestQueueDuration(
 	).Observe(duration.Seconds())
 }
 
-// SLO class constants label for flow control SLO metrics (bounded buckets for the TTFT SLO header in ms).
-const (
-	SLOClassNone        = "none"
-	SLOClassBelowMS200  = "below_ms_200"
-	SLOClassMS200to399  = "ms_200_399"
-	SLOClassMS400to599  = "ms_400_599"
-	SLOClassMS600to799  = "ms_600_799"
-	SLOClassMS800to1000 = "ms_800_1000"
-	SLOClassAboveMS1000 = "above_ms_1000"
-)
-
-// ClassifySLO maps a raw SLO header value (in milliseconds) to a bounded SLO class label.
-// Returns SLOClassNone when the header is absent or unparseable.
-func ClassifySLO(rawHeaderValue string) string {
-	if rawHeaderValue == "" {
-		return SLOClassNone
-	}
-	ms, err := strconv.ParseInt(rawHeaderValue, 10, 64)
-	if err != nil || ms < 0 {
-		return SLOClassNone
-	}
-	switch {
-	case ms < 200:
-		return SLOClassBelowMS200
-	case ms < 400:
-		return SLOClassMS200to399
-	case ms < 600:
-		return SLOClassMS400to599
-	case ms < 800:
-		return SLOClassMS600to799
-	case ms <= 1000:
-		return SLOClassMS800to1000
-	default:
-		return SLOClassAboveMS1000
-	}
-}
+// SLOClassNone is the metric label used when a request has no associated InferenceObjective.
+const SLOClassNone = "none"
 
 // RecordFlowControlSLORequestQueueDuration records the queue duration for a request partitioned by its
 // SLO class (derived from the TTFT SLO header "x-slo-ttft-ms").

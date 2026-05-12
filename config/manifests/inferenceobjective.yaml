@@ -7,6 +7,9 @@ spec:
   poolRef:
     group: inference.networking.k8s.io
     name: vllm-qwen3-32b
+  slo:
+    ttft:
+      minMs: 500
 ---
 apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
@@ -17,6 +20,9 @@ spec:
   poolRef:
     group: inference.networking.k8s.io
     name: vllm-qwen3-32b
+  slo:
+    ttft:
+      maxMs: 100
 ---
 apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
@@ -27,3 +33,7 @@ spec:
   poolRef:
     group: inference.networking.k8s.io
     name: vllm-qwen3-32b
+  slo:
+    ttft:
+      minMs: 100
+      maxMs: 500

@@ -99,6 +99,50 @@ spec:
                   Similarly requests with a Priority of -10 will always be served after requests with Priority of 0.
                 format: int32
                 type: integer
+              slo:
+                description: |-
+                  SLO defines the expected Service Level Objective ranges for requests targeting this objective.
+                  When set, the InferenceObjective name is used as the SLO class label in metrics.
+                  The ranges define the expected bounds for SLO header values (e.g. x-slo-ttft-ms),
+                  enabling mismatch detection between a request's SLO deadline and its declared objective.
+                properties:
+                  tpot:
+                    description: |-
+                      TPOT defines the expected Time Per Output Token SLO range in milliseconds.
+                      The range bounds correspond to values expected in the x-slo-tpot-ms request header.
+                    properties:
+                      maxMs:
+                        description: MaxMs is the exclusive upper bound of the SLO
+                          range in milliseconds.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      minMs:
+                        description: MinMs is the inclusive lower bound of the SLO
+                          range in milliseconds.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    type: object
+                  ttft:
+                    description: |-
+                      TTFT defines the expected Time To First Token SLO range in milliseconds.
+                      The range bounds correspond to values expected in the x-slo-ttft-ms request header.
+                    properties:
+                      maxMs:
+                        description: MaxMs is the exclusive upper bound of the SLO
+                          range in milliseconds.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      minMs:
+                        description: MinMs is the inclusive lower bound of the SLO
+                          range in milliseconds.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    type: object
+                type: object
             required:
             - poolRef
             type: object

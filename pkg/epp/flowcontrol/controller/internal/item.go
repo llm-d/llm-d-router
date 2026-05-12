@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -167,7 +168,10 @@ func (fi *FlowItem) finalizeInternal(outcome types.QueueOutcome, err error) {
 		fi.OriginalRequest().ModelName(), fi.OriginalRequest().TargetModelName(),
 		duration)
 
-	sloClass := metrics.ClassifySLO(extractHeader(fi.originalRequest, request.TTFTSLOMsHeaderKey))
+	sloClass := extractHeader(fi.originalRequest, metadata.ObjectiveKey)
+	if sloClass == "" {
+		sloClass = metrics.SLOClassNone
+	}
 	metrics.RecordFlowControlSLORequestQueueDuration(
 		sloClass, outcomeStr, fi.originalRequest.InferencePoolName(),
 		duration)

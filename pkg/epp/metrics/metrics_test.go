@@ -1259,44 +1259,14 @@ func TestFlowControlQueueDurationMetric(t *testing.T) {
 	}
 }
 
-func TestClassifySLO(t *testing.T) {
-	testCases := []struct {
-		raw      string
-		expected string
-	}{
-		{"", SLOClassNone},
-		{"not-a-number", SLOClassNone},
-		{"-1", SLOClassNone},
-		{"0", SLOClassBelowMS200},
-		{"50", SLOClassBelowMS200},
-		{"199", SLOClassBelowMS200},
-		{"200", SLOClassMS200to399},
-		{"399", SLOClassMS200to399},
-		{"400", SLOClassMS400to599},
-		{"500", SLOClassMS400to599},
-		{"599", SLOClassMS400to599},
-		{"600", SLOClassMS600to799},
-		{"799", SLOClassMS600to799},
-		{"800", SLOClassMS800to1000},
-		{"1000", SLOClassMS800to1000},
-		{"1001", SLOClassAboveMS1000},
-		{"5000", SLOClassAboveMS1000},
-	}
-	for _, tc := range testCases {
-		t.Run("raw="+tc.raw, func(t *testing.T) {
-			require.Equal(t, tc.expected, ClassifySLO(tc.raw))
-		})
-	}
-}
-
 func TestFlowControlSLOIncomingRequestsTotalMetric(t *testing.T) {
 	Reset()
 
 	const pool = "pool-1"
 
-	RecordFlowControlSLOIncomingRequest(SLOClassBelowMS200, pool)
-	RecordFlowControlSLOIncomingRequest(SLOClassBelowMS200, pool)
-	RecordFlowControlSLOIncomingRequest(SLOClassMS400to599, pool)
+	RecordFlowControlSLOIncomingRequest("realtime", pool)
+	RecordFlowControlSLOIncomingRequest("realtime", pool)
+	RecordFlowControlSLOIncomingRequest("interactive", pool)
 	RecordFlowControlSLOIncomingRequest(SLOClassNone, "pool-2")
 
 	testCases := []struct {
@@ -1305,13 +1275,13 @@ func TestFlowControlSLOIncomingRequestsTotalMetric(t *testing.T) {
 		expectCount float64
 	}{
 		{
-			name:        "below_ms_200, pool-1",
-			labels:      prometheus.Labels{"slo_class": SLOClassBelowMS200, "inference_pool": pool},
+			name:        "realtime, pool-1",
+			labels:      prometheus.Labels{"slo_class": "realtime", "inference_pool": pool},
 			expectCount: 2,
 		},
 		{
-			name:        "ms_400_599, pool-1",
-			labels:      prometheus.Labels{"slo_class": SLOClassMS400to599, "inference_pool": pool},
+			name:        "interactive, pool-1",
+			labels:      prometheus.Labels{"slo_class": "interactive", "inference_pool": pool},
 			expectCount: 1,
 		},
 		{
@@ -1340,11 +1310,11 @@ func TestFlowControlSLOQueueDurationMetric(t *testing.T) {
 		outcome  string
 		duration time.Duration
 	}{
-		{sloClass: SLOClassBelowMS200, outcome: "Dispatched", duration: 5 * time.Millisecond},
-		{sloClass: SLOClassBelowMS200, outcome: "Dispatched", duration: 15 * time.Millisecond},
-		{sloClass: SLOClassMS400to599, outcome: "Dispatched", duration: 50 * time.Millisecond},
+		{sloClass: "realtime", outcome: "Dispatched", duration: 5 * time.Millisecond},
+		{sloClass: "realtime", outcome: "Dispatched", duration: 15 * time.Millisecond},
+		{sloClass: "interactive", outcome: "Dispatched", duration: 50 * time.Millisecond},
 		{sloClass: SLOClassNone, outcome: "RejectedCapacity", duration: 2 * time.Millisecond},
-		{sloClass: SLOClassAboveMS1000, outcome: "Dispatched", duration: 200 * time.Millisecond},
+		{sloClass: "batch", outcome: "Dispatched", duration: 200 * time.Millisecond},
 	}
 
 	for _, rec := range records {
@@ -1358,9 +1328,9 @@ func TestFlowControlSLOQueueDurationMetric(t *testing.T) {
 		expectSum   float64
 	}{
 		{
-			name: "below_ms_200, dispatched",
+			name: "realtime, dispatched",
 			labels: prometheus.Labels{
-				"slo_class":      SLOClassBelowMS200,
+				"slo_class":      "realtime",
 				"outcome":        "Dispatched",
 				"inference_pool": pool,
 			},
@@ -1368,9 +1338,9 @@ func TestFlowControlSLOQueueDurationMetric(t *testing.T) {
 			expectSum:   0.02, // 0.005 + 0.015
 		},
 		{
-			name: "ms_400_599, dispatched",
+			name: "interactive, dispatched",
 			labels: prometheus.Labels{
-				"slo_class":      SLOClassMS400to599,
+				"slo_class":      "interactive",
 				"outcome":        "Dispatched",
 				"inference_pool": pool,
 			},
@@ -1388,9 +1358,9 @@ func TestFlowControlSLOQueueDurationMetric(t *testing.T) {
 			expectSum:   0.002,
 		},
 		{
-			name: "above_ms_1000, dispatched",
+			name: "batch, dispatched",
 			labels: prometheus.Labels{
-				"slo_class":      SLOClassAboveMS1000,
+				"slo_class":      "batch",
 				"outcome":        "Dispatched",
 				"inference_pool": pool,
 			},
