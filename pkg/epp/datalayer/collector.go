@@ -84,7 +84,7 @@ func NewCollector() *Collector {
 }
 
 // Start launches the collection goroutine.
-func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, pollers []fwkdl.PollingDataSource, extractors map[string][]fwkdl.ExtractorBase) error {
+func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, pollers []fwkdl.PollingDataSource, extractors *extractorMap) error {
 	if len(pollers) == 0 {
 		return errors.New("cannot start collector with empty sources")
 	}
@@ -98,14 +98,15 @@ func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint,
 	}
 
 	// Filter to poll-capable extractors up front so the hot loop avoids per-tick type assertions.
-	pollingExtractors := make(map[string][]fwkdl.Extractor, len(extractors))
-	for name, exts := range extractors {
+	pollingExtractors := make(map[string][]fwkdl.Extractor, extractors.Count())
+	extractors.Range(func(name string, exts []fwkdl.ExtractorBase) bool {
 		for _, ext := range exts {
 			if e, ok := ext.(fwkdl.Extractor); ok {
 				pollingExtractors[name] = append(pollingExtractors[name], e)
 			}
 		}
-	}
+		return true
+	})
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -117,13 +117,13 @@ func TestCollectorStartInputs(t *testing.T) {
 
 			c := NewCollector()
 			ticker := mocks.NewTicker()
-			err := c.Start(ctx, ticker, endpoint, tt.sources, nil)
+			err := c.Start(ctx, ticker, endpoint, tt.sources, newExtractorMap())
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.wantErrIs != nil {
 					assert.ErrorIs(t, err, tt.wantErrIs)
 				}
-				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, nil),
+				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, newExtractorMap()),
 					"retry after failed Start should succeed")
 			} else {
 				require.NoError(t, err)
@@ -138,8 +138,8 @@ func TestCollectorCanStartOnlyOnce(t *testing.T) {
 	ticker := mocks.NewTicker()
 	ctx := context.Background()
 
-	require.NoError(t, c.Start(ctx, ticker, endpoint, sources, nil))
-	assert.Error(t, c.Start(ctx, ticker, endpoint, sources, nil),
+	require.NoError(t, c.Start(ctx, ticker, endpoint, sources, newExtractorMap()))
+	assert.Error(t, c.Start(ctx, ticker, endpoint, sources, newExtractorMap()),
 		"second Start after success should error")
 	c.Stop()
 }
@@ -158,7 +158,7 @@ func TestCollectorStop(t *testing.T) {
 			setup: func(t *testing.T) *Collector {
 				c := NewCollector()
 				ticker := mocks.NewTicker()
-				_ = c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{}, nil)
+				_ = c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{}, newExtractorMap())
 				return c
 			},
 		},
@@ -167,7 +167,7 @@ func TestCollectorStop(t *testing.T) {
 			setup: func(t *testing.T) *Collector {
 				c := NewCollector()
 				ticker := mocks.NewTicker()
-				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, nil))
+				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, newExtractorMap()))
 				return c
 			},
 		},
@@ -189,7 +189,7 @@ func TestCollectorCollectsOnTicks(t *testing.T) {
 	c := NewCollector()
 	ticker := mocks.NewTicker()
 
-	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{source}, nil))
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{source}, newExtractorMap()))
 	defer c.Stop()
 
 	ticker.Tick()
@@ -248,10 +248,10 @@ func TestCollectorErrorMetrics(t *testing.T) {
 				src = &dataSource{kind: tt.srcType}
 			}
 
-			var extractors map[string][]fwkdl.ExtractorBase
+			extractors := newExtractorMap()
 			if tt.extType != "" {
 				ext := &stubExtractor{kind: tt.extType, err: tt.extErr}
-				extractors = map[string][]fwkdl.ExtractorBase{src.TypedName().Name: {ext}}
+				extractors.Set(src.TypedName().Name, []fwkdl.ExtractorBase{ext})
 			}
 
 			pollBefore := testutil.ToFloat64(metrics.DataLayerPollErrorsTotal.WithLabelValues(tt.srcType))
@@ -301,7 +301,7 @@ func TestCollectorRapidStartStopRaceFree(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		c := NewCollector()
 		ticker := mocks.NewTicker()
-		require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{src}, nil))
+		require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{src}, newExtractorMap()))
 		ticker.Tick()
 		c.Stop()
 	}
@@ -312,7 +312,7 @@ func TestCollectorRapidStartStopRaceFree(t *testing.T) {
 func TestCollectorConcurrentStopRaceFree(t *testing.T) {
 	c := NewCollector()
 	ticker := mocks.NewTicker()
-	require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, nil))
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, newExtractorMap()))
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
