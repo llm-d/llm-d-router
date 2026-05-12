@@ -207,6 +207,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		TargetModel:      reqCtx.TargetModelName,
 		Body:             inferenceRequestBody,
 		Headers:          reqCtx.Request.Headers,
+		FairnessID:       reqCtx.FairnessID,
 		Objectives:       requestObjectives,
 		RequestSizeBytes: reqCtx.RequestSize,
 	}
@@ -214,6 +215,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
+
+	if err := d.runPreAdmissionProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
+		return reqCtx, err
+	}
 
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
@@ -483,6 +488,23 @@ func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.I
 		metrics.RecordPluginProcessingLatency(fwkrc.PreRequestExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
 		loggerDebug.Info("Completed running PreRequest plugin successfully", "plugin", plugin.TypedName())
 	}
+}
+
+func (d *Director) runPreAdmissionProcessors(ctx context.Context, request *fwksched.InferenceRequest) error {
+	if len(d.requestControlPlugins.preAdmissionProcessors) == 0 {
+		return nil
+	}
+	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	for _, plugin := range d.requestControlPlugins.preAdmissionProcessors {
+		loggerDebug.Info("Running PreAdmissionProcessor plugin", "plugin", plugin.TypedName())
+		before := time.Now()
+		if err := plugin.ProcessPreAdmission(ctx, request); err != nil {
+			return err
+		}
+		metrics.RecordPluginProcessingLatency(fwkrc.PreAdmissionProcessorExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		loggerDebug.Info("Completed running PreAdmissionProcessor plugin successfully", "plugin", plugin.TypedName())
+	}
+	return nil
 }
 
 func (d *Director) runDataProducerPlugins(ctx context.Context,

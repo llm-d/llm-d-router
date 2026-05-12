@@ -25,10 +25,11 @@ import (
 )
 
 const (
-	PreRequestExtensionPoint        = "PreRequest"
-	ResponseReceivedExtensionPoint  = "ResponseReceived"
-	ResponseStreamingExtensionPoint = "ResponseStreaming"
-	ResponseCompleteExtensionPoint  = "ResponseComplete"
+	PreAdmissionProcessorExtensionPoint = "PreAdmissionProcessor"
+	PreRequestExtensionPoint            = "PreRequest"
+	ResponseReceivedExtensionPoint      = "ResponseReceived"
+	ResponseStreamingExtensionPoint     = "ResponseStreaming"
+	ResponseCompleteExtensionPoint      = "ResponseComplete"
 )
 
 // PreRequest is called by the director after a getting result from scheduling layer and
@@ -79,4 +80,11 @@ type Admitter interface {
 	// AdmitRequest returns the denial reason, wrapped as error if the request is denied.
 	// If the request is allowed, it returns nil.
 	AdmitRequest(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
+}
+
+// PreAdmissionProcessor runs after InferenceRequest creation but before admission control.
+// It can mutate InferenceRequest fields such as FairnessID and Headers.
+type PreAdmissionProcessor interface {
+	plugin.Plugin
+	ProcessPreAdmission(ctx context.Context, request *fwksched.InferenceRequest) error
 }

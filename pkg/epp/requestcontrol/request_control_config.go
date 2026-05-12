@@ -24,6 +24,7 @@ import (
 // NewConfig creates a new Config object and returns its pointer.
 func NewConfig() *Config {
 	return &Config{
+		preAdmissionProcessors:   []fwkrc.PreAdmissionProcessor{},
 		admissionPlugins:         []fwkrc.Admitter{},
 		dataProducerPlugins:      []fwkrc.DataProducer{},
 		preRequestPlugins:        []fwkrc.PreRequest{},
@@ -34,11 +35,18 @@ func NewConfig() *Config {
 
 // Config provides a configuration for the requestcontrol plugins.
 type Config struct {
+	preAdmissionProcessors   []fwkrc.PreAdmissionProcessor
 	admissionPlugins         []fwkrc.Admitter
 	dataProducerPlugins      []fwkrc.DataProducer
 	preRequestPlugins        []fwkrc.PreRequest
 	responseReceivedPlugins  []fwkrc.ResponseHeaderProcessor
 	responseStreamingPlugins []fwkrc.ResponseBodyProcessor
+}
+
+// WithPreAdmissionProcessors sets the given plugins as the PreAdmissionProcessor plugins.
+func (c *Config) WithPreAdmissionProcessors(plugins ...fwkrc.PreAdmissionProcessor) *Config {
+	c.preAdmissionProcessors = plugins
+	return c
 }
 
 // WithPreRequestPlugins sets the given plugins as the PreRequest plugins.
@@ -79,6 +87,9 @@ func (c *Config) WithAdmissionPlugins(plugins ...fwkrc.Admitter) *Config {
 // If a plugin implements multiple plugin interfaces, it will be added to each corresponding list.
 func (c *Config) AddPlugins(pluginObjects ...plugin.Plugin) {
 	for _, plugin := range pluginObjects {
+		if preAdmissionProcessor, ok := plugin.(fwkrc.PreAdmissionProcessor); ok {
+			c.preAdmissionProcessors = append(c.preAdmissionProcessors, preAdmissionProcessor)
+		}
 		if preRequestPlugin, ok := plugin.(fwkrc.PreRequest); ok {
 			c.preRequestPlugins = append(c.preRequestPlugins, preRequestPlugin)
 		}
