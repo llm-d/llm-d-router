@@ -58,11 +58,11 @@ func makeRequestWithTokens(tokens int) *scheduling.InferenceRequest {
 
 func TestGetUserInputLenInTokens(t *testing.T) {
 	tests := []struct {
-		name     string
-		req      *scheduling.InferenceRequest
-		wantMin  int // at least this many tokens
+		name      string
+		req       *scheduling.InferenceRequest
+		wantMin   int // at least this many tokens
 		wantExact int // if > 0, require an exact match
-		wantZero bool
+		wantZero  bool
 	}{
 		{
 			name:    "completions prompt",
