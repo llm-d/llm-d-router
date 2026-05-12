@@ -1,0 +1,4 @@
+# HELP llm_d_router_epp_scheduler_attempts_total [ALPHA] Total number of scheduling attempts.
+# TYPE llm_d_router_epp_scheduler_attempts_total counter
+llm_d_router_epp_scheduler_attempts_total{endpoint_name="pod-1",namespace="ns-1",port="8080",status="success",target_model_name="modelA"} 2
+llm_d_router_epp_scheduler_attempts_total{endpoint_name="pod-2",namespace="ns-2",port="9090",status="success",target_model_name="modelB"} 1

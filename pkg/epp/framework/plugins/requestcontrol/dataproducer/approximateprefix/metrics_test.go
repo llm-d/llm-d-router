@@ -69,6 +69,9 @@ func getHistogram(histogram *prometheus.HistogramVec) (*dto.Histogram, error) {
 
 func resetMetrics() {
 	prefixCacheSize.Reset()
+	llmdPrefixCacheSize.Reset()
 	prefixCacheHitRatio.Reset()
+	llmdPrefixCacheHitRatio.Reset()
 	prefixCacheHitLength.Reset()
+	llmdPrefixCacheHitLength.Reset()
 }
