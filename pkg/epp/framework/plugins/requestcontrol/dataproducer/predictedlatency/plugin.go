@@ -276,13 +276,22 @@ type predictedLatencyCtx struct {
 
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
 	var promptText string
+	inputTokenCount := 0
 	if request.Body != nil {
 		promptText = request.Body.PromptText()
+		// Prefer the exact token count when the caller provided pre-tokenized
+		// input (e.g. `"prompt": [1,2,3]`); PromptText() returns "" in that
+		// case, so word-splitting it would always yield 0.
+		if hint := request.Body.InputTokenCountHint(); hint >= 0 {
+			inputTokenCount = hint
+		} else {
+			inputTokenCount = len(strings.Fields(promptText))
+		}
 	}
 	return &predictedLatencyCtx{
 		schedulingRequest:             *request,
 		promptText:                    promptText,
-		inputTokenCount:               len(strings.Fields(promptText)),
+		inputTokenCount:               inputTokenCount,
 		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints: make(map[string]float64),
 		predictionsForScheduling:      make(map[string]endpointPredictionResult),
