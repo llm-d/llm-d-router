@@ -341,6 +341,42 @@ func TestDisaggregate(t *testing.T) {
 	}
 }
 
+// TestDisaggregateRAMCachedScenario reproduces issues/1047: with default
+// weights gpu=1.0 / cpu=0.8 and 240 of 256 blocks hit, the (weighted)
+// matchBlocks differs between HBM (240) and RAM (192) but the unweighted
+// count is 240 in both cases. The decider must skip remote prefill in both.
+func TestDisaggregateRAMCachedScenario(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	const (
+		inputTokens     = 4096
+		blockSize       = 16
+		totalBlocks     = 256
+		matchedBlocks   = 240
+		nonCachedTokens = 512
+	)
+
+	tests := []struct {
+		name        string
+		matchBlocks int // what the weighted scorer writes
+	}{
+		{"HBM hit (weighted=240)", 240},
+		{"RAM hit (weighted=192)", 192},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ep := makeTestEndpointBase()
+			ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+				attrprefix.NewPrefixCacheMatchInfo(tt.matchBlocks, totalBlocks, blockSize).
+					WithMatchBlocksUnweighted(matchedBlocks))
+
+			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: nonCachedTokens})
+			require.NoError(t, err)
+			assert.False(t, decider.disaggregate(ctx, makeRequestWithTokens(inputTokens), ep))
+		})
+	}
+}
+
 func TestDisaggregateNoPrefixInfo(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 

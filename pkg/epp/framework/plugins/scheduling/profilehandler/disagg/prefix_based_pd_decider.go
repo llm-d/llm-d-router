@@ -131,8 +131,9 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 		return false
 	}
 
-	// number of cached tokens
-	hitPrefixTokens := prefixCacheMatchInfo.MatchBlocks() * prefixCacheMatchInfo.BlockSizeTokens()
+	// Cached tokens on this endpoint. Use the unweighted (physical) block
+	// count so RAM-tier hits are not undercounted; see issues/1047.
+	hitPrefixTokens := prefixCacheMatchInfo.MatchBlocksUnweighted() * prefixCacheMatchInfo.BlockSizeTokens()
 	// length of non-cached suffix in tokens
 	nonCachedTokens := inputTokens - hitPrefixTokens
 

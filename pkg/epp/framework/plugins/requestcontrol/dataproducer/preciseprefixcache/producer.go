@@ -266,6 +266,7 @@ func (p *Producer) Produce(ctx context.Context,
 
 	totalBlocks := len(blockKeys)
 	maxMatch := 0
+	unweighted := computeUnweightedMatchBlocks(blockKeys, keyToPods)
 	for _, ep := range endpoints {
 		md := ep.GetMetadata()
 		if md == nil {
@@ -277,7 +278,8 @@ func (p *Producer) Produce(ctx context.Context,
 			maxMatch = matchLen
 		}
 		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens))
+			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
+				WithMatchBlocksUnweighted(unweighted[addr]))
 	}
 
 	if p.speculativeEnabled {
