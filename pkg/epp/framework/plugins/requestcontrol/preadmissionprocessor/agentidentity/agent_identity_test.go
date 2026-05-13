@@ -38,24 +38,18 @@ func TestProcessPreAdmission(t *testing.T) {
 		{
 			name:           "explicit fairness ID is preserved",
 			fairnessID:     "my-explicit-id",
-			headers:        map[string]string{AgentIDHeader: "agent-1"},
+			headers:        map[string]string{ClaudeCodeSessionHeader: "session-abc"},
 			wantFairnessID: "my-explicit-id",
 		},
 		{
-			name:           "agent-id header used when fairness ID is default",
+			name:           "claude code session header used when fairness ID is default",
 			fairnessID:     metadata.DefaultFairnessID,
-			headers:        map[string]string{AgentIDHeader: "agent-1"},
-			wantFairnessID: "agent-1",
+			headers:        map[string]string{ClaudeCodeSessionHeader: "session-abc"},
+			wantFairnessID: "session-abc",
 		},
 		{
-			name:           "agent-id header used when fairness ID is empty",
+			name:           "claude code session header used when fairness ID is empty",
 			fairnessID:     "",
-			headers:        map[string]string{AgentIDHeader: "agent-1"},
-			wantFairnessID: "agent-1",
-		},
-		{
-			name:           "claude code session header",
-			fairnessID:     metadata.DefaultFairnessID,
 			headers:        map[string]string{ClaudeCodeSessionHeader: "session-abc"},
 			wantFairnessID: "session-abc",
 		},
@@ -72,15 +66,6 @@ func TestProcessPreAdmission(t *testing.T) {
 			wantFairnessID: "parent-1",
 		},
 		{
-			name:       "priority order: agent-id wins over claude code",
-			fairnessID: metadata.DefaultFairnessID,
-			headers: map[string]string{
-				AgentIDHeader:           "agent-1",
-				ClaudeCodeSessionHeader: "session-abc",
-			},
-			wantFairnessID: "agent-1",
-		},
-		{
 			name:       "priority order: claude code wins over opencode",
 			fairnessID: metadata.DefaultFairnessID,
 			headers: map[string]string{
@@ -90,29 +75,20 @@ func TestProcessPreAdmission(t *testing.T) {
 			wantFairnessID: "session-abc",
 		},
 		{
-			name:       "priority order: headers win over body previous_response_id",
+			name:       "priority order: opencode session wins over parent",
 			fairnessID: metadata.DefaultFairnessID,
-			headers:    map[string]string{AgentIDHeader: "agent-1"},
-			body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.PayloadMap{"previous_response_id": "resp-123"},
+			headers: map[string]string{
+				OpenCodeSessionHeader:       "oc-session-1",
+				OpenCodeParentSessionHeader: "parent-1",
 			},
-			wantFairnessID: "agent-1",
+			wantFairnessID: "oc-session-1",
 		},
 		{
-			name:       "previous_response_id from body",
+			name:       "previous_response_id in body is ignored",
 			fairnessID: metadata.DefaultFairnessID,
 			headers:    map[string]string{},
 			body: &fwkrh.InferenceRequestBody{
 				Payload: fwkrh.PayloadMap{"previous_response_id": "resp-456"},
-			},
-			wantFairnessID: "resp-456",
-		},
-		{
-			name:       "previous_response_id ignored when non-string",
-			fairnessID: metadata.DefaultFairnessID,
-			headers:    map[string]string{},
-			body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.PayloadMap{"previous_response_id": 123},
 			},
 			wantFairnessID: metadata.DefaultFairnessID,
 		},

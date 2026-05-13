@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package agentidentity provides a PreAdmissionProcessor plugin that resolves
-// agent identity from provider-specific headers and body fields into the FairnessID field.
+// agent identity from provider-specific headers into the FairnessID field.
 package agentidentity
 
 import (
@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -31,7 +30,6 @@ import (
 const (
 	PluginType = "agent-identity"
 
-	AgentIDHeader               = "x-gateway-inference-agent-id"
 	ClaudeCodeSessionHeader     = "x-claude-code-session-id"
 	OpenCodeSessionHeader       = "x-session-affinity"
 	OpenCodeParentSessionHeader = "x-parent-session-id"
@@ -40,7 +38,6 @@ const (
 // priorityHeaders is the ordered list of headers to check for agent identity.
 // The first non-empty value wins.
 var priorityHeaders = []string{
-	AgentIDHeader,
 	ClaudeCodeSessionHeader,
 	OpenCodeSessionHeader,
 	OpenCodeParentSessionHeader,
@@ -53,7 +50,7 @@ func PluginFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plug
 	}, nil
 }
 
-// Plugin resolves agent identity from provider-specific headers and body fields into FairnessID.
+// Plugin resolves agent identity from provider-specific headers into FairnessID.
 type Plugin struct {
 	typedName plugin.TypedName
 }
@@ -75,32 +72,13 @@ func (p *Plugin) ProcessPreAdmission(_ context.Context, request *scheduling.Infe
 		}
 	}
 
-	// Check body for OpenAI Responses API previous_response_id.
-	if id := extractPreviousResponseID(request.Body); id != "" {
-		request.FairnessID = id
-		return nil
-	}
-
+	// TODO(#1031): OpenAI Responses API `previous_response_id` is intentionally
+	// not used here. It references the prior turn's response, not the chain, so
+	// every turn would map to a different FairnessID and fall into a separate
+	// fairness queue. A correct implementation needs a ResponseBody hook on this
+	// plugin that records `response.id -> rootID` and folds `previous_response_id`
+	// back to its root at request time. That requires exposing response body
+	// bytes (or the extracted `id`) on requestcontrol.Response, which is out of
+	// scope for this change.
 	return nil
-}
-
-// extractPreviousResponseID extracts the previous_response_id from the request body payload
-// when available. This is used by the OpenAI Responses API to chain related requests.
-func extractPreviousResponseID(body *fwkrh.InferenceRequestBody) string {
-	if body == nil || body.Payload == nil {
-		return ""
-	}
-	payloadMap, ok := body.Payload.(fwkrh.PayloadMap)
-	if !ok {
-		return ""
-	}
-	id, ok := payloadMap["previous_response_id"]
-	if !ok {
-		return ""
-	}
-	s, ok := id.(string)
-	if !ok || s == "" {
-		return ""
-	}
-	return s
 }
