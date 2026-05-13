@@ -1,5 +1,12 @@
 SHELL := /usr/bin/env bash
 
+# Image registry + dev-environment image tags (single source of truth).
+include versions.mk
+
+# Export all dev-env image references so scripts/kind-dev-env.sh sees them.
+export IMAGE_REGISTRY VLLM_SIMULATOR_TAG EPP_TAG SIDECAR_TAG UDS_TOKENIZER_TAG
+export VLLM_IMAGE EPP_IMAGE SIDECAR_IMAGE UDS_TOKENIZER_IMAGE
+
 # Defaults
 TARGETOS ?= $(shell command -v go >/dev/null 2>&1 && go env GOOS || uname -s | tr '[:upper:]' '[:lower:]')
 TARGETARCH ?= $(shell command -v go >/dev/null 2>&1 && go env GOARCH || uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/; s/armv7l/arm/')
@@ -14,7 +21,7 @@ BUILDER_TAG ?= dev
 BUILDER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(BUILDER_IMAGE_NAME)
 export BUILDER_IMAGE ?= $(BUILDER_TAG_BASE):$(BUILDER_TAG)
 
-CONTAINER_RUNTIME ?= $(shell { command -v docker >/dev/null 2>&1 && echo docker; } || { command -v podman >/dev/null 2>&1 && echo podman; } || echo "")
+CONTAINER_RUNTIME := $(shell { command -v docker >/dev/null 2>&1 && echo docker; } || { command -v podman >/dev/null 2>&1 && echo podman; } || echo "")
 export CONTAINER_RUNTIME
 
 GIT_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null)
@@ -210,7 +217,6 @@ image-build-builder: check-container-tool ## Build builder image if missing loca
 		touch $(BUILDER_STAMP); \
 	fi
 
-
 ##@ Environment
 
 .PHONY: env
@@ -223,3 +229,19 @@ env: ## Print environment variables
 	@echo "BUILDER_IMAGE=$(BUILDER_IMAGE)"
 	@echo "GIT_COMMIT_SHA=$(GIT_COMMIT_SHA)"
 	@echo "BUILD_REF=$(BUILD_REF)"
+
+##@ EPP Image
+
+.PHONY: image-build-epp
+image-build-epp: ## Clone llm-d-inference-scheduler at pinned commit and build EPP image
+	scripts/build-epp-image.sh
+
+##@ Kind Development Environment
+
+.PHONY: env-dev-kind
+env-dev-kind: image-build-epp ## Deploy dev environment on a local Kind cluster (DISAGG_TOPOLOGY=pd|epd, default: pd)
+	scripts/kind-dev-env.sh
+
+.PHONY: clean-env-dev-kind
+clean-env-dev-kind: ## Delete the Kind dev cluster
+	kind delete cluster --name llm-d-coordinator-dev

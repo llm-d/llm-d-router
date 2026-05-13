@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${EPP_NAME}
+  labels:
+    app: ${EPP_NAME}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${EPP_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${EPP_NAME}
+    spec:
+      serviceAccountName: ${EPP_NAME}
+      terminationGracePeriodSeconds: 130
+      containers:
+      - name: epp
+        image: ${EPP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - --pool-name
+        - "${POOL_NAME}"
+        - --pool-namespace
+        - "${NAMESPACE}"
+        - --v
+        - "4"
+        - --zap-encoder
+        - "json"
+        - --grpc-port
+        - "9002"
+        - --grpc-health-port
+        - "9003"
+        - --config-file
+        - "/etc/epp/epp-config.yaml"
+        - --metrics-endpoint-auth=${METRICS_ENDPOINT_AUTH}
+        ports:
+        - containerPort: 5557
+        - containerPort: 9002
+        - containerPort: 9003
+        - name: metrics
+          containerPort: 9090
+        livenessProbe:
+          grpc:
+            port: 9003
+            service: envoy.service.ext_proc.v3.ExternalProcessor
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          grpc:
+            port: 9003
+            service: envoy.service.ext_proc.v3.ExternalProcessor
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: epp-config
+          mountPath: /etc/epp
+        - name: cache
+          mountPath: /cache
+        - name: uds-socket
+          mountPath: /tmp/tokenizer
+      - name: uds-tokenizer
+        image: ${UDS_TOKENIZER_IMAGE}
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: PROBE_PORT
+          value: "8082"
+        ports:
+        - name: health
+          containerPort: 8082
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8082
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: uds-socket
+          mountPath: /tmp/tokenizer
+        - name: model-cache
+          mountPath: /models
+      volumes:
+      - name: epp-config
+        configMap:
+          name: ${EPP_CONFIG_MAP}
+      - name: cache
+        emptyDir: {}
+      - name: uds-socket
+        emptyDir: {}
+      - name: model-cache
+        emptyDir: {}

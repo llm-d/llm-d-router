@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-p
+  labels:
+    app: ${PREFILL_POOL_NAME}
+spec:
+  replicas: ${VLLM_REPLICA_COUNT_P}
+  selector:
+    matchLabels:
+      app: ${PREFILL_POOL_NAME}
+      llm-d.ai/component: prefill
+  template:
+    metadata:
+      labels:
+        app: ${PREFILL_POOL_NAME}
+        llm-d.ai/component: prefill
+        llm-d.ai/role: prefill
+    spec:
+      containers:
+      - name: vllm
+        # VLLM_IMAGE can be a simulator (e.g. llm-d-inference-sim) or a real
+        # vLLM image (e.g. vllm/vllm-openai:v0.16.0)
+        image: ${VLLM_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - "--model=${MODEL_NAME}"
+        - "--port=8000"
+        - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
+        - "${VLLM_EXTRA_ARGS_P}"
+        ports:
+        - name: prefill-http
+          containerPort: 8000
+          protocol: TCP
+        - name: prefill-rank1
+          containerPort: 8001
+          protocol: TCP
+        - name: prefill-rank2
+          containerPort: 8002
+          protocol: TCP
+        - name: prefill-rank3
+          containerPort: 8003
+          protocol: TCP
+        - name: prefill-rank4
+          containerPort: 8004
+          protocol: TCP
+        - name: prefill-rank5
+          containerPort: 8005
+          protocol: TCP
+        - name: prefill-rank6
+          containerPort: 8006
+          protocol: TCP
+        - name: prefill-rank7
+          containerPort: 8007
+          protocol: TCP
+        # Startup Probe: Wait for model to load during initialization
+        # Protects liveness/readiness probes from firing too early
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 60  # Allow up to 10 minutes (60 * 10s)
+          periodSeconds: 10
+          timeoutSeconds: 5
+        # Readiness Probe: Is the model loaded and ready?
+        # Controls traffic routing, removes from service if failing
+        readinessProbe:
+          httpGet:
+            path: /health # Use /health/ready if available in your version
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        # Liveness Probe: Is the server process alive?
+        # Simple health check, restarts container if failing
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        env:
+        - name: PORT
+          value: "8000"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30

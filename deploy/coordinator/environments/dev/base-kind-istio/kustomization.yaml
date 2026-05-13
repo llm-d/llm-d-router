@@ -1,0 +1,17 @@
+# ------------------------------------------------------------------------------
+# Kubernetes In Docker (KIND) Environment
+#
+# Deploys the base dev stack on a KIND cluster:
+#   * Istio Control Plane
+#   * Inference Gateway (dual InferencePools for P/D)
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- services.yaml
+- ../../../components/istio-control-plane/
+- ../../../components/inference-gateway/
+
+patches:
+- path: patch-gateways.yaml

@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-d
+  labels:
+    app: ${DECODE_POOL_NAME}
+spec:
+  replicas: ${VLLM_REPLICA_COUNT_D}
+  selector:
+    matchLabels:
+      app: ${DECODE_POOL_NAME}
+      llm-d.ai/component: decode
+  template:
+    metadata:
+      labels:
+        app: ${DECODE_POOL_NAME}
+        llm-d.ai/component: decode
+        llm-d.ai/role: ${DECODE_ROLE}
+    spec:
+      initContainers:
+      # Routing sidecar - proxies requests from port 8000 to vllm on port 8200
+      # Scenario patches add --kv-connector and/or --ec-connector args as needed
+      - name: routing-sidecar
+        image: ${SIDECAR_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - "--port=8000"
+        - "--vllm-port=8200"
+        - "--secure-proxy=false"
+        - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
+        ports:
+        - name: sidecar-http
+          containerPort: 8000
+          protocol: TCP
+        - name: sidecar-rank1
+          containerPort: 8001
+          protocol: TCP
+        - name: sidecar-rank2
+          containerPort: 8002
+          protocol: TCP
+        - name: sidecar-rank3
+          containerPort: 8003
+          protocol: TCP
+        - name: sidecar-rank4
+          containerPort: 8004
+          protocol: TCP
+        - name: sidecar-rank5
+          containerPort: 8005
+          protocol: TCP
+        - name: sidecar-rank6
+          containerPort: 8006
+          protocol: TCP
+        - name: sidecar-rank7
+          containerPort: 8007
+          protocol: TCP
+        restartPolicy: Always
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+      containers:
+      - name: vllm
+        # VLLM_IMAGE can be a simulator (e.g. llm-d-inference-sim) or a real vLLM image (e.g. vllm/vllm-openai:v0.16.0)
+        image: ${VLLM_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - "--port=8200"
+        - "--model=${MODEL_NAME}"
+        - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
+        - "${VLLM_EXTRA_ARGS_D}"
+        ports:
+        - name: http
+          containerPort: 8200
+          protocol: TCP
+        - name: rank1
+          containerPort: 8201
+          protocol: TCP
+        - name: rank2
+          containerPort: 8202
+          protocol: TCP
+        - name: rank3
+          containerPort: 8203
+          protocol: TCP
+        - name: rank4
+          containerPort: 8204
+          protocol: TCP
+        - name: rank5
+          containerPort: 8205
+          protocol: TCP
+        - name: rank6
+          containerPort: 8206
+          protocol: TCP
+        - name: rank7
+          containerPort: 8207
+          protocol: TCP
+        # Startup Probe: Wait for model to load during initialization
+        # Protects liveness/readiness probes from firing too early
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8200
+          failureThreshold: 60  # Allow up to 10 minutes (60 * 10s)
+          periodSeconds: 10
+          timeoutSeconds: 5
+        # Readiness Probe: Is the model loaded and ready?
+        # Controls traffic routing, removes from service if failing
+        readinessProbe:
+          httpGet:
+            path: /health # Use /health/ready if available in your version
+            port: 8200
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        # Liveness Probe: Is the server process alive?
+        # Simple health check, restarts container if failing
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8200
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: PORT
+          value: "8200"
+        - name: PYTHONHASHSEED
+          value: "42"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace

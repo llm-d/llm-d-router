@@ -1,0 +1,133 @@
+# ------------------------------------------------------------------------------
+# Simulator Overlay
+#
+# Adds simulator-specific configuration to vLLM deployments:
+#   - --mode=${VLLM_SIM_MODE} arg on Decode (vllm-d) only — controls simulator
+#     response mode (echo: returns input, random: returns random sentences)
+#   - --zmq-endpoint on Decode only — publishes KV cache events to the EPP
+#   - UDS tokenizer sidecar on all deployments (Decode, Prefill)
+#   - KV cache args on Decode for cache-aware scheduling tests
+#
+# Uses JSON patches (op: add) to INSERT into args arrays without replacing
+# them, avoiding conflicts with scenario-specific strategic merge patches.
+#
+# Usage: include as a Kustomize component in scenario overlays:
+#   components:
+#   - ../../../components/overlays/simulator/
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+# --- Decode deployment (vllm-d) ---
+# Has initContainers (routing-sidecar), so insert tokenizer at index 0
+- target:
+    kind: Deployment
+    name: vllm-d
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/0
+      value: "--mode=${VLLM_SIM_MODE}"
+    - op: add
+      path: /spec/template/spec/containers/0/args/1
+      value: "--enable-kvcache=${KV_CACHE_ENABLED}"
+    - op: add
+      path: /spec/template/spec/containers/0/args/2
+      value: "--kv-cache-size=1024"
+    - op: add
+      path: /spec/template/spec/containers/0/args/3
+      value: "--block-size=16"
+    - op: add
+      path: /spec/template/spec/containers/0/args/4
+      value: "--zmq-endpoint=tcp://${EPP_NAME_D}.${NAMESPACE}.svc.cluster.local:5557"
+    - op: add
+      path: /spec/template/spec/initContainers/0
+      value:
+        name: uds-tokenizer
+        image: ${UDS_TOKENIZER_IMAGE}
+        imagePullPolicy: IfNotPresent
+        restartPolicy: Always
+        env:
+        - name: LOG_LEVEL
+          value: "DEBUG"
+        - name: PROBE_PORT
+          value: "8082"
+        - name: HF_TOKEN
+          value: "${HF_TOKEN}"
+        ports:
+        - name: health
+          containerPort: 8082
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: uds-socket
+          mountPath: /tmp/tokenizer
+    - op: add
+      path: /spec/template/spec/containers/0/volumeMounts
+      value:
+      - name: uds-socket
+        mountPath: /tmp/tokenizer
+    - op: add
+      path: /spec/template/spec/volumes
+      value:
+      - name: uds-socket
+        emptyDir: {}
+
+# --- Prefill deployment (vllm-p) ---
+# No initContainers in base, so create the array
+- target:
+    kind: Deployment
+    name: vllm-p
+  patch: |
+    - op: add
+      path: /spec/template/spec/initContainers
+      value:
+      - name: uds-tokenizer
+        image: ${UDS_TOKENIZER_IMAGE}
+        imagePullPolicy: IfNotPresent
+        restartPolicy: Always
+        env:
+        - name: LOG_LEVEL
+          value: "DEBUG"
+        - name: PROBE_PORT
+          value: "8082"
+        - name: HF_TOKEN
+          value: "${HF_TOKEN}"
+        ports:
+        - name: health
+          containerPort: 8082
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: uds-socket
+          mountPath: /tmp/tokenizer
+    - op: add
+      path: /spec/template/spec/containers/0/volumeMounts
+      value:
+      - name: uds-socket
+        mountPath: /tmp/tokenizer
+    - op: add
+      path: /spec/template/spec/volumes
+      value:
+      - name: uds-socket
+        emptyDir: {}

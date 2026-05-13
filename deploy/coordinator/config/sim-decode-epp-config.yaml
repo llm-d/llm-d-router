@@ -1,0 +1,21 @@
+# EPP config for the decode pool (single-profile, decode-filter)
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: prefix-cache-scorer
+  parameters:
+    maxPrefixBlocksToMatch: 256
+    lruCapacityPerServer: 31250
+- type: queue-scorer
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
+  - pluginRef: queue-scorer
+    weight: 1

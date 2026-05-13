@@ -1,0 +1,17 @@
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: ${POOL_NAME}
+spec:
+  selector:
+    matchLabels:
+      app: ${POOL_NAME}
+  endpointPickerRef:
+    name: ${EPP_NAME}
+    kind: Service
+    port:
+      number: 9002
+  # TARGET_PORTS is a pre-formatted YAML block-sequence fragment produced by
+  # kind-dev-env.sh. It begins with a newline and carries its own
+  # "  - number: <port>" lines at this indentation level.
+  targetPorts: ${TARGET_PORTS}

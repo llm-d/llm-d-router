@@ -1,0 +1,14 @@
+# ------------------------------------------------------------------------------
+# VLLM Decode Component
+#
+# Decode deployment — always present in every scenario. Includes routing sidecar.
+# Configurable via Kustomize patches per scenario for:
+#   - role label (decode, prefill-decode, or none)
+#   - connector args (--kv-connector, --ec-connector)
+#   - data-parallel-size
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- deployment.yaml

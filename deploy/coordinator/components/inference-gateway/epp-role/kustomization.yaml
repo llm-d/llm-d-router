@@ -1,0 +1,18 @@
+# ------------------------------------------------------------------------------
+# EPP Role Template (single-role)
+#
+# Generic per-EPP resources parameterized by EPP_NAME, POOL_NAME, and
+# EPP_CONFIG_MAP. Rendered once per role (prefill / decode) by
+# scripts/kind-dev-env.sh and piped through envsubst before apply.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- service-account.yaml
+- rbac.yaml
+- inference-pool.yaml
+- httproute.yaml
+- service.yaml
+- deployment.yaml
+- destination-rule.yaml

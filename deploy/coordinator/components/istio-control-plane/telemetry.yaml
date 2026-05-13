@@ -1,0 +1,10 @@
+# Enables debug logging for Gateways
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: mesh-default
+  namespace: istio-gateway
+spec:
+  accessLogging:
+  - providers:
+    - name: envoy

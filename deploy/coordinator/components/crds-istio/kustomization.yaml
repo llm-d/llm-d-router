@@ -1,0 +1,11 @@
+# ------------------------------------------------------------------------------
+# Custom Resource Definitions (CRDs) for Istio
+#
+# **Warning**: CRDs are cluster-level, so in a shared development environment
+# this needs to be done in a controlled and communicated manner.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- istio.yaml
