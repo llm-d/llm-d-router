@@ -27,7 +27,7 @@ image-build-epp: ## Clone llm-d-inference-scheduler at pinned commit and build E
 ##@ Kind Development Environment
 
 .PHONY: env-dev-kind
-env-dev-kind: image-build-epp ## Deploy dev environment on a local Kind cluster
+env-dev-kind: image-build-epp ## Deploy dev environment on a local Kind cluster (DISAGG_TOPOLOGY=pd|epd, default: pd)
 	scripts/kind-dev-env.sh
 
 .PHONY: clean-env-dev-kind
