@@ -1,3 +1,52 @@
+replicas: 1
+image:
+  registry: ghcr.io/llm-d
+  repository: llm-d-inference-scheduler-dev
+  tag: main
+  pullPolicy: Always
+extProcPort: 9002
+env: []
+pluginsConfigFile: "default-plugins.yaml"
+
+# EPP container resources: CPU limits unset for burst capacity, memory capped at 16Gi
+resources:
+  requests:
+    cpu: "4"
+    memory: 8Gi
+  limits:
+    memory: 16Gi
+
+# Monitoring configuration for EPP
+monitoring:
+  interval: "10s"
+  # Prometheus ServiceMonitor will be created when enabled for EPP metrics collection
+  prometheus:
+    enabled: false
+    auth:
+      # To allow unauthenticated /metrics access (e.g., for debugging with curl), set to false
+      enabled: true
+      # Service account token secret for authentication
+      secretName: inference-gateway-sa-metrics-reader-secret
+    # additional labels for the ServiceMonitor
+    extraLabels: {}
+
+tracing:
+  enabled: false
+  otelExporterEndpoint: "http://localhost:4317"
+  sampling:
+    sampler: "parentbased_traceidratio"
+    samplerArg: "0.1"
+
+# Metrics DataSource Configuration
+# These values configure how the EPP scrapes metrics from model server pods.
+metricsDataSource:
+  # scheme is the HTTP scheme used to scrape metrics (http or https).
+  scheme: "http"
+  # path is the URL path on the model server pod that exposes Prometheus metrics.
+  path: "/metrics"
+  # insecureSkipVerify disables TLS certificate verification when scheme is https.
+  insecureSkipVerify: true
+
 latencyPredictor:
   enabled: false
   # Training Server Configuration

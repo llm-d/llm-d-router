@@ -1,14 +1,6 @@
 inferenceExtension:
-  replicas: 1
-  image:
-    registry: ghcr.io/llm-d
-    repository: llm-d-inference-scheduler-dev
-    tag: main
-    pullPolicy: Always
-  extProcPort: 9002
   failureMode: "FailOpen"
   env: []
-  pluginsConfigFile: "default-plugins.yaml"
 
   # Define additional container ports
   extraContainerPorts: []
@@ -49,64 +41,9 @@ inferenceExtension:
 
   tolerations: []
 
-  # Resource requests and limits for the EPP container.
-  # These defaults are sized for a standard EPP deployment with built-in
-  # scheduling plugins. CPU limits are intentionally unset to allow bursting
-  # to all available node CPUs during scheduling spikes. Memory limit is set
-  # to 16Gi to avoid putting the node under memory pressure in case of a
-  # memory leak.
-  #
-  # These values were validated with scale testing at high QPS, achieving
-  # p90 scheduler latency within 100ms.
-  #
-  # If you add computationally intensive plugins or sidecars (e.g., latency
-  # prediction, custom scorers), you may need to increase these values.
-  # Use pprof (https://pkg.go.dev/net/http/pprof) to profile your deployment
-  # and right-size resources for your workload.
-  resources:
-    requests:
-      cpu: "4"
-      memory: 8Gi
-    limits:
-      memory: 16Gi
-
   # Sidecar configuration for EPP
   sidecar:
     enabled: false
-
-  # Monitoring configuration for EPP
-  monitoring:
-    interval: "10s"
-    # Prometheus ServiceMonitor will be created when enabled for EPP metrics collection
-    prometheus:
-      enabled: false
-      auth:
-        enabled: true
-        # Service account token secret for authentication
-        secretName: inference-gateway-sa-metrics-reader-secret
-      # additional labels for the ServiceMonitor
-      extraLabels: {}
-  tracing:
-    enabled: false
-    otelExporterEndpoint: "http://localhost:4317"
-    sampling:
-      sampler: "parentbased_traceidratio"
-      samplerArg: "0.1"
-
-  # Latency Predictor Configuration
-  latencyPredictor:
-    # common latencyPredictor setting exists in config/charts/epplib/values.yaml
-    enabled: false
-
-  # Metrics DataSource Configuration
-  # These values configure how the EPP scrapes metrics from model server pods.
-  metricsDataSource:
-    # scheme is the HTTP scheme used to scrape metrics (http or https).
-    scheme: "http"
-    # path is the URL path on the model server pod that exposes Prometheus metrics.
-    path: "/metrics"
-    # insecureSkipVerify disables TLS certificate verification when scheme is https.
-    insecureSkipVerify: true
 
 inferencePool:
   targetPorts:
