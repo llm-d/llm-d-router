@@ -665,8 +665,8 @@ type AnthropicContentBlock struct {
 }
 
 type AnthropicImageSource struct {
-	Type  string `json:"type"` // "base64" or "url"
-	MediaType string `json:"media_type,omitempty"` // "image/jpeg", "image/png", "image/gif", "image/webp"
-	Data  string `json:"data,omitempty"` // base64-encoded image data
-	URL   string `json:"url,omitempty"`  // imae URL
+	Type      string `json:"type"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
