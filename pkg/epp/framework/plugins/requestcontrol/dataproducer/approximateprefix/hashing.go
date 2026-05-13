@@ -127,14 +127,14 @@ func getUserInputBytes(request *scheduling.InferenceRequest) ([]byte, error) {
 		if ids := request.Body.Completions.Prompt.TokenIDs; len(ids) > 0 {
 			return tokenIDsToBytes(ids), nil
 		}
-		return []byte(request.Body.Completions.Prompt.PlainText()), nil
+		return request.Body.Completions.Prompt.Bytes(), nil
 
 	case request.Body.Embeddings != nil:
 		input := request.Body.Embeddings.Input
 		if ids := input.TokenIDs; len(ids) > 0 {
 			return tokenIDsToBytes(ids), nil
 		}
-		return []byte(input.PlainText()), nil
+		return input.Bytes(), nil
 
 	default:
 		return nil, errors.New("invalid request body: no recognized API format found")

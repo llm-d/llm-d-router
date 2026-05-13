@@ -25,6 +25,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
@@ -701,14 +702,11 @@ func (s *Scorer) computeBlockKeys(ctx context.Context,
 		return nil, nil
 	}
 
-	if tp := request.Body.TokenizedPrompt; tp != nil && len(tp.TokenIDs) > 0 {
-		var extraFeatures []*kvblock.BlockExtraFeatures
-		if len(tp.MultiModalFeatures) > 0 {
-			mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(tp.MultiModalFeatures)
-			extraFeatures = kvblock.ComputeBlockExtraFeatures(
-				mmHashes, mmPlaceholders, s.blockSizeTokens, len(tp.TokenIDs))
-		}
-		return s.kvCacheIndexer.ComputeBlockKeysFromTokens(ctx, tp.TokenIDs, request.TargetModel, extraFeatures)
+	// Prefer pre-tokenized input when available (from the tokenizer
+	// DataProducer plugin or from a token-ID prompt in the request body)
+	// so we don't collapse to an empty prompt text.
+	if tokens, extraFeatures := preTokenizedInput(request.Body, s.blockSizeTokens); len(tokens) > 0 {
+		return s.kvCacheIndexer.ComputeBlockKeysFromTokens(ctx, tokens, request.TargetModel, extraFeatures)
 	}
 
 	var (
@@ -730,6 +728,32 @@ func (s *Scorer) computeBlockKeys(ctx context.Context,
 		return nil, nil
 	}
 	return keys, err
+}
+
+// preTokenizedInput returns the token IDs and per-block multimodal extra
+// features when the request body carries pre-tokenized input, either via
+// the tokenizer DataProducer plugin (Body.TokenizedPrompt) or directly in
+// a token-ID completions/embeddings prompt. Returns (nil, nil) when no
+// pre-tokenized input is available.
+func preTokenizedInput(body *fwkrh.InferenceRequestBody, blockSize int) ([]uint32, []*kvblock.BlockExtraFeatures) {
+	if body == nil {
+		return nil, nil
+	}
+	if tp := body.TokenizedPrompt; tp != nil && len(tp.TokenIDs) > 0 {
+		var extraFeatures []*kvblock.BlockExtraFeatures
+		if len(tp.MultiModalFeatures) > 0 {
+			mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(tp.MultiModalFeatures)
+			extraFeatures = kvblock.ComputeBlockExtraFeatures(mmHashes, mmPlaceholders, blockSize, len(tp.TokenIDs))
+		}
+		return tp.TokenIDs, extraFeatures
+	}
+	if body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0 {
+		return body.Completions.Prompt.TokenIDs, nil
+	}
+	if body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0 {
+		return body.Embeddings.Input.TokenIDs, nil
+	}
+	return nil, nil
 }
 
 // extractPodSet builds a set of pod identifiers from endpoints for filtered index lookups.
@@ -762,24 +786,16 @@ func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, reques
 		"isChatCompletions", request.Body != nil && request.Body.ChatCompletions != nil,
 		"isCompletions", request.Body != nil && request.Body.Completions != nil)
 
-	// Prefer pre-tokenized input from the tokenizer DataProducer plugin.
-	if request.Body != nil {
-		if tp := request.Body.TokenizedPrompt; tp != nil && len(tp.TokenIDs) > 0 {
-			traceLogger.Info("tokens found on request, skipping tokenization")
+	// Prefer pre-tokenized input when available (from the tokenizer DataProducer
+	// plugin or a token-ID prompt in the request body itself).
+	if tokens, extraFeatures := preTokenizedInput(request.Body, s.blockSizeTokens); len(tokens) > 0 {
+		traceLogger.Info("tokens found on request, skipping tokenization")
 
-			var extraFeatures []*kvblock.BlockExtraFeatures
-			if len(tp.MultiModalFeatures) > 0 {
-				mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(tp.MultiModalFeatures)
-				extraFeatures = kvblock.ComputeBlockExtraFeatures(
-					mmHashes, mmPlaceholders, s.blockSizeTokens, len(tp.TokenIDs))
-			}
-
-			scores, err := s.kvCacheIndexer.ScoreTokens(ctx, tp.TokenIDs, request.TargetModel, nil, extraFeatures)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get endpoint scores for tokens: %w", err)
-			}
-			return scores, nil
+		scores, err := s.kvCacheIndexer.ScoreTokens(ctx, tokens, request.TargetModel, nil, extraFeatures)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get endpoint scores for tokens: %w", err)
 		}
+		return scores, nil
 	}
 
 	// The upstream parser guarantees exactly one body is populated, but we defensively prioritize chat completions.
