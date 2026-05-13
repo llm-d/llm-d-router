@@ -64,9 +64,10 @@ func TestInFlightLoadProducer_Lifecycle(t *testing.T) {
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker: newConcurrencyTracker(),
-		tokenTracker:   newConcurrencyTracker(),
-		tokenEstimator: NewSimpleTokenEstimator(),
+		requestTracker:      newConcurrencyTracker(),
+		tokenTracker:        newConcurrencyTracker(),
+		tokenEstimator:      NewSimpleTokenEstimator(),
+		includeOutputTokens: true,
 	}
 	ctx := context.Background()
 	endpointName := "lifecycle-endpoint"
@@ -92,9 +93,10 @@ func TestInFlightLoadProducer_MultiPodLifecycle(t *testing.T) {
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker: newConcurrencyTracker(),
-		tokenTracker:   newConcurrencyTracker(),
-		tokenEstimator: NewSimpleTokenEstimator(),
+		requestTracker:      newConcurrencyTracker(),
+		tokenTracker:        newConcurrencyTracker(),
+		tokenEstimator:      NewSimpleTokenEstimator(),
+		includeOutputTokens: true,
 	}
 	ctx := context.Background()
 	podA := "pod-a"
@@ -161,9 +163,10 @@ func TestInFlightLoadProducer_ConcurrencyStress(t *testing.T) {
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker: newConcurrencyTracker(),
-		tokenTracker:   newConcurrencyTracker(),
-		tokenEstimator: NewSimpleTokenEstimator(),
+		requestTracker:      newConcurrencyTracker(),
+		tokenTracker:        newConcurrencyTracker(),
+		tokenEstimator:      NewSimpleTokenEstimator(),
+		includeOutputTokens: true,
 	}
 	ctx := context.Background()
 	endpointName := "stress-endpoint"
