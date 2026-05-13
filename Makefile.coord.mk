@@ -33,3 +33,32 @@ env-dev-kind: image-build-epp ## Deploy dev environment on a local Kind cluster
 .PHONY: clean-env-dev-kind
 clean-env-dev-kind: ## Delete the Kind dev cluster
 	kind delete cluster --name llm-d-coordinator-dev
+
+##@ Go Coordinator Service
+
+BINARY := coordinator
+BUILD_DIR := bin
+
+.PHONY: build
+build: ## Build the coordinator Go binary
+	go build -o $(BUILD_DIR)/$(BINARY) ./cmd/coordinator
+
+.PHONY: test
+test: ## Run Go tests
+	go test ./...
+
+.PHONY: lint
+lint: ## Run Go linter
+	golangci-lint run ./...
+
+.PHONY: run
+run: build ## Build and run the coordinator locally
+	$(BUILD_DIR)/$(BINARY) --config configs/coordinator.yaml
+
+.PHONY: tidy
+tidy: ## Run go mod tidy
+	go mod tidy
+
+.PHONY: clean
+clean: ## Remove build artifacts
+	rm -rf $(BUILD_DIR)
