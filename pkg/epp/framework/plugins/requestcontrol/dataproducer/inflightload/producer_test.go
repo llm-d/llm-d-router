@@ -34,11 +34,12 @@ import (
 
 func newTestProducer() *InFlightLoadProducer {
 	return &InFlightLoadProducer{
-		typedName:      fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: "inflight-load-producer"},
-		requestTracker: newConcurrencyTracker(),
-		tokenTracker:   newConcurrencyTracker(),
-		tokenEstimator: NewSimpleTokenEstimator(),
-		dk:             attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(""),
+		typedName:           fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: "inflight-load-producer"},
+		requestTracker:      newConcurrencyTracker(),
+		tokenTracker:        newConcurrencyTracker(),
+		tokenEstimator:      NewSimpleTokenEstimator(),
+		includeOutputTokens: true,
+		dk:                  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName("inflight-load-producer"),
 	}
 }
 
@@ -57,11 +58,11 @@ func TestInFlightLoadProducer_Produce(t *testing.T) {
 	ctx := context.Background()
 	endpoints := []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}
 
-	err := producer.Produce(ctx, nil, endpoints)
+	err := producer.PrepareRequestData(ctx, nil, endpoints)
 	require.NoError(t, err)
 
 	// Verify AttributeMap population
-	key := attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(producer.typedName.Name).String()
+	key := producer.dk.String()
 	val, ok := endpoints[0].Get(key)
 	require.True(t, ok)
 	load := val.(*attrconcurrency.InFlightLoad)
