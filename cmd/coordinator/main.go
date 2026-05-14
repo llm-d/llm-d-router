@@ -2,11 +2,13 @@ package main
 
 import (
 	"flag"
-	"log/slog"
 	"os"
+
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/coordinator/pkg/config"
 	"github.com/llm-d/coordinator/pkg/gateway"
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"github.com/llm-d/coordinator/pkg/server"
 	_ "github.com/llm-d/coordinator/pkg/steps"
@@ -16,11 +18,12 @@ func main() {
 	configPath := flag.String("config", "configs/coordinator.yaml", "path to configuration file")
 	flag.Parse()
 
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	logging.InitLogging(logging.DEFAULT)
+	log := ctrl.Log.WithName("coordinator")
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		slog.Error("failed to load config", "error", err)
+		log.Error(err, "failed to load config")
 		os.Exit(1)
 	}
 
@@ -28,16 +31,16 @@ func main() {
 
 	steps, err := buildPipeline(cfg, gwClient)
 	if err != nil {
-		slog.Error("failed to build pipeline", "error", err)
+		log.Error(err, "failed to build pipeline")
 		os.Exit(1)
 	}
 
 	p := pipeline.New(steps)
 	srv := server.New(cfg.Server, p)
 
-	slog.Info("starting coordinator", "addr", cfg.Server.ListenAddr)
+	log.Info("starting coordinator", "addr", cfg.Server.ListenAddr)
 	if err := srv.ListenAndServe(); err != nil {
-		slog.Error("server error", "error", err)
+		log.Error(err, "server error")
 		os.Exit(1)
 	}
 }

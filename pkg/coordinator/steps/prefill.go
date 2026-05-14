@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 
 	"github.com/llm-d/coordinator/pkg/gateway"
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -35,6 +35,8 @@ func (s *PrefillStep) SetGatewayClient(c *gateway.Client) {
 func (s *PrefillStep) Name() string { return "prefill" }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	logger := logging.FromContext(ctx).WithName("prefill")
+
 	allHashes := make([]string, len(reqCtx.MultimodalEntries))
 	allPlaceholders := make([]any, len(reqCtx.MultimodalEntries))
 	for i, entry := range reqCtx.MultimodalEntries {
@@ -75,7 +77,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	path := fmt.Sprintf("%s%s", gateway.PrefillPrefix, s.gatewayPath)
-	slog.Info("prefill: sending request", "path", path)
+	logger.V(logging.DEFAULT).Info("sending request", "path", path)
 
 	resp, err := s.gwClient.Post(ctx, path, bodyBytes, map[string]string{
 		"X-Request-ID": reqCtx.RequestID,
@@ -97,7 +99,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 
 	reqCtx.KVTransferParams = prefillResp.KVTransferParams
 
-	slog.Info("prefill: complete")
+	logger.V(logging.DEFAULT).Info("complete")
 	return nil
 }
 
