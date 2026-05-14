@@ -113,7 +113,7 @@ type renderResponse struct {
 }
 
 type renderFeatures struct {
-	MMHashes       map[string][]string                   `json:"mm_hashes"`
+	MMHashes       map[string][]string                    `json:"mm_hashes"`
 	MMPlaceholders map[string][]pipeline.PlaceholderRange `json:"mm_placeholders"`
-	KwargsData     map[string][]string                   `json:"kwargs_data"`
+	KwargsData     map[string][]string                    `json:"kwargs_data"`
 }

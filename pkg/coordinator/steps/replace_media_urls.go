@@ -17,9 +17,9 @@ func init() {
 }
 
 type ReplaceMediaURLsStep struct {
-	downloadTimeout       time.Duration
+	downloadTimeout        time.Duration
 	maxConcurrentDownloads int
-	client                *http.Client
+	client                 *http.Client
 }
 
 func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
@@ -40,9 +40,9 @@ func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
 	}
 
 	return &ReplaceMediaURLsStep{
-		downloadTimeout:       timeout,
+		downloadTimeout:        timeout,
 		maxConcurrentDownloads: maxConcurrent,
-		client:                &http.Client{Timeout: timeout},
+		client:                 &http.Client{Timeout: timeout},
 	}, nil
 }
 
@@ -97,7 +97,6 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 
 	results := make([]downloadResult, len(imageURLs))
 	for i, ref := range imageURLs {
-		i, ref := i, ref
 		g.Go(func() error {
 			data, contentType, err := s.download(gCtx, ref.url)
 			if err != nil {

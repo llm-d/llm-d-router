@@ -12,7 +12,7 @@ import (
 func TestReplaceMediaURLsStep_DownloadsAndInlines(t *testing.T) {
 	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/jpeg")
-		w.Write([]byte("jpeg-bytes"))
+		_, _ = w.Write([]byte("jpeg-bytes"))
 	}))
 	defer imageServer.Close()
 
@@ -116,7 +116,7 @@ func TestReplaceMediaURLsStep_DownloadFailure(t *testing.T) {
 func TestReplaceMediaURLsStep_MultipleImages(t *testing.T) {
 	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write([]byte("png-data"))
+		_, _ = w.Write([]byte("png-data"))
 	}))
 	defer imageServer.Close()
 

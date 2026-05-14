@@ -13,6 +13,11 @@ import (
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
+const (
+	prefillPath = "/prefill/inference/v1/generate"
+	decodePath  = "/decode/v1/chat/completions"
+)
+
 func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	expectedKVParams := map[string]any{
 		"block_id":  "block-999",
@@ -23,19 +28,19 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	var decodeReceivedKVParams map[string]any
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/prefill/inference/v1/generate":
-			json.NewEncoder(w).Encode(map[string]any{
+		switch r.URL.Path {
+		case prefillPath:
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"kv_transfer_params": expectedKVParams,
 			})
 
-		case r.URL.Path == "/decode/v1/chat/completions":
+		case decodePath:
 			body, _ := io.ReadAll(r.Body)
 			var parsed map[string]any
-			json.Unmarshal(body, &parsed)
+			_ = json.Unmarshal(body, &parsed)
 			decodeReceivedKVParams, _ = parsed["kv_transfer_params"].(map[string]any)
 
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{
 					{"message": map[string]any{"role": "assistant", "content": "done"}},
 				},

@@ -22,9 +22,9 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		}
 
 		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &prefillBody)
+		_ = json.Unmarshal(body, &prefillBody)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"kv_transfer_params": map[string]any{
 				"block_id":  "block-xyz",
 				"peer_host": "10.0.0.5",
@@ -134,7 +134,7 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 func TestPrefillStep_GatewayError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte("overloaded"))
+		_, _ = w.Write([]byte("overloaded"))
 	}))
 	defer server.Close()
 

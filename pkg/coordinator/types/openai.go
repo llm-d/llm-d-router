@@ -1,4 +1,4 @@
-package types
+package types //nolint:revive
 
 // ChatCompletionRequest represents an OpenAI-compatible chat completion request
 // with extensions for disaggregated inference.

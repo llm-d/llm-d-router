@@ -22,7 +22,7 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
-		json.Unmarshal(body, &parsed)
+		_ = json.Unmarshal(body, &parsed)
 
 		// Verify token_ids present
 		tokenIDs, ok := parsed["token_ids"].([]any)
@@ -46,7 +46,7 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 			t.Errorf("expected 1 kwargs_data per encode request, got %d", len(imageKwargs))
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
 				"peer_host": "10.0.0.1",
 				"peer_port": 5501,
@@ -102,10 +102,10 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 		n := count.Add(1)
 		if n == 2 {
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("encode failed"))
+			_, _ = w.Write([]byte("encode failed"))
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 		})
 	}))
@@ -139,10 +139,10 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
-		json.Unmarshal(body, &parsed)
+		_ = json.Unmarshal(body, &parsed)
 		receivedTokenIDs, _ = parsed["token_ids"].([]any)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 		})
 	}))

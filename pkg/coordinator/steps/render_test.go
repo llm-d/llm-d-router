@@ -22,12 +22,12 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
-		json.Unmarshal(body, &parsed)
+		_ = json.Unmarshal(body, &parsed)
 		if parsed["model"] != "gpt-4o" {
 			t.Fatalf("expected model gpt-4o, got %v", parsed["model"])
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789},
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{"image": {"vllm-hash-a", "vllm-hash-b"}},
@@ -95,7 +95,7 @@ func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
 	var called bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 2345, 6789},
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{"image": {}},
@@ -129,7 +129,7 @@ func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
 func TestRenderStep_ServiceError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer server.Close()
 

@@ -22,17 +22,17 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 		receivedPaths = append(receivedPaths, r.URL.Path)
 		mu.Unlock()
 
-		switch {
-		case r.URL.Path == "/encode/inference/v1/generate":
-			json.NewEncoder(w).Encode(map[string]any{
+		switch r.URL.Path {
+		case "/encode/inference/v1/generate":
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ec_transfer_params": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 			})
-		case r.URL.Path == "/prefill/inference/v1/generate":
-			json.NewEncoder(w).Encode(map[string]any{
+		case "/prefill/inference/v1/generate":
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"kv_transfer_params": map[string]any{"block_id": "b1"},
 			})
-		case r.URL.Path == "/decode/v1/chat/completions":
-			json.NewEncoder(w).Encode(map[string]any{
+		case "/decode/v1/chat/completions":
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
 			})
 		default:
@@ -128,7 +128,7 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
-		json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{}}})
 	}))
 	defer gwServer.Close()
 
@@ -139,10 +139,10 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
-		RequestID:    "req-2",
-		OriginalPath: "/v1/completions",
-		Model:        "test",
-		Stream:       false,
+		RequestID:        "req-2",
+		OriginalPath:     "/v1/completions",
+		Model:            "test",
+		Stream:           false,
 		KVTransferParams: map[string]any{"k": "v"},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "h1"},

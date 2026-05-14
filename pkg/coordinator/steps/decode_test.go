@@ -23,7 +23,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
-		json.Unmarshal(body, &parsed)
+		_ = json.Unmarshal(body, &parsed)
 
 		if parsed["model"] != "llama-3" {
 			t.Fatalf("expected model llama-3, got %v", parsed["model"])
@@ -46,7 +46,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 			t.Fatalf("expected original URL preserved, got %v", imgURL["url"])
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{
 				{"message": map[string]any{"role": "assistant", "content": "I see a cat."}},
 			},
@@ -111,7 +111,7 @@ func TestDecodeStep_Streaming(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
-		json.Unmarshal(body, &parsed)
+		_ = json.Unmarshal(body, &parsed)
 
 		if parsed["stream"] != true {
 			t.Fatalf("expected stream=true")
@@ -176,7 +176,7 @@ func TestDecodeStep_Streaming(t *testing.T) {
 func TestDecodeStep_GatewayError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write([]byte("upstream unavailable"))
+		_, _ = w.Write([]byte("upstream unavailable"))
 	}))
 	defer server.Close()
 
