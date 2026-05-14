@@ -10,6 +10,8 @@ FROM --platform=${BUILDPLATFORM} quay.io/projectquay/golang:1.25 AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG COMMIT_SHA=unknown
+ARG BUILD_REF
 ARG LDFLAGS="-s -w"
 
 WORKDIR /workspace
@@ -23,15 +25,23 @@ RUN go mod download
 # Copy the go source
 COPY cmd/ cmd/
 COPY pkg/ pkg/
-COPY configs/ /configs/
+COPY configs/ configs/
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LDFLAGS}" -o bin/coordinator ./cmd/coordinator/...
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -ldflags="${LDFLAGS} -X github.com/llm-d/coordinator/pkg/version.CommitSHA=${COMMIT_SHA} -X github.com/llm-d/coordinator/pkg/version.BuildRef=${BUILD_REF}" \
+    -o bin/coordinator ./cmd/coordinator/...
 
 # Runtime stage
 FROM ${BASE_IMAGE}
 
+WORKDIR /
 COPY --from=builder /workspace/bin/coordinator /coordinator
+COPY --from=builder /workspace/configs/ /configs/
 
 USER 65532:65532
 
+EXPOSE 8080
+
 ENTRYPOINT ["/coordinator", "--config", "/configs/coordinator.yaml"]
+
+# Made with Bob
