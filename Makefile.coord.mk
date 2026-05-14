@@ -186,3 +186,5 @@ env-dev-kind: image-build-epp ## Deploy dev environment on a local Kind cluster 
 .PHONY: clean-env-dev-kind
 clean-env-dev-kind: ## Delete the Kind dev cluster
 	kind delete cluster --name llm-d-coordinator-dev
+
+# Made with Bob

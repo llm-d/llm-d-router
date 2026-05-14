@@ -38,7 +38,9 @@ func (s *DecodeStep) SetGatewayClient(c *gateway.Client) {
 func (s *DecodeStep) Name() string { return "decode" }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	reqCtx.Body["kv_transfer_params"] = reqCtx.KVTransferParams
+	kvParams := reqCtx.KVTransferParams
+	kvParams["do_remote_prefill"] = true
+	reqCtx.Body["kv_transfer_params"] = kvParams
 	s.injectUUIDs(reqCtx)
 
 	bodyBytes, err := json.Marshal(reqCtx.Body)
@@ -94,6 +96,7 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 			}
 			if hashIdx < len(reqCtx.MultimodalEntries) {
 				partMap["uuid"] = reqCtx.MultimodalEntries[hashIdx].Hash
+				partMap["image_url"] = nil
 				hashIdx++
 			}
 		}
