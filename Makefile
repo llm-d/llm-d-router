@@ -17,7 +17,9 @@ include Makefile.gen.mk
 # Defaults
 TARGETOS ?= $(shell command -v go >/dev/null 2>&1 && go env GOOS || uname -s | tr '[:upper:]' '[:lower:]')
 TARGETARCH ?= $(shell command -v go >/dev/null 2>&1 && go env GOARCH || uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/; s/armv7l/arm/')
-PROJECT_NAME ?= llm-d-inference-scheduler
+PROJECT_NAME ?= llm-d-router
+# TODO: rename EPP_IMAGE_NAME to router-endpoint-picker
+EPP_IMAGE_NAME ?= llm-d-inference-scheduler
 SIDECAR_IMAGE_NAME ?= llm-d-routing-sidecar
 VLLM_SIMULATOR_IMAGE_NAME ?= llm-d-inference-sim
 UDS_TOKENIZER_IMAGE_NAME ?= llm-d-uds-tokenizer
@@ -25,12 +27,12 @@ SIDECAR_NAME ?= pd-sidecar
 BUILDER_IMAGE_NAME ?= llm-d-builder
 IMAGE_REGISTRY ?= ghcr.io/llm-d
 
-IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(PROJECT_NAME)
+EPP_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(EPP_IMAGE_NAME)
 EPP_TAG ?= dev
-export EPP_IMAGE ?= $(IMAGE_TAG_BASE):$(EPP_TAG)
+export EPP_IMAGE ?= $(EPP_IMAGE_TAG_BASE):$(EPP_TAG)
 
-SIDECAR_TAG ?= dev
 SIDECAR_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(SIDECAR_IMAGE_NAME)
+SIDECAR_TAG ?= dev
 export SIDECAR_IMAGE ?= $(SIDECAR_IMAGE_TAG_BASE):$(SIDECAR_TAG)
 
 VLLM_SIMULATOR_TAG ?= v0.8.2
@@ -200,7 +202,7 @@ upgrade-deps: ## Upgrade all Go dependencies to latest minor/patch versions and 
 .PHONY: vulncheck
 vulncheck: image-build-builder ## Run govulncheck for known vulnerabilities
 	@printf "\033[33;1m==== Running govulncheck ====\033[0m\n"
-	$(BUILDER_RUN) 'go install golang.org/x/vuln/cmd/govulncheck@v1.3.0 && govulncheck ./...'
+	$(BUILDER_RUN) 'govulncheck ./...'
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
@@ -456,7 +458,6 @@ env: ## Print environment variables
 	@echo "TARGETOS=$(TARGETOS)"
 	@echo "TARGETARCH=$(TARGETARCH)"
 	@echo "CONTAINER_RUNTIME=$(CONTAINER_RUNTIME)"
-	@echo "IMAGE_TAG_BASE=$(IMAGE_TAG_BASE)"
 	@echo "EPP_TAG=$(EPP_TAG)"
 	@echo "EPP_IMAGE=$(EPP_IMAGE)"
 	@echo "SIDECAR_TAG=$(SIDECAR_TAG)"

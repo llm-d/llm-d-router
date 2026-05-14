@@ -14,7 +14,7 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Set a default CLUSTER_NAME if not provided
-: "${CLUSTER_NAME:=llm-d-inference-scheduler-dev}"
+: "${CLUSTER_NAME:=llm-d-router-dev}"
 
 # Set the host port to map to the Gateway's inbound port (30080)
 : "${GATEWAY_HOST_PORT:=30080}"

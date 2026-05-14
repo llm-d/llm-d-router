@@ -220,13 +220,36 @@ type DataLayerConfig struct {
 	// +optional
 	// Sources is the list of sources to define to the DataLayer
 	Sources []DataLayerSource `json:"sources,omitempty"`
+	// +optional
+	// Discovery specifies which EndpointDiscovery plugin to use for populating the
+	// endpoint datastore. When set, the EPP bypasses Kubernetes CRD reconcilers and
+	// relies entirely on the referenced plugin to enumerate and track inference
+	// endpoints. This enables running the EPP without a Kubernetes cluster.
+	// If omitted, the EPP uses the default Kubernetes-based discovery.
+	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
 }
 
 func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v}", dlc.Sources)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v}", dlc.Sources, dlc.Discovery)
+}
+
+// DiscoveryConfig references the EndpointDiscovery plugin to use.
+type DiscoveryConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef is the name of the plugin instance (from the Plugins list) that
+	// implements EndpointDiscovery.
+	PluginRef string `json:"pluginRef"`
+}
+
+func (dc *DiscoveryConfig) String() string {
+	if dc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", dc.PluginRef)
 }
 
 // DataLayerSource contains the configuration of a DataSource of the DataLayer feature

@@ -20,8 +20,11 @@ Documentation for developing the inference scheduler.
       - [3. Encode/Prefill-Decode (E/PD) Disaggregation](#3-encodeprefill-decode-epd-disaggregation)
       - [4. Encode/Prefill/Decode (E/P/D) Disaggregation](#4-encodeprefilldecode-epd-disaggregation)
       - [5. Disaggregated Setup Verification](#5-disaggregated-setup-verification)
-      - [Combining Scenarios with Data Parallel and KV Cache](#combining-scenarios-with-data-parallel-and-kv-cache)
+    - [Combining Scenarios with Data Parallel and KV Cache](#combining-scenarios-with-data-parallel-and-kv-cache)
     - [Simulator vs Real vLLM](#simulator-vs-real-vllm)
+      - [Deploying with Simulator (default)](#deploying-with-simulator-default)
+      - [Deploying with Real vLLM](#deploying-with-real-vllm)
+      - [Deployment Component Summary](#deployment-component-summary)
     - [Cleanup](#cleanup)
   - [Running Tests](#running-tests)
     - [Unit Tests](#unit-tests)
@@ -38,6 +41,8 @@ Documentation for developing the inference scheduler.
     - [Deploying Changes](#deploying-changes)
     - [Cleanup Environment](#cleanup-environment)
   - [Submitting Changes](#submitting-changes)
+    - [Scope](#scope)
+    - [Presubmit](#presubmit)
 
 ## Overview
 
@@ -52,7 +57,7 @@ A real Kubernetes cluster setup is covered later for shared or production-like t
 ## Requirements
 
 - [Make] `v4`+
-- [Golang] `v1.24`+
+- [Golang] `v1.25`+
 - [Docker] (or [Podman])
 - [Kubernetes in Docker (KIND)]
 - [Kubectl] `v1.25`+
@@ -72,7 +77,7 @@ Deploys the EPP, vLLM simulator, and Gateway API implementation into a local KIN
 make env-dev-kind
 ```
 
-Creates a new `kind` cluster (or reuses an existing one) in the `default` namespace.
+Creates a new `kind` cluster (or reuses an existing one) in the `default` namespace. The cluster name defaults to `KIND_CLUSTER_NAME` in `Makefile.kind.mk` (currently `$(PROJECT_NAME)-dev`), and the kubectl context is `kind-<cluster-name>`.
 
 > [!NOTE]
 > You can pre-pull external images to avoid slow downloads:
@@ -86,7 +91,7 @@ Creates a new `kind` cluster (or reuses an existing one) in the `default` namesp
 Use port-forward for local development:
 
 ```bash
-kubectl --context kind-llm-d-inference-scheduler-dev \
+kubectl --context kind-llm-d-router-dev \
   port-forward service/inference-gateway-istio 8080:80
 ```
 
@@ -141,7 +146,7 @@ The service is then accessible at `http://localhost:30080`.
 ```bash
 # Install and run cloud-provider-kind:
 go install sigs.k8s.io/cloud-provider-kind@latest && cloud-provider-kind &
-kubectl --context kind-llm-d-inference-scheduler-dev get service inference-gateway-istio
+kubectl --context kind-llm-d-router-dev get service inference-gateway-istio
 # Wait for the LoadBalancer External-IP to become available.
 # The service is accessible over port 80.
 ```
@@ -260,7 +265,7 @@ then attach `dlv` via the ephemeral container:
 ```bash
 # 1. Build and load the debug image
 LDFLAGS="" make image-build-epp
-kind load docker-image $(EPP_IMAGE) --name llm-d-inference-scheduler-dev
+kind load docker-image $(EPP_IMAGE) --name llm-d-router-dev
 
 # 2. Restart the deployment to pick up the new image
 kubectl rollout restart deployment tinyllama-1-1b-chat-v1-0-endpoint-picker
@@ -392,7 +397,7 @@ curl -s http://localhost:30080/v1/chat/completions \
 After deploying any disaggregation mode, verify with a basic request:
 
 ```bash
-kubectl --context kind-llm-d-inference-scheduler-dev port-forward service/inference-gateway-istio 8080:80
+kubectl --context kind-llm-d-router-dev port-forward service/inference-gateway-istio 8080:80
 ```
 
 For multimodal disaggregation (E/PD, E/P/D), test with an image request to verify the encoder stage is working:
@@ -903,6 +908,36 @@ For more details, see the Gateway API Inference Extension
 [getting started guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
 
 ## Submitting Changes
+
+Read the [llm-d organization contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md)
+first — it covers project-wide guidelines, code of conduct, and community resources that apply across
+all llm-d repositories. The sections below describe router-repo-specific expectations on top of that
+baseline.
+
+### Scope
+
+Scoped changes and localized bug fixes can be submitted directly as a PR. 
+For larger changes please [create an issue](https://github.com/llm-d/llm-d-router/issues/new)
+first describing the change so the maintainers can do an assessment, and work on the details
+with you. Getting alignment on the requirements and approach is critical for getting your
+changes merged.
+
+Please call out any user facing changes your change will introduce, including changes to
+documentation, deployment guides, etc. If your changes replace and deprecate an existing feature,
+please be sure to consider that in your design and implementation.
+We follow an "N+2 deprecation" policy: features deprecated in release N must continue to work
+without user impact (e.g., configuration changes) for 2 releases and can be fully removed
+in release N+2. Use of a deprecated feature must produce a clear warning message in releases
+N and N+1, providing users with a two release grace period to adjust before the feature is removed.
+
+Please use the [template](.github/PULL_REQUEST_TEMPLATE.md) provided when creating a PR.
+If using coding agents, please ensure that the agent uses the PR template format as well.
+The template contains a `release-notes` section which must be filled for any change that has
+user facing impact.
+
+For additional information and context, please refer to the [llm-d contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md)
+
+### Presubmit
 
 Before opening a PR, run:
 

@@ -33,9 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	infextv1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/env"
 
 	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
+	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/env"
 	igwtestutils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
 )
 

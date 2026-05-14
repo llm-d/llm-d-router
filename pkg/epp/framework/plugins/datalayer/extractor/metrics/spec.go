@@ -47,7 +47,7 @@ func parseStringToSpec(spec string) (*Spec, error) {
 	// Be liberal in accepting inputs that are missing quotes around label values,
 	// allowing both {label=value} and {label=\"value\"} inputs
 	quoted := addQuotesToLabelValues(spec)
-	expr, err := parser.ParseExpr(quoted)
+	expr, err := parser.NewParser(parser.Options{}).ParseExpr(quoted)
 	if err != nil {
 		return nil, err
 	}

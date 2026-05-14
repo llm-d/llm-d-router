@@ -26,7 +26,7 @@ import (
 	"net/http"
 	"time"
 
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 )
 
 // batchSubmission represents a single caller's request to PredictBulkStrict

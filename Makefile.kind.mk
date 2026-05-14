@@ -1,6 +1,6 @@
 ##@ Kind Development Environments
 
-KIND_CLUSTER_NAME ?= llm-d-inference-scheduler-dev
+KIND_CLUSTER_NAME ?= $(PROJECT_NAME)-dev
 KIND_GATEWAY_HOST_PORT ?= 30080
 
 .PHONY: image-kind
