@@ -1,0 +1,15 @@
+# EPP config for the encode pool (single-profile, encode-filter)
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: queue-scorer
+- type: encode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: encode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: queue-scorer
+    weight: 1

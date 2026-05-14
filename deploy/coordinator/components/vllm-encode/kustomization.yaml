@@ -1,0 +1,10 @@
+# ------------------------------------------------------------------------------
+# VLLM Encode Component
+#
+# Encoder deployment for multimodal disaggregation scenarios (E/P/D).
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- deployment.yaml

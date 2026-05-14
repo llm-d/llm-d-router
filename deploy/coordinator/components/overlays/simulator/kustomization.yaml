@@ -83,11 +83,12 @@ patches:
       - name: uds-socket
         emptyDir: {}
 
-# --- Prefill deployment (vllm-p) ---
-# No initContainers in base, so create the array
+# --- Prefill and Encode deployments (vllm-p, vllm-e) ---
+# No initContainers in base; regex target covers both.
+# Kustomize no-ops silently when vllm-e is absent (pd topology).
 - target:
     kind: Deployment
-    name: vllm-p
+    name: "vllm-[pe]"
   patch: |
     - op: add
       path: /spec/template/spec/initContainers

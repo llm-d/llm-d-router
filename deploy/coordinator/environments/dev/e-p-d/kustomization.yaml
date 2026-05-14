@@ -1,0 +1,18 @@
+# ------------------------------------------------------------------------------
+# E/P/D (Encode / Prefill / Decode) Development Environment
+#
+# Deploys fully disaggregated encode, prefill, and decode deployments.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../../components/vllm-encode/
+- ../../../components/vllm-prefill/
+- ../../../components/vllm-decode/
+
+patches:
+- path: patch-decode.yaml
+
+components:
+- ../../../components/overlays/simulator/
