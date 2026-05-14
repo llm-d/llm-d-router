@@ -99,19 +99,14 @@ func newRegistryTestHarness(t *testing.T, opts harnessOptions) *registryTestHarn
 // assertFlowExists synchronously checks if a flow's queue exists on the first shard.
 func (h *registryTestHarness) assertFlowExists(key flowcontrol.FlowKey, msgAndArgs ...any) {
 	h.t.Helper()
-	require.NotNil(h.t, h.fr.shard, "Cannot check for flow existence when the shard doesn't exist")
-	_, err := h.fr.shard.ManagedQueue(key)
+	_, err := h.fr.ManagedQueue(key)
 	assert.NoError(h.t, err, msgAndArgs...)
 }
 
 // assertFlowDoesNotExist synchronously checks if a flow's queue does not exist.
 func (h *registryTestHarness) assertFlowDoesNotExist(key flowcontrol.FlowKey, msgAndArgs ...any) {
 	h.t.Helper()
-	if h.fr.shard == nil {
-		assert.True(h.t, true, "Flow correctly does not exist because shard doesn't exist")
-		return
-	}
-	_, err := h.fr.shard.ManagedQueue(key)
+	_, err := h.fr.ManagedQueue(key)
 	require.Error(h.t, err, "Expected an error when getting a non-existent flow, but got none")
 	assert.ErrorIs(h.t, err, contracts.ErrFlowInstanceNotFound, msgAndArgs...)
 }
@@ -198,22 +193,17 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 		t.Parallel()
 		// Create a registry
 		h := newRegistryTestHarness(t, harnessOptions{})
-		require.NotNil(t, h.fr.shard, "Test setup: should have one shard")
 
 		key := flowcontrol.FlowKey{ID: "test-flow", Priority: highPriority}
 
 		err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
-			shard := conn.GetShard()
+			dataPlane := conn.GetDataPlane()
 
-			assert.NotNil(t, shard, "GetShard() must never return nil")
+			assert.NotNil(t, dataPlane, "GetDataPlane() must never return nil")
 
 			return nil
 		})
 		require.NoError(t, err)
-
-		// Prove the registry's internal state was not mutated by the modification.
-		assert.NotNil(t, h.fr.shard,
-			"Modifying the slice returned by ActiveShards() must not affect the registry's internal state")
 	})
 }
 
@@ -228,9 +218,8 @@ func TestFlowRegistry_Stats(t *testing.T) {
 	h.openConnectionOnFlow(keyHigh)
 	h.openConnectionOnFlow(keyLow)
 
-	require.NotNil(t, h.fr.shard, "Test setup assumes one shard")
-	mqHigh, _ := h.fr.shard.ManagedQueue(keyHigh)
-	mqLow, _ := h.fr.shard.ManagedQueue(keyLow)
+	mqHigh, _ := h.fr.ManagedQueue(keyHigh)
+	mqLow, _ := h.fr.ManagedQueue(keyLow)
 	require.NoError(t, mqHigh.Add(mocks.NewMockQueueItemAccessor(10, "req1", keyHigh)),
 		"Adding item to queue should not fail")
 	require.NoError(t, mqLow.Add(mocks.NewMockQueueItemAccessor(30, "req3", keyLow)),
@@ -242,17 +231,18 @@ func TestFlowRegistry_Stats(t *testing.T) {
 	assert.Equal(t, uint64(2), globalStats.TotalLen, "Global TotalLen should be the sum of all items")
 	assert.Equal(t, uint64(40), globalStats.TotalByteSize, "Global TotalByteSize should be the sum of all item sizes")
 
-	shardStats := h.fr.ShardStats()
-	var totalShardLen, totalShardBytes uint64
+	var totalPriorityBandLen, totalPriorityBandBytes uint64
 
-	assert.True(t, shardStats.IsActive, "The shard should be active in this test")
-	assert.NotEmpty(t, shardStats.PerPriorityBandStats, "The shard should have stats for its priority bands")
-	assert.NotEmpty(t, shardStats.ID, "The shard should have a non-empty ID")
-	totalShardLen += shardStats.TotalLen
-	totalShardBytes += shardStats.TotalByteSize
+	h.fr.priorityBands.Range(func(_, value any) bool {
+		priorityBand := value.(*priorityBand)
+		totalPriorityBandLen += uint64(priorityBand.len.Load())
+		totalPriorityBandBytes += uint64(priorityBand.byteSize.Load())
 
-	assert.Equal(t, globalStats.TotalLen, totalShardLen, "The shard length must equal global length")
-	assert.Equal(t, globalStats.TotalByteSize, totalShardBytes, "The shard byte size must equal global byte size")
+		return true
+	})
+
+	assert.Equal(t, globalStats.TotalLen, totalPriorityBandLen, "The priorityBand length must equal global length")
+	assert.Equal(t, globalStats.TotalByteSize, totalPriorityBandBytes, "The priorityBand byte size must equal global byte size")
 }
 
 // --- Garbage Collection Tests ---
@@ -372,8 +362,8 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 		_, existsInStats := stats.PerPriorityBandStats[dynamicPrio]
 		assert.True(t, existsInStats, "Dynamic priority must appear in global stats")
 
-		_, err = h.fr.shard.ManagedQueue(key)
-		assert.NoError(t, err, "Dynamic band must be provisioned on shard %s", h.fr.shard.ID())
+		_, err = h.fr.ManagedQueue(key)
+		assert.NoError(t, err, "Dynamic band must be provisioned")
 	})
 
 	t.Run("ShouldHandleConcurrentDynamicCreation", func(t *testing.T) {
@@ -407,13 +397,13 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 		dynamicPrio := 88
 		key := flowcontrol.FlowKey{ID: "scaling-flow", Priority: dynamicPrio}
 
-		// Create dynamic band on Shard 0.
+		// Create dynamic band
 		h.openConnectionOnFlow(key)
 
-		_, policyErr := h.fr.shard.FairnessPolicy(dynamicPrio)
-		assert.NoError(t, policyErr, "New shard must have the dynamic priority band configured")
+		_, policyErr := h.fr.FairnessPolicy(dynamicPrio)
+		assert.NoError(t, policyErr, "The dynamic priority band must have been configured")
 
-		mq, err := h.fr.shard.ManagedQueue(key)
+		mq, err := h.fr.ManagedQueue(key)
 		require.NoError(t, err, "Existing flows should be auto-synced")
 		require.NotNil(t, mq)
 	})
@@ -618,7 +608,7 @@ func TestFlowRegistry_deletePriorityBand(t *testing.T) {
 	// highPriority (20) and lowPriority (10) come from package-level constants
 	const dynamicPrio = 120
 
-	t.Run("ShouldDeleteDynamicBandFromAllShards", func(t *testing.T) {
+	t.Run("ShouldDeleteDynamicBand", func(t *testing.T) {
 		t.Parallel()
 		h := newRegistryTestHarness(t, harnessOptions{})
 
@@ -632,15 +622,16 @@ func TestFlowRegistry_deletePriorityBand(t *testing.T) {
 		h.fr.mu.RUnlock()
 		require.True(t, exists, "Dynamic band should exist in registry config")
 
-		// Verify band exists in shard
+		// Verify band exists in registry
 
-		_, ok := h.fr.shard.priorityBands.Load(dynamicPrio)
-		require.True(t, ok, "Band should exist in the shard")
+		_, ok := h.fr.priorityBands.Load(dynamicPrio)
+		require.True(t, ok, "Band should exist")
 
-		h.fr.shard.mu.RLock()
-		_, ok = h.fr.shard.config.PriorityBands[dynamicPrio]
-		h.fr.shard.mu.RUnlock()
-		require.True(t, ok, "Band should exist in shard config")
+		h.fr.mu.RLock()
+
+		_, ok = h.fr.config.PriorityBands[dynamicPrio]
+		h.fr.mu.RUnlock()
+		require.True(t, ok, "Band should exist in config")
 
 		// Delete the band
 		h.fr.deletePriorityBand(dynamicPrio)
@@ -655,21 +646,21 @@ func TestFlowRegistry_deletePriorityBand(t *testing.T) {
 		_, exists = h.fr.perPriorityBandStats.Load(dynamicPrio)
 		assert.False(t, exists, "Band should be removed from stats tracking")
 
-		// Verify band removed from shard
-		_, ok = h.fr.shard.priorityBands.Load(dynamicPrio)
-		assert.False(t, ok, "Band should be removed from shard")
+		// Verify band removed from registry
+		_, ok = h.fr.priorityBands.Load(dynamicPrio)
+		assert.False(t, ok, "Band should be removed from registry")
 
-		h.fr.shard.mu.RLock()
-		_, ok = h.fr.shard.config.PriorityBands[dynamicPrio]
-		h.fr.shard.mu.RUnlock()
-		assert.False(t, ok, "Band should be removed from shard config")
+		h.fr.mu.RLock()
+		_, ok = h.fr.config.PriorityBands[dynamicPrio]
+		h.fr.mu.RUnlock()
+		assert.False(t, ok, "Band should be removed from config")
 
 		// Verify removed from ordered list
-		h.fr.shard.mu.RLock()
-		orderedList := h.fr.shard.orderedPriorityLevels
-		h.fr.shard.mu.RUnlock()
+		h.fr.mu.RLock()
+		orderedList := h.fr.orderedPriorityLevels
+		h.fr.mu.RUnlock()
 		for _, p := range orderedList {
-			assert.NotEqual(t, dynamicPrio, p, "Band priority should be removed from ordered list in shard")
+			assert.NotEqual(t, dynamicPrio, p, "Band priority should be removed from ordered list in registry")
 		}
 	})
 
@@ -820,12 +811,9 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 
 		// Create flow on all shards
 		h.openConnectionOnFlow(key)
-
-		// Verify band exists on shard
-		require.NotNil(t, h.fr.shard, "Should have a shard")
-
-		_, ok := h.fr.shard.priorityBands.Load(dynamicPrio)
-		require.True(t, ok, "Band should exist on shard")
+		// Verify band exists
+		_, ok := h.fr.priorityBands.Load(dynamicPrio)
+		require.True(t, ok, "Band should exist on registry")
 
 		// Collect the flow
 		h.fakeClock.Step(h.config.FlowGCTimeout + time.Second)
@@ -835,21 +823,21 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 		h.fakeClock.Step(h.config.PriorityBandGCTimeout + time.Second)
 		h.fr.executeGCCycle()
 
-		// Verify band is removed from registry
+		// Verify band is removed from registry config
 		h.fr.mu.RLock()
 		_, exists := h.fr.config.PriorityBands[dynamicPrio]
 		h.fr.mu.RUnlock()
 		assert.False(t, exists, "Band should be removed from registry config")
 
-		// Verify band is removed from the shard
-		_, ok = h.fr.shard.priorityBands.Load(dynamicPrio)
-		assert.False(t, ok, "Band should be removed from the shard")
+		// Verify band is removed from the registry
+		_, ok = h.fr.priorityBands.Load(dynamicPrio)
+		assert.False(t, ok, "Band should be removed from the registry")
 
 		// Verify config also cleaned up
-		h.fr.shard.mu.RLock()
-		_, configExists := h.fr.shard.config.PriorityBands[dynamicPrio]
-		h.fr.shard.mu.RUnlock()
-		assert.False(t, configExists, "Band should be removed from the shard config")
+		h.fr.mu.RLock()
+		_, configExists := h.fr.config.PriorityBands[dynamicPrio]
+		h.fr.mu.RUnlock()
+		assert.False(t, configExists, "Band should be removed from the config")
 	})
 
 	t.Run("ShouldHandleConcurrentFlowCreation_DuringBandGC", func(t *testing.T) {

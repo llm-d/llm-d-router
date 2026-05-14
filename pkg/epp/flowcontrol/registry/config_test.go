@@ -388,41 +388,6 @@ func TestConfig_Partition(t *testing.T) {
 	// We need to check what the setup resulted in.
 	expectedBand2Total := defaultPriorityBandMaxBytes
 	assert.Equal(t, expectedBand2Total, cfg.PriorityBands[2].MaxBytes, "Band 2 should have been defaulted")
-
-	t.Run("ShouldDistributeRemainderCorrectly", func(t *testing.T) {
-		t.Parallel()
-		totalShards := 10
-
-		// Global: 103 / 10 = 10 rem 3. First 3 shards get 11.
-		// Band 1: 55 / 10 = 5 rem 5. First 5 shards get 6.
-		// Band 3: 20 / 10 = 2 rem 0. All get 2.
-
-		var sumGlobal, sumBand1, sumBand2, sumBand3 uint64
-
-		for i := range totalShards {
-			shard := cfg.partition(i, totalShards)
-			require.NotNil(t, shard)
-
-			// Accumulate.
-			sumGlobal += shard.MaxBytes
-			sumBand1 += shard.PriorityBands[1].MaxBytes
-			sumBand2 += shard.PriorityBands[2].MaxBytes
-			sumBand3 += shard.PriorityBands[3].MaxBytes
-
-			// Spot check specific shards.
-			if i < 3 {
-				assert.Equal(t, uint64(11), shard.MaxBytes, "Shard %d global bytes mismatch", i)
-			} else {
-				assert.Equal(t, uint64(10), shard.MaxBytes, "Shard %d global bytes mismatch", i)
-			}
-		}
-
-		// Verify totals.
-		assert.Equal(t, cfg.MaxBytes, sumGlobal, "Total global bytes preserved")
-		assert.Equal(t, cfg.PriorityBands[1].MaxBytes, sumBand1, "Total Band 1 bytes preserved")
-		assert.Equal(t, cfg.PriorityBands[2].MaxBytes, sumBand2, "Total Band 2 bytes preserved")
-		assert.Equal(t, cfg.PriorityBands[3].MaxBytes, sumBand3, "Total Band 3 bytes preserved")
-	})
 }
 
 func TestConfig_Clone(t *testing.T) {
