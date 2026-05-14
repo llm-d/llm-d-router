@@ -90,9 +90,6 @@ func init() {
 // egressConcurrencyLimit (L) defines the maximum capacity of the simulated pool.
 type egressConcurrencyLimit int64
 
-// shardCount (S) dictates the data parallelism of the Flow Control layer.
-type shardCount int
-
 // priorityLevels (P) dictates the number of priority bands.
 type priorityLevels int
 
@@ -107,7 +104,6 @@ type ingressConcurrency int
 // benchMatrix defines a single coordinate in the performance hypercube.
 type benchMatrix struct {
 	limit       egressConcurrencyLimit
-	shards      shardCount
 	priorities  priorityLevels
 	flows       flowCount
 	concurrency ingressConcurrency
@@ -115,8 +111,8 @@ type benchMatrix struct {
 
 // name returns a human-readable string representation of the matrix coordinate.
 func (m benchMatrix) name() string {
-	return fmt.Sprintf("L=%03d/S=%03d/P=%03d/F=%06d/W=%05d",
-		m.limit, m.shards, m.priorities, m.flows, m.concurrency)
+	return fmt.Sprintf("L=%03d/P=%03d/F=%06d/W=%05d",
+		m.limit, m.priorities, m.flows, m.concurrency)
 }
 
 // testDetector exposes an API to manually release downstream capacity during a test run.
@@ -195,13 +191,11 @@ func setupRegistry(
 	ctx context.Context,
 	b *testing.B,
 	handle plugin.Handle,
-	s shardCount,
 	p priorityLevels,
 ) contracts.FlowRegistry {
 	b.Helper()
 
 	cfgOpts := []registry.ConfigOption{
-		registry.WithInitialShardCount(int(s)),
 		registry.WithMaxBytes(0), // Capacity restricted strictly via concurrency (L).
 	}
 
@@ -234,7 +228,6 @@ func setupRegistry(
 func setupBenchmarkHarness(
 	ctx context.Context,
 	b *testing.B,
-	s shardCount,
 	p priorityLevels,
 	limit egressConcurrencyLimit,
 	customDetector testDetector,
@@ -255,7 +248,7 @@ func setupBenchmarkHarness(
 	}
 	handle.AddPlugin(registry.DefaultOrderingPolicyRef, oPolicy)
 
-	reg := setupRegistry(ctx, b, handle, s, p)
+	reg := setupRegistry(ctx, b, handle, p)
 
 	detector := customDetector
 	if detector == nil {
@@ -266,13 +259,11 @@ func setupBenchmarkHarness(
 
 	cfg := customCfg
 	if cfg == nil {
-		// Buffer size dynamically scales down with parallel shards to isolate queue sorting overhead.
-		bufferSize := max(2000/int(s), 10)
 		cfg = &controller.Config{
 			DefaultRequestTTL:               5 * time.Minute,
 			ProcessorReconciliationInterval: 1 * time.Hour, // Effectively disabled
 			ExpiryCleanupInterval:           1 * time.Hour, // Effectively disabled
-			EnqueueChannelBufferSize:        bufferSize,
+			EnqueueChannelBufferSize:        2000,
 		}
 	}
 

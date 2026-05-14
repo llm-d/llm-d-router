@@ -52,6 +52,9 @@ type priorityBand struct {
 	// The priority is implicit from the parent priorityBand.
 	queues map[string]*managedQueue
 
+	// priorityBandAccessor is a preallocated flowcontrol.PriorityBandAccessor for this priorityBand
+	priorityBandAccessor *priorityBandAccessor
+
 	// --- Concurrent-Safe State (Atomics) ---
 
 	// Band-level statistics, updated via lock-free propagation from child queues.
@@ -149,6 +152,7 @@ func (s *registryShard) initPriorityBand(bandConfig *PriorityBandConfig) {
 		fairnessPolicy: bandConfig.FairnessPolicy,
 		policyState:    policyState,
 	}
+	band.priorityBandAccessor = &priorityBandAccessor{shard: s, band: band}
 	s.priorityBands.Store(bandConfig.Priority, band)
 	s.orderedPriorityLevels = append(s.orderedPriorityLevels, bandConfig.Priority)
 	sort.Slice(s.orderedPriorityLevels, func(i, j int) bool {
@@ -247,7 +251,7 @@ func (s *registryShard) PriorityBandAccessor(priority int) (flowcontrol.Priority
 			priority, contracts.ErrPriorityBandNotFound)
 	}
 	band := val.(*priorityBand)
-	return &priorityBandAccessor{shard: s, band: band}, nil
+	return band.priorityBandAccessor, nil
 }
 
 // AllOrderedPriorityLevels returns a snapshot of all configured priority levels for this shard,
@@ -266,7 +270,7 @@ func (s *registryShard) AllOrderedPriorityLevels() []int {
 // Note on Concurrency: Statistics are aggregated using high-performance, lock-free atomic updates.
 // The returned stats represent a near-consistent snapshot. We acquire a Read Lock to ensure that
 // configuration metadata (like names and capacity limits) remains stable during the iteration.
-func (s *registryShard) Stats() contracts.ShardStats {
+func (s *registryShard) Stats() *contracts.ShardStats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -293,7 +297,7 @@ func (s *registryShard) Stats() contracts.ShardStats {
 		}
 		return true
 	})
-	return stats
+	return &stats
 }
 
 //  --- Internal Administrative/Lifecycle Methods ---

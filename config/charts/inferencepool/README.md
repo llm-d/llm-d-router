@@ -185,9 +185,9 @@ inferenceExtension:
 
 **Note:** Prometheus monitoring requires the Prometheus Operator and ServiceMonitor CRD to be installed in the cluster.
 
-For GKE environments, you need to set `provider.name` to `gke` firstly. This will create the necessary `PodMonitoring` and RBAC resources for metrics collection.
+For GKE environments, if you are using **Google Managed Prometheus** for metrics collection, set `inferenceExtension.monitoring.provider.name` to `gmp`. This will create the necessary `PodMonitoring` and RBAC resources for metrics collection.
 
-If you are using a GKE Autopilot cluster, you also need to set `provider.gke.autopilot` to `true`.
+If you are using a GKE Autopilot cluster, you also need to set `inferenceExtension.monitoring.provider.gmp.autopilot` to `true`.
 
 Then apply it with:
 
@@ -253,8 +253,9 @@ The following table list the configurable parameters of the chart.
 | `inferenceExtension.sidecar.volumes`                       | List of volumes for the sidecar container. Optional.                                                                                                                                                                                                                                                                                                                                          |
 | `inferenceExtension.sidecar.configMapData`                 | Custom key-value pairs to be included in a ConfigMap created for the sidecar container. Only used when `inferenceExtension.sidecar.enabled` is `true`. Optional.                                                                                                                                                                                                                              |                                                                                                                                      |
 | `inferenceObjectives`                                      | A list of names and priorities to create optional InferenceObjectives from that will be assigned to the inference pool. This can be used when `InferenceObjectives` are known in advance and are mostly static. In these cases managing lifecycle through the helm chart ensures creation and cleanup, leaving users free to update, or add and delete more `InferenceObjectives` as desired. |
-| `provider.name`                                            | Name of the Inference Gateway implementation being used. Possible values: [`none`, `gke`, or `istio`]. Defaults to `none`.                                                                                                                                                                                                                                                                    |
-| `provider.gke.autopilot`                                   | Set to `true` if the cluster is a GKE Autopilot cluster. This is only used if `provider.name` is `gke`. Defaults to `false`.                                                                                                                                                                                                                                                                  |
+| `provider.name`                                            | Name of the Gateway implementation being used. Possible values: [`none`, `gke`, or `istio`]. Defaults to `none`. This is the gateway provider section, not a generic infrastructure provider.                                                                                                                                                                                       |
+| `inferenceExtension.monitoring.provider.name`              | Monitoring provider used for EPP metrics resources. Possible values: [`gmp`, `prometheusoperator`]. If empty, defaults to `prometheusoperator`; for backwards compatibility, `provider.name=gke` still maps to `gmp` when this field is unset.                                                                                                                                                  |
+| `inferenceExtension.monitoring.provider.gmp.autopilot`      | Set to `true` if the cluster is a GKE Autopilot cluster for GKE Managed Prometheus monitoring. Only used when `inferenceExtension.monitoring.provider.name` is `gmp` (or when legacy `provider.name=gke` fallback maps to `gmp`). Defaults to `false`.                                                                                                                                         |
 
 ### Provider Specific Configuration
 

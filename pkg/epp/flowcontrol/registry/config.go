@@ -51,8 +51,6 @@ const (
 	defaultPriorityBandMaxBytes uint64 = 1_000_000_000
 	// defaultQueue is the default queue implementation for flows.
 	defaultQueue queue.RegisteredQueueName = queue.ListQueueName
-	// defaultInitialShardCount is the default number of parallel shards to create when the registry is initialized.
-	defaultInitialShardCount int = 1
 	// defaultFlowGCTimeout is the default duration of inactivity after which an idle flow is garbage collected.
 	// This also serves as the interval for the periodic garbage collection scan.
 	defaultFlowGCTimeout time.Duration = 5 * time.Minute
@@ -131,11 +129,6 @@ type Config struct {
 	// If nil, it is automatically populated with system defaults during NewConfig.
 	DefaultPriorityBand *PriorityBandConfig
 
-	// InitialShardCount specifies the number of parallel shards to create when the registry is initialized.
-	// This value must be greater than zero.
-	// Optional: Defaults to `defaultInitialShardCount` (1).
-	InitialShardCount int
-
 	// FlowGCTimeout defines the interval at which the registry scans for and garbage collects idle flows.
 	// A flow is collected if it has been observed to be Idle for at least one full scan interval.
 	// Optional: Defaults to `defaultFlowGCTimeout` (1 hour).
@@ -208,17 +201,6 @@ func WithMaxBytes(maxBytes uint64) ConfigOption {
 func WithMaxRequests(maxRequests uint64) ConfigOption {
 	return func(b *configBuilder) error {
 		b.config.MaxRequests = maxRequests
-		return nil
-	}
-}
-
-// WithInitialShardCount sets the number of shards to create on startup.
-func WithInitialShardCount(count int) ConfigOption {
-	return func(b *configBuilder) error {
-		if count <= 0 {
-			return errors.New("initialShardCount must be greater than 0")
-		}
-		b.config.InitialShardCount = count
 		return nil
 	}
 }
@@ -501,7 +483,6 @@ func NewConfig(handle plugin.Handle, opts ...ConfigOption) (*Config, error) {
 		config: &Config{
 			MaxBytes:              0, // no limit enforced
 			MaxRequests:           0, // no limit enforced
-			InitialShardCount:     defaultInitialShardCount,
 			FlowGCTimeout:         defaultFlowGCTimeout,
 			PriorityBandGCTimeout: defaultPriorityBandGCTimeout,
 			PriorityBands:         make(map[int]*PriorityBandConfig),
@@ -619,9 +600,6 @@ func (p *PriorityBandConfig) validate(checker capabilityChecker) error {
 
 // validate checks global constraints and delegates band validation.
 func (c *Config) validate(checker capabilityChecker) error {
-	if c.InitialShardCount <= 0 {
-		return errors.New("initialShardCount must be greater than 0")
-	}
 	if c.FlowGCTimeout <= 0 {
 		return errors.New("flowGCTimeout must be positive")
 	}

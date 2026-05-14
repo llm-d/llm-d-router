@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
 )
 
 func TestEvictionRegistry_RegisterAndGet(t *testing.T) {
@@ -51,6 +53,24 @@ func TestEvictionRegistry_Deregister(t *testing.T) {
 	r.Deregister("non-existent")
 }
 
+func TestEvictionRegistry_SetAndGetReason(t *testing.T) {
+	t.Parallel()
+	r := NewEvictionRegistry()
+
+	ch := make(chan struct{})
+	r.Register("req-1", ch)
+
+	assert.Equal(t, errcommon.RequestDroppedReason(""), r.GetReason("req-1"), "reason should be empty initially")
+
+	r.SetReason("req-1", errcommon.RequestDroppedReasonEvicted)
+	assert.Equal(t, errcommon.RequestDroppedReasonEvicted, r.GetReason("req-1"))
+
+	assert.Equal(t, errcommon.RequestDroppedReason(""), r.GetReason("non-existent"), "GetReason for unregistered ID should return empty")
+
+	// SetReason on non-existent should not panic.
+	r.SetReason("non-existent", errcommon.RequestDroppedReasonEvicted)
+}
+
 func TestEvictionRegistry_Concurrency(t *testing.T) {
 	t.Parallel()
 	r := NewEvictionRegistry()
@@ -68,7 +88,7 @@ func TestEvictionRegistry_Concurrency(t *testing.T) {
 				reqID := fmt.Sprintf("req-%d-%d", id, i)
 				ch := make(chan struct{})
 
-				switch i % 3 {
+				switch i % 5 {
 				case 0:
 					r.Register(reqID, ch)
 				case 1:
@@ -77,6 +97,12 @@ func TestEvictionRegistry_Concurrency(t *testing.T) {
 					r.Deregister(reqID)
 				case 2:
 					r.Get(reqID)
+				case 3:
+					r.Register(reqID, ch)
+					r.SetReason(reqID, errcommon.RequestDroppedReasonEvicted)
+					r.GetReason(reqID)
+				case 4:
+					r.GetReason(reqID)
 				}
 			}
 		}(g)

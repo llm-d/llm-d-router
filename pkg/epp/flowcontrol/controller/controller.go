@@ -22,17 +22,14 @@ limitations under the License.
 package controller
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
-	k8srand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -251,47 +248,32 @@ func (fc *FlowController) EnqueueAndWait(
 	// 2. Acquire a lease for the Flow.
 	// We hold this lease for the entire duration of the request (Distribution + Queueing).
 	err := fc.registry.WithConnection(flowKey, func(conn contracts.ActiveFlowConnection) error {
-		// 3. Enter the distribution loop to find a home for the request.
-		// This loop is responsible for retrying on ErrShardDraining.
-		// We can safely retry within this loop using the same 'conn' object because conn.ActiveShards() provides a live
-		// view of the topology.
-		for {
-			select { // Non-blocking check on controller lifecycle.
-			case <-fc.parentCtx.Done():
-				finalOutcome = types.QueueOutcomeRejectedOther
-				return fmt.Errorf("%w: %w", types.ErrRejected, types.ErrFlowControllerNotRunning)
-			default:
-			}
 
-			// Attempt to distribute the request once, passing the active connection.
-			item, err := fc.tryDistribution(reqCtx, req, enqueueTime, conn)
-			if err != nil {
-				// Distribution failed terminally (e.g., no shards, context cancelled during blocking submit).
-				// The item has already been finalized by tryDistribution.
-				finalState := item.FinalState()
-				finalOutcome = finalState.Outcome
-				return finalState.Err
-			}
-
-			// Distribution was successful; ownership of the item has been transferred to a processor.
-			// Now, we block here in awaitFinalization until the request is finalized by either the processor (e.g., dispatched,
-			// rejected) or the controller itself (e.g., caller's context cancelled/TTL expired).
-			outcome, err := fc.awaitFinalization(reqCtx, item)
-			if errors.Is(err, contracts.ErrShardDraining) {
-				// This is a benign race condition where the chosen shard started draining after acceptance.
-				fc.logger.V(logutil.DEBUG).Info("Selected shard is Draining, retrying request distribution",
-					"flowKey", req.FlowKey(), "requestID", req.ID())
-				// Introduce a small, randomized delay (1-10ms) to prevent tight spinning loops and thundering herds during retry
-				// scenarios (e.g., shard draining)
-				jitterMs := k8srand.Intn(10) + 1
-				fc.clock.Sleep(time.Duration(jitterMs) * time.Millisecond)
-				continue
-			}
-
-			// The outcome is terminal (Dispatched, Evicted, or a non-retriable rejection).
-			finalOutcome = outcome
-			return err
+		select { // Non-blocking check on controller lifecycle.
+		case <-fc.parentCtx.Done():
+			finalOutcome = types.QueueOutcomeRejectedOther
+			return fmt.Errorf("%w: %w", types.ErrRejected, types.ErrFlowControllerNotRunning)
+		default:
 		}
+
+		// Attempt to distribute the request once, passing the active connection.
+		item, err := fc.tryDistribution(reqCtx, req, enqueueTime, conn)
+		if err != nil {
+			// Distribution failed terminally (e.g., context cancelled during blocking submit).
+			// The item has already been finalized by tryDistribution.
+			finalState := item.FinalState()
+			finalOutcome = finalState.Outcome
+			return finalState.Err
+		}
+
+		// Distribution was successful; ownership of the item has been transferred to a processor.
+		// Now, we block here in awaitFinalization until the request is finalized by either the processor (e.g., dispatched,
+		// rejected) or the controller itself (e.g., caller's context cancelled/TTL expired).
+		outcome, err := fc.awaitFinalization(reqCtx, item)
+
+		// The outcome is terminal (Dispatched, Evicted, or another rejection).
+		finalOutcome = outcome
+		return err
 	})
 
 	// If WithConnection returned an error (e.g. connection failure, context cancelled before lease), we must ensure we
@@ -326,7 +308,7 @@ func (fc *FlowController) tryDistribution(
 	// We must create a fresh FlowItem on each attempt as finalization is per-lifecycle.
 	item := internal.NewItem(req, effectiveTTL, enqueueTime)
 
-	candidates, err := fc.selectDistributionCandidates(conn)
+	candidate, err := fc.selectDistributionCandidate(conn)
 	if err != nil {
 		outcome := types.QueueOutcomeRejectedOther
 		if errors.Is(err, errNoShards) {
@@ -337,7 +319,7 @@ func (fc *FlowController) tryDistribution(
 		return item, finalErr
 	}
 
-	outcome, err := fc.distributeRequest(reqCtx, item, candidates)
+	outcome, err := fc.distributeRequest(reqCtx, item, candidate)
 	if err == nil {
 		// Success: Ownership of the item has been transferred to the processor.
 		return item, nil
@@ -406,36 +388,23 @@ type candidate struct {
 	byteSize  uint64
 }
 
-// selectDistributionCandidates identifies all Active shards for the leased flow and ranks them by the current byte size
+// selectDistributionCandidate identifies all Active shards for the leased flow and ranks them by the current byte size
 // of that flow's queue, from least to most loaded.
-func (fc *FlowController) selectDistributionCandidates(conn contracts.ActiveFlowConnection) ([]candidate, error) {
-	shards := conn.ActiveShards()
-	if len(shards) == 0 {
+func (fc *FlowController) selectDistributionCandidate(conn contracts.ActiveFlowConnection) (*candidate, error) {
+	shard := conn.GetShard()
+	if shard == nil {
 		return nil, fmt.Errorf("%w for flow %s", errNoShards, conn.FlowKey())
 	}
 
-	candidates := make([]candidate, 0, len(shards))
-	for _, shard := range shards {
-		worker := fc.getOrStartWorker(shard)
-		mq, err := shard.ManagedQueue(conn.FlowKey())
-		if err != nil {
-			fc.logger.Error(err,
-				"Invariant violation. Failed to get ManagedQueue for a leased flow on an Active shard. Skipping shard.",
-				"flowKey", conn.FlowKey(), "shardID", shard.ID())
-			continue
-		}
-		candidates = append(candidates, candidate{worker.processor, shard.ID(), mq.FlowQueueAccessor().ByteSize()})
-	}
-
-	if len(candidates) == 0 {
+	worker := fc.getOrStartWorker(shard)
+	mq, err := shard.ManagedQueue(conn.FlowKey())
+	if err != nil {
+		fc.logger.Error(err,
+			"Invariant violation. Failed to get ManagedQueue for a leased flow on an Active shard. Skipping shard.",
+			"flowKey", conn.FlowKey(), "shardID", shard.ID())
 		return nil, fmt.Errorf("%w for flow %s", errNoShards, conn.FlowKey())
 	}
-
-	slices.SortFunc(candidates, func(a, b candidate) int {
-		return cmp.Compare(a.byteSize, b.byteSize)
-	})
-
-	return candidates, nil
+	return &candidate{worker.processor, shard.ID(), mq.FlowQueueAccessor().ByteSize()}, nil
 }
 
 // distributeRequest implements a flow-aware, two-phase "Join-Shortest-Queue-by-Bytes" (JSQ-Bytes) distribution strategy
@@ -456,22 +425,16 @@ func (fc *FlowController) selectDistributionCandidates(conn contracts.ActiveFlow
 func (fc *FlowController) distributeRequest(
 	ctx context.Context,
 	item *internal.FlowItem,
-	candidates []candidate,
+	candidate *candidate,
 ) (types.QueueOutcome, error) {
 	reqID := item.OriginalRequest().ID()
-	for _, c := range candidates {
-		if err := c.processor.Submit(item); err == nil {
-			return types.QueueOutcomeNotYetFinalized, nil
-		}
-		fc.logger.V(logutil.TRACE).Info("Processor busy during fast failover, trying next candidate",
-			"shardID", c.shardID, "requestID", reqID)
+	if err := candidate.processor.Submit(item); err == nil {
+		return types.QueueOutcomeNotYetFinalized, nil
 	}
 
-	// All processors are busy. Attempt a single blocking submission to the least-loaded candidate.
-	bestCandidate := candidates[0]
-	fc.logger.V(logutil.TRACE).Info("All processors busy, attempting blocking submit to best candidate",
-		"shardID", bestCandidate.shardID, "requestID", reqID)
-	err := bestCandidate.processor.SubmitOrBlock(ctx, item)
+	// processor is busy. Attempt a single blocking submission to the candidate.
+	fc.logger.V(logutil.TRACE).Info("Processor is busy, attempting blocking submit", "requestID", reqID)
+	err := candidate.processor.SubmitOrBlock(ctx, item)
 	if err != nil {
 		return types.QueueOutcomeRejectedOther, fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
 	}
@@ -528,8 +491,8 @@ func (fc *FlowController) getOrStartWorker(shard contracts.RegistryShard) *manag
 func (fc *FlowController) reconcileProcessors() {
 	stats := fc.registry.ShardStats()
 	activeShards := sets.New[string]()
-	for _, s := range stats {
-		activeShards.Insert(s.ID)
+	if stats != nil {
+		activeShards.Insert(stats.ID)
 	}
 
 	fc.workers.Range(func(key, value any) bool {

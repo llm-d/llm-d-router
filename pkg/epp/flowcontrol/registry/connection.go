@@ -31,13 +31,9 @@ type connection struct {
 
 var _ contracts.ActiveFlowConnection = &connection{}
 
-// Shards returns a stable snapshot of accessors for all internal state shards.
-func (c *connection) ActiveShards() []contracts.RegistryShard {
-	// Return a copy to ensure the caller cannot modify the registry's internal slice.
-	shardsCopy := make([]contracts.RegistryShard, 1)
-	shardsCopy[0] = c.registry.shard
-
-	return shardsCopy
+// GetShard returns the shard this connection is pinned to.
+func (c *connection) GetShard() contracts.RegistryShard {
+	return c.registry.shard
 }
 
 // FlowKey returns the immutable identity of the flow this connection is pinned to.

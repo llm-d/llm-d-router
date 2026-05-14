@@ -51,6 +51,55 @@ llm-d.ai/igw-mode: inferencepool
 {{- end -}}
 
 {{/*
+Return the monitoring provider name.
+
+If inferenceExtension.monitoring.provider.name is unset/empty, default to
+prometheusoperator. For backwards compatibility, provider.name=gke still maps
+to gmp when no monitoring provider is explicitly set.
+*/}}
+{{- define "llm-d-inference-scheduler.inferenceExtension.monitoring.provider.name" -}}
+{{- $monitoring := .Values.inferenceExtension.monitoring | default dict -}}
+{{- $mp := index $monitoring "provider" | default dict -}}
+{{- $mpName := index $mp "name" | default "" -}}
+{{- $gatewayProvider := .Values.provider | default dict -}}
+{{- $gatewayProviderName := index $gatewayProvider "name" | default "" -}}
+{{- if and (kindIs "string" $mpName) (ne (trim $mpName) "") -}}
+{{- $mpName -}}
+{{- else if eq (lower $gatewayProviderName) "gke" -}}
+gmp
+{{- else -}}
+prometheusoperator
+{{- end -}}
+{{- end -}}
+
+{{/*
+Return the monitoring provider config object.
+
+When inferenceExtension.monitoring.provider.name is unset/empty, use defaults.
+For backwards compatibility, provider.gke.autopilot is still honored when
+provider.name=gke and no monitoring provider is explicitly set.
+*/}}
+{{- define "llm-d-inference-scheduler.inferenceExtension.monitoring.provider" -}}
+{{- $monitoring := .Values.inferenceExtension.monitoring | default dict -}}
+{{- $mp := index $monitoring "provider" | default dict -}}
+{{- $mpName := include "llm-d-inference-scheduler.inferenceExtension.monitoring.provider.name" . -}}
+{{- $gatewayProvider := .Values.provider | default dict -}}
+{{- $gatewayProviderName := index $gatewayProvider "name" | default "" -}}
+{{- $resolved := dict "name" $mpName -}}
+{{- if eq (lower $mpName) "gmp" -}}
+  {{- $gmp := index $mp "gmp" | default dict -}}
+  {{- $legacyGke := dict -}}
+  {{- if and (eq (lower $gatewayProviderName) "gke") (index $gatewayProvider "gke") -}}
+    {{- $legacyGke = index $gatewayProvider "gke" -}}
+  {{- end -}}
+  {{- $_ := set $resolved "gmp" (mergeOverwrite (deepCopy $legacyGke) (deepCopy $gmp)) -}}
+{{- else -}}
+  {{- $_ := set $resolved "prometheusoperator" (index $mp "prometheusoperator" | default dict) -}}
+{{- end -}}
+{{- toYaml $resolved -}}
+{{- end -}}
+
+{{/*
 Return the standalone sidecar proxy type.
 */}}
 {{- define "llm-d-inference-scheduler.sidecarProxyType" -}}

@@ -351,6 +351,16 @@ inferenceExtension:
     # preset. For example, set sidecar.image to replace the preset image.
   monitoring:
     interval: "10s"
+    # Monitoring provider selection.
+    # Options: ["gmp", "prometheusoperator"].
+    #     gmp: Google Managed Prometheus
+    #     prometheusoperator: Open Source Prometheus Operator
+    # If not set, defaults to "prometheusoperator". For backwards compatibility,
+    # legacy provider.name=gke still maps to "gmp" when this field is unset.
+    provider:
+      name: ""
+      gmp:
+        autopilot: false
     # Prometheus ServiceMonitor will be created when enabled for EPP metrics collection
     prometheus:
       enabled: false
@@ -382,16 +392,6 @@ inferenceExtension:
     path: "/metrics"
     # insecureSkipVerify disables TLS certificate verification when scheme is https.
     insecureSkipVerify: true
-
-# Options: ["gke"]
-provider:
-  name: none
-
-  # GKE-specific configuration.
-  # This block is only used if name is "gke".
-  gke:
-    # Set to true if the cluster is an Autopilot cluster.
-    autopilot: false
 
 # This is not used when you deploy standalone with inferenceExtension.endpointsServer.createInferencePool=false
 inferencePool:

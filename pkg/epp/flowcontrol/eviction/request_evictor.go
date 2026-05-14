@@ -45,10 +45,14 @@ func NewRequestEvictor(
 	filter flowcontrol.EvictionFilterPolicy,
 	evictor Evictor,
 ) *RequestEvictor {
+	registry := NewEvictionRegistry()
+	if re, ok := evictor.(EvictorWithRegistry); ok {
+		re.SetRegistry(registry)
+	}
 	return &RequestEvictor{
 		queue:            NewEvictionQueue(ordering, filter),
 		evictor:          evictor,
-		evictionRegistry: NewEvictionRegistry(),
+		evictionRegistry: registry,
 	}
 }
 

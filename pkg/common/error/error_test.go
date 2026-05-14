@@ -227,6 +227,7 @@ func TestBuildErrResponse(t *testing.T) {
 		wantHTTPStatus   envoyTypePb.StatusCode
 		wantBodyContains string
 		wantGRPCErr      bool
+		wantHeaders      map[string]string
 	}{
 		{
 			name:             "BadRequest returns 400",
@@ -275,6 +276,19 @@ func TestBuildErrResponse(t *testing.T) {
 			err:         errors.New("unknown problem"),
 			wantGRPCErr: true,
 		},
+		{
+			name:             "headers are included in response",
+			err:              Error{Code: ResourceExhausted, Msg: "no capacity", Headers: map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)}},
+			wantHTTPStatus:   envoyTypePb.StatusCode_TooManyRequests,
+			wantBodyContains: "no capacity",
+			wantHeaders:      map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)},
+		},
+		{
+			name:             "nil headers omits header mutation",
+			err:              Error{Code: ResourceExhausted, Msg: "no capacity"},
+			wantHTTPStatus:   envoyTypePb.StatusCode_TooManyRequests,
+			wantBodyContains: "no capacity",
+		},
 	}
 
 	for _, tt := range tests {
@@ -307,6 +321,24 @@ func TestBuildErrResponse(t *testing.T) {
 			}
 			if tt.wantBodyContains != "" && !strings.Contains(string(ir.GetBody()), tt.wantBodyContains) {
 				t.Errorf("body %q should contain %q", string(ir.GetBody()), tt.wantBodyContains)
+			}
+			if len(tt.wantHeaders) > 0 {
+				if ir.Headers == nil || len(ir.Headers.SetHeaders) == 0 {
+					t.Fatal("expected response headers, got none")
+				}
+				gotHeaders := make(map[string]string, len(ir.Headers.SetHeaders))
+				for _, h := range ir.Headers.SetHeaders {
+					gotHeaders[h.Header.Key] = string(h.Header.RawValue)
+				}
+				for k, v := range tt.wantHeaders {
+					if gotHeaders[k] != v {
+						t.Errorf("header %q = %q, want %q", k, gotHeaders[k], v)
+					}
+				}
+			} else if !tt.wantGRPCErr {
+				if ir.Headers != nil && len(ir.Headers.SetHeaders) > 0 {
+					t.Errorf("expected no headers, got %v", ir.Headers.SetHeaders)
+				}
 			}
 		})
 	}

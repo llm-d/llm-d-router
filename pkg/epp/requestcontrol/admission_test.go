@@ -209,6 +209,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 		expectErr       bool
 		expectErrCode   string
 		expectErrSubstr string
+		expectHeaders   map[string]string
 	}{
 		{
 			name:      "sheddable_dispatched",
@@ -229,6 +230,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.ResourceExhausted,
 			expectErrSubstr: "request rejected by flow control",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
 		},
 		{
 			name:            "fc_evict_ttl",
@@ -238,6 +240,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.ServiceUnavailable,
 			expectErrSubstr: "request timed out in queue: timeout",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)},
 		},
 		{
 			name:            "fc_evict_context_cancelled",
@@ -246,6 +249,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.ServiceUnavailable,
 			expectErrSubstr: "client disconnected",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled)},
 		},
 		{
 			name:            "fc_reject_other",
@@ -292,6 +296,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 				if assert.ErrorAs(t, err, &e, "error should be of type errcommon.Error") {
 					assert.Equal(t, tc.expectErrCode, e.Code, "incorrect error code for scenario: %s", tc.name)
 					assert.Contains(t, e.Msg, tc.expectErrSubstr, "incorrect error message substring for scenario: %s", tc.name)
+					assert.Equal(t, tc.expectHeaders, e.Headers, "incorrect headers for scenario: %s", tc.name)
 				}
 			}
 		})

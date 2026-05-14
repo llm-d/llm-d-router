@@ -40,44 +40,29 @@ func BenchmarkFlowController_PerformanceMatrix(b *testing.B) {
 		b.Skip("skipping PerformanceMatrix in short mode")
 	}
 	limits := []egressConcurrencyLimit{0, 1, 100}
-	shards := []shardCount{1, 8}
 	priorities := []priorityLevels{1, 8}
-	flows := []flowCount{10, 50000}
-	concurrencies := []ingressConcurrency{10, 5000, 50000}
+	flows := []flowCount{10, 5000}
+	concurrencies := []ingressConcurrency{10, 5000}
 
 	for _, L := range limits {
-		for _, S := range shards {
-			for _, P := range priorities {
-				for _, F := range flows {
-					for _, W := range concurrencies {
-						// Skip illogical boundaries.
-						if L == 0 && W > 100 {
-							continue // High concurrency is redundant for free-flow.
-						}
-						if L > 0 && int64(W) <= int64(L) {
-							continue // Requires W > L to generate backpressure.
-						}
-
-						matrix := benchMatrix{limit: L, shards: S, priorities: P, flows: F, concurrency: W}
-						b.Run(matrix.name(), func(b *testing.B) {
-							runMatrixCoordinate(b, matrix)
-						})
+		for _, P := range priorities {
+			for _, F := range flows {
+				for _, W := range concurrencies {
+					// Skip illogical boundaries.
+					if L == 0 && W > 100 {
+						continue // High concurrency is redundant for free-flow.
 					}
+					if L > 0 && int64(W) <= int64(L) {
+						continue // Requires W > L to generate backpressure.
+					}
+
+					matrix := benchMatrix{limit: L, priorities: P, flows: F, concurrency: W}
+					b.Run(matrix.name(), func(b *testing.B) {
+						runMatrixCoordinate(b, matrix)
+					})
 				}
 			}
 		}
-	}
-}
-
-// BenchmarkFlowController_HighShardSort isolates the O(S log S) sorting overhead of shortest-queue
-// load balancing by evaluating highly sharded configurations.
-func BenchmarkFlowController_HighShardSort(b *testing.B) {
-	shards := []shardCount{16, 64, 128, 256}
-	for _, S := range shards {
-		matrix := benchMatrix{limit: 50, shards: S, priorities: 1, flows: 100, concurrency: 100}
-		b.Run(matrix.name(), func(b *testing.B) {
-			runMatrixCoordinate(b, matrix)
-		})
 	}
 }
 
@@ -85,7 +70,7 @@ func BenchmarkFlowController_HighShardSort(b *testing.B) {
 func runMatrixCoordinate(b *testing.B, m benchMatrix) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	fc, detector := setupBenchmarkHarness(ctx, b, m.shards, m.priorities, m.limit, nil, nil)
+	fc, detector := setupBenchmarkHarness(ctx, b, m.priorities, m.limit, nil, nil)
 
 	// Yield briefly to allow the background supervisor to bootstrap the data plane.
 	time.Sleep(10 * time.Millisecond)
@@ -140,7 +125,8 @@ func runMatrixCoordinate(b *testing.B, m benchMatrix) {
 
 		// Offset the starting index per thread to prevent identical striding over the array.
 		// Multiply by a prime to guarantee threads start at different offsets.
-		localIdx := int(globalThreadID.Add(1)) * 9973
+		threadID := globalThreadID.Add(1)
+		localIdx := int(threadID) * 9973
 
 		for pb.Next() {
 			localIdx++
@@ -189,9 +175,9 @@ func BenchmarkFlowController_TopologyChurn(b *testing.B) {
 		EnqueueChannelBufferSize:        100,
 	}
 
-	fc, detector := setupBenchmarkHarness(ctx, b, 4, 1, 100, nil, cfg)
+	fc, detector := setupBenchmarkHarness(ctx, b, 1, 100, nil, cfg)
 
-	const numKeys = 50000
+	const numKeys = 5000
 	preAllocatedReqs := make([]*benchRequest, numKeys)
 	for i := range numKeys {
 		preAllocatedReqs[i] = &benchRequest{
@@ -247,7 +233,7 @@ func BenchmarkFlowController_MassCancellation(b *testing.B) {
 	}
 
 	// Use the permanently saturated detector to guarantee all requests queue and definitively rot.
-	fc, _ := setupBenchmarkHarness(ctx, b, 4, 1, 100, &alwaysSaturatedDetector{}, cfg)
+	fc, _ := setupBenchmarkHarness(ctx, b, 1, 100, &alwaysSaturatedDetector{}, cfg)
 
 	var timeoutCount atomic.Int64
 

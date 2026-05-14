@@ -101,10 +101,11 @@ type FlowRegistry struct {
 	// add new keys safely.
 	perPriorityBandStats sync.Map
 
+	shard *registryShard
+
 	// --- Administrative state (protected by `mu`) ---
 
-	mu    sync.RWMutex
-	shard *registryShard
+	mu sync.RWMutex
 }
 
 var _ contracts.FlowRegistry = &FlowRegistry{}
@@ -254,12 +255,12 @@ func (fr *FlowRegistry) ensureFlowInfrastructure(key flowcontrol.FlowKey) error 
 	fr.mu.RLock()
 	defer fr.mu.RUnlock()
 
-	components, err := fr.buildFlowComponents(key, 1)
+	components, err := fr.buildFlowComponents(key)
 	if err != nil {
 		return err
 	}
 
-	fr.shard.synchronizeFlow(key, components[0].policy, components[0].queue)
+	fr.shard.synchronizeFlow(key, components.policy, components.queue)
 
 	fr.logger.V(logging.DEBUG).Info("JIT provisioned flow infrastructure", "flowKey", key)
 	return nil
@@ -333,11 +334,9 @@ func (fr *FlowRegistry) Stats() contracts.AggregateStats {
 	return stats
 }
 
-// ShardStats returns a slice of statistics, one for each internal shard.
-func (fr *FlowRegistry) ShardStats() []contracts.ShardStats {
-	shardStats := make([]contracts.ShardStats, 1)
-	shardStats[0] = fr.shard.Stats()
-	return shardStats
+// ShardStats returns statistics for the internal shard.
+func (fr *FlowRegistry) ShardStats() *contracts.ShardStats {
+	return fr.shard.Stats()
 }
 
 // --- Garbage Collection ---
@@ -439,34 +438,7 @@ func (fr *FlowRegistry) createShard() error {
 
 	// Prepare Shard Object (Infallible)
 	partitionedConfig := fr.config.partition(0, 1)
-	shard := newShard("shard-0", partitionedConfig, fr.logger, fr.propagateStatsDelta)
-
-	// Prepare All Components for All New Shards (Fallible):
-	// Pre-build every component for every existing flow on every new shard.
-	// If any single component fails to build, the entire scale-up operation is aborted, and all prepared data is
-	// discarded, leaving the system state clean.
-	allComponents := make(map[flowcontrol.FlowKey][]flowComponents)
-	var rangeErr error
-	fr.flowStates.Range(func(key, _ any) bool {
-		flowKey := key.(flowcontrol.FlowKey)
-		components, err := fr.buildFlowComponents(flowKey, 1)
-		if err != nil {
-			rangeErr = fmt.Errorf("failed to prepare components for flow %s on new shards: %w", flowKey, err)
-			return false
-		}
-		allComponents[flowKey] = components
-		return true
-	})
-	if rangeErr != nil {
-		return rangeErr
-	}
-
-	// Commit (Infallible):
-	for key, components := range allComponents {
-		shard.synchronizeFlow(key, components[0].policy, components[0].queue)
-	}
-	fr.shard = shard
-	fr.repartitionShardConfigsLocked()
+	fr.shard = newShard("shard-0", partitionedConfig, fr.logger, fr.propagateStatsDelta)
 	return nil
 }
 
@@ -486,23 +458,21 @@ type flowComponents struct {
 }
 
 // buildFlowComponents instantiates the necessary plugin components for a new flow instance.
-// It creates a distinct instance of each component for each shard to ensure state isolation.
-func (fr *FlowRegistry) buildFlowComponents(key flowcontrol.FlowKey, numInstances int) ([]flowComponents, error) {
+// It creates a distinct instance of each component to ensure state isolation.
+func (fr *FlowRegistry) buildFlowComponents(key flowcontrol.FlowKey) (*flowComponents, error) {
 	bandConfig, ok := fr.config.PriorityBands[key.Priority]
 	if !ok {
 		return nil, fmt.Errorf("priority band %d not found: %w", key.Priority, contracts.ErrPriorityBandNotFound)
 	}
 
-	allComponents := make([]flowComponents, numInstances)
-	for i := range numInstances {
-		q, err := queue.NewQueueFromName(bandConfig.Queue, bandConfig.OrderingPolicy)
-		if err != nil {
-			return nil, fmt.Errorf("failed to instantiate queue %q for flow %s: %w",
-				bandConfig.Queue, key, err)
-		}
-		allComponents[i] = flowComponents{policy: bandConfig.OrderingPolicy, queue: q}
+	q, err := queue.NewQueueFromName(bandConfig.Queue, bandConfig.OrderingPolicy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to instantiate queue %q for flow %s: %w",
+			bandConfig.Queue, key, err)
 	}
-	return allComponents, nil
+	components := &flowComponents{policy: bandConfig.OrderingPolicy, queue: q}
+
+	return components, nil
 }
 
 // propagateStatsDelta is the top-level, lock-free aggregator for all statistics.

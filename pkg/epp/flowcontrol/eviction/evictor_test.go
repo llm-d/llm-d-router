@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
 )
 
@@ -110,6 +111,33 @@ func TestImmediateResponseEvictor_Cleanup(t *testing.T) {
 
 	// Cleanup non-existent should not panic.
 	evictor.Cleanup("non-existent")
+}
+
+func TestImmediateResponseEvictor_SetsReasonOnRegistry(t *testing.T) {
+	t.Parallel()
+	evictor := NewImmediateResponseEvictor()
+	registry := NewEvictionRegistry()
+	evictor.SetRegistry(registry)
+
+	evictCh := make(chan struct{})
+	registry.Register("req-1", evictCh)
+
+	item := &flowcontrol.EvictionItem{
+		RequestID: "req-1",
+		EvictCh:   evictCh,
+	}
+
+	err := evictor.Evict(context.Background(), item)
+	require.NoError(t, err)
+
+	assert.Equal(t, errcommon.RequestDroppedReasonEvicted, registry.GetReason("req-1"),
+		"Evict should set the removal reason on the registry")
+
+	select {
+	case <-evictCh:
+	default:
+		t.Fatal("eviction channel should be closed after Evict()")
+	}
 }
 
 func TestNoOpEvictor(t *testing.T) {

@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
@@ -110,6 +111,9 @@ func TestRequestEvictor_EvictN_ClosesEvictChannel(t *testing.T) {
 	default:
 		t.Fatal("eviction channel should be closed after EvictN")
 	}
+
+	assert.Equal(t, errcommon.RequestDroppedReasonEvicted, re.EvictionRegistry().GetReason("req-1"),
+		"EvictN should store the removal reason in the registry")
 }
 
 func TestRequestEvictor_EvictN_ReTracksOnFailure(t *testing.T) {

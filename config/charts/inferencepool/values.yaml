@@ -77,6 +77,16 @@ inferenceExtension:
   # Monitoring configuration for EPP
   monitoring:
     interval: "10s"
+    # Monitoring provider selection.
+    # Options: ["gmp", "prometheusoperator"].
+    #     gmp: Google Managed Prometheus
+    #     prometheusoperator: Open Source Prometheus Operator    
+    # If not set, defaults to "prometheusoperator". For backwards compatibility,
+    # provider.name=gke still maps to "gmp" when this field is unset.
+    provider:
+      name: ""
+      gmp:
+        autopilot: false
     # Prometheus ServiceMonitor will be created when enabled for EPP metrics collection
     prometheus:
       enabled: false
@@ -119,15 +129,11 @@ inferencePool:
   #   matchLabels:
   #     app: vllm-qwen3-32b
 
+# Gateway provider selection.
+# This section configures the gateway implementation only; it is not a generic infrastructure provider setting.
 # Options: ["gke", "istio", "none"]
 provider:
   name: none
-
-  # GKE-specific configuration.
-  # This block is only used if name is "gke".
-  gke:
-    # Set to true if the cluster is an Autopilot cluster.
-    autopilot: false
 
   # Istio-specific configuration.
   # This block is only used if name is "istio".

@@ -56,8 +56,8 @@ type FlowRegistryObserver interface {
 	// Stats returns a near-consistent snapshot globally aggregated statistics for the entire `FlowRegistry`.
 	Stats() AggregateStats
 
-	// ShardStats returns a near-consistent slice of statistics snapshots, one for each `RegistryShard`.
-	ShardStats() []ShardStats
+	// ShardStats returns a near-consistent statistics snapshot for the `RegistryShard`.
+	ShardStats() *ShardStats
 }
 
 // FlowRegistryDataPlane defines the high-throughput, request-path interface for the registry.
@@ -90,8 +90,8 @@ type FlowRegistryDataPlane interface {
 // This interface represents an active "Lease" on the flow. As long as this object is valid (within the callback), the
 // Flow Registry guarantees that the underlying Flow State is "Pinned" and protected from Garbage Collection.
 type ActiveFlowConnection interface {
-	// ActiveShards returns a current snapshot of accessors for all Active internal state shards.
-	ActiveShards() []RegistryShard
+	// GetShard returns the shard this connection is pinned to.
+	GetShard() RegistryShard
 
 	// FlowKey returns the immutable identity of the flow this connection is pinned to.
 	FlowKey() flowcontrol.FlowKey
@@ -140,7 +140,7 @@ type RegistryShard interface {
 	AllOrderedPriorityLevels() []int
 
 	// Stats returns a near consistent snapshot of the shard's state.
-	Stats() ShardStats
+	Stats() *ShardStats
 }
 
 // ManagedQueue defines the interface for a flow's queue on a specific shard.

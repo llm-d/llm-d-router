@@ -23,6 +23,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
 )
@@ -43,17 +44,31 @@ func (e *NoOpEvictor) Evict(ctx context.Context, item *flowcontrol.EvictionItem)
 	return nil
 }
 
+// EvictorWithRegistry is an optional interface for evictors that need access to the
+// EvictionRegistry to store eviction metadata (e.g., eviction reason) before signaling.
+type EvictorWithRegistry interface {
+	SetRegistry(registry *EvictionRegistry)
+}
+
+var _ EvictorWithRegistry = (*ImmediateResponseEvictor)(nil)
+
 // ImmediateResponseEvictor evicts requests by closing the EvictionItem's EvictCh.
 // The ext_proc Process() goroutine selects on this channel and sends an ImmediateResponse
 // to Envoy when it is closed, causing Envoy to reset the upstream connection to the model server.
 type ImmediateResponseEvictor struct {
 	// closeOnce tracks which channels have been closed to prevent double-close panics.
 	closeOnce sync.Map // requestID → *sync.Once
+	registry  *EvictionRegistry
 }
 
 // NewImmediateResponseEvictor creates an ImmediateResponseEvictor.
 func NewImmediateResponseEvictor() *ImmediateResponseEvictor {
 	return &ImmediateResponseEvictor{}
+}
+
+// SetRegistry sets the eviction registry. Called by NewRequestEvictor via the EvictorWithRegistry interface.
+func (e *ImmediateResponseEvictor) SetRegistry(registry *EvictionRegistry) {
+	e.registry = registry
 }
 
 func (e *ImmediateResponseEvictor) Evict(ctx context.Context, item *flowcontrol.EvictionItem) error {
@@ -63,6 +78,9 @@ func (e *ImmediateResponseEvictor) Evict(ctx context.Context, item *flowcontrol.
 
 	once, _ := e.closeOnce.LoadOrStore(item.RequestID, &sync.Once{})
 	once.(*sync.Once).Do(func() {
+		if e.registry != nil {
+			e.registry.SetReason(item.RequestID, errcommon.RequestDroppedReasonEvicted)
+		}
 		close(item.EvictCh)
 	})
 

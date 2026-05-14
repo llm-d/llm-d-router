@@ -82,8 +82,6 @@ func TestNewConfigFromAPI(t *testing.T) {
 				assert.NotNil(t, cfg.Registry, "Registry config sub-struct should be initialized even when API config is nil")
 				assert.NotNil(t, cfg.Controller,
 					"Controller config sub-struct should be initialized even when API config is nil")
-				assert.NotZero(t, cfg.Registry.InitialShardCount,
-					"Registry should contain default values (InitialShardCount) when API config is nil")
 				assert.NotZero(t, cfg.Controller.EnqueueChannelBufferSize,
 					"Controller should contain default values (EnqueueChannelBufferSize) when API config is nil")
 			},

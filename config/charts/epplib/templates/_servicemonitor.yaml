@@ -1,5 +1,6 @@
 {{- define "inference-extension.service-monitor" -}}
-{{- if and .Values.inferenceExtension.monitoring.prometheus.enabled (ne (lower .Values.provider.name) "gke") }}
+{{- $inferenceExtensionMonitoringProviderName := include "llm-d-inference-scheduler.inferenceExtension.monitoring.provider.name" . | lower -}}
+{{- if and .Values.inferenceExtension.monitoring.prometheus.enabled (eq $inferenceExtensionMonitoringProviderName "prometheusoperator") }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
