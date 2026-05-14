@@ -1,3 +1,4 @@
+2026-05-14 https://github.com/llm-d/llm-d-router/pull/683 Add sidecar configuration specified via either `--configuration-file <path>` or `--configuration <text>`. Both YAML and JSON formats are allowed. Configuration field names are the same as the CLI flags. CLI has priority over the configuration file or text.
 2026-05-13 https://github.com/llm-d/llm-d-router/pull/959 Add probabilistic-admitter plugin for binary-tier probabilistic load shedding of low-priority inference requests under cluster saturation.
 2026-05-13 https://github.com/llm-d/llm-d-inference-scheduler/pull/890 Adds new configuration option for the `tokens-producer` plugin. Existing configurations are unaffected.
 2026-05-07 https://github.com/llm-d/llm-d-inference-scheduler/pull/931 active-request-scorer now uses inflight-load-producer for in-flight request tracking; requestTimeout is deprecated and ignored, and idleThreshold/maxBusyScore configure idle/busy endpoint scoring.
