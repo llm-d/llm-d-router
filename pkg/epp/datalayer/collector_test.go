@@ -251,7 +251,7 @@ func TestCollectorErrorMetrics(t *testing.T) {
 			extractors := newExtractorMap()
 			if tt.extType != "" {
 				ext := &stubExtractor{kind: tt.extType, err: tt.extErr}
-				extractors.Set(src.TypedName().Name, []fwkdl.ExtractorBase{ext})
+				extractors.Append(src.TypedName().Name, ext)
 			}
 
 			pollBefore := testutil.ToFloat64(metrics.DataLayerPollErrorsTotal.WithLabelValues(tt.srcType))

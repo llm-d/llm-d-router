@@ -93,6 +93,9 @@ func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint,
 			return errors.New("cannot add nil data source")
 		}
 	}
+	if extractors == nil {
+		extractors = newExtractorMap()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

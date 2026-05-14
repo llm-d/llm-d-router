@@ -113,8 +113,8 @@ func (r *Runtime) Configure(cfg *Config, enableNewMetrics bool, disallowedExtrac
 				return err
 			}
 
-			if len(srcCfg.Extractors) > 0 {
-				r.extractors.Set(srcName, srcCfg.Extractors)
+			for _, ext := range srcCfg.Extractors {
+				r.extractors.Append(srcName, ext)
 			}
 
 			extractorNames := make([]string, len(srcCfg.Extractors))
@@ -133,8 +133,8 @@ func (r *Runtime) Configure(cfg *Config, enableNewMetrics bool, disallowedExtrac
 	for _, pending := range r.pendingRegistrations {
 		var gvkFilter *schema.GroupVersionKind
 		if ns, ok := pending.DefaultSource.(fwkdl.NotificationSource); ok {
-			gvk := ns.GVK()
-			gvkFilter = &gvk
+			sourceGVK := ns.GVK()
+			gvkFilter = &sourceGVK
 		}
 		srcName, matchedSrc, err := r.findSourceByType(pending.SourceType, gvkFilter)
 		if err != nil {

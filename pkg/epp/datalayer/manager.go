@@ -21,7 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 // sourceHit identifies a matched source by its variant, registered name, and value.
@@ -190,59 +190,54 @@ func (cm *collectorManager) StopAll() {
 	})
 }
 
-// extractorMap is a name-keyed map of extractor slices used to associate
-// extractors with their source by name. Extractors arrive as ExtractorBase;
-// callers type-assert per variant at use.
-// sync.Map: written during Configure; read concurrently afterwards.
+// extractorMap is a name-keyed map of extractor slices.
 type extractorMap struct {
-	m sync.Map
+	// RWMutex (not sync.Map) so Append's read-then-write is atomic.
+	mu sync.RWMutex
+	m  map[string][]fwkdl.ExtractorBase
 }
 
 func newExtractorMap() *extractorMap {
-	return &extractorMap{}
-}
-
-// Set stores exts under srcName, overwriting any prior entry.
-func (e *extractorMap) Set(srcName string, exts []fwkdl.ExtractorBase) {
-	e.m.Store(srcName, exts)
+	return &extractorMap{m: make(map[string][]fwkdl.ExtractorBase)}
 }
 
 // Get returns the extractors stored under srcName, if any.
 func (e *extractorMap) Get(srcName string) ([]fwkdl.ExtractorBase, bool) {
-	raw, ok := e.m.Load(srcName)
-	if !ok {
-		return nil, false
-	}
-	return raw.([]fwkdl.ExtractorBase), true
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	exts, ok := e.m[srcName]
+	return exts, ok
 }
 
 // Count returns the number of stored entries.
 func (e *extractorMap) Count() int {
-	n := 0
-	e.m.Range(func(_, _ any) bool {
-		n++
-		return true
-	})
-	return n
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.m)
 }
 
-// Range invokes f for every entry. f returning false stops iteration.
+// Range invokes f for every entry; f returning false stops iteration.
+// f runs under RLock — must not block or call back into write methods.
 func (e *extractorMap) Range(f func(name string, exts []fwkdl.ExtractorBase) bool) {
-	e.m.Range(func(k, raw any) bool {
-		return f(k.(string), raw.([]fwkdl.ExtractorBase))
-	})
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for k, v := range e.m {
+		if !f(k, v) {
+			return
+		}
+	}
 }
 
-// Append adds ext to srcName's extractor slice, deduping by extractor type so
-// code-registered extractors are a no-op when an equivalent type is already
-// wired via config.
+// Append adds ext to srcName's slice, deduping by Type. Safe for concurrent use.
 func (e *extractorMap) Append(srcName string, ext fwkdl.ExtractorBase) {
-	existing, _ := e.Get(srcName)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	existing := e.m[srcName]
 	extType := ext.TypedName().Type
 	for _, p := range existing {
 		if p.TypedName().Type == extType {
 			return
 		}
 	}
-	e.Set(srcName, append(existing, ext))
+	e.m[srcName] = append(existing, ext)
 }
