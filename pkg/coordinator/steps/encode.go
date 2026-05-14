@@ -12,8 +12,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const EncodeStepName = "encode"
+
 func init() {
-	pipeline.Register("encode", NewEncodeStep)
+	pipeline.Register(EncodeStepName, NewEncodeStep)
 }
 
 type EncodeStep struct {
@@ -44,7 +46,7 @@ func (s *EncodeStep) SetGatewayClient(c *gateway.Client) {
 	s.gwClient = c
 }
 
-func (s *EncodeStep) Name() string { return "encode" }
+func (s *EncodeStep) Name() string { return EncodeStepName }
 
 func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	if len(reqCtx.MultimodalEntries) == 0 {

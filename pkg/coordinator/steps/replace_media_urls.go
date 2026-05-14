@@ -12,8 +12,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const ReplaceMediaURLsStepName = "replace-media-urls"
+
 func init() {
-	pipeline.Register("replace-media-urls", NewReplaceMediaURLsStep)
+	pipeline.Register(ReplaceMediaURLsStepName, NewReplaceMediaURLsStep)
 }
 
 type ReplaceMediaURLsStep struct {
@@ -46,7 +48,7 @@ func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
 	}, nil
 }
 
-func (s *ReplaceMediaURLsStep) Name() string { return "replace-media-urls" }
+func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	messages, ok := reqCtx.Body["messages"].([]any)

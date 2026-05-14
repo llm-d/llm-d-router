@@ -11,8 +11,10 @@ import (
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
+const PrefillStepName = "prefill"
+
 func init() {
-	pipeline.Register("prefill", NewPrefillStep)
+	pipeline.Register(PrefillStepName, NewPrefillStep)
 }
 
 type PrefillStep struct {
@@ -32,7 +34,7 @@ func (s *PrefillStep) SetGatewayClient(c *gateway.Client) {
 	s.gwClient = c
 }
 
-func (s *PrefillStep) Name() string { return "prefill" }
+func (s *PrefillStep) Name() string { return PrefillStepName }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	allHashes := make([]string, len(reqCtx.MultimodalEntries))
