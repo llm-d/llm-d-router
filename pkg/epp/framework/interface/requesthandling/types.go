@@ -91,7 +91,13 @@ type InferenceRequestBody struct {
 // actual token data such as prefix-cache awareness.
 type TokenizedPrompt struct {
 	// TokenIDs are the token IDs for the prompt, including multimodal placeholder tokens.
+	// For multi-prompt completions this is the concatenation of all per-prompt tokens.
 	TokenIDs []uint32
+	// PerPromptTokens holds the token IDs for each individual prompt string.
+	// Set only when the request carries a []string prompt with more than one element.
+	// Consumers that need per-prompt granularity (e.g. prefix-cache scoring) use
+	// this field; all others use the flat TokenIDs.
+	PerPromptTokens [][]uint32
 	// MultiModalFeatures holds one entry per multimodal item in prompt order.
 	// Nil if the prompt contains no multimodal content.
 	MultiModalFeatures []MultiModalFeature

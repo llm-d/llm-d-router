@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -101,14 +102,18 @@ type speculativeEntries struct {
 // precisePluginState holds data shared between Produce, Score,
 // and PreRequest via PluginState.
 type precisePluginState struct {
-	blockKeys []kvblock.BlockHash
-	scores    map[string]float64 // pod addr → score
+	blockKeys [][]kvblock.BlockHash // per-prompt block keys; single prompt = one element
+	scores    map[string]float64    // pod addr → score
 }
 
 // Clone implements plugin.StateData.
 func (s *precisePluginState) Clone() plugin.StateData {
-	blockKeys := make([]kvblock.BlockHash, len(s.blockKeys))
-	copy(blockKeys, s.blockKeys)
+	blockKeys := make([][]kvblock.BlockHash, len(s.blockKeys))
+	for i, keys := range s.blockKeys {
+		cp := make([]kvblock.BlockHash, len(keys))
+		copy(cp, keys)
+		blockKeys[i] = cp
+	}
 	scores := make(map[string]float64, len(s.scores))
 	for k, v := range s.scores {
 		scores[k] = v
@@ -357,6 +362,64 @@ func (s *Scorer) Produce(ctx context.Context,
 		return nil
 	}
 
+	// Build pod set from endpoints
+	podSet := extractPodSet(endpoints)
+
+	if request.Body.Completions != nil && len(request.Body.Completions.Prompt.Strings) > 0 {
+		var perPromptScores []map[string]float64
+		var perPromptKeys [][]kvblock.BlockHash
+		totalBlocks := 0
+
+		// Keep string-array completions as separate prefix chains. Flattening
+		// here would create cross-prompt block adjacency that never exists in
+		// the model server cache and would poison speculative indexing.
+		for _, promptStr := range request.Body.Completions.Prompt.Strings {
+			keys, err := s.kvCacheIndexer.ComputeBlockKeys(ctx, nil, promptStr, request.TargetModel)
+			if err != nil {
+				return fmt.Errorf("failed to compute block keys: %w", err)
+			}
+			perPromptKeys = append(perPromptKeys, keys)
+			totalBlocks += len(keys)
+
+			if len(keys) == 0 {
+				continue
+			}
+
+			keyToPods, err := s.kvCacheIndexer.KVBlockIndex().Lookup(ctx, keys, podSet)
+			if err != nil {
+				return fmt.Errorf("failed to lookup block keys: %w", err)
+			}
+			scores, err := s.kvBlockScorer.Score(ctx, keys, keyToPods)
+			if err != nil {
+				return fmt.Errorf("failed to score block keys: %w", err)
+			}
+			perPromptScores = append(perPromptScores, scores)
+		}
+
+		if totalBlocks == 0 {
+			return nil
+		}
+
+		aggregatedScores := aggregatePromptScores(perPromptScores)
+		blockSize := s.getBlockSizeTokens()
+		for _, ep := range endpoints {
+			md := ep.GetMetadata()
+			if md == nil {
+				continue
+			}
+			addr := fmt.Sprintf("%s:%s", md.Address, md.Port)
+			matchLen := int(aggregatedScores[addr])
+			ep.Put(attrprefix.PrefixCacheMatchInfoKey,
+				attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
+		}
+
+		s.pluginState.Write(request.RequestID, stateKey, &precisePluginState{
+			blockKeys: perPromptKeys,
+			scores:    aggregatedScores,
+		})
+		return nil
+	}
+
 	// 1. Compute block keys from the request
 	blockKeys, err := s.computeBlockKeys(ctx, request)
 	if err != nil {
@@ -366,22 +429,19 @@ func (s *Scorer) Produce(ctx context.Context,
 		return nil
 	}
 
-	// 2. Build pod set from endpoints for filtered lookup
-	podSet := extractPodSet(endpoints)
-
-	// 3. Lookup index for matching pods
+	// 2. Lookup index for matching pods
 	keyToPods, err := s.kvCacheIndexer.KVBlockIndex().Lookup(ctx, blockKeys, podSet)
 	if err != nil {
 		return fmt.Errorf("failed to lookup block keys: %w", err)
 	}
 
-	// 4. Compute per-pod scores using KVBlockScorer (supports device-backend weights)
+	// 3. Compute per-pod scores using KVBlockScorer (supports device-backend weights)
 	scores, err := s.kvBlockScorer.Score(ctx, blockKeys, keyToPods)
 	if err != nil {
 		return fmt.Errorf("failed to score block keys: %w", err)
 	}
 
-	// 5. Store PrefixCacheMatchInfo on each endpoint
+	// 4. Store PrefixCacheMatchInfo on each endpoint
 	blockSize := s.getBlockSizeTokens()
 	for _, ep := range endpoints {
 		md := ep.GetMetadata()
@@ -395,7 +455,7 @@ func (s *Scorer) Produce(ctx context.Context,
 
 	// 6. Save to PluginState for Score() and PreRequest()
 	s.pluginState.Write(request.RequestID, stateKey, &precisePluginState{
-		blockKeys: blockKeys,
+		blockKeys: [][]kvblock.BlockHash{blockKeys},
 		scores:    scores,
 	})
 
@@ -570,9 +630,15 @@ func (s *Scorer) PreRequest(ctx context.Context,
 	index := s.kvCacheIndexer.KVBlockIndex()
 	// Pass nil engineKeys: speculative entries only need requestKey -> PodEntry mapping.
 	// Engine keys will be linked later when confirmed KV events arrive.
-	if err := index.Add(ctx, nil, state.blockKeys, []kvblock.PodEntry{speculativePod}); err != nil {
-		logger.Error(err, "Failed to add speculative entries to index",
-			"pod", speculativePod.PodIdentifier)
+	// Each prompt's block keys are added as an independent prefix chain.
+	for _, keys := range state.blockKeys {
+		if len(keys) == 0 {
+			continue
+		}
+		if err := index.Add(ctx, nil, keys, []kvblock.PodEntry{speculativePod}); err != nil {
+			logger.Error(err, "Failed to add speculative entries to index",
+				"pod", speculativePod.PodIdentifier)
+		}
 	}
 
 	// 4. Handle P/D disaggregation: also add speculative entry for prefill endpoint
@@ -582,23 +648,29 @@ func (s *Scorer) PreRequest(ctx context.Context,
 			PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
 			Speculative:   true,
 		}
-		if err := index.Add(ctx, nil, state.blockKeys, []kvblock.PodEntry{prefillPod}); err != nil {
-			logger.Error(err, "Failed to add speculative entries for prefill endpoint",
-				"pod", prefillPod.PodIdentifier)
+		for _, keys := range state.blockKeys {
+			if len(keys) == 0 {
+				continue
+			}
+			if err := index.Add(ctx, nil, keys, []kvblock.PodEntry{prefillPod}); err != nil {
+				logger.Error(err, "Failed to add speculative entries for prefill endpoint",
+					"pod", prefillPod.PodIdentifier)
+			}
 		}
 		allPodEntries = append(allPodEntries, prefillPod)
 	}
 
 	// 5. Register in TTL cache for automatic eviction
+	flatKeys := slices.Concat(state.blockKeys...)
 	s.speculativeCache.Set(request.RequestID, &speculativeEntries{
-		blockKeys:  state.blockKeys,
+		blockKeys:  flatKeys,
 		podEntries: allPodEntries,
 	}, s.speculativeTTL)
 
 	logger.V(logging.TRACE).Info("Added speculative entries",
 		"requestID", request.RequestID,
 		"pod", speculativePod.PodIdentifier,
-		"blockKeys", len(state.blockKeys),
+		"blockKeys", len(flatKeys),
 		"ttl", s.speculativeTTL)
 }
 
@@ -721,8 +793,24 @@ func (s *Scorer) computeBlockKeys(ctx context.Context,
 		//nolint:staticcheck // SA1019: legacy path retained for tokenizersPoolConfig configs.
 		keys, err = s.kvCacheIndexer.ComputeBlockKeys(ctx, renderReq, "", request.TargetModel)
 	case request.Body.Completions != nil:
+		prompt := request.Body.Completions.Prompt
+		if len(prompt.Strings) > 0 {
+			var allBlockKeys []kvblock.BlockHash
+			for _, promptStr := range prompt.Strings {
+				//nolint:staticcheck // SA1019: legacy path retained for tokenizersPoolConfig configs.
+				pKeys, pErr := s.kvCacheIndexer.ComputeBlockKeys(ctx, nil, promptStr, request.TargetModel)
+				if pErr != nil {
+					if errors.Is(pErr, kvcache.ErrInternalTokenizationDisabled) {
+						return nil, nil
+					}
+					return nil, pErr
+				}
+				allBlockKeys = append(allBlockKeys, pKeys...)
+			}
+			return allBlockKeys, nil
+		}
 		//nolint:staticcheck // SA1019: legacy path retained for tokenizersPoolConfig configs.
-		keys, err = s.kvCacheIndexer.ComputeBlockKeys(ctx, nil, request.Body.Completions.Prompt.Raw, request.TargetModel)
+		keys, err = s.kvCacheIndexer.ComputeBlockKeys(ctx, nil, prompt.Raw, request.TargetModel)
 	default:
 		return nil, nil
 	}
@@ -743,9 +831,42 @@ func extractPodSet(endpoints []scheduling.Endpoint) sets.Set[string] {
 	return podSet
 }
 
+// aggregatePromptScores uses total cached-work semantics for multi-prompt
+// completions: each prompt contributes its raw prefix-cache score to the pod.
+func aggregatePromptScores(perPromptScores []map[string]float64) map[string]float64 {
+	aggregated := make(map[string]float64)
+	for _, scores := range perPromptScores {
+		for pod, score := range scores {
+			aggregated[pod] += score
+		}
+	}
+	return aggregated
+}
+
 // getBlockSizeTokens returns the block size in tokens from the token processor config.
 func (s *Scorer) getBlockSizeTokens() int {
 	return s.blockSizeTokens
+}
+
+func perPromptTokenGroups(request *scheduling.InferenceRequest, tp *scheduling.TokenizedPrompt) ([][]uint32, bool, string) {
+	if tp == nil || len(tp.PerPromptTokens) == 0 {
+		return nil, false, ""
+	}
+	if request == nil || request.Body == nil || request.Body.Completions == nil {
+		return nil, false, "per-prompt tokens require a completions request body"
+	}
+	expectedPromptCount := len(request.Body.Completions.Prompt.Strings)
+	if expectedPromptCount <= 1 {
+		return nil, false, "per-prompt tokens require a completions string-array prompt with more than one prompt"
+	}
+	if len(tp.PerPromptTokens) != expectedPromptCount {
+		return nil, false, fmt.Sprintf("per-prompt token count %d does not match prompt count %d",
+			len(tp.PerPromptTokens), expectedPromptCount)
+	}
+	if !slices.Equal(slices.Concat(tp.PerPromptTokens...), tp.TokenIDs) {
+		return nil, false, "per-prompt tokens do not match flattened token IDs"
+	}
+	return tp.PerPromptTokens, true, ""
 }
 
 // getScores retrieves the endpoint scores from the KV-cache indexer
@@ -765,6 +886,29 @@ func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, reques
 	// Prefer pre-tokenized input from the tokenizer DataProducer plugin.
 	if request.Body != nil {
 		if tp := request.Body.TokenizedPrompt; tp != nil && len(tp.TokenIDs) > 0 {
+			if promptTokenGroups, ok, reason := perPromptTokenGroups(request, tp); len(tp.PerPromptTokens) > 0 {
+				if !ok {
+					traceLogger.Info("Ignoring invalid per-prompt tokens, using flat token scoring", "reason", reason)
+				} else {
+					traceLogger.Info("multi-prompt tokens found on request, scoring independently",
+						"promptCount", len(promptTokenGroups))
+
+					perPromptScores := make([]map[string]float64, 0, len(promptTokenGroups))
+					for _, promptTokens := range promptTokenGroups {
+						if len(promptTokens) == 0 {
+							continue
+						}
+						scores, scoreErr := s.kvCacheIndexer.ScoreTokens(ctx, promptTokens, request.TargetModel, nil, nil)
+						if scoreErr != nil {
+							return nil, fmt.Errorf("failed to get endpoint scores for tokens: %w", scoreErr)
+						}
+						perPromptScores = append(perPromptScores, scores)
+					}
+					return aggregatePromptScores(perPromptScores), nil
+				}
+			}
+
+			// Single-prompt path: use concatenated TokenIDs directly.
 			traceLogger.Info("tokens found on request, skipping tokenization")
 
 			var extraFeatures []*kvblock.BlockExtraFeatures
@@ -809,11 +953,22 @@ func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, reques
 
 	// For regular completions, use the prompt directly
 	if request.Body != nil && request.Body.Completions != nil {
-		prompt := request.Body.Completions.Prompt.Raw
-		traceLogger.Info("Using completion prompt directly", "promptLength", len(prompt))
+		prompt := request.Body.Completions.Prompt
+		if len(prompt.Strings) > 0 {
+			perPromptScores := make([]map[string]float64, 0, len(prompt.Strings))
+			for _, promptStr := range prompt.Strings {
+				traceLogger.Info("Scoring completion prompt independently", "promptLength", len(promptStr))
+				scores, err := s.kvCacheIndexer.GetPodScores(ctx, nil, promptStr, request.TargetModel, nil)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get endpoint scores for completions: %w", err)
+				}
+				perPromptScores = append(perPromptScores, scores)
+			}
+			return aggregatePromptScores(perPromptScores), nil
+		}
 
 		//nolint:staticcheck // SA1019: legacy path retained for tokenizersPoolConfig configs.
-		scores, err := s.kvCacheIndexer.GetPodScores(ctx, nil, prompt, request.TargetModel, nil)
+		scores, err := s.kvCacheIndexer.GetPodScores(ctx, nil, prompt.Raw, request.TargetModel, nil)
 		if err != nil {
 			if errors.Is(err, kvcache.ErrInternalTokenizationDisabled) {
 				return map[string]float64{}, nil
