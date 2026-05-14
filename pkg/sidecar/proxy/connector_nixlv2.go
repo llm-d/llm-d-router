@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"time"
 
@@ -101,6 +102,10 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 		}
 	}
 
+	// Snapshot the original request map before prefill mutations so the
+	// fallback-to-decode path can dispatch with the correct original fields.
+	originalRequest := maps.Clone(completionRequest)
+
 	completionRequest[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemoteDecode:  true,
 		requestFieldDoRemotePrefill: false,
@@ -154,8 +159,8 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 
 		if shouldFallbackToDecode(pw) {
 			s.logger.Info("fallback to decode", "request_id", uuidStr)
-			r.Body = io.NopCloser(bytes.NewReader(original))
-			s.decoderProxy.ServeHTTP(w, r)
+			fallbackReq := cloneRequestWithBody(r, original)
+			s.dispatchDecode(w, fallbackReq, originalRequest)
 		} else {
 			for key, values := range pw.Header() {
 				for _, v := range values {
@@ -250,7 +255,7 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	if !dataParallelUsed {
 		s.logger.V(4).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
 		decodeSpan.SetAttributes(attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host))
-		s.decoderProxy.ServeHTTP(w, dreq)
+		s.dispatchDecode(w, dreq, completionRequest)
 	}
 
 	decodeDuration := time.Since(decodeStart)

@@ -61,6 +61,7 @@ cert-path: "/etc/certificates-file"
 inference-pool: "file-ns/inference-pool-file"
 pool-group: "pool-group-file"
 max-idle-conns-per-host: 300
+decode-chunk-size: 128
 `)
 }
 
@@ -102,7 +103,8 @@ func TestSidecarConfiguration(t *testing.T) {
 		cert-path: '/etc/certificates-inline',
 		inference-pool: inline-ns/inference-pool-inline,
 		pool-group: pool-group-inline,
-		max-idle-conns-per-host: 200
+		max-idle-conns-per-host: 200,
+		decode-chunk-size: 256
 	}`
 	invalidInlineYAML := "{port: 8200, invalid-yaml}"
 
@@ -154,6 +156,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.InferencePoolName = "inference-pool-inline"
 				o.PoolGroup = "pool-group-inline"
 
+				o.DecodeChunkSize = 256
+
 				o.inlineConfiguration = inlineYAML
 				o.fileConfiguration = ""
 			},
@@ -193,6 +197,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.InferencePoolNamespace = "file-ns"
 				o.InferencePoolName = "inference-pool-file"
 				o.PoolGroup = "pool-group-file"
+
+				o.DecodeChunkSize = 128
 
 				o.inlineConfiguration = ""
 				o.fileConfiguration = validYAMLPath
@@ -247,6 +253,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.InferencePoolName = "inference-pool"
 				o.PoolGroup = "pool-group"
 
+				o.DecodeChunkSize = 256
+
 				o.inlineConfiguration = inlineYAML
 				o.fileConfiguration = ""
 			},
@@ -300,6 +308,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.InferencePoolNamespace = "ns"
 				o.InferencePoolName = "inference-pool"
 				o.PoolGroup = "pool-group"
+
+				o.DecodeChunkSize = 128
 
 				o.inlineConfiguration = ""
 				o.fileConfiguration = validYAMLPath
@@ -425,6 +435,8 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	assertEqual(inferencePoolNamespace, expected.InferencePoolNamespace, actual.InferencePoolNamespace)
 	assertEqual(inferencePoolName, expected.InferencePoolName, actual.InferencePoolName)
 	assertEqual(poolGroup, expected.PoolGroup, actual.PoolGroup)
+
+	assertEqual(decodeChunkSize, expected.DecodeChunkSize, actual.DecodeChunkSize)
 
 	assertEqual(inlineConfiguration, expected.inlineConfiguration, actual.inlineConfiguration)
 	assertEqual(configurationFile, expected.fileConfiguration, actual.fileConfiguration)
