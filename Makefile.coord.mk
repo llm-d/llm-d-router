@@ -132,9 +132,9 @@ test: test-unit ## Run all tests
 .PHONY: test-unit
 test-unit: image-build-builder
 	@mkdir -p $(COVERAGE_DIR)
-	@printf "\033[33;1m==== Running $* Unit Tests ====\033[0m\n"
-	$(BUILDER_RUN) "go test -v -race -coverprofile=$(COVERAGE_DIR)/$*.out -covermode=atomic $(TEST_PACKAGES)"
-	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/$*.out | tail -1'
+	@printf "\033[33;1m==== Running Unit Tests ====\033[0m\n"
+	$(BUILDER_RUN) "go test -v -race -coverprofile=$(COVERAGE_DIR)/unit.out -covermode=atomic $(TEST_PACKAGES)"
+	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/unit.out | tail -1'
 
 ##@ Coverage
 
