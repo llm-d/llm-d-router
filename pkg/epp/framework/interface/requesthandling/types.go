@@ -269,6 +269,30 @@ func (p Prompt) PlainText() string {
 	return strings.Join(p.Strings, " ")
 }
 
+// Bytes returns the prompt text as bytes without going through PlainText()
+// first. Returns nil for token-ID-only prompts (callers that need to
+// hash token IDs should read Prompt.TokenIDs directly).
+func (p Prompt) Bytes() []byte {
+	if p.Raw != "" {
+		return []byte(p.Raw)
+	}
+	if len(p.Strings) == 0 {
+		return nil
+	}
+	n := len(p.Strings) - 1 // separators
+	for _, s := range p.Strings {
+		n += len(s)
+	}
+	out := make([]byte, 0, n)
+	for i, s := range p.Strings {
+		if i > 0 {
+			out = append(out, ' ')
+		}
+		out = append(out, s...)
+	}
+	return out
+}
+
 func (p Prompt) IsEmpty() bool {
 	return p.Raw == "" && len(p.Strings) == 0 && len(p.TokenIDs) == 0
 }
@@ -402,6 +426,30 @@ func (e EmbeddingsInput) PlainText() string {
 		return e.Raw
 	}
 	return strings.Join(e.Strings, " ")
+}
+
+// Bytes returns the input text as bytes without going through PlainText()
+// first. Returns nil for token-ID-only inputs (callers that need to hash
+// token IDs should read EmbeddingsInput.TokenIDs directly).
+func (e EmbeddingsInput) Bytes() []byte {
+	if e.Raw != "" {
+		return []byte(e.Raw)
+	}
+	if len(e.Strings) == 0 {
+		return nil
+	}
+	n := len(e.Strings) - 1
+	for _, s := range e.Strings {
+		n += len(s)
+	}
+	out := make([]byte, 0, n)
+	for i, s := range e.Strings {
+		if i > 0 {
+			out = append(out, ' ')
+		}
+		out = append(out, s...)
+	}
+	return out
 }
 
 func (e EmbeddingsInput) IsEmpty() bool {

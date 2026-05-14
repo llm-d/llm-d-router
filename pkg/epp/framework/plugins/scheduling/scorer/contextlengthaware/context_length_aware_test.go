@@ -284,6 +284,33 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
 }
 
+func TestEstimateContextLength_PreTokenizedPrompt(t *testing.T) {
+	// No TokenizedPrompt on the body — the scorer's estimator should still
+	// prefer the exact TokenIDs count from Prompt when available.
+	ids := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{TokenIDs: ids},
+			},
+		},
+	}
+	assert.Equal(t, len(ids), estimateContextLength(req))
+}
+
+func TestEstimateContextLength_StringsArrayPrompt(t *testing.T) {
+	// "hello world" joined == 11 chars; 11 * 0.25 = 2 (int truncation).
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Strings: []string{"hello", "world"}},
+			},
+		},
+	}
+	got := estimateContextLength(req)
+	assert.Greater(t, got, 0, "string-array prompts must contribute to the estimate")
+}
+
 func TestContextLengthAwareFallbackWithoutTokenizedPrompt(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 

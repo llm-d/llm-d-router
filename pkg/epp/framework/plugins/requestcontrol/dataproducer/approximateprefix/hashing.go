@@ -124,13 +124,30 @@ func getUserInputBytes(request *scheduling.InferenceRequest) ([]byte, error) {
 		return json.Marshal(request.Body.ChatCompletions.Messages)
 
 	case request.Body.Completions != nil:
-		return []byte(request.Body.Completions.Prompt.PlainText()), nil
+		if ids := request.Body.Completions.Prompt.TokenIDs; len(ids) > 0 {
+			return tokenIDsToBytes(ids), nil
+		}
+		return request.Body.Completions.Prompt.Bytes(), nil
 
 	case request.Body.Embeddings != nil:
-		// Handle embeddings API - marshal input for cache key generation
-		return json.Marshal(request.Body.Embeddings.Input)
+		input := request.Body.Embeddings.Input
+		if ids := input.TokenIDs; len(ids) > 0 {
+			return tokenIDsToBytes(ids), nil
+		}
+		return input.Bytes(), nil
 
 	default:
 		return nil, errors.New("invalid request body: no recognized API format found")
 	}
+}
+
+// tokenIDsToBytes encodes a uint32 token ID slice as little-endian bytes so
+// pre-tokenized prompts contribute real content to the prefix hash (rather
+// than collapsing to an empty byte slice).
+func tokenIDsToBytes(ids []uint32) []byte {
+	out := make([]byte, 4*len(ids))
+	for i, id := range ids {
+		binary.LittleEndian.PutUint32(out[i*4:(i+1)*4], id)
+	}
+	return out
 }

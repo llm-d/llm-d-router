@@ -10,6 +10,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
@@ -57,10 +58,11 @@ func makeRequestWithTokens(tokens int) *scheduling.InferenceRequest {
 
 func TestGetUserInputLenInTokens(t *testing.T) {
 	tests := []struct {
-		name     string
-		req      *scheduling.InferenceRequest
-		wantMin  int // at least this many tokens
-		wantZero bool
+		name      string
+		req       *scheduling.InferenceRequest
+		wantMin   int // at least this many tokens
+		wantExact int // if > 0, require an exact match
+		wantZero  bool
 	}{
 		{
 			name:    "completions prompt",
@@ -77,14 +79,40 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 			req:      completionsRequest(""),
 			wantZero: true,
 		},
+		{
+			name: "pre-tokenized completions prompt returns exact token count",
+			req: &scheduling.InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					Completions: &fwkrh.CompletionsRequest{
+						Prompt: fwkrh.Prompt{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7}},
+					},
+				},
+			},
+			wantExact: 7,
+		},
+		{
+			name: "string-array completions prompt estimates by joined length",
+			req: &scheduling.InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					Completions: &fwkrh.CompletionsRequest{
+						Prompt: fwkrh.Prompt{Strings: []string{"hello world", "hello world"}},
+					},
+				},
+			},
+			// joined "hello world hello world" = 23 chars → 23/4 = 5
+			wantMin: 5,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tokens, err := getUserInputLenInTokens(tt.req)
 			assert.NoError(t, err)
-			if tt.wantZero {
+			switch {
+			case tt.wantZero:
 				assert.Zero(t, tokens)
-			} else {
+			case tt.wantExact > 0:
+				assert.Equal(t, tt.wantExact, tokens)
+			default:
 				assert.GreaterOrEqual(t, tokens, tt.wantMin)
 			}
 		})
