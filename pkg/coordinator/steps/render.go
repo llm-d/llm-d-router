@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -48,13 +48,15 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return "render" }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	logger := logging.FromContext(ctx).WithName("render")
+
 	body, err := json.Marshal(reqCtx.Body)
 	if err != nil {
 		return fmt.Errorf("marshaling request for render: %w", err)
 	}
 
 	url := s.serviceAddress + s.endpoint
-	slog.Info("render: sending request", "url", url)
+	logger.V(logging.DEFAULT).Info("sending request", "url", url)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
@@ -103,7 +105,7 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
 	}
 
-	slog.Info("render: complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))
+	logger.V(logging.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))
 	return nil
 }
 

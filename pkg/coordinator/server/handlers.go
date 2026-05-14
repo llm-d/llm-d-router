@@ -3,11 +3,13 @@ package server
 import (
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -60,8 +62,13 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		StartTime:        time.Now(),
 	}
 
-	if err := s.pipeline.Execute(r.Context(), reqCtx); err != nil {
-		slog.Error("pipeline execution failed", "request_id", reqCtx.RequestID, "error", err)
+	logger := ctrl.Log.WithName("handler").WithValues("request_id", reqCtx.RequestID)
+	ctx := logging.IntoContext(r.Context(), logger)
+
+	logger.V(logging.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)
+
+	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
+		logger.Error(err, "pipeline execution failed")
 		http.Error(w, err.Error(), http.StatusBadGateway)
 	}
 }
