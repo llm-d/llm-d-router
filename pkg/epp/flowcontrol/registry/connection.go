@@ -31,9 +31,9 @@ type connection struct {
 
 var _ contracts.ActiveFlowConnection = &connection{}
 
-// GetShard returns the shard this connection is pinned to.
-func (c *connection) GetShard() contracts.RegistryShard {
-	return c.registry.shard
+// GetDataPlane returns the registry data plane API.
+func (c *connection) GetDataPlane() contracts.FlowRegistryDataPlane {
+	return c.registry
 }
 
 // FlowKey returns the immutable identity of the flow this connection is pinned to.

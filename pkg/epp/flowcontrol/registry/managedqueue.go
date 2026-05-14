@@ -62,9 +62,6 @@ type managedQueue struct {
 
 	// onStatsDelta is the callback used to propagate statistics changes up to the parent shard.
 	onStatsDelta propagateStatsDeltaFunc
-	// isDraining is a callback that checks the lifecycle state of the parent shard, allowing this queue to reject new
-	// work when the shard is being decommissioned.
-	isDraining func() bool
 
 	// --- State Protected by `mu` ---
 
@@ -95,7 +92,6 @@ func newManagedQueue(
 	key flowcontrol.FlowKey,
 	logger logr.Logger,
 	onStatsDelta propagateStatsDeltaFunc,
-	isDraining func() bool,
 ) *managedQueue {
 	mqLogger := logger.WithName("managed-queue").WithValues(
 		"flowKey", key,
@@ -107,7 +103,6 @@ func newManagedQueue(
 		key:          key,
 		onStatsDelta: onStatsDelta,
 		logger:       mqLogger,
-		isDraining:   isDraining,
 	}
 	mq.flowQueueAccessor = &flowQueueAccessor{mq: mq}
 	return mq
@@ -124,9 +119,6 @@ func (mq *managedQueue) Add(item flowcontrol.QueueItemAccessor) error {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
 
-	if mq.isDraining() {
-		return contracts.ErrShardDraining
-	}
 	mq.queue.Add(item)
 
 	mq.propagateStatsDeltaLocked(1, int64(item.OriginalRequest().ByteSize()))

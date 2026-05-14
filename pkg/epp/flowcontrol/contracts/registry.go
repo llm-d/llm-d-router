@@ -55,9 +55,6 @@ type FlowRegistry interface {
 type FlowRegistryObserver interface {
 	// Stats returns a near-consistent snapshot globally aggregated statistics for the entire `FlowRegistry`.
 	Stats() AggregateStats
-
-	// ShardStats returns a near-consistent statistics snapshot for the `RegistryShard`.
-	ShardStats() *ShardStats
 }
 
 // FlowRegistryDataPlane defines the high-throughput, request-path interface for the registry.
@@ -78,36 +75,6 @@ type FlowRegistryDataPlane interface {
 	// Errors returned by the callback `fn` are propagated up.
 	// Returns `ErrFlowIDEmpty` if the provided key has an empty ID.
 	WithConnection(key flowcontrol.FlowKey, fn func(conn ActiveFlowConnection) error) error
-}
-
-// ActiveFlowConnection represents a handle to a scoped, leased session on a flow.
-// It provides a safe entry point to the registry's sharded data plane.
-//
-// An `ActiveFlowConnection` instance is only valid for the duration of the `WithConnection` callback from which it was
-// received. Callers MUST NOT store a reference to this object or use it after the callback returns.
-//
-// Lifecycle & Pinning:
-// This interface represents an active "Lease" on the flow. As long as this object is valid (within the callback), the
-// Flow Registry guarantees that the underlying Flow State is "Pinned" and protected from Garbage Collection.
-type ActiveFlowConnection interface {
-	// GetShard returns the shard this connection is pinned to.
-	GetShard() RegistryShard
-
-	// FlowKey returns the immutable identity of the flow this connection is pinned to.
-	FlowKey() flowcontrol.FlowKey
-}
-
-// RegistryShard defines the interface for a single slice (shard) of the `FlowRegistry`'s state.
-// A shard acts as an independent, parallel execution unit, allowing the system's dispatch logic to scale horizontally.
-//
-// # Conformance: Implementations MUST be goroutine-safe.
-type RegistryShard interface {
-	// ID returns a unique identifier for this shard, which must remain stable for the shard's lifetime.
-	ID() string
-
-	// IsActive returns true if the shard should accept new requests for enqueueing. A false value indicates the shard is
-	// being gracefully drained and should not be given new work.
-	IsActive() bool
 
 	// ManagedQueue retrieves the managed queue for the given, unique FlowKey. This is the primary method for accessing
 	// a specific flow's queue for either enqueueing or dispatching requests.
@@ -138,9 +105,22 @@ type RegistryShard interface {
 	// The returned slice provides a definitive, ordered list of priority levels for iteration, for example, by a
 	// `controller.FlowController` worker's dispatch loop.
 	AllOrderedPriorityLevels() []int
+}
 
-	// Stats returns a near consistent snapshot of the shard's state.
-	Stats() *ShardStats
+// ActiveFlowConnection represents a handle to a scoped, leased session on a flow.
+// It provides a safe entry point to the registry's data plane.
+//
+// An `ActiveFlowConnection` instance is only valid for the duration of the `WithConnection` callback from which it was
+// received. Callers MUST NOT store a reference to this object or use it after the callback returns.
+//
+// Lifecycle & Pinning:
+// This interface represents an active "Lease" on the flow. As long as this object is valid (within the callback), the
+// Flow Registry guarantees that the underlying Flow State is "Pinned" and protected from Garbage Collection.
+type ActiveFlowConnection interface {
+	// GetDataPlane returns the FlowRegistryDataPlane this connection is pinned to.
+	GetDataPlane() FlowRegistryDataPlane
+	// FlowKey returns the immutable identity of the flow this connection is pinned to.
+	FlowKey() flowcontrol.FlowKey
 }
 
 // ManagedQueue defines the interface for a flow's queue on a specific shard.
@@ -180,36 +160,6 @@ type AggregateStats struct {
 	// TotalLen is the total number of items currently queued across the entire system.
 	TotalLen uint64
 	// PerPriorityBandStats maps each configured priority level to its globally aggregated statistics.
-	PerPriorityBandStats map[int]PriorityBandStats
-}
-
-// ShardStats holds statistics and identifying information for a `RegistryShard` within the `FlowRegistry`.
-// It is a read-only data object representing a near-consistent snapshot of the shard's state.
-type ShardStats struct {
-	// ID is the unique, stable identifier for this shard.
-	ID string
-	// IsActive indicates if the shard was accepting new work at the time this stats snapshot was generated.
-	// A value of `false` means the shard is in the process of being gracefully drained.
-	// Due to the concurrent nature of the system, this state could change immediately after the snapshot is taken.
-	IsActive bool
-	// TotalCapacityBytes is the optional, maximum total byte size limit aggregated across all priority bands within this
-	// shard. Its value represents the globally configured limit for the `FlowRegistry` partitioned for this shard.
-	// The `controller.FlowController` enforces this limit in addition to any per-band capacity limits.
-	// A value of 0 signifies that this global limit is ignored, and only per-band limits apply.
-	TotalCapacityBytes uint64
-	// TotalCapacityRequests is the optional, maximum total request count limit aggregated across all priority bands within this
-	// shard. Its value represents the globally configured limit for the `FlowRegistry` partitioned for this shard.
-	// The `controller.FlowController` enforces this limit in addition to any per-band capacity limits.
-	// A value of 0 signifies that this global limit is ignored, and only per-band limits apply.
-	TotalCapacityRequests uint64
-	// TotalByteSize is the total byte size of all items currently queued across all priority bands within this shard.
-	TotalByteSize uint64
-	// TotalLen is the total number of items currently queued across all priority bands within this shard.
-	TotalLen uint64
-	// PerPriorityBandStats maps each configured priority level to its statistics within this shard.
-	// The capacity values within represent this shard's partition of the global band capacity.
-	// The key is the numerical priority level.
-	// All configured priority levels are guaranteed to be represented.
 	PerPriorityBandStats map[int]PriorityBandStats
 }
 

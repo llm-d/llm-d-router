@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	testclock "k8s.io/utils/clock/testing"
 
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/framework/plugins/queue"
@@ -42,18 +44,18 @@ const (
 
 // --- Test Harness and Mocks ---
 
-// shardTestHarness holds all components for a `registryShard` test.
-type shardTestHarness struct {
+// testHarness holds all components for a `registry` test.
+type testHarness struct {
 	t                *testing.T
-	shard            *registryShard
+	registry         *FlowRegistry
 	statsPropagator  *mockStatsPropagator
 	highPriorityKey1 flowcontrol.FlowKey
 	highPriorityKey2 flowcontrol.FlowKey
 	lowPriorityKey   flowcontrol.FlowKey
 }
 
-// newShardTestHarness initializes a `shardTestHarness` with a default configuration.
-func newShardTestHarness(t *testing.T) *shardTestHarness {
+// newTestHarness initializes a `testHarness` with a default configuration.
+func newTestHarness(t *testing.T) *testHarness {
 	t.Helper()
 
 	globalConfig, err := NewConfig(
@@ -64,12 +66,13 @@ func newShardTestHarness(t *testing.T) *shardTestHarness {
 	require.NoError(t, err, "Test setup: validating and defaulting config should not fail")
 
 	statsPropagator := &mockStatsPropagator{}
-	shardConfig := globalConfig.partition(0, 1)
-	shard := newShard("test-shard-1", shardConfig, logr.Discard(), statsPropagator.propagate)
+	fakeClock := testclock.NewFakeClock(time.Now())
+	registryOpts := []RegistryOption{withClock(fakeClock)}
+	registry, _ := NewFlowRegistry(globalConfig, logr.Discard(), registryOpts...)
 
-	h := &shardTestHarness{
+	h := &testHarness{
 		t:                t,
-		shard:            shard,
+		registry:         registry,
 		statsPropagator:  statsPropagator,
 		highPriorityKey1: flowcontrol.FlowKey{ID: "hp-flow-1", Priority: highPriority},
 		highPriorityKey2: flowcontrol.FlowKey{ID: "hp-flow-2", Priority: highPriority},
@@ -83,18 +86,18 @@ func newShardTestHarness(t *testing.T) *shardTestHarness {
 }
 
 // synchronizeFlow simulates the registry synchronizing a flow with a real queue.
-func (h *shardTestHarness) synchronizeFlow(key flowcontrol.FlowKey) {
+func (h *testHarness) synchronizeFlow(key flowcontrol.FlowKey) {
 	h.t.Helper()
-	policy := h.shard.config.PriorityBands[key.Priority].OrderingPolicy
+	policy := h.registry.config.PriorityBands[key.Priority].OrderingPolicy
 	q, err := queue.NewQueueFromName(defaultQueue, policy)
 	assert.NoError(h.t, err, "Helper synchronizeFlow: failed to create real queue for synchronization")
-	h.shard.synchronizeFlow(key, policy, q)
+	h.registry.synchronizeFlow(key, policy, q)
 }
 
 // addItem adds an item to a specific flow's queue on the shard.
-func (h *shardTestHarness) addItem(key flowcontrol.FlowKey, size uint64) flowcontrol.QueueItemAccessor {
+func (h *testHarness) addItem(key flowcontrol.FlowKey, size uint64) flowcontrol.QueueItemAccessor {
 	h.t.Helper()
-	mq, err := h.shard.ManagedQueue(key)
+	mq, err := h.registry.ManagedQueue(key)
 	require.NoError(h.t, err, "Helper addItem: failed to get queue for flow %s; ensure flow is synchronized", key)
 	item := mocks.NewMockQueueItemAccessor(size, "req", key)
 	require.NoError(h.t, mq.Add(item), "Helper addItem: failed to add item to queue for flow %s", key)
@@ -102,9 +105,9 @@ func (h *shardTestHarness) addItem(key flowcontrol.FlowKey, size uint64) flowcon
 }
 
 // removeItem removes an item from a specific flow's queue.
-func (h *shardTestHarness) removeItem(key flowcontrol.FlowKey, item flowcontrol.QueueItemAccessor) {
+func (h *testHarness) removeItem(key flowcontrol.FlowKey, item flowcontrol.QueueItemAccessor) {
 	h.t.Helper()
-	mq, err := h.shard.ManagedQueue(key)
+	mq, err := h.registry.ManagedQueue(key)
 	require.NoError(h.t, err, "Helper removeItem: failed to get queue for flow %s; ensure flow is synchronized", key)
 	_, err = mq.Remove(item.Handle())
 	require.NoError(h.t, err, "Helper removeItem: failed to remove item from queue for flow %s", key)
@@ -117,14 +120,12 @@ func TestShard_New(t *testing.T) {
 
 	t.Run("ShouldInitializeCorrectly_WithDefaultConfig", func(t *testing.T) {
 		t.Parallel()
-		h := newShardTestHarness(t)
+		h := newTestHarness(t)
 
-		assert.Equal(t, "test-shard-1", h.shard.ID(), "Shard ID must match the value provided during construction")
-		assert.True(t, h.shard.IsActive(), "A newly created shard must be initialized in the Active state")
-		assert.Equal(t, []int{highPriority, lowPriority}, h.shard.AllOrderedPriorityLevels(),
-			"Shard must report configured priority levels sorted numerically (highest priority first)")
+		assert.Equal(t, []int{highPriority, lowPriority}, h.registry.AllOrderedPriorityLevels(),
+			"Registry must report configured priority levels sorted numerically (highest priority first)")
 
-		val, ok := h.shard.priorityBands.Load(highPriority)
+		val, ok := h.registry.priorityBands.Load(highPriority)
 		bandHigh := val.(*priorityBand)
 		require.True(t, ok, "Priority band %d (High) must be initialized", highPriority)
 		require.NotNil(t, bandHigh.fairnessPolicy, "Fairness policy must be instantiated during construction")
@@ -135,16 +136,14 @@ func TestShard_New(t *testing.T) {
 
 func TestShard_Stats(t *testing.T) {
 	t.Parallel()
-	h := newShardTestHarness(t)
+	h := newTestHarness(t)
 	h.addItem(h.highPriorityKey1, 100)
 	h.addItem(h.highPriorityKey1, 50)
 
-	stats := h.shard.Stats()
+	stats := h.registry.Stats()
 
-	assert.Equal(t, h.shard.ID(), stats.ID, "Stats ID must match the shard ID")
-	assert.True(t, stats.IsActive, "Shard must report itself as active in the stats snapshot")
-	assert.Equal(t, uint64(2), stats.TotalLen, "Total shard length must aggregate counts from all bands")
-	assert.Equal(t, uint64(150), stats.TotalByteSize, "Total shard byte size must aggregate sizes from all bands")
+	assert.Equal(t, uint64(2), stats.TotalLen, "Total length must aggregate counts from all bands")
+	assert.Equal(t, uint64(150), stats.TotalByteSize, "Total byte size must aggregate sizes from all bands")
 
 	bandHighStats, ok := stats.PerPriorityBandStats[highPriority]
 	require.True(t, ok, "Stats snapshot must include entries for all configured priority bands (e.g., %d)", highPriority)
@@ -158,11 +157,11 @@ func TestShard_Accessors(t *testing.T) {
 
 	t.Run("SuccessPaths", func(t *testing.T) {
 		t.Parallel()
-		h := newShardTestHarness(t)
+		h := newTestHarness(t)
 
 		t.Run("ManagedQueue", func(t *testing.T) {
 			t.Parallel()
-			mq, err := h.shard.ManagedQueue(h.highPriorityKey1)
+			mq, err := h.registry.ManagedQueue(h.highPriorityKey1)
 			require.NoError(t, err, "ManagedQueue accessor must succeed for a synchronized flow")
 			require.NotNil(t, mq, "Returned ManagedQueue must not be nil")
 			assert.Equal(t, h.highPriorityKey1, mq.FlowQueueAccessor().FlowKey(),
@@ -171,7 +170,7 @@ func TestShard_Accessors(t *testing.T) {
 
 		t.Run("FairnessPolicy", func(t *testing.T) {
 			t.Parallel()
-			policy, err := h.shard.FairnessPolicy(highPriority)
+			policy, err := h.registry.FairnessPolicy(highPriority)
 			require.NoError(t, err, "InterFlowDispatchPolicy accessor must succeed for a configured priority band")
 			require.NotNil(t, policy, "Returned policy must not be nil (guaranteed by contract)")
 			assert.Equal(t, DefaultFairnessPolicyRef, policy.TypedName().Name,
@@ -183,29 +182,29 @@ func TestShard_Accessors(t *testing.T) {
 		t.Parallel()
 		testCases := []struct {
 			name      string
-			action    func(s *registryShard) error
+			action    func(fr contracts.FlowRegistry) error
 			expectErr error
 		}{
 			{
 				name: "ManagedQueue_PriorityNotFound",
-				action: func(s *registryShard) error {
-					_, err := s.ManagedQueue(flowcontrol.FlowKey{Priority: nonExistentPriority})
+				action: func(fr contracts.FlowRegistry) error {
+					_, err := fr.ManagedQueue(flowcontrol.FlowKey{Priority: nonExistentPriority})
 					return err
 				},
 				expectErr: contracts.ErrPriorityBandNotFound,
 			},
 			{
 				name: "ManagedQueue_FlowNotFound",
-				action: func(s *registryShard) error {
-					_, err := s.ManagedQueue(flowcontrol.FlowKey{ID: "missing", Priority: highPriority})
+				action: func(fr contracts.FlowRegistry) error {
+					_, err := fr.ManagedQueue(flowcontrol.FlowKey{ID: "missing", Priority: highPriority})
 					return err
 				},
 				expectErr: contracts.ErrFlowInstanceNotFound,
 			},
 			{
 				name: "FairnessPolicy_PriorityNotFound",
-				action: func(s *registryShard) error {
-					_, err := s.FairnessPolicy(nonExistentPriority)
+				action: func(fr contracts.FlowRegistry) error {
+					_, err := fr.FairnessPolicy(nonExistentPriority)
 					return err
 				},
 				expectErr: contracts.ErrPriorityBandNotFound,
@@ -214,8 +213,8 @@ func TestShard_Accessors(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
-				h := newShardTestHarness(t)
-				err := tc.action(h.shard)
+				h := newTestHarness(t)
+				err := tc.action(h.registry)
 				require.Error(t, err, "The accessor method must return an error for this scenario")
 				assert.ErrorIs(t, err, tc.expectErr,
 					"The error must wrap the specific sentinel error defined in the contracts package")
@@ -229,16 +228,16 @@ func TestShard_PriorityBandAccessor(t *testing.T) {
 
 	t.Run("ShouldFail_WhenPriorityDoesNotExist", func(t *testing.T) {
 		t.Parallel()
-		h := newShardTestHarness(t)
-		_, err := h.shard.PriorityBandAccessor(nonExistentPriority)
+		h := newTestHarness(t)
+		_, err := h.registry.PriorityBandAccessor(nonExistentPriority)
 		assert.ErrorIs(t, err, contracts.ErrPriorityBandNotFound,
 			"Requesting an accessor for an unconfigured priority must fail with ErrPriorityBandNotFound")
 	})
 
 	t.Run("ShouldSucceed_WhenPriorityExists", func(t *testing.T) {
 		t.Parallel()
-		h := newShardTestHarness(t)
-		accessor, err := h.shard.PriorityBandAccessor(h.highPriorityKey1.Priority)
+		h := newTestHarness(t)
+		accessor, err := h.registry.PriorityBandAccessor(h.highPriorityKey1.Priority)
 		require.NoError(t, err, "Requesting an accessor for a configured priority must succeed")
 		require.NotNil(t, accessor, "The returned accessor instance must not be nil")
 
@@ -291,8 +290,8 @@ func TestShard_PriorityBandAccessor(t *testing.T) {
 
 			t.Run("ShouldBeSafe_DuringConcurrentMapModification", func(t *testing.T) {
 				t.Parallel()
-				h := newShardTestHarness(t) // Isolated harness to avoid corrupting the state for other parallel tests
-				accessor, err := h.shard.PriorityBandAccessor(highPriority)
+				h := newTestHarness(t) // Isolated harness to avoid corrupting the state for other parallel tests
+				accessor, err := h.registry.PriorityBandAccessor(highPriority)
 				require.NoError(t, err)
 
 				var wg sync.WaitGroup
@@ -316,7 +315,9 @@ func TestShard_PriorityBandAccessor(t *testing.T) {
 					for i := range 100 {
 						key := flowcontrol.FlowKey{ID: fmt.Sprintf("new-flow-%d", i), Priority: highPriority}
 						h.synchronizeFlow(key)
-						h.shard.deleteFlow(key)
+						h.registry.mu.Lock()
+						h.registry.deleteFlow(key)
+						h.registry.mu.Unlock()
 					}
 				}()
 
@@ -328,9 +329,11 @@ func TestShard_PriorityBandAccessor(t *testing.T) {
 
 		t.Run("OnEmptyBand", func(t *testing.T) {
 			t.Parallel()
-			h := newShardTestHarness(t)
-			h.shard.deleteFlow(h.lowPriorityKey)
-			accessor, err := h.shard.PriorityBandAccessor(lowPriority)
+			h := newTestHarness(t)
+			h.registry.mu.Lock()
+			h.registry.deleteFlow(h.lowPriorityKey)
+			h.registry.mu.Unlock()
+			accessor, err := h.registry.PriorityBandAccessor(lowPriority)
 			require.NoError(t, err, "Setup: getting an accessor for an empty band must succeed")
 
 			keys := accessor.FlowKeys()
@@ -351,43 +354,33 @@ func TestShard_PriorityBandAccessor(t *testing.T) {
 
 func TestShard_SynchronizeFlow(t *testing.T) {
 	t.Parallel()
-	h := newShardTestHarness(t)
+	h := newTestHarness(t)
 	flowKey := flowcontrol.FlowKey{ID: "flow1", Priority: highPriority}
 
 	h.synchronizeFlow(flowKey)
-	mq1, err := h.shard.ManagedQueue(flowKey)
+	mq1, err := h.registry.ManagedQueue(flowKey)
 	require.NoError(t, err, "Flow instance should be accessible after synchronization")
 
 	h.synchronizeFlow(flowKey)
-	mq2, err := h.shard.ManagedQueue(flowKey)
+	mq2, err := h.registry.ManagedQueue(flowKey)
 	require.NoError(t, err, "Flow instance should remain accessible after idempotent re-synchronization")
 	assert.Same(t, mq1, mq2, "Idempotent synchronization must not replace the existing queue instance")
 }
 
 func TestShard_DeleteFlow(t *testing.T) {
 	t.Parallel()
-	h := newShardTestHarness(t)
-	_, err := h.shard.ManagedQueue(h.highPriorityKey1)
+	h := newTestHarness(t)
+	_, err := h.registry.ManagedQueue(h.highPriorityKey1)
 	require.NoError(t, err, "Test setup: flow instance must exist before deletion")
 
-	h.shard.deleteFlow(h.highPriorityKey1)
+	h.registry.mu.Lock()
+	h.registry.deleteFlow(h.highPriorityKey1)
+	h.registry.mu.Unlock()
 
-	_, err = h.shard.ManagedQueue(h.highPriorityKey1)
+	_, err = h.registry.ManagedQueue(h.highPriorityKey1)
 	require.Error(t, err, "Flow instance should not be accessible after deletion")
 	assert.ErrorIs(t, err, contracts.ErrFlowInstanceNotFound,
 		"Accessing a deleted flow must return ErrFlowInstanceNotFound")
-}
-
-func TestShard_MarkAsDraining(t *testing.T) {
-	t.Parallel()
-	h := newShardTestHarness(t)
-	assert.True(t, h.shard.IsActive(), "Shard should be active initially")
-
-	h.shard.markAsDraining()
-	assert.False(t, h.shard.IsActive(), "Shard must report IsActive as false after being marked for draining")
-
-	h.shard.markAsDraining()
-	assert.False(t, h.shard.IsActive(), "Marking as draining should be idempotent")
 }
 
 func TestShard_DynamicProvisioning(t *testing.T) {
@@ -395,40 +388,44 @@ func TestShard_DynamicProvisioning(t *testing.T) {
 
 	t.Run("ShouldAddBandDynamically", func(t *testing.T) {
 		t.Parallel()
-		h := newShardTestHarness(t)
+		h := newTestHarness(t)
 
 		// Update the config definition first (simulating the Registry's job).
 		dynamicPrio := 15
 		newBandCfg, err := NewPriorityBandConfig(newTestPluginsHandle(t), dynamicPrio)
 		require.NoError(t, err)
-		h.shard.config.PriorityBands[dynamicPrio] = newBandCfg
+		h.registry.config.PriorityBands[dynamicPrio] = newBandCfg
 
-		h.shard.addPriorityBand(dynamicPrio)
+		h.registry.mu.Lock()
+		h.registry.addPriorityBand(dynamicPrio)
+		h.registry.mu.Unlock()
 
 		expectedLevels := []int{highPriority, dynamicPrio, lowPriority} // 20, 15, 10
-		assert.Equal(t, expectedLevels, h.shard.AllOrderedPriorityLevels(),
+		assert.Equal(t, expectedLevels, h.registry.AllOrderedPriorityLevels(),
 			"New priority must be inserted into the sorted order correctly")
 
-		_, err = h.shard.PriorityBandAccessor(dynamicPrio)
+		_, err = h.registry.PriorityBandAccessor(dynamicPrio)
 		require.NoError(t, err, "Accessor should be available for the new band")
 	})
 
 	t.Run("ShouldBeIdempotent", func(t *testing.T) {
 		t.Parallel()
-		h := newShardTestHarness(t)
+		h := newTestHarness(t)
 
 		// Prepare config.
 		dynamicPrio := 15
 		newBandCfg, err := NewPriorityBandConfig(newTestPluginsHandle(t), dynamicPrio)
 		require.NoError(t, err)
-		h.shard.config.PriorityBands[dynamicPrio] = newBandCfg
+		h.registry.config.PriorityBands[dynamicPrio] = newBandCfg
 
 		// Call twice.
-		h.shard.addPriorityBand(dynamicPrio)
-		h.shard.addPriorityBand(dynamicPrio)
+		h.registry.mu.Lock()
+		h.registry.addPriorityBand(dynamicPrio)
+		h.registry.addPriorityBand(dynamicPrio)
+		h.registry.mu.Unlock()
 
 		levelCount := 0
-		for _, p := range h.shard.AllOrderedPriorityLevels() {
+		for _, p := range h.registry.AllOrderedPriorityLevels() {
 			if p == dynamicPrio {
 				levelCount++
 			}
@@ -438,10 +435,10 @@ func TestShard_DynamicProvisioning(t *testing.T) {
 
 	t.Run("ShouldPanic_WhenConfigMissing", func(t *testing.T) {
 		t.Parallel()
-		h := newShardTestHarness(t)
+		h := newTestHarness(t)
 
 		// Try to add a band that is not in h.shard.config.
-		assert.Panics(t, func() { h.shard.addPriorityBand(nonExistentPriority) },
+		assert.Panics(t, func() { h.registry.addPriorityBand(nonExistentPriority) },
 			"Should fail if the definition layer hasn't been updated first")
 	})
 }
@@ -460,7 +457,7 @@ func TestShard_Concurrency_MixedWorkload(t *testing.T) {
 		opsPerWriter = 100
 	)
 
-	h := newShardTestHarness(t)
+	h := newTestHarness(t)
 	stopCh := make(chan struct{})
 	var readersWg, writersWg sync.WaitGroup
 
@@ -473,8 +470,8 @@ func TestShard_Concurrency_MixedWorkload(t *testing.T) {
 				case <-stopCh:
 					return
 				default:
-					for _, priority := range h.shard.AllOrderedPriorityLevels() {
-						accessor, err := h.shard.PriorityBandAccessor(priority)
+					for _, priority := range h.registry.AllOrderedPriorityLevels() {
+						accessor, err := h.registry.PriorityBandAccessor(priority)
 						if err == nil {
 							accessor.IterateQueues(func(q flowcontrol.FlowQueueAccessor) bool { return true })
 						}
@@ -510,7 +507,7 @@ func TestShard_Concurrency_MixedWorkload(t *testing.T) {
 
 	// The primary assertion is that this test completes without the race detector firing; however, we can make some final
 	// assertions on state consistency.
-	finalStats := h.shard.Stats()
+	finalStats := h.registry.Stats()
 	assert.Zero(t, finalStats.TotalLen, "After all paired add/remove operations, the total length should be zero")
 	assert.Zero(t, finalStats.TotalByteSize, "After all paired add/remove operations, the total byte size should be zero")
 }
@@ -525,12 +522,12 @@ func TestShard_Concurrency_AllOrderedPriorityLevels_RaceSafety(t *testing.T) {
 		iterations = 200
 	)
 
-	h := newShardTestHarness(t)
+	h := newTestHarness(t)
 
 	dynamicPrio := 15
 	newBandCfg, err := NewPriorityBandConfig(newTestPluginsHandle(t), dynamicPrio)
 	require.NoError(t, err)
-	h.shard.config.PriorityBands[dynamicPrio] = newBandCfg
+	h.registry.config.PriorityBands[dynamicPrio] = newBandCfg
 
 	stopCh := make(chan struct{})
 	var readersWg, writerWg sync.WaitGroup
@@ -545,7 +542,7 @@ func TestShard_Concurrency_AllOrderedPriorityLevels_RaceSafety(t *testing.T) {
 				case <-stopCh:
 					return
 				default:
-					levels := h.shard.AllOrderedPriorityLevels()
+					levels := h.registry.AllOrderedPriorityLevels()
 					// Force iteration over the returned slice to surface races on the backing array.
 					sum := 0
 					for _, p := range levels {
@@ -562,12 +559,15 @@ func TestShard_Concurrency_AllOrderedPriorityLevels_RaceSafety(t *testing.T) {
 	go func() {
 		defer writerWg.Done()
 		for range iterations {
-			h.shard.addPriorityBand(dynamicPrio)
-			h.shard.deletePriorityBand(dynamicPrio)
+			h.registry.mu.Lock()
+			h.registry.addPriorityBand(dynamicPrio)
+			h.registry.mu.Unlock()
 
-			h.shard.mu.Lock()
-			h.shard.config.PriorityBands[dynamicPrio] = newBandCfg
-			h.shard.mu.Unlock()
+			h.registry.deletePriorityBand(dynamicPrio)
+
+			h.registry.mu.Lock()
+			h.registry.config.PriorityBands[dynamicPrio] = newBandCfg
+			h.registry.mu.Unlock()
 		}
 	}()
 
@@ -577,6 +577,6 @@ func TestShard_Concurrency_AllOrderedPriorityLevels_RaceSafety(t *testing.T) {
 
 	// If we reach here without the race detector firing, the implementation is safe.
 	// Final sanity: dynamic band should be removed, only the original two remain.
-	assert.Equal(t, []int{highPriority, lowPriority}, h.shard.AllOrderedPriorityLevels(),
+	assert.Equal(t, []int{highPriority, lowPriority}, h.registry.AllOrderedPriorityLevels(),
 		"After all add/delete cycles, only original priority levels should remain")
 }
