@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"golang.org/x/sync/errgroup"
 )
@@ -49,6 +50,8 @@ func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
 func (s *ReplaceMediaURLsStep) Name() string { return "replace-media-urls" }
 
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	logger := logging.FromContext(ctx).WithName("replace-media-urls")
+
 	messages, ok := reqCtx.Body["messages"].([]any)
 	if !ok {
 		return nil
@@ -91,6 +94,8 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 	if len(imageURLs) == 0 {
 		return nil
 	}
+
+	logger.V(logging.TRACE).Info("downloading images", "count", len(imageURLs))
 
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxConcurrentDownloads)

@@ -5,9 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
-
 	"github.com/llm-d/coordinator/pkg/gateway"
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"golang.org/x/sync/errgroup"
 )
@@ -51,6 +50,8 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return nil
 	}
 
+	logger := logging.FromContext(ctx).WithName("encode")
+
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxParallel)
 
@@ -76,7 +77,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 			}
 
 			path := fmt.Sprintf("%s%s", gateway.EncodePrefix, s.gatewayPath)
-			slog.Info("encode: sending sub-request", "index", i, "path", path)
+			logger.V(logging.DEFAULT).Info("sending sub-request", "index", i, "path", path)
 
 			resp, err := s.gwClient.Post(gCtx, path, bodyBytes, map[string]string{
 				"X-Request-ID": reqCtx.RequestID,
@@ -107,7 +108,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	reqCtx.ECTransferParams = results
 
-	slog.Info("encode: all sub-requests complete", "count", len(results))
+	logger.V(logging.DEFAULT).Info("all sub-requests complete", "count", len(results))
 	return nil
 }
 
