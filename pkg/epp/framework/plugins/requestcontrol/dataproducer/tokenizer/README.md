@@ -24,6 +24,12 @@ The plugin calls vLLM's `/v1/completions/render` and
 to `vllm` with `http://localhost:8000`. Future protocol fields (e.g. `grpc`)
 can be added alongside `http` under the same `vllm` block.
 
+> [!WARNING]
+> The `udsTokenizerConfig` backend (gRPC-over-UDS sidecar) is **deprecated**
+> and will be removed in a future release. Existing configs continue to work
+> but emit a deprecation warning at startup. Migrate to `vllm.http`. See
+> [Migration](#migration-from-udstokenizerconfig) below.
+
 ## Config
 
 | Parameter        | Default                 | Description                                                       |
@@ -81,6 +87,36 @@ Plugin config — dedicated render Service:
 A complete sample config that pairs this with `precise-prefix-cache-scorer`
 is at
 [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](/deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
+
+## Migration from `udsTokenizerConfig`
+
+The legacy UDS backend ran a per-pod tokenizer sidecar and connected over a
+shared Unix domain socket. Replace it with the vLLM HTTP /render backend,
+which calls the same model-serving pods (or a co-located `vllm launch render`
+sidecar) and removes the dedicated tokenizer image.
+
+Before:
+
+```yaml
+- type: token-producer
+  parameters:
+    modelName: "${MODEL_NAME}"
+    udsTokenizerConfig:
+      socketFile: /tmp/tokenizer/tokenizer-uds.socket
+```
+
+After:
+
+```yaml
+- type: token-producer
+  parameters:
+    modelName: "${MODEL_NAME}"
+    vllm:
+      http: "http://localhost:8000"   # or a shared render Service
+```
+
+See the [Deployment](#deployment) section above for sidecar vs shared-Service
+options.
 
 ---
 

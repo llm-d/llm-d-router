@@ -61,10 +61,13 @@ var TokenizedPromptDataKey = plugin.NewDataKey(tokenizedPromptKeyID, PluginType)
 // tokenizerPluginConfig holds the configuration for the tokenizer plugin.
 //
 // The default backend is `vllm` (HTTP /render). `udsTokenizerConfig` is the
-// legacy gRPC-over-UDS backend, selected only when explicitly enabled. An
+// deprecated gRPC-over-UDS backend, selected only when explicitly enabled. An
 // empty configuration falls back to `vllm` with its default endpoint.
 type tokenizerPluginConfig struct {
-	// TokenizerConfig configures the legacy gRPC-over-UDS backend.
+	// TokenizerConfig configures the deprecated gRPC-over-UDS backend.
+	//
+	// Deprecated: the UDS tokenizer backend is deprecated and will be removed
+	// in a future release. Migrate to the `vllm` HTTP /render backend.
 	TokenizerConfig tokenization.UdsTokenizerConfig `json:"udsTokenizerConfig,omitempty"`
 	// VLLM configures the vLLM /render backend.
 	VLLM *vllmConfig `json:"vllm,omitempty"`
@@ -112,11 +115,15 @@ func LegacyPluginFactory(name string, rawParameters json.RawMessage, handle plug
 
 // NewPlugin creates a new tokenizer plugin instance and constructs the
 // configured backend. vllm is the default; udsTokenizerConfig is selected
-// only when explicitly enabled (its socketFile is set).
+// only when explicitly enabled (its socketFile is set) and is deprecated.
 func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) (*Plugin, error) {
 	var tk tokenizer
 	switch {
 	case config.TokenizerConfig.IsEnabled():
+		log.FromContext(ctx).Info(
+			"DEPRECATION: 'udsTokenizerConfig' backend is deprecated and will be removed in a future release; migrate to the 'vllm' HTTP /render backend",
+			"pluginType", PluginType,
+		)
 		uds, err := newUDSTokenizer(ctx, &config.TokenizerConfig, config.ModelName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize UDS tokenizer for '%s' plugin - %w", PluginType, err)
