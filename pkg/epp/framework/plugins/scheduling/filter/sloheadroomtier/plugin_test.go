@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
 )
@@ -115,13 +116,13 @@ func TestFilter_NoPredictionGoesToNegative(t *testing.T) {
 // Note: Deficit bucketing tests are in the slo-deficit-bucket-filter package.
 
 func TestFactory_ValidConfig(t *testing.T) {
-	plugin, err := Factory("test", nil, nil)
+	plugin, err := Factory("test", fwkplugin.StrictDecoder(nil), nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, plugin)
 }
 
 func TestFactory_InvalidEpsilon(t *testing.T) {
-	_, err := Factory("test", []byte(`{"epsilonExploreNeg": 1.5}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"epsilonExploreNeg": 1.5}`)), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "epsilonExploreNeg must be in [0, 1]")
 }

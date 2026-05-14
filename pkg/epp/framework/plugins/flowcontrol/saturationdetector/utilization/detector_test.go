@@ -118,7 +118,7 @@ func TestUtilizationDetectorFactory(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			plugin, err := UtilizationDetectorFactory("test-util-detector", tc.configJSON, fwkplugin.NewEppHandle(t.Context(), func() []types.NamespacedName { return nil }))
+			plugin, err := UtilizationDetectorFactory("test-util-detector", fwkplugin.StrictDecoder(tc.configJSON), fwkplugin.NewEppHandle(t.Context(), func() []types.NamespacedName { return nil }))
 			if tc.wantError {
 				require.Error(t, err, "Expected initialization to fail on invalid configuration")
 				require.Nil(t, plugin, "Plugin must be nil when initialization fails")
@@ -133,7 +133,7 @@ func TestUtilizationDetectorFactory(t *testing.T) {
 // TestDetector_TypedName provides structural assurance that initialization assigns proper types.
 func TestDetector_TypedName(t *testing.T) {
 	t.Parallel()
-	plugin, err := UtilizationDetectorFactory("test-plugin", []byte(`{}`), fwkplugin.NewEppHandle(
+	plugin, err := UtilizationDetectorFactory("test-plugin", fwkplugin.StrictDecoder([]byte(`{}`)), fwkplugin.NewEppHandle(
 		t.Context(), func() []types.NamespacedName { return nil }))
 	require.NoError(t, err, "Plugin initialization should succeed")
 	require.Equal(t, "test-plugin", plugin.TypedName().Name,

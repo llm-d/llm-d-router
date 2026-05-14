@@ -121,7 +121,7 @@ func (s *precisePluginState) Clone() plugin.StateData {
 
 // PluginFactory defines the factory function for creating
 // a new instance of the PrefixCacheTrackingPlugin.
-func PluginFactory(name string, rawParameters json.RawMessage,
+func PluginFactory(name string, rawParameters *json.Decoder,
 	handle plugin.Handle,
 ) (plugin.Plugin, error) {
 	indexerConfig, err := kvcache.NewDefaultConfig()
@@ -135,7 +135,7 @@ func PluginFactory(name string, rawParameters json.RawMessage,
 	}
 
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PrecisePrefixCachePluginType, err)
 		}
 	}

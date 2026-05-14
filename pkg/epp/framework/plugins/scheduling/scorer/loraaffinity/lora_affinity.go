@@ -33,7 +33,7 @@ const (
 var _ fwksched.Scorer = &LoraAffinityScorer{}
 
 // LoraAffinityScorerFactory defines the factory function for LoraAffinityScorer.
-func LoraAffinityScorerFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func LoraAffinityScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewLoraAffinityScorer().WithName(name), nil
 }
 

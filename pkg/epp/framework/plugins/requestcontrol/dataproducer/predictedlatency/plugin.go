@@ -134,10 +134,10 @@ var DefaultConfig = Config{
 	PredictInProduce:                   true,
 }
 
-func PredictedLatencyFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func PredictedLatencyFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	parameters := DefaultConfig
-	if len(rawParameters) > 0 {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal config for PredictedLatency: %w", err)
 		}
 	}

@@ -33,7 +33,7 @@ func init() {
 }
 
 // SheddableFilterFactory creates a SheddableFilter plugin.
-func SheddableFilterFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func SheddableFilterFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	f := &SheddableFilter{name: SheddableFilterType}
 	if name != "" {
 		f.name = name

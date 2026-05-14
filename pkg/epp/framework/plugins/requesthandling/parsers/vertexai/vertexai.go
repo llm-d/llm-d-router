@@ -71,7 +71,7 @@ func (p *VertexAIParser) SupportedAppProtocols() []v1.AppProtocol {
 	return []v1.AppProtocol{v1.AppProtocolH2C}
 }
 
-func VertexAIParserPluginFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func VertexAIParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewVertexAIParser().WithName(name), nil
 }
 

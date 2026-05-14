@@ -288,25 +288,25 @@ func TestCreateMissingDataProducers(t *testing.T) {
 
 	// A DataProducer that produces keyA.
 	producerTypeA := "producer-a"
-	producerAFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	producerAFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockDataProducerP{name: name, produces: map[string]any{keyA: nil}}, nil
 	})
 
 	// A DataProducer that produces keyB.
 	producerTypeB := "producer-b"
-	producerBFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	producerBFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockDataProducerP{name: name, produces: map[string]any{keyB: nil}}, nil
 	})
 
 	// A non-ProducerPlugin registry entry (e.g. a scheduling scorer).
 	nonProducerType := "non-producer"
-	nonProducerFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	nonProducerFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &MockSchedulingPlugin{consumes: map[string]any{keyA: nil}}, nil
 	})
 
 	// A factory that always fails.
 	failingType := "failing"
-	failingFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	failingFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return nil, errors.New("requires params")
 	})
 

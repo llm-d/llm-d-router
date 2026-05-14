@@ -42,7 +42,7 @@ const (
 	sloTtftHeader = "x-slo-ttft-ms"
 )
 
-func SLODeadlineOrderingPolicyFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func SLODeadlineOrderingPolicyFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return newSLODeadlinePolicy().withName(name), nil
 }
 

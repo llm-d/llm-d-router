@@ -40,10 +40,10 @@ func NewHTTPModelsDataSource(scheme, path, name string) (*http.HTTPDataSource, e
 
 // ModelDataSourceFactory is a factory function used to instantiate data layer's
 // models data source plugins specified in a configuration.
-func ModelDataSourceFactory(name string, parameters json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func ModelDataSourceFactory(name string, parameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	cfg := defaultDataSourceConfigParams()
 	if parameters != nil { // overlay the defaults with configured values
-		if err := json.Unmarshal(parameters, cfg); err != nil {
+		if err := parameters.Decode(cfg); err != nil {
 			return nil, err
 		}
 	}

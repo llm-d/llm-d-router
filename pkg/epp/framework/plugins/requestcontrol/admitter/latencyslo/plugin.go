@@ -56,10 +56,10 @@ type LatencyAdmission struct {
 }
 
 // LatencyAdmissionFactory creates a new LatencyAdmission plugin instance.
-func LatencyAdmissionFactory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func LatencyAdmissionFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	config := LatencyAdmissionDefaultConfig
-	if len(rawParameters) > 0 {
-		if err := json.Unmarshal(rawParameters, &config); err != nil {
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal config for LatencyAdmission: %w", err)
 		}
 	}

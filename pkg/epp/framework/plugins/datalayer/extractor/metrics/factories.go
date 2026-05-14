@@ -123,11 +123,11 @@ const defaultEngineName = "vllm"
 
 // CoreMetricsExtractorFactory is a factory function used to instantiate data layer's metrics
 // Extractor plugins specified in a configuration.
-func CoreMetricsExtractorFactory(name string, parameters json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func CoreMetricsExtractorFactory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	params := defaultExtractorParams()
 
 	if parameters != nil { // overlay the defaults with configured values
-		if err := json.Unmarshal(parameters, params); err != nil {
+		if err := parameters.Decode(params); err != nil {
 			return nil, err
 		}
 	}

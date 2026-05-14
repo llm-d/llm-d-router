@@ -786,7 +786,7 @@ func registerTestPlugins(t *testing.T) {
 	}
 
 	mockFactory := func(tType string) fwkplugin.FactoryFunc {
-		return func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 			return &mockPlugin{t: fwkplugin.TypedName{Name: name, Type: tType}}, nil
 		}
 	}
@@ -794,45 +794,45 @@ func registerTestPlugins(t *testing.T) {
 	// Register standard test mocks.
 	register(testPluginType, mockFactory(testPluginType))
 
-	fwkplugin.Register(testScorerType, func(name string, params json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testScorerType, func(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		// Attempt to unmarshal to trigger errors for invalid JSON in tests.
-		if len(params) > 0 {
+		if params != nil {
 			var p struct {
 				BlockSize int `json:"blockSize"`
 			}
-			if err := json.Unmarshal(params, &p); err != nil {
+			if err := params.Decode(&p); err != nil {
 				return nil, err
 			}
 		}
 		return &mockScorer{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testScorerType}}}, nil
 	})
 
-	fwkplugin.Register("utilization-detector", func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register("utilization-detector", func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockSaturationDetector{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: "utilization-detector"}}}, nil
 	})
 
-	fwkplugin.Register(testPickerType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testPickerType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockPicker{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testPickerType}}}, nil
 	})
 
-	fwkplugin.Register(testProfileHandler, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testProfileHandler, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockHandler{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testProfileHandler}}}, nil
 	})
 
-	fwkplugin.Register(testSourceType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testSourceType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockSource{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testSourceType}}}, nil
 	})
 
-	fwkplugin.Register(testExtractorType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testExtractorType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockExtractor{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testExtractorType}}}, nil
 	})
 
-	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &fwkfcmocks.MockFairnessPolicy{
 			TypedNameV: fwkplugin.TypedName{Name: name, Type: globalstrict.GlobalStrictFairnessPolicyType},
 		}, nil
 	})
-	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &fwkfcmocks.MockOrderingPolicy{
 			TypedNameV: fwkplugin.TypedName{Name: name, Type: fcfs.FCFSOrderingPolicyType},
 		}, nil

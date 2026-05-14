@@ -44,7 +44,7 @@ const (
 )
 
 // PrefixCachePluginFactory defines the factory function for the Prefix plugin.
-func PrefixCachePluginFactory(name string, _ json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func PrefixCachePluginFactory(name string, _ *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	p, err := New(handle.Context())
 	if err != nil {
 		return nil, err

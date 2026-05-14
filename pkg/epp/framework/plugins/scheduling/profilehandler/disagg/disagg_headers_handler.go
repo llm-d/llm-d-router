@@ -41,13 +41,13 @@ type disaggHeadersHandlerParameters struct {
 // HeadersHandlerFactory defines the factory function for the HeadersHandler.
 //
 // Deprecated: Use HandlerFactory instead, disagg-profile-handler now implements PreRequest natively.
-func HeadersHandlerFactory(name string, rawParameters json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func HeadersHandlerFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	parameters := disaggHeadersHandlerParameters{
 		PrefillProfile: defaultPrefillProfile,
 		EncodeProfile:  defaultEncodeProfile,
 	}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' pre-request plugin - %w", DisaggHeadersHandlerType, err)
 		}
 	}

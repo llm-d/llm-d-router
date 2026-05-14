@@ -46,7 +46,7 @@ var _ scheduling.ProfileHandler = &PdProfileHandler{}
 // PdProfileHandlerFactory defines the factory function for the PdProfileHandler.
 //
 // Deprecated: Use HandlerFactory instead.
-func PdProfileHandlerFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func PdProfileHandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	log.FromContext(handle.Context()).Info("Deprecated: pd-profile-handler is deprecated, use disagg-profile-handler instead")
 	parameters := pdProfileHandlerParameters{
 		DecodeProfile:     defaultDecodeProfile,
@@ -56,7 +56,7 @@ func PdProfileHandlerFactory(name string, rawParameters json.RawMessage, handle 
 		DeciderPluginName: defaultDeciderPluginName,
 	}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' profile handler - %w", PdProfileHandlerType, err)
 		}
 	}

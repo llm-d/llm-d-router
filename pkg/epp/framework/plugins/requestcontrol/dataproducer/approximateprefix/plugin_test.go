@@ -18,6 +18,7 @@ package approximateprefix
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -582,6 +583,54 @@ func BenchmarkPrefixPluginStress(b *testing.B) {
 			}
 		})
 	}
+}
+
+// TestFactory_RejectsUnknownField verifies that strict JSON parsing rejects
+// unknown fields in the plugin config. Encodes the strict-parsing policy
+// from issue #1068.
+func TestFactory_RejectsUnknownField(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handle := plugin.NewEppHandle(ctx, func() []k8stypes.NamespacedName { return nil })
+
+	dec := plugin.StrictDecoder(json.RawMessage(`{"unknownField": "value"}`))
+	_, err := ApproxPrefixCacheFactory("test", dec, handle)
+
+	assert.Error(t, err, "factory must reject unknown config fields")
+	if err != nil {
+		assert.Contains(t, err.Error(), "unknownField",
+			"error message should name the offending field")
+	}
+}
+
+// TestFactory_DeprecatedBlockSizeMapped verifies that the deprecated
+// 'blockSize' field is accepted (with a warning) and maps to
+// 'blockSizeTokens'. Encodes the two-pass deprecation policy from #1068:
+// deprecated fields are valid configuration, not errors.
+func TestFactory_DeprecatedBlockSizeMapped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handle := plugin.NewEppHandle(ctx, func() []k8stypes.NamespacedName { return nil })
+
+	// User supplies only the deprecated field. AutoTune=false forces
+	// BlockSizeTokens to be a meaningful value (no auto-tune fallback).
+	dec := plugin.StrictDecoder(json.RawMessage(`{"autoTune": false, "blockSize": 24}`))
+	p, err := ApproxPrefixCacheFactory("test", dec, handle)
+
+	assert.NoError(t, err, "deprecated blockSize should be accepted, not rejected")
+	if err != nil {
+		return
+	}
+
+	dp, ok := p.(*dataProducer)
+	if !ok {
+		t.Fatalf("expected *dataProducer, got %T", p)
+	}
+
+	assert.Equal(t, 24, dp.config.BlockSizeTokens,
+		"deprecated 'blockSize' should map to BlockSizeTokens")
+	assert.Equal(t, 0, dp.config.BlockSize,
+		"deprecated 'blockSize' should be cleared after mapping")
 }
 
 func randomPrompt(n int) string {

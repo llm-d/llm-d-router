@@ -10,6 +10,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
 )
@@ -94,7 +95,7 @@ func TestFactory(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rawParams := json.RawMessage(tt.jsonParams)
-			plugin, err := Factory(tt.pluginName, rawParams, nil)
+			plugin, err := Factory(tt.pluginName, fwkplugin.StrictDecoder(rawParams), nil)
 
 			if tt.expectErr {
 				assert.Error(t, err)
@@ -129,7 +130,7 @@ func TestFactoryInvalidJSON(t *testing.T) {
 	for _, tt := range invalidTests {
 		t.Run(tt.name, func(t *testing.T) {
 			rawParams := json.RawMessage(tt.jsonParams)
-			plugin, err := Factory("test", rawParams, nil)
+			plugin, err := Factory("test", fwkplugin.StrictDecoder(rawParams), nil)
 
 			assert.Error(t, err)
 			assert.Nil(t, plugin)
@@ -238,7 +239,7 @@ func TestByLabelFiltering(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			plugin, err := Factory("test-label", rawParams, nil)
+			plugin, err := Factory("test-label", fwkplugin.StrictDecoder(rawParams), nil)
 			require.NoError(t, err)
 			require.NotNil(t, plugin)
 

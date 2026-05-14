@@ -111,10 +111,10 @@ func NewPlugin(config Config) *Plugin {
 	}
 }
 
-func Factory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	config := DefaultConfig
-	if len(rawParameters) > 0 {
-		if err := json.Unmarshal(rawParameters, &config); err != nil {
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 		}
 	}

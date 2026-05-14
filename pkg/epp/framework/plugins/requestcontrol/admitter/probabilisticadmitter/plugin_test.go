@@ -25,6 +25,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
@@ -51,7 +52,7 @@ func defaultParams() Parameters {
 
 func TestFactory(t *testing.T) {
 	raw := json.RawMessage(`{"queueDepthThreshold":10,"kvCacheUtilThreshold":0.9,"power":3,"k":100}`)
-	p, err := Factory("test-admitter", raw, nil)
+	p, err := Factory("test-admitter", fwkplugin.StrictDecoder(raw), nil)
 	if err != nil {
 		t.Fatalf("Factory returned error: %v", err)
 	}
@@ -65,7 +66,7 @@ func TestFactory(t *testing.T) {
 }
 
 func TestFactory_Defaults(t *testing.T) {
-	p, err := Factory("test", nil, nil)
+	p, err := Factory("test", fwkplugin.StrictDecoder(nil), nil)
 	if err != nil {
 		t.Fatalf("Factory returned error: %v", err)
 	}
@@ -75,49 +76,49 @@ func TestFactory_Defaults(t *testing.T) {
 }
 
 func TestFactory_InvalidJSON(t *testing.T) {
-	_, err := Factory("test", json.RawMessage(`{invalid}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder(json.RawMessage(`{invalid}`)), nil)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
 }
 
 func TestFactory_ZeroQueueDepthThreshold(t *testing.T) {
-	_, err := Factory("test", json.RawMessage(`{"queueDepthThreshold":0}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"queueDepthThreshold":0}`)), nil)
 	if err == nil {
 		t.Fatal("expected error for queueDepthThreshold=0")
 	}
 }
 
 func TestFactory_ZeroKVCacheUtilThreshold(t *testing.T) {
-	_, err := Factory("test", json.RawMessage(`{"kvCacheUtilThreshold":0}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"kvCacheUtilThreshold":0}`)), nil)
 	if err == nil {
 		t.Fatal("expected error for kvCacheUtilThreshold=0")
 	}
 }
 
 func TestFactory_NegativePower(t *testing.T) {
-	_, err := Factory("test", json.RawMessage(`{"power":-1}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"power":-1}`)), nil)
 	if err == nil {
 		t.Fatal("expected error for negative power")
 	}
 }
 
 func TestFactory_ZeroPower(t *testing.T) {
-	_, err := Factory("test", json.RawMessage(`{"power":0}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"power":0}`)), nil)
 	if err == nil {
 		t.Fatal("expected error for zero power")
 	}
 }
 
 func TestFactory_NegativeK(t *testing.T) {
-	_, err := Factory("test", json.RawMessage(`{"k":-1}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"k":-1}`)), nil)
 	if err == nil {
 		t.Fatal("expected error for negative k")
 	}
 }
 
 func TestFactory_ZeroK(t *testing.T) {
-	_, err := Factory("test", json.RawMessage(`{"k":0}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"k":0}`)), nil)
 	if err == nil {
 		t.Fatal("expected error for zero k")
 	}

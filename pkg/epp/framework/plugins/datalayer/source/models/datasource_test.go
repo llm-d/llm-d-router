@@ -13,12 +13,13 @@ import (
 
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	extmodels "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/models"
 )
 
 func TestDatasource(t *testing.T) {
 	srcPlugin, err := ModelDataSourceFactory("models-data-source",
-		json.RawMessage(`{"scheme":"https","path":"/models","insecureSkipVerify":true}`), nil)
+		plugin.StrictDecoder(json.RawMessage(`{"scheme":"https","path":"/models","insecureSkipVerify":true}`)), nil)
 	assert.Nil(t, err, "failed to create http datasource")
 	source := srcPlugin.(fwkdl.PollingDataSource)
 

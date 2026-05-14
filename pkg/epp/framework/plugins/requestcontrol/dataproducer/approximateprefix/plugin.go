@@ -65,10 +65,9 @@ func (p *dataProducer) Produces() map[string]any {
 func newDataProducer(ctx context.Context, config config, handle plugin.Handle) (*dataProducer, error) {
 	log.FromContext(ctx).V(logutil.DEFAULT).Info("Prefix DataProducer initialized", "config", config)
 
-	//nolint:staticcheck // BlockSize is deprecated, but we check it here to provide a migration path for users.
-	if config.BlockSize > 0 && config.BlockSizeTokens <= 0 {
-		return nil, fmt.Errorf("invalid configuration: BlockSize (%d) is deprecated; please use BlockSizeTokens instead to define the cache block size in tokens", config.BlockSize)
-	}
+	// Note: 'blockSize' deprecation handling lives in ApproxPrefixCacheFactory so it
+	// applies to JSON-decoded configs uniformly with the strict-parsing policy (#1068).
+	// Direct callers of newDataProducer are expected to populate BlockSizeTokens.
 
 	if !config.AutoTune && config.BlockSizeTokens <= 0 {
 		return nil, fmt.Errorf("invalid configuration: BlockSizeTokens must be > 0 when AutoTune is disabled (current value: %d)", config.BlockSizeTokens)
@@ -245,12 +244,27 @@ func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
 }
 
 // ApproxPrefixCacheFactory is the factory function for the prefix cache data producer plugin.
-func ApproxPrefixCacheFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func ApproxPrefixCacheFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	parameters := defaultConfig
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal prefix cache parameters: %w", err)
 		}
+	}
+
+	// Deprecated 'blockSize' is accepted with a warning and mapped to
+	// 'blockSizeTokens'. Removed (truly unknown) fields are rejected by the
+	// strict decoder above. See #1068.
+	if parameters.BlockSize > 0 {
+		log.FromContext(handle.Context()).V(logutil.DEFAULT).Info(
+			"'blockSize' is deprecated; use 'blockSizeTokens' instead",
+			"blockSize", parameters.BlockSize,
+		)
+		if parameters.BlockSizeTokens == defaultBlockSizeTokens {
+			// BlockSizeTokens left at its default — map the deprecated value into it.
+			parameters.BlockSizeTokens = parameters.BlockSize
+		}
+		parameters.BlockSize = 0
 	}
 
 	// pluginState will be initialized by newDataProducer as we pass nil here.

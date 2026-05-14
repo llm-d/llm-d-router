@@ -34,7 +34,7 @@ const (
 var _ fwksched.Scorer = &RunningRequestsSizeScorer{}
 
 // RunningRequestsSizeScorerFactory defines the factory function for RunningRequestsSizeScorer.
-func RunningRequestsSizeScorerFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func RunningRequestsSizeScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewRunningRequestsSizeScorer().WithName(name), nil
 }
 

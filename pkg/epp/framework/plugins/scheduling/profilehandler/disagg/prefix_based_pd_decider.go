@@ -48,14 +48,14 @@ type PrefixBasedPDDecider struct {
 
 // PrefixBasedPDDeciderPluginFactory defines the factory function for creating
 // a new instance of the prefixBasedPDDecider.
-func PrefixBasedPDDeciderPluginFactory(name string, rawParameters json.RawMessage,
+func PrefixBasedPDDeciderPluginFactory(name string, rawParameters *json.Decoder,
 	handle plugin.Handle) (plugin.Plugin, error) {
 	config := PrefixBasedPDDeciderConfig{
 		NonCachedTokens: 0,
 	}
 
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &config); err != nil {
+		if err := rawParameters.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PrefixBasedPDDeciderPluginType, err)
 		}
 	}

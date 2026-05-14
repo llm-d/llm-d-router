@@ -62,7 +62,7 @@ func (desv *DestinationEndpointServedVerifier) WithName(name string) *Destinatio
 }
 
 // DestinationEndpointServedVerifierFactory defines the factory function for DestinationEndpointServedVerifier.
-func DestinationEndpointServedVerifierFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func DestinationEndpointServedVerifierFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewDestinationEndpointServedVerifier().WithName(name), nil
 }
 

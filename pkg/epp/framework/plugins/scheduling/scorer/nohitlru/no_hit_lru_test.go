@@ -125,7 +125,7 @@ func TestNoHitLRUFactoryDependencyValidation(t *testing.T) {
 			raw = bytes
 		}
 
-		plugin, err := nohitlru.Factory("test", raw, tt.handle)
+		plugin, err := nohitlru.Factory("test", plugin.StrictDecoder(raw), tt.handle)
 		if tt.expectError {
 			if err == nil {
 				t.Fatalf("expected error for case %q, got none", tt.name)

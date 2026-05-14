@@ -89,7 +89,7 @@ func (me *ModelExtractor) ExpectedInputType() reflect.Type {
 
 // ModelServerExtractorFactory is a factory function used to instantiate data layer's
 // models extractor plugins specified in a configuration.
-func ModelServerExtractorFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func ModelServerExtractorFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	extractor := NewModelExtractor()
 	extractor.typedName.Name = name
 	return extractor, nil

@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -105,7 +106,7 @@ func TestFilter_ExplorationProbability(t *testing.T) {
 }
 
 func TestFactory_ValidConfig(t *testing.T) {
-	plugin, err := Factory("test", nil, nil)
+	plugin, err := Factory("test", fwkplugin.StrictDecoder(nil), nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, plugin)
 	assert.Equal(t, PluginType, plugin.TypedName().Type)
@@ -113,7 +114,7 @@ func TestFactory_ValidConfig(t *testing.T) {
 
 func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	// Setting only affinityThreshold should preserve defaults for other params.
-	plugin, err := Factory("test", []byte(`{"affinityThreshold": 0.95}`), nil)
+	plugin, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"affinityThreshold": 0.95}`)), nil)
 	assert.NoError(t, err)
 	p := plugin.(*Plugin)
 	assert.Equal(t, 0.95, p.config.AffinityThreshold)
@@ -121,7 +122,7 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultConfig.MaxTTFTPenaltyMs, p.config.MaxTTFTPenaltyMs)
 
 	// Setting only explorationProbability should preserve defaults for other params.
-	plugin, err = Factory("test", []byte(`{"explorationProbability": 0.05}`), nil)
+	plugin, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"explorationProbability": 0.05}`)), nil)
 	assert.NoError(t, err)
 	p = plugin.(*Plugin)
 	assert.Equal(t, DefaultConfig.AffinityThreshold, p.config.AffinityThreshold)
@@ -129,7 +130,7 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultConfig.MaxTTFTPenaltyMs, p.config.MaxTTFTPenaltyMs)
 
 	// Setting only maxTTFTPenaltyMs should preserve defaults for other params.
-	plugin, err = Factory("test", []byte(`{"maxTTFTPenaltyMs": 10000}`), nil)
+	plugin, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"maxTTFTPenaltyMs": 10000}`)), nil)
 	assert.NoError(t, err)
 	p = plugin.(*Plugin)
 	assert.Equal(t, DefaultConfig.AffinityThreshold, p.config.AffinityThreshold)
@@ -138,13 +139,13 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 }
 
 func TestFactory_InvalidAffinityThreshold(t *testing.T) {
-	_, err := Factory("test", []byte(`{"affinityThreshold": 1.5}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"affinityThreshold": 1.5}`)), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "affinityThreshold must be <= 1.0")
 }
 
 func TestFactory_InvalidExplorationProbability(t *testing.T) {
-	_, err := Factory("test", []byte(`{"explorationProbability": -0.1}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"explorationProbability": -0.1}`)), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "explorationProbability must be in [0, 1]")
 }

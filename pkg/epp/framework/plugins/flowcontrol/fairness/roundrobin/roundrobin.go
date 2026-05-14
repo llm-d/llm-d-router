@@ -36,7 +36,7 @@ import (
 const RoundRobinFairnessPolicyType = "round-robin-fairness-policy"
 
 // RoundRobinFairnessPolicyFactory is the factory function for the round-robin fairness policy.
-func RoundRobinFairnessPolicyFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func RoundRobinFairnessPolicyFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return newRoundRobin(name), nil
 }
 

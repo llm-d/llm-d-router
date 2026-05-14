@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	extractormetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
@@ -348,8 +349,8 @@ func parseWithDatalayerMetrics(ctx context.Context, t *testing.T, urlStr string)
 
 	plugin, err := sourcemetrics.MetricsDataSourceFactory(
 		"test-metrics-source",
-		params, // configure scheme and path via parameters
-		nil,    // no plugin handle needed for test
+		fwkplugin.StrictDecoder(params), // configure scheme and path via parameters
+		nil,                             // no plugin handle needed for test
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create data source: %w", err)

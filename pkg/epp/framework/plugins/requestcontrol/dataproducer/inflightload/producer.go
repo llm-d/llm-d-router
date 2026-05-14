@@ -39,7 +39,7 @@ const (
 	profilePrefill           = "prefill"
 )
 
-func InFlightLoadProducerFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func InFlightLoadProducerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return &InFlightLoadProducer{
 		typedName:      fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker: newConcurrencyTracker(),

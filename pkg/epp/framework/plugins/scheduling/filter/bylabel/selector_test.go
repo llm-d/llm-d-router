@@ -11,6 +11,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
@@ -94,7 +95,7 @@ func TestLabelSelectorFilterFactoryWithJSON(t *testing.T) {
 		t.Run(tt.testName, func(t *testing.T) {
 			rawParams := json.RawMessage(tt.jsonParams)
 
-			plugin, err := bylabel.SelectorFactory(tt.pluginName, rawParams, nil)
+			plugin, err := bylabel.SelectorFactory(tt.pluginName, fwkplugin.StrictDecoder(rawParams), nil)
 
 			if tt.expectErr {
 				assert.Error(t, err)
@@ -137,7 +138,7 @@ func TestLabelSelectorFilterFactoryWithInvalidJSON(t *testing.T) {
 		t.Run(tt.testName, func(t *testing.T) {
 			rawParams := json.RawMessage(tt.jsonParams)
 
-			plugin, err := bylabel.SelectorFactory(tt.pluginName, rawParams, nil)
+			plugin, err := bylabel.SelectorFactory(tt.pluginName, fwkplugin.StrictDecoder(rawParams), nil)
 
 			assert.Error(t, err)
 			assert.Nil(t, plugin)
@@ -291,7 +292,7 @@ func TestLabelSelectorFilterFiltering(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.testName, func(t *testing.T) {
 			rawParams := json.RawMessage(tt.selectorJSON)
-			plugin, err := bylabel.SelectorFactory("test-selector", rawParams, nil)
+			plugin, err := bylabel.SelectorFactory("test-selector", fwkplugin.StrictDecoder(rawParams), nil)
 			require.NoError(t, err)
 			require.NotNil(t, plugin)
 
@@ -317,7 +318,7 @@ func TestLabelSelectorFilterFiltering(t *testing.T) {
 
 func TestLabelSelectorFilterEdgeCases(t *testing.T) {
 	rawParams := json.RawMessage(`{"matchLabels": {"app": "test"}}`)
-	plugin, err := bylabel.SelectorFactory("test-selector", rawParams, nil)
+	plugin, err := bylabel.SelectorFactory("test-selector", fwkplugin.StrictDecoder(rawParams), nil)
 	require.NoError(t, err)
 
 	blf, ok := plugin.(*bylabel.Selector)
@@ -352,7 +353,7 @@ func TestLabelSelectorFilterEdgeCases(t *testing.T) {
 // Definition of labels is based on https://github.com/llm-d/llm-d-inference-scheduler/issues/220.
 func ExamplePrefillDecodeRolesInLWS() {
 	decodeLeaderJSON := json.RawMessage(`{ "matchLabels": { "leaderworkerset.sigs.k8s.io/worker-index": "0" } }`)
-	plugin, _ := bylabel.SelectorFactory("decode-role", decodeLeaderJSON, nil)
+	plugin, _ := bylabel.SelectorFactory("decode-role", fwkplugin.StrictDecoder(decodeLeaderJSON), nil)
 	decodeLeader, _ := plugin.(*bylabel.Selector)
 
 	decodeFollowerJSON := json.RawMessage(`{"matchExpressions": [{ 
@@ -360,14 +361,14 @@ func ExamplePrefillDecodeRolesInLWS() {
       	"operator": "NotIn",
       	"values": ["0"]
     }]}`)
-	plugin, _ = bylabel.SelectorFactory("ignore-decode-workers", decodeFollowerJSON, nil)
+	plugin, _ = bylabel.SelectorFactory("ignore-decode-workers", fwkplugin.StrictDecoder(decodeFollowerJSON), nil)
 	decodeFollower, _ := plugin.(*bylabel.Selector)
 
 	prefillWorkerJSON := json.RawMessage(`{"matchExpressions": [{
     	"key": "leaderworkerset.sigs.k8s.io/worker-index",
       	"operator": "DoesNotExist"
     }]}`)
-	plugin, _ = bylabel.SelectorFactory("prefill-role", prefillWorkerJSON, nil)
+	plugin, _ = bylabel.SelectorFactory("prefill-role", fwkplugin.StrictDecoder(prefillWorkerJSON), nil)
 	prefillworker, _ := plugin.(*bylabel.Selector)
 
 	endpoints := []scheduling.Endpoint{createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "vllm"},
@@ -415,7 +416,7 @@ func PrefillDecodeRolesInLWS(blf *bylabel.Selector, endpoints []scheduling.Endpo
 func TestDeprecatedSelectorFactoryBackwardCompat(t *testing.T) {
 	rawParams := json.RawMessage(`{"matchLabels": {"app": "nginx"}}`)
 
-	plugin, err := bylabel.DeprecatedSelectorFactory("compat-test", rawParams, nil) //nolint:staticcheck // testing deprecated function
+	plugin, err := bylabel.DeprecatedSelectorFactory("compat-test", fwkplugin.StrictDecoder(rawParams), nil) //nolint:staticcheck // testing deprecated function
 	require.NoError(t, err)
 	require.NotNil(t, plugin)
 

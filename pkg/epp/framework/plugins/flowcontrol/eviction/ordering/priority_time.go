@@ -32,7 +32,7 @@ func init() {
 }
 
 // PriorityThenTimeOrderingFactory creates a PriorityThenTimeOrdering plugin.
-func PriorityThenTimeOrderingFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func PriorityThenTimeOrderingFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	p := &PriorityThenTimeOrdering{name: PriorityThenTimeOrderingType}
 	if name != "" {
 		p.name = name

@@ -57,7 +57,7 @@ func (p *PassthroughParser) SupportedAppProtocols() []v1.AppProtocol {
 	return []v1.AppProtocol{}
 }
 
-func PassthroughParserPluginFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func PassthroughParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewPassthroughParser().WithName(name), nil
 }
 

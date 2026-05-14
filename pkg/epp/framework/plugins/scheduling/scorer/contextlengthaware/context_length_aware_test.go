@@ -10,6 +10,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
@@ -68,7 +69,7 @@ func TestFactory(t *testing.T) {
 			if tt.jsonParams != "" {
 				rawParams = json.RawMessage(tt.jsonParams)
 			}
-			plugin, err := Factory(tt.pluginName, rawParams, nil)
+			plugin, err := Factory(tt.pluginName, fwkplugin.StrictDecoder(rawParams), nil)
 
 			if tt.expectErr {
 				assert.Error(t, err)

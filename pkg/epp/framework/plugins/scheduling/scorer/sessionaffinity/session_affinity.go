@@ -26,7 +26,7 @@ var _ scheduling.Scorer = &SessionAffinity{}
 var _ requestcontrol.ResponseBodyProcessor = &SessionAffinity{}
 
 // Factory defines the factory function for SessionAffinity scorer.
-func Factory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func Factory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return NewSessionAffinity().WithName(name), nil
 }
 

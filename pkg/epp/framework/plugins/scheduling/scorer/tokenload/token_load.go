@@ -48,12 +48,12 @@ type TokenLoadScorer struct {
 	queueThresholdTokens float64
 }
 
-func TokenLoadScorerFactory(name string, params json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func TokenLoadScorerFactory(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	cfg := Config{
 		QueueThresholdTokens: tokenQueueThresholdDefault,
 	}
-	if len(params) > 0 {
-		if err := json.Unmarshal(params, &cfg); err != nil {
+	if params != nil {
+		if err := params.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal token load scorer config: %w", err)
 		}
 	}

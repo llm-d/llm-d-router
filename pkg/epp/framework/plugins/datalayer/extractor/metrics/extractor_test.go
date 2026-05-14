@@ -28,6 +28,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	sourcemetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
@@ -615,7 +616,7 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 				}
 			}
 
-			plugin, err := CoreMetricsExtractorFactory("test", params, nil)
+			plugin, err := CoreMetricsExtractorFactory("test", fwkplugin.StrictDecoder(params), nil)
 
 			if tt.wantErr {
 				if err == nil {
