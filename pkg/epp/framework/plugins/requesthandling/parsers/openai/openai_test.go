@@ -792,6 +792,97 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		// /inference/v1/generate API tests (vLLM disaggregated Prefill/Decode)
+		{
+			name:    "generate request with token_ids",
+			headers: map[string]string{":path": "/inference/v1/generate"},
+			body: map[string]any{
+				"token_ids": []any{1, 2, 3},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs: []uint32{1, 2, 3},
+				},
+				Payload: fwkrh.PayloadMap{
+					"token_ids": []any{float64(1), float64(2), float64(3)},
+				},
+			},
+		},
+		{
+			name:    "generate request with token_ids and cache_salt",
+			headers: map[string]string{":path": "/inference/v1/generate"},
+			body: map[string]any{
+				"token_ids":  []any{10, 20, 30},
+				"cache_salt": "abc123",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs:  []uint32{10, 20, 30},
+					CacheSalt: "abc123",
+				},
+				Payload: fwkrh.PayloadMap{
+					"token_ids":  []any{float64(10), float64(20), float64(30)},
+					"cache_salt": "abc123",
+				},
+			},
+		},
+		{
+			name:    "generate request with token_ids and sampling_params",
+			headers: map[string]string{":path": "/inference/v1/generate"},
+			body: map[string]any{
+				"token_ids": []any{1, 2, 3},
+				"sampling_params": map[string]any{
+					"temperature": 0.8,
+					"max_tokens":  128,
+				},
+				"stream": true,
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs: []uint32{1, 2, 3},
+				},
+				Payload: fwkrh.PayloadMap{
+					"token_ids": []any{float64(1), float64(2), float64(3)},
+					"sampling_params": map[string]any{
+						"temperature": 0.8,
+						"max_tokens":  float64(128),
+					},
+					"stream": true,
+				},
+				Stream: true,
+			},
+		},
+		{
+			name:    "generate request missing token_ids",
+			headers: map[string]string{":path": "/inference/v1/generate"},
+			body: map[string]any{
+				"sampling_params": map[string]any{"temperature": 0.8},
+			},
+			wantErr: true,
+		},
+		{
+			name:    "generate request with empty token_ids",
+			headers: map[string]string{":path": "/inference/v1/generate"},
+			body: map[string]any{
+				"token_ids": []any{},
+			},
+			wantErr: true,
+		},
+		{
+			name:    "generate request via x-original-path header",
+			headers: map[string]string{"x-original-path": "/inference/v1/generate"},
+			body: map[string]any{
+				"token_ids": []any{5, 6, 7},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs: []uint32{5, 6, 7},
+				},
+				Payload: fwkrh.PayloadMap{
+					"token_ids": []any{float64(5), float64(6), float64(7)},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {

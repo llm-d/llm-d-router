@@ -39,6 +39,7 @@ const (
 	chatCompletionsAPI = "chat/completions"
 	completionsAPI     = "completions"
 	embeddingsAPI      = "embeddings"
+	generateAPI        = "generate"
 
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
@@ -185,6 +186,10 @@ func determineAPITypeFromPath(path string) string {
 	if strings.HasSuffix(path, "/embeddings") {
 		return embeddingsAPI
 	}
+	// /inference/v1/generate is the vLLM disaggregated Prefill/Decode API path.
+	if strings.HasSuffix(path, "/inference/v1/generate") {
+		return generateAPI
+	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
 	return completionsAPI
@@ -233,6 +238,14 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 			return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
 		}
 		return nil, errors.New("invalid embeddings request: must have input field")
+
+	case generateAPI:
+		var generate fwkrh.GenerateRequest
+		if err := json.Unmarshal(rawBody, &generate); err == nil && len(generate.TokenIDs) > 0 {
+			return &fwkrh.InferenceRequestBody{Generate: &generate}, nil
+		}
+		return nil, errors.New("invalid generate request: must have non-empty token_ids field")
+
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}

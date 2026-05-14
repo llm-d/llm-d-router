@@ -61,7 +61,7 @@ func (RawPayload) IsParsed() bool    { return false }
 
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
-// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, or EmbeddingsRequest.
+// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, EmbeddingsRequest, or GenerateRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
@@ -73,6 +73,8 @@ type InferenceRequestBody struct {
 	Conversations *ConversationsRequest `json:"conversations,omitempty"`
 	// EmbeddingsRequest is the representation of the OpenAI /v1/embeddings request body.
 	Embeddings *EmbeddingsRequest `json:"embeddings,omitempty"`
+	// GenerateRequest is the representation of the vLLM native /generate request body.
+	Generate *GenerateRequest `json:"generate,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
@@ -138,6 +140,8 @@ func (r *InferenceRequestBody) PromptText() string {
 		return string(b)
 	case r.Embeddings != nil:
 		return r.Embeddings.Input.PlainText()
+	case r.Generate != nil:
+		return ""
 	default:
 		return ""
 	}
@@ -152,6 +156,9 @@ func (r *InferenceRequestBody) InputTokenCountHint() int {
 	}
 	if r.Embeddings != nil {
 		return r.Embeddings.Input.TokenCountHint()
+	}
+	if r.Generate != nil {
+		return len(r.Generate.TokenIDs)
 	}
 	return -1
 }
@@ -171,6 +178,9 @@ func (r *InferenceRequestBody) CacheSalt() string {
 	}
 	if r.Embeddings != nil {
 		return r.Embeddings.CacheSalt
+	}
+	if r.Generate != nil {
+		return r.Generate.CacheSalt
 	}
 	return ""
 }
@@ -422,6 +432,40 @@ func (e *EmbeddingsRequest) String() string {
 		return nilStr
 	}
 	return fmt.Sprintf("{InputType: %T}", e.Input)
+}
+
+// GenerateRequest is a structured representation of the fields we parse out of the vLLM
+// disaggregated Prefill/Decode API at /inference/v1/generate.
+// Unlike the OpenAI-compatible endpoints, this API accepts pre-tokenized input (token IDs).
+// This struct includes fields usable for plugins and scheduling decisions.
+type GenerateRequest struct {
+	// TokenIDs are the pre-tokenized input token IDs.
+	TokenIDs []uint32 `json:"token_ids"`
+	// CacheSalt is an optional request parameter to isolate prefix caches for security reasons.
+	CacheSalt string `json:"cache_salt,omitempty"`
+}
+
+func (r *GenerateRequest) String() string {
+	if r == nil {
+		return nilStr
+	}
+	return fmt.Sprintf("{TokenIDsCount: %d}", len(r.TokenIDs))
+}
+
+func (r *GenerateRequest) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		TokenIDs  []float64 `json:"token_ids"`
+		CacheSalt string    `json:"cache_salt,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	r.CacheSalt = raw.CacheSalt
+	r.TokenIDs = make([]uint32, len(raw.TokenIDs))
+	for i, v := range raw.TokenIDs {
+		r.TokenIDs[i] = uint32(v)
+	}
+	return nil
 }
 
 // ConversationItem represents a single item in a conversation
