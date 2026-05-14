@@ -59,7 +59,7 @@ func Load(path string) (*Config, error) {
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
-		return nil, fmt.Errorf("unmarshaling config: %w", err)
+		return nil, fmt.Errorf("unmarshalling config: %w", err)
 	}
 	return &cfg, nil
 }

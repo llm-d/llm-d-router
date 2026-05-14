@@ -18,12 +18,12 @@ import (
 func TestFullPipeline_Integration(t *testing.T) {
 	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write([]byte("fake-image-data"))
+		_, _ = w.Write([]byte("fake-image-data"))
 	}))
 	defer imageServer.Close()
 
 	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 32000, 32000, 32000, 2345, 6789},
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{"image": {"vllm-hash-img0"}},
@@ -37,14 +37,14 @@ func TestFullPipeline_Integration(t *testing.T) {
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/encode"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ec_transfer_params": map[string]any{
 					"peer_host": "10.0.0.1",
 					"peer_port": 5501,
 				},
 			})
 		case strings.HasPrefix(r.URL.Path, "/prefill"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"kv_transfer_params": map[string]any{
 					"block_id":  "abc123",
 					"peer_host": "10.0.0.2",
@@ -52,7 +52,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 				},
 			})
 		case strings.HasPrefix(r.URL.Path, "/decode"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{
 					{"message": map[string]any{"role": "assistant", "content": "Hello!"}},
 				},
@@ -76,7 +76,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 		{Type: "decode", Params: map[string]any{}},
 	}
 
-	var pipelineSteps []pipeline.Step
+	pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
 	for _, sc := range stepConfigs {
 		step, err := pipeline.Build(sc.Type, sc.Params)
 		if err != nil {
@@ -123,7 +123,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 		Flusher:          recorder,
 	}
 
-	json.Unmarshal([]byte(requestBody), &reqCtx.Body)
+	_ = json.Unmarshal([]byte(requestBody), &reqCtx.Body)
 
 	err := p.Execute(t.Context(), reqCtx)
 	if err != nil {

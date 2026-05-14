@@ -16,7 +16,7 @@ import (
 
 func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{"image": {"hash-img0", "hash-img1"}},
@@ -33,13 +33,13 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
-		json.Unmarshal(body, &parsed)
+		_ = json.Unmarshal(body, &parsed)
 
 		mu.Lock()
 		receivedBodies = append(receivedBodies, parsed)
 		mu.Unlock()
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 		})
 	}))

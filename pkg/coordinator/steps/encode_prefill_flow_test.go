@@ -20,7 +20,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/encode"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ec_transfer_params": map[string]any{
 					"peer_host": "10.0.0.1",
 					"peer_port": 5501,
@@ -29,9 +29,9 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 
 		case strings.HasPrefix(r.URL.Path, "/prefill"):
 			body, _ := io.ReadAll(r.Body)
-			json.Unmarshal(body, &prefillBody)
+			_ = json.Unmarshal(body, &prefillBody)
 
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"kv_transfer_params": map[string]any{"block_id": "b1"},
 			})
 

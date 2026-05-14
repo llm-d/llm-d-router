@@ -2,7 +2,7 @@ package pipeline
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"testing"
 )
 
@@ -48,7 +48,7 @@ func TestPipeline_AbortsOnError(t *testing.T) {
 	steps := []Step{
 		&mockStep{name: "a", fn: func(_ context.Context, _ *RequestContext) error {
 			executed["a"] = true
-			return fmt.Errorf("step a failed")
+			return errors.New("step a failed")
 		}},
 		&mockStep{name: "b", fn: func(_ context.Context, _ *RequestContext) error {
 			executed["b"] = true

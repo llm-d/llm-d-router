@@ -55,10 +55,10 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	body := map[string]any{
-		"request_id":        reqCtx.RequestID,
-		"token_ids":         reqCtx.TokenIDs,
-		"model":             reqCtx.Model,
-		"sampling_params":   map[string]any{"max_tokens": 1},
+		"request_id":         reqCtx.RequestID,
+		"token_ids":          reqCtx.TokenIDs,
+		"model":              reqCtx.Model,
+		"sampling_params":    map[string]any{"max_tokens": 1},
 		"kv_transfer_params": map[string]any{"do_remote_decode": true},
 	}
 

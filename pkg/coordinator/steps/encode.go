@@ -57,7 +57,6 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	results := make([]map[string]any, len(reqCtx.MultimodalEntries))
 
 	for i, entry := range reqCtx.MultimodalEntries {
-		i, entry := i, entry
 		g.Go(func() error {
 			tokenIDs := s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
 

@@ -22,7 +22,7 @@ func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
 
 	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		renderCalled.Store(true)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 2345, 6789},
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{"image": {}},
@@ -40,11 +40,11 @@ func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
 			t.Error("encode should not be called for text-only request")
 		case strings.HasPrefix(r.URL.Path, "/prefill"):
 			prefillCalled.Store(true)
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"kv_transfer_params": map[string]any{"block_id": "b1"},
 			})
 		case strings.HasPrefix(r.URL.Path, "/decode"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{
 					{"message": map[string]any{"role": "assistant", "content": "Hi there!"}},
 				},
@@ -65,7 +65,7 @@ func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
 		{Type: "decode", Params: map[string]any{}},
 	}
 
-	var pipelineSteps []pipeline.Step
+	pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
 	for _, sc := range stepConfigs {
 		step, err := pipeline.Build(sc.Type, sc.Params)
 		if err != nil {
