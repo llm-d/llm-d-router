@@ -219,7 +219,7 @@ The `ec_transfer_params` map is keyed by mm_hash, with each value containing:
 ```go
 []map[string]any{
     {"abc123hash": {"peer_host": "10.0.0.1", "peer_port": 5501, "size_bytes": 2359296, "nixl_agent_metadata_b64": "TklYTA..."}},
-    {"def456hash": {"peer_host": "10.0.0.2", "peer_port": 5502, "size_bytes": 2359296, "nixl_agent_metadata_b64": "UE9EUw..."}},
+    {"def456hash": {"peer_host": "10.0.0.2", "peer_port": 5502, "size_bytes": 2359296, "nixl_agent_metadata_b64": "QWdlbnQ..."}},
 }
 ```
 
@@ -253,7 +253,7 @@ X-Request-ID: <request_id>
   "ec_transfer_params": {
     "image": [
       {"abc123hash": {"peer_host": "10.0.0.1", "peer_port": 5501, "size_bytes": 2359296, "nixl_agent_metadata_b64": "TklYTA..."}},
-      {"def456hash": {"peer_host": "10.0.0.2", "peer_port": 5502, "size_bytes": 2359296, "nixl_agent_metadata_b64": "UE9EUw..."}}
+      {"def456hash": {"peer_host": "10.0.0.2", "peer_port": 5502, "size_bytes": 2359296, "nixl_agent_metadata_b64": "QWdlbnQ..."}}
     ]
   },
   "kv_transfer_params": {"do_remote_decode": true},
