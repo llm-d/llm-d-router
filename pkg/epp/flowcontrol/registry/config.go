@@ -627,57 +627,6 @@ func (c *Config) validate(checker capabilityChecker) error {
 	return nil
 }
 
-// --- Sharding & Partitioning ---
-
-// ShardConfig holds the partitioned configuration for a single registryShard.
-type ShardConfig struct {
-	MaxBytes      uint64
-	MaxRequests   uint64
-	PriorityBands map[int]*PriorityBandConfig
-}
-
-// partition derives a `ShardConfig` from the master `Config` for a specific shard index.
-// It calculates the capacity distribution, ensuring that the total global capacity is distributed completely and
-// evenly.
-func (c *Config) partition(shardIndex, totalShards int) *ShardConfig {
-	shardCfg := &ShardConfig{
-		MaxBytes:      partitionUint64(c.MaxBytes, shardIndex, totalShards),
-		MaxRequests:   partitionUint64(c.MaxRequests, shardIndex, totalShards),
-		PriorityBands: make(map[int]*PriorityBandConfig, len(c.PriorityBands)),
-	}
-
-	for _, template := range c.PriorityBands {
-		shardBand := &PriorityBandConfig{
-			Priority:       template.Priority,
-			OrderingPolicy: template.OrderingPolicy,
-			FairnessPolicy: template.FairnessPolicy,
-			Queue:          template.Queue,
-			MaxBytes:       partitionUint64(template.MaxBytes, shardIndex, totalShards),
-			MaxRequests:    partitionUint64(template.MaxRequests, shardIndex, totalShards),
-		}
-
-		shardCfg.PriorityBands[shardBand.Priority] = shardBand
-	}
-	return shardCfg
-}
-
-// partitionUint64 distributes a total uint64 value across a number of partitions.
-// It distributes the remainder of the division one by one to the first few partitions.
-func partitionUint64(total uint64, partitionIndex, totalPartitions int) uint64 {
-	if total == 0 {
-		return 0
-	}
-
-	t := uint64(totalPartitions)
-	base := total / t
-	remainder := total % t
-
-	if uint64(partitionIndex) < remainder {
-		return base + 1
-	}
-	return base
-}
-
 // Clone creates a deep copy of the Config.
 // It ensures the new Config has its own independent map and PriorityBandConfig instances.
 func (c *Config) Clone() *Config {

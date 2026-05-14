@@ -27,10 +27,10 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -48,8 +48,8 @@ type registryClient interface {
 	contracts.FlowRegistryDataPlane
 }
 
-// shardProcessor is the minimal internal interface that the FlowController requires from its workers.
-type shardProcessor interface {
+// processor is the minimal internal interface that the FlowController requires from its workers.
+type processor interface {
 	Run(ctx context.Context)
 	Submit(item *internal.FlowItem) error
 	SubmitOrBlock(ctx context.Context, item *internal.FlowItem) error
@@ -58,7 +58,7 @@ type shardProcessor interface {
 // shardProcessorFactory defines the signature for creating a shardProcessor.
 type shardProcessorFactory func(
 	ctx context.Context,
-	shard contracts.RegistryShard,
+	registry contracts.FlowRegistry,
 	saturationDetector flowcontrol.SaturationDetector,
 	endpointCandidates contracts.EndpointCandidates,
 	usageLimitPolicy flowcontrol.UsageLimitPolicy,
@@ -66,15 +66,13 @@ type shardProcessorFactory func(
 	cleanupSweepInterval time.Duration,
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
-) shardProcessor
+) processor
 
-var _ shardProcessor = &internal.ShardProcessor{}
+var _ processor = &internal.ShardProcessor{}
 
 // managedWorker holds the state for a single supervised worker.
 type managedWorker struct {
-	processor shardProcessor
-	// cancel function for the worker-specific context. Used during shutdown and GC.
-	cancel context.CancelFunc
+	processor processor
 }
 
 // FlowController is the central, high-throughput engine of the Flow Control layer.
@@ -111,9 +109,8 @@ type FlowController struct {
 
 	// --- Concurrent state ---
 
-	// workers is a highly concurrent map storing the managedWorker for each shard.
-	// It is the controller's source of truth for the worker pool.
-	workers sync.Map // key: shard ID (string); value: *managedWorker
+	// worker is a highly concurrent pointer storing the managedWorker.
+	worker atomic.Pointer[managedWorker]
 
 	// wg waits for all worker goroutines to terminate during shutdown.
 	wg sync.WaitGroup
@@ -152,7 +149,7 @@ func NewFlowController(
 
 	fc.shardProcessorFactory = func(
 		ctx context.Context,
-		shard contracts.RegistryShard,
+		registry contracts.FlowRegistry,
 		saturationDetector flowcontrol.SaturationDetector,
 		endpointCandidates contracts.EndpointCandidates,
 		usageLimitPolicy flowcontrol.UsageLimitPolicy,
@@ -160,11 +157,11 @@ func NewFlowController(
 		cleanupSweepInterval time.Duration,
 		enqueueChannelBufferSize int,
 		logger logr.Logger,
-	) shardProcessor {
+	) processor {
 		return internal.NewShardProcessor(
 			ctx,
 			poolName,
-			shard,
+			registry,
 			saturationDetector,
 			endpointCandidates,
 			usageLimitPolicy,
@@ -175,29 +172,7 @@ func NewFlowController(
 		)
 	}
 
-	go fc.run(ctx)
 	return fc, nil
-}
-
-// run starts the FlowController's main reconciliation loop (supervisor loop).
-// This loop is responsible for garbage collecting workers whose shards no longer exist in the registry.
-// This method blocks until the provided context is cancelled and all worker goroutines have fully terminated.
-func (fc *FlowController) run(ctx context.Context) {
-	fc.logger.Info("Starting FlowController reconciliation loop.")
-	defer fc.logger.Info("FlowController reconciliation loop stopped.")
-
-	ticker := fc.clock.NewTicker(fc.config.ProcessorReconciliationInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			fc.shutdown()
-			return
-		case <-ticker.C():
-			fc.reconcileProcessors()
-		}
-	}
 }
 
 // EnqueueAndWait is the primary, synchronous entry point to the Flow Control system. It submits a request and blocks
@@ -383,28 +358,24 @@ func (fc *FlowController) createRequestContext(
 
 // candidate holds the information needed to evaluate a shard as a potential target for a request.
 type candidate struct {
-	processor shardProcessor
-	shardID   string
+	processor processor
 	byteSize  uint64
 }
 
 // selectDistributionCandidate identifies all Active shards for the leased flow and ranks them by the current byte size
 // of that flow's queue, from least to most loaded.
 func (fc *FlowController) selectDistributionCandidate(conn contracts.ActiveFlowConnection) (*candidate, error) {
-	shard := conn.GetShard()
-	if shard == nil {
-		return nil, fmt.Errorf("%w for flow %s", errNoShards, conn.FlowKey())
-	}
+	dp := conn.GetDataPlane()
 
-	worker := fc.getOrStartWorker(shard)
-	mq, err := shard.ManagedQueue(conn.FlowKey())
+	worker := fc.getOrStartWorker()
+	mq, err := dp.ManagedQueue(conn.FlowKey())
 	if err != nil {
 		fc.logger.Error(err,
-			"Invariant violation. Failed to get ManagedQueue for a leased flow on an Active shard. Skipping shard.",
-			"flowKey", conn.FlowKey(), "shardID", shard.ID())
+			"Invariant violation. Failed to get ManagedQueue for a leased flow.",
+			"flowKey", conn.FlowKey())
 		return nil, fmt.Errorf("%w for flow %s", errNoShards, conn.FlowKey())
 	}
-	return &candidate{worker.processor, shard.ID(), mq.FlowQueueAccessor().ByteSize()}, nil
+	return &candidate{worker.processor, mq.FlowQueueAccessor().ByteSize()}, nil
 }
 
 // distributeRequest implements a flow-aware, two-phase "Join-Shortest-Queue-by-Bytes" (JSQ-Bytes) distribution strategy
@@ -445,80 +416,39 @@ func (fc *FlowController) distributeRequest(
 // It ensures that exactly one worker goroutine is started for each shard, using atomic operations
 // (sync.Map.LoadOrStore). The worker's processor goroutine is only started after it has successfully been registered,
 // preventing race conditions where multiple goroutines create and start the same worker.
-func (fc *FlowController) getOrStartWorker(shard contracts.RegistryShard) *managedWorker {
-	if w, ok := fc.workers.Load(shard.ID()); ok {
-		return w.(*managedWorker)
+func (fc *FlowController) getOrStartWorker() *managedWorker {
+	if w := fc.worker.Load(); w != nil {
+		return w
 	}
 
 	// Construct a new worker, but do not start its goroutine yet.
-	processorCtx, cancel := context.WithCancel(fc.parentCtx)
 	processor := fc.shardProcessorFactory(
-		processorCtx,
-		shard,
+		fc.parentCtx,
+		fc.registry,
 		fc.saturationDetector,
 		fc.endpointCandidates,
 		fc.usageLimitPolicy,
 		fc.clock,
 		fc.config.ExpiryCleanupInterval,
 		fc.config.EnqueueChannelBufferSize,
-		fc.logger.WithValues("shardID", shard.ID()),
+		fc.logger,
 	)
 	newWorker := &managedWorker{
 		processor: processor,
-		cancel:    cancel,
 	}
 
 	// Atomically load or store. This is the critical synchronization step.
-	actual, loaded := fc.workers.LoadOrStore(shard.ID(), newWorker)
-	if loaded {
+	swapped := fc.worker.CompareAndSwap(nil, newWorker)
+	if !swapped {
 		// Another goroutine beat us to it. The `newWorker` we created was not stored.
-		// We must cancel the context we created to prevent a leak.
-		cancel()
-		return actual.(*managedWorker)
+		return fc.worker.Load()
 	}
 
 	// We won the race. The newWorker was stored. Now, start the processor's long-running goroutine.
-	fc.logger.V(logutil.DEFAULT).Info("Starting new ShardProcessor worker.", "shardID", shard.ID())
+	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor worker.")
 	fc.wg.Go(func() {
-		processor.Run(processorCtx)
+		processor.Run(fc.parentCtx)
 	})
 
 	return newWorker
-}
-
-// reconcileProcessors is the supervisor's core garbage collection loop.
-// It identifies and stops workers whose corresponding shards have been removed from the registry.
-func (fc *FlowController) reconcileProcessors() {
-	stats := fc.registry.ShardStats()
-	activeShards := sets.New[string]()
-	if stats != nil {
-		activeShards.Insert(stats.ID)
-	}
-
-	fc.workers.Range(func(key, value any) bool {
-		shardID := key.(string)
-		worker := value.(*managedWorker)
-		if !activeShards.Has(shardID) {
-			fc.logger.V(logutil.DEFAULT).Info("Stale worker detected for GC'd shard, initiating shutdown.",
-				"shardID", shardID)
-			worker.cancel()            // Cancel the worker's context, initiating the Processor's graceful shutdown sequence.
-			fc.workers.Delete(shardID) // Delete from the map so no new requests are routed to it.
-		}
-		return true
-	})
-}
-
-// shutdown gracefully terminates all running `shardProcessor` goroutines.
-// It signals all workers to stop and waits for them to complete their shutdown procedures.
-func (fc *FlowController) shutdown() {
-	fc.logger.Info("Shutting down FlowController and all shard processors.")
-	fc.workers.Range(func(key, value any) bool {
-		shardID := key.(string)
-		worker := value.(*managedWorker)
-		fc.logger.V(logutil.VERBOSE).Info("Sending shutdown signal to processor", "shardID", shardID)
-		worker.cancel()
-		return true
-	})
-	fc.wg.Wait()
-	fc.logger.Info("All shard processors have shut down.")
 }
