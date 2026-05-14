@@ -18,15 +18,28 @@ func SetSSEHeaders(w http.ResponseWriter) {
 // StreamSSE reads SSE events from src and writes them to the client ResponseWriter,
 // flushing after each complete event (blank line).
 func StreamSSE(w http.ResponseWriter, flusher http.Flusher, src io.Reader) error {
-	scanner := bufio.NewScanner(src)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if _, err := fmt.Fprintf(w, "%s\n", line); err != nil {
+	reader := bufio.NewReader(src)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
 			return err
 		}
-		if line == "" {
-			flusher.Flush()
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			line = line[:len(line)-1]
+		}
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		if len(line) > 0 || err != io.EOF {
+			if _, writeErr := fmt.Fprintf(w, "%s\n", line); writeErr != nil {
+				return writeErr
+			}
+			if line == "" {
+				flusher.Flush()
+			}
+		}
+		if err == io.EOF {
+			return nil
 		}
 	}
-	return scanner.Err()
 }

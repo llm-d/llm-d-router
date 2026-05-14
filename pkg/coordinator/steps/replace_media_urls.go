@@ -33,6 +33,9 @@ func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
 
 	maxConcurrent := 10
 	if v, ok := params["max_concurrent_downloads"].(int); ok {
+		if v <= 0 {
+			return nil, fmt.Errorf("max_concurrent_downloads must be positive, got %d", v)
+		}
 		maxConcurrent = v
 	}
 

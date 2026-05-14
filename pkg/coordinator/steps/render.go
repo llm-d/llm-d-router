@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -26,9 +27,17 @@ func NewRenderStep(params map[string]any) (pipeline.Step, error) {
 	if v, ok := params["endpoint"].(string); ok {
 		endpoint = v
 	}
+
+	timeout := 30 * time.Second
+	if v, ok := params["timeout"].(string); ok {
+		if d, err := time.ParseDuration(v); err == nil {
+			timeout = d
+		}
+	}
+
 	return &RenderStep{
 		endpoint: endpoint,
-		client:   &http.Client{},
+		client:   &http.Client{Timeout: timeout},
 	}, nil
 }
 
@@ -77,16 +86,21 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	imagePlaceholders := renderResp.Features.MMPlaceholders["image"]
 	imageKwargs := renderResp.Features.KwargsData["image"]
 
-	for i := range imageHashes {
-		if i < len(reqCtx.MultimodalEntries) {
-			reqCtx.MultimodalEntries[i].Hash = imageHashes[i]
-			if i < len(imageKwargs) {
-				reqCtx.MultimodalEntries[i].KwargsData = imageKwargs[i]
-			}
-			if i < len(imagePlaceholders) {
-				reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
-			}
-		}
+	expected := len(reqCtx.MultimodalEntries)
+	if len(imageHashes) != expected {
+		return fmt.Errorf("render returned %d mm_hashes but expected %d", len(imageHashes), expected)
+	}
+	if len(imagePlaceholders) != expected {
+		return fmt.Errorf("render returned %d mm_placeholders but expected %d", len(imagePlaceholders), expected)
+	}
+	if len(imageKwargs) != expected {
+		return fmt.Errorf("render returned %d kwargs_data but expected %d", len(imageKwargs), expected)
+	}
+
+	for i := range reqCtx.MultimodalEntries {
+		reqCtx.MultimodalEntries[i].Hash = imageHashes[i]
+		reqCtx.MultimodalEntries[i].KwargsData = imageKwargs[i]
+		reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
 	}
 
 	slog.Info("render: complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))

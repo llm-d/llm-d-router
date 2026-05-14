@@ -19,10 +19,16 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	s.handleInference(w, r)
 }
 
+const maxRequestBodySize = 64 << 20 // 64 MB
+
 func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize+1))
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxRequestBodySize {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 

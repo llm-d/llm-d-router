@@ -13,7 +13,7 @@ import (
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
-func TestGatewayPaths_EncodePrefilDecode(t *testing.T) {
+func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	var mu sync.Mutex
 	receivedPaths := []string{}
 

@@ -41,6 +41,7 @@ BUILD_DIR := bin
 
 .PHONY: build
 build: ## Build the coordinator Go binary
+	@mkdir -p $(BUILD_DIR)
 	go build -o $(BUILD_DIR)/$(BINARY) ./cmd/coordinator
 
 .PHONY: test

@@ -28,7 +28,8 @@ type GatewayConfig struct {
 }
 
 type RenderingConfig struct {
-	Address string `mapstructure:"address"`
+	Address string        `mapstructure:"address"`
+	Timeout time.Duration `mapstructure:"timeout"`
 }
 
 type PipelineConfig struct {
@@ -50,6 +51,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("gateway.max_idle_conns_per_host", 100)
 	v.SetDefault("gateway.idle_conn_timeout", 90*time.Second)
 	v.SetDefault("gateway.timeout", 60*time.Second)
+	v.SetDefault("rendering_service.timeout", 30*time.Second)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)

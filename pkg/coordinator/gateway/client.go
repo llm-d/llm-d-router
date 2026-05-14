@@ -24,15 +24,15 @@ func New(cfg config.GatewayConfig) *Client {
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		MaxIdleConnsPerHost: cfg.MaxIdleConnsPerHost,
-		IdleConnTimeout:     cfg.IdleConnTimeout,
-		ForceAttemptHTTP2:   true,
+		MaxIdleConnsPerHost:   cfg.MaxIdleConnsPerHost,
+		IdleConnTimeout:       cfg.IdleConnTimeout,
+		ResponseHeaderTimeout: cfg.Timeout,
+		ForceAttemptHTTP2:     true,
 	}
 
 	return &Client{
 		httpClient: &http.Client{
 			Transport: transport,
-			Timeout:   cfg.Timeout,
 		},
 		baseURL: cfg.Address,
 	}

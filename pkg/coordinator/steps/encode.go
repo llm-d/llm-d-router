@@ -29,6 +29,9 @@ func NewEncodeStep(params map[string]any) (pipeline.Step, error) {
 	}
 	maxParallel := 8
 	if v, ok := params["max_parallel"].(int); ok {
+		if v <= 0 {
+			return nil, fmt.Errorf("max_parallel must be positive, got %d", v)
+		}
 		maxParallel = v
 	}
 	return &EncodeStep{
@@ -65,6 +68,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 					"mm_placeholders": map[string][]any{"image": {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
 					"kwargs_data":     map[string][]string{"image": {entry.KwargsData}},
 				},
+				"sampling_params": map[string]any{"max_tokens": 1},
 			}
 
 			bodyBytes, err := json.Marshal(body)
