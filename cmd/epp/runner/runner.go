@@ -347,6 +347,11 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		}
 	}
 
+	if err = runserver.SetupPluginStateDebugHandler(mgr, r.PluginHandle); err != nil {
+		setupLog.Error(err, "Failed to setup plugin state debug handler")
+		return nil, nil, err
+	}
+
 	// --- Initialize Core EPP Components ---
 	if r.schedulerConfig == nil {
 		err := errors.New("scheduler config must be set either by config api or through code")
