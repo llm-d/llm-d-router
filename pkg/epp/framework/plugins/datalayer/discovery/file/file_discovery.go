@@ -176,13 +176,16 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 	}
 
 	incoming := make(map[types.NamespacedName]struct{}, len(ef.Endpoints))
+	var errs []error
 	for _, e := range ef.Endpoints {
 		if net.ParseIP(e.Address) == nil {
-			return fmt.Errorf("endpoint %q: invalid address %q", e.Name, e.Address)
+			errs = append(errs, fmt.Errorf("endpoint %q: invalid address %q", e.Name, e.Address))
+			continue
 		}
 		portNum, err := strconv.Atoi(e.Port)
 		if err != nil || portNum < 1 || portNum > 65535 {
-			return fmt.Errorf("endpoint %q: invalid port %q", e.Name, e.Port)
+			errs = append(errs, fmt.Errorf("endpoint %q: invalid port %q", e.Name, e.Port))
+			continue
 		}
 		ns := e.Namespace
 		if ns == "" {
@@ -209,5 +212,5 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 		}
 	}
 	f.current = incoming
-	return nil
+	return errors.Join(errs...)
 }
