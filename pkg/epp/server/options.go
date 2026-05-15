@@ -137,7 +137,6 @@ func NewOptions() *Options {
 		MetricsPort:                      9090,
 		GRPCHealthPort:                   9003,
 		EnablePprof:                      true,
-		EnablePluginStateDebug:           true,
 		SecureServing:                    true,
 		MetricsEndpointAuth:              true,
 	}
@@ -208,7 +207,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&opts.EnablePprof, "enable-pprof", opts.EnablePprof,
 		"Enables pprof handlers. Defaults to true. Set to false to disable pprof handlers.")
 	fs.BoolVar(&opts.EnablePluginStateDebug, "enable-plugin-state-debug", opts.EnablePluginStateDebug,
-		"Enables the /debug/plugins/state handler on the metrics server. Defaults to true.")
+		"Enables the /debug/plugins/state handler on the metrics server. Defaults to false.")
 	fs.StringVar(&opts.CertPath, "cert-path", opts.CertPath,
 		"The path to the certificate for secure serving. The certificate and private key files "+
 			"are assumed to be named tls.crt and tls.key, respectively. If not set, and secureServing is enabled, "+
