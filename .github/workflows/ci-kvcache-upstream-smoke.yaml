@@ -1,0 +1,29 @@
+name: CI - kv-cache Upstream Smoke
+
+# Non-blocking smoke test that pins llm-d-kv-cache to its latest main and
+# runs the preciseprefixcache unit tests. See issue #1056.
+
+on:
+  push:
+    branches: [main]
+    paths: ['**/*.go', 'go.mod', 'Makefile', '.github/workflows/ci-kvcache-upstream-smoke.yaml']
+  pull_request:
+    branches: [main]
+    paths: ['**/*.go', 'go.mod', 'Makefile', '.github/workflows/ci-kvcache-upstream-smoke.yaml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true  # informational only; never blocks merges
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make test-kvcache-upstream-smoke
