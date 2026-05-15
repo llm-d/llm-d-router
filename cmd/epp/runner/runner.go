@@ -80,6 +80,7 @@ import (
 	latencyproducer "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	testresponsereceived "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
+	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
@@ -505,6 +506,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointSourceFactory)
 	// register request control plugins
 	fwkplugin.Register(requestattributereporter.RequestAttributeReporterType, requestattributereporter.RequestAttributeReporterPluginFactory)
+	fwkplugin.Register(anthropic.AnthropicParserType, anthropic.AnthropicParserPluginFactory)
 	fwkplugin.Register(openai.OpenAIParserType, openai.OpenAIParserPluginFactory)
 	fwkplugin.Register(vllmgrpc.VllmGRPCParserType, vllmgrpc.VllmGRPCParserPluginFactory)
 	fwkplugin.Register(passthrough.PassthroughParserType, passthrough.PassthroughParserPluginFactory)

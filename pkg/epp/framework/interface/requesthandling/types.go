@@ -61,12 +61,14 @@ func (RawPayload) IsParsed() bool    { return false }
 
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
-// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, or EmbeddingsRequest.
+// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, MessagesRequest, ResponsesRequest, ConversationsRequest, or EmbeddingsRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
 	// ChatCompletionsRequest is the representation of the OpenAI /v1/chat/completions request body.
 	ChatCompletions *ChatCompletionsRequest `json:"chat_completions,omitempty"`
+	// MessagesRequest is the representation of the Claude /v1/messages request body.
+	Messages *MessagesRequest `json:"messages,omitempty"`
 	// ResponsesRequest is the representation of the OpenAI /v1/responses request body.
 	Responses *ResponsesRequest `json:"responses,omitempty"`
 	// ConversationsRequest is the representation of the OpenAI /v1/conversations request body.
@@ -127,6 +129,21 @@ func (r *InferenceRequestBody) PromptText() string {
 			}
 		}
 		return sb.String()
+	case r.Messages != nil:
+		var sb strings.Builder
+		sysText := r.Messages.System.PlainText()
+		if sysText != "" {
+			sb.WriteString(sysText)
+			sb.WriteString(" ")
+		}
+		for _, msg := range r.Messages.Messages {
+			text := msg.Content.PlainText()
+			if text != "" {
+				sb.WriteString(text)
+				sb.WriteString(" ")
+			}
+		}
+		return sb.String()
 	case r.Responses != nil:
 		if s, ok := r.Responses.Input.(string); ok {
 			return s
@@ -165,6 +182,9 @@ func (r *InferenceRequestBody) CacheSalt() string {
 	}
 	if r.ChatCompletions != nil {
 		return r.ChatCompletions.CacheSalt
+	}
+	if r.Messages != nil {
+		return r.Messages.CacheSalt
 	}
 	if r.Completions != nil {
 		return r.Completions.CacheSalt
@@ -521,4 +541,97 @@ type Usage struct {
 
 type PromptTokenDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+// MessagesRequest is a structured representation of the fields we parse out of the /v1/messages
+// request body. For detailed body fields, please refer to https://docs.anthropic.com/en/api/messages.
+// This struct includes fields usable for plugins and scheduling decisions - and not the entire
+// API spec.
+type MessagesRequest struct {
+	// Messages is the array of conversation messages with alternating user/assistant roles.
+	Messages []AnthropicMessage `json:"messages,omitempty"`
+	// System is the system prompt. In the Anthropic API this is a top-level field,
+	// not a message with role "system".
+	System AnthropicContent `json:"system,omitempty"`
+	// Tools field for tool use capabilities.
+	Tools []any `json:"tools,omitempty"`
+	// CacheSalt isolates prefix caches for security.
+	CacheSalt string `json:"cache_salt,omitempty"`
+}
+
+func (r *MessagesRequest) String() string {
+	if r == nil {
+		return nilStr
+	}
+	messagesLen := 0
+	for _, msg := range r.Messages {
+		messagesLen += len(msg.Content.PlainText())
+	}
+	return fmt.Sprintf("{MessagesLength: %d}", messagesLen)
+}
+
+type AnthropicMessage struct {
+	Role    string `json:"role"`
+	Content AnthropicContent `json:"content"`
+}
+
+// AnthropicContent handles the Anthropic content format which can be either
+// a plain string or an array of content blocks.
+type AnthropicContent struct {
+	Raw        string
+	Structured []AnthropicContentBlock
+}
+
+func (ac *AnthropicContent) UnmarshalJSON(data []byte) error {
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		ac.Raw = str
+		return nil
+	}
+
+	var blocks []AnthropicContentBlock
+	if err := json.Unmarshal(data, &blocks); err == nil {
+		ac.Structured = blocks
+		return nil
+	}
+
+	return errors.New("anthropic content: must be a string or an array of content blocks")
+}
+
+func (ac AnthropicContent) MarshalJSON() ([]byte, error) {
+	if ac.Raw != "" {
+		return json.Marshal(ac.Raw)
+	}
+	if ac.Structured != nil {
+		return json.Marshal(ac.Structured)
+	}
+	return json.Marshal("")
+}
+
+func (ac AnthropicContent) PlainText() string {
+	if ac.Raw != "" {
+		return ac.Raw
+	}
+	var sb strings.Builder
+	for _, block := range ac.Structured {
+		if block.Type == "text" {
+			sb.WriteString(block.Text)
+			sb.WriteString(" ")
+		}
+	}
+	return sb.String()
+}
+
+type AnthropicContentBlock struct {
+	Type       string     `json:"type"`
+	Text       string     `json:"text,omitempty"`
+	// image source fields (base64 or URL)
+	Source *AnthropicImageSource `json:"source,omitempty"`
+}
+
+type AnthropicImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
