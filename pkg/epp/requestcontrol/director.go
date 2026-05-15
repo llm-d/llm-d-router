@@ -45,6 +45,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -201,13 +202,18 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		attribute.Int("request_prio", priority),
 	)
 
+	fairnessID, _ := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
+	if fairnessID == "" {
+		fairnessID = metadata.DefaultFairnessID
+	}
+
 	// Prepare InferenceRequest (needed for both saturation detection and Scheduler)
 	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{
 		RequestID:        reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
 		TargetModel:      reqCtx.TargetModelName,
 		Body:             inferenceRequestBody,
 		Headers:          reqCtx.Request.Headers,
-		FairnessID:       reqCtx.FairnessID,
+		FairnessID:       fairnessID,
 		Objectives:       requestObjectives,
 		RequestSizeBytes: reqCtx.RequestSize,
 	}
