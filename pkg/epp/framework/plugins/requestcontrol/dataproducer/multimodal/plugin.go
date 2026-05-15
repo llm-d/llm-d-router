@@ -146,7 +146,7 @@ func (p *Producer) PluginState() *plugin.PluginState {
 }
 
 // PrepareRequestData attaches multimodal encoder-cache match data to endpoints.
-func (p *Producer) PrepareRequestData(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
+func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
 	logger := log.FromContext(ctx).V(logging.DEBUG)
 	requestItems := ExtractMMItems(request)
 	if len(requestItems) == 0 {

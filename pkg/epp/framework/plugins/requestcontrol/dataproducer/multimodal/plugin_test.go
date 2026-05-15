@@ -178,7 +178,7 @@ func TestPrepareDataMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.
 	endpointC := newEndpoint(podC)
 	request := requestWithHashes("req-1", map[string]int{"hash-a": 80, "hash-c": 20})
 
-	require.NoError(t, producer.PrepareRequestData(context.Background(), request, []scheduling.Endpoint{endpointA, endpointB, endpointC}))
+	require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpointA, endpointB, endpointC}))
 
 	assertMatchInfo(t, endpointA,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}},
@@ -205,7 +205,7 @@ func TestLRUEviction(t *testing.T) {
 
 	for _, hash := range []string{"hash-1", "hash-2", "hash-3"} {
 		request := requestWithHashes(hash, map[string]int{hash: 1})
-		require.NoError(t, producer.PrepareRequestData(context.Background(), request, []scheduling.Endpoint{endpoint}))
+		require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpoint}))
 		producer.PreRequest(context.Background(), request, schedulingResult(endpoint))
 	}
 
@@ -223,7 +223,7 @@ func TestStalePodCleanup(t *testing.T) {
 
 	endpointA := newEndpoint(podA)
 	endpointB := newEndpoint(podB)
-	require.NoError(t, producer.PrepareRequestData(context.Background(), requestWithHashes("req", map[string]int{"hash-a": 1}), []scheduling.Endpoint{endpointA, endpointB}))
+	require.NoError(t, producer.Produce(context.Background(), requestWithHashes("req", map[string]int{"hash-a": 1}), []scheduling.Endpoint{endpointA, endpointB}))
 
 	assertMatchInfo(t, endpointA,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}},
