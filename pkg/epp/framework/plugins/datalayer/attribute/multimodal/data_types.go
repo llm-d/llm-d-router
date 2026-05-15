@@ -43,8 +43,8 @@ type EncoderCacheMatchInfo struct {
 // NewEncoderCacheMatchInfo creates endpoint-local multimodal cache match data.
 func NewEncoderCacheMatchInfo(matchedItems []MatchItem, requestItems []MatchItem) *EncoderCacheMatchInfo {
 	return &EncoderCacheMatchInfo{
-		matchedItems: cloneMatchItems(matchedItems),
-		requestItems: cloneMatchItems(requestItems),
+		matchedItems: CloneMatchItems(matchedItems),
+		requestItems: CloneMatchItems(requestItems),
 	}
 }
 
@@ -53,7 +53,7 @@ func (m *EncoderCacheMatchInfo) MatchedItems() []MatchItem {
 	if m == nil {
 		return nil
 	}
-	return cloneMatchItems(m.matchedItems)
+	return CloneMatchItems(m.matchedItems)
 }
 
 // RequestItems returns all unique multimodal request items.
@@ -61,7 +61,7 @@ func (m *EncoderCacheMatchInfo) RequestItems() []MatchItem {
 	if m == nil {
 		return nil
 	}
-	return cloneMatchItems(m.requestItems)
+	return CloneMatchItems(m.requestItems)
 }
 
 // Clone implements datalayer.Cloneable.
@@ -70,12 +70,13 @@ func (m *EncoderCacheMatchInfo) Clone() fwkdl.Cloneable {
 		return nil
 	}
 	return &EncoderCacheMatchInfo{
-		matchedItems: cloneMatchItems(m.matchedItems),
-		requestItems: cloneMatchItems(m.requestItems),
+		matchedItems: CloneMatchItems(m.matchedItems),
+		requestItems: CloneMatchItems(m.requestItems),
 	}
 }
 
-func cloneMatchItems(items []MatchItem) []MatchItem {
+// CloneMatchItems creates a deep copy of a MatchItem slice.
+func CloneMatchItems(items []MatchItem) []MatchItem {
 	if len(items) == 0 {
 		return nil
 	}

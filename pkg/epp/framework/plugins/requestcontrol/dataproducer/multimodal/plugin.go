@@ -96,7 +96,7 @@ func (s *requestState) Clone() plugin.StateData {
 	if s == nil {
 		return nil
 	}
-	return &requestState{items: cloneMatchItems(s.items)}
+	return &requestState{items: attrmm.CloneMatchItems(s.items)}
 }
 
 // New creates a Producer.
