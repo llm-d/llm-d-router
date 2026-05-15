@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 
 	"github.com/llm-d/coordinator/pkg/connector/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"github.com/llm-d/coordinator/pkg/server"
 )
@@ -45,6 +45,7 @@ func (s *DecodeStep) SetGatewayClient(c *gateway.Client) {
 func (s *DecodeStep) Name() string { return "decode" }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	logger := logging.FromContext(ctx).WithName("decode")
 	reqCtx.Body["kv_transfer_params"] = s.kv.PrepareDecodeKVParams(reqCtx)
 	s.injectUUIDs(reqCtx)
 
@@ -54,7 +55,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	}
 
 	path := fmt.Sprintf("%s%s", gateway.DecodePrefix, reqCtx.OriginalPath)
-	slog.Info("decode: sending request", "path", path, "stream", reqCtx.Stream)
+	logger.V(logging.DEFAULT).Info("sending request", "path", path, "stream", reqCtx.Stream)
 
 	resp, err := s.gwClient.Post(ctx, path, bodyBytes, map[string]string{
 		"X-Request-ID": reqCtx.RequestID,
