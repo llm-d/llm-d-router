@@ -25,7 +25,7 @@ import (
 	"strconv"
 	"strings"
 
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 )
 
 // GetMetrics fetches & parses metrics from the training server (for Bayesian Ridge).

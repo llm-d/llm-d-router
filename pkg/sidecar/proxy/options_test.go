@@ -17,8 +17,506 @@ limitations under the License.
 package proxy
 
 import (
+	"errors"
+	"flag"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/require"
 )
+
+func writeTempYAML(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	return path
+}
+
+func createConfigWithValidYAML(t *testing.T) string {
+	t.Helper()
+	return writeTempYAML(t, "valid.yaml", `
+port: 8100
+vllm-port: 8200
+data-parallel-size: 5
+kv-connector: "sglang"
+connector: "nixlv2"
+ec-connector: "ec-example"
+enable-ssrf-protection: true
+enable-prefiller-sampling: true
+enable-tls:
+- prefiller
+- decoder
+prefiller-use-tls: false
+tls-insecure-skip-verify:
+- prefiller
+decoder-tls-insecure-skip-verify: true
+secure-proxy: false
+cert-path: "/etc/certificates-file"
+inference-pool: "file-ns/inference-pool-file"
+pool-group: "pool-group-file"
+max-idle-conns-per-host: 300
+`)
+}
+
+func createConfigWithUnknownKeys(t *testing.T) string {
+	t.Helper()
+	return writeTempYAML(t, "valid.yaml", `
+port: 8100
+vllm-port: 8200
+unknown-key: 1001
+`)
+}
+
+func createConfigWithInvalidYAML(t *testing.T) string {
+	t.Helper()
+	return writeTempYAML(t, "invalid.yaml", `
+port: 8100
+invalid-yaml,
+`)
+}
+
+func TestSidecarConfiguration(t *testing.T) {
+	// --- inline YAML for testing ---
+	inlineYAML :=
+		`{
+		port: 8011,
+		vllm-port: 8021,
+		data-parallel-size: 3,
+		kv-connector: sglang,
+		connector: nixlv2,
+		ec-connector: ec-example,
+		enable-ssrf-protection: true,
+		enable-prefiller-sampling: true,
+		enable-tls: ['prefiller', 'decoder'],
+		prefiller-use-tls: false,
+		decoder-use-tls: true,
+		tls-insecure-skip-verify: ['decoder'],
+		prefiller-tls-insecure-skip-verify: true,
+		secure-proxy: false,
+		cert-path: '/etc/certificates-inline',
+		inference-pool: inline-ns/inference-pool-inline,
+		pool-group: pool-group-inline,
+		max-idle-conns-per-host: 200
+	}`
+	invalidInlineYAML := "{port: 8200, invalid-yaml}"
+
+	// -- file YAML for testing ---
+	validYAMLPath := createConfigWithValidYAML(t)
+	invalidYAMLPath := createConfigWithInvalidYAML(t)
+	unknownKeysYAMLPath := createConfigWithUnknownKeys(t)
+
+	tests := []struct {
+		name          string
+		expected      func(*Options)
+		expectedError error
+		inputFlags    map[string]any
+		inputEnvVar   map[string]any
+	}{
+		{
+			name: "inline YAML overrides default",
+			inputFlags: map[string]any{
+				inlineConfiguration: &inlineYAML,
+			},
+			expected: func(o *Options) {
+				o.Port = "8011"
+				o.vllmPort = "8021"
+				o.DataParallelSize = 3
+				o.MaxIdleConnsPerHost = 200
+
+				o.KVConnector = KVConnectorSGLang
+				o.connector = KVConnectorNIXLV2
+				o.ECConnector = ECExampleConnector
+
+				o.EnableSSRFProtection = true
+				o.EnablePrefillerSampling = true
+
+				o.enableTLS = []string{prefillStage, decodeStage}
+				o.UseTLSForPrefiller = true
+				o.UseTLSForDecoder = true
+				o.UseTLSForEncoder = false
+
+				o.tlsInsecureSkipVerify = []string{prefillStage, decodeStage}
+				o.InsecureSkipVerifyForPrefiller = true
+				o.InsecureSkipVerifyForDecoder = true
+				o.InsecureSkipVerifyForEncoder = false
+
+				o.SecureServing = false
+				o.CertPath = "/etc/certificates-inline"
+
+				o.inferencePool = "inline-ns/inference-pool-inline"
+				o.InferencePoolNamespace = "inline-ns"
+				o.InferencePoolName = "inference-pool-inline"
+				o.PoolGroup = "pool-group-inline"
+
+				o.inlineConfiguration = inlineYAML
+				o.fileConfiguration = ""
+			},
+			expectedError: nil,
+		},
+		{
+			name: "file YAML overrides default",
+			inputFlags: map[string]any{
+				configurationFile: validYAMLPath,
+			},
+			expected: func(o *Options) {
+				o.Port = "8100"
+				o.vllmPort = "8200"
+				o.DataParallelSize = 5
+				o.MaxIdleConnsPerHost = 300
+
+				o.KVConnector = KVConnectorSGLang
+				o.ECConnector = ECExampleConnector
+
+				o.EnableSSRFProtection = true
+				o.EnablePrefillerSampling = true
+
+				o.enableTLS = []string{prefillStage, decodeStage}
+				o.UseTLSForPrefiller = true
+				o.UseTLSForDecoder = true
+				o.UseTLSForEncoder = false
+
+				o.tlsInsecureSkipVerify = []string{prefillStage, decodeStage}
+				o.InsecureSkipVerifyForPrefiller = true
+				o.InsecureSkipVerifyForDecoder = true
+				o.InsecureSkipVerifyForEncoder = false
+
+				o.SecureServing = false
+				o.CertPath = "/etc/certificates-file"
+
+				o.inferencePool = "file-ns/inference-pool-file"
+				o.InferencePoolNamespace = "file-ns"
+				o.InferencePoolName = "inference-pool-file"
+				o.PoolGroup = "pool-group-file"
+
+				o.inlineConfiguration = ""
+				o.fileConfiguration = validYAMLPath
+			},
+			expectedError: nil,
+		},
+		{
+			name: "flags override inline YAML",
+			inputFlags: map[string]any{
+				port:                    "8111",
+				vllmPort:                "8222",
+				dataParallelSize:        2,
+				kvConnector:             KVConnectorSGLang,
+				ecConnector:             ECExampleConnector,
+				enableSSRFProtection:    true,
+				enablePrefillerSampling: true,
+				enableTLS:               &[]string{prefillStage},
+				tlsInsecureSkipVerify:   &[]string{prefillStage},
+				secureServing:           false,
+				certPath:                "/etc/certificates",
+				inferencePool:           "ns/inference-pool",
+				poolGroup:               "pool-group",
+				inlineConfiguration:     &inlineYAML,
+			},
+			expected: func(o *Options) {
+				o.Port = "8111"
+				o.vllmPort = "8222"
+				o.DataParallelSize = 2
+				o.MaxIdleConnsPerHost = 200
+
+				o.KVConnector = KVConnectorSGLang
+				o.ECConnector = ECExampleConnector
+
+				o.EnableSSRFProtection = true
+				o.EnablePrefillerSampling = true
+
+				o.enableTLS = []string{prefillStage}
+				o.UseTLSForPrefiller = true
+				o.UseTLSForDecoder = false
+				o.UseTLSForEncoder = false
+
+				o.tlsInsecureSkipVerify = []string{prefillStage}
+				o.InsecureSkipVerifyForPrefiller = true
+				o.InsecureSkipVerifyForDecoder = false
+				o.InsecureSkipVerifyForEncoder = false
+
+				o.SecureServing = false
+				o.CertPath = "/etc/certificates"
+
+				o.inferencePool = "ns/inference-pool"
+				o.InferencePoolNamespace = "ns"
+				o.InferencePoolName = "inference-pool"
+				o.PoolGroup = "pool-group"
+
+				o.inlineConfiguration = inlineYAML
+				o.fileConfiguration = ""
+			},
+			expectedError: nil,
+		},
+		{
+			name: "flags override file YAML",
+			inputFlags: map[string]any{
+				port:                    "8111",
+				vllmPort:                "8222",
+				dataParallelSize:        2,
+				kvConnector:             KVConnectorSGLang,
+				ecConnector:             ECExampleConnector,
+				enableSSRFProtection:    true,
+				enablePrefillerSampling: true,
+				enableTLS:               &[]string{prefillStage},
+				tlsInsecureSkipVerify:   &[]string{prefillStage},
+				secureServing:           false,
+				certPath:                "/etc/certificates",
+				inferencePool:           "ns/inference-pool",
+				poolGroup:               "pool-group",
+				configurationFile:       validYAMLPath,
+				maxIdleConnsPerHost:     400,
+			},
+			expected: func(o *Options) {
+				o.Port = "8111"
+				o.vllmPort = "8222"
+				o.DataParallelSize = 2
+				o.MaxIdleConnsPerHost = 400
+
+				o.KVConnector = KVConnectorSGLang
+				o.ECConnector = ECExampleConnector
+
+				o.EnableSSRFProtection = true
+				o.EnablePrefillerSampling = true
+
+				o.enableTLS = []string{prefillStage}
+				o.UseTLSForPrefiller = true
+				o.UseTLSForDecoder = false
+				o.UseTLSForEncoder = false
+
+				o.tlsInsecureSkipVerify = []string{prefillStage}
+				o.InsecureSkipVerifyForPrefiller = true
+				o.InsecureSkipVerifyForDecoder = false
+				o.InsecureSkipVerifyForEncoder = false
+
+				o.SecureServing = false
+				o.CertPath = "/etc/certificates"
+
+				o.inferencePool = "ns/inference-pool"
+				o.InferencePoolNamespace = "ns"
+				o.InferencePoolName = "inference-pool"
+				o.PoolGroup = "pool-group"
+
+				o.inlineConfiguration = ""
+				o.fileConfiguration = validYAMLPath
+			},
+			expectedError: nil,
+		},
+		{
+			name: "invalid inline YAML ",
+			inputFlags: map[string]any{
+				inlineConfiguration: invalidInlineYAML,
+			},
+			expectedError: errors.New("failed to unmarshal sidecar configuration"),
+		},
+		{
+			name: "invalid file YAML",
+			inputFlags: map[string]any{
+				configurationFile: invalidYAMLPath,
+			},
+			expectedError: errors.New("failed to unmarshal sidecar configuration"),
+		},
+		{
+			name: "unknown keys in YAML",
+			inputFlags: map[string]any{
+				configurationFile: unknownKeysYAMLPath,
+			},
+			expectedError: errors.New("failed to unmarshal sidecar configuration"),
+		},
+		{
+			name: "both inline and file YAML",
+			inputFlags: map[string]any{
+				inlineConfiguration: inlineYAML,
+				configurationFile:   validYAMLPath,
+			},
+			expectedError: fmt.Errorf("flags --%s and --%s are mutually exclusive", inlineConfiguration, configurationFile),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setEnv(t, tt.inputEnvVar)
+
+			opts, testPFlagSet := newTestOptions(t)
+
+			for name, value := range tt.inputFlags {
+				setFlag(t, testPFlagSet, name, value)
+			}
+
+			require.NoError(t, testPFlagSet.Parse(nil))
+
+			err := opts.Complete()
+			if tt.expectedError != nil {
+				require.ErrorContains(t, err, tt.expectedError.Error(), "Error should be: %v, got: %v", tt.expectedError, err)
+				return
+			}
+
+			require.NoError(t, err, "Complete() error: %v", err)
+			require.NoError(t, opts.Validate(), "Validate() error: %v", err)
+
+			expected := NewOptions()
+			if tt.expected != nil {
+				tt.expected(expected)
+			}
+
+			compareOptions(t, expected, opts)
+		})
+	}
+}
+
+func newTestOptions(t *testing.T) (*Options, *pflag.FlagSet) {
+	t.Helper()
+
+	opts := NewOptions()
+
+	goFlagSet := flag.NewFlagSet(t.Name(), flag.ContinueOnError)
+	pFlagSet := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+
+	opts.loggingOptions.BindFlags(goFlagSet)
+	opts.AddFlags(pFlagSet)
+	pFlagSet.AddGoFlagSet(goFlagSet)
+
+	return opts, pFlagSet
+}
+
+func compareOptions(t *testing.T, expected, actual *Options) {
+	t.Helper()
+
+	assertEqual := func(name string, expected, actual any) {
+		require.Equal(t, expected, actual,
+			"expected %v to be %v but got %v", name, expected, actual)
+	}
+	assertSlice := func(name string, expected, actual []string) {
+		ok, missing, extra := compareSlices(expected, actual)
+		require.True(t, ok,
+			"%s mismatch:\nexpected: %v\ngot: %v\nextra: %v\nmissing: %v",
+			name, expected, actual, extra, missing)
+	}
+
+	assertEqual(port, expected.Port, actual.Port)
+	assertEqual(vllmPort, expected.vllmPort, actual.vllmPort)
+	assertEqual(dataParallelSize, expected.DataParallelSize, actual.DataParallelSize)
+	assertEqual(maxIdleConnsPerHost, expected.MaxIdleConnsPerHost, actual.MaxIdleConnsPerHost)
+
+	assertEqual(kvConnector, expected.KVConnector, actual.KVConnector)
+	assertEqual(ecConnector, expected.ECConnector, actual.ECConnector)
+
+	assertEqual(enableSSRFProtection, expected.EnableSSRFProtection, actual.EnableSSRFProtection)
+	assertEqual(enablePrefillerSampling, expected.EnablePrefillerSampling, actual.EnablePrefillerSampling)
+
+	assertEqual(prefillerUseTLS, expected.UseTLSForPrefiller, actual.UseTLSForPrefiller)
+	assertEqual(decoderUseTLS, expected.UseTLSForDecoder, actual.UseTLSForDecoder)
+	assertEqual(encoderUseTLS, expected.UseTLSForEncoder, actual.UseTLSForEncoder)
+
+	assertEqual(prefillerTLSInsecureSkipVerify, expected.InsecureSkipVerifyForPrefiller, actual.InsecureSkipVerifyForPrefiller)
+	assertEqual(decoderTLSInsecureSkipVerify, expected.InsecureSkipVerifyForDecoder, actual.InsecureSkipVerifyForDecoder)
+	assertEqual("InsecureSkipVerifyForEncoder", expected.InsecureSkipVerifyForEncoder, actual.InsecureSkipVerifyForEncoder)
+
+	assertSlice(enableTLS, expected.enableTLS, actual.enableTLS)
+	assertSlice(tlsInsecureSkipVerify, expected.tlsInsecureSkipVerify, actual.tlsInsecureSkipVerify)
+
+	assertEqual(certPath, expected.CertPath, actual.CertPath)
+	assertEqual(secureServing, expected.SecureServing, actual.SecureServing)
+
+	assertEqual(inferencePool, expected.inferencePool, actual.inferencePool)
+	assertEqual(inferencePoolNamespace, expected.InferencePoolNamespace, actual.InferencePoolNamespace)
+	assertEqual(inferencePoolName, expected.InferencePoolName, actual.InferencePoolName)
+	assertEqual(poolGroup, expected.PoolGroup, actual.PoolGroup)
+
+	assertEqual(inlineConfiguration, expected.inlineConfiguration, actual.inlineConfiguration)
+	assertEqual(configurationFile, expected.fileConfiguration, actual.fileConfiguration)
+
+	assertEqual("decoderURL", calculateURL(t, expected.UseTLSForDecoder, expected.vllmPort), actual.DecoderURL)
+}
+
+// setEnv sets environment variables for testing and ensures they are cleaned up after the test finishes
+func setEnv(t *testing.T, env map[string]any) {
+	t.Helper()
+	for k, v := range env {
+		switch val := v.(type) {
+		case string:
+			t.Setenv(k, val)
+		case bool:
+			t.Setenv(k, strconv.FormatBool(val))
+		case int:
+			t.Setenv(k, strconv.Itoa(val))
+		default:
+			require.FailNow(t, "unsupported env var type", "key=%s type=%T", k, v)
+		}
+	}
+}
+
+// setFlag sets command-line flags for testing and fails the test if the flag name is unknown or if the value type is unsupported
+func setFlag(t *testing.T, fs *pflag.FlagSet, name string, value any) {
+	t.Helper()
+	if fs.Lookup(name) == nil {
+		require.FailNow(t, "unknown flag", "flag=%s", name)
+	}
+	switch v := value.(type) {
+	case string:
+		require.NoError(t, fs.Set(name, v))
+	case int:
+		require.NoError(t, fs.Set(name, strconv.Itoa(v)))
+	case float64:
+		require.NoError(t, fs.Set(name, fmt.Sprintf("%v", v)))
+	case bool:
+		require.NoError(t, fs.Set(name, strconv.FormatBool(v)))
+	case *string:
+		require.NoError(t, fs.Set(name, *v))
+	case *[]string:
+		require.NoError(t, fs.Set(name, strings.Join(*v, ",")))
+	case []string:
+		require.NoError(t, fs.Set(name, strings.Join(v, ",")))
+	default:
+		require.FailNow(t, "unsupported flag type", "flag=%s type=%T", name, value)
+	}
+}
+
+// calculateURL calculates decoder URL
+func calculateURL(t *testing.T, useTLSForDecoder bool, vllmport string) *url.URL {
+	expectedScheme := "http"
+	if useTLSForDecoder {
+		expectedScheme = schemeHTTPS
+	}
+	expectedURL, err := url.Parse(expectedScheme + "://localhost:" + vllmport)
+	require.NoError(t, err)
+	return expectedURL
+}
+
+// compareSlices returns:
+// 1. true when two slices contain same elements irrespective of order
+// 2. false when two slices contain different elements and
+// - what elements are missing in `got` slice compared to `expected` slice
+// - what elements are extra in `got` slice compared to `expected` slice
+func compareSlices(expected, got []string) (bool, []string, []string) {
+	temp := make(map[string]int)
+	var missing []string
+	var extra []string
+	if len(expected) == 0 && len(got) == 0 {
+		return true, nil, nil
+	}
+	for _, v := range expected {
+		temp[v]++
+	}
+	for _, v := range got {
+		temp[v]--
+	}
+	for k, v := range temp {
+		if v > 0 {
+			for i := 0; i < v; i++ {
+				missing = append(missing, k)
+			}
+		} else if v < 0 {
+			for i := 0; i < -v; i++ {
+				extra = append(extra, k)
+			}
+		}
+	}
+	return len(missing) == 0 && len(extra) == 0, missing, extra
+}
 
 func TestNewOptionsWithEnvVars(t *testing.T) {
 	// Set environment variables - t.Setenv automatically handles cleanup

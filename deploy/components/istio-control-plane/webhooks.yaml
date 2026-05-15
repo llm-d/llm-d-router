@@ -3,75 +3,84 @@ kind: ValidatingWebhookConfiguration
 metadata:
   labels:
     app: istiod
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
     istio: istiod
     istio.io/rev: llm-d-gateway
     release: istio
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
   name: istio-validator-llm-d-gateway-llm-d-istio-system
 webhooks:
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: istiod-llm-d-gateway
-      namespace: llm-d-istio-system
-      path: /validate
-  failurePolicy: Ignore
-  name: rev.validation.istio.io
-  objectSelector:
-    matchExpressions:
-    - key: istio.io/rev
-      operator: In
-      values:
-      - llm-d-gateway
-  rules:
-  - apiGroups:
-    - security.istio.io
-    - networking.istio.io
-    - telemetry.istio.io
-    - extensions.istio.io
-    apiVersions:
-    - '*'
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - '*'
-  sideEffects: None
-
+  # Webhook handling per-revision validation. Mostly here so we can determine whether webhooks
+  # are rejecting invalid configs on a per-revision basis.
+  - name: rev.validation.istio.io
+    clientConfig:
+      # Should change from base but cannot for API compat
+      service:
+        name: istiod-llm-d-gateway
+        namespace: llm-d-istio-system
+        path: "/validate"
+    rules:
+      - operations:
+          - CREATE
+          - UPDATE
+        apiGroups:
+          - security.istio.io
+          - networking.istio.io
+          - telemetry.istio.io
+          - extensions.istio.io
+        apiVersions:
+          - "*"
+        resources:
+          - "*"
+    # Fail open until the validation webhook is ready. The webhook controller
+    # will update this to `Fail` and patch in the `caBundle` when the webhook
+    # endpoint is ready.
+    failurePolicy: Ignore
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    objectSelector:
+      matchExpressions:
+        - key: istio.io/rev
+          operator: In
+          values:
+          - "llm-d-gateway"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
   labels:
-    app: sidecar-injector
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
     install.operator.istio.io/owning-resource: unknown
-    istio.io/rev: llm-d-gateway
-    operator.istio.io/component: Pilot
+    operator.istio.io/component: "Pilot"
+    app: sidecar-injector
     release: istio
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
   name: istio-sidecar-injector-llm-d-gateway-llm-d-istio-system
 webhooks:
-- admissionReviewVersions:
-  - v1
+- name: rev.namespace.sidecar-injector.istio.io
   clientConfig:
     service:
       name: istiod-llm-d-gateway
       namespace: llm-d-istio-system
-      path: /inject
+      path: "/inject"
       port: 443
+  sideEffects: None
+  rules:
+  - operations: [ "CREATE" ]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
   failurePolicy: Fail
-  name: rev.namespace.sidecar-injector.istio.io
+  reinvocationPolicy: "Never"
+  admissionReviewVersions: ["v1"]
   namespaceSelector:
     matchExpressions:
     - key: istio.io/rev
@@ -86,27 +95,22 @@ webhooks:
       operator: NotIn
       values:
       - "false"
-  reinvocationPolicy: Never
-  rules:
-  - apiGroups:
-    - ""
-    apiVersions:
-    - v1
-    operations:
-    - CREATE
-    resources:
-    - pods
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
+- name: rev.object.sidecar-injector.istio.io
   clientConfig:
     service:
       name: istiod-llm-d-gateway
       namespace: llm-d-istio-system
-      path: /inject
+      path: "/inject"
       port: 443
+  sideEffects: None
+  rules:
+  - operations: [ "CREATE" ]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
   failurePolicy: Fail
-  name: rev.object.sidecar-injector.istio.io
+  reinvocationPolicy: "Never"
+  admissionReviewVersions: ["v1"]
   namespaceSelector:
     matchExpressions:
     - key: istio.io/rev
@@ -123,27 +127,22 @@ webhooks:
       operator: In
       values:
       - llm-d-gateway
-  reinvocationPolicy: Never
-  rules:
-  - apiGroups:
-    - ""
-    apiVersions:
-    - v1
-    operations:
-    - CREATE
-    resources:
-    - pods
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
+- name: namespace.sidecar-injector.istio.io
   clientConfig:
     service:
       name: istiod-llm-d-gateway
       namespace: llm-d-istio-system
-      path: /inject
+      path: "/inject"
       port: 443
+  sideEffects: None
+  rules:
+  - operations: [ "CREATE" ]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
   failurePolicy: Fail
-  name: namespace.sidecar-injector.istio.io
+  reinvocationPolicy: "Never"
+  admissionReviewVersions: ["v1"]
   namespaceSelector:
     matchExpressions:
     - key: istio-injection
@@ -156,27 +155,22 @@ webhooks:
       operator: NotIn
       values:
       - "false"
-  reinvocationPolicy: Never
-  rules:
-  - apiGroups:
-    - ""
-    apiVersions:
-    - v1
-    operations:
-    - CREATE
-    resources:
-    - pods
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
+- name: object.sidecar-injector.istio.io
   clientConfig:
     service:
       name: istiod-llm-d-gateway
       namespace: llm-d-istio-system
-      path: /inject
+      path: "/inject"
       port: 443
+  sideEffects: None
+  rules:
+  - operations: [ "CREATE" ]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
   failurePolicy: Fail
-  name: object.sidecar-injector.istio.io
+  reinvocationPolicy: "Never"
+  admissionReviewVersions: ["v1"]
   namespaceSelector:
     matchExpressions:
     - key: istio-injection
@@ -191,15 +185,4 @@ webhooks:
       - "true"
     - key: istio.io/rev
       operator: DoesNotExist
-  reinvocationPolicy: Never
-  rules:
-  - apiGroups:
-    - ""
-    apiVersions:
-    - v1
-    operations:
-    - CREATE
-    resources:
-    - pods
-  sideEffects: None
 

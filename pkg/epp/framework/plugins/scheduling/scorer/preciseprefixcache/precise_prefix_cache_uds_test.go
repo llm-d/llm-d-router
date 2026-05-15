@@ -3,11 +3,11 @@ package preciseprefixcache
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
@@ -39,8 +39,14 @@ func createUDSTokenizer(t *testing.T, model string) *tokenization.UdsTokenizer {
 	return udsTokenizer
 }
 
-// TestPrefixCacheTracking_Score_UDS tests the prefix cache scoring with UDS tokenizer.
-// This test requires a running UDS tokenizer sidecar.
+// TestPrefixCacheTracking_Score_UDS exercises the full precise scorer end-to-end
+// against a real UDS tokenizer: tokenize a prompt, populate the kvblock.Index
+// with synthetic per-pod cache entries, then verify Score() emits absolute
+// `matched_blocks / total_blocks` per pod. Skipped without a UDS socket.
+//
+// Per-subcase expected values are computed dynamically from the matched chunk
+// counts and the actual chunk count produced by the tokenizer, so the test
+// stays correct if tokenization output changes.
 func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 	skipIfNoUDSTokenizer(t)
 
@@ -49,12 +55,18 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 		"He lay on his armour-like back, and if he lifted his head a little he could see his brown belly, " +
 		"slightly domed and divided by arches into stiff sections."
 
+	// kvBlockData populates the index for the request and reports the total
+	// chunk count, which is the absolute-normalization denominator.
+	type populateFn func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+		blockData map[kvblock.BlockHash][]kvblock.PodEntry, totalChunks int)
+
 	testcases := []struct {
-		name                string
-		endpoints           []scheduling.Endpoint
-		request             *scheduling.InferenceRequest
-		kvBlockData         func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) map[kvblock.BlockHash][]kvblock.PodEntry
-		wantScoresByAddress map[string]float64
+		name        string
+		endpoints   []scheduling.Endpoint
+		request     *scheduling.InferenceRequest
+		populate    populateFn
+		wantEmpty   bool           // Score returned no entries (nil or empty body)
+		wantMatched map[string]int // matched chunks per pod under longest-prefix; expected = matched / totalChunks
 	}{
 		{
 			name: "nil request",
@@ -64,12 +76,10 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
 						Address:        "10.0.0.1",
 						Port:           "8080",
-					},
-					nil,
-					nil,
+					}, nil, nil,
 				),
 			},
-			wantScoresByAddress: map[string]float64{}, // empty map
+			wantEmpty: true,
 		},
 		{
 			name: "empty request body",
@@ -79,9 +89,7 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
 						Address:        "10.0.0.1",
 						Port:           "8080",
-					},
-					nil,
-					nil,
+					}, nil, nil,
 				),
 			},
 			request: &scheduling.InferenceRequest{
@@ -89,7 +97,7 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 				TargetModel: "test-model",
 				Body:        nil,
 			},
-			wantScoresByAddress: map[string]float64{}, // empty map
+			wantEmpty: true,
 		},
 		{
 			name: "longest prefix scorer (default scorer)",
@@ -99,33 +107,21 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
 						Address:        "10.0.0.1",
 						Port:           "8080",
-					},
-					&fwkdl.Metrics{
-						WaitingQueueSize: 0,
-					},
-					nil,
+					}, &fwkdl.Metrics{WaitingQueueSize: 0}, nil,
 				),
 				scheduling.NewEndpoint(
 					&fwkdl.EndpointMetadata{
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
 						Address:        "10.0.0.2",
 						Port:           "8080",
-					},
-					&fwkdl.Metrics{
-						WaitingQueueSize: 1,
-					},
-					nil,
+					}, &fwkdl.Metrics{WaitingQueueSize: 1}, nil,
 				),
 				scheduling.NewEndpoint(
 					&fwkdl.EndpointMetadata{
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-c"},
 						Address:        "10.0.0.3",
 						Port:           "8080",
-					},
-					&fwkdl.Metrics{
-						WaitingQueueSize: 2,
-					},
-					nil,
+					}, &fwkdl.Metrics{WaitingQueueSize: 2}, nil,
 				),
 			},
 			request: &scheduling.InferenceRequest{
@@ -137,13 +133,13 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 					},
 				},
 			},
-			kvBlockData: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) map[kvblock.BlockHash][]kvblock.PodEntry {
+			populate: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+				map[kvblock.BlockHash][]kvblock.PodEntry, int) {
 				require.NotNil(t, req.Completions, "req expected to use Completions API")
 
 				udsTokenizer := createUDSTokenizer(t, model)
 				defer func() {
-					err := udsTokenizer.Close()
-					require.NoError(t, err)
+					require.NoError(t, udsTokenizer.Close())
 				}()
 
 				tokens, _, err := udsTokenizer.Render(req.Completions.Prompt.Raw)
@@ -153,7 +149,6 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 				require.NoError(t, err)
 				chunkKeys, err := tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, model, nil)
 				require.NoError(t, err)
-
 				require.GreaterOrEqual(t, len(chunkKeys), 3, "Need at least 3 chunks for test")
 
 				return map[kvblock.BlockHash][]kvblock.PodEntry{
@@ -169,12 +164,14 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 					chunkKeys[2]: {
 						{PodIdentifier: "10.0.0.1:8080"},
 					},
-				}
+				}, len(chunkKeys)
 			},
-			wantScoresByAddress: map[string]float64{
-				"10.0.0.1:8080": 1.0, // 3 chunks -> (3-1)/(3-1) = 1.0
-				"10.0.0.2:8080": 0.5, // 2 chunks -> (2-1)/(3-1) = 0.5
-				"10.0.0.3:8080": 0.0, // 1 chunk -> (1-1)/(3-1) = 0.0
+			// pod-a has all 3 leading chunks; pod-b 2; pod-c 1. Absolute norm
+			// scales each by 1/totalChunks (computed at assert time).
+			wantMatched: map[string]int{
+				"10.0.0.1:8080": 3,
+				"10.0.0.2:8080": 2,
+				"10.0.0.3:8080": 1,
 			},
 		},
 		{
@@ -185,22 +182,14 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
 						Address:        "10.0.0.1",
 						Port:           "8080",
-					},
-					&fwkdl.Metrics{
-						WaitingQueueSize: 0,
-					},
-					nil,
+					}, &fwkdl.Metrics{WaitingQueueSize: 0}, nil,
 				),
 				scheduling.NewEndpoint(
 					&fwkdl.EndpointMetadata{
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
 						Address:        "10.0.0.2",
 						Port:           "8080",
-					},
-					&fwkdl.Metrics{
-						WaitingQueueSize: 1,
-					},
-					nil,
+					}, &fwkdl.Metrics{WaitingQueueSize: 1}, nil,
 				),
 			},
 			request: &scheduling.InferenceRequest{
@@ -211,26 +200,17 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						ChatTemplate: `{% for message in messages %}{{ message.role }}: {{ message.content }}
 		{% endfor %}`,
 						Messages: []fwkrh.Message{
-							{
-								Role:    "user",
-								Content: fwkrh.Content{Raw: "Hello, how are you?"},
-							},
-							{
-								Role:    "assistant",
-								Content: fwkrh.Content{Raw: "I'm doing well, thank you for asking!"},
-							},
-							{
-								Role:    "user",
-								Content: fwkrh.Content{Raw: "Can you help me with a question about prefix caching in LLM inference?"},
-							},
+							{Role: "user", Content: fwkrh.Content{Raw: "Hello, how are you?"}},
+							{Role: "assistant", Content: fwkrh.Content{Raw: "I'm doing well, thank you for asking!"}},
+							{Role: "user", Content: fwkrh.Content{Raw: "Can you help me with a question about prefix caching in LLM inference?"}},
 						},
 					},
 				},
 			},
-			kvBlockData: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) map[kvblock.BlockHash][]kvblock.PodEntry {
+			populate: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+				map[kvblock.BlockHash][]kvblock.PodEntry, int) {
 				require.NotNil(t, req.ChatCompletions, "req expected to use ChatCompletions API")
 
-				// convert to types format
 				conversations := make([]types.Conversation, 0, len(req.ChatCompletions.Messages))
 				for _, msg := range req.ChatCompletions.Messages {
 					conversations = append(conversations, types.Conversation{
@@ -241,11 +221,9 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 
 				udsTokenizer := createUDSTokenizer(t, model)
 				defer func() {
-					err := udsTokenizer.Close()
-					require.NoError(t, err)
+					require.NoError(t, udsTokenizer.Close())
 				}()
 
-				// render the chat template using UDS tokenizer
 				renderReq := &types.RenderChatRequest{
 					Conversation: conversations,
 					ChatTemplate: req.ChatCompletions.ChatTemplate,
@@ -257,10 +235,8 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 				require.NoError(t, err)
 				chunkKeys, err := tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, model, nil)
 				require.NoError(t, err)
-
 				require.GreaterOrEqual(t, len(chunkKeys), 2, "Need at least 2 chunks for test")
 
-				// pod-a has both chunks, pod-b has only the first
 				return map[kvblock.BlockHash][]kvblock.PodEntry{
 					chunkKeys[0]: {
 						{PodIdentifier: "10.0.0.1:8080"},
@@ -269,11 +245,11 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 					chunkKeys[1]: {
 						{PodIdentifier: "10.0.0.1:8080"},
 					},
-				}
+				}, len(chunkKeys)
 			},
-			wantScoresByAddress: map[string]float64{
-				"10.0.0.1:8080": 1.0, // 2 chunks -> (2-1)/(2-1) = 1.0
-				"10.0.0.2:8080": 0.0, // 1 chunk -> (1-1)/(2-1) = 0.0
+			wantMatched: map[string]int{
+				"10.0.0.1:8080": 2,
+				"10.0.0.2:8080": 1,
 			},
 		},
 		{
@@ -284,33 +260,21 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
 						Address:        "10.0.0.1",
 						Port:           "8080",
-					},
-					&fwkdl.Metrics{
-						WaitingQueueSize: 0,
-					},
-					nil,
+					}, &fwkdl.Metrics{WaitingQueueSize: 0}, nil,
 				),
 				scheduling.NewEndpoint(
 					&fwkdl.EndpointMetadata{
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
 						Address:        "10.0.0.2",
 						Port:           "8080",
-					},
-					&fwkdl.Metrics{
-						WaitingQueueSize: 1,
-					},
-					nil,
+					}, &fwkdl.Metrics{WaitingQueueSize: 1}, nil,
 				),
 				scheduling.NewEndpoint(
 					&fwkdl.EndpointMetadata{
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-c"},
 						Address:        "10.0.0.3",
 						Port:           "8080",
-					},
-					&fwkdl.Metrics{
-						WaitingQueueSize: 2,
-					},
-					nil,
+					}, &fwkdl.Metrics{WaitingQueueSize: 2}, nil,
 				),
 			},
 			request: &scheduling.InferenceRequest{
@@ -322,13 +286,13 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 					},
 				},
 			},
-			kvBlockData: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) map[kvblock.BlockHash][]kvblock.PodEntry {
+			populate: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+				map[kvblock.BlockHash][]kvblock.PodEntry, int) {
 				require.NotNil(t, req.Completions, "req expected to use Completions API")
 
 				udsTokenizer := createUDSTokenizer(t, model)
 				defer func() {
-					err := udsTokenizer.Close()
-					require.NoError(t, err)
+					require.NoError(t, udsTokenizer.Close())
 				}()
 
 				tokens, _, err := udsTokenizer.Render(req.Completions.Prompt.Raw)
@@ -338,13 +302,14 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 				require.NoError(t, err)
 				chunkKeys, err := tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, model, nil)
 				require.NoError(t, err)
-
 				require.GreaterOrEqual(t, len(chunkKeys), 3, "Need at least 3 chunks for test")
 
-				// Test partial prefix cache scenario:
-				// - chunk0: all endpoints (common prefix start)
-				// - chunk1: only pod-a (creates a gap for pod-b and pod-c)
-				// - chunk2: pod-a and pod-b (pod-b has this but missing chunk1)
+				// Partial-prefix scenario:
+				//   chunk0: all three pods
+				//   chunk1: only pod-a (gap for pod-b and pod-c)
+				//   chunk2: pod-a and pod-b (pod-b has it but is missing chunk1)
+				// Longest contiguous prefix:
+				//   pod-a: 3, pod-b: 1 (stops at gap), pod-c: 1
 				return map[kvblock.BlockHash][]kvblock.PodEntry{
 					chunkKeys[0]: {
 						{PodIdentifier: "10.0.0.1:8080"},
@@ -352,21 +317,18 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						{PodIdentifier: "10.0.0.3:8080"},
 					},
 					chunkKeys[1]: {
-						{PodIdentifier: "10.0.0.1:8080"}, // only pod-a has chunk1
+						{PodIdentifier: "10.0.0.1:8080"},
 					},
 					chunkKeys[2]: {
 						{PodIdentifier: "10.0.0.1:8080"},
-						{PodIdentifier: "10.0.0.2:8080"}, // pod-b has chunk2 but missing chunk1
+						{PodIdentifier: "10.0.0.2:8080"},
 					},
-				}
+				}, len(chunkKeys)
 			},
-			wantScoresByAddress: map[string]float64{
-				// pod-a: 3 chunks contiguously -> (3-1)/(3-1) = 1.0
-				// pod-b: prefix breaks at chunk1 (has 0,2 but not 1) -> only 1 chunk counted -> (1-1)/(3-1) = 0.0
-				// pod-c: only chunk 0 -> (1-1)/(3-1) = 0.0
-				"10.0.0.1:8080": 1.0,
-				"10.0.0.2:8080": 0.0,
-				"10.0.0.3:8080": 0.0,
+			wantMatched: map[string]int{
+				"10.0.0.1:8080": 3,
+				"10.0.0.2:8080": 1,
+				"10.0.0.3:8080": 1,
 			},
 		},
 		{
@@ -377,11 +339,7 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
 						Address:        "10.0.0.1",
 						Port:           "8080",
-					},
-					&fwkdl.Metrics{
-						WaitingQueueSize: 0,
-					},
-					nil,
+					}, &fwkdl.Metrics{WaitingQueueSize: 0}, nil,
 				),
 			},
 			request: &scheduling.InferenceRequest{
@@ -393,13 +351,13 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 					},
 				},
 			},
-			kvBlockData: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) map[kvblock.BlockHash][]kvblock.PodEntry {
+			populate: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+				map[kvblock.BlockHash][]kvblock.PodEntry, int) {
 				require.NotNil(t, req.Completions, "req expected to use Completions API")
 
 				udsTokenizer := createUDSTokenizer(t, model)
 				defer func() {
-					err := udsTokenizer.Close()
-					require.NoError(t, err)
+					require.NoError(t, udsTokenizer.Close())
 				}()
 
 				tokens, _, err := udsTokenizer.Render(req.Completions.Prompt.Raw)
@@ -409,22 +367,19 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 				require.NoError(t, err)
 				chunkKeys, err := tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, model, nil)
 				require.NoError(t, err)
-
 				require.GreaterOrEqual(t, len(chunkKeys), 2, "Need at least 2 chunks for test")
 
-				// Single endpoint has 2 chunks cached
+				// pod-a has the leading 2 chunks cached.
 				return map[kvblock.BlockHash][]kvblock.PodEntry{
-					chunkKeys[0]: {
-						{PodIdentifier: "10.0.0.1:8080"},
-					},
-					chunkKeys[1]: {
-						{PodIdentifier: "10.0.0.1:8080"},
-					},
-				}
+					chunkKeys[0]: {{PodIdentifier: "10.0.0.1:8080"}},
+					chunkKeys[1]: {{PodIdentifier: "10.0.0.1:8080"}},
+				}, len(chunkKeys)
 			},
-			wantScoresByAddress: map[string]float64{
-				// with only one endpoint, minScore == maxScore, so normalization returns 1.0
-				"10.0.0.1:8080": 1.0,
+			// Note: under absolute normalization, a single endpoint with 2/N
+			// matched chunks scores 2/N — not 1.0 (the previous min-max default
+			// when min==max).
+			wantMatched: map[string]int{
+				"10.0.0.1:8080": 2,
 			},
 		},
 		{
@@ -435,27 +390,21 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
 						Address:        "10.0.0.1",
 						Port:           "8080",
-					},
-					nil,
-					nil,
+					}, nil, nil,
 				),
 				scheduling.NewEndpoint(
 					&fwkdl.EndpointMetadata{
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
 						Address:        "10.0.0.2",
 						Port:           "8080",
-					},
-					nil,
-					nil,
+					}, nil, nil,
 				),
 				scheduling.NewEndpoint(
 					&fwkdl.EndpointMetadata{
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-c"},
 						Address:        "10.0.0.3",
 						Port:           "8080",
-					},
-					nil,
-					nil,
+					}, nil, nil,
 				),
 			},
 			request: &scheduling.InferenceRequest{
@@ -467,12 +416,12 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 					},
 				},
 			},
-			kvBlockData: nil, // no cached data
-			wantScoresByAddress: map[string]float64{
-				// when no endpoints have any cache hits, all should get equal scores (0.0)
-				"10.0.0.1:8080": 0.0,
-				"10.0.0.2:8080": 0.0,
-				"10.0.0.3:8080": 0.0,
+			// nil populate: no kvBlockData written, all pods score 0.0 under
+			// absolute normalization (cold-cluster behavior).
+			wantMatched: map[string]int{
+				"10.0.0.1:8080": 0,
+				"10.0.0.2:8080": 0,
+				"10.0.0.3:8080": 0,
 			},
 		},
 		{
@@ -483,27 +432,21 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
 						Address:        "10.0.0.1",
 						Port:           "8080",
-					},
-					nil,
-					nil,
+					}, nil, nil,
 				),
 				scheduling.NewEndpoint(
 					&fwkdl.EndpointMetadata{
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
 						Address:        "10.0.0.2",
 						Port:           "8080",
-					},
-					nil,
-					nil,
+					}, nil, nil,
 				),
 				scheduling.NewEndpoint(
 					&fwkdl.EndpointMetadata{
 						NamespacedName: k8stypes.NamespacedName{Name: "pod-c"},
 						Address:        "10.0.0.3",
 						Port:           "8080",
-					},
-					nil,
-					nil,
+					}, nil, nil,
 				),
 			},
 			request: &scheduling.InferenceRequest{
@@ -515,13 +458,13 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 					},
 				},
 			},
-			kvBlockData: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) map[kvblock.BlockHash][]kvblock.PodEntry {
+			populate: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+				map[kvblock.BlockHash][]kvblock.PodEntry, int) {
 				require.NotNil(t, req.Completions, "req expected to use Completions API")
 
 				udsTokenizer := createUDSTokenizer(t, model)
 				defer func() {
-					err := udsTokenizer.Close()
-					require.NoError(t, err)
+					require.NoError(t, udsTokenizer.Close())
 				}()
 
 				tokens, _, err := udsTokenizer.Render(req.Completions.Prompt.Raw)
@@ -531,10 +474,8 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 				require.NoError(t, err)
 				chunkKeys, err := tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, model, nil)
 				require.NoError(t, err)
-
 				require.GreaterOrEqual(t, len(chunkKeys), 2, "Need at least 2 chunks for test")
 
-				// all endpoints have the same 2 chunks cached
 				return map[kvblock.BlockHash][]kvblock.PodEntry{
 					chunkKeys[0]: {
 						{PodIdentifier: "10.0.0.1:8080"},
@@ -546,14 +487,15 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 						{PodIdentifier: "10.0.0.2:8080"},
 						{PodIdentifier: "10.0.0.3:8080"},
 					},
-				}
+				}, len(chunkKeys)
 			},
-			wantScoresByAddress: map[string]float64{
-				// when all endpoints have equal cache (minScore == maxScore), the implementation
-				// returns 1.0 for all endpoints to avoid division by zero
-				"10.0.0.1:8080": 1.0,
-				"10.0.0.2:8080": 1.0,
-				"10.0.0.3:8080": 1.0,
+			// Note: under absolute normalization, all-equal coverage no longer
+			// returns 1.0 for everyone (the prior min==max default). It returns
+			// 2/N for everyone — the actual coverage fraction.
+			wantMatched: map[string]int{
+				"10.0.0.1:8080": 2,
+				"10.0.0.2:8080": 2,
+				"10.0.0.3:8080": 2,
 			},
 		},
 	}
@@ -564,7 +506,6 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 
 			kvcacheConfig, err := kvcache.NewDefaultConfig()
 			require.NoError(t, err)
-
 			// Configure UDS tokenizer
 			//nolint:staticcheck // SA1019: exercising the legacy in-indexer tokenization path.
 			kvcacheConfig.TokenizersPoolConfig = &tokenization.Config{
@@ -582,13 +523,17 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, prefixCacheScorer)
 
-			// populate the kvblock.Index with test data
-			if tt.kvBlockData != nil && tt.request != nil && tt.request.Body != nil {
+			// Populate the index and capture the chunk count for absolute-norm
+			// expected-value computation.
+			totalChunks := 0
+			if tt.populate != nil && tt.request != nil && tt.request.Body != nil {
 				kvBlockIndex := prefixCacheScorer.kvCacheIndexer.KVBlockIndex()
-				blockData := tt.kvBlockData(t, tt.request.Body, tt.request.TargetModel)
+				blockData, n := tt.populate(t, tt.request.Body, tt.request.TargetModel)
+				totalChunks = n
 				for key, entries := range blockData {
-					err := kvBlockIndex.Add(ctx, []kvblock.BlockHash{kvblock.EmptyBlockHash}, []kvblock.BlockHash{key}, entries)
-					require.NoError(t, err)
+					require.NoError(t, kvBlockIndex.Add(ctx,
+						[]kvblock.BlockHash{kvblock.EmptyBlockHash},
+						[]kvblock.BlockHash{key}, entries))
 				}
 			}
 
@@ -596,14 +541,38 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 
 			gotByAddress := make(map[string]float64)
 			for endpoint, score := range got {
-				if endpoint.GetMetadata() != nil {
-					m := endpoint.GetMetadata()
+				if m := endpoint.GetMetadata(); m != nil {
 					gotByAddress[fmt.Sprintf("%s:%s", m.Address, m.Port)] = score
 				}
 			}
 
-			if diff := cmp.Diff(tt.wantScoresByAddress, gotByAddress); diff != "" {
-				t.Errorf("Unexpected output (-want +got): %v", diff)
+			if tt.wantEmpty {
+				require.Empty(t, gotByAddress, "expected Score to return no entries")
+				return
+			}
+
+			// Build expected = matched / totalChunks (absolute normalization).
+			// totalChunks==0 means cold cluster — every pod scores 0.0.
+			wantByAddress := make(map[string]float64, len(tt.wantMatched))
+			for _, ep := range tt.endpoints {
+				m := ep.GetMetadata()
+				addr := fmt.Sprintf("%s:%s", m.Address, m.Port)
+				matched := tt.wantMatched[addr]
+				if totalChunks <= 0 || matched <= 0 {
+					wantByAddress[addr] = 0.0
+					continue
+				}
+				wantByAddress[addr] = float64(matched) / float64(totalChunks)
+			}
+
+			require.Equal(t, len(wantByAddress), len(gotByAddress),
+				"unexpected number of scored endpoints: want %v, got %v", wantByAddress, gotByAddress)
+			for addr, want := range wantByAddress {
+				got, ok := gotByAddress[addr]
+				require.True(t, ok, "no score for endpoint %s", addr)
+				require.Lessf(t, math.Abs(want-got), 1e-9,
+					"absolute-norm score mismatch for %s: want %f, got %f (totalChunks=%d, matched=%d)",
+					addr, want, got, totalChunks, tt.wantMatched[addr])
 			}
 		})
 	}

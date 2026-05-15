@@ -70,6 +70,8 @@ To ensure clarity across the project, we use the following standard terminology:
 
 ## Contributing
 
+Start with the [llm-d organization contributing guide][org-contributing] for project-wide guidelines, code of conduct, and community resources.
+
 Our community meeting is bi-weekly at Wednesday 10AM PDT ([Google Meet], [Meeting Notes]).
 
 We currently utilize the [#sig-router] channel in llm-d Slack workspace for communications.
@@ -80,6 +82,7 @@ maintainers can do an assessment, and work on the details with you. See
 
 Contributions are welcome!
 
+[org-contributing]:https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md
 [create an issue]:https://github.com/llm-d/llm-d-inference-scheduler/issues/new
 [discussion]:https://github.com/llm-d/llm-d-inference-scheduler/discussions/new?category=q-a
 [Slack]:https://llm-d.slack.com/

@@ -24,6 +24,30 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 )
 
+// DiscoveryBackendStore is the narrow interface required by NewDiscoveryNotifier.
+// Any store that implements BackendUpsert and BackendDelete satisfies it.
+type DiscoveryBackendStore interface {
+	BackendUpsert(ctx context.Context, meta *EndpointMetadata)
+	BackendDelete(id types.NamespacedName)
+}
+
+// NewDiscoveryNotifier wraps a DiscoveryBackendStore as a DiscoveryNotifier.
+func NewDiscoveryNotifier(store DiscoveryBackendStore) DiscoveryNotifier {
+	return &discoveryNotifier{store: store}
+}
+
+type discoveryNotifier struct {
+	store DiscoveryBackendStore
+}
+
+func (n *discoveryNotifier) Upsert(endpoint *EndpointMetadata) {
+	n.store.BackendUpsert(context.Background(), endpoint)
+}
+
+func (n *discoveryNotifier) Delete(id types.NamespacedName) {
+	n.store.BackendDelete(id)
+}
+
 // EndpointDiscovery discovers inference endpoints and drives their lifecycle in the datastore.
 // Implementations are registered in the plugin registry and selected via
 // EndpointPickerConfig.discovery.pluginRef.
