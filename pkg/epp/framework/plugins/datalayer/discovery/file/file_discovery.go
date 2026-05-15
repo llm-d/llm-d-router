@@ -126,7 +126,14 @@ func (f *FileDiscovery) Start(ctx context.Context, notifier fwkdl.DiscoveryNotif
 			if !ok {
 				return nil
 			}
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
+			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Create) {
+				// Re-attach to the new inode at f.path after atomic rename
+				// (editor safe-write) or ConfigMap symlink swap. Safe to
+				// ignore error: if the file isn't present yet the subsequent
+				// Create event will re-add it.
+				_ = watcher.Add(f.path)
+			}
+			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) {
 				logger.Info("endpoints file changed, reloading")
 				if err := f.load(notifier); err != nil {
 					logger.Error(err, "failed to reload endpoints file")
