@@ -157,7 +157,7 @@ func (p *Producer) PrepareRequestData(ctx context.Context, request *scheduling.I
 	if request != nil && request.RequestID != "" {
 		p.pluginState.Write(request.RequestID, plugin.StateKey(ProducerType), &requestState{items: requestItems})
 	}
-
+	// TODO(#1144): Removal of stale pods should happen in background for better performance.
 	p.removeStalePods()
 	for _, endpoint := range endpoints {
 		metadata := endpoint.GetMetadata()
