@@ -12,8 +12,10 @@ import (
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
+const RenderStepName = "render"
+
 func init() {
-	pipeline.Register("render", NewRenderStep)
+	pipeline.Register(RenderStepName, NewRenderStep)
 }
 
 type RenderStep struct {
@@ -45,7 +47,7 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 	s.serviceAddress = addr
 }
 
-func (s *RenderStep) Name() string { return "render" }
+func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := logging.FromContext(ctx).WithName("render")

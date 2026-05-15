@@ -13,8 +13,10 @@ import (
 	"github.com/llm-d/coordinator/pkg/server"
 )
 
+const DecodeStepName = "decode"
+
 func init() {
-	pipeline.Register("decode", NewDecodeStep)
+	pipeline.Register(DecodeStepName, NewDecodeStep)
 }
 
 type DecodeStep struct {
@@ -35,7 +37,7 @@ func (s *DecodeStep) SetGatewayClient(c *gateway.Client) {
 	s.gwClient = c
 }
 
-func (s *DecodeStep) Name() string { return "decode" }
+func (s *DecodeStep) Name() string { return DecodeStepName }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := logging.FromContext(ctx).WithName("decode")
