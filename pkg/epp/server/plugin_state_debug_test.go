@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2025 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -45,7 +46,16 @@ func (p *stateDebugTestDumper) DumpState() any {
 	return p.state
 }
 
+func withFrozenNow(t *testing.T, fixed time.Time) {
+	t.Helper()
+	prev := nowFunc
+	nowFunc = func() time.Time { return fixed }
+	t.Cleanup(func() { nowFunc = prev })
+}
+
 func TestPluginStateDebugHandlerIncludesDumpers(t *testing.T) {
+	withFrozenNow(t, time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC))
+
 	handle := fwkplugin.NewEppHandle(context.Background(), nil)
 	handle.AddPlugin("skip", &stateDebugTestPlugin{
 		typedName: fwkplugin.TypedName{Type: "skip-type", Name: "skip"},
@@ -66,17 +76,19 @@ func TestPluginStateDebugHandlerIncludesDumpers(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
 	require.JSONEq(t, `{
-		"plugins": [
-			{"name":"a-dumper","type":"test-type","state":{"value":"first"}},
-			{"name":"z-dumper","type":"test-type","state":{"count":2}}
-		]
+		"timestamp": "2025-01-02T03:04:05Z",
+		"plugins": {
+			"a-dumper": {"type":"test-type","state":{"value":"first"}},
+			"z-dumper": {"type":"test-type","state":{"count":2}}
+		}
 	}`, recorder.Body.String())
 
 	var response pluginStateDebugResponse
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
 	require.Len(t, response.Plugins, 2)
-	require.Equal(t, "a-dumper", response.Plugins[0].Name)
-	require.Equal(t, "z-dumper", response.Plugins[1].Name)
+	require.Contains(t, response.Plugins, "a-dumper")
+	require.Contains(t, response.Plugins, "z-dumper")
+	require.NotContains(t, response.Plugins, "skip")
 }
 
 func TestPluginStateDebugHandlerRejectsNonGet(t *testing.T) {

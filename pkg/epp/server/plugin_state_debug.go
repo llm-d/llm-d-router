@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2025 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
+	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -30,12 +30,15 @@ import (
 
 const PluginStateDebugPath = "/debug/plugins/state"
 
+// nowFunc is overridable in tests for deterministic timestamps.
+var nowFunc = time.Now
+
 type pluginStateDebugResponse struct {
-	Plugins []pluginStateDebugEntry `json:"plugins"`
+	Timestamp string                           `json:"timestamp"`
+	Plugins   map[string]pluginStateDebugEntry `json:"plugins"`
 }
 
 type pluginStateDebugEntry struct {
-	Name  string `json:"name"`
 	Type  string `json:"type"`
 	State any    `json:"state"`
 }
@@ -74,17 +77,11 @@ func NewPluginStateDebugHandler(plugins fwkplugin.HandlePlugins) http.Handler {
 
 func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugResponse {
 	allPlugins := plugins.GetAllPluginsWithNames()
-	names := make([]string, 0, len(allPlugins))
-	for name := range allPlugins {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
 	response := pluginStateDebugResponse{
-		Plugins: make([]pluginStateDebugEntry, 0, len(names)),
+		Timestamp: nowFunc().UTC().Format(time.RFC3339Nano),
+		Plugins:   make(map[string]pluginStateDebugEntry, len(allPlugins)),
 	}
-	for _, name := range names {
-		plugin := allPlugins[name]
+	for name, plugin := range allPlugins {
 		if plugin == nil {
 			continue
 		}
@@ -92,13 +89,10 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugRespons
 		if !ok {
 			continue
 		}
-
-		response.Plugins = append(response.Plugins, pluginStateDebugEntry{
-			Name:  name,
+		response.Plugins[name] = pluginStateDebugEntry{
 			Type:  plugin.TypedName().Type,
 			State: dumper.DumpState(),
-		})
+		}
 	}
-
 	return response
 }

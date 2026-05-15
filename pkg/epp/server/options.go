@@ -99,6 +99,7 @@ type Options struct {
 	MetricsPort            int    // The metrics port exposed by EPP. (TODO: uint16)
 	GRPCHealthPort         int    // The port used for gRPC liveness and readiness probes. (TODO: uint16)
 	EnablePprof            bool   // Enables pprof handlers.
+	EnablePluginStateDebug bool   // Enables the /debug/plugins/state handler.
 	CertPath               string // The path to the certificate for secure serving.
 	EnableCertReload       bool   // Enables certificate reloading of the certificates specified in --cert-path.
 	SecureServing          bool   // Enables secure serving.
@@ -136,6 +137,7 @@ func NewOptions() *Options {
 		MetricsPort:                      9090,
 		GRPCHealthPort:                   9003,
 		EnablePprof:                      true,
+		EnablePluginStateDebug:           true,
 		SecureServing:                    true,
 		MetricsEndpointAuth:              true,
 	}
@@ -205,6 +207,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"The port used for gRPC liveness and readiness probes.")
 	fs.BoolVar(&opts.EnablePprof, "enable-pprof", opts.EnablePprof,
 		"Enables pprof handlers. Defaults to true. Set to false to disable pprof handlers.")
+	fs.BoolVar(&opts.EnablePluginStateDebug, "enable-plugin-state-debug", opts.EnablePluginStateDebug,
+		"Enables the /debug/plugins/state handler on the metrics server. Defaults to true.")
 	fs.StringVar(&opts.CertPath, "cert-path", opts.CertPath,
 		"The path to the certificate for secure serving. The certificate and private key files "+
 			"are assumed to be named tls.crt and tls.key, respectively. If not set, and secureServing is enabled, "+
