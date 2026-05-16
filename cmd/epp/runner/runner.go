@@ -158,6 +158,11 @@ type Runner struct {
 	parser               fwkrh.Parser
 	dlRuntime            *datalayer.Runtime
 	PluginHandle         fwkplugin.Handle
+	// rawConfig caches the result of parseConfigurationPhaseOne. Run() peeks at
+	// it to decide between K8s and file-discovery paths; setup() also parses
+	// the same config. Caching avoids re-reading the file, re-registering
+	// plugins/feature gates, and re-emitting the data-layer setup logs.
+	rawConfig *configapi.EndpointPickerConfig
 }
 
 // WithExecutableName sets the name of the executable containing the runner.
@@ -589,6 +594,10 @@ func (r *Runner) registerInTreePlugins() {
 }
 
 func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapi.EndpointPickerConfig, error) {
+	if r.rawConfig != nil {
+		return r.rawConfig, nil
+	}
+
 	logger := log.FromContext(ctx)
 
 	var configBytes []byte
@@ -627,6 +636,7 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 		setupLog.Info("Data layer: ENABLED (default)")
 	}
 
+	r.rawConfig = rawConfig
 	return rawConfig, nil
 }
 
