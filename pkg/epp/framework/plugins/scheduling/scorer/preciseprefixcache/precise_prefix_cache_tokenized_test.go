@@ -123,10 +123,10 @@ func TestScorer_PassesExtraFeaturesToScoreTokens(t *testing.T) {
 	var capturedExtraFeatures []*kvblock.BlockExtraFeatures
 
 	scorer := &Scorer{
-		typedName:       plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: "test"},
-		kvEventsConfig:  &kvevents.Config{},
-		pluginState:     plugin.NewPluginState(ctx),
-		blockSizeTokens: 16,
+		typedName:            plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: "test"},
+		kvEventsConfig:       &kvevents.Config{},
+		pluginState:          plugin.NewPluginState(ctx),
+		tokenProcessorConfig: &kvblock.TokenProcessorConfig{BlockSizeTokens: 16},
 		kvCacheIndexer: &mockKVCacheIndexer{
 			scoreTokensFunc: func(_ context.Context, _ []uint32, _ string, _ []string, extraFeatures []*kvblock.BlockExtraFeatures) (map[string]float64, error) {
 				capturedExtraFeatures = extraFeatures
@@ -160,10 +160,10 @@ func TestScorer_NilExtraFeaturesForTextOnly(t *testing.T) {
 	called := false
 
 	scorer := &Scorer{
-		typedName:       plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: "test"},
-		kvEventsConfig:  &kvevents.Config{},
-		pluginState:     plugin.NewPluginState(ctx),
-		blockSizeTokens: 16,
+		typedName:            plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: "test"},
+		kvEventsConfig:       &kvevents.Config{},
+		pluginState:          plugin.NewPluginState(ctx),
+		tokenProcessorConfig: &kvblock.TokenProcessorConfig{BlockSizeTokens: 16},
 		kvCacheIndexer: &mockKVCacheIndexer{
 			scoreTokensFunc: func(_ context.Context, _ []uint32, _ string, _ []string, extraFeatures []*kvblock.BlockExtraFeatures) (map[string]float64, error) {
 				called = true

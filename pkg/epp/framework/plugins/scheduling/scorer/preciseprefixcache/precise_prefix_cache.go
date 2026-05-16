@@ -244,17 +244,18 @@ func New(ctx context.Context, config PluginConfig) (*Scorer, error) {
 	}
 
 	return &Scorer{
-		typedName:          plugin.TypedName{Type: PrecisePrefixCachePluginType},
-		kvCacheIndexer:     kvCacheIndexer,
-		kvBlockScorer:      kvBlockScorer,
-		subscribersManager: subscribersManager,
-		kvEventsConfig:     config.KVEventsConfig,
-		pluginState:        plugin.NewPluginState(ctx),
-		speculativeCache:   speculativeCache,
-		speculativeTTL:     speculativeTTL,
-		blockSizeTokens:    config.TokenProcessorConfig.BlockSize,
-		speculativeEnabled: config.SpeculativeIndexing,
-		subscriberCtx:      ctx,
+		typedName:            plugin.TypedName{Type: PrecisePrefixCachePluginType},
+		kvCacheIndexer:       kvCacheIndexer,
+		tokenProcessor:       tokenProcessor,
+		kvBlockScorer:        kvBlockScorer,
+		subscribersManager:   subscribersManager,
+		kvEventsConfig:       config.KVEventsConfig,
+		pluginState:          plugin.NewPluginState(ctx),
+		speculativeCache:     speculativeCache,
+		speculativeTTL:       speculativeTTL,
+		tokenProcessorConfig: config.TokenProcessorConfig,
+		speculativeEnabled:   config.SpeculativeIndexing,
+		subscriberCtx:        ctx,
 	}, nil
 }
 
@@ -275,6 +276,7 @@ func New(ctx context.Context, config PluginConfig) (*Scorer, error) {
 type Scorer struct {
 	typedName      plugin.TypedName
 	kvCacheIndexer kvCacheIndexer
+	tokenProcessor kvblock.TokenProcessor
 
 	subscribersManager *kvevents.SubscriberManager
 	kvEventsConfig     *kvevents.Config
@@ -291,9 +293,9 @@ type Scorer struct {
 	// kvBlockScorer scores pods based on block hits with device-backend weights.
 	kvBlockScorer kvcache.KVBlockScorer
 
-	// blockSizeTokens is the number of tokens per KV-block, used for
-	// constructing PrefixCacheMatchInfo in Produce.
-	blockSizeTokens int
+	// tokenProcessorConfig is the config used to construct the token processor.
+	// Guaranteed non-nil by New() (defaults are filled in there).
+	tokenProcessorConfig *kvblock.TokenProcessorConfig
 
 	// speculativeEnabled controls whether speculative indexing is active.
 	speculativeEnabled bool
@@ -690,6 +692,45 @@ func (s *Scorer) ensureSubscribersForEndpoints(ctx context.Context, endpoints []
 	}
 }
 
+func (s *Scorer) GetEngineKeysForRequest(ctx context.Context,
+	request *scheduling.InferenceRequest) ([]uint64, error) {
+	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
+		return nil, nil
+	}
+
+	tp := request.Body.TokenizedPrompt
+	if len(tp.TokenIDs) == 0 {
+		return nil, nil
+	}
+
+	var extraFeatures []*kvblock.BlockExtraFeatures
+	if len(tp.MultiModalFeatures) > 0 {
+		mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(tp.MultiModalFeatures)
+		extraFeatures = kvblock.ComputeBlockExtraFeatures(
+			mmHashes, mmPlaceholders, s.getBlockSizeTokens(), len(tp.TokenIDs))
+	}
+
+	processor := s.tokenProcessor
+	if processor == nil {
+		var err error
+		processor, err = kvblock.NewChunkedTokenDatabase(s.tokenProcessorConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create token processor for engine keys: %w", err)
+		}
+	}
+
+	blockKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tp.TokenIDs, request.TargetModel, extraFeatures)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute engine keys: %w", err)
+	}
+
+	engineKeys := make([]uint64, 0, len(blockKeys))
+	for _, blockKey := range blockKeys {
+		engineKeys = append(engineKeys, uint64(blockKey))
+	}
+	return engineKeys, nil
+}
+
 // --- Internal helper methods ---
 
 // computeBlockKeys extracts block keys from an LLM request. Prefers the
@@ -707,7 +748,7 @@ func (s *Scorer) computeBlockKeys(ctx context.Context,
 		if len(tp.MultiModalFeatures) > 0 {
 			mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(tp.MultiModalFeatures)
 			extraFeatures = kvblock.ComputeBlockExtraFeatures(
-				mmHashes, mmPlaceholders, s.blockSizeTokens, len(tp.TokenIDs))
+				mmHashes, mmPlaceholders, s.getBlockSizeTokens(), len(tp.TokenIDs))
 		}
 		return s.kvCacheIndexer.ComputeBlockKeysFromTokens(ctx, tp.TokenIDs, request.TargetModel, extraFeatures)
 	}
@@ -744,9 +785,9 @@ func extractPodSet(endpoints []scheduling.Endpoint) sets.Set[string] {
 	return podSet
 }
 
-// getBlockSizeTokens returns the block size in tokens from the token processor config.
+// getBlockSizeTokens returns the block size in tokens from the token processor.
 func (s *Scorer) getBlockSizeTokens() int {
-	return s.blockSizeTokens
+	return s.tokenProcessor.BlockSize()
 }
 
 // scoreBlockKeys computes per-pod scores from precomputed block keys, avoiding
@@ -783,7 +824,7 @@ func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, reques
 			if len(tp.MultiModalFeatures) > 0 {
 				mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(tp.MultiModalFeatures)
 				extraFeatures = kvblock.ComputeBlockExtraFeatures(
-					mmHashes, mmPlaceholders, s.blockSizeTokens, len(tp.TokenIDs))
+					mmHashes, mmPlaceholders, s.getBlockSizeTokens(), len(tp.TokenIDs))
 			}
 
 			scores, err := s.kvCacheIndexer.ScoreTokens(ctx, tp.TokenIDs, request.TargetModel, nil, extraFeatures)
@@ -792,8 +833,8 @@ func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, reques
 			}
 			// floor(tokens/blockSize) — trailing partial block is dropped.
 			totalBlocks := 0
-			if s.blockSizeTokens > 0 {
-				totalBlocks = len(tp.TokenIDs) / s.blockSizeTokens
+			if s.getBlockSizeTokens() > 0 {
+				totalBlocks = len(tp.TokenIDs) / s.getBlockSizeTokens()
 			}
 			return scores, totalBlocks, nil
 		}
