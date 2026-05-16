@@ -34,9 +34,10 @@ type Parameters struct {
 	// (pods with request count > idleThreshold). This creates a scoring gap
 	// between idle and busy pods.
 	// Range: 0.0 to 1.0
-	// Default: 1.0 (no gap, current behavior)
+	// Default: 1.0 (no gap, current behavior). Pointer so an unset value is
+	// distinguishable from an explicit 0.0.
 	// Example: 0.5 means idle pods get 1.0, busiest pod gets 0.0, least busy gets 0.5
-	MaxBusyScore float64 `json:"maxBusyScore"`
+	MaxBusyScore *float64 `json:"maxBusyScore,omitempty"`
 }
 
 // endpointScores implements logr.Marshaler to lazily convert endpoint keys
@@ -84,8 +85,12 @@ func NewActiveRequest(ctx context.Context, params *Parameters) *ActiveRequest {
 
 	// Set max busy score (default: 1.0)
 	maxBusyScore := 1.0
-	if params != nil && params.MaxBusyScore >= 0 && params.MaxBusyScore <= 1.0 {
-		maxBusyScore = params.MaxBusyScore
+	if params != nil && params.MaxBusyScore != nil {
+		if *params.MaxBusyScore >= 0 && *params.MaxBusyScore <= 1.0 {
+			maxBusyScore = *params.MaxBusyScore
+		} else {
+			logger.Info("Ignoring out-of-range maxBusyScore; using default 1.0", "provided", *params.MaxBusyScore)
+		}
 	}
 
 	if idleThreshold != 0 || maxBusyScore != 1.0 {
