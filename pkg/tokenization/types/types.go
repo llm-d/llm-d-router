@@ -83,8 +83,9 @@ func (c Content) PlainText() string {
 
 // Conversation represents a single message in a conversation.
 type Conversation struct {
-	Role    string  `json:"role"`
-	Content Content `json:"content"`
+	Role      string        `json:"role"`
+	Content   Content       `json:"content"`
+	ToolCalls []interface{} `json:"tool_calls,omitempty"`
 }
 
 // RenderChatRequest represents the request to render a chat template.

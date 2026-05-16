@@ -72,6 +72,7 @@ message ChatMessage {
   string role = 1;                        // Role of the message (e.g., "user", "assistant", "system")
   optional string content = 2;           // Plain-text content (Content.Raw)
   repeated ContentPart content_parts = 3; // Multimodal content blocks (Content.Structured)
+  optional string tool_calls_json = 4;    // Assistant tool calls, encoded as a JSON array
 }
 
 // ToolDescription represents a description of a tool

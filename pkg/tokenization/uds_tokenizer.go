@@ -295,6 +295,14 @@ func (u *UdsTokenizer) RenderChat(
 	messages := make([]*tokenizerpb.ChatMessage, 0, len(renderReq.Conversation))
 	for _, msg := range renderReq.Conversation {
 		pbMsg := &tokenizerpb.ChatMessage{Role: msg.Role}
+		if len(msg.ToolCalls) > 0 {
+			b, err := json.Marshal(msg.ToolCalls)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to marshal message tool_calls: %w", err)
+			}
+			s := string(b)
+			pbMsg.ToolCallsJson = &s
+		}
 		if len(msg.Content.Structured) > 0 {
 			parts := make([]*tokenizerpb.ContentPart, 0, len(msg.Content.Structured))
 			for _, block := range msg.Content.Structured {

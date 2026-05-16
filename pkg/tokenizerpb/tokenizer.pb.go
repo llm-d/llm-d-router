@@ -431,9 +431,10 @@ func (x *ContentPart) GetImageUrl() *ImageUrl {
 // content_parts for multimodal (image_url blocks). Exactly one should be set.
 type ChatMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Role          string                 `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`                                     // Role of the message (e.g., "user", "assistant", "system")
-	Content       *string                `protobuf:"bytes,2,opt,name=content,proto3,oneof" json:"content,omitempty"`                         // Plain-text content (Content.Raw)
-	ContentParts  []*ContentPart         `protobuf:"bytes,3,rep,name=content_parts,json=contentParts,proto3" json:"content_parts,omitempty"` // Multimodal content blocks (Content.Structured)
+	Role          string                 `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`                                                // Role of the message (e.g., "user", "assistant", "system")
+	Content       *string                `protobuf:"bytes,2,opt,name=content,proto3,oneof" json:"content,omitempty"`                                    // Plain-text content (Content.Raw)
+	ContentParts  []*ContentPart         `protobuf:"bytes,3,rep,name=content_parts,json=contentParts,proto3" json:"content_parts,omitempty"`            // Multimodal content blocks (Content.Structured)
+	ToolCallsJson *string                `protobuf:"bytes,4,opt,name=tool_calls_json,json=toolCallsJson,proto3,oneof" json:"tool_calls_json,omitempty"` // Assistant tool calls, encoded as a JSON array
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -487,6 +488,13 @@ func (x *ChatMessage) GetContentParts() []*ContentPart {
 		return x.ContentParts
 	}
 	return nil
+}
+
+func (x *ChatMessage) GetToolCallsJson() string {
+	if x != nil && x.ToolCallsJson != nil {
+		return *x.ToolCallsJson
+	}
+	return ""
 }
 
 // ToolDescription represents a description of a tool
@@ -1504,13 +1512,15 @@ const file_api_tokenizerpb_tokenizer_proto_rawDesc = "" +
 	"\timage_url\x18\x03 \x01(\v2\x16.tokenization.ImageUrlH\x01R\bimageUrl\x88\x01\x01B\a\n" +
 	"\x05_textB\f\n" +
 	"\n" +
-	"_image_url\"\x8c\x01\n" +
+	"_image_url\"\xcd\x01\n" +
 	"\vChatMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x1d\n" +
 	"\acontent\x18\x02 \x01(\tH\x00R\acontent\x88\x01\x01\x12>\n" +
-	"\rcontent_parts\x18\x03 \x03(\v2\x19.tokenization.ContentPartR\fcontentPartsB\n" +
+	"\rcontent_parts\x18\x03 \x03(\v2\x19.tokenization.ContentPartR\fcontentParts\x12+\n" +
+	"\x0ftool_calls_json\x18\x04 \x01(\tH\x01R\rtoolCallsJson\x88\x01\x01B\n" +
 	"\n" +
-	"\b_content\"\x9c\x01\n" +
+	"\b_contentB\x12\n" +
+	"\x10_tool_calls_json\"\x9c\x01\n" +
 	"\x0fToolDescription\x12;\n" +
 	"\x04tool\x18\x01 \x03(\v2'.tokenization.ToolDescription.ToolEntryR\x04tool\x1aL\n" +
 	"\tToolEntry\x12\x10\n" +
