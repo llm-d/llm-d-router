@@ -1404,3 +1404,26 @@ func TestEndpointDelete_Missing(t *testing.T) {
 		ds.EndpointDelete(types.NamespacedName{Name: "nonexistent", Namespace: "default"})
 	})
 }
+
+func TestDiscoveryNotifier_WorksAlongsideDirectUpsert(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+
+	// Populate one endpoint directly (simulates the K8s reconciler path).
+	directID := types.NamespacedName{Name: "direct-ep", Namespace: "default"}
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: directID, Address: "10.0.0.1"})
+
+	// Add a second endpoint via DiscoveryNotifier (the file-discovery path).
+	notifier := fwkdl.NewDiscoveryNotifier(ds)
+	notifID := types.NamespacedName{Name: "notif-ep", Namespace: "default"}
+	notifier.Upsert(&fwkdl.EndpointMetadata{NamespacedName: notifID, Address: "10.0.0.2"})
+
+	// Both endpoints must coexist.
+	assert.Len(t, ds.PodList(AllPodsPredicate), 2)
+
+	// Deleting via the notifier must only remove the notifier-added endpoint.
+	notifier.Delete(notifID)
+	eps := ds.PodList(AllPodsPredicate)
+	assert.Len(t, eps, 1)
+	assert.Equal(t, "10.0.0.1", eps[0].GetMetadata().Address)
+}
