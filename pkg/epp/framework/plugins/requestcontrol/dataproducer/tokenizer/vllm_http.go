@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -31,6 +32,8 @@ import (
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
+
+	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
 )
 
 const (
@@ -117,10 +120,25 @@ func parseHTTPDuration(s string, def time.Duration) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-// Render calls /v1/completions/render. Char offsets are not provided by vLLM's
-// render endpoint and the upstream call site discards them, so we return nil.
+// Render calls /v1/completions/render for prompt-only callers. The Produce path
+// uses renderCompletionsPayload so the original request payload is preserved.
+// Char offsets are not provided by vLLM's render endpoint and the upstream call
+// site discards them, so we return nil.
 func (r *vllmHTTPRenderer) Render(ctx context.Context, prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
-	body := completionsRenderRequest{Model: r.modelName, Prompt: prompt}
+	return r.postCompletionsRender(ctx, map[string]any{
+		"model":  r.modelName,
+		"prompt": prompt,
+	})
+}
+
+func (r *vllmHTTPRenderer) renderCompletionsPayload(ctx context.Context, payload fwkrh.PayloadMap) ([]uint32, []tokenizerTypes.Offset, error) {
+	body := maps.Clone(payload)
+	body["model"] = r.modelName
+
+	return r.postCompletionsRender(ctx, body)
+}
+
+func (r *vllmHTTPRenderer) postCompletionsRender(ctx context.Context, body any) ([]uint32, []tokenizerTypes.Offset, error) {
 	var resp []renderResponse
 	if err := r.postJSON(ctx, completionsRenderPath, body, r.timeout, &resp); err != nil {
 		return nil, nil, err
@@ -136,8 +154,20 @@ func (r *vllmHTTPRenderer) Render(ctx context.Context, prompt string) ([]uint32,
 // kvcache map shape expected by the upstream interface.
 func (r *vllmHTTPRenderer) RenderChat(ctx context.Context, req *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
 	body := buildChatRenderRequest(r.modelName, req)
+
+	return r.postChatRender(ctx, body, r.chatTimeout(req))
+}
+
+func (r *vllmHTTPRenderer) renderChatPayload(ctx context.Context, payload fwkrh.PayloadMap, req *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	body := maps.Clone(payload)
+	body["model"] = r.modelName
+
+	return r.postChatRender(ctx, body, r.chatTimeout(req))
+}
+
+func (r *vllmHTTPRenderer) postChatRender(ctx context.Context, body any, timeout time.Duration) ([]uint32, *tokenization.MultiModalFeatures, error) {
 	var resp renderResponse
-	if err := r.postJSON(ctx, chatRenderPath, body, r.chatTimeout(req), &resp); err != nil {
+	if err := r.postJSON(ctx, chatRenderPath, body, timeout, &resp); err != nil {
 		return nil, nil, err
 	}
 	return resp.TokenIDs, toKVCacheMM(resp.Features), nil
@@ -150,12 +180,6 @@ func (r *vllmHTTPRenderer) chatTimeout(req *tokenizerTypes.RenderChatRequest) ti
 		}
 	}
 	return r.timeout
-}
-
-// completionsRenderRequest is the wire body for POST /v1/completions/render.
-type completionsRenderRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
 }
 
 // chatRenderRequest is the wire body for POST /v1/chat/completions/render.

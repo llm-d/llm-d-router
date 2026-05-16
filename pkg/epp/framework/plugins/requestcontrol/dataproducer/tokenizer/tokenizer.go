@@ -205,15 +205,26 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 	var tokenIDs []uint32
 	var mmFeatures *tokenization.MultiModalFeatures
 	var err error
+	renderer, isVLLMHTTP := p.tokenizer.(*vllmHTTPRenderer)
+	payload, hasPayload := request.Body.Payload.(fwkrh.PayloadMap)
+	hasPayload = hasPayload && payload != nil
 
 	switch {
 	case request.Body.Completions != nil:
 		traceLogger.Info("Calling Render for completions", "prompt", request.Body.Completions.Prompt)
-		tokenIDs, _, err = p.tokenizer.Render(ctx, request.Body.Completions.Prompt.Raw)
+		if isVLLMHTTP && hasPayload {
+			tokenIDs, _, err = renderer.renderCompletionsPayload(ctx, payload)
+		} else {
+			tokenIDs, _, err = p.tokenizer.Render(ctx, request.Body.Completions.Prompt.Raw)
+		}
 	case request.Body.ChatCompletions != nil:
-		renderReq := ChatCompletionsToRenderChatRequest(request.Body.ChatCompletions)
 		traceLogger.Info("Calling RenderChat for chat completions", "messageCount", len(request.Body.ChatCompletions.Messages))
-		tokenIDs, mmFeatures, err = p.tokenizer.RenderChat(ctx, renderReq)
+		renderReq := ChatCompletionsToRenderChatRequest(request.Body.ChatCompletions)
+		if isVLLMHTTP && hasPayload {
+			tokenIDs, mmFeatures, err = renderer.renderChatPayload(ctx, payload, renderReq)
+		} else {
+			tokenIDs, mmFeatures, err = p.tokenizer.RenderChat(ctx, renderReq)
+		}
 	default:
 		return nil, errors.New("unsupported request body type, skipping tokenization")
 	}

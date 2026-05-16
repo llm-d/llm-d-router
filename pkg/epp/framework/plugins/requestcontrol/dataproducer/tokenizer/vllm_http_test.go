@@ -27,9 +27,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	tokenizerTypes "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
-
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
 )
 
@@ -77,9 +77,37 @@ func TestVLLMHTTPRenderer_Render(t *testing.T) {
 	assert.Equal(t, "hello", sent["prompt"])
 }
 
-// TestVLLMHTTPRenderer_RenderChat_Multimodal covers the chat endpoint, the
-// OpenAI-shape request projection from kvcache RenderChatRequest, and the
-// wire→kvcache conversion of multimodal features.
+func TestProduce_CompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
+	srv, cap := httpFixture(t,
+		[]renderResponse{{TokenIDs: []uint32{4, 5}}}, renderResponse{})
+	defer srv.Close()
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Raw: "hello"},
+			},
+			Payload: fwkrh.PayloadMap{
+				"prompt":      "hello",
+				"dummy_field": "kept",
+			},
+		},
+	}
+
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{4, 5}, req.Body.TokenizedPrompt.TokenIDs)
+
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal(cap.completions, &sent))
+	assert.Equal(t, "kept", sent["dummy_field"])
+	assert.Equal(t, testHTTPModel, sent["model"])
+}
+
+// TestVLLMHTTPRenderer_RenderChat_Multimodal covers the chat endpoint: the raw
+// payload is forwarded directly and multimodal features are converted from wire
+// format to kvcache map shape.
 func TestVLLMHTTPRenderer_RenderChat_Multimodal(t *testing.T) {
 	srv, cap := httpFixture(t, nil, renderResponse{
 		TokenIDs: []uint32{1, 2, 3, 4, 5},
@@ -93,17 +121,29 @@ func TestVLLMHTTPRenderer_RenderChat_Multimodal(t *testing.T) {
 	defer srv.Close()
 
 	r := newHTTPRenderer(t, srv)
-	req := &tokenizerTypes.RenderChatRequest{
-		Conversation: []tokenizerTypes.Conversation{{
+	payload := fwkrh.PayloadMap{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,xx"}},
+					map[string]any{"type": "text", "text": "describe"},
+				},
+			},
+		},
+		"add_generation_prompt": true,
+	}
+	chat := &fwkrh.ChatCompletionsRequest{
+		Messages: []fwkrh.Message{{
 			Role: "user",
-			Content: tokenizerTypes.Content{Structured: []tokenizerTypes.ContentBlock{
-				{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "data:image/png;base64,xx"}},
+			Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+				{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "data:image/png;base64,xx"}},
 				{Type: "text", Text: "describe"},
 			}},
 		}},
 		AddGenerationPrompt: true,
 	}
-	tokenIDs, mm, err := r.RenderChat(context.Background(), req)
+	tokenIDs, mm, err := r.renderChatPayload(context.Background(), payload, ChatCompletionsToRenderChatRequest(chat))
 	require.NoError(t, err)
 	assert.Equal(t, []uint32{1, 2, 3, 4, 5}, tokenIDs)
 	require.NotNil(t, mm)
@@ -120,10 +160,42 @@ func TestVLLMHTTPRenderer_RenderChat_Multimodal(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, msgs, 1)
 	parts, ok := msgs[0].(map[string]any)["content"].([]any)
-	require.True(t, ok, "structured content must be sent as an array of parts")
+	require.True(t, ok, "structured content must be forwarded as an array of parts")
 	require.Len(t, parts, 2)
 	assert.Equal(t, "image_url", parts[0].(map[string]any)["type"])
 	assert.Equal(t, "text", parts[1].(map[string]any)["type"])
+}
+
+func TestProduce_ChatCompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
+	srv, cap := httpFixture(t, nil, renderResponse{TokenIDs: []uint32{9, 10}})
+	defer srv.Close()
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
+			},
+			Payload: fwkrh.PayloadMap{
+				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+				"model":    "caller-supplied-model",
+				"dummy":    "kept",
+				"reasoning": map[string]any{
+					"effort": "high",
+				},
+			},
+		},
+	}
+
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{9, 10}, req.Body.TokenizedPrompt.TokenIDs)
+
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal(cap.chat, &sent))
+	assert.Equal(t, "kept", sent["dummy"])
+	assert.Equal(t, map[string]any{"effort": "high"}, sent["reasoning"])
+	assert.Equal(t, testHTTPModel, sent["model"])
 }
 
 func TestVLLMHTTPRenderer_HTTPError(t *testing.T) {
