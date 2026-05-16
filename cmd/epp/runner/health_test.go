@@ -89,6 +89,17 @@ func TestHealthServer_Check(t *testing.T) {
 			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
 		},
 		{
+			// File-discovery pools and K8s pools without an explicit AppProtocol
+			// must not be constrained to HTTP -- a non-HTTP parser would otherwise
+			// lock the EPP out of SERVING permanently.
+			name:                  "LeaderElectionDisabled_EmptyAppProtocol_NoConstraint",
+			leaderElectionEnabled: false,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{},
+			supporter:             &mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolH2C}},
+			wantStatus:            healthPb.HealthCheckResponse_SERVING,
+		},
+		{
 			name:                  "LeaderElectionEnabled_Liveness_AlwaysServing",
 			leaderElectionEnabled: true,
 			service:               LivenessCheckService,
