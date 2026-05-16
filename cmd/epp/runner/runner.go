@@ -975,10 +975,19 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	return g.Run(ctx)
 }
 
+// metricsShutdownTimeout bounds graceful shutdown of the metrics server so a
+// scraper holding a connection at process exit cannot block termination.
+const metricsShutdownTimeout = 5 * time.Second
+
 // serveMetrics starts a standalone Prometheus metrics HTTP server.
+//
+// EPP metrics are registered with controller-runtime's registry (see
+// pkg/epp/metrics.Register), not the prometheus default registry. The handler
+// must serve ctrlmetrics.Registry directly; promhttp.Handler() would expose only
+// Go runtime/process metrics and silently omit every EPP metric.
 func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	if enablePprof {
 		mux.HandleFunc("/debug/pprof/", nhpprof.Index)
 		mux.HandleFunc("/debug/pprof/cmdline", nhpprof.Cmdline)
@@ -995,7 +1004,9 @@ func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux}
 	go func() {
 		<-ctx.Done()
-		_ = srv.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("metrics server: %w", err)
