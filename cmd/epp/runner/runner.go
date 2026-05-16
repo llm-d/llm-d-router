@@ -950,10 +950,23 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	g.Add("discovery", func(ctx context.Context) error {
 		return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
 	})
+	// epp-server and health wait for the discovery plugin's initial sync before
+	// going live, so requests and probes never observe an empty datastore. See
+	// EndpointDiscovery.Ready contract.
 	g.Add("epp-server", func(ctx context.Context) error {
+		select {
+		case <-disc.Ready():
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		return serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(ctx)
 	})
 	g.Add("health", func(ctx context.Context) error {
+		select {
+		case <-disc.Ready():
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, opts.GRPCHealthPort)).Start(ctx)
 	})
 	g.Add("metrics", func(ctx context.Context) error {

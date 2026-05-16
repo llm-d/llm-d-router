@@ -64,6 +64,21 @@ type EndpointDiscovery interface {
 	// through their watch mechanism (e.g. a Kubernetes list+watch) may fold the
 	// initial enumeration into the watch sequence instead.
 	Start(ctx context.Context, notifier DiscoveryNotifier) error
+
+	// Ready returns a channel that is closed once after the plugin has completed
+	// its initial reconciliation with the underlying source, regardless of how
+	// many endpoints that produced. Callers use it to gate request-serving
+	// components until the datastore has been populated for the first time.
+	//
+	// Contract:
+	//   - The channel is closed at most once per Start invocation.
+	//   - It is closed only after a successful initial sync. If Start returns
+	//     an error before that point, the channel remains open and callers
+	//     waiting on it should also observe ctx cancellation.
+	//   - "Initial sync" means whatever the plugin considers a complete first
+	//     pass (e.g. file load for FileDiscovery; first list+watch reconcile
+	//     for a Kubernetes plugin). Zero endpoints is a valid outcome.
+	Ready() <-chan struct{}
 }
 
 // DiscoveryNotifier is the callback through which EndpointDiscovery communicates
