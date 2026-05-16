@@ -440,6 +440,8 @@ type Message struct {
 	Role string `json:"role,omitempty"`
 	// Content defines text of this message
 	Content Content `json:"content"`
+	// ToolCalls contains assistant tool calls for chat template rendering.
+	ToolCalls []any `json:"tool_calls,omitempty"`
 }
 
 type Content struct {

@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
@@ -238,6 +239,7 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 			Role:    msg.Role,
 			Content: tokenizerTypes.Content{Raw: msg.Content.Raw},
 		}
+		setToolCallsIfSupported(&conv, msg.ToolCalls)
 		for _, block := range msg.Content.Structured {
 			conv.Content.Structured = append(conv.Content.Structured, tokenizerTypes.ContentBlock{
 				Type:     block.Type,
@@ -257,6 +259,16 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 		ContinueFinalMessage:      chat.ContinueFinalMessage,
 		AddGenerationPrompt:       chat.AddGenerationPrompt,
 		ChatTemplateKWArgs:        chat.ChatTemplateKWArgs,
+	}
+}
+
+func setToolCallsIfSupported(conv *tokenizerTypes.Conversation, toolCalls []any) {
+	if len(toolCalls) == 0 {
+		return
+	}
+	field := reflect.ValueOf(conv).Elem().FieldByName("ToolCalls")
+	if field.IsValid() && field.CanSet() && field.Type() == reflect.TypeOf(toolCalls) {
+		field.Set(reflect.ValueOf(toolCalls))
 	}
 }
 
