@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -12,6 +13,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-inference-scheduler/pkg/metrics"
 	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
 )
 
@@ -319,4 +321,76 @@ func TestWithName(t *testing.T) {
 
 	decider.WithName("renamed")
 	assert.Equal(t, "renamed", decider.TypedName().Name)
+}
+
+func TestDisaggregateMetricReasons(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	tests := []struct {
+		name           string
+		nonCachedToks  int
+		request        *scheduling.InferenceRequest
+		endpoint       scheduling.Endpoint
+		expectedReason string
+	}{
+		{
+			name:           "disabled records disabled reason",
+			nonCachedToks:  0,
+			request:        makeRequestWithTokens(10),
+			endpoint:       makeTestEndpoint(5),
+			expectedReason: metrics.DeciderReasonDisabled,
+		},
+		{
+			name:           "nil endpoint records error reason",
+			nonCachedToks:  5,
+			request:        makeRequestWithTokens(10),
+			endpoint:       nil,
+			expectedReason: metrics.DeciderReasonError,
+		},
+		{
+			name:           "input too short records input_too_short reason",
+			nonCachedToks:  20,
+			request:        makeRequestWithTokens(10),
+			endpoint:       makeTestEndpoint(0),
+			expectedReason: metrics.DeciderReasonInputTooShort,
+		},
+		{
+			name:           "missing prefix info records error reason",
+			nonCachedToks:  5,
+			request:        makeRequestWithTokens(100),
+			endpoint:       makeTestEndpointBase(),
+			expectedReason: metrics.DeciderReasonError,
+		},
+		{
+			name:           "suffix cached records suffix_cached reason",
+			nonCachedToks:  5,
+			request:        makeRequestWithTokens(10),
+			endpoint:       makeTestEndpoint(8),
+			expectedReason: metrics.DeciderReasonSuffixCached,
+		},
+		{
+			name:           "disaggregated records disaggregated reason",
+			nonCachedToks:  3,
+			request:        makeRequestWithTokens(10),
+			endpoint:       makeTestEndpoint(2),
+			expectedReason: metrics.DeciderReasonDisaggregated,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metrics.SchedulerDeciderEvaluationCount.Reset()
+
+			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: tt.nonCachedToks})
+			require.NoError(t, err)
+
+			decider.disaggregate(ctx, tt.request, tt.endpoint)
+
+			count := testutil.ToFloat64(
+				metrics.SchedulerDeciderEvaluationCount.WithLabelValues("unknown", PrefixBasedPDDeciderPluginType, tt.expectedReason),
+			)
+			assert.Equal(t, float64(1), count,
+				"expected reason %q to be recorded once", tt.expectedReason)
+		})
+	}
 }

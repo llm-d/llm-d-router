@@ -89,3 +89,51 @@ func TestDisaggDecisionType(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordDeciderEvaluation(t *testing.T) {
+	SchedulerDeciderEvaluationCount.Reset()
+
+	model := "test-model"
+	decider := "prefix-based-pd-decider"
+
+	RecordDeciderEvaluation(model, decider, DeciderReasonDisabled)
+	RecordDeciderEvaluation(model, decider, DeciderReasonInputTooShort)
+	RecordDeciderEvaluation(model, decider, DeciderReasonInputTooShort)
+	RecordDeciderEvaluation(model, decider, DeciderReasonSuffixCached)
+	RecordDeciderEvaluation(model, decider, DeciderReasonError)
+	RecordDeciderEvaluation(model, decider, DeciderReasonDisaggregated)
+	RecordDeciderEvaluation(model, decider, DeciderReasonDisaggregated)
+	RecordDeciderEvaluation(model, decider, DeciderReasonDisaggregated)
+
+	expected := `
+		# HELP llm_d_inference_scheduler_decider_evaluation_total [ALPHA] Total number of disaggregation decider evaluations by reason
+		# TYPE llm_d_inference_scheduler_decider_evaluation_total counter
+		llm_d_inference_scheduler_decider_evaluation_total{decider="prefix-based-pd-decider",model_name="test-model",reason="disabled"} 1
+		llm_d_inference_scheduler_decider_evaluation_total{decider="prefix-based-pd-decider",model_name="test-model",reason="disaggregated"} 3
+		llm_d_inference_scheduler_decider_evaluation_total{decider="prefix-based-pd-decider",model_name="test-model",reason="error"} 1
+		llm_d_inference_scheduler_decider_evaluation_total{decider="prefix-based-pd-decider",model_name="test-model",reason="input_too_short"} 2
+		llm_d_inference_scheduler_decider_evaluation_total{decider="prefix-based-pd-decider",model_name="test-model",reason="suffix_cached"} 1
+	`
+
+	if err := testutil.CollectAndCompare(SchedulerDeciderEvaluationCount, strings.NewReader(expected),
+		"llm_d_inference_scheduler_decider_evaluation_total"); err != nil {
+		t.Errorf("RecordDeciderEvaluation() failed: %v", err)
+	}
+}
+
+func TestRecordDeciderEvaluationEmptyModel(t *testing.T) {
+	SchedulerDeciderEvaluationCount.Reset()
+
+	RecordDeciderEvaluation("", "my-decider", DeciderReasonDisaggregated)
+
+	expected := `
+		# HELP llm_d_inference_scheduler_decider_evaluation_total [ALPHA] Total number of disaggregation decider evaluations by reason
+		# TYPE llm_d_inference_scheduler_decider_evaluation_total counter
+		llm_d_inference_scheduler_decider_evaluation_total{decider="my-decider",model_name="unknown",reason="disaggregated"} 1
+	`
+
+	if err := testutil.CollectAndCompare(SchedulerDeciderEvaluationCount, strings.NewReader(expected),
+		"llm_d_inference_scheduler_decider_evaluation_total"); err != nil {
+		t.Errorf("RecordDeciderEvaluation() with empty model failed: %v", err)
+	}
+}

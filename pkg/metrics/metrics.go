@@ -20,6 +20,19 @@ const (
 	DecisionTypeEncodeDecode = "encode-decode"
 	// DecisionTypeEncodePrefillDecode is for requests that are gone through E/P/D.
 	DecisionTypeEncodePrefillDecode = "encode-prefill-decode"
+
+	// DeciderReasonDisabled indicates disaggregation is disabled (NonCachedTokens=0).
+	DeciderReasonDisabled = "disabled"
+	// DeciderReasonInputTooShort indicates the total input is shorter than the NonCachedTokens threshold.
+	DeciderReasonInputTooShort = "input_too_short"
+	// DeciderReasonSuffixCached indicates the non-cached suffix is below the threshold,
+	// meaning enough of the prompt is already cached and disaggregation is unnecessary.
+	DeciderReasonSuffixCached = "suffix_cached"
+	// DeciderReasonError indicates disaggregation was skipped due to an error
+	// (e.g. nil endpoint, missing prefix cache state, input parse failure).
+	DeciderReasonError = "error"
+	// DeciderReasonDisaggregated indicates the decider chose to disaggregate.
+	DeciderReasonDisaggregated = "disaggregated"
 )
 
 var (
@@ -44,6 +57,19 @@ var (
 			Help:      metrics.HelpMsgWithStability("Total number of disaggregation routing decisions made", compbasemetrics.ALPHA),
 		},
 		[]string{"model_name", "decision_type"},
+	)
+
+	// DeciderEvaluationCount records the reason for each disaggregation decider
+	// evaluation. This complements disagg_decision_total by exposing *why* the
+	// decider accepted or rejected disaggregation, enabling operators to
+	// distinguish threshold misses from errors or disabled configurations.
+	SchedulerDeciderEvaluationCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: SchedulerSubsystem,
+			Name:      "decider_evaluation_total",
+			Help:      metrics.HelpMsgWithStability("Total number of disaggregation decider evaluations by reason", compbasemetrics.ALPHA),
+		},
+		[]string{"model_name", "decider", "reason"},
 	)
 
 	// Data-layer counters: label values must be plugin TypedName.Type only —
@@ -73,6 +99,7 @@ func GetCollectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		SchedulerPDDecisionCount,
 		SchedulerDisaggDecisionCount,
+		SchedulerDeciderEvaluationCount,
 		DataLayerPollErrorsTotal,
 		DataLayerExtractErrorsTotal,
 	}
@@ -112,4 +139,14 @@ func DisaggDecisionType(encodeUsed, prefillUsed bool) string {
 	default:
 		return DecisionTypeDecodeOnly
 	}
+}
+
+// RecordDeciderEvaluation increments the counter for a disaggregation decider evaluation.
+// The decider parameter identifies the decider plugin (e.g. "prefix-based-pd-decider").
+// The reason parameter must be one of the DeciderReason* constants.
+func RecordDeciderEvaluation(modelName, decider, reason string) {
+	if modelName == "" {
+		modelName = "unknown"
+	}
+	SchedulerDeciderEvaluationCount.WithLabelValues(modelName, decider, reason).Inc()
 }
