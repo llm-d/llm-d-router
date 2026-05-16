@@ -120,3 +120,62 @@ func TestEndpointTargetPorts(t *testing.T) {
 		})
 	}
 }
+
+func TestGRPCFlags(t *testing.T) {
+	tests := []struct {
+		name                string
+		args                []string
+		expectedMaxRecvSize int
+		expectedMaxSendSize int
+		expectedCompression bool
+	}{
+		{
+			name: "Valid flags",
+			args: []string{
+				"--grpc-max-recv-msg-size", "10485760",
+				"--grpc-max-send-msg-size", "20971520",
+				"--grpc-enable-compression",
+			},
+			expectedMaxRecvSize: 10485760,
+			expectedMaxSendSize: 20971520,
+			expectedCompression: true,
+		},
+		{
+			name:                "Defaults",
+			args:                []string{},
+			expectedMaxRecvSize: 0,
+			expectedMaxSendSize: 0,
+			expectedCompression: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := pflag.NewFlagSet(tt.name, pflag.ContinueOnError)
+			opts := NewOptions()
+			opts.AddFlags(fs)
+
+			argv := make([]string, 0, 4+len(tt.args))
+			argv = append(argv, "--endpoint-selector", "app=vllm", "--config-file", "fake-config.yaml")
+			argv = append(argv, tt.args...)
+
+			if err := fs.Parse(argv); err != nil {
+				t.Fatalf("Failed to parse flags: %v", err)
+			}
+
+			if err := opts.Complete(); err != nil {
+				t.Fatalf("Complete failed unexpectedly with error: %v", err)
+			}
+
+			if opts.GRPCMaxRecvMsgSize != tt.expectedMaxRecvSize {
+				t.Errorf("GRPCMaxRecvMsgSize mismatch: got %v, want %v", opts.GRPCMaxRecvMsgSize, tt.expectedMaxRecvSize)
+			}
+			if opts.GRPCMaxSendMsgSize != tt.expectedMaxSendSize {
+				t.Errorf("GRPCMaxSendMsgSize mismatch: got %v, want %v", opts.GRPCMaxSendMsgSize, tt.expectedMaxSendSize)
+			}
+			if opts.GRPCEnableCompression != tt.expectedCompression {
+				t.Errorf("GRPCEnableCompression mismatch: got %v, want %v", opts.GRPCEnableCompression, tt.expectedCompression)
+			}
+		})
+	}
+}

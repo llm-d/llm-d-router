@@ -53,8 +53,11 @@ type Options struct {
 	//
 	// ext_proc configuration.
 	//
-	GRPCPort             int  // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
-	EnableLeaderElection bool // Enables leader election for high availability
+	GRPCPort              int  // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
+	EnableLeaderElection  bool // Enables leader election for high availability
+	GRPCMaxRecvMsgSize    int  // Maximum size of a gRPC message to receive.
+	GRPCMaxSendMsgSize    int  // Maximum size of a gRPC message to send.
+	GRPCEnableCompression bool // Enables gRPC compression.
 	//
 	// InferencePool.
 	//
@@ -142,6 +145,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.GRPCPort, "grpc-port", opts.GRPCPort, "gRPC port used for communicating with Envoy proxy.")
 	fs.BoolVar(&opts.EnableLeaderElection, "ha-enable-leader-election", opts.EnableLeaderElection,
 		"Enables leader election for high availability. When enabled, readiness probes will only pass on the leader.")
+	fs.IntVar(&opts.GRPCMaxRecvMsgSize, "grpc-max-recv-msg-size", opts.GRPCMaxRecvMsgSize, "Maximum size of a gRPC message to receive.")
+	fs.IntVar(&opts.GRPCMaxSendMsgSize, "grpc-max-send-msg-size", opts.GRPCMaxSendMsgSize, "Maximum size of a gRPC message to send.")
+	fs.BoolVar(&opts.GRPCEnableCompression, "grpc-enable-compression", opts.GRPCEnableCompression, "Enables gRPC compression.")
 	fs.StringVar(&opts.PoolGroup, "pool-group", opts.PoolGroup,
 		"Kubernetes resource group of the InferencePool this Endpoint Picker is associated with. Only `inference.networking.k8s.io/v1` is currently supported.")
 	fs.StringVar(&opts.PoolNamespace, "pool-namespace", opts.PoolNamespace,

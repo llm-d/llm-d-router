@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	_ "google.golang.org/grpc/encoding/gzip" // Register gzip compressor for gRPC.
 	"google.golang.org/grpc/health"
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -62,6 +63,9 @@ type ExtProcServerRunner struct {
 	Parser                           fwkrh.Parser
 	SaturationDetector               fwkfc.SaturationDetector
 	UseExperimentalDatalayerV2       bool // Pluggable data layer feature flag
+	GRPCMaxRecvMsgSize               int
+	GRPCMaxSendMsgSize               int
+	GRPCEnableCompression            bool
 }
 
 // NewDefaultExtProcServerRunner creates a runner with default values.
@@ -81,6 +85,9 @@ func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 	}
 	return &ExtProcServerRunner{
 		GrpcPort:                         opts.GRPCPort,
+		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
+		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
+		GRPCEnableCompression:            opts.GRPCEnableCompression,
 		GKNN:                             gknn,
 		ControllerCfg:                    ControllerConfig{true, true, true},
 		SecureServing:                    opts.SecureServing,
@@ -142,6 +149,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 
 		var srv *grpc.Server
+		var creds credentials.TransportCredentials
 		if r.SecureServing {
 			var cert tls.Certificate
 			var err error
@@ -155,7 +163,6 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 				return fmt.Errorf("failed to create self signed certificate - %w", err)
 			}
 
-			var creds credentials.TransportCredentials
 			if r.CertPath != "" && r.EnableCertReload {
 				reloader, err := common.NewCertReloader(ctx, r.CertPath, &cert)
 				if err != nil {
@@ -173,13 +180,27 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 					NextProtos:   []string{"h2"},
 				})
 			}
-			// Init the server.
-			srv = grpc.NewServer(grpc.Creds(creds))
-		} else {
-			srv = grpc.NewServer()
 		}
 
-		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.Parser)
+		var grpcOpts []grpc.ServerOption
+		if creds != nil {
+			grpcOpts = append(grpcOpts, grpc.Creds(creds))
+		}
+		if r.GRPCMaxRecvMsgSize > 0 {
+			grpcOpts = append(grpcOpts, grpc.MaxRecvMsgSize(r.GRPCMaxRecvMsgSize))
+		}
+		if r.GRPCMaxSendMsgSize > 0 {
+			grpcOpts = append(grpcOpts, grpc.MaxSendMsgSize(r.GRPCMaxSendMsgSize))
+		}
+		// Note: gzip compressor is registered via blank import above.
+
+		srv = grpc.NewServer(grpcOpts...)
+
+		poolCap := r.GRPCMaxRecvMsgSize
+		if poolCap == 0 {
+			poolCap = 4 * 1024 * 1024 // gRPC default 4MB
+		}
+		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.Parser, poolCap)
 		extProcPb.RegisterExternalProcessorServer(srv, extProcServer)
 
 		if r.HealthChecking {
