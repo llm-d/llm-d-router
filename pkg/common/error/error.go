@@ -25,9 +25,13 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// RequestDroppedReasonHeaderKey is the HTTP response header that communicates the specific
-// reason a request was dropped by flow control.
-const RequestDroppedReasonHeaderKey = "x-llm-d-request-dropped-reason"
+const (
+	// RequestDroppedReasonHeaderKey is the HTTP response header that communicates the specific
+	// reason a request was dropped by flow control.
+	RequestDroppedReasonHeaderKey = "x-llm-d-router-request-dropped-reason"
+	// OldRequestDroppedReasonHeaderKey is the deprecated alias for RequestDroppedReasonHeaderKey.
+	OldRequestDroppedReasonHeaderKey = "x-llm-d-request-dropped-reason"
+)
 
 // RequestDroppedReason is the reason a request was rejected before dispatch or evicted after dispatch.
 type RequestDroppedReason string
@@ -45,6 +49,14 @@ const (
 	RequestDroppedReasonEvictedQueuePressure RequestDroppedReason = "evicted-queue-pressure"
 	RequestDroppedReasonEvictedPriority      RequestDroppedReason = "evicted-priority"
 )
+
+// RequestDroppedReasonHeaders returns the canonical and deprecated dropped-reason headers for compatibility.
+func RequestDroppedReasonHeaders(reason RequestDroppedReason) map[string]string {
+	return map[string]string{
+		RequestDroppedReasonHeaderKey:    string(reason),
+		OldRequestDroppedReasonHeaderKey: string(reason),
+	}
+}
 
 // Error is an error struct for errors returned by the epp/bbr server.
 type Error struct {

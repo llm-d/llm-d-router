@@ -26,9 +26,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
 )
 
 const (
@@ -39,7 +39,7 @@ const (
 	SLODeadlineOrderingPolicyType = "slo-deadline-ordering-policy"
 
 	// sloTtftHeader is the request header name for SLO time-to-first-token in milliseconds.
-	sloTtftHeader = "x-slo-ttft-ms"
+	sloTtftHeader = metadata.TTFTSLOHeaderKey
 )
 
 func SLODeadlineOrderingPolicyFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
@@ -83,7 +83,7 @@ func (p *sloDeadlinePolicy) TypedName() plugin.TypedName {
 
 var sloMaxDeadlineTime = time.Unix(0, 1<<63-1)
 
-// calculateSLODeadline computes the SLO-based deadline for a request: ReceivedTimestamp + x-slo-ttft-ms (ms).
+// calculateSLODeadline computes the SLO-based deadline for a request: ReceivedTimestamp + SLO TTFT header (ms).
 // The header is read from the InferenceRequest()'s headers. If the header is missing, empty, or invalid,
 // the request is assigned a far-future deadline so it sorts after SLO-bound requests.
 func calculateSLODeadline(item flowcontrol.QueueItemAccessor) time.Time {
@@ -95,7 +95,7 @@ func calculateSLODeadline(item flowcontrol.QueueItemAccessor) time.Time {
 	if infReq == nil || infReq.Headers == nil {
 		return sloMaxDeadlineTime
 	}
-	sloTtft := request.GetHeader(infReq.Headers, sloTtftHeader)
+	sloTtft := metadata.GetHeader(infReq.Headers, sloTtftHeader)
 	if sloTtft == "" {
 		return sloMaxDeadlineTime
 	}

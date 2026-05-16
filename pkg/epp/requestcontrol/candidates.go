@@ -94,7 +94,7 @@ func NewDatastoreEndpointCandidates(ds Datastore, opts ...EndpointCandidatesOpti
 //
 // It supports:
 // 1. Returning all endpoint candidates if no specific subset filter is present.
-// 2. Returning a filtered list of endpoint candidates if "x-gateway-destination-endpoint-subset" is present.
+// 2. Returning a filtered list of endpoint candidates if the destination endpoint subset metadata is present.
 func (d *DatastoreEndpointCandidates) Locate(ctx context.Context, requestMetadata map[string]any) []fwkdl.Endpoint {
 	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
 
@@ -116,7 +116,11 @@ func (d *DatastoreEndpointCandidates) Locate(ctx context.Context, requestMetadat
 	}
 
 	// Check if the specific endpoint key exists within the subset map.
-	endpointSubsetList, found := subsetMap[metadata.SubsetFilterKey].([]any)
+	endpointSubsetRaw, found := metadata.GetValue(subsetMap, metadata.SubsetFilterKey)
+	if !found {
+		return d.datastore.PodList(datastore.AllPodsPredicate)
+	}
+	endpointSubsetList, found := endpointSubsetRaw.([]any)
 	if !found {
 		return d.datastore.PodList(datastore.AllPodsPredicate)
 	}
@@ -254,7 +258,7 @@ func (c *CachedEndpointCandidates) Locate(ctx context.Context, requestMetadata m
 }
 
 // generateCacheKey creates a deterministic string key representing the endpoint selection criteria.
-// It handles the "x-gateway-destination-endpoint-subset" structure specifically.
+// It handles the destination endpoint subset structure specifically.
 func (c *CachedEndpointCandidates) generateCacheKey(reqMetadata map[string]any) string {
 	// No Metadata -> All Endpoints
 	if reqMetadata == nil {
@@ -268,9 +272,13 @@ func (c *CachedEndpointCandidates) generateCacheKey(reqMetadata map[string]any) 
 
 	// The subset filter key contains a list of endpoint strings (e.g., "10.0.0.1:8080").
 	// We must treat this list as a set (order independent).
-	endpointSubsetList, found := subsetMap[metadata.SubsetFilterKey].([]any)
+	endpointSubsetRaw, found := metadata.GetValue(subsetMap, metadata.SubsetFilterKey)
 
 	// Namespace exists, but "subset" key is missing -> All Endpoints
+	if !found {
+		return defaultCacheKey
+	}
+	endpointSubsetList, found := endpointSubsetRaw.([]any)
 	if !found {
 		return defaultCacheKey
 	}

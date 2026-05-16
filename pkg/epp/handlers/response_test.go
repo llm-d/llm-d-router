@@ -341,10 +341,12 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	reqCtx := &RequestContext{
 		Response: &Response{
 			Headers: map[string]string{
-				"x-backend-server":              "vllm-v0.6.3",            // should passthrough
-				metadata.ObjectiveKey:           "sensitive-objective-id", // should be stripped
-				metadata.DestinationEndpointKey: "10.2.0.5:8080",          // should be stripped
-				"content-length":                "500",                    // should be stripped
+				"x-backend-server":                 "vllm-v0.6.3",                // should passthrough
+				metadata.ObjectiveKey:              "sensitive-objective-id",     // should be stripped
+				metadata.OldObjectiveKey:           "old-sensitive-objective-id", // should be stripped
+				metadata.DestinationEndpointKey:    "10.2.0.5:8080",              // should be stripped
+				metadata.OldDestinationEndpointKey: "10.2.0.6:8080",              // should be stripped
+				"content-length":                   "500",                        // should be stripped
 			},
 		},
 	}
@@ -359,7 +361,9 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	assert.Contains(t, gotHeaders, "x-backend-server")
 	assert.Contains(t, gotHeaders, "x-went-into-resp-headers")
 	assert.NotContains(t, gotHeaders, metadata.ObjectiveKey)
+	assert.NotContains(t, gotHeaders, metadata.OldObjectiveKey)
 	assert.NotContains(t, gotHeaders, metadata.DestinationEndpointKey)
+	assert.NotContains(t, gotHeaders, metadata.OldDestinationEndpointKey)
 	assert.NotContains(t, gotHeaders, "content-length")
 }
 

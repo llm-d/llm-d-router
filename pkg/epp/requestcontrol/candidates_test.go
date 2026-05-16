@@ -74,6 +74,23 @@ func TestDatastoreEndpointCandidates_Locate(t *testing.T) {
 			expectedEndpointIPs: []string{"10.0.0.1"},
 		},
 		{
+			name: "Subset filter with old key alias",
+			metadata: makeMetadataWithSubsetKey(metadata.OldSubsetFilterKey, []any{
+				"10.0.0.2:8080",
+			}),
+			expectedEndpointIPs: []string{"10.0.0.2"},
+		},
+		{
+			name: "Subset filter prefers new key over old alias",
+			metadata: map[string]any{
+				metadata.SubsetFilterNamespace: map[string]any{
+					metadata.OldSubsetFilterKey: []any{"10.0.0.2:8080"},
+					metadata.SubsetFilterKey:    []any{"10.0.0.1:8080"},
+				},
+			},
+			expectedEndpointIPs: []string{"10.0.0.1"},
+		},
+		{
 			name: "Subset filter with multiple matches",
 			metadata: makeMetadataWithSubset([]any{
 				"10.0.0.1:8080",
@@ -313,9 +330,13 @@ func makeMockEndpoint(name, ip string) fwkdl.Endpoint {
 }
 
 func makeMetadataWithSubset(endpoints []any) map[string]any {
+	return makeMetadataWithSubsetKey(metadata.SubsetFilterKey, endpoints)
+}
+
+func makeMetadataWithSubsetKey(key string, endpoints []any) map[string]any {
 	return map[string]any{
 		metadata.SubsetFilterNamespace: map[string]any{
-			metadata.SubsetFilterKey: endpoints,
+			key: endpoints,
 		},
 	}
 }

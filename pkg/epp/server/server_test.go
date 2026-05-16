@@ -119,8 +119,14 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	expectedMutatedBodyBytes, _ := json.Marshal(expectedMutatedBodyMap)
 	contentLength := strconv.Itoa(len(expectedMutatedBodyBytes))
 	expectedBody := string(expectedMutatedBodyBytes)
-	expectedRequestHeaders := map[string]string{metadata.DestinationEndpointKey: fmt.Sprintf("%s:%d", podAddress, poolPort),
-		"Content-Length": contentLength, ":method": "POST", "x-test": "body", "x-request-id": "test-request-id"}
+	expectedRequestHeaders := map[string]string{
+		metadata.DestinationEndpointKey:    fmt.Sprintf("%s:%d", podAddress, poolPort),
+		metadata.OldDestinationEndpointKey: fmt.Sprintf("%s:%d", podAddress, poolPort),
+		"Content-Length":                   contentLength,
+		":method":                          "POST",
+		"x-test":                           "body",
+		"x-request-id":                     "test-request-id",
+	}
 	expectedResponseHeaders := map[string]string{"x-went-into-resp-headers": "true", ":method": "POST", "x-test": "body"}
 	expectedSchedulerHeaders := map[string]string{":method": "POST", "x-test": "body", "x-request-id": "test-request-id"}
 

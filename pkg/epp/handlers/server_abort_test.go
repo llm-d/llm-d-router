@@ -94,9 +94,12 @@ func TestUpdateStateAndSendIfNeeded_Evicted(t *testing.T) {
 
 			if tt.wantHeader {
 				require.NotNil(t, ir.Headers, "Should have HeaderMutation when eviction reason is set")
-				require.Len(t, ir.Headers.SetHeaders, 1)
-				assert.Equal(t, "x-llm-d-request-dropped-reason", ir.Headers.SetHeaders[0].Header.Key)
-				assert.Equal(t, []byte(tt.requestDroppedReason), ir.Headers.SetHeaders[0].Header.RawValue)
+				require.Len(t, ir.Headers.SetHeaders, 2)
+				gotHeaders := make(map[string]string, len(ir.Headers.SetHeaders))
+				for _, header := range ir.Headers.SetHeaders {
+					gotHeaders[header.Header.Key] = string(header.Header.RawValue)
+				}
+				assert.Equal(t, errcommon.RequestDroppedReasonHeaders(tt.requestDroppedReason), gotHeaders)
 			} else {
 				assert.Nil(t, ir.Headers, "Should not have HeaderMutation when eviction reason is empty")
 			}

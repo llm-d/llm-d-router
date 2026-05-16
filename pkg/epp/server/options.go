@@ -66,7 +66,7 @@ type Options struct {
 	//
 	EndpointSelector            string // Selector to filter model server pods on, only 'key=value' pairs are supported. (TODO: k8s.Selector, pflag.StringSlice?)
 	EndpointTargetPorts         []int  // Target ports of model server pods.
-	DisableEndpointSubsetFilter bool   // Disables respecting x-gateway-destination-endpoint-subset in EPP.
+	DisableEndpointSubsetFilter bool   // Disables respecting destination endpoint subset metadata in EPP.
 	//
 	// MSP metrics scraping.
 	//
@@ -153,7 +153,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntSliceVar(&opts.EndpointTargetPorts, "endpoint-target-ports", opts.EndpointTargetPorts, "Target ports of model server pods. "+
 		"Format: a comma-separated list of numbers without whitespace (e.g., '3000,3001,3002').")
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
-		"Disables respecting the x-gateway-destination-endpoint-subset metadata for dispatching requests in EPP.")
+		"Disables respecting the destination endpoint subset metadata for dispatching requests in EPP.")
 	fs.StringVar(&opts.ModelServerMetricsScheme, "model-server-metrics-scheme", opts.ModelServerMetricsScheme,
 		"Protocol scheme used in scraping metrics from endpoints.")
 	_ = fs.MarkDeprecated("model-server-metrics-scheme", "This flag is deprecated. Configure via EndpointPickerConfig data layer plugin parameters instead.")

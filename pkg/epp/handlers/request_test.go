@@ -37,12 +37,14 @@ func TestHandleRequestHeaders(t *testing.T) {
 		headers        []*configPb.HeaderValue
 		wantHeaders    map[string]string
 		wantFairnessID string
+		wantObjective  string
+		wantTarget     string
 	}{
 		{
-			name: "Extracts Fairness ID and Removes Header",
+			name: "Extracts old Fairness ID alias",
 			headers: []*configPb.HeaderValue{
 				{Key: "x-test", Value: "val"},
-				{Key: metadata.FlowFairnessIDKey, Value: "user-123"},
+				{Key: metadata.OldFlowFairnessIDKey, Value: "user-123"},
 			},
 			wantHeaders:    map[string]string{"x-test": "val"},
 			wantFairnessID: "user-123",
@@ -53,6 +55,20 @@ func TestHandleRequestHeaders(t *testing.T) {
 				{Key: metadata.FlowFairnessIDKey, RawValue: []byte("binary-id"), Value: "wrong-id"},
 			},
 			wantFairnessID: "binary-id",
+		},
+		{
+			name: "Prefers new control headers over old aliases",
+			headers: []*configPb.HeaderValue{
+				{Key: metadata.OldFlowFairnessIDKey, Value: "old-user"},
+				{Key: metadata.FlowFairnessIDKey, Value: "new-user"},
+				{Key: metadata.OldObjectiveKey, Value: "old-objective"},
+				{Key: metadata.ObjectiveKey, Value: "new-objective"},
+				{Key: metadata.OldModelNameRewriteKey, Value: "old-model"},
+				{Key: metadata.ModelNameRewriteKey, Value: "new-model"},
+			},
+			wantFairnessID: "new-user",
+			wantObjective:  "new-objective",
+			wantTarget:     "new-model",
 		},
 	}
 
@@ -72,6 +88,8 @@ func TestHandleRequestHeaders(t *testing.T) {
 			assert.NoError(t, err, "HandleRequestHeaders should not return an error")
 
 			assert.Equal(t, tc.wantFairnessID, reqCtx.FairnessID, "FairnessID should match expected value")
+			assert.Equal(t, tc.wantObjective, reqCtx.ObjectiveKey, "ObjectiveKey should match expected value")
+			assert.Equal(t, tc.wantTarget, reqCtx.TargetModelName, "TargetModelName should match expected value")
 
 			if tc.wantHeaders != nil {
 				for k, v := range tc.wantHeaders {
@@ -89,10 +107,12 @@ func TestGenerateHeaders_Sanitization(t *testing.T) {
 		RequestSize:    123,
 		Request: &Request{
 			Headers: map[string]string{
-				"x-user-data":                   "important",              // should passthrough
-				metadata.ObjectiveKey:           "sensitive-objective-id", // should be stripped
-				metadata.DestinationEndpointKey: "1.1.1.1:666",            // should be stripped
-				"content-length":                "99999",                  // should be stripped (re-added by logic)
+				"x-user-data":                      "important",                  // should passthrough
+				metadata.ObjectiveKey:              "sensitive-objective-id",     // should be stripped
+				metadata.OldObjectiveKey:           "old-sensitive-objective-id", // should be stripped
+				metadata.DestinationEndpointKey:    "1.1.1.1:666",                // should be stripped
+				metadata.OldDestinationEndpointKey: "1.1.1.1:777",                // should be stripped
+				"content-length":                   "99999",                      // should be stripped (re-added by logic)
 			},
 		},
 	}
@@ -106,7 +126,9 @@ func TestGenerateHeaders_Sanitization(t *testing.T) {
 
 	assert.Contains(t, gotHeaders, "x-user-data")
 	assert.NotContains(t, gotHeaders, metadata.ObjectiveKey)
+	assert.NotContains(t, gotHeaders, metadata.OldObjectiveKey)
 	assert.Equal(t, "1.2.3.4:8080", gotHeaders[metadata.DestinationEndpointKey])
+	assert.Equal(t, "1.2.3.4:8080", gotHeaders[metadata.OldDestinationEndpointKey])
 	assert.Equal(t, "123", gotHeaders["Content-Length"])
 }
 
@@ -151,6 +173,9 @@ func TestGenerateRequestHeaderResponse_MergeMetadata(t *testing.T) {
 	endpointKey, ok := endpointNamespace.GetStructValue().Fields[metadata.DestinationEndpointKey]
 	assert.True(t, ok, "Expected DestinationEndpointKey to be in DestinationEndpointNamespace")
 	assert.Equal(t, "1.2.3.4:8080", endpointKey.GetStringValue(), "Unexpected value for DestinationEndpointKey")
+	oldEndpointKey, ok := endpointNamespace.GetStructValue().Fields[metadata.OldDestinationEndpointKey]
+	assert.True(t, ok, "Expected old DestinationEndpointKey alias to be in DestinationEndpointNamespace")
+	assert.Equal(t, "1.2.3.4:8080", oldEndpointKey.GetStringValue(), "Unexpected value for old DestinationEndpointKey alias")
 }
 
 func TestFallbackToRandomEndpoint(t *testing.T) {

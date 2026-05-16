@@ -25,6 +25,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
 )
 
 func makeLatencyAdmissionEndpoint(name string, kvCache float64, runningRequests int) fwksched.Endpoint {
@@ -108,6 +109,44 @@ func TestAdmitRequest(t *testing.T) {
 					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
 			wantErr: true,
+		},
+		{
+			name: "sheddable, old SLO aliases — reject",
+			request: &fwksched.InferenceRequest{
+				Headers: map[string]string{
+					metadata.OldTTFTSLOHeaderKey: "100",
+					metadata.OldTPOTSLOHeaderKey: "30",
+				},
+				Objectives: fwksched.RequestObjectives{Priority: -1},
+			},
+			endpoints: []fwksched.Endpoint{
+				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
+			},
+			setupFn: func(endpoints []fwksched.Endpoint) {
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
+			},
+			wantErr: true,
+		},
+		{
+			name: "new SLO headers take precedence over old aliases",
+			request: &fwksched.InferenceRequest{
+				Headers: map[string]string{
+					metadata.TTFTSLOHeaderKey:    "0",
+					metadata.OldTTFTSLOHeaderKey: "100",
+					metadata.TPOTSLOHeaderKey:    "0",
+					metadata.OldTPOTSLOHeaderKey: "30",
+				},
+				Objectives: fwksched.RequestObjectives{Priority: -1},
+			},
+			endpoints: []fwksched.Endpoint{
+				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
+			},
+			setupFn: func(endpoints []fwksched.Endpoint) {
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
+			},
+			wantErr: false,
 		},
 		{
 			name:    "sheddable, all invalid, but one pod idle — admit",

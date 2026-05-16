@@ -14,21 +14,21 @@ The SLO Deadline ordering policy selects requests based on a deadline derived fr
 ## What It Does
 
 The policy computes a deadline for each request as:
-`Deadline = ReceivedTimestamp + x-slo-ttft-ms`
+`Deadline = ReceivedTimestamp + x-llm-d-router-slo-ttft-ms`
 
 - **`ReceivedTimestamp`**: The time the request was received by the gateway.
-- **`x-slo-ttft-ms`**: A request header specifying the target Time-To-First-Token in milliseconds.
+- **`x-llm-d-router-slo-ttft-ms`**: A request header specifying the target Time-To-First-Token in milliseconds. The deprecated `x-slo-ttft-ms` alias is still accepted for compatibility.
 
 ## Inputs consumed
 
 This policy inspects the following attributes of the request:
 - **ReceivedTimestamp**: The time the request was received by the gateway.
-- **`x-slo-ttft-ms` Header**: A header specifying the target Time-To-First-Token in milliseconds.
+- **`x-llm-d-router-slo-ttft-ms` Header**: A header specifying the target Time-To-First-Token in milliseconds.
 
 Requests are prioritized as follows:
 1. Requests with **earlier absolute deadlines** are dispatched first.
 2. If two requests have the same deadline, or if both lack a valid deadline, they are ordered by `ReceivedTimestamp` (FCFS).
-3. Requests without a valid `x-slo-ttft-ms` header (missing, empty, or invalid integer) are assigned a far-future deadline, placing them behind all SLO-bound requests.
+3. Requests without a valid `x-llm-d-router-slo-ttft-ms` header (missing, empty, or invalid integer) are assigned a far-future deadline, placing them behind all SLO-bound requests.
 
 ## Behavior and Queue Pairing
 
@@ -39,7 +39,7 @@ This policy **requires** specific queue capabilities to function correctly.
 
 ## Configuration
 
-This policy does not require any custom parameters in the flow control configuration itself, but it relies on the presence of the `x-slo-ttft-ms` header in incoming requests.
+This policy does not require any custom parameters in the flow control configuration itself, but it relies on the presence of the `x-llm-d-router-slo-ttft-ms` header in incoming requests.
 
 ```yaml
 orderingPolicyRef: slo-deadline-ordering-policy
@@ -47,10 +47,9 @@ orderingPolicyRef: slo-deadline-ordering-policy
 
 ## Trade-offs
 
-- **Header Dependency:** Requires clients or upstream components to correctly set the `x-slo-ttft-ms` header.
+- **Header Dependency:** Requires clients or upstream components to correctly set the `x-llm-d-router-slo-ttft-ms` header.
 - **Starvation Risk:** Non-SLO requests or requests with very loose SLOs may be starved if there is a constant influx of tight-SLO requests.
 - **Computational Overhead:** Similar to EDF, maintaining a priority heap incurs higher CPU overhead ($O(\log n)$) than a simple FIFO list.
 
 ## Related Documentation
 *   [Ordering Overview](../README.md)
-

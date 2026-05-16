@@ -48,15 +48,11 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 
 	for _, header := range req.RequestHeaders.Headers.Headers {
 		reqCtx.Request.Headers[header.Key] = envoy.GetHeaderValue(header)
-		switch header.Key {
-		case metadata.FlowFairnessIDKey:
-			reqCtx.FairnessID = reqCtx.Request.Headers[header.Key]
-		case metadata.ObjectiveKey:
-			reqCtx.ObjectiveKey = reqCtx.Request.Headers[header.Key]
-		case metadata.ModelNameRewriteKey:
-			reqCtx.TargetModelName = reqCtx.Request.Headers[header.Key]
-		}
 	}
+
+	reqCtx.FairnessID = metadata.GetHeader(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
+	reqCtx.ObjectiveKey = metadata.GetHeader(reqCtx.Request.Headers, metadata.ObjectiveKey)
+	reqCtx.TargetModelName = metadata.GetHeader(reqCtx.Request.Headers, metadata.ModelNameRewriteKey)
 
 	if reqCtx.FairnessID == "" {
 		reqCtx.FairnessID = metadata.DefaultFairnessID
@@ -109,13 +105,14 @@ func (s *StreamingServer) generateRequestHeaderResponse(ctx context.Context, req
 
 func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestContext) []*configPb.HeaderValueOption {
 	// can likely refactor these two bespoke headers to be updated in PostDispatch, to centralize logic.
-	headers := []*configPb.HeaderValueOption{
-		{
+	headers := make([]*configPb.HeaderValueOption, 0, len(metadata.HeaderNames(metadata.DestinationEndpointKey)))
+	for _, key := range metadata.HeaderNames(metadata.DestinationEndpointKey) {
+		headers = append(headers, &configPb.HeaderValueOption{
 			Header: &configPb.HeaderValue{
-				Key:      metadata.DestinationEndpointKey,
+				Key:      key,
 				RawValue: []byte(reqCtx.TargetEndpoint),
 			},
-		},
+		})
 	}
 	if reqCtx.RequestSize > 0 {
 		// We need to update the content length header if the body is mutated, see Envoy doc:
@@ -157,18 +154,20 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 }
 
 func (s *StreamingServer) generateMetadata(endpoint string) *structpb.Struct {
+	fields := make(map[string]*structpb.Value, len(metadata.HeaderNames(metadata.DestinationEndpointKey)))
+	for _, key := range metadata.HeaderNames(metadata.DestinationEndpointKey) {
+		fields[key] = &structpb.Value{
+			Kind: &structpb.Value_StringValue{
+				StringValue: endpoint,
+			},
+		}
+	}
 	return &structpb.Struct{
 		Fields: map[string]*structpb.Value{
 			metadata.DestinationEndpointNamespace: {
 				Kind: &structpb.Value_StructValue{
 					StructValue: &structpb.Struct{
-						Fields: map[string]*structpb.Value{
-							metadata.DestinationEndpointKey: {
-								Kind: &structpb.Value_StringValue{
-									StringValue: endpoint,
-								},
-							},
-						},
+						Fields: fields,
 					},
 				},
 			},

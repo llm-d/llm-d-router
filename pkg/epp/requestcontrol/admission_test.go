@@ -230,7 +230,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.ResourceExhausted,
 			expectErrSubstr: "request rejected by flow control",
-			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+			expectHeaders:   errcommon.RequestDroppedReasonHeaders(errcommon.RequestDroppedReasonSaturated),
 		},
 		{
 			name:            "fc_evict_ttl",
@@ -240,7 +240,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.ServiceUnavailable,
 			expectErrSubstr: "request timed out in queue: timeout",
-			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)},
+			expectHeaders:   errcommon.RequestDroppedReasonHeaders(errcommon.RequestDroppedReasonTTLExpired),
 		},
 		{
 			name:            "fc_evict_context_cancelled",
@@ -249,7 +249,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.ServiceUnavailable,
 			expectErrSubstr: "client disconnected",
-			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled)},
+			expectHeaders:   errcommon.RequestDroppedReasonHeaders(errcommon.RequestDroppedReasonContextCancelled),
 		},
 		{
 			name:            "fc_reject_other",

@@ -499,15 +499,17 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 			Body: []byte("request evicted by flow control"),
 		}
 		if r.RequestDroppedReason != "" {
-			ir.Headers = &extProcPb.HeaderMutation{
-				SetHeaders: []*configPb.HeaderValueOption{
-					{
-						Header: &configPb.HeaderValue{
-							Key:      errcommon.RequestDroppedReasonHeaderKey,
-							RawValue: []byte(r.RequestDroppedReason),
-						},
+			setHeaders := make([]*configPb.HeaderValueOption, 0, 2)
+			for key, value := range errcommon.RequestDroppedReasonHeaders(r.RequestDroppedReason) {
+				setHeaders = append(setHeaders, &configPb.HeaderValueOption{
+					Header: &configPb.HeaderValue{
+						Key:      key,
+						RawValue: []byte(value),
 					},
-				},
+				})
+			}
+			ir.Headers = &extProcPb.HeaderMutation{
+				SetHeaders: setHeaders,
 			}
 		}
 		return srv.Send(&extProcPb.ProcessingResponse{

@@ -269,7 +269,7 @@ func GenerateStreamedRequestSet(
 func GenerateStreamedGRPCRequestSet(
 	logger logr.Logger,
 	prompt string,
-	inferenceObjective string, // Set to non-empty to set x-gateway-inference-objective value
+	inferenceObjective string, // Set to non-empty to set x-llm-d-router-inference-objective value
 	filterMetadata []string,
 	methodName string,
 ) []*extProcPb.ProcessingRequest {

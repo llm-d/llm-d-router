@@ -83,7 +83,9 @@ func (desv *DestinationEndpointServedVerifier) ResponseHeader(ctx context.Contex
 		return
 	}
 
-	actualEndpoint, ok := lbMetadata[metadata.DestinationEndpointServedKey].(string)
+	actualEndpointRaw, ok := metadata.GetValue(lbMetadata, metadata.DestinationEndpointServedKey)
+	actualEndpoint, stringOK := actualEndpointRaw.(string)
+	ok = ok && stringOK
 	if !ok {
 		logger.V(logging.DEBUG).Info("Response does not contain destination endpoint served metadata, skipping verification")
 		response.Headers[test.ConformanceTestResultHeader] = "fail: missing destination endpoint served metadata"

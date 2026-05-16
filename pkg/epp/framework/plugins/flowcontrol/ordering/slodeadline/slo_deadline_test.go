@@ -26,6 +26,7 @@ import (
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
 )
 
 var testFlowKey = flowcontrol.FlowKey{ID: "test-flow", Priority: 0}
@@ -119,6 +120,23 @@ func TestCalculateSLODeadline(t *testing.T) {
 	accValid := &mocks.MockQueueItemAccessor{OriginalRequestV: reqValid}
 	deadline := calculateSLODeadline(accValid)
 	assert.Equal(t, now.Add(200*time.Millisecond), deadline)
+
+	// Old alias
+	reqOldAlias := mocks.NewMockFlowControlRequest(1, "old-alias", testFlowKey)
+	reqOldAlias.ReceivedTimestampV = now
+	reqOldAlias.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{metadata.OldTTFTSLOHeaderKey: "150"}}
+	accOldAlias := &mocks.MockQueueItemAccessor{OriginalRequestV: reqOldAlias}
+	assert.Equal(t, now.Add(150*time.Millisecond), calculateSLODeadline(accOldAlias))
+
+	// New header takes precedence over old alias
+	reqBoth := mocks.NewMockFlowControlRequest(1, "both", testFlowKey)
+	reqBoth.ReceivedTimestampV = now
+	reqBoth.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{
+		sloTtftHeader:                "200",
+		metadata.OldTTFTSLOHeaderKey: "50",
+	}}
+	accBoth := &mocks.MockQueueItemAccessor{OriginalRequestV: reqBoth}
+	assert.Equal(t, now.Add(200*time.Millisecond), calculateSLODeadline(accBoth))
 
 	// Missing header
 	reqNoHeader := mocks.NewMockFlowControlRequest(2, "no", testFlowKey)

@@ -159,7 +159,7 @@ data:
                 max_requests: 40000
           original_dst_lb_config:
             use_http_header: true
-            http_header_name: x-gateway-destination-endpoint
+            http_header_name: x-llm-d-router-destination-endpoint
         - name: ext_proc
           type: STRICT_DNS
           connect_timeout: 86400s

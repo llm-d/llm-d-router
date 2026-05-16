@@ -21,24 +21,31 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
 )
 
 var (
 	// InputControlHeaders are sent by the Gateway/User to control EPP behavior.
 	// We must extract these, then strip them so they don't leak to the backend.
-	InputControlHeaders = sets.New(
-		strings.ToLower(metadata.FlowFairnessIDKey),
-		strings.ToLower(metadata.ObjectiveKey),
-		strings.ToLower(metadata.ModelNameRewriteKey),
-		strings.ToLower(metadata.SubsetFilterKey),
+	InputControlHeaders = lowerHeaderNames(
+		metadata.FlowFairnessIDKey,
+		metadata.ObjectiveKey,
+		metadata.ModelNameRewriteKey,
+		metadata.SubsetFilterKey,
+		metadata.TTFTSLOHeaderKey,
+		metadata.TPOTSLOHeaderKey,
 	)
 
 	// OutputInjectionHeaders are headers EPP injects for the backend.
 	// If the user sends these, they must be stripped to prevent ambiguity.
-	OutputInjectionHeaders = sets.New(
-		strings.ToLower(metadata.DestinationEndpointKey),
-		strings.ToLower(metadata.DestinationEndpointServedKey),
+	OutputInjectionHeaders = addLowerHeaders(
+		lowerHeaderNames(
+			metadata.DestinationEndpointKey,
+			metadata.DestinationEndpointServedKey,
+		),
+		errcommon.RequestDroppedReasonHeaderKey,
+		errcommon.OldRequestDroppedReasonHeaderKey,
 	)
 
 	// ProtocolHeaders are managed by the proxy layer (Envoy/EPP).
@@ -48,4 +55,21 @@ var (
 func IsSystemOwnedHeader(key string) bool {
 	k := strings.ToLower(key)
 	return InputControlHeaders.Has(k) || OutputInjectionHeaders.Has(k) || ProtocolHeaders.Has(k)
+}
+
+func lowerHeaderNames(keys ...string) sets.Set[string] {
+	headers := sets.New[string]()
+	for _, key := range keys {
+		for _, name := range metadata.HeaderNames(key) {
+			headers.Insert(strings.ToLower(name))
+		}
+	}
+	return headers
+}
+
+func addLowerHeaders(headers sets.Set[string], keys ...string) sets.Set[string] {
+	for _, key := range keys {
+		headers.Insert(strings.ToLower(key))
+	}
+	return headers
 }
