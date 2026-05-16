@@ -270,6 +270,27 @@ The plugin fails at startup (before `Start` returns an error) if:
 - The YAML/JSON cannot be parsed.
 - Any endpoint has an invalid `address` or `port`.
 
+### Kubernetes-only features that do not run in file discovery mode
+
+File discovery starts the EPP without a controller manager, so any feature
+that depends on a Kubernetes API server is inactive:
+
+- **`InferenceModelRewrite`** (model name rewriting for traffic split or
+  canary). The reconciler is not started; `ds.ModelRewriteGet` returns nil
+  for every request. There is no file-mode equivalent today.
+- **`InferenceObjective`** (per-request SLO objectives). The reconciler is
+  not started; objective lookups return nil. Plugins that depend on
+  per-request SLO data will see no objectives configured.
+- **`k8s-notification-source` data layer plugin** (and any other notification
+  source that needs the controller manager). The plugin loads from config
+  but is never bound to a manager, so it produces no events. Remove it from
+  `dataLayer.sources` when running in file discovery mode.
+
+If you copy a Kubernetes EPP config into a file-discovery deployment, expect
+behavior tied to these features to differ. The runner emits a one-time log
+at startup naming these inactive features.
+
+
 ---
 
 ## Running EPP with file discovery (no Kubernetes)

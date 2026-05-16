@@ -873,6 +873,17 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	pool := datalayer.NewEndpointPool(namespace, poolName)
 	ds := datastore.NewDatastore(ctx, epf, int32(opts.ModelServerMetricsPort)).WithEndpointPool(pool)
 
+	// File mode runs without a controller manager, so several Kubernetes-only
+	// features are inactive: the InferenceModelRewrite and InferenceObjective
+	// reconcilers never start, and any "k8s-notification-source" plugin in the
+	// data layer config silently fails to bind (Runtime.Start, which wires
+	// notification sources into the manager, is intentionally skipped below).
+	// Surface this once at startup so operators porting a K8s config see why
+	// related behavior differs.
+	setupLog.Info("file-discovery mode: Kubernetes-only features are inactive " +
+		"(InferenceModelRewrite, InferenceObjective, and any " +
+		"k8s-notification-source data layer plugins); see docs/discovery.md")
+
 	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
