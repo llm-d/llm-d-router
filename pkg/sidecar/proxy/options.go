@@ -499,7 +499,8 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 		opts.decoderInsecureSkipVerify = *cfg.DecoderTLSInsecureSkipVerify
 	}
 
-	if cfg.InferencePool != "" && !opts.isFlagSet(inferencePool) {
+	if cfg.InferencePool != "" && !opts.isFlagSet(inferencePool) &&
+		!opts.isFlagSet(inferencePoolNamespace) && !opts.isFlagSet(inferencePoolName) {
 		opts.inferencePool = cfg.InferencePool
 	}
 	if cfg.PoolGroup != "" && !opts.isFlagSet(poolGroup) {
