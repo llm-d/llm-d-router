@@ -42,12 +42,16 @@ func NewSchedulerWithConfig(config *SchedulerConfig) *Scheduler {
 	return &Scheduler{
 		profileHandler: config.profileHandler,
 		profiles:       config.profiles,
+		fallbacks:      config.fallbacks,
 	}
 }
 
 type Scheduler struct {
 	profileHandler fwksched.ProfileHandler
 	profiles       map[string]fwksched.SchedulerProfile
+	// fallbacks maps a primary profile name to the SchedulerProfile that should run
+	// in its place when the primary's Run reports NoSignal=true. See #1139.
+	fallbacks map[string]fwksched.SchedulerProfile
 }
 
 // Schedule finds the target pod based on metrics and the requested lora adapter.
@@ -81,6 +85,21 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 				loggerVerbose.Info("failed to run scheduler profile", "profile", name, "error", err.Error())
 			} else {
 				loggerVerbose.Info("Completed running scheduler profile succuessfully", "profile", name)
+			}
+
+			// Fallback chaining (#1139): if the profile reported no usable signal
+			// and a fallback is configured for it, run the fallback and substitute
+			// its result. ProfileHandler stays unaware that fallback was used.
+			if profileRunResult != nil && profileRunResult.NoSignal {
+				if fb, ok := s.fallbacks[name]; ok {
+					loggerVerbose.Info("Primary profile produced no usable signal; running fallback", "primary", name)
+					fbResult, fbErr := fb.Run(ctx, request, cycleState, candidateEndpoints)
+					if fbErr != nil {
+						loggerVerbose.Info("fallback profile failed to run", "primary", name, "error", fbErr.Error())
+					} else {
+						profileRunResult = fbResult
+					}
+				}
 			}
 
 			profileRunResults[name] = profileRunResult // if profile failed to run, the run result is nil

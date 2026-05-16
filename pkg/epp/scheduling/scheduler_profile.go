@@ -114,6 +114,11 @@ func (p *SchedulerProfile) String() string {
 
 // Run runs a SchedulerProfile. It invokes all the SchedulerProfile plugins for the given request in this
 // order - Filters, Scorers, Picker. After completing all, it returns the result.
+//
+// When the profile's scorers produce no usable signal (all weighted scores are
+// zero), Run sets ProfileRunResult.NoSignal on the returned result. The scheduler
+// uses this to chain to a configured fallback profile before the ProfileHandler
+// is involved. See #1139.
 func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, cycleState *fwksched.CycleState, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	endpoints := p.runFilterPlugins(ctx, request, cycleState, candidateEndpoints)
 	if len(endpoints) == 0 {
@@ -124,7 +129,22 @@ func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceR
 
 	result := p.runPickerPlugin(ctx, cycleState, weightedScorePerEndpoint)
 
+	if result != nil && allScoresZero(weightedScorePerEndpoint) {
+		result.NoSignal = true
+	}
+
 	return result, nil
+}
+
+// allScoresZero reports whether every weighted score in the map is exactly 0.
+// Empty maps are treated as "all zero" (no signal). See #1139.
+func allScoresZero(scores map[fwksched.Endpoint]float64) bool {
+	for _, s := range scores {
+		if s != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksched.InferenceRequest, cycleState *fwksched.CycleState, endpoints []fwksched.Endpoint) []fwksched.Endpoint {

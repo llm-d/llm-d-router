@@ -214,12 +214,59 @@ func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplug
 	return nil
 }
 
+// validateFallbackReferences validates that all FallbackProfile references on
+// the given configProfiles point to existing profile names and that no fallback
+// chain forms a cycle (including the degenerate one-node self-reference case).
+// Returns nil when the reference graph is acyclic and complete. See #1139.
+func validateFallbackReferences(configProfiles []configapi.SchedulingProfile) error {
+	nameSet := make(map[string]bool, len(configProfiles))
+	fallbackByName := make(map[string]string)
+	for _, p := range configProfiles {
+		nameSet[p.Name] = true
+		if p.FallbackProfile != "" {
+			fallbackByName[p.Name] = p.FallbackProfile
+		}
+	}
+
+	for primary, fb := range fallbackByName {
+		if primary == fb {
+			return fmt.Errorf("profile %q references itself as fallback", primary)
+		}
+		if !nameSet[fb] {
+			return fmt.Errorf("profile %q references unknown fallback profile %q", primary, fb)
+		}
+	}
+
+	// Cycle detection: from each profile, walk the fallback chain and fail if a
+	// node is revisited. Each node has at most one outgoing edge, so this is
+	// O(N) per starting profile and O(N^2) overall — fine for a startup-time
+	// validation over a handful of profiles.
+	for start := range fallbackByName {
+		visited := map[string]bool{start: true}
+		current := fallbackByName[start]
+		for current != "" {
+			if visited[current] {
+				return fmt.Errorf("fallback cycle detected involving profile %q", start)
+			}
+			visited[current] = true
+			current = fallbackByName[current]
+		}
+	}
+	return nil
+}
+
 func buildSchedulerConfig(
 	configProfiles []configapi.SchedulingProfile,
 	handle fwkplugin.Handle,
 ) (*scheduling.SchedulerConfig, error) {
 
-	profiles := make(map[string]fwksched.SchedulerProfile)
+	// Validate fallback references early so we surface configuration errors before
+	// instantiating plugins. See #1139.
+	if err := validateFallbackReferences(configProfiles); err != nil {
+		return nil, err
+	}
+
+	profiles := make(map[string]fwksched.SchedulerProfile, len(configProfiles))
 
 	for _, cfgProfile := range configProfiles {
 		fwProfile := scheduling.NewSchedulerProfile()
@@ -248,6 +295,16 @@ func buildSchedulerConfig(
 		profiles[cfgProfile.Name] = fwProfile
 	}
 
+	// Build the primary→fallback map (references already validated above). The
+	// scheduler consults this at run time when a primary's Run reports NoSignal=true.
+	fallbacks := make(map[string]fwksched.SchedulerProfile)
+	for _, cfgProfile := range configProfiles {
+		if cfgProfile.FallbackProfile == "" {
+			continue
+		}
+		fallbacks[cfgProfile.Name] = profiles[cfgProfile.FallbackProfile]
+	}
+
 	var profileHandler fwksched.ProfileHandler
 	for name, plugin := range handle.GetAllPluginsWithNames() {
 		if ph, ok := plugin.(fwksched.ProfileHandler); ok {
@@ -267,7 +324,7 @@ func buildSchedulerConfig(
 		return nil, errors.New("SingleProfileHandler cannot support multiple scheduling profiles")
 	}
 
-	return scheduling.NewSchedulerConfig(profileHandler, profiles), nil
+	return scheduling.NewSchedulerConfig(profileHandler, profiles).WithFallbacks(fallbacks), nil
 }
 
 func loadFeatureConfig(gates configapi.FeatureGates) map[string]bool {

@@ -74,6 +74,10 @@ func TestPDSchedule(t *testing.T) {
 						Endpoint: endpoint1,
 					},
 				},
+				// Prefill has no scorers in this test, so all weighted scores
+				// are zero — Run flags this for the scheduler's fallback path (#1139).
+				// No fallback is configured here so the result passes through unchanged.
+				NoSignal: true,
 			},
 		},
 
@@ -205,6 +209,7 @@ func TestPDSchedule(t *testing.T) {
 								Endpoint: endpoint1,
 							},
 						},
+						NoSignal: true, // prefill has no scorers — see comment on prefillDecodeResult above
 					},
 				},
 				PrimaryProfileName: decode,

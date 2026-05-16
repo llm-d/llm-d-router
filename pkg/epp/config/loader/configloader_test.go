@@ -975,3 +975,83 @@ func TestFilterExecutionOrderFromYAML(t *testing.T) {
 	require.Equal(t, []string{"filter-A", "filter-B", "filter-C", "scorer-X", "scorer-Y", "maxScorePicker"}, pluginRefs,
 		"Plugins slice must preserve YAML declaration order")
 }
+
+// TestValidateFallbackReferences covers the loader-level validation rules for
+// the fallbackProfile field on SchedulingProfile, per #1139:
+//   - dangling references → error,
+//   - self-references → error,
+//   - cycles in the fallback chain → error,
+//   - valid (acyclic) chains → no error.
+func TestValidateFallbackReferences(t *testing.T) {
+	tests := []struct {
+		name     string
+		profiles []configapi.SchedulingProfile
+		wantErr  string // substring expected in the error message; "" = no error
+	}{
+		{
+			name: "no fallbacks",
+			profiles: []configapi.SchedulingProfile{
+				{Name: "a"},
+				{Name: "b"},
+			},
+		},
+		{
+			name: "valid one-level fallback",
+			profiles: []configapi.SchedulingProfile{
+				{Name: "primary", FallbackProfile: "secondary"},
+				{Name: "secondary"},
+			},
+		},
+		{
+			name: "valid two-level chain",
+			profiles: []configapi.SchedulingProfile{
+				{Name: "a", FallbackProfile: "b"},
+				{Name: "b", FallbackProfile: "c"},
+				{Name: "c"},
+			},
+		},
+		{
+			name: "dangling reference",
+			profiles: []configapi.SchedulingProfile{
+				{Name: "primary", FallbackProfile: "does-not-exist"},
+			},
+			wantErr: "unknown fallback",
+		},
+		{
+			name: "self-reference",
+			profiles: []configapi.SchedulingProfile{
+				{Name: "loop", FallbackProfile: "loop"},
+			},
+			wantErr: "itself",
+		},
+		{
+			name: "two-node cycle",
+			profiles: []configapi.SchedulingProfile{
+				{Name: "a", FallbackProfile: "b"},
+				{Name: "b", FallbackProfile: "a"},
+			},
+			wantErr: "cycle",
+		},
+		{
+			name: "three-node cycle",
+			profiles: []configapi.SchedulingProfile{
+				{Name: "a", FallbackProfile: "b"},
+				{Name: "b", FallbackProfile: "c"},
+				{Name: "c", FallbackProfile: "a"},
+			},
+			wantErr: "cycle",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateFallbackReferences(tt.profiles)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}

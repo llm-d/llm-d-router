@@ -157,6 +157,14 @@ type ScoredEndpoint struct {
 // ProfileRunResult captures the profile run result.
 type ProfileRunResult struct {
 	TargetEndpoints []Endpoint
+
+	// NoSignal is set by SchedulerProfile.Run when the profile's scorers
+	// produced no usable signal (all weighted scores were zero). The scheduler
+	// uses this to decide whether to fall through to a configured fallback
+	// profile before the ProfileHandler is involved. See #1139. Default false
+	// preserves pre-fallback behavior for any caller that constructs
+	// ProfileRunResult directly.
+	NoSignal bool
 }
 
 // SchedulingResult captures the result of the scheduling cycle.

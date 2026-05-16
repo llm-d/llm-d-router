@@ -603,6 +603,79 @@ func (p *filterOnlyPlugin) Filter(_ context.Context, _ *fwksched.CycleState, _ *
 	return endpoints
 }
 
+// TestProfileRun_SetsNoSignalWhenScoresAllZero verifies that Run sets
+// ProfileRunResult.NoSignal when every weighted score is zero. The picker still
+// runs (it produces a fallback-eligible result); the scheduler then consults
+// NoSignal to decide whether to chain to a configured fallback. See #1139.
+func TestProfileRun_SetsNoSignalWhenScoresAllZero(t *testing.T) {
+	zeroScorer := &testPlugin{
+		TypeRes:   "zero-scorer",
+		ScoreRes:  0,
+		FilterRes: []k8stypes.NamespacedName{{Name: "pod1"}, {Name: "pod2"}},
+	}
+	picker := &testPlugin{
+		TypeRes: "picker",
+		PickRes: k8stypes.NamespacedName{Name: "pod1"},
+	}
+
+	profile := NewSchedulerProfile().
+		WithFilters(zeroScorer).
+		WithScorers(NewWeightedScorer(zeroScorer, 1)).
+		WithPicker(picker)
+
+	input := []fwksched.Endpoint{
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil),
+	}
+	req := &fwksched.InferenceRequest{TargetModel: "test", RequestID: uuid.NewString()}
+
+	result, err := profile.Run(context.Background(), req, fwksched.NewCycleState(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !result.NoSignal {
+		t.Error("expected result.NoSignal=true when every weighted score is zero")
+	}
+	if picker.PickCallCount != 1 {
+		t.Errorf("picker should still run when scores are zero; got %d calls", picker.PickCallCount)
+	}
+}
+
+// TestProfileRun_NoSignalFalseWhenScoresNonZero verifies the inverse: when at
+// least one weighted score is non-zero, NoSignal stays false.
+func TestProfileRun_NoSignalFalseWhenScoresNonZero(t *testing.T) {
+	nonZeroScorer := &testPlugin{
+		TypeRes:   "non-zero-scorer",
+		ScoreRes:  0.5,
+		FilterRes: []k8stypes.NamespacedName{{Name: "pod1"}, {Name: "pod2"}},
+	}
+	picker := &testPlugin{
+		TypeRes: "picker",
+		PickRes: k8stypes.NamespacedName{Name: "pod1"},
+	}
+
+	profile := NewSchedulerProfile().
+		WithFilters(nonZeroScorer).
+		WithScorers(NewWeightedScorer(nonZeroScorer, 1)).
+		WithPicker(picker)
+
+	input := []fwksched.Endpoint{
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil),
+	}
+	req := &fwksched.InferenceRequest{TargetModel: "test", RequestID: uuid.NewString()}
+
+	result, err := profile.Run(context.Background(), req, fwksched.NewCycleState(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.NoSignal {
+		t.Error("expected result.NoSignal=false when at least one score is non-zero")
+	}
+}
+
 func findEndpoints(endpoints []fwksched.Endpoint, names ...k8stypes.NamespacedName) []fwksched.Endpoint {
 	res := []fwksched.Endpoint{}
 	for _, endpoint := range endpoints {

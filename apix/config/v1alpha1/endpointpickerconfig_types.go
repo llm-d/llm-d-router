@@ -139,6 +139,13 @@ type SchedulingProfile struct {
 	// Plugins is the list of plugins for this SchedulingProfile. They are assigned
 	// to the appropriate "slots" based on their type.
 	Plugins []SchedulingPlugin `json:"plugins"`
+
+	// +optional
+	// FallbackProfile names another SchedulingProfile to run when this profile's
+	// scorers produce no usable signal (all weighted scores are zero). The
+	// referenced profile must exist in the same configuration and fallback chains
+	// must not cycle; both are validated at load time. See #1139.
+	FallbackProfile string `json:"fallbackProfile,omitempty"`
 }
 
 func (sp SchedulingProfile) String() string {
