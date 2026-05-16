@@ -22,6 +22,7 @@ import (
 
 	metricsutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
+	eppmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
 )
 
 var (
@@ -53,6 +54,7 @@ func NewInferencePoolMetricsCollector(ds datastore.Datastore) prometheus.Collect
 // DescribeWithStability implements the prometheus.Collector interface.
 func (c *inferencePoolMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descInferencePoolPerPodQueueSize
+	ch <- eppmetrics.DescInferencePoolPerEndpointQueueSize
 }
 
 // CollectWithStability implements the prometheus.Collector interface.
@@ -70,6 +72,13 @@ func (c *inferencePoolMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, pod := range podMetrics {
 		ch <- prometheus.MustNewConstMetric(
 			descInferencePoolPerPodQueueSize,
+			prometheus.GaugeValue,
+			float64(pod.GetMetrics().WaitingQueueSize),
+			pool.Name,
+			pod.GetMetadata().NamespacedName.Name,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			eppmetrics.DescInferencePoolPerEndpointQueueSize,
 			prometheus.GaugeValue,
 			float64(pod.GetMetrics().WaitingQueueSize),
 			pool.Name,

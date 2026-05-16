@@ -1,0 +1,4 @@
+# HELP llm_d_router_epp_running_requests [ALPHA] Inference objective number of running requests in each model.
+# TYPE llm_d_router_epp_running_requests gauge
+llm_d_router_epp_running_requests{model_name="m1"} 1
+llm_d_router_epp_running_requests{model_name="m2"} 1

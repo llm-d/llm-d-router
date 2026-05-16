@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/component-base/metrics/testutil"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
@@ -117,6 +118,15 @@ func TestMetricsCollected(t *testing.T) {
 `), "inference_pool_per_pod_queue_size")
 		if err != nil {
 			t.Fatal(err)
+		}
+
+		errNew := promtestutil.CollectAndCompare(collector, strings.NewReader(`
+		# HELP llm_d_router_epp_per_endpoint_queue_size [ALPHA] The total number of requests pending in the model server queue for each underlying endpoint.
+		# TYPE llm_d_router_epp_per_endpoint_queue_size gauge
+		llm_d_router_epp_per_endpoint_queue_size{model_server_endpoint="pod1-rank-0",name="test-pool"} 100
+`), "llm_d_router_epp_per_endpoint_queue_size")
+		if errNew != nil {
+			t.Fatal(errNew)
 		}
 	}
 }

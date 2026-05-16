@@ -1,0 +1,19 @@
+# HELP llm_d_router_epp_prefix_indexer_hit_bytes [ALPHA] Length of the prefix match in number of bytes in the cache lookup.
+# TYPE llm_d_router_epp_prefix_indexer_hit_bytes histogram
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="0"} 2
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="16"} 5
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="32"} 5
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="64"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="128"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="256"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="512"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="1024"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="2048"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="4096"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="8192"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="16384"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="32768"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="65536"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_bucket{le="+Inf"} 6
+llm_d_router_epp_prefix_indexer_hit_bytes_sum 86
+llm_d_router_epp_prefix_indexer_hit_bytes_count 6

@@ -72,9 +72,13 @@ var (
 func GetCollectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		SchedulerPDDecisionCount,
+		LlmdPDDecisionCount,
 		SchedulerDisaggDecisionCount,
+		LlmdDisaggDecisionCount,
 		DataLayerPollErrorsTotal,
+		LlmdDataLayerPollErrorsTotal,
 		DataLayerExtractErrorsTotal,
+		LlmdDataLayerExtractErrorsTotal,
 	}
 }
 
@@ -86,6 +90,7 @@ func RecordPDDecision(modelName, decisionType string) {
 		modelName = "unknown"
 	}
 	SchedulerPDDecisionCount.WithLabelValues(modelName, decisionType).Inc()
+	LlmdPDDecisionCount.WithLabelValues(modelName, decisionType).Inc()
 }
 
 // RecordDisaggDecision increments the counter for a disaggregation routing decision.
@@ -97,6 +102,7 @@ func RecordDisaggDecision(modelName, decisionType string) {
 		modelName = "unknown"
 	}
 	SchedulerDisaggDecisionCount.WithLabelValues(modelName, decisionType).Inc()
+	LlmdDisaggDecisionCount.WithLabelValues(modelName, decisionType).Inc()
 }
 
 // DisaggDecisionType returns the DecisionType* constant corresponding to which

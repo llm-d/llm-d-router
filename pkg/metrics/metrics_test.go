@@ -8,11 +8,15 @@ import (
 )
 
 func TestSchedulerPDDecisionCount(t *testing.T) {
+	SchedulerPDDecisionCount.Reset()
+	LlmdPDDecisionCount.Reset()
+
 	model := "test-model"
 
 	RecordPDDecision(model, DecisionTypePrefillDecode)
 	RecordPDDecision(model, DecisionTypeDecodeOnly)
 	RecordPDDecision(model, DecisionTypePrefillDecode)
+	
 	expected := `
 		# HELP llm_d_inference_scheduler_pd_decision_total [ALPHA] Total number of P/D disaggregation decisions made
 		# TYPE llm_d_inference_scheduler_pd_decision_total counter
@@ -24,11 +28,24 @@ func TestSchedulerPDDecisionCount(t *testing.T) {
 		"llm_d_inference_scheduler_pd_decision_total"); err != nil {
 		t.Errorf("RecordPDDecision() failed: %v", err)
 	}
+
+	expectedNew := `
+		# HELP llm_d_router_epp_pd_decision_total [ALPHA] Total number of P/D disaggregation decisions made
+		# TYPE llm_d_router_epp_pd_decision_total counter
+		llm_d_router_epp_pd_decision_total{decision_type="decode-only",model_name="test-model"} 1
+		llm_d_router_epp_pd_decision_total{decision_type="prefill-decode",model_name="test-model"} 2
+	`
+
+	if err := testutil.CollectAndCompare(LlmdPDDecisionCount, strings.NewReader(expectedNew),
+		"llm_d_router_epp_pd_decision_total"); err != nil {
+		t.Errorf("RecordPDDecision() new failed: %v", err)
+	}
 }
 
 func TestRecordDisaggDecision(t *testing.T) {
-	// Reset the counter before the test to avoid interference from other tests.
+	// Reset the counters before the test to avoid interference from other tests.
 	SchedulerDisaggDecisionCount.Reset()
+	LlmdDisaggDecisionCount.Reset()
 
 	model := "test-model"
 	RecordDisaggDecision(model, DecisionTypeDecodeOnly)
@@ -52,10 +69,25 @@ func TestRecordDisaggDecision(t *testing.T) {
 		"llm_d_inference_scheduler_disagg_decision_total"); err != nil {
 		t.Errorf("RecordDisaggDecision() failed: %v", err)
 	}
+
+	expectedNew := `
+		# HELP llm_d_router_epp_disagg_decision_total [ALPHA] Total number of disaggregation routing decisions made
+		# TYPE llm_d_router_epp_disagg_decision_total counter
+		llm_d_router_epp_disagg_decision_total{decision_type="decode-only",model_name="test-model"} 1
+		llm_d_router_epp_disagg_decision_total{decision_type="encode-decode",model_name="test-model"} 1
+		llm_d_router_epp_disagg_decision_total{decision_type="encode-prefill-decode",model_name="test-model"} 3
+		llm_d_router_epp_disagg_decision_total{decision_type="prefill-decode",model_name="test-model"} 2
+	`
+
+	if err := testutil.CollectAndCompare(LlmdDisaggDecisionCount, strings.NewReader(expectedNew),
+		"llm_d_router_epp_disagg_decision_total"); err != nil {
+		t.Errorf("RecordDisaggDecision() new failed: %v", err)
+	}
 }
 
 func TestRecordDisaggDecisionEmptyModel(t *testing.T) {
 	SchedulerDisaggDecisionCount.Reset()
+	LlmdDisaggDecisionCount.Reset()
 
 	RecordDisaggDecision("", DecisionTypeDecodeOnly)
 
@@ -68,6 +100,17 @@ func TestRecordDisaggDecisionEmptyModel(t *testing.T) {
 	if err := testutil.CollectAndCompare(SchedulerDisaggDecisionCount, strings.NewReader(expected),
 		"llm_d_inference_scheduler_disagg_decision_total"); err != nil {
 		t.Errorf("RecordDisaggDecision() with empty model failed: %v", err)
+	}
+
+	expectedNew := `
+		# HELP llm_d_router_epp_disagg_decision_total [ALPHA] Total number of disaggregation routing decisions made
+		# TYPE llm_d_router_epp_disagg_decision_total counter
+		llm_d_router_epp_disagg_decision_total{decision_type="decode-only",model_name="unknown"} 1
+	`
+
+	if err := testutil.CollectAndCompare(LlmdDisaggDecisionCount, strings.NewReader(expectedNew),
+		"llm_d_router_epp_disagg_decision_total"); err != nil {
+		t.Errorf("RecordDisaggDecision() new empty model failed: %v", err)
 	}
 }
 

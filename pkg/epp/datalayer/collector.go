@@ -159,6 +159,7 @@ func (c *Collector) pollOne(ctx context.Context, src fwkdl.PollingDataSource, ep
 	data, err := src.Poll(pollCtx, ep)
 	if err != nil {
 		metrics.DataLayerPollErrorsTotal.WithLabelValues(tn.Type).Inc()
+		metrics.LlmdDataLayerPollErrorsTotal.WithLabelValues(tn.Type).Inc()
 		logger.V(logging.DEBUG).Info("poll failed", "source", tn, "err", err)
 		return
 	}
@@ -176,6 +177,7 @@ func (c *Collector) pollOne(ctx context.Context, src fwkdl.PollingDataSource, ep
 		if err != nil {
 			extName := ext.TypedName()
 			metrics.DataLayerExtractErrorsTotal.WithLabelValues(tn.Type, extName.Type).Inc()
+			metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(tn.Type, extName.Type).Inc()
 			logger.V(logging.DEBUG).Info("extract failed", "source", tn, "extractor", extName, "err", err)
 		}
 	}
