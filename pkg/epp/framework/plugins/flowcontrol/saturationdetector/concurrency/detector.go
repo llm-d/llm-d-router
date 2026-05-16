@@ -108,12 +108,8 @@ func (d *detector) Consumes() map[string]any {
 }
 
 func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLoad {
-	if val, ok := m.Get(attrconcurrency.InFlightLoadKey); ok {
-		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
-			return load
-		}
-	}
-	return &attrconcurrency.InFlightLoad{}
+	val, _ := datalayer.ReadAttribute[*attrconcurrency.InFlightLoad](m, attrconcurrency.InFlightLoadKey)
+	return val
 }
 
 // Saturation calculates the saturation level of the pool.
