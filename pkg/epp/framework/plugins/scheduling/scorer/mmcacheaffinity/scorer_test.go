@@ -18,7 +18,6 @@ package mmcacheaffinity
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,13 +30,10 @@ import (
 )
 
 func TestFactory(t *testing.T) {
-	created, err := Factory("mm-scorer", json.RawMessage(`{}`), nil)
+	created, err := Factory("mm-scorer", nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, created)
 	assert.Equal(t, "mm-scorer", created.TypedName().Name)
-
-	_, err = Factory("bad", json.RawMessage(`{`), nil)
-	require.Error(t, err)
 }
 
 func TestScorerConsumesMatchInfo(t *testing.T) {

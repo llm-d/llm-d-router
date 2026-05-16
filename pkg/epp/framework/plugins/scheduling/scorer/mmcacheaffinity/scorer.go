@@ -21,7 +21,6 @@ package mmcacheaffinity
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -33,7 +32,7 @@ import (
 
 const (
 	// Type is the type name used to register the multimodal encoder-cache scorer.
-	Type = "mm-cache-affinity-scorer"
+	Type = "mm-embeddings-cache-scorer"
 )
 
 var (
@@ -42,14 +41,7 @@ var (
 )
 
 // Factory creates a multimodal encoder-cache affinity scorer.
-func Factory(name string, rawParameters json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
-	if len(rawParameters) > 0 {
-		var parameters map[string]any
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
-			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", Type, err)
-		}
-	}
-
+func Factory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
 	return New().WithName(name), nil
 }
 
@@ -87,7 +79,7 @@ func (s *Scorer) Consumes() map[string]any {
 // Score scores endpoints by matched multimodal encoder-cache item size divided
 // by total multimodal request item size.
 func (s *Scorer) Score(ctx context.Context, _ *scheduling.CycleState, req *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
-	logger := log.FromContext(ctx).V(logging.DEBUG)
+	traceLogger := log.FromContext(ctx).V(logging.TRACE)
 	requestID := ""
 	if req != nil {
 		requestID = req.RequestID
@@ -101,23 +93,23 @@ func (s *Scorer) Score(ctx context.Context, _ *scheduling.CycleState, req *sched
 		}
 		info, ok := endpoint.Get(attrmm.EncoderCacheMatchInfoKey)
 		if !ok {
-			logger.Info("mm-cache-affinity: no match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
+			traceLogger.Info("mm-embeddings-cache: no match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
 			continue
 		}
 		matchInfo, ok := info.(*attrmm.EncoderCacheMatchInfo)
 		if !ok {
-			logger.Info("mm-cache-affinity: invalid match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
+			traceLogger.Info("mm-embeddings-cache: invalid match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
 			continue
 		}
 		totalWeight := itemWeight(matchInfo.RequestItems())
 		if totalWeight <= 0 {
-			logger.Info("mm-cache-affinity: invalid match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
+			traceLogger.Info("mm-embeddings-cache: invalid match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
 			continue
 		}
 		matchedWeight := itemWeight(matchInfo.MatchedItems())
 		score := float64(matchedWeight) / float64(totalWeight)
 		scores[endpoint] = score
-		logger.Info("mm-cache-affinity: pod score",
+		traceLogger.Info("mm-embeddings-cache: pod score",
 			"requestID", requestID,
 			"pod", pod,
 			"matchedWeight", matchedWeight,

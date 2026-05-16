@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"reflect"
 	"sort"
 	"sync"
 
@@ -33,17 +34,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+	tokenproducer "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
 const (
 	// ProducerType is the type name used to register the multimodal data producer.
-	ProducerType = "multimodal-encoder-producer"
+	ProducerType = "mm-embeddings-cache-producer"
 
 	// ProducedKey is the data key emitted by this producer.
 	ProducedKey = attrmm.EncoderCacheMatchInfoKey
@@ -54,6 +57,7 @@ const (
 var (
 	_ requestcontrol.DataProducer = &Producer{}
 	_ requestcontrol.PreRequest   = &Producer{}
+	_ fwkdl.EndpointExtractor     = &Producer{}
 )
 
 // Parameters configures the multimodal encoder-cache data producer.
@@ -137,7 +141,7 @@ func (p *Producer) Produces() map[string]any {
 
 // Consumes returns the data keys this plugin requires.
 func (p *Producer) Consumes() map[string]any {
-	return nil
+	return map[string]any{tokenproducer.TokenizedPromptKey: scheduling.TokenizedPrompt{}}
 }
 
 // PluginState returns request-scoped state shared between producer extension points.
@@ -145,7 +149,7 @@ func (p *Producer) PluginState() *plugin.PluginState {
 	return p.pluginState
 }
 
-// PrepareRequestData attaches multimodal encoder-cache match data to endpoints.
+// Produce attaches multimodal encoder-cache match data to endpoints.
 func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
 	logger := log.FromContext(ctx).V(logging.DEBUG)
 	requestItems := ExtractMMItems(request)
@@ -172,44 +176,6 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 	}
 
 	return nil
-}
-
-// PreRequest records the selected endpoint(s) for each hash in the current request.
-func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	logger := log.FromContext(ctx).V(logging.DEBUG)
-	if request == nil || request.RequestID == "" {
-		return
-	}
-	defer p.pluginState.Delete(request.RequestID)
-
-	state, err := plugin.ReadPluginStateKey[*requestState](p.pluginState, request.RequestID, plugin.StateKey(ProducerType))
-	if err != nil || len(state.items) == 0 {
-		logger.Info("No multimodal request state found, skipping encoder-cache update")
-		return
-	}
-
-	targets := targetEndpoints(schedulingResult)
-	if len(targets) == 0 {
-		logger.Info("No target endpoints found, skipping encoder-cache update")
-		return
-	}
-
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	for _, item := range state.items {
-		pods := map[string]struct{}{}
-		if existing, ok := p.cache.Get(item.Hash); ok {
-			pods = maps.Clone(existing)
-		}
-		for _, endpoint := range targets {
-			if metadata := endpoint.GetMetadata(); metadata != nil {
-				pods[metadata.NamespacedName.String()] = struct{}{}
-			}
-		}
-		if len(pods) > 0 {
-			p.cache.Add(item.Hash, pods)
-		}
-	}
 }
 
 // ExtractMMItems returns deterministic, unique multimodal encoder-cache items
@@ -304,17 +270,6 @@ func (p *Producer) matchedItemsForPod(pod string, requestItems []attrmm.MatchIte
 	return sortedItems(matchedItemsByHash)
 }
 
-func targetEndpoints(schedulingResult *scheduling.SchedulingResult) []scheduling.Endpoint {
-	if schedulingResult == nil || schedulingResult.PrimaryProfileName == "" || schedulingResult.ProfileResults == nil {
-		return nil
-	}
-	result := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	if result == nil {
-		return nil
-	}
-	return result.TargetEndpoints
-}
-
 func (p *Producer) removeStalePods() {
 	if p.podList == nil {
 		return
@@ -348,6 +303,44 @@ func (p *Producer) removeStalePods() {
 	}
 }
 
+// ExpectedInputType declares the endpoint lifecycle event type this extractor consumes.
+func (p *Producer) ExpectedInputType() reflect.Type {
+	return fwkdl.EndpointEventReflectType
+}
+
+// ExtractEndpoint removes deleted endpoints from the best-effort multimodal
+// cache-affinity state when endpoint lifecycle events are wired through the data layer.
+func (p *Producer) ExtractEndpoint(ctx context.Context, event fwkdl.EndpointEvent) error {
+	if event.Type != fwkdl.EventDelete || event.Endpoint == nil {
+		return nil
+	}
+	metadata := event.Endpoint.GetMetadata()
+	if metadata == nil || metadata.NamespacedName.Name == "" {
+		return nil
+	}
+	p.removePod(metadata.NamespacedName.String())
+	log.FromContext(ctx).V(logging.DEBUG).Info("Removed stale pod from multimodal encoder-cache state",
+		"pod", metadata.NamespacedName.String())
+	return nil
+}
+
+func (p *Producer) removePod(pod string) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	for _, hash := range p.cache.Keys() {
+		pods, ok := p.cache.Get(hash)
+		if !ok {
+			continue
+		}
+		delete(pods, pod)
+		if len(pods) == 0 {
+			p.cache.Remove(hash)
+			continue
+		}
+		p.cache.Add(hash, pods)
+	}
+}
+
 func (p *Producer) cacheSnapshot() map[string]map[string]struct{} {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
@@ -371,13 +364,4 @@ func (p *Producer) putCacheEntry(hash string, pods ...k8stypes.NamespacedName) {
 		podSet[pod.String()] = struct{}{}
 	}
 	p.cache.Add(hash, podSet)
-}
-
-func cloneMatchItems(items []attrmm.MatchItem) []attrmm.MatchItem {
-	if len(items) == 0 {
-		return nil
-	}
-	cloned := make([]attrmm.MatchItem, len(items))
-	copy(cloned, items)
-	return cloned
 }

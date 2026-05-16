@@ -1,0 +1,47 @@
+# Sample EPP configuration with multimodal embeddings cache affinity.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: hf-repo/model-name           # set to the model used in the vLLM deployment
+      vllm:
+        http: http://localhost:8000
+  - type: endpoint-notification-source
+  - type: metrics-data-source
+  - type: core-metrics-extractor
+  - type: mm-embeddings-cache-producer
+    parameters:
+      cacheSize: 10000
+  - type: mm-embeddings-cache-scorer
+  - type: precise-prefix-cache-scorer
+    parameters:
+      tokenProcessorConfig:
+        blockSize: 64
+      indexerConfig:
+        kvBlockIndexConfig:
+          enableMetrics: true
+  - type: queue-scorer
+  - type: max-score-picker
+  - type: single-profile-handler
+  - type: decode-filter
+dataLayer:
+  sources:
+    - pluginRef: metrics-data-source
+      extractors:
+        - pluginRef: core-metrics-extractor
+    - pluginRef: endpoint-notification-source
+      extractors:
+        - pluginRef: mm-embeddings-cache-producer
+        - pluginRef: precise-prefix-cache-scorer
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: decode-filter
+      - pluginRef: precise-prefix-cache-scorer
+        weight: 10
+      - pluginRef: mm-embeddings-cache-scorer
+        weight: 4
+      - pluginRef: queue-scorer
+        weight: 1
+      - pluginRef: max-score-picker

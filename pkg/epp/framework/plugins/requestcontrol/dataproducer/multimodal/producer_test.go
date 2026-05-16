@@ -19,6 +19,7 @@ package multimodal
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,6 +41,7 @@ func TestFactory(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, created)
 	assert.Equal(t, "mm-producer", created.TypedName().Name)
+	assert.Equal(t, ProducerType, created.TypedName().Type)
 
 	_, err = Factory("bad", json.RawMessage(`{"cacheSize":"bad"}`), &testHandle{ctx: context.Background()})
 	require.Error(t, err)
@@ -166,7 +168,7 @@ func TestExtractMMItemsIgnoresGenericResponsesAndConversationsContent(t *testing
 	assert.Nil(t, conversationItems)
 }
 
-func TestPrepareDataMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
+func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
 	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
 	podB := k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}
@@ -232,6 +234,31 @@ func TestStalePodCleanup(t *testing.T) {
 		nil,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}})
 	assert.NotContains(t, producer.cacheSnapshot()["hash-a"], podB.String())
+}
+
+func TestProducerEndpointExtractorInterfaceContract(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+
+	assert.Equal(t, fwkdl.EndpointEventReflectType, producer.ExpectedInputType())
+	var _ fwkdl.EndpointExtractor = producer
+	assert.True(t, reflect.TypeOf(producer).Implements(reflect.TypeFor[fwkdl.EndpointExtractor]()))
+}
+
+func TestExtractEndpointRemovesDeletedPod(t *testing.T) {
+	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
+	podB := k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}
+	producer := newTestProducer(t, nil, nil)
+	producer.putCacheEntry("hash-a", podA, podB)
+
+	err := producer.ExtractEndpoint(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: podB}, nil),
+	})
+
+	require.NoError(t, err)
+	cache := producer.cacheSnapshot()
+	assert.Contains(t, cache["hash-a"], podA.String())
+	assert.NotContains(t, cache["hash-a"], podB.String())
 }
 
 type testHandle struct {
