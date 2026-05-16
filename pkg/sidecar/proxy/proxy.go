@@ -80,9 +80,11 @@ const (
 
 	// DefaultPoolGroup is the default pool group name
 	DefaultPoolGroup = "inference.networking.k8s.io"
-	// LegacyPoolGroup is the legacy pool group name
+	// LLMDAPIGroup is the llm-d API group name.
+	LLMDAPIGroup = "llm-d.ai"
+	// LegacyPoolGroup is the deprecated API group for llm-d inference APIs.
 	LegacyPoolGroup = "inference.networking.x-k8s.io"
-)
+	)
 
 // APIType represents the type of OpenAI API being used.
 type APIType int

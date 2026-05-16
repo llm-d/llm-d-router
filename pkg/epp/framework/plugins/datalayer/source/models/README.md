@@ -45,7 +45,7 @@ The data source expects responses in the OpenAI-compatible format:
 ## Complete Configuration Example
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: models-data-source
@@ -62,4 +62,3 @@ data:
     extractors:
     - pluginRef: vllm-models-extractor
 ```
-

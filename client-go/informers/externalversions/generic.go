@@ -36,7 +36,7 @@ func (f *genericInformer) Lister() cache.GenericLister {
 // TODO extend this to unknown resources with a client pool
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
-	// Group=inference.networking.x-k8s.io, Version=v1alpha2
+	// Group=llm-d.ai, Version=v1alpha2
 	case v1alpha2.SchemeGroupVersion.WithResource("inferencemodelrewrites"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.XInference().V1alpha2().InferenceModelRewrites().Informer()}, nil
 	case v1alpha2.SchemeGroupVersion.WithResource("inferenceobjectives"):

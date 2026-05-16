@@ -63,7 +63,7 @@ See [`deploy/config/probabilistic-admitter-epp-config.yaml`](../../../../../../.
 key snippet:
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: probabilistic-admitter
@@ -98,7 +98,7 @@ Define one `InferenceObjective` per traffic tier pointing to the same model and 
 **Sheddable tier** - batch jobs, background processing, non-interactive workloads:
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
   name: batch-workload
@@ -113,7 +113,7 @@ spec:
 **Critical tier** - interactive workloads, SLO-bound traffic:
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
   name: interactive-workload

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -52,6 +53,12 @@ func (c *InferenceObjectiveReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, fmt.Errorf("unable to get InferenceObjective - %w", err)
 		}
 		notFound = true
+	}
+
+	// Keep compatibility while surfacing migration guidance for legacy group users.
+	if strings.HasPrefix(infObjective.APIVersion, "inference.networking.x-k8s.io/") {
+		logger.Info("DEPRECATION: apiVersion inference.networking.x-k8s.io/v1alpha2/InferenceObjective is deprecated",
+			"replacement", "llm-d.ai/v1alpha2/InferenceObjective")
 	}
 
 	if notFound || !infObjective.DeletionTimestamp.IsZero() || infObjective.Spec.PoolRef.Name != v1alpha2.ObjectName(c.PoolGKNN.Name) || infObjective.Spec.PoolRef.Group != v1alpha2.Group(c.PoolGKNN.Group) {

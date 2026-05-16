@@ -75,7 +75,7 @@ To set custom EPP plugin config, you can pass it as an inline yaml. For example:
   inferenceExtension:
     pluginsCustomConfig:
       custom-plugins.yaml: |
-        apiVersion: inference.networking.x-k8s.io/v1alpha1
+        apiVersion: llm-d.ai/v1alpha1
         kind: EndpointPickerConfig
         plugins:
         - type: custom-scorer

@@ -16,7 +16,7 @@ type XInferenceV1alpha2Interface interface {
 	InferenceObjectivesGetter
 }
 
-// XInferenceV1alpha2Client is used to interact with features provided by the inference.networking.x-k8s.io group.
+// XInferenceV1alpha2Client is used to interact with features provided by the llm-d.ai group.
 type XInferenceV1alpha2Client struct {
 	restClient rest.Interface
 }

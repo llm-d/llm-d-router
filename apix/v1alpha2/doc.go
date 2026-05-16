@@ -15,10 +15,10 @@ limitations under the License.
 */
 
 // Package v1alpha2 contains API Schema definitions for the
-// inference.networking.x-k8s.io API group.
+// llm-d.ai API group.
 //
 // +k8s:openapi-gen=true
 // +kubebuilder:object:generate=true
-// +groupName=inference.networking.x-k8s.io
+// +groupName=llm-d.ai
 // +groupGoName=XInference
 package v1alpha2

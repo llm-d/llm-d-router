@@ -1,6 +1,6 @@
 {{- range .Values.inferenceObjectives }}
 ---
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
   name: {{ .name }}
@@ -10,6 +10,6 @@ metadata:
 spec:
   priority: {{ .priority }}
   poolRef:
-    group: {{ .Values.inferenceExtension.apiVersion }}
+    group: {{ .Values.inferenceExtension.poolGroup | default "inference.networking.k8s.io" }}
     name: {{ $.Release.Name }}
 {{- end }}

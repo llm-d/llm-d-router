@@ -26,7 +26,7 @@ func InferenceObjective(name, namespace string) *InferenceObjectiveApplyConfigur
 	b.WithName(name)
 	b.WithNamespace(namespace)
 	b.WithKind("InferenceObjective")
-	b.WithAPIVersion("inference.networking.x-k8s.io/v1alpha2")
+	b.WithAPIVersion("llm-d.ai/v1alpha2")
 	return b
 }
 
