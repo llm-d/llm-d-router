@@ -873,6 +873,20 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	pool := datalayer.NewEndpointPool(namespace, poolName)
 	ds := datastore.NewDatastore(ctx, epf, int32(opts.ModelServerMetricsPort)).WithEndpointPool(pool)
 
+	// On bare metal / Slurm / Ray (or any deployment without the K8s Downward
+	// API), neither --pool-namespace nor the NAMESPACE env var is set, so the
+	// pool ends up labeled with the literal "default" -- a Kubernetes-flavored
+	// string that is meaningless outside K8s. Behavior is unaffected; only
+	// metrics labels and log fields look wrong. Warn so operators set
+	// --pool-namespace explicitly for their environment.
+	if opts.PoolNamespace == "" && os.Getenv("NAMESPACE") == "" {
+		setupLog.Info("file-discovery mode: pool namespace defaulted to "+
+			runserver.DefaultPoolNamespace+"; pass --pool-namespace to label "+
+			"metrics and logs for your environment",
+			"namespace", runserver.DefaultPoolNamespace)
+	}
+
+
 	// File mode runs without a controller manager, so several Kubernetes-only
 	// features are inactive: the InferenceModelRewrite and InferenceObjective
 	// reconcilers never start, and any "k8s-notification-source" plugin in the

@@ -290,6 +290,32 @@ If you copy a Kubernetes EPP config into a file-discovery deployment, expect
 behavior tied to these features to differ. The runner emits a one-time log
 at startup naming these inactive features.
 
+### Pool namespace
+
+The pool namespace ends up in metrics labels, log fields, and the pool's
+`{namespace}/{name}` identity. The runner resolves it in this order:
+
+1. `--pool-namespace` flag, if set.
+2. `NAMESPACE` environment variable, if set (Kubernetes injects this via the
+   Downward API).
+3. The literal string `default`, as a last-resort fallback.
+
+In Kubernetes the second source is always populated, so the fallback is
+effectively unreachable. On bare metal, in Slurm, in Ray, or in any
+container without the Downward API, neither source is set and the pool is
+labeled `default` -- a Kubernetes-flavored string that is meaningless
+outside K8s. Pass `--pool-namespace` explicitly so labels reflect your
+environment:
+
+```
+llm-d-inference-scheduler \
+  --pool-name slurm-job-42 \
+  --pool-namespace slurm \
+  --config-file /etc/epp/config.yaml
+```
+
+The runner emits a startup warning when neither `--pool-namespace` nor
+`NAMESPACE` is set, naming the value it fell back to.
 
 ---
 
