@@ -42,6 +42,7 @@ import (
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	latencyproducerconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/constants"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
@@ -50,9 +51,9 @@ const (
 	LatencyDataProviderPluginType = latencyproducerconstants.LatencyDataProviderPluginType
 
 	// TTFTSLOHeaderKey is the header key for the TTFT SLO.
-	TTFTSLOHeaderKey = "x-slo-ttft-ms"
+	TTFTSLOHeaderKey = metadata.TTFTSLOHeaderKey
 	// TPOTSLOHeaderKey is the header key for the TPOT SLO.
-	TPOTSLOHeaderKey = "x-slo-tpot-ms"
+	TPOTSLOHeaderKey = metadata.TPOTSLOHeaderKey
 
 	// ExperimentalDefaultPrefillProfile is the default profile name for prefill endpoints in disaggregated serving.
 	ExperimentalDefaultPrefillProfile = "prefill"
@@ -315,7 +316,7 @@ func (pl *PredictedLatency) deletePredictedLatencyContextForRequest(request *fwk
 // parseFloatHeader retrieves a header by name, parses it as a float64,
 // and returns the value or an error if the header is missing or invalid.
 func parseFloatHeader(request fwksched.InferenceRequest, headerName string) (float64, error) {
-	headerValue, ok := request.Headers[headerName]
+	headerValue, ok := metadata.GetLowerCaseHeaderValue(request.Headers, headerName)
 	if !ok {
 		return 0, nil
 	}
