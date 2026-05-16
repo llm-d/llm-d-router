@@ -6,7 +6,7 @@
 {{- $serviceName := index $service "name" | default "" -}}
 {{- if and $sidecar.enabled (eq $proxyType "agentgateway") $serviceCreate (not (empty $serviceName)) -}}
 {{- $serviceNamespace := index $service "namespace" | default .Release.Namespace -}}
-{{- $servicePorts := splitList "," (include "llm-d-inference-scheduler.agentgateway.modelServicePorts" .) -}}
+{{- $servicePorts := splitList "," (include "llm-d-router.agentgateway.modelServicePorts" .) -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -14,13 +14,13 @@ metadata:
   namespace: {{ $serviceNamespace | quote }}
   labels:
     app.kubernetes.io/component: agentgateway-model-service
-    app.kubernetes.io/part-of: {{ include "llm-d-inference-scheduler.name" . | quote }}
+    app.kubernetes.io/part-of: {{ include "llm-d-router.name" . | quote }}
     {{- if .Chart.AppVersion }}
     app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
     {{- end }}
 spec:
   selector:
-    {{- include "llm-d-inference-scheduler.agentgateway.modelServiceSelectorLabels" . | trim | nindent 4 }}
+    {{- include "llm-d-router.agentgateway.modelServiceSelectorLabels" . | trim | nindent 4 }}
   ports:
     {{- range $servicePort := $servicePorts }}
     - name: http-{{ $servicePort }}

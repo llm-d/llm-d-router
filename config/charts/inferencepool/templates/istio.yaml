@@ -5,9 +5,9 @@
 apiVersion: networking.istio.io/v1beta1
 kind: DestinationRule
 metadata:
-  name: {{ include "llm-d-inference-scheduler.name" . }}
+  name: {{ include "llm-d-router.name" . }}
 spec:
-  host: {{ (index $dr "host") | default (printf "%s.%s.svc.cluster.local" (include "llm-d-inference-scheduler.name" .) .Release.Namespace) }}
+  host: {{ (index $dr "host") | default (printf "%s.%s.svc.cluster.local" (include "llm-d-router.name" .) .Release.Namespace) }}
   trafficPolicy:
     tls:
       mode: SIMPLE

@@ -2,11 +2,11 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "llm-d-inference-scheduler.name" . }}
+  name: {{ include "llm-d-router.name" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "llm-d-inference-scheduler.labels" . | nindent 4 }}
-    {{- include "llm-d-inference-scheduler.modeLabels" . | nindent 4 }}
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- include "llm-d-router.modeLabels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.inferenceExtension.replicas | default 1 }}
   strategy:
@@ -19,22 +19,22 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      {{- include "llm-d-inference-scheduler.selectorLabels" . | nindent 6 }}
+      {{- include "llm-d-router.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "llm-d-inference-scheduler.selectorLabels" . | nindent 8 }}
-        {{- include "llm-d-inference-scheduler.modeLabels" . | nindent 8 }}
+        {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
+        {{- include "llm-d-router.modeLabels" . | nindent 8 }}
     spec:
-      {{- $sidecar := include "llm-d-inference-scheduler.sidecar" . | fromYaml | default dict }}
-      {{- $proxyType := include "llm-d-inference-scheduler.sidecarProxyType" . | trim }}
+      {{- $sidecar := include "llm-d-router.sidecar" . | fromYaml | default dict }}
+      {{- $proxyType := include "llm-d-router.sidecarProxyType" . | trim }}
       {{- $sidecarConfigMap := index $sidecar "configMap" | default dict }}
       {{- $sidecarConfigMapName := index $sidecarConfigMap "name" | default "" }}
       {{- $inferenceExtensionFlags := deepCopy (.Values.inferenceExtension.flags | default dict) }}
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $inferenceExtensionFlags "secure-serving")) }}
         {{- $_ := set $inferenceExtensionFlags "secure-serving" false }}
       {{- end }}
-      serviceAccountName: {{ include "llm-d-inference-scheduler.name" . }}
+      serviceAccountName: {{ include "llm-d-router.name" . }}
       # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
       terminationGracePeriodSeconds: 130
       containers:
@@ -108,7 +108,7 @@ spec:
               - --endpoint-selector
               - {{ .Values.inferenceExtension.endpointsServer.endpointSelector | quote }}
               - --endpoint-target-ports
-              - {{ include "llm-d-inference-scheduler.standaloneEndpointTargetPorts" . | quote }}
+              - {{ include "llm-d-router.standaloneEndpointTargetPorts" . | quote }}
           {{- else }}
               - --pool-name
               - {{ .Release.Name }}
@@ -212,10 +212,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-        {{- include "llm-d-inference-scheduler.latencyPredictor.env" . | nindent 12 }}
+        {{- include "llm-d-router.latencyPredictor.env" . | nindent 12 }}
         {{- if .Values.inferenceExtension.tracing.enabled }}
             - name: OTEL_SERVICE_NAME
-              value: "llm-d-inference-scheduler/epp"
+              value: "llm-d-router/epp"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.inferenceExtension.tracing.otelExporterEndpoint | quote }}
             - name: OTEL_TRACES_EXPORTER
@@ -246,7 +246,7 @@ spec:
         {{- if .Values.inferenceExtension.volumeMounts }}
         {{- toYaml .Values.inferenceExtension.volumeMounts | nindent 12 }}
         {{- end }}
-      {{- include "llm-d-inference-scheduler.latencyPredictor.containers" . | nindent 8 }}
+      {{- include "llm-d-router.latencyPredictor.containers" . | nindent 8 }}
       volumes:
       {{- if .Values.inferenceExtension.volumes }}
       {{- toYaml .Values.inferenceExtension.volumes | nindent 8 }}
@@ -264,8 +264,8 @@ spec:
       {{- end }}
         - name: plugins-config-volume
           configMap:
-            name: {{ include "llm-d-inference-scheduler.name" . }}
-      {{- include "llm-d-inference-scheduler.latencyPredictor.volumes" . | nindent 8 }}
+            name: {{ include "llm-d-router.name" . }}
+      {{- include "llm-d-router.latencyPredictor.volumes" . | nindent 8 }}
       {{- if .Values.inferenceExtension.affinity }}
       affinity:
         {{- toYaml .Values.inferenceExtension.affinity | nindent 8 }}

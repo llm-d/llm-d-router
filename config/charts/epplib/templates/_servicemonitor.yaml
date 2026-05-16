@@ -1,13 +1,13 @@
 {{- define "inference-extension.service-monitor" -}}
-{{- $inferenceExtensionMonitoringProviderName := include "llm-d-inference-scheduler.inferenceExtension.monitoring.provider.name" . | lower -}}
+{{- $inferenceExtensionMonitoringProviderName := include "llm-d-router.inferenceExtension.monitoring.provider.name" . | lower -}}
 {{- if and .Values.inferenceExtension.monitoring.prometheus.enabled (eq $inferenceExtensionMonitoringProviderName "prometheusoperator") }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "llm-d-inference-scheduler.name" . }}-monitor
+  name: {{ include "llm-d-router.name" . }}-monitor
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "llm-d-inference-scheduler.labels" . | nindent 4 }}
+    {{- include "llm-d-router.labels" . | nindent 4 }}
     {{- with .Values.inferenceExtension.monitoring.prometheus.extraLabels }}
     {{- . | toYaml | nindent 4 }}
     {{- end }}
@@ -22,13 +22,13 @@ spec:
         key: token
         name: {{ .Values.inferenceExtension.monitoring.prometheus.auth.secretName }}
     {{- end }}
-  jobLabel: {{ include "llm-d-inference-scheduler.name" . }}
+  jobLabel: {{ include "llm-d-router.name" . }}
   namespaceSelector:
     matchNames:
     - {{ .Release.Namespace }}
   selector:
     matchLabels:
-      {{- include "llm-d-inference-scheduler.labels" . | nindent 6 }}
+      {{- include "llm-d-router.labels" . | nindent 6 }}
 ---
 {{- end }}
 {{- end }}

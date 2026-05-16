@@ -1,8 +1,8 @@
 {{/*
 Common labels
 */}}
-{{- define "llm-d-inference-scheduler.labels" -}}
-app.kubernetes.io/name: {{ include "llm-d-inference-scheduler.name" . }}
+{{- define "llm-d-router.labels" -}}
+app.kubernetes.io/name: {{ include "llm-d-router.name" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
@@ -11,7 +11,7 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{/*
 Inference extension name
 */}}
-{{- define "llm-d-inference-scheduler.name" -}}
+{{- define "llm-d-router.name" -}}
 {{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
 {{ $base }}-epp
 {{- end -}}
@@ -19,7 +19,7 @@ Inference extension name
 {{/*
 Cluster RBAC unique name
 */}}
-{{- define "llm-d-inference-scheduler.cluster-rbac-name" -}}
+{{- define "llm-d-router.cluster-rbac-name" -}}
 {{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 }}
 {{- $ns := .Release.Namespace | default "default" | lower | trim | trunc 40 }}
 {{- printf "%s-%s-epp" $base $ns | quote | trunc 84 }}
@@ -28,21 +28,21 @@ Cluster RBAC unique name
 {{/*
 Selector labels
 */}}
-{{- define "llm-d-inference-scheduler.selectorLabels" -}}
+{{- define "llm-d-router.selectorLabels" -}}
 {{- /* Check if endpointsServer exists AND if createInferencePool is false */ -}}
 {{- if and .Values.inferenceExtension.endpointsServer (not .Values.inferenceExtension.endpointsServer.createInferencePool) -}}
 {{- /* LOGIC FOR STANDALONE EPP MODE */ -}}
-epp: {{ include "llm-d-inference-scheduler.name" . }}
+epp: {{ include "llm-d-router.name" . }}
 {{- else -}}
 {{- /* LOGIC FOR PARENT (INFERENCEPOOL) MODE */ -}}
-inferencepool: {{ include "llm-d-inference-scheduler.name" . }}
+inferencepool: {{ include "llm-d-router.name" . }}
 {{- end -}}
 {{- end -}}
 
 {{/*
 Mode labels
 */}}
-{{- define "llm-d-inference-scheduler.modeLabels" -}}
+{{- define "llm-d-router.modeLabels" -}}
 {{- if and .Values.inferenceExtension.endpointsServer (not .Values.inferenceExtension.endpointsServer.createInferencePool) -}}
 llm-d.ai/igw-mode: standalone
 {{- else -}}
@@ -57,7 +57,7 @@ If inferenceExtension.monitoring.provider.name is unset/empty, default to
 prometheusoperator. For backwards compatibility, provider.name=gke still maps
 to gmp when no monitoring provider is explicitly set.
 */}}
-{{- define "llm-d-inference-scheduler.inferenceExtension.monitoring.provider.name" -}}
+{{- define "llm-d-router.inferenceExtension.monitoring.provider.name" -}}
 {{- $monitoring := .Values.inferenceExtension.monitoring | default dict -}}
 {{- $mp := index $monitoring "provider" | default dict -}}
 {{- $mpName := index $mp "name" | default "" -}}
@@ -79,10 +79,10 @@ When inferenceExtension.monitoring.provider.name is unset/empty, use defaults.
 For backwards compatibility, provider.gke.autopilot is still honored when
 provider.name=gke and no monitoring provider is explicitly set.
 */}}
-{{- define "llm-d-inference-scheduler.inferenceExtension.monitoring.provider" -}}
+{{- define "llm-d-router.inferenceExtension.monitoring.provider" -}}
 {{- $monitoring := .Values.inferenceExtension.monitoring | default dict -}}
 {{- $mp := index $monitoring "provider" | default dict -}}
-{{- $mpName := include "llm-d-inference-scheduler.inferenceExtension.monitoring.provider.name" . -}}
+{{- $mpName := include "llm-d-router.inferenceExtension.monitoring.provider.name" . -}}
 {{- $gatewayProvider := .Values.provider | default dict -}}
 {{- $gatewayProviderName := index $gatewayProvider "name" | default "" -}}
 {{- $resolved := dict "name" $mpName -}}
@@ -102,7 +102,7 @@ provider.name=gke and no monitoring provider is explicitly set.
 {{/*
 Return the standalone sidecar proxy type.
 */}}
-{{- define "llm-d-inference-scheduler.sidecarProxyType" -}}
+{{- define "llm-d-router.sidecarProxyType" -}}
 {{- $sidecar := .Values.inferenceExtension.sidecar | default dict -}}
 {{- default "envoy" ($sidecar.proxyType | default "envoy") | lower -}}
 {{- end -}}
@@ -111,7 +111,7 @@ Return the standalone sidecar proxy type.
 Normalize a scalar, comma-separated string, or list of ports into a
 comma-separated numeric string.
 */}}
-{{- define "llm-d-inference-scheduler.normalizedPortList" -}}
+{{- define "llm-d-router.normalizedPortList" -}}
 {{- $path := .path -}}
 {{- $value := .value -}}
 {{- if empty $value -}}
@@ -146,7 +146,7 @@ Return the standalone proxy listener port exposed by the EPP Service.
 The port is selected by the Service port named "http" so selection is
 deterministic even when additional Service ports are configured.
 */}}
-{{- define "llm-d-inference-scheduler.standaloneProxyListenerPort" -}}
+{{- define "llm-d-router.standaloneProxyListenerPort" -}}
 {{- $servicePorts := .Values.inferenceExtension.extraServicePorts | default list -}}
 {{- $found := false -}}
 {{- $listenerPort := "" -}}
@@ -194,34 +194,34 @@ deterministic even when additional Service ports are configured.
 {{/*
 Return the standalone EPP model-server target ports.
 */}}
-{{- define "llm-d-inference-scheduler.standaloneEndpointTargetPorts" -}}
-{{- include "llm-d-inference-scheduler.normalizedPortList" (dict "path" ".Values.inferenceExtension.endpointsServer.targetPorts" "value" .Values.inferenceExtension.endpointsServer.targetPorts) -}}
+{{- define "llm-d-router.standaloneEndpointTargetPorts" -}}
+{{- include "llm-d-router.normalizedPortList" (dict "path" ".Values.inferenceExtension.endpointsServer.targetPorts" "value" .Values.inferenceExtension.endpointsServer.targetPorts) -}}
 {{- end -}}
 
 {{/*
 Return the agentgateway model Service ports.
 */}}
-{{- define "llm-d-inference-scheduler.agentgateway.modelServicePorts" -}}
+{{- define "llm-d-router.agentgateway.modelServicePorts" -}}
 {{- $sidecarValues := .Values.inferenceExtension.sidecar | default dict -}}
 {{- $agentgateway := index $sidecarValues "agentgateway" | default dict -}}
 {{- $service := index $agentgateway "service" | default dict -}}
-{{- include "llm-d-inference-scheduler.normalizedPortList" (dict "path" ".Values.inferenceExtension.sidecar.agentgateway.service.ports" "value" (index $service "ports")) -}}
+{{- include "llm-d-router.normalizedPortList" (dict "path" ".Values.inferenceExtension.sidecar.agentgateway.service.ports" "value" (index $service "ports")) -}}
 {{- end -}}
 
 {{/*
 Return the resolved sidecar configuration for the current chart.
 Standalone uses proxy presets merged with explicit sidecar overrides.
 */}}
-{{- define "llm-d-inference-scheduler.sidecar" -}}
+{{- define "llm-d-router.sidecar" -}}
 {{- $sidecar := deepCopy (.Values.inferenceExtension.sidecar | default dict) -}}
 {{- $resolved := $sidecar -}}
 {{- if eq .Chart.Name "standalone" -}}
-  {{- $proxyType := include "llm-d-inference-scheduler.sidecarProxyType" . -}}
+  {{- $proxyType := include "llm-d-router.sidecarProxyType" . -}}
   {{- $presets := index $sidecar "presets" | default dict -}}
   {{- $preset := deepCopy ((index $presets $proxyType) | default dict) -}}
   {{- $resolved = mergeOverwrite $preset $sidecar -}}
   {{- if eq $proxyType "agentgateway" -}}
-    {{- $listenerPort := include "llm-d-inference-scheduler.standaloneProxyListenerPort" . | int -}}
+    {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . | int -}}
     {{- $ports := index $resolved "ports" | default list -}}
     {{- $resolvedPorts := list (dict "containerPort" $listenerPort "name" "http") -}}
     {{- range $index, $port := $ports -}}
@@ -239,12 +239,12 @@ Standalone uses proxy presets merged with explicit sidecar overrides.
 {{/*
 Return the rendered sidecar ConfigMap data.
 */}}
-{{- define "llm-d-inference-scheduler.sidecarConfigMapData" -}}
-{{- $sidecar := include "llm-d-inference-scheduler.sidecar" . | fromYaml | default dict -}}
+{{- define "llm-d-router.sidecarConfigMapData" -}}
+{{- $sidecar := include "llm-d-router.sidecar" . | fromYaml | default dict -}}
 {{- $configMap := index $sidecar "configMap" | default dict -}}
 {{- $data := deepCopy ((index $configMap "data") | default dict) -}}
-{{- if and (eq .Chart.Name "standalone") (eq (include "llm-d-inference-scheduler.sidecarProxyType" .) "agentgateway") -}}
-  {{- $generated := dict "config.yaml" (include "llm-d-inference-scheduler.sidecar.agentgatewayConfig" .) -}}
+{{- if and (eq .Chart.Name "standalone") (eq (include "llm-d-router.sidecarProxyType" .) "agentgateway") -}}
+  {{- $generated := dict "config.yaml" (include "llm-d-router.sidecar.agentgatewayConfig" .) -}}
   {{- $data = mergeOverwrite $data $generated -}}
 {{- end -}}
 {{- toYaml $data -}}
@@ -254,7 +254,7 @@ Return the rendered sidecar ConfigMap data.
 Render labels from the standalone endpoint selector for the generated model Service.
 Only equality-based selectors are supported because Service selectors are a map.
 */}}
-{{- define "llm-d-inference-scheduler.agentgateway.modelServiceSelectorLabels" -}}
+{{- define "llm-d-router.agentgateway.modelServiceSelectorLabels" -}}
 {{- $selector := .Values.inferenceExtension.endpointsServer.endpointSelector | default "" -}}
 {{- if empty $selector -}}
   {{- fail ".Values.inferenceExtension.endpointsServer.endpointSelector is required when creating an agentgateway model Service" -}}
@@ -277,15 +277,15 @@ Only equality-based selectors are supported because Service selectors are a map.
 {{/*
 Render the default standalone agentgateway sidecar config template.
 */}}
-{{- define "llm-d-inference-scheduler.sidecar.agentgatewayConfig" -}}
+{{- define "llm-d-router.sidecar.agentgatewayConfig" -}}
 {{- $sidecarValues := .Values.inferenceExtension.sidecar | default dict -}}
 {{- $agentgateway := index $sidecarValues "agentgateway" | default dict -}}
 {{- $service := index $agentgateway "service" | default dict -}}
 {{- $serviceName := index $service "name" | default "" -}}
 {{- $serviceNamespace := index $service "namespace" | default .Release.Namespace -}}
-{{- $servicePorts := splitList "," (include "llm-d-inference-scheduler.agentgateway.modelServicePorts" .) -}}
+{{- $servicePorts := splitList "," (include "llm-d-router.agentgateway.modelServicePorts" .) -}}
 {{- $backendPort := index $servicePorts 0 -}}
-{{- $listenerPort := include "llm-d-inference-scheduler.standaloneProxyListenerPort" . | int -}}
+{{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . | int -}}
 config:
   statsAddr: "0.0.0.0:15020"
   readinessAddr: "0.0.0.0:15021"

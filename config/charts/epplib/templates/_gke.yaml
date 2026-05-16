@@ -1,5 +1,5 @@
 {{- define "inference-extension.gke" -}}
-{{- $inferenceExtensionMonitoringProvider := include "llm-d-inference-scheduler.inferenceExtension.monitoring.provider" . | fromYaml | default dict -}}
+{{- $inferenceExtensionMonitoringProvider := include "llm-d-router.inferenceExtension.monitoring.provider" . | fromYaml | default dict -}}
 {{- if and $inferenceExtensionMonitoringProvider (eq (lower (index $inferenceExtensionMonitoringProvider "name" | default "")) "gmp") }}
 {{- if and .Values.inferenceExtension.monitoring.prometheus.enabled .Values.inferenceExtension.monitoring.prometheus.auth.enabled }}
 {{- $metricsReadSA := printf "%s-metrics-reader-sa" .Release.Name -}}
@@ -28,7 +28,7 @@ metadata:
   name: {{ $metricsReadSecretName }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "llm-d-inference-scheduler.labels" . | nindent 4 }}
+    {{- include "llm-d-router.labels" . | nindent 4 }}
   annotations:
     kubernetes.io/service-account.name: {{ $metricsReadSA }}
 type: kubernetes.io/service-account-token
@@ -39,7 +39,7 @@ metadata:
   name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "llm-d-inference-scheduler.labels" . | nindent 4 }}
+    {{- include "llm-d-router.labels" . | nindent 4 }}
 spec:
   endpoints:
     - port: metrics
@@ -54,7 +54,7 @@ spec:
             key: token
   selector:
     matchLabels:
-      {{- include "llm-d-inference-scheduler.selectorLabels" . | nindent 8 }}
+      {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

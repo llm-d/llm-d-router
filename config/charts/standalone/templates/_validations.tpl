@@ -1,7 +1,7 @@
 {{/*
 common validations
 */}}
-{{- define "llm-d-inference-scheduler.validations.inferencepool.common" }}
+{{- define "llm-d-router.validations.inferencepool.common" }}
 {{- if and .Values.inferenceExtension.endpointsServer .Values.inferenceExtension.endpointsServer.createInferencePool }}
 {{- if or (empty $.Values.inferencePool.modelServers) (not $.Values.inferencePool.modelServers.matchLabels) }}
 {{- fail ".Values.inferencePool.modelServers.matchLabels is required" }}
@@ -12,7 +12,7 @@ common validations
 {{/*
 standalone validations
 */}}
-{{- define "llm-d-inference-scheduler.validations.standalone" -}}
+{{- define "llm-d-router.validations.standalone" -}}
 {{- $sidecar := .Values.inferenceExtension.sidecar | default dict -}}
 {{- if $sidecar.enabled -}}
   {{- $proxyType := default "envoy" ($sidecar.proxyType | default "envoy") | lower -}}
@@ -33,18 +33,18 @@ standalone validations
     {{- if empty $serviceName -}}
       {{- fail ".Values.inferenceExtension.sidecar.agentgateway.service.name is required when proxyType=agentgateway" -}}
     {{- end -}}
-    {{- $targetPorts := include "llm-d-inference-scheduler.standaloneEndpointTargetPorts" . -}}
-    {{- $servicePorts := include "llm-d-inference-scheduler.agentgateway.modelServicePorts" . -}}
+    {{- $targetPorts := include "llm-d-router.standaloneEndpointTargetPorts" . -}}
+    {{- $servicePorts := include "llm-d-router.agentgateway.modelServicePorts" . -}}
     {{- if ne $targetPorts $servicePorts -}}
       {{- fail (printf ".Values.inferenceExtension.sidecar.agentgateway.service.ports must match .Values.inferenceExtension.endpointsServer.targetPorts when proxyType=agentgateway, got service ports %q and target ports %q" $servicePorts $targetPorts) -}}
     {{- end -}}
-    {{- $listenerPort := include "llm-d-inference-scheduler.standaloneProxyListenerPort" . -}}
+    {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . -}}
     {{- $flags := .Values.inferenceExtension.flags | default dict -}}
     {{- if and (hasKey $flags "secure-serving") (ne (toString (index $flags "secure-serving")) "false") -}}
       {{- fail ".Values.inferenceExtension.flags.secure-serving must be false when proxyType=agentgateway; standalone agentgateway uses plaintext gRPC to EPP over localhost" -}}
     {{- end -}}
     {{- if $serviceCreate -}}
-      {{- $selectorLabels := include "llm-d-inference-scheduler.agentgateway.modelServiceSelectorLabels" . -}}
+      {{- $selectorLabels := include "llm-d-router.agentgateway.modelServiceSelectorLabels" . -}}
     {{- end -}}
   {{- end -}}
 {{- end -}}
