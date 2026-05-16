@@ -1411,7 +1411,7 @@ func TestDiscoveryNotifier_WorksAlongsideDirectUpsert(t *testing.T) {
 
 	// Populate one endpoint directly (simulates the K8s reconciler path).
 	directID := types.NamespacedName{Name: "direct-ep", Namespace: "default"}
-	ds.BackendUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: directID, Address: "10.0.0.1"})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: directID, Address: "10.0.0.1"})
 
 	// Add a second endpoint via DiscoveryNotifier (the file-discovery path).
 	notifier := fwkdl.NewDiscoveryNotifier(ds)
