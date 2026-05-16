@@ -91,6 +91,14 @@ const (
 	// defaultBlockSizeTokens is the default token block size (vLLM default is 16).
 	defaultBlockSizeTokens = 16
 
+	// minBlockSizeTokens is the floor applied to the autotuned block size and the
+	// recommended minimum for manual configuration. The routing-side indexer keeps
+	// one LRU entry per (pod, block), so with very small block sizes the indexer
+	// can consume gigabytes of memory under live traffic. 64 tokens is coarse
+	// enough to bound memory while still preserving useful prefix-match signal.
+	// See https://github.com/llm-d/llm-d-router/issues/1158.
+	minBlockSizeTokens = 64
+
 	// defaultMaxPrefixBlocks is the maximum number of blocks to match.
 	// Two long requests with the same prefix up to this limit will be indistinguishable.
 	// This parameter provides a trade-off between cache size, prefix matching speed and matching

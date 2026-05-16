@@ -76,6 +76,21 @@ func newDataProducer(ctx context.Context, config config, handle plugin.Handle) (
 	if config.MaxPrefixTokensToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxPrefixTokensToMatch must be >= 0 (current value: %d)", config.MaxPrefixTokensToMatch)
 	}
+
+	// Warn (but don't reject) when a user has explicitly opted out of autotune
+	// AND set BlockSizeTokens below the recommended minimum. Under AutoTune the
+	// runtime clamp in GetBlockSize protects memory, and the default config
+	// (AutoTune=true, BlockSizeTokens=16) would otherwise produce a misleading
+	// warning on every vanilla deployment.
+	if !config.AutoTune && config.BlockSizeTokens > 0 && config.BlockSizeTokens < minBlockSizeTokens {
+		log.FromContext(ctx).Info(
+			"WARNING: blockSizeTokens is below the recommended minimum; this can cause high EPP memory usage at scale",
+			"blockSizeTokens", config.BlockSizeTokens,
+			"recommendedMinimum", minBlockSizeTokens,
+			"issue", "https://github.com/llm-d/llm-d-router/issues/1158",
+		)
+	}
+
 	indexer := newIndexer(ctx, config.LRUCapacityPerServer)
 
 	p := &dataProducer{
@@ -230,16 +245,37 @@ func (p *dataProducer) matchLongestPrefix(ctx context.Context, hashes []blockHas
 }
 
 // GetBlockSize returns the block size in tokens, potentially auto-tuned from endpoint metrics.
+//
+// When AutoTune is on, the result is clamped at minBlockSizeTokens regardless of
+// whether the value comes from the endpoint metric or the configured fallback. The
+// routing-side indexer holds one LRU entry per (pod, block), so a small block size
+// (e.g., vLLM's default of 16) would inflate indexer memory by ~64x. Routing
+// intentionally measures matches at coarser granularity than the model server's
+// true block size. See #1158.
+//
+// Manual configuration (AutoTune off) is honored verbatim; a startup warning is
+// logged in newDataProducer when the configured value is below the recommended floor.
 func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
-	if !p.config.AutoTune || len(endpoints) == 0 {
+	if !p.config.AutoTune {
+		// Manual mode: honor the user's configured value verbatim.
 		return p.config.BlockSizeTokens
 	}
 
-	if endpoint := endpoints[0]; endpoint.GetMetrics() != nil {
-		cacheBlockSize := endpoint.GetMetrics().CacheBlockSize
-		if cacheBlockSize > 0 {
-			return cacheBlockSize
+	// AutoTune path: prefer the metric from the first endpoint when available.
+	if len(endpoints) > 0 {
+		if endpoint := endpoints[0]; endpoint.GetMetrics() != nil {
+			if cacheBlockSize := endpoint.GetMetrics().CacheBlockSize; cacheBlockSize > 0 {
+				if cacheBlockSize < minBlockSizeTokens {
+					return minBlockSizeTokens
+				}
+				return cacheBlockSize
+			}
 		}
+	}
+	// AutoTune fallback (no endpoints, no metrics, or zero metric): apply the
+	// same floor so the indexer memory bound holds across all autotune paths.
+	if p.config.BlockSizeTokens < minBlockSizeTokens {
+		return minBlockSizeTokens
 	}
 	return p.config.BlockSizeTokens
 }

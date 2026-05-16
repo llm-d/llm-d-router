@@ -441,7 +441,10 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 	podName := "pod-autotune"
 	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: podName}},
 		&fwkdl.Metrics{
-			CacheBlockSize: 16,   // 16 tokens * 4 chars/token = 64 chars per block
+			// Pod reports a block size above minBlockSizeTokens so the autotune
+			// path passes the metric through unclamped. (Metric values below the
+			// minimum are clamped per #1158; see TestGetBlockSize_AutotuneClampsBelowMinimum.)
+			CacheBlockSize: 128,  // 128 tokens * 4 chars/token = 512 chars per block
 			CacheNumBlocks: 1000, // 1000 blocks capacity
 		}, fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint}
@@ -451,16 +454,15 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{
-				// Length 128 chars.
-				// If block size is 64 chars: 2 blocks
-				Prompt: fwkrh.Prompt{Raw: strings.Repeat("a", 128)},
+				// Length 1024 chars / 512 chars per block = 2 blocks.
+				Prompt: fwkrh.Prompt{Raw: strings.Repeat("a", 1024)},
 			},
 		},
 	}
 
 	config := config{
 		AutoTune:               true,
-		BlockSizeTokens:        32, // Should be ignored in favor of pod metrics (16)
+		BlockSizeTokens:        256, // Should be ignored in favor of pod metrics (128)
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   1,
 	}
@@ -468,8 +470,8 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 
 	_ = p.Produce(context.Background(), req, endpoints)
 	state, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
-	// 128 chars / (16 tokens * 4 chars/token) = 2 blocks
-	assert.Equal(t, 2, len(state.PrefixHashes), "Should use pod block size (16 tokens) -> 2 body blocks")
+	// 1024 chars / (128 tokens * 4 chars/token) = 2 blocks
+	assert.Equal(t, 2, len(state.PrefixHashes), "Should use pod block size (128 tokens) -> 2 body blocks")
 
 	schedulingResult := &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
@@ -545,6 +547,85 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 	state2, err := plugin.ReadPluginStateKey[*SchedulingContextState](p2.PluginState(), req2.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	assert.NoError(t, err)
 	assert.Equal(t, 3, len(state2.PrefixHashes), "should fall back to MaxPrefixBlocksToMatch when MaxPrefixTokensToMatch is 0")
+}
+
+// TestGetBlockSize_AutotuneClampsBelowMinimum verifies that when AutoTune is on and
+// the endpoint reports a small CacheBlockSize, GetBlockSize floors the result at
+// minBlockSizeTokens to bound EPP indexer memory. See issue #1158.
+func TestGetBlockSize_AutotuneClampsBelowMinimum(t *testing.T) {
+	cfg := config{
+		AutoTune:        true,
+		BlockSizeTokens: 16, // also small; metric should override but clamp wins
+	}
+	p, err := newDataProducer(context.Background(), cfg, nil)
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.Metrics{CacheBlockSize: 16}, // model server uses small blocks
+		fwkdl.NewAttributes(),
+	)
+
+	got := p.GetBlockSize([]fwksched.Endpoint{endpoint})
+	assert.Equal(t, minBlockSizeTokens, got,
+		"autotuned block size below the minimum should be clamped to minBlockSizeTokens")
+}
+
+// TestGetBlockSize_AutotuneAboveMinimumPassesThrough verifies the clamp is one-sided —
+// metric values at or above the minimum are returned unchanged.
+func TestGetBlockSize_AutotuneAboveMinimumPassesThrough(t *testing.T) {
+	cfg := config{AutoTune: true, BlockSizeTokens: 16}
+	p, err := newDataProducer(context.Background(), cfg, nil)
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.Metrics{CacheBlockSize: 128},
+		fwkdl.NewAttributes(),
+	)
+
+	got := p.GetBlockSize([]fwksched.Endpoint{endpoint})
+	assert.Equal(t, 128, got, "autotuned block size at or above minimum should not be clamped")
+}
+
+// TestGetBlockSize_ManualConfigHonoredBelowMinimum verifies that with AutoTune off
+// the user's configured BlockSizeTokens is honored verbatim — the floor only applies
+// to the autotune path. Manual configurations below the minimum receive a startup
+// warning (see TestNewDataProducer_AcceptsLowManualBlockSize) but are not coerced.
+func TestGetBlockSize_ManualConfigHonoredBelowMinimum(t *testing.T) {
+	cfg := config{AutoTune: false, BlockSizeTokens: 32}
+	p, err := newDataProducer(context.Background(), cfg, nil)
+	assert.NoError(t, err)
+
+	got := p.GetBlockSize(nil)
+	assert.Equal(t, 32, got, "manual BlockSizeTokens below minimum should be honored, not clamped")
+}
+
+// TestGetBlockSize_AutotuneFallbackClampsLowConfig verifies that the floor applies
+// to the autotune fallback path too — when AutoTune is on but no endpoint metric is
+// available, the configured BlockSizeTokens still gets clamped. This is the path the
+// default config (AutoTune=true, BlockSizeTokens=16) would land on if endpoint
+// metrics are missing.
+func TestGetBlockSize_AutotuneFallbackClampsLowConfig(t *testing.T) {
+	cfg := config{AutoTune: true, BlockSizeTokens: 16} // default config shape
+	p, err := newDataProducer(context.Background(), cfg, nil)
+	assert.NoError(t, err)
+
+	// No endpoints passed — exercise the autotune fallback path.
+	got := p.GetBlockSize(nil)
+	assert.Equal(t, minBlockSizeTokens, got,
+		"autotune fallback should clamp BlockSizeTokens to the floor when below minimum")
+}
+
+// TestNewDataProducer_AcceptsLowManualBlockSize verifies that a low BlockSizeTokens
+// with AutoTune off does not cause initialization to fail — the operator gets a
+// warning logged but the producer comes up. (We intentionally don't assert on log
+// output here; the GetBlockSize test above confirms the value flows through.)
+func TestNewDataProducer_AcceptsLowManualBlockSize(t *testing.T) {
+	cfg := config{AutoTune: false, BlockSizeTokens: 32}
+	p, err := newDataProducer(context.Background(), cfg, nil)
+	assert.NoError(t, err, "low manual BlockSizeTokens should warn, not error")
+	assert.NotNil(t, p)
 }
 
 // BenchmarkPrefixPluginStress is a stress test using prompts of increasing length.
