@@ -238,6 +238,49 @@ schedulingProfiles:
     weight: 10
 `
 
+// EPP config for multimodal encoder-cache affinity plus precise KV-prefix affinity.
+// The multimodal data producer runs before scheduling and the scorer consumes its endpoint match info.
+const mmCacheAffinityConfig = `apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: multimodal-encoder-producer
+  parameters:
+    cacheSize: 10000
+- type: tokenizer
+  parameters:
+    modelName: Qwen/Qwen2.5-1.5B-Instruct
+- type: precise-prefix-cache-scorer
+  parameters:
+    tokenProcessorConfig:
+      blockSize: 16
+      hashSeed: "42"
+    kvEventsConfig:
+      zmqEndpoint: tcp://0.0.0.0:5557
+    indexerConfig:
+      prefixStoreConfig:
+        blockSize: 16
+      tokenizersPoolConfig:
+        modelName: Qwen/Qwen2.5-1.5B-Instruct
+        uds:
+          socketFile: "/tmp/tokenizer/tokenizer-uds.socket"
+      kvBlockIndexConfig:
+        enableMetrics: false
+- type: mm-cache-affinity-scorer
+- type: decode-filter
+- type: max-score-picker
+- type: disagg-profile-handler
+schedulingProfiles:
+- name: decode
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: tokenizer
+  - pluginRef: max-score-picker
+  - pluginRef: precise-prefix-cache-scorer
+    weight: 10
+  - pluginRef: mm-cache-affinity-scorer
+    weight: 4
+`
+
 // EPP configuration for running scale model server test
 const scaleConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
