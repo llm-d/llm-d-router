@@ -23,6 +23,14 @@ type Plugin interface {
 	TypedName() TypedName
 }
 
+// StateDumper is an optional interface for plugins that can expose sanitized
+// internal state through operational debug endpoints.
+type StateDumper interface {
+	// DumpState returns JSON-serializable plugin state. Implementations must not
+	// include request payloads, credentials, or other sensitive values.
+	DumpState() any
+}
+
 // ConsumerPlugin defines the interface for a consumer.
 type ConsumerPlugin interface {
 	Plugin

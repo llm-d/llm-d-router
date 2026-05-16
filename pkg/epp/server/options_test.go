@@ -120,3 +120,20 @@ func TestEndpointTargetPorts(t *testing.T) {
 		})
 	}
 }
+
+func TestEnablePluginStateDebugDefaultAndFlag(t *testing.T) {
+	opts := NewOptions()
+	if opts.EnablePluginStateDebug {
+		t.Fatal("EnablePluginStateDebug should default to false")
+	}
+
+	fs := pflag.NewFlagSet("plugin-state-debug", pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	if err := fs.Parse([]string{"--enable-plugin-state-debug"}); err != nil {
+		t.Fatalf("Failed to parse flags: %v", err)
+	}
+
+	if !opts.EnablePluginStateDebug {
+		t.Fatal("EnablePluginStateDebug should be enabled when --enable-plugin-state-debug is set")
+	}
+}

@@ -157,6 +157,30 @@ func TestInFlightLoadProducer_NotificationCleanup(t *testing.T) {
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
 }
 
+func TestInFlightLoadProducer_DumpState(t *testing.T) {
+	t.Parallel()
+
+	producer := &InFlightLoadProducer{
+		requestTracker: newConcurrencyTracker(),
+		tokenTracker:   newConcurrencyTracker(),
+	}
+	podA := fullEndpointName("pod-a")
+	podB := fullEndpointName("pod-b")
+
+	producer.requestTracker.add(podB, 2)
+	producer.tokenTracker.add(podA, 10)
+	producer.tokenTracker.add(podB, 20)
+
+	state, ok := producer.DumpState().(InFlightLoadState)
+	require.True(t, ok)
+	require.Equal(t, InFlightLoadState{
+		Endpoints: []EndpointInFlightLoadState{
+			{Endpoint: podA, Requests: 0, Tokens: 10},
+			{Endpoint: podB, Requests: 2, Tokens: 20},
+		},
+	}, state)
+}
+
 func TestInFlightLoadProducer_ConcurrencyStress(t *testing.T) {
 	t.Parallel()
 
