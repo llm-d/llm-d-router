@@ -16,7 +16,7 @@ limitations under the License.
 
 package contracts
 
-import "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
+import "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 
 // PredicateFunc defines a function that returns true if a given item matches a certain condition.
 // It is used by SafeQueue.Cleanup to filter items.

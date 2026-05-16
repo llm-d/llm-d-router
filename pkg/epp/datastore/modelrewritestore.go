@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
 // modelRewriteStore encapsulates the logic for storing and retrieving

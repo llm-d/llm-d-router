@@ -3,8 +3,8 @@
 package apix
 
 import (
-	v1alpha2 "github.com/llm-d/llm-d-inference-scheduler/client-go/informers/externalversions/apix/v1alpha2"
-	internalinterfaces "github.com/llm-d/llm-d-inference-scheduler/client-go/informers/externalversions/internalinterfaces"
+	v1alpha2 "github.com/llm-d/llm-d-router/client-go/informers/externalversions/apix/v1alpha2"
+	internalinterfaces "github.com/llm-d/llm-d-router/client-go/informers/externalversions/internalinterfaces"
 )
 
 // Interface provides access to each of this group's versions.

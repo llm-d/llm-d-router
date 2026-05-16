@@ -20,7 +20,7 @@ set -o pipefail
 
 SCRIPT_ROOT=$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CODEGEN_PKG=${1:-"${SCRIPT_ROOT}/bin"}
-THIS_PKG="github.com/llm-d/llm-d-inference-scheduler"
+THIS_PKG="github.com/llm-d/llm-d-router"
 
 echo "Generating CRDs"
 (cd "${SCRIPT_ROOT}" && go run ./pkg/generator)

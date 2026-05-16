@@ -23,7 +23,7 @@ import (
 	"k8s.io/client-go/discovery/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
 func TestNewControllerConfig(t *testing.T) {

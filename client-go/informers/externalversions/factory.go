@@ -7,9 +7,9 @@ import (
 	sync "sync"
 	time "time"
 
-	versioned "github.com/llm-d/llm-d-inference-scheduler/client-go/clientset/versioned"
-	apix "github.com/llm-d/llm-d-inference-scheduler/client-go/informers/externalversions/apix"
-	internalinterfaces "github.com/llm-d/llm-d-inference-scheduler/client-go/informers/externalversions/internalinterfaces"
+	versioned "github.com/llm-d/llm-d-router/client-go/clientset/versioned"
+	apix "github.com/llm-d/llm-d-router/client-go/informers/externalversions/apix"
+	internalinterfaces "github.com/llm-d/llm-d-router/client-go/informers/externalversions/internalinterfaces"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"

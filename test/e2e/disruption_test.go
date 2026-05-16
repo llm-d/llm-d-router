@@ -15,7 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 const (

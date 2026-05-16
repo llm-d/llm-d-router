@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
 // InferenceObjectiveWrapper wraps an InferenceObjective.

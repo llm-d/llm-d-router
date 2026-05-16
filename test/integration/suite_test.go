@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
 const (

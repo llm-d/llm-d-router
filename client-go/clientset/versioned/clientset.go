@@ -6,7 +6,7 @@ import (
 	fmt "fmt"
 	http "net/http"
 
-	xinferencev1alpha2 "github.com/llm-d/llm-d-inference-scheduler/client-go/clientset/versioned/typed/apix/v1alpha2"
+	xinferencev1alpha2 "github.com/llm-d/llm-d-router/client-go/clientset/versioned/typed/apix/v1alpha2"
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
 	flowcontrol "k8s.io/client-go/util/flowcontrol"

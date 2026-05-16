@@ -1,4 +1,4 @@
-module github.com/llm-d/llm-d-inference-scheduler
+module github.com/llm-d/llm-d-router
 
 go 1.25.7
 

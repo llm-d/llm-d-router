@@ -17,7 +17,7 @@ limitations under the License.
 package contracts
 
 import (
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
 // FlowRegistry is the complete interface for the global flow control plane.

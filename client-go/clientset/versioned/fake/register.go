@@ -3,7 +3,7 @@
 package fake
 
 import (
-	xinferencev1alpha2 "github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
+	xinferencev1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"

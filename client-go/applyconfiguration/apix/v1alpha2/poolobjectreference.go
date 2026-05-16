@@ -3,7 +3,7 @@
 package v1alpha2
 
 import (
-	apixv1alpha2 "github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
+	apixv1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
 // PoolObjectReferenceApplyConfiguration represents a declarative configuration of the PoolObjectReference type for use

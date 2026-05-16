@@ -19,7 +19,7 @@ package requestcontrol
 import (
 	"google.golang.org/protobuf/types/known/structpb"
 
-	requesthandling "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
+	requesthandling "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // Response contains information from the response received to be passed to the Response requestcontrol plugins

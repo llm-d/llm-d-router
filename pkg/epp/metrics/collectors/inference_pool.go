@@ -20,8 +20,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	compbasemetrics "k8s.io/component-base/metrics"
 
-	metricsutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 )
 
 var (

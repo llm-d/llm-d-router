@@ -21,7 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 var (

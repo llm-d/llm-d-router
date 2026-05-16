@@ -20,9 +20,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/sidecar/proxy"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/sidecar/version"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/version"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 func main() {

@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // NewCycleState initializes a new CycleState and returns its pointer.

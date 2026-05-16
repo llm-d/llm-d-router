@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package vllm.grpc.engine;
 
-option go_package = "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen";
+option go_package = "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen";
 
 // Service definition for vLLM engine communication
 // This protocol is designed for efficient binary communication between

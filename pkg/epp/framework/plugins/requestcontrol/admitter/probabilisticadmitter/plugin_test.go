@@ -23,9 +23,9 @@ import (
 	"math"
 	"testing"
 
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 

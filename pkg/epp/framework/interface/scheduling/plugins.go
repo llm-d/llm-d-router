@@ -19,7 +19,7 @@ package scheduling
 import (
 	"context"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // ScorerCategory marks the preference a scorer applies when scoring candidate endpoints.

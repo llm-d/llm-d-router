@@ -12,7 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 func createModelServersFromKustomize(kustomizeDir string, extra map[string]string) []string {

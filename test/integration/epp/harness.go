@@ -46,17 +46,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	eppRunner "github.com/llm-d/llm-d-inference-scheduler/cmd/epp/runner"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	dlmocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/mocks"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
-	eppServer "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/server"
-	testutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/testing"
-	integration "github.com/llm-d/llm-d-inference-scheduler/test/integration"
+	eppRunner "github.com/llm-d/llm-d-router/cmd/epp/runner"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	dlmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
 // Global State (Initialized in TestMain)

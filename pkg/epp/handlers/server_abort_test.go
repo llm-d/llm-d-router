@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 )
 
 // mockProcessServer implements ExternalProcessor_ProcessServer for testing.

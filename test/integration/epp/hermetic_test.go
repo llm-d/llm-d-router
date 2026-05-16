@@ -42,11 +42,11 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
-	integration "github.com/llm-d/llm-d-inference-scheduler/test/integration"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
 const (

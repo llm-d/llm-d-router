@@ -25,7 +25,7 @@ import (
 
 	"k8s.io/utils/set"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // testPrefillHeaderRouting is a shared table-driven helper that exercises

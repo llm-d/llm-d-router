@@ -24,7 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
 
-	"github.com/llm-d/llm-d-inference-scheduler/test/sidecar/utils"
+	"github.com/llm-d/llm-d-router/test/sidecar/utils"
 )
 
 const (

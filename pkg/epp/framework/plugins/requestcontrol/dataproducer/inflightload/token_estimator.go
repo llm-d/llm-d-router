@@ -19,7 +19,7 @@ package inflightload
 import (
 	"math"
 
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // TokenEstimator estimates the number of tokens for an LLM request.

@@ -3,7 +3,7 @@
 package v1alpha2
 
 import (
-	apixv1alpha2 "github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
+	apixv1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 	labels "k8s.io/apimachinery/pkg/labels"
 	listers "k8s.io/client-go/listers"
 	cache "k8s.io/client-go/tools/cache"

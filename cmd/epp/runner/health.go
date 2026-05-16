@@ -28,8 +28,8 @@ import (
 	"google.golang.org/grpc/status"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 )
 
 type appProtocolSupporter interface {

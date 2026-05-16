@@ -16,7 +16,7 @@ limitations under the License.
 
 package datalayer
 
-import "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+import "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 
 // Registrar accepts pending source/extractor dependency declarations from plugins.
 // Runtime.Configure() resolves them after processing user config.

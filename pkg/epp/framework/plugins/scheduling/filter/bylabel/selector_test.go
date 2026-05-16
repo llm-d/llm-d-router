@@ -10,10 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/filter/bylabel"
-	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
+	"github.com/llm-d/llm-d-router/test/utils"
 )
 
 func TestLabelSelectorFilterFactoryWithJSON(t *testing.T) {
@@ -349,7 +349,7 @@ func TestLabelSelectorFilterEdgeCases(t *testing.T) {
 }
 
 // Example for setting Prefill/Decode roles using a LabelSelector filter.
-// Definition of labels is based on https://github.com/llm-d/llm-d-inference-scheduler/issues/220.
+// Definition of labels is based on https://github.com/llm-d/llm-d-router/issues/220.
 func ExamplePrefillDecodeRolesInLWS() {
 	decodeLeaderJSON := json.RawMessage(`{ "matchLabels": { "leaderworkerset.sigs.k8s.io/worker-index": "0" } }`)
 	plugin, _ := bylabel.SelectorFactory("decode-role", decodeLeaderJSON, nil)

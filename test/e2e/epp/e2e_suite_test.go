@@ -34,9 +34,9 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	infextv1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/env"
-	igwtestutils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 const (

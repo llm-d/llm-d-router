@@ -3,9 +3,9 @@
 package applyconfiguration
 
 import (
-	v1alpha2 "github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	apixv1alpha2 "github.com/llm-d/llm-d-inference-scheduler/client-go/applyconfiguration/apix/v1alpha2"
-	internal "github.com/llm-d/llm-d-inference-scheduler/client-go/applyconfiguration/internal"
+	v1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
+	apixv1alpha2 "github.com/llm-d/llm-d-router/client-go/applyconfiguration/apix/v1alpha2"
+	internal "github.com/llm-d/llm-d-router/client-go/applyconfiguration/internal"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	managedfields "k8s.io/apimachinery/pkg/util/managedfields"

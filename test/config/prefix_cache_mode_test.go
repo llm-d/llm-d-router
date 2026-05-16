@@ -7,12 +7,12 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/config/loader"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins"
-	preciseprefixcache "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache"
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils"
-	igwtestutils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
+	"github.com/llm-d/llm-d-router/pkg/epp/config/loader"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
+	preciseprefixcache "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 func TestScorer(t *testing.T) {

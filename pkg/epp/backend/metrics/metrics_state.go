@@ -17,7 +17,7 @@ limitations under the License.
 package metrics
 
 import (
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 // MetricsState holds the latest state of the metrics that were scraped from a pod.

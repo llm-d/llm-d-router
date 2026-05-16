@@ -30,7 +30,7 @@ import (
 	"github.com/prometheus/common/model"
 	"go.uber.org/multierr"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 const (

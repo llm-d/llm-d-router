@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	igwtestutils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 type TestConfig = igwtestutils.TestConfig

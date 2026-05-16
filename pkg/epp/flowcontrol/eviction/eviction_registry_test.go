@@ -23,7 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 )
 
 func TestEvictionRegistry_RegisterAndGet(t *testing.T) {

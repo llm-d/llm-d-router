@@ -21,7 +21,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	integration "github.com/llm-d/llm-d-inference-scheduler/test/integration"
+	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
 func TestRequestAttributeReporterStreaming(t *testing.T) {

@@ -29,10 +29,10 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/llm-d/llm-d-inference-scheduler/cmd/epp/runner"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/cmd/epp/runner"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
+	"github.com/llm-d/llm-d-router/pkg/metrics"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 func main() {

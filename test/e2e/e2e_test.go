@@ -7,8 +7,8 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/metrics"
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	"github.com/llm-d/llm-d-router/pkg/metrics"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 const (

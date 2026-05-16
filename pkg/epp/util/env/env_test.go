@@ -7,7 +7,7 @@ import (
 
 	"github.com/go-logr/logr/testr"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 func TestGetEnvFloat(t *testing.T) {

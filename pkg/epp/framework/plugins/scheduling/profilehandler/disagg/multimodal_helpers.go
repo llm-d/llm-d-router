@@ -1,7 +1,7 @@
 package disagg
 
 import (
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // hasMultimodalContent returns true if the request contains any image, video, or audio content blocks.

@@ -33,17 +33,17 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	"github.com/llm-d/llm-d-inference-scheduler/internal/runnable"
-	tlsutil "github.com/llm-d/llm-d-inference-scheduler/internal/tls"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common"
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/controller"
-	datalayerlogger "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer/logger"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
-	fwkfc "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/handlers"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/requestcontrol"
+	"github.com/llm-d/llm-d-router/internal/runnable"
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
+	"github.com/llm-d/llm-d-router/pkg/common"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/controller"
+	datalayerlogger "github.com/llm-d/llm-d-router/pkg/epp/datalayer/logger"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 )
 
 // ExtProcServerRunner provides methods to manage an external process server.

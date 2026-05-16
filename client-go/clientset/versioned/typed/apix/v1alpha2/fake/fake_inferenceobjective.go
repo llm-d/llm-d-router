@@ -3,9 +3,9 @@
 package fake
 
 import (
-	v1alpha2 "github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	apixv1alpha2 "github.com/llm-d/llm-d-inference-scheduler/client-go/applyconfiguration/apix/v1alpha2"
-	typedapixv1alpha2 "github.com/llm-d/llm-d-inference-scheduler/client-go/clientset/versioned/typed/apix/v1alpha2"
+	v1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
+	apixv1alpha2 "github.com/llm-d/llm-d-router/client-go/applyconfiguration/apix/v1alpha2"
+	typedapixv1alpha2 "github.com/llm-d/llm-d-router/client-go/clientset/versioned/typed/apix/v1alpha2"
 	gentype "k8s.io/client-go/gentype"
 )
 
