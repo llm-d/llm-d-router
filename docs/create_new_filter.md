@@ -1,157 +1,196 @@
-# Extending llm-d-inference-scheduler with a custom filter
+# Extending llm-d-router with a custom filter
 
 ## Goal
 
-This tutorial outlines the steps needed for creating and hooking a new filter
- for the llm-d-inference-scheduler.
- 
+This tutorial outlines the steps needed for creating and hooking a new filter  
+ for the llm-d-router.
+
 The tutorial demonstrates the coding of a new filter, which selects inference
- serving Pods based on their labels. All relevant code is contained in the
- [`bylabel`](https://github.com/llm-d/llm-d-inference-scheduler/tree/main/pkg/epp/framework/plugins/scheduling/filter/bylabel) package
+ serving endpoints based on their labels. All relevant code is contained in the
+ [`bylabel`](https://github.com/llm-d/llm-d-router/tree/main/pkg/epp/framework/plugins/scheduling/filter/bylabel) package
  (registered as the `label-selector-filter` plugin type).
 
 ## Introduction to filtering
 
-Plugins are used to modify llm-d-inference-scheduler's default behavior. Filter plugins
- are provided with a list of candidate inference serving Pods and filter out the
- Pods which do not match the filtering criteria. Several filtering plugins can
+Plugins are used to modify llm-d-router's default behavior. Filter plugins
+ are provided with a list of candidate inference serving endpoints and filter out the
+ endpoints which do not match the filtering criteria. Several filtering plugins can
  run in succession to produce the final candidate list which is then evaluated,
- through the process of _scoring_, to select the most appropriate target Pods.
- While llm-d-inference-scheduler comes with several existing filters and
- more are available in the upstream [Gateway API Inference Extension](https://sigs.k8s.io/gateway-api-inference-extension),
- in some cases it may be desirable to create and deploy custom filtering code to
- match your specific requirements.
+ through the process of _scoring_, to select the most appropriate target endpoints.
 
-Filters implement the `scheduling.Filter` interface and execute early in the scheduling pipeline:
+The base [`plugin.Plugin`](https://github.com/llm-d/llm-d-router/blob/main/pkg/epp/framework/interface/plugin/plugins.go) interface requires a single method:
 
 ```go
-Filter(ctx context.Context, cycleState *scheduling.CycleState, request *scheduling.InferenceRequest, pods []scheduling.Endpoint) []scheduling.Endpoint
+type Plugin interface {
+    TypedName() TypedName
+}
 ```
 
-Key upstream types used in the signature:
-- `scheduling.InferenceRequest` — parsed request with model, body, headers, and objectives
-- `scheduling.Endpoint` — candidate endpoint interface with metadata and metrics
+Filters implement the [`scheduling.Filter`](https://github.com/llm-d/llm-d-router/blob/main/pkg/epp/framework/interface/scheduling/plugins.go) interface:
 
-The `Filter` function accepts the request and a slice of candidate endpoints. Each endpoint exposes relevant inference attributes, such a model server metrics, which can be used to make scheduling decisions. The function returns a (possibly smaller) slice of endpoints which satisfy the filtering criteria.
+```go
+type Filter interface {
+    plugin.Plugin
+    Filter(ctx context.Context, cycleState *CycleState, request *InferenceRequest, pods []Endpoint) []Endpoint
+}
+```
+
+Key types used in the filter signature:
+- `scheduling.CycleState` — per-scheduling-cycle state for plugin-to-plugin data sharing
+- `scheduling.InferenceRequest` — parsed request with model, body, headers, and objectives
+- `scheduling.Endpoint` — candidate endpoint interface exposing metadata (including labels) and metrics
+
+The `Filter` function accepts the request and a slice of candidate endpoints. Each endpoint exposes relevant inference attributes, such as model server metrics, which can be used to make scheduling decisions. The function returns a (possibly smaller) slice of endpoints which satisfy the filtering criteria.
 
 ## Code walkthrough
+
+The following walkthrough references [`selector.go`](https://github.com/llm-d/llm-d-router/blob/main/pkg/epp/framework/plugins/scheduling/filter/bylabel/selector.go).
 
 The top of the file has the expected Go package and import statements:
 
 ```go
-package filter
+package bylabel
 
 import (
-	"errors"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/scheduling/plugins"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/scheduling/types"
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+    "k8s.io/apimachinery/pkg/labels"
+
+    "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+    "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 ```
 
-Specifically, we import the Kubernetes `meta/v1` and `labels` packages to allow
- defining and using `label.Selector` objects, and the Gateway API Infernce
- Extension's `plugin` (defininig the plugin interfaces) and `types` (defining
- scheduling related objects) packages.
+Specifically, we import:
+- Kubernetes `meta/v1` and `labels` — for label selector types
+- framework's `plugin` — base plugin interfaces
+- framework's `scheduling` — filter interface and scheduling-related types
 
-Next we define the `ByLabels` struct type, along with the relevant fields,
- and a constructor function.
+Next we define the `Selector` struct type, a plugin type constant, and a compile-time interface check:
 
 ```go
-// ByLabels filters out pods that do not match its label selector criteria
-type ByLabels struct {
-	name     string
-	selector labels.Selector
-}
+const (
+    LabelSelectorFilterType = "label-selector-filter"
+)
 
-var _ plugins.Filter = &ByLabels{} // validate interface conformance
+var _ scheduling.Filter = &Selector{}
 
-// NewByLabel returns a new filter instance, configured with the provided
-// name and label selector.
-func NewByLabel(name string, selector *metav1.LabelSelector) (plugins.Filter, error) {
-	if name == "" {
-		return nil, errors.New("ByLabels: missing filter name")
-	}
-	labelSelector, err := metav1.LabelSelectorAsSelector(selector)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ByLabels{
-		name:     name,
-		selector: labelSelector,
-	}, nil
+// Selector filters out endpoints that do not match its label selector criteria.
+type Selector struct {
+    typedName plugin.TypedName
+    selector  labels.Selector
 }
 ```
 
-> Note that, since Go supports "duck typing", the`plugin` package is
- not strictly required. We use it to validate `ByLabels` interface conformance
- (a pattern known as "interface implementation assertion" or "compile-time
- interface" check). The statement asserts at compile time that `ByLabels`
- implements the `plugins.Filter` interface and is useful for catching errors
- early, especially when refactoring (e.g. interface methods or signatures change).
+> Note the compile-time interface check `var _ scheduling.Filter = &Selector{}`.
+ This asserts at compile time that `Selector` implements the `scheduling.Filter`
+ interface and is useful for catching errors early, especially when refactoring
+ (e.g., interface methods or signatures change).
 
-Next, we define the required `plugins.Filter` interface methods:
+### Factory function
+
+Plugins are instantiated via factory functions. The factory receives the instance name, raw JSON parameters from the configuration, and a `plugin.Handle`:
 
 ```go
-// Name returns the name of the filter
-func (blf *ByLabels) Name() string {
-	return blf.name
+func SelectorFactory(name string, rawParameters json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+    parameters := metav1.LabelSelector{}
+    if rawParameters != nil {
+        if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+            return nil, fmt.Errorf("failed to parse the parameters of the '%s' filter - %w", LabelSelectorFilterType, err)
+        }
+    }
+    return NewSelector(name, &parameters)
 }
 
-// Filter filters out all pods that do not satisfy the label selector
-func (blf *ByLabels) Filter(_ *types.SchedulingContext, pods []types.Pod) []types.Pod {
-	filtered := []types.Pod{}
+func NewSelector(name string, selector *metav1.LabelSelector) (*Selector, error) {
+    if name == "" {
+        return nil, errors.New("Selector: missing filter name")
+    }
+    labelSelector, err := metav1.LabelSelectorAsSelector(selector)
+    if err != nil {
+        return nil, err
+    }
 
-	for _, pod := range pods {
-		labels := labels.Set(pod.GetPod().Labels)
-		if blf.selector.Matches(labels) {
-			filtered = append(filtered, pod)
-		}
-	}
-	return filtered
+    return &Selector{
+        typedName: plugin.TypedName{Type: LabelSelectorFilterType, Name: name},
+        selector:  labelSelector,
+    }, nil
 }
 ```
 
-Since the filter is only matching on candidate `types.Pod` labels,
- we leave the `types.SchedulingContext` parameter unnamed. Filters
- that need access to LLM request information (e.g., filtering based
- on prompt length) may use it.
+### Interface methods
+
+Next, we define the required interface methods:
+- `TypedName()` from `plugin.Plugin`
+- `Filter()` from `scheduling.Filter`
+
+```go
+func (blf *Selector) TypedName() plugin.TypedName {
+    return blf.typedName
+}
+
+func (blf *Selector) Filter(_ context.Context, _ *scheduling.CycleState, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+    filtered := []scheduling.Endpoint{}
+
+    for _, endpoint := range endpoints {
+        labels := labels.Set(endpoint.GetMetadata().Labels)
+        if blf.selector.Matches(labels) {
+            filtered = append(filtered, endpoint)
+        }
+    }
+    return filtered
+}
+```
+
+Since the filter is only matching on candidate endpoint labels, we leave the `context.Context`, `CycleState`, and `InferenceRequest` parameters unnamed. Filters that need access to LLM request information (e.g., filtering based on prompt length) may use them.
 
 ## Hooking the filter into the scheduling flow
 
-Once a filter is defined, it can be used to modify llm-d-inference-scheduler
- configuration. This would typically be done by modifying the
-`pkg/config/config.go` file to
- 
-- Add the relevant import path (if defined outside this repository);
-- Add any desired configuration knobs (e.g., environment variables); and
-- Listing the new filter in the `LoadConfigPhaseTwo()` function's `cfg.loadPluginInfo`
- list of available plugins.
+Once a filter is defined, two steps are needed to make it available:
 
-In the case of the llm-d-inference-scheduler, filters can be hooked into the
- `Prefill` and/or `Decode` scheduling cycles. For example, the following snippet
- adds the `ByLabels` filter to the list of plugins available to the `Decode`
- scheduler (assuming a `ByLabelFilterName` constant is defined along with other
- environment variables):
+### 1. Register the factory
 
-```go 
-func (c *Config) LoadConfigPhaseTwo() {
-	c.loadPluginInfo(c.DecodeSchedulerPlugins, false,
-		KVCacheScorerName, ..., ByLabelFilterName, ... )
-	c.loadPluginInfo(c.PrefillSchedulerPlugins, true, ... )
-	// ...
+Add an import and a `plugin.Register` call in [`register.go`](https://github.com/llm-d/llm-d-router/blob/main/pkg/epp/framework/plugins/register.go):
+
+```go
+import (
+    // ...existing imports...
+    "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
+    // ...
+)
+
+func RegisterAllPlugins() {
+    // ...existing registrations...
+    plugin.Register(bylabel.LabelSelectorFilterType, bylabel.SelectorFactory)
 }
 ```
 
-> Note: a real filter would require unit tests, etc. These are left out to
- keep the tutorial short and focused.
+### 2. Reference the plugin in the EndpointPickerConfig
+
+The EPP is configured via an `EndpointPickerConfig`. First declare the plugin instance in the `plugins` section (with optional `parameters`), then reference it by name in a `schedulingProfiles` entry:
+
+```yaml
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: label-selector-filter
+  name: my-label-filter
+  parameters:
+    matchLabels:
+      role: decode
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: my-label-filter
+```
+
+> Note: a real filter would require unit tests, etc. These are left out to keep the tutorial short and focused.
 
 ## Next steps
 
-If you have an idea for a new `Filter` (or other) plugin - we'd love to hear
- from you! Please open an [issue](https://github.com/llm-d/llm-d-inference-scheduler/issues/new/choose),
- describing your use case and requirements, and we'll reach out to refine
- and collaborate.
+If you have an idea for a new `Filter` (or other) plugin - we'd love to hear from you!
+Please open an [issue](https://github.com/llm-d/llm-d-router/issues/new/choose), describing your use case and requirements, and we'll reach out to refine and collaborate.
