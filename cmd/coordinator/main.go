@@ -6,9 +6,10 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+
 	"github.com/llm-d/coordinator/pkg/config"
 	"github.com/llm-d/coordinator/pkg/gateway"
-	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"github.com/llm-d/coordinator/pkg/server"
 	_ "github.com/llm-d/coordinator/pkg/steps"
@@ -18,7 +19,7 @@ func main() {
 	configPath := flag.String("config", "configs/coordinator.yaml", "path to configuration file")
 	flag.Parse()
 
-	logging.InitLogging(logging.DEFAULT)
+	logutil.InitSetupLogging()
 	log := ctrl.Log.WithName("coordinator")
 
 	cfg, err := config.Load(*configPath)
