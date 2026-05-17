@@ -156,6 +156,15 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	for _, endpoint := range endpoints {
 		weightedScorePerEndpoint[endpoint] = float64(0) // initialize weighted score per endpoint with 0 value
 	}
+	// Cache the debug logger and its enabled state once. The per-endpoint Info
+	// call below evaluates and boxes its variadic args even when the verbosity
+	// gate would suppress output; on a 100-endpoint, 4-scorer fleet that line
+	// alone accounted for ~80% of total allocations per Scheduler.Schedule call.
+	// Guarding by Enabled() preserves debugging behavior while removing the
+	// per-endpoint allocation when DEBUG logging is off (the production default).
+	debug := logger.V(logutil.DEBUG)
+	debugEnabled := debug.Enabled()
+
 	// Iterate through each scorer in the chain and accumulate the weighted scores.
 	for _, scorer := range p.scorers {
 		logger.V(logutil.VERBOSE).Info("Running scorer plugin", "plugin", scorer.TypedName())
@@ -163,10 +172,14 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 		scores := scorer.Score(ctx, cycleState, request, endpoints)
 		metrics.RecordPluginProcessingLatency(scorerExtensionPoint, scorer.TypedName().Type, scorer.TypedName().Name, time.Since(before))
 		for endpoint, score := range scores { // weight is relative to the sum of weights
-			logger.V(logutil.DEBUG).Info("Calculated score", "plugin", scorer.TypedName(), "endpoint", endpoint.GetMetadata().NamespacedName, "score", score)
+			if debugEnabled {
+				debug.Info("Calculated score", "plugin", scorer.TypedName(), "endpoint", endpoint.GetMetadata().NamespacedName, "score", score)
+			}
 			weightedScorePerEndpoint[endpoint] += enforceScoreRange(score) * scorer.Weight()
 		}
-		logger.V(logutil.DEBUG).Info("Completed running scorer plugin successfully", "plugin", scorer.TypedName())
+		if debugEnabled {
+			debug.Info("Completed running scorer plugin successfully", "plugin", scorer.TypedName())
+		}
 	}
 	logger.V(logutil.VERBOSE).Info("Completed running scorer plugins successfully")
 
@@ -175,10 +188,20 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 
 func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, cycleState *fwksched.CycleState, weightedScorePerEndpoint map[fwksched.Endpoint]float64) *fwksched.ProfileRunResult {
 	logger := log.FromContext(ctx)
-	scoredEndpoints := make([]*fwksched.ScoredEndpoint, len(weightedScorePerEndpoint))
+
+	// Allocate the ScoredEndpoint values as a single contiguous backing array
+	// and build the picker's pointer slice by indexing into it. Previously each
+	// per-endpoint &ScoredEndpoint{...} was a separate heap allocation, which
+	// at production fleet sizes (~100 pods) dominated per-request picker cost.
+	// Pickers reorder the pointer slice (shuffle/sort) but do not realloc, so
+	// pointer aliasing into the backing array is safe.
+	n := len(weightedScorePerEndpoint)
+	storage := make([]fwksched.ScoredEndpoint, n)
+	scoredEndpoints := make([]*fwksched.ScoredEndpoint, n)
 	i := 0
 	for endpoint, score := range weightedScorePerEndpoint {
-		scoredEndpoints[i] = &fwksched.ScoredEndpoint{Endpoint: endpoint, Score: score}
+		storage[i] = fwksched.ScoredEndpoint{Endpoint: endpoint, Score: score}
+		scoredEndpoints[i] = &storage[i]
 		i++
 	}
 	logger.V(logutil.VERBOSE).Info("Running picker plugin", "plugin", p.picker.TypedName())
