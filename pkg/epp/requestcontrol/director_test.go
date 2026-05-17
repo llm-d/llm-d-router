@@ -53,6 +53,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
@@ -326,6 +327,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 		dataProducerPlugin      *mockDataProducerPlugin
 		preRequestPlugin        *mockPreRequestPlugin
 		wantMutatedBody         map[string]any
+		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
+		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 	}{
 		{
 			name: "successful completions request",
@@ -354,6 +357,35 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"prompt": "critical prompt",
 			},
 			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "fairness ID derived from header",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "user-123",
+			wantFairnessID:         "user-123",
+		},
+		{
+			name: "fairness ID falls back to default when header absent",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			wantFairnessID:         metadata.DefaultFairnessID,
 		},
 		{
 			name: "successful request with preRequest plugin adding key",
@@ -790,6 +822,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 					reqCtx.Request.Headers[":path"] = "/v1/chat/completions"
 				}
 
+				if test.fairnessIDHeader != "" {
+					reqCtx.Request.Headers[metadata.FlowFairnessIDKey] = test.fairnessIDHeader
+				}
+
 				parseResult, parseErr := openai.NewOpenAIParser().ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				var returnedReqCtx *handlers.RequestContext
 				if parseErr != nil {
@@ -817,6 +853,11 @@ func TestDirector_HandleRequest(t *testing.T) {
 						t.Errorf("reqCtx.TargetPod mismatch (-want +got):\n%s", diff)
 					}
 					assert.Equal(t, test.wantReqCtx.TargetEndpoint, returnedReqCtx.TargetEndpoint, "reqCtx.TargetEndpoint mismatch")
+				}
+
+				if test.wantFairnessID != "" {
+					require.NotNil(t, returnedReqCtx.SchedulingRequest, "SchedulingRequest should be populated")
+					assert.Equal(t, test.wantFairnessID, returnedReqCtx.SchedulingRequest.FairnessID, "SchedulingRequest.FairnessID mismatch")
 				}
 
 				if test.wantMutatedBody != nil {
