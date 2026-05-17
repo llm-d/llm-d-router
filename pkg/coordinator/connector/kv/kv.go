@@ -47,6 +47,9 @@ func Build(name string) (Connector, error) {
 	case connector.NameSharedStorage:
 		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return sharedStorage{}, nil
+	case connector.NameSGLang:
+		logger.V(logging.DEFAULT).Info("using connector", "name", name)
+		return sglangKV{}, nil
 	default:
 		return nil, fmt.Errorf("unknown connector: %q", name)
 	}

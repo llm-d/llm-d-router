@@ -9,4 +9,5 @@ package connector
 const (
 	NameNIXLv2        = "nixlv2"
 	NameSharedStorage = "shared_storage"
+	NameSGLang        = "sglang"
 )
