@@ -8,8 +8,8 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 )
 
 // DefaultECConnectorName is the EC connector selected when an empty string is

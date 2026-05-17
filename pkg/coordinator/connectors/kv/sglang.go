@@ -5,8 +5,8 @@ import (
 	"strconv"
 
 	"github.com/google/uuid"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 )
 
 const (
