@@ -152,6 +152,13 @@ func PredictedLatencyFactory(name string, rawParameters json.RawMessage, handle 
 		return nil, fmt.Errorf("invalid PredictedLatency config: %w", err)
 	}
 
+	if handle == nil {
+		return nil, errors.New("plugin handle is required")
+	}
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
+	}
+
 	predictor, err := startPredictor(handle)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start latency predictor: %w", err)

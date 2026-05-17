@@ -30,8 +30,12 @@ type Handle interface {
 
 	HandlePlugins
 
-	// PodList lists pods.
+	// PodList lists pods. Returns nil if no pod source was configured on the handle.
 	PodList() []types.NamespacedName
+
+	// Metrics returns a recorder plugins can use to register metrics. It may return
+	// nil when no recorder is configured.
+	Metrics() MetricsRecorder
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -56,7 +60,8 @@ type PodListFunc func() []types.NamespacedName
 type eppHandle struct {
 	ctx context.Context
 	HandlePlugins
-	podList PodListFunc
+	podList         PodListFunc
+	metricsRecorder MetricsRecorder
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -95,17 +100,42 @@ func (h *eppHandlePlugins) GetAllPluginsWithNames() map[string]Plugin {
 
 // PodList lists pods.
 func (h *eppHandle) PodList() []types.NamespacedName {
+	if h.podList == nil {
+		return nil
+	}
 	return h.podList()
 }
 
-func NewEppHandle(ctx context.Context, podList PodListFunc) Handle {
-	return &eppHandle{
+// Metrics returns the MetricsRecorder.
+func (h *eppHandle) Metrics() MetricsRecorder {
+	return h.metricsRecorder
+}
+
+// HandleOption configures an eppHandle constructed via NewEppHandle.
+type HandleOption func(*eppHandle)
+
+// WithMetricsRecorder sets the MetricsRecorder used by the handle. A nil recorder
+// is ignored.
+func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
+	return func(h *eppHandle) {
+		if recorder != nil {
+			h.metricsRecorder = recorder
+		}
+	}
+}
+
+func NewEppHandle(ctx context.Context, podList PodListFunc, opts ...HandleOption) Handle {
+	h := &eppHandle{
 		ctx: ctx,
 		HandlePlugins: &eppHandlePlugins{
 			plugins: map[string]Plugin{},
 		},
 		podList: podList,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // PluginByType retrieves the specified plugin by name and verifies its type
