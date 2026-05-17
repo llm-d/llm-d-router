@@ -11,7 +11,7 @@ import (
 	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"github.com/llm-d/coordinator/pkg/server"
-	_ "github.com/llm-d/coordinator/pkg/steps"
+	"github.com/llm-d/coordinator/pkg/steps"
 )
 
 func main() {
@@ -50,11 +50,11 @@ func mergeConnectorDefaults(params map[string]any, kvConnector, ecConnector stri
 	for k, v := range params {
 		out[k] = v
 	}
-	if _, ok := out["kv_connector"]; !ok && kvConnector != "" {
-		out["kv_connector"] = kvConnector
+	if _, ok := out[steps.ParamKVConnector]; !ok && kvConnector != "" {
+		out[steps.ParamKVConnector] = kvConnector
 	}
-	if _, ok := out["ec_connector"]; !ok && ecConnector != "" {
-		out["ec_connector"] = ecConnector
+	if _, ok := out[steps.ParamECConnector]; !ok && ecConnector != "" {
+		out[steps.ParamECConnector] = ecConnector
 	}
 	return out
 }
