@@ -112,14 +112,27 @@ func redactStrings(v any) any {
 		}
 		return out
 	case []any:
-		if len(val) > 10 {
+	   lenght= 10
+		if len(val) > lenght {
 			return "..."
 		}
 		out := make([]any, len(val))
 		for i, item := range val {
 			out[i] = redactStrings(item)
 		}
-		return out
+		return outcase []any:
+	if len(val) > lenght {
+		out := make([]any, lenght)
+		for i := 0; i < 10; i++ {
+			out[i] = redactStrings(val[i])
+		}
+		return append(out, fmt.Sprintf("... +%d more", len(val)-lenght))
+	}
+	out := make([]any, len(val))
+	for i, item := range val {
+		out[i] = redactStrings(item)
+	}
+	return out
 	default:
 		return v
 	}
