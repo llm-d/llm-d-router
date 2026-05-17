@@ -44,13 +44,13 @@ const (
 
 // Config controls optional behaviors of InFlightLoadProducer.
 type Config struct {
-	// IncludeOutputTokens controls whether estimated output tokens are added to
+	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
 	// the in-flight token counter. Defaults to true to preserve historical behavior.
-	IncludeOutputTokens bool `json:"includeOutputTokens"`
+	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
 }
 
 func defaultConfig() Config {
-	return Config{IncludeOutputTokens: true}
+	return Config{AddEstimatedOutputTokens: true}
 }
 
 func InFlightLoadProducerFactory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -61,12 +61,12 @@ func InFlightLoadProducerFactory(name string, rawParameters json.RawMessage, _ f
 		}
 	}
 	return &InFlightLoadProducer{
-		typedName:           fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
-		requestTracker:      newConcurrencyTracker(),
-		tokenTracker:        newConcurrencyTracker(),
-		tokenEstimator:      NewSimpleTokenEstimator(),
-		includeOutputTokens: cfg.IncludeOutputTokens,
-		dk:                  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
+		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
+		requestTracker:           newConcurrencyTracker(),
+		tokenTracker:             newConcurrencyTracker(),
+		tokenEstimator:           NewSimpleTokenEstimator(),
+		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
+		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 	}, nil
 }
 
@@ -79,11 +79,11 @@ var (
 )
 
 type InFlightLoadProducer struct {
-	typedName           fwkplugin.TypedName
-	requestTracker      *concurrencyTracker
-	tokenTracker        *concurrencyTracker
-	tokenEstimator      TokenEstimator
-	includeOutputTokens bool
+	typedName                fwkplugin.TypedName
+	requestTracker           *concurrencyTracker
+	tokenTracker             *concurrencyTracker
+	tokenEstimator           TokenEstimator
+	addEstimatedOutputTokens bool
 	// addedTokens tracks the exact token amount added per (requestID, endpointID, profileName)
 	// so release subtracts the same value (accounting for prefix-cache discount).
 	// The profile name is part of the key so that multiple profiles targeting the
@@ -128,7 +128,7 @@ func (p *InFlightLoadProducer) ExtractEndpoint(ctx context.Context, event datala
 	return nil
 }
 
-func (p *InFlightLoadProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+func (p *InFlightLoadProducer) PrepareRequestData(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	for _, e := range endpoints {
 		endpointID := e.GetMetadata().NamespacedName.String()
 		e.Put(p.dk.String(), &attrconcurrency.InFlightLoad{
@@ -164,7 +164,7 @@ func (p *InFlightLoadProducer) PreRequest(_ context.Context, request *fwksched.I
 		// the (estimated) input tokens otherwise.
 		adjustedInput := uncachedInputTokens(endpoint, inputTokens)
 		tokens := adjustedInput
-		if p.includeOutputTokens {
+		if p.addEstimatedOutputTokens {
 			// Output tokens are based on the full input, not the cached portion.
 			tokens += p.tokenEstimator.EstimateOutput(inputTokens)
 		}
@@ -196,7 +196,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// arrives (StartOfStream), prefill is done across all profiles, so free the
 	// token counters for every targeted endpoint regardless of profile name.
 	// Request counters are still released on EndOfStream below.
-	if !p.includeOutputTokens && resp.StartOfStream {
+	if !p.addEstimatedOutputTokens && resp.StartOfStream {
 		for profileName, profileResult := range result.ProfileResults {
 			if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
 				continue
@@ -207,7 +207,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 
 	// 1. Early Prefill Release (on first chunk) — original behavior.
 	// Uses the new StartOfStream signal provided by the framework.
-	if p.includeOutputTokens && resp.StartOfStream {
+	if p.addEstimatedOutputTokens && resp.StartOfStream {
 		if prefillResult, ok := result.ProfileResults[profilePrefill]; ok && len(prefillResult.TargetEndpoints) > 0 {
 			p.release(prefillResult.TargetEndpoints[0], request, profilePrefill)
 		}
@@ -221,7 +221,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 			}
 			endpoint := profileResult.TargetEndpoints[0]
 
-			if !p.includeOutputTokens {
+			if !p.addEstimatedOutputTokens {
 				// Tokens are normally freed at StartOfStream; also call
 				// releaseTokens here as a safety net for non-streaming or
 				// error paths where StartOfStream may not be observed. It is
@@ -280,12 +280,12 @@ func (p *InFlightLoadProducer) releaseTokens(endpoint fwksched.Endpoint, request
 	// (request is nil or has no RequestID, so nothing was stored to release).
 	// Mirror PreRequest's accounting so we subtract the same amount we would
 	// have added: uncached input tokens, plus output tokens only when
-	// includeOutputTokens is true. Using tokenEstimator.Estimate() here would
-	// ignore both the includeOutputTokens=false semantics and any prefix-cache
-	// discount applied at PreRequest time, leading to over/under-decrement.
+	// addEstimatedOutputTokens is true. Using tokenEstimator.Estimate() here would
+	// ignore both the addEstimatedOutputTokens=false semantics and any prefix-cache
+	// discount applied at PreRequest time, leading over/under-decrement.
 	inputTokens := p.tokenEstimator.EstimateInput(request)
 	tokens := uncachedInputTokens(endpoint, inputTokens)
-	if p.includeOutputTokens {
+	if p.addEstimatedOutputTokens {
 		tokens += p.tokenEstimator.EstimateOutput(inputTokens)
 	}
 	if tokens != 0 {

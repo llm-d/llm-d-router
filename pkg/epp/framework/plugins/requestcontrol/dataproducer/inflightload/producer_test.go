@@ -35,12 +35,12 @@ import (
 
 func newTestProducer() *InFlightLoadProducer {
 	return &InFlightLoadProducer{
-		typedName:           fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: "inflight-load-producer"},
-		requestTracker:      newConcurrencyTracker(),
-		tokenTracker:        newConcurrencyTracker(),
-		tokenEstimator:      NewSimpleTokenEstimator(),
-		includeOutputTokens: true,
-		dk:                  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName("inflight-load-producer"),
+		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: "inflight-load-producer"},
+		requestTracker:           newConcurrencyTracker(),
+		tokenTracker:             newConcurrencyTracker(),
+		tokenEstimator:           NewSimpleTokenEstimator(),
+		addEstimatedOutputTokens: true,
+		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName("inflight-load-producer"),
 	}
 }
 
@@ -253,16 +253,16 @@ func makeTokenRequest(requestID, prompt string) *fwksched.InferenceRequest {
 }
 
 // TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease verifies that when
-// IncludeOutputTokens is false, token counters are released as soon as the first chunk
+// AddEstimatedOutputTokens is false, token counters are released as soon as the first chunk
 // arrives (StartOfStream), while request counters are released only on EndOfStream.
 func TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease(t *testing.T) {
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker:      newConcurrencyTracker(),
-		tokenTracker:        newConcurrencyTracker(),
-		tokenEstimator:      NewSimpleTokenEstimator(),
-		includeOutputTokens: false,
+		requestTracker:           newConcurrencyTracker(),
+		tokenTracker:             newConcurrencyTracker(),
+		tokenEstimator:           NewSimpleTokenEstimator(),
+		addEstimatedOutputTokens: false,
 	}
 	ctx := context.Background()
 	endpointName := "exclude-output-endpoint"
@@ -293,10 +293,10 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_SingleChunk(t *testing.T) {
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker:      newConcurrencyTracker(),
-		tokenTracker:        newConcurrencyTracker(),
-		tokenEstimator:      NewSimpleTokenEstimator(),
-		includeOutputTokens: false,
+		requestTracker:           newConcurrencyTracker(),
+		tokenTracker:             newConcurrencyTracker(),
+		tokenEstimator:           NewSimpleTokenEstimator(),
+		addEstimatedOutputTokens: false,
 	}
 	ctx := context.Background()
 	endpointName := "single-chunk-endpoint"
@@ -320,10 +320,10 @@ func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker:      newConcurrencyTracker(),
-		tokenTracker:        newConcurrencyTracker(),
-		tokenEstimator:      NewSimpleTokenEstimator(),
-		includeOutputTokens: true,
+		requestTracker:           newConcurrencyTracker(),
+		tokenTracker:             newConcurrencyTracker(),
+		tokenEstimator:           NewSimpleTokenEstimator(),
+		addEstimatedOutputTokens: true,
 	}
 	ctx := context.Background()
 	endpointName := "prefix-cache-endpoint"
@@ -364,10 +364,10 @@ func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker:      newConcurrencyTracker(),
-		tokenTracker:        newConcurrencyTracker(),
-		tokenEstimator:      NewSimpleTokenEstimator(),
-		includeOutputTokens: true,
+		requestTracker:           newConcurrencyTracker(),
+		tokenTracker:             newConcurrencyTracker(),
+		tokenEstimator:           NewSimpleTokenEstimator(),
+		addEstimatedOutputTokens: true,
 	}
 	ctx := context.Background()
 	podA := "pod-a-cached"
@@ -412,10 +412,10 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker:      newConcurrencyTracker(),
-		tokenTracker:        newConcurrencyTracker(),
-		tokenEstimator:      NewSimpleTokenEstimator(),
-		includeOutputTokens: true,
+		requestTracker:           newConcurrencyTracker(),
+		tokenTracker:             newConcurrencyTracker(),
+		tokenEstimator:           NewSimpleTokenEstimator(),
+		addEstimatedOutputTokens: true,
 	}
 	ctx := context.Background()
 	endpointName := "shared-endpoint"
@@ -450,7 +450,7 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 }
 
 // TestInFlightLoadProducer_ExcludeOutputTokens_EndOfStreamWithoutStart verifies the
-// safety net for non-streaming or error paths: when includeOutputTokens=false and
+// safety net for non-streaming or error paths: when addEstimatedOutputTokens=false and
 // ResponseBody delivers EndOfStream without ever seeing StartOfStream, the token
 // counter and request counter must both drain (tokens are normally released at
 // StartOfStream, so a missing StartOfStream would otherwise leak them). Also
@@ -459,10 +459,10 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_EndOfStreamWithoutStart(t *tes
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker:      newConcurrencyTracker(),
-		tokenTracker:        newConcurrencyTracker(),
-		tokenEstimator:      NewSimpleTokenEstimator(),
-		includeOutputTokens: false,
+		requestTracker:           newConcurrencyTracker(),
+		tokenTracker:             newConcurrencyTracker(),
+		tokenEstimator:           NewSimpleTokenEstimator(),
+		addEstimatedOutputTokens: false,
 	}
 	ctx := context.Background()
 	endpointName := "no-start-endpoint"
