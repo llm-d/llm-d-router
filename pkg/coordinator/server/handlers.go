@@ -8,8 +8,10 @@ import (
 
 	"github.com/google/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/coordinator/pkg/logging"
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -63,9 +65,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger := ctrl.Log.WithName("handler").WithValues("request_id", reqCtx.RequestID)
-	ctx := logging.IntoContext(r.Context(), logger)
+	ctx := log.IntoContext(r.Context(), logger)
 
-	logger.V(logging.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)
+	logger.V(logutil.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)
 
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
 		logger.Error(err, "pipeline execution failed")

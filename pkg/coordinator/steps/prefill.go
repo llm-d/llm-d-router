@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"io"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
+
 	"github.com/llm-d/coordinator/pkg/gateway"
-	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -37,7 +41,7 @@ func (s *PrefillStep) SetGatewayClient(c *gateway.Client) {
 func (s *PrefillStep) Name() string { return PrefillStepName }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := logging.FromContext(ctx).WithName("prefill")
+	logger := log.FromContext(ctx).WithName("prefill")
 
 	allHashes := make([]string, len(reqCtx.MultimodalEntries))
 	allPlaceholders := make([]any, len(reqCtx.MultimodalEntries))
@@ -79,10 +83,10 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	path := fmt.Sprintf("%s%s", gateway.PrefillPrefix, s.gatewayPath)
-	logger.V(logging.DEFAULT).Info("sending request", "path", path)
+	logger.V(logutil.DEFAULT).Info("sending request", "path", path)
 
 	resp, err := s.gwClient.Post(ctx, path, bodyBytes, map[string]string{
-		"X-Request-ID": reqCtx.RequestID,
+		reqcommon.RequestIDHeaderKey: reqCtx.RequestID,
 	})
 	if err != nil {
 		return fmt.Errorf("prefill: request: %w", err)
@@ -101,7 +105,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 
 	reqCtx.KVTransferParams = prefillResp.KVTransferParams
 
-	logger.V(logging.DEFAULT).Info("complete")
+	logger.V(logutil.DEFAULT).Info("complete")
 	return nil
 }
 
