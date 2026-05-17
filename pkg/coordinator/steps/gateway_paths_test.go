@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -24,12 +25,21 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 
 		switch r.URL.Path {
 		case "/encode/inference/v1/generate":
+			body, _ := io.ReadAll(r.Body)
+			var parsed map[string]any
+			_ = json.Unmarshal(body, &parsed)
+			features, _ := parsed["features"].(map[string]any)
+			mmHashes, _ := features["mm_hashes"].(map[string]any)
+			imageHashes, _ := mmHashes["image"].([]any)
+			hash, _ := imageHashes[0].(string)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ec_transfer_params": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+				"ec_transfer_params": map[string]any{
+					hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+				},
 			})
 		case "/prefill/inference/v1/generate":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"kv_transfer_params": map[string]any{"block_id": "b1"},
+				"kv_transfer_params": map[string]any{"block_id": "b1", "peer_host": "10.0.0.2", "peer_port": 5502},
 			})
 		case "/decode/v1/chat/completions":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -45,7 +55,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
 
 	// --- Encode step ---
-	encodeStep, _ := NewEncodeStep(map[string]any{"gateway_path": "/inference/v1/generate"})
+	encodeStep, _ := NewEncodeStep(map[string]any{"gateway_path": gateway.DefaultGeneratePath})
 	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
@@ -81,7 +91,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	}
 
 	// --- Prefill step ---
-	prefillStep, _ := NewPrefillStep(map[string]any{"gateway_path": "/inference/v1/generate"})
+	prefillStep, _ := NewPrefillStep(map[string]any{"gateway_path": gateway.DefaultGeneratePath})
 	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 
 	err = prefillStep.Execute(context.Background(), reqCtx)

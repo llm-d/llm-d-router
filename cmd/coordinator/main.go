@@ -12,7 +12,7 @@ import (
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"github.com/llm-d/coordinator/pkg/server"
-	_ "github.com/llm-d/coordinator/pkg/steps"
+	"github.com/llm-d/coordinator/pkg/steps"
 )
 
 func main() {
@@ -46,10 +46,25 @@ func main() {
 	}
 }
 
+func mergeConnectorDefaults(params map[string]any, kvConnector, ecConnector string) map[string]any {
+	out := make(map[string]any, len(params))
+	for k, v := range params {
+		out[k] = v
+	}
+	if _, ok := out[steps.ParamKVConnector]; !ok && kvConnector != "" {
+		out[steps.ParamKVConnector] = kvConnector
+	}
+	if _, ok := out[steps.ParamECConnector]; !ok && ecConnector != "" {
+		out[steps.ParamECConnector] = ecConnector
+	}
+	return out
+}
+
 func buildPipeline(cfg *config.Config, gwClient *gateway.Client) ([]pipeline.Step, error) {
 	var steps []pipeline.Step
 	for _, stepCfg := range cfg.Pipeline.Steps {
-		step, err := pipeline.Build(stepCfg.Type, stepCfg.Params)
+		params := mergeConnectorDefaults(stepCfg.Params, cfg.Pipeline.KVConnector, cfg.Pipeline.ECConnector)
+		step, err := pipeline.Build(stepCfg.Type, params)
 		if err != nil {
 			return nil, err
 		}

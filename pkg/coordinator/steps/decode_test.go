@@ -32,6 +32,21 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 			t.Fatalf("expected stream=false, got %v", parsed["stream"])
 		}
 
+		// Verify kv_transfer_params injected with do_remote_prefill
+		kvParams, ok := parsed["kv_transfer_params"].(map[string]any)
+		if !ok {
+			t.Fatal("expected kv_transfer_params in decode body")
+		}
+		if kvParams["block_id"] != "xyz" {
+			t.Errorf("kv_transfer_params.block_id = %v, want xyz", kvParams["block_id"])
+		}
+		if kvParams["peer_host"] != "10.0.0.5" {
+			t.Errorf("kv_transfer_params.peer_host = %v, want 10.0.0.5", kvParams["peer_host"])
+		}
+		if kvParams["do_remote_prefill"] != true {
+			t.Errorf("kv_transfer_params.do_remote_prefill = %v, want true", kvParams["do_remote_prefill"])
+		}
+
 		// Verify uuid was injected into the image_url content part
 		messages := parsed["messages"].([]any)
 		msg := messages[0].(map[string]any)
@@ -70,7 +85,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "hash-a"},
 		},
-		KVTransferParams: map[string]any{"block_id": "xyz"},
+		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
 			"model":  "llama-3",
 			"stream": false,

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/connectors/ec"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -39,8 +40,15 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 		receivedBodies = append(receivedBodies, parsed)
 		mu.Unlock()
 
+		// Echo per-image hash back as the ec_transfer_params key (nixl shape).
+		features, _ := parsed["features"].(map[string]any)
+		mmHashes, _ := features["mm_hashes"].(map[string]any)
+		imageHashes, _ := mmHashes["image"].([]any)
+		hash, _ := imageHashes[0].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ec_transfer_params": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			"ec_transfer_params": map[string]any{
+				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			},
 		})
 	}))
 	defer gwServer.Close()
@@ -77,8 +85,11 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 		t.Fatalf("render did not set Placeholder for entry 0")
 	}
 
-	// Run encode step
-	encodeStep, _ := NewEncodeStep(map[string]any{"gateway_path": "/inference/v1/generate"})
+	// Run encode step (nixl EC connector merges per-hash ec_transfer_params)
+	encodeStep, _ := NewEncodeStep(map[string]any{
+		"gateway_path":   gateway.DefaultGeneratePath,
+		ParamECConnector: ec.NIXLv2,
+	})
 	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
 	err = encodeStep.Execute(context.Background(), reqCtx)

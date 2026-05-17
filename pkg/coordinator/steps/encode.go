@@ -11,6 +11,7 @@ import (
 	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
 
+	"github.com/llm-d/coordinator/pkg/connectors/ec"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"golang.org/x/sync/errgroup"
@@ -26,11 +27,12 @@ type EncodeStep struct {
 	gatewayPath string
 	maxParallel int
 	gwClient    *gateway.Client
+	ec          ec.Connector
 }
 
 func NewEncodeStep(params map[string]any) (pipeline.Step, error) {
 	path := gateway.DefaultGeneratePath
-	if v, ok := params["gateway_path"].(string); ok {
+	if v, ok := params[ParamGatewayPath].(string); ok {
 		path = v
 	}
 	maxParallel := 8
@@ -40,9 +42,15 @@ func NewEncodeStep(params map[string]any) (pipeline.Step, error) {
 		}
 		maxParallel = v
 	}
+	ecName, _ := params[ParamECConnector].(string)
+	ecConn, err := ec.Build(ecName)
+	if err != nil {
+		return nil, fmt.Errorf("encode: %w", err)
+	}
 	return &EncodeStep{
 		gatewayPath: path,
 		maxParallel: maxParallel,
+		ec:          ecConn,
 	}, nil
 }
 
@@ -113,7 +121,9 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	reqCtx.ECTransferParams = results
+	for _, r := range results {
+		s.ec.MergeEncodeResponse(reqCtx, r)
+	}
 
 	logger.V(logutil.DEFAULT).Info("all sub-requests complete", "count", len(results))
 	return nil

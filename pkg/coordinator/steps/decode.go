@@ -12,6 +12,7 @@ import (
 	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
 
+	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"github.com/llm-d/coordinator/pkg/server"
@@ -26,14 +27,20 @@ func init() {
 type DecodeStep struct {
 	gatewayPath string
 	gwClient    *gateway.Client
+	kv          kv.Connector
 }
 
 func NewDecodeStep(params map[string]any) (pipeline.Step, error) {
 	path := gateway.DefaultGeneratePath
-	if v, ok := params["gateway_path"].(string); ok {
+	if v, ok := params[ParamGatewayPath].(string); ok {
 		path = v
 	}
-	return &DecodeStep{gatewayPath: path}, nil
+	kvName, _ := params[ParamKVConnector].(string)
+	kvConn, err := kv.Build(kvName)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return &DecodeStep{gatewayPath: path, kv: kvConn}, nil
 }
 
 // SetGatewayClient injects the shared gateway client.
@@ -45,10 +52,7 @@ func (s *DecodeStep) Name() string { return DecodeStepName }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName("decode")
-
-	kvParams := reqCtx.KVTransferParams
-	kvParams["do_remote_prefill"] = true
-	reqCtx.Body["kv_transfer_params"] = kvParams
+	reqCtx.Body["kv_transfer_params"] = s.kv.PrepareDecodeKVParams(reqCtx)
 	s.injectUUIDs(reqCtx)
 
 	bodyBytes, err := json.Marshal(reqCtx.Body)
@@ -99,7 +103,7 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 			if !ok {
 				continue
 			}
-			if partMap["type"] != "image_url" && partMap["image_url"] == nil {
+			if partMap["type"] != "image_url" {
 				continue
 			}
 			if hashIdx < len(reqCtx.MultimodalEntries) {

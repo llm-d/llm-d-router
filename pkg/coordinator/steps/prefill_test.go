@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/connectors/ec"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -36,7 +37,10 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, err := NewPrefillStep(map[string]any{"gateway_path": "/inference/v1/generate"})
+	step, err := NewPrefillStep(map[string]any{
+		"gateway_path":   gateway.DefaultGeneratePath,
+		ParamECConnector: ec.NIXLv2,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,12 +51,12 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		Model:     "llama-3",
 		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
-			{Index: 1, Hash: "hash-b", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
+			{Index: 0, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Index: 1, Hash: "hash-b", KwargsData: "dGVuc29yLWI=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
 		},
 		ECTransferParams: []map[string]any{
-			{"peer_host": "10.0.0.1", "peer_port": 5501},
-			{"peer_host": "10.0.0.2", "peer_port": 5502},
+			{"hash-a": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},
+			{"hash-b": map[string]any{"peer_host": "10.0.0.2", "peer_port": 5502}},
 		},
 		KVTransferParams: make(map[string]any),
 	}
@@ -92,19 +96,46 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		t.Fatalf("unexpected mm_hashes: %v", imageHashes)
 	}
 
-	// Verify kwargs_data is null
-	if features["kwargs_data"] != nil {
-		t.Fatalf("expected kwargs_data=null in prefill, got %v", features["kwargs_data"])
+	// Verify kwargs_data carries per-image base64 tensors
+	kwargsData, ok := features["kwargs_data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected kwargs_data map in prefill, got %T", features["kwargs_data"])
+	}
+	imageKwargs, _ := kwargsData["image"].([]any)
+	if len(imageKwargs) != 2 || imageKwargs[0] != "dGVuc29yLWE=" || imageKwargs[1] != "dGVuc29yLWI=" {
+		t.Fatalf("expected kwargs_data.image=[dGVuc29yLWE=,dGVuc29yLWI=], got %v", imageKwargs)
 	}
 
-	// Verify ec_transfer_params as {"image": [params_0, params_1]}
+	// Verify ec_transfer_params has per-modality wrapped list (doc shape)
 	ecParams, ok := prefillBody["ec_transfer_params"].(map[string]any)
 	if !ok {
 		t.Fatal("expected ec_transfer_params in prefill request")
 	}
-	imageEC, ok := ecParams["image"].([]any)
-	if !ok || len(imageEC) != 2 {
-		t.Fatalf("expected ec_transfer_params.image with 2 entries, got %v", ecParams)
+	imageList, ok := ecParams["image"].([]any)
+	if !ok {
+		t.Fatalf("ec_transfer_params.image not a list: %v", ecParams)
+	}
+	if len(imageList) != 2 {
+		t.Fatalf("expected 2 image entries, got %d: %v", len(imageList), imageList)
+	}
+	seen := make(map[string]bool)
+	for i, e := range imageList {
+		entryMap, ok := e.(map[string]any)
+		if !ok || len(entryMap) != 1 {
+			t.Fatalf("image[%d]: expected single-key map, got %v", i, e)
+		}
+		for hash, v := range entryMap {
+			seen[hash] = true
+			peer, _ := v.(map[string]any)
+			if peer["peer_host"] == nil {
+				t.Fatalf("image[%d][%q].peer_host missing", i, hash)
+			}
+		}
+	}
+	for _, want := range []string{"hash-a", "hash-b"} {
+		if !seen[want] {
+			t.Errorf("missing hash %q in image list: %v", want, imageList)
+		}
 	}
 
 	// Verify sampling_params
@@ -151,7 +182,7 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 			{Index: 0, Hash: "h1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},
 		ECTransferParams: []map[string]any{
-			{"peer_host": "10.0.0.1", "peer_port": 5501},
+			{"h1": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},
 		},
 		KVTransferParams: make(map[string]any),
 	}

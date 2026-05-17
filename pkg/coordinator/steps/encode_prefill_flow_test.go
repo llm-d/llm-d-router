@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/connectors/ec"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -20,10 +21,16 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/encode"):
+			body, _ := io.ReadAll(r.Body)
+			var parsed map[string]any
+			_ = json.Unmarshal(body, &parsed)
+			features, _ := parsed["features"].(map[string]any)
+			mmHashes, _ := features["mm_hashes"].(map[string]any)
+			imageHashes, _ := mmHashes["image"].([]any)
+			hash, _ := imageHashes[0].(string)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ec_transfer_params": map[string]any{
-					"peer_host": "10.0.0.1",
-					"peer_port": 5501,
+					hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 				},
 			})
 
@@ -32,7 +39,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 			_ = json.Unmarshal(body, &prefillBody)
 
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"kv_transfer_params": map[string]any{"block_id": "b1"},
+				"kv_transfer_params": map[string]any{"block_id": "b1", "peer_host": "10.0.0.2", "peer_port": 5502},
 			})
 
 		default:
@@ -55,7 +62,10 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	}
 
 	// Run encode step
-	encodeStep, _ := NewEncodeStep(map[string]any{"gateway_path": "/inference/v1/generate"})
+	encodeStep, _ := NewEncodeStep(map[string]any{
+		"gateway_path":   gateway.DefaultGeneratePath,
+		ParamECConnector: ec.NIXLv2,
+	})
 	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
 	err := encodeStep.Execute(context.Background(), reqCtx)
@@ -69,7 +79,10 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	}
 
 	// Run prefill step
-	prefillStep, _ := NewPrefillStep(map[string]any{"gateway_path": "/inference/v1/generate"})
+	prefillStep, _ := NewPrefillStep(map[string]any{
+		"gateway_path":   gateway.DefaultGeneratePath,
+		ParamECConnector: ec.NIXLv2,
+	})
 	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 
 	err = prefillStep.Execute(context.Background(), reqCtx)
@@ -82,24 +95,39 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 		t.Fatal("prefill was not called")
 	}
 
-	// Verify ec_transfer_params formatted as {"image": [params_0, params_1]}
+	// Verify ec_transfer_params has per-modality wrapped list (doc shape)
 	ecParams, ok := prefillBody["ec_transfer_params"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected ec_transfer_params map, got %T", prefillBody["ec_transfer_params"])
 	}
-	imageEC, ok := ecParams["image"].([]any)
-	if !ok || len(imageEC) != 2 {
-		t.Fatalf("expected ec_transfer_params.image with 2 entries, got %v", ecParams)
+	imageList, ok := ecParams["image"].([]any)
+	if !ok {
+		t.Fatalf("ec_transfer_params.image not a list: %v", ecParams)
 	}
-	entry0, _ := imageEC[0].(map[string]any)
-	if entry0["peer_host"] != "10.0.0.1" {
-		t.Fatalf("ec_transfer_params[0].peer_host = %v, want 10.0.0.1", entry0["peer_host"])
+	if len(imageList) != 2 {
+		t.Fatalf("expected 2 image entries, got %d: %v", len(imageList), imageList)
+	}
+	first, ok := imageList[0].(map[string]any)
+	if !ok || len(first) != 1 {
+		t.Fatalf("image[0]: expected single-key map, got %v", imageList[0])
+	}
+	entry, ok := first["img-hash-1"].(map[string]any)
+	if !ok {
+		t.Fatalf("image[0] missing key %q: %v", "img-hash-1", first)
+	}
+	if entry["peer_host"] != "10.0.0.1" {
+		t.Fatalf("image[0][img-hash-1].peer_host = %v, want 10.0.0.1", entry["peer_host"])
 	}
 
-	// Verify features has kwargs_data=null
+	// Verify features has kwargs_data with per-image base64 tensors
 	features, _ := prefillBody["features"].(map[string]any)
-	if features["kwargs_data"] != nil {
-		t.Fatalf("expected kwargs_data=null in prefill, got %v", features["kwargs_data"])
+	kwargsData, ok := features["kwargs_data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected kwargs_data map in prefill, got %T", features["kwargs_data"])
+	}
+	imageKwargs, _ := kwargsData["image"].([]any)
+	if len(imageKwargs) != 2 || imageKwargs[0] != "dDE=" || imageKwargs[1] != "dDI=" {
+		t.Fatalf("expected kwargs_data.image=[dDE=,dDI=], got %v", imageKwargs)
 	}
 
 	// Verify mm_hashes in features

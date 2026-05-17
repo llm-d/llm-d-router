@@ -33,7 +33,9 @@ type RenderingConfig struct {
 }
 
 type PipelineConfig struct {
-	Steps []StepConfig `mapstructure:"steps"`
+	KVConnector string       `mapstructure:"kv_connector"`
+	ECConnector string       `mapstructure:"ec_connector"`
+	Steps       []StepConfig `mapstructure:"steps"`
 }
 
 type StepConfig struct {

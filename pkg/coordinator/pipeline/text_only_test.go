@@ -41,7 +41,7 @@ func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
 		case strings.HasPrefix(r.URL.Path, "/prefill"):
 			prefillCalled.Store(true)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"kv_transfer_params": map[string]any{"block_id": "b1"},
+				"kv_transfer_params": map[string]any{"block_id": "b1", "peer_host": "10.0.0.2", "peer_port": 5502},
 			})
 		case strings.HasPrefix(r.URL.Path, "/decode"):
 			_ = json.NewEncoder(w).Encode(map[string]any{

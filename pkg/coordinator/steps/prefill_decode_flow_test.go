@@ -55,7 +55,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
 
 	// Run prefill step
-	prefillStep, _ := NewPrefillStep(map[string]any{"gateway_path": "/inference/v1/generate"})
+	prefillStep, _ := NewPrefillStep(map[string]any{"gateway_path": gateway.DefaultGeneratePath})
 	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
@@ -68,7 +68,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 			{Index: 0, Hash: "hash-1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		ECTransferParams: []map[string]any{
-			{"peer_host": "10.0.0.1", "peer_port": 5501},
+			{"hash-1": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},
 		},
 		KVTransferParams: make(map[string]any),
 		Body: map[string]any{

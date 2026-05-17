@@ -16,8 +16,13 @@ type RequestContext struct {
 
 	TokenIDs          []int
 	MultimodalEntries []MultimodalEntry
-	ECTransferParams  []map[string]any
-	KVTransferParams  map[string]any
+	// ECTransferParams is an ordered list (one entry per encode response).
+	// Each entry is a single-key map: mm_hash -> per-encoding transfer
+	// descriptor (peer_host, peer_port, size_bytes, nixl_agent_metadata_b64).
+	// Populated by EncodeStep when the EC connector is nixl; empty for
+	// shared_storage.
+	ECTransferParams []map[string]any
+	KVTransferParams map[string]any
 
 	ResponseWriter http.ResponseWriter
 	Flusher        http.Flusher
