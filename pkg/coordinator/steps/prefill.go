@@ -59,12 +59,14 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 
 	allHashes := make([]string, len(reqCtx.MultimodalEntries))
 	allPlaceholders := make([]any, len(reqCtx.MultimodalEntries))
+	allKwargsData := make([]string, len(reqCtx.MultimodalEntries))
 	for i, entry := range reqCtx.MultimodalEntries {
 		allHashes[i] = entry.Hash
 		allPlaceholders[i] = map[string]any{
 			"offset": entry.Placeholder.Offset,
 			"length": entry.Placeholder.Length,
 		}
+		allKwargsData[i] = entry.KwargsData
 	}
 
 	var features any
@@ -72,7 +74,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		features = map[string]any{
 			"mm_hashes":       map[string][]string{"image": allHashes},
 			"mm_placeholders": map[string][]any{"image": allPlaceholders},
-			"kwargs_data":     nil,
+			"kwargs_data":     map[string][]string{"image": allKwargsData},
 		}
 	}
 

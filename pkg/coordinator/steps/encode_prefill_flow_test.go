@@ -119,10 +119,15 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 		t.Fatalf("image[0][img-hash-1].peer_host = %v, want 10.0.0.1", entry["peer_host"])
 	}
 
-	// Verify features has kwargs_data=null
+	// Verify features has kwargs_data with per-image base64 tensors
 	features, _ := prefillBody["features"].(map[string]any)
-	if features["kwargs_data"] != nil {
-		t.Fatalf("expected kwargs_data=null in prefill, got %v", features["kwargs_data"])
+	kwargsData, ok := features["kwargs_data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected kwargs_data map in prefill, got %T", features["kwargs_data"])
+	}
+	imageKwargs, _ := kwargsData["image"].([]any)
+	if len(imageKwargs) != 2 || imageKwargs[0] != "dDE=" || imageKwargs[1] != "dDI=" {
+		t.Fatalf("expected kwargs_data.image=[dDE=,dDI=], got %v", imageKwargs)
 	}
 
 	// Verify mm_hashes in features
