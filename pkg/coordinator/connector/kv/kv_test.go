@@ -34,21 +34,23 @@ func TestConnectors_KVParams(t *testing.T) {
 		{
 			name: connector.NameNIXLv2,
 			decodeIncoming: map[string]any{
-				"remote_engine_id": "eng-7",
-				"remote_block_ids": []any{1, 2, 3},
-				"remote_host":      "10.0.0.5",
-				"remote_port":      6001,
+				"block_id":  "block-999",
+				"peer_host": "10.0.0.42",
+				"peer_port": float64(7777),
 			},
 			wantPrefill: map[string]any{
 				"do_remote_decode":  true,
 				"do_remote_prefill": false,
+				"remote_engine_id":  nil,
+				"remote_block_ids":  nil,
+				"remote_host":       nil,
+				"remote_port":       nil,
 			},
 			wantDecode: map[string]any{
 				"do_remote_prefill": true,
-				"remote_engine_id":  "eng-7",
-				"remote_block_ids":  []any{1, 2, 3},
-				"remote_host":       "10.0.0.5",
-				"remote_port":       6001,
+				"block_id":          "block-999",
+				"peer_host":         "10.0.0.42",
+				"peer_port":         float64(7777),
 			},
 		},
 		{

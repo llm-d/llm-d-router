@@ -18,6 +18,10 @@ func (nixlV2) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any 
 	params := map[string]any{
 		"do_remote_decode":  true,
 		"do_remote_prefill": false,
+		"remote_engine_id":  nil,
+		"remote_block_ids":  nil,
+		"remote_host":       nil,
+		"remote_port":       nil,
 	}
 	logger.V(logging.TRACE).Info("preparing prefill kv params", "params", params)
 	return params
