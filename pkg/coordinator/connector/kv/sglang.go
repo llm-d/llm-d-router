@@ -11,6 +11,12 @@ import (
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
+const (
+	fieldBootstrapHost = "bootstrap_host"
+	fieldBootstrapPort = "bootstrap_port"
+	fieldBootstrapRoom = "bootstrap_room"
+)
+
 var sglangBootstrapPort = func() int {
 	port := 8998
 	if s := os.Getenv("SGLANG_BOOTSTRAP_PORT"); s != "" {
@@ -34,8 +40,8 @@ func (sglangKV) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]an
 	roomID := time.Now().UnixNano() + int64(rand.IntN(1000))
 	params := map[string]any{
 		"do_remote_decode": true,
-		"bootstrap_port":   sglangBootstrapPort,
-		"bootstrap_room":   roomID,
+		fieldBootstrapPort: sglangBootstrapPort,
+		fieldBootstrapRoom: roomID,
 	}
 	logger.V(logging.TRACE).Info("preparing prefill kv params", "params", params)
 	return params

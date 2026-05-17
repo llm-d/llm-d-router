@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -65,9 +66,9 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
 	step, err := NewEncodeStep(map[string]any{
-		"gateway_path": "/inference/v1/generate",
+		"gateway_path": gateway.DefaultGeneratePath,
 		"max_parallel": 4,
-		"ec_connector": "nixlv2",
+		"ec_connector": connector.NameNIXLv2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -124,13 +125,22 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 	var count atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := count.Add(1)
+		body, _ := io.ReadAll(r.Body)
 		if n == 2 {
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte("encode failed"))
 			return
 		}
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		features, _ := parsed["features"].(map[string]any)
+		mmHashes, _ := features["mm_hashes"].(map[string]any)
+		imageHashes, _ := mmHashes["image"].([]any)
+		hash, _ := imageHashes[0].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ec_transfer_params": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			"ec_transfer_params": map[string]any{
+				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			},
 		})
 	}))
 	defer server.Close()
@@ -165,9 +175,14 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 		var parsed map[string]any
 		_ = json.Unmarshal(body, &parsed)
 		receivedTokenIDs, _ = parsed["token_ids"].([]any)
-
+		features, _ := parsed["features"].(map[string]any)
+		mmHashes, _ := features["mm_hashes"].(map[string]any)
+		imageHashes, _ := mmHashes["image"].([]any)
+		hash, _ := imageHashes[0].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ec_transfer_params": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			"ec_transfer_params": map[string]any{
+				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			},
 		})
 	}))
 	defer server.Close()

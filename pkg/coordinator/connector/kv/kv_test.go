@@ -19,9 +19,9 @@ func TestSGLangKV_Params(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		KVTransferParams: map[string]any{
-			"bootstrap_host": "10.0.0.42",
-			"bootstrap_port": 8998,
-			"bootstrap_room": int64(12345),
+			fieldBootstrapHost: "10.0.0.42",
+			fieldBootstrapPort: 8998,
+			fieldBootstrapRoom: int64(12345),
 		},
 	}
 
@@ -30,19 +30,19 @@ func TestSGLangKV_Params(t *testing.T) {
 	if prefill["do_remote_decode"] != true {
 		t.Errorf("prefill: do_remote_decode = %v, want true", prefill["do_remote_decode"])
 	}
-	if prefill["bootstrap_port"] != sglangBootstrapPort {
-		t.Errorf("prefill: bootstrap_port = %v, want %d", prefill["bootstrap_port"], sglangBootstrapPort)
+	if prefill[fieldBootstrapPort] != sglangBootstrapPort {
+		t.Errorf("prefill: %s = %v, want %d", fieldBootstrapPort, prefill[fieldBootstrapPort], sglangBootstrapPort)
 	}
-	room, ok := prefill["bootstrap_room"].(int64)
+	room, ok := prefill[fieldBootstrapRoom].(int64)
 	if !ok || room == 0 {
-		t.Errorf("prefill: bootstrap_room = %v (%T), want non-zero int64", prefill["bootstrap_room"], prefill["bootstrap_room"])
+		t.Errorf("prefill: %s = %v (%T), want non-zero int64", fieldBootstrapRoom, prefill[fieldBootstrapRoom], prefill[fieldBootstrapRoom])
 	}
 
 	// Decode: forwards prefill-response kv_transfer_params verbatim.
 	wantDecode := map[string]any{
-		"bootstrap_host": "10.0.0.42",
-		"bootstrap_port": 8998,
-		"bootstrap_room": int64(12345),
+		fieldBootstrapHost: "10.0.0.42",
+		fieldBootstrapPort: 8998,
+		fieldBootstrapRoom: int64(12345),
 	}
 	if got := c.PrepareDecodeKVParams(reqCtx); !reflect.DeepEqual(got, wantDecode) {
 		t.Errorf("decode params:\n got=%v\nwant=%v", got, wantDecode)

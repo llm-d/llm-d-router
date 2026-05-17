@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -38,7 +39,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 			_ = json.Unmarshal(body, &prefillBody)
 
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"kv_transfer_params": map[string]any{"block_id": "b1"},
+				"kv_transfer_params": map[string]any{"block_id": "b1", "peer_host": "10.0.0.2", "peer_port": 5502},
 			})
 
 		default:
@@ -62,8 +63,8 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 
 	// Run encode step
 	encodeStep, _ := NewEncodeStep(map[string]any{
-		"gateway_path": "/inference/v1/generate",
-		"ec_connector": "nixlv2",
+		"gateway_path": gateway.DefaultGeneratePath,
+		"ec_connector": connector.NameNIXLv2,
 	})
 	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
@@ -79,8 +80,8 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 
 	// Run prefill step
 	prefillStep, _ := NewPrefillStep(map[string]any{
-		"gateway_path": "/inference/v1/generate",
-		"ec_connector": "nixlv2",
+		"gateway_path": gateway.DefaultGeneratePath,
+		"ec_connector": connector.NameNIXLv2,
 	})
 	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 

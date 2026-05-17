@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -24,7 +25,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 		denyFields []string       // must NOT be present
 	}{
 		{
-			connector: "nixlv2",
+			connector: connector.NameNIXLv2,
 			wantFields: map[string]any{
 				"do_remote_decode":  true,
 				"do_remote_prefill": false,
@@ -35,7 +36,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 			},
 		},
 		{
-			connector:  "shared_storage",
+			connector:  connector.NameSharedStorage,
 			wantFields: map[string]any{"do_remote_decode": true},
 			denyFields: []string{"remote_engine_id", "remote_host", "remote_block_ids", "remote_port"},
 		},
@@ -55,7 +56,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 
 			gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
 			step, err := NewPrefillStep(map[string]any{
-				"gateway_path": "/inference/v1/generate",
+				"gateway_path": gateway.DefaultGeneratePath,
 				"kv_connector": tc.connector,
 			})
 			if err != nil {
@@ -106,14 +107,14 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 		denyFields []string
 	}{
 		{
-			connector: "nixlv2",
+			connector: connector.NameNIXLv2,
 			wantFields: map[string]any{
 				"do_remote_prefill": true,
 				"block_id":          "from-prefill",
 			},
 		},
 		{
-			connector:  "shared_storage",
+			connector:  connector.NameSharedStorage,
 			wantFields: map[string]any{"do_remote_prefill": true},
 			denyFields: []string{"block_id"},
 		},

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -37,8 +38,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
 	step, err := NewPrefillStep(map[string]any{
-		"gateway_path": "/inference/v1/generate",
-		"ec_connector": "nixlv2",
+		"gateway_path": gateway.DefaultGeneratePath,
+		"ec_connector": connector.NameNIXLv2,
 	})
 	if err != nil {
 		t.Fatal(err)

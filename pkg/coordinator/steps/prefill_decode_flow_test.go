@@ -55,7 +55,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
 
 	// Run prefill step
-	prefillStep, _ := NewPrefillStep(map[string]any{"gateway_path": "/inference/v1/generate"})
+	prefillStep, _ := NewPrefillStep(map[string]any{"gateway_path": gateway.DefaultGeneratePath})
 	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{

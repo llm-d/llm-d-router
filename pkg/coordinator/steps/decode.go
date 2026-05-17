@@ -97,7 +97,7 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 			if !ok {
 				continue
 			}
-			if partMap["type"] != "image_url" && partMap["image_url"] == nil {
+			if partMap["type"] != "image_url" {
 				continue
 			}
 			if hashIdx < len(reqCtx.MultimodalEntries) {
