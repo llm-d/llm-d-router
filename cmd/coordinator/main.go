@@ -16,16 +16,26 @@ import (
 
 func main() {
 	configPath := flag.String("config", "configs/coordinator.yaml", "path to configuration file")
+	verbosity := flag.Int("v", -1, "log verbosity override (2=info, 4=debug, 5=trace); defaults to log_level in config")
 	flag.Parse()
-
-	logging.InitLogging(logging.DEFAULT)
-	log := ctrl.Log.WithName("coordinator")
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Error(err, "failed to load config")
+		logging.InitLogging(logging.DEFAULT)
+		ctrl.Log.WithName("coordinator").Error(err, "failed to load config")
 		os.Exit(1)
 	}
+
+	logLevel := cfg.LogLevel
+	if logLevel <= 0 {
+		logLevel = logging.DEFAULT
+	}
+	if *verbosity >= 0 {
+		logLevel = *verbosity
+	}
+	logging.InitLogging(logLevel)
+	log := ctrl.Log.WithName("coordinator")
+	log.Info("log level set", "level", logLevel)
 
 	gwClient := gateway.New(cfg.Gateway)
 

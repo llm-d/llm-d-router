@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/logging"
 )
 
 // Client is an HTTP client configured for persistent connections to the Envoy Gateway.
@@ -57,14 +59,68 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 		req.Header.Set(k, v)
 	}
 
+	logger := logging.FromContext(ctx).WithName("gateway")
+	if body != nil {
+		logger.V(logging.TRACE).Info("request body", "method", method, "path", path, "body", redactBody(body))
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("sending request to gateway: %w", err)
 	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("reading response from gateway: %w", err)
+	}
+	logger.V(logging.TRACE).Info("response body", "status", resp.StatusCode, "body", redactBody(respBody))
+	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+
 	return resp, nil
 }
 
 // Post is a convenience method for POST requests.
 func (c *Client) Post(ctx context.Context, path string, body []byte, headers map[string]string) (*http.Response, error) {
 	return c.Request(ctx, http.MethodPost, path, body, headers)
+}
+
+// redactBody parses JSON and replaces string values longer than 50 chars with
+// "..." so tensor blobs don't drown out the structural fields.
+func redactBody(data []byte) any {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		if len(data) > 200 {
+			return string(data[:200]) + "..."
+		}
+		return string(data)
+	}
+	return redactStrings(v)
+}
+
+func redactStrings(v any) any {
+	switch val := v.(type) {
+	case string:
+		if len(val) > 50 {
+			return "..."
+		}
+		return val
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, item := range val {
+			out[k] = redactStrings(item)
+		}
+		return out
+	case []any:
+		if len(val) > 10 {
+			return "..."
+		}
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = redactStrings(item)
+		}
+		return out
+	default:
+		return v
+	}
 }
