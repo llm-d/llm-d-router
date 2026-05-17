@@ -10,8 +10,8 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 )
 
 // DefaultKVConnectorName is the KV connector selected when an empty string is
