@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
-	"github.com/llm-d/coordinator/pkg/connector"
+	"github.com/llm-d/coordinator/pkg/connectors/ec"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -68,7 +68,7 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	step, err := NewEncodeStep(map[string]any{
 		"gateway_path":   gateway.DefaultGeneratePath,
 		"max_parallel":   4,
-		ParamECConnector: connector.ECNIXLv2,
+		ParamECConnector: ec.NIXLv2,
 	})
 	if err != nil {
 		t.Fatal(err)

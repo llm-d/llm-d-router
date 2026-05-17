@@ -1,7 +1,6 @@
 package ec
 
 import (
-	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -10,7 +9,7 @@ import (
 // reads them back, so no ec_transfer_params is emitted on the wire.
 type sharedStorage struct{}
 
-func (sharedStorage) Name() string { return connector.ECSharedStorage }
+func (sharedStorage) Name() string { return SharedStorage }
 
 func (sharedStorage) MergeEncodeResponse(_ *pipeline.RequestContext, _ map[string]any) {}
 

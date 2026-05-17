@@ -1,7 +1,6 @@
 package kv
 
 import (
-	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -12,7 +11,7 @@ import (
 // so the decode pod can pull KV blocks from the prefill pod.
 type nixlV2 struct{}
 
-func (nixlV2) Name() string { return connector.KVNIXLv2 }
+func (nixlV2) Name() string { return NIXLv2 }
 
 func (nixlV2) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any {
 	params := map[string]any{

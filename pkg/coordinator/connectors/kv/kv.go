@@ -10,14 +10,13 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
 // DefaultKVConnectorName is the KV connector selected when an empty string is
 // passed to Build.
-const DefaultKVConnectorName = connector.KVNIXLv2
+const DefaultKVConnectorName = NIXLv2
 
 var logger = ctrl.Log.WithName("kv")
 
@@ -41,13 +40,13 @@ func Build(name string) (Connector, error) {
 		name = DefaultKVConnectorName
 	}
 	switch name {
-	case connector.KVNIXLv2:
+	case NIXLv2:
 		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return nixlV2{}, nil
-	case connector.KVSharedStorage:
+	case SharedStorage:
 		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return sharedStorage{}, nil
-	case connector.KVSGLang:
+	case SGLang:
 		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return sglangKV{}, nil
 	default:

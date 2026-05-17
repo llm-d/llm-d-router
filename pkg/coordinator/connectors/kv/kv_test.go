@@ -4,17 +4,16 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
 func TestSGLangKV_Params(t *testing.T) {
-	c, err := Build(connector.KVSGLang)
+	c, err := Build(SGLang)
 	if err != nil {
-		t.Fatalf("Build(%q): %v", connector.KVSGLang, err)
+		t.Fatalf("Build(%q): %v", SGLang, err)
 	}
-	if c.Name() != connector.KVSGLang {
-		t.Fatalf("Name() = %q, want %q", c.Name(), connector.KVSGLang)
+	if c.Name() != SGLang {
+		t.Fatalf("Name() = %q, want %q", c.Name(), SGLang)
 	}
 
 	reqCtx := &pipeline.RequestContext{
@@ -33,9 +32,9 @@ func TestSGLangKV_Params(t *testing.T) {
 	if prefill[fieldBootstrapPort] != sglangBootstrapPort {
 		t.Errorf("prefill: %s = %v, want %d", fieldBootstrapPort, prefill[fieldBootstrapPort], sglangBootstrapPort)
 	}
-	room, ok := prefill[fieldBootstrapRoom].(int64)
-	if !ok || room == 0 {
-		t.Errorf("prefill: %s = %v (%T), want non-zero int64", fieldBootstrapRoom, prefill[fieldBootstrapRoom], prefill[fieldBootstrapRoom])
+	room, ok := prefill[fieldBootstrapRoom].(string)
+	if !ok || room == "" {
+		t.Errorf("prefill: %s = %v (%T), want non-empty string", fieldBootstrapRoom, prefill[fieldBootstrapRoom], prefill[fieldBootstrapRoom])
 	}
 
 	// Decode: forwards prefill-response kv_transfer_params verbatim.
@@ -73,7 +72,7 @@ func TestConnectors_KVParams(t *testing.T) {
 		wantDecode     map[string]any
 	}{
 		{
-			name: connector.KVNIXLv2,
+			name: NIXLv2,
 			decodeIncoming: map[string]any{
 				"block_id":  "block-999",
 				"peer_host": "10.0.0.42",
@@ -95,7 +94,7 @@ func TestConnectors_KVParams(t *testing.T) {
 			},
 		},
 		{
-			name:           connector.KVSharedStorage,
+			name:           SharedStorage,
 			decodeIncoming: map[string]any{"ignored": "field"},
 			wantPrefill:    map[string]any{"do_remote_decode": true},
 			wantDecode:     map[string]any{"do_remote_prefill": true},
