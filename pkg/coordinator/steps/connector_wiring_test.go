@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
-	"github.com/llm-d/coordinator/pkg/connector"
+	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -25,7 +25,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 		denyFields []string       // must NOT be present
 	}{
 		{
-			connector: connector.KVNIXLv2,
+			connector: kv.NIXLv2,
 			wantFields: map[string]any{
 				"do_remote_decode":  true,
 				"do_remote_prefill": false,
@@ -36,7 +36,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 			},
 		},
 		{
-			connector:  connector.KVSharedStorage,
+			connector:  kv.SharedStorage,
 			wantFields: map[string]any{"do_remote_decode": true},
 			denyFields: []string{"remote_engine_id", "remote_host", "remote_block_ids", "remote_port"},
 		},
@@ -107,14 +107,14 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 		denyFields []string
 	}{
 		{
-			connector: connector.KVNIXLv2,
+			connector: kv.NIXLv2,
 			wantFields: map[string]any{
 				"do_remote_prefill": true,
 				"block_id":          "from-prefill",
 			},
 		},
 		{
-			connector:  connector.KVSharedStorage,
+			connector:  kv.SharedStorage,
 			wantFields: map[string]any{"do_remote_prefill": true},
 			denyFields: []string{"block_id"},
 		},

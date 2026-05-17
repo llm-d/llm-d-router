@@ -4,7 +4,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -25,7 +24,7 @@ func TestBuild_EmptyReturnsDefault(t *testing.T) {
 }
 
 func TestBuild_NamedConnectors(t *testing.T) {
-	for _, name := range []string{connector.ECNIXLv2, connector.ECSharedStorage} {
+	for _, name := range []string{NIXLv2, SharedStorage} {
 		t.Run(name, func(t *testing.T) {
 			c, err := Build(name)
 			if err != nil {
@@ -42,7 +41,7 @@ func TestBuild_NamedConnectors(t *testing.T) {
 // response in order and emits a per-modality wrapped list on the prefill
 // request: {"image": [{hash1: ...}, {hash2: ...}]}.
 func TestNIXL_MergeAndPrepare(t *testing.T) {
-	c, err := Build(connector.ECNIXLv2)
+	c, err := Build(NIXLv2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +76,7 @@ func TestNIXL_MergeAndPrepare(t *testing.T) {
 // TestNIXL_MergeIgnoresEmpty verifies that an empty encode response is not
 // appended to the ordered list.
 func TestNIXL_MergeIgnoresEmpty(t *testing.T) {
-	c, err := Build(connector.ECNIXLv2)
+	c, err := Build(NIXLv2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +95,7 @@ func TestNIXL_MergeIgnoresEmpty(t *testing.T) {
 // connector emits nothing on the prefill request and does not mutate
 // ECTransferParams on encode response.
 func TestSharedStorage_NoWireFields(t *testing.T) {
-	c, err := Build(connector.ECSharedStorage)
+	c, err := Build(SharedStorage)
 	if err != nil {
 		t.Fatal(err)
 	}

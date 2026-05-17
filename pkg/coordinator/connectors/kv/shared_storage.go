@@ -1,7 +1,6 @@
 package kv
 
 import (
-	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -11,7 +10,7 @@ import (
 // writes to.
 type sharedStorage struct{}
 
-func (sharedStorage) Name() string { return connector.KVSharedStorage }
+func (sharedStorage) Name() string { return SharedStorage }
 
 func (sharedStorage) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any {
 	params := map[string]any{"do_remote_decode": true}

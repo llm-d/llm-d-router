@@ -8,14 +8,13 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
 // DefaultECConnectorName is the EC connector selected when an empty string is
 // passed to Build. Defaults to shared_storage (no-op on the wire).
-const DefaultECConnectorName = connector.ECSharedStorage
+const DefaultECConnectorName = SharedStorage
 
 var logger = ctrl.Log.WithName("ec")
 
@@ -35,9 +34,9 @@ var logger = ctrl.Log.WithName("ec")
 type Connector interface {
 	Name() string
 	// MergeEncodeResponse incorporates one encoder response into
-	// reqCtx.ECTransferParams. Called once per encoder sub-request.
-	// Implementations must be safe for non-concurrent calls (the caller
-	// merges sequentially after gathering responses in parallel).
+	// reqCtx.ECTransferParams. Callers must not call MergeEncodeResponse
+	// concurrently; the encode step serializes calls after gathering parallel
+	// responses.
 	MergeEncodeResponse(reqCtx *pipeline.RequestContext, encResp map[string]any)
 	// PreparePrefillECParams returns the ec_transfer_params map for the
 	// prefill request body. A nil/empty return means no ec_transfer_params
@@ -51,10 +50,10 @@ func Build(name string) (Connector, error) {
 		name = DefaultECConnectorName
 	}
 	switch name {
-	case connector.ECNIXLv2:
+	case NIXLv2:
 		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return nixlV2{}, nil
-	case connector.ECSharedStorage:
+	case SharedStorage:
 		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return sharedStorage{}, nil
 	default:

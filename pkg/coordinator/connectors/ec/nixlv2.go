@@ -1,7 +1,6 @@
 package ec
 
 import (
-	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -12,7 +11,7 @@ import (
 // list on the prefill request: {"image": [{"hash1": {...}}, ...]}.
 type nixlV2 struct{}
 
-func (nixlV2) Name() string { return connector.ECNIXLv2 }
+func (nixlV2) Name() string { return NIXLv2 }
 
 func (nixlV2) MergeEncodeResponse(reqCtx *pipeline.RequestContext, encResp map[string]any) {
 	if len(encResp) == 0 {

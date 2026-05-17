@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/llm-d/coordinator/pkg/connector/kv"
+	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"

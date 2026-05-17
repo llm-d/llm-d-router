@@ -1,12 +1,10 @@
 package kv
 
 import (
-	"math/rand/v2"
 	"os"
 	"strconv"
-	"time"
 
-	"github.com/llm-d/coordinator/pkg/connector"
+	"github.com/google/uuid"
 	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -34,14 +32,13 @@ var sglangBootstrapPort = func() int {
 // bootstrap channel to the prefill pod.
 type sglangKV struct{}
 
-func (sglangKV) Name() string { return connector.KVSGLang }
+func (sglangKV) Name() string { return SGLang }
 
 func (sglangKV) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any {
-	roomID := time.Now().UnixNano() + int64(rand.IntN(1000))
 	params := map[string]any{
 		"do_remote_decode": true,
 		fieldBootstrapPort: sglangBootstrapPort,
-		fieldBootstrapRoom: roomID,
+		fieldBootstrapRoom: uuid.NewString(),
 	}
 	logger.V(logging.TRACE).Info("preparing prefill kv params", "params", params)
 	return params

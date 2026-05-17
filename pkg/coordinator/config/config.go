@@ -8,7 +8,6 @@ import (
 )
 
 type Config struct {
-	LogLevel  int             `mapstructure:"log_level"`
 	Server    ServerConfig    `mapstructure:"server"`
 	Gateway   GatewayConfig   `mapstructure:"gateway"`
 	Rendering RenderingConfig `mapstructure:"rendering_service"`
@@ -48,7 +47,6 @@ func Load(path string) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 
-	v.SetDefault("log_level", 2)
 	v.SetDefault("server.listen_addr", ":8080")
 	v.SetDefault("server.read_timeout", 30*time.Second)
 	v.SetDefault("server.write_timeout", 120*time.Second)

@@ -11,7 +11,8 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
-	"github.com/llm-d/coordinator/pkg/connector"
+	"github.com/llm-d/coordinator/pkg/connectors/ec"
+	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"github.com/llm-d/coordinator/pkg/steps"
@@ -23,10 +24,10 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 		ecConnector     string
 		wantECInPrefill bool // ec_transfer_params should be present in prefill body
 	}{
-		{connector.KVNIXLv2, connector.ECNIXLv2, true},
-		{connector.KVNIXLv2, connector.ECSharedStorage, false},
-		{connector.KVSharedStorage, connector.ECNIXLv2, true},
-		{connector.KVSharedStorage, connector.ECSharedStorage, false},
+		{kv.NIXLv2, ec.NIXLv2, true},
+		{kv.NIXLv2, ec.SharedStorage, false},
+		{kv.SharedStorage, ec.NIXLv2, true},
+		{kv.SharedStorage, ec.SharedStorage, false},
 	}
 
 	for _, tc := range cases {
@@ -241,8 +242,8 @@ func TestFullPipeline_Integration(t *testing.T) {
 	stepConfigs := []config.StepConfig{
 		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
 		{Type: "render", Params: map[string]any{"endpoint": "/v1/chat/completions/render"}},
-		{Type: "encode", Params: map[string]any{steps.ParamGatewayPath: gateway.DefaultGeneratePath, steps.ParamECConnector: connector.ECNIXLv2}},
-		{Type: "prefill", Params: map[string]any{steps.ParamGatewayPath: gateway.DefaultGeneratePath, steps.ParamECConnector: connector.ECNIXLv2}},
+		{Type: "encode", Params: map[string]any{steps.ParamGatewayPath: gateway.DefaultGeneratePath, steps.ParamECConnector: ec.NIXLv2}},
+		{Type: "prefill", Params: map[string]any{steps.ParamGatewayPath: gateway.DefaultGeneratePath, steps.ParamECConnector: ec.NIXLv2}},
 		{Type: "decode", Params: map[string]any{}},
 	}
 

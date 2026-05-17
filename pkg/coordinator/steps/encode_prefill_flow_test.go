@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
-	"github.com/llm-d/coordinator/pkg/connector"
+	"github.com/llm-d/coordinator/pkg/connectors/ec"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -64,7 +64,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	// Run encode step
 	encodeStep, _ := NewEncodeStep(map[string]any{
 		"gateway_path":   gateway.DefaultGeneratePath,
-		ParamECConnector: connector.ECNIXLv2,
+		ParamECConnector: ec.NIXLv2,
 	})
 	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
@@ -81,7 +81,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	// Run prefill step
 	prefillStep, _ := NewPrefillStep(map[string]any{
 		"gateway_path":   gateway.DefaultGeneratePath,
-		ParamECConnector: connector.ECNIXLv2,
+		ParamECConnector: ec.NIXLv2,
 	})
 	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 
