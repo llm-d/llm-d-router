@@ -60,10 +60,10 @@ func TestProcessPreAdmission(t *testing.T) {
 			wantFairnessID: "oc-session-1",
 		},
 		{
-			name:           "opencode parent session header",
+			name:           "codex session header",
 			fairnessID:     metadata.DefaultFairnessID,
-			headers:        map[string]string{OpenCodeParentSessionHeader: "parent-1"},
-			wantFairnessID: "parent-1",
+			headers:        map[string]string{CodexSessionHeader: "codex-session-1"},
+			wantFairnessID: "codex-session-1",
 		},
 		{
 			name:       "priority order: claude code wins over opencode",
@@ -75,11 +75,11 @@ func TestProcessPreAdmission(t *testing.T) {
 			wantFairnessID: "session-abc",
 		},
 		{
-			name:       "priority order: opencode session wins over parent",
+			name:       "priority order: opencode wins over codex",
 			fairnessID: metadata.DefaultFairnessID,
 			headers: map[string]string{
-				OpenCodeSessionHeader:       "oc-session-1",
-				OpenCodeParentSessionHeader: "parent-1",
+				OpenCodeSessionHeader: "oc-session-1",
+				CodexSessionHeader:    "codex-session-1",
 			},
 			wantFairnessID: "oc-session-1",
 		},

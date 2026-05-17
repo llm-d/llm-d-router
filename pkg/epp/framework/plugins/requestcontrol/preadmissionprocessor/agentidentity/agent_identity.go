@@ -30,17 +30,17 @@ import (
 const (
 	PluginType = "agent-identity"
 
-	ClaudeCodeSessionHeader     = "x-claude-code-session-id"
-	OpenCodeSessionHeader       = "x-session-affinity"
-	OpenCodeParentSessionHeader = "x-parent-session-id"
+	ClaudeCodeSessionHeader = "x-claude-code-session-id"
+	OpenCodeSessionHeader   = "x-session-affinity"
+	CodexSessionHeader      = "session_id"
 )
 
 // priorityHeaders is the ordered list of headers to check for agent identity.
-// The first non-empty value wins.
+// One canonical session header per supported agent; first non-empty value wins.
 var priorityHeaders = []string{
 	ClaudeCodeSessionHeader,
 	OpenCodeSessionHeader,
-	OpenCodeParentSessionHeader,
+	CodexSessionHeader,
 }
 
 // PluginFactory is the factory function for the agent identity plugin.
