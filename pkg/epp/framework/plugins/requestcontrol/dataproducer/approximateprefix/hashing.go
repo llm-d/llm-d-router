@@ -150,6 +150,15 @@ func getKVCacheBlocksFromRawPrompt(ctx context.Context, request *scheduling.Infe
 		rawBytes := []byte(request.Body.Completions.Prompt.PlainText())
 		return getKVCacheBlocksFromRawBytes(rawBytes, blockSizeTokens), nil
 
+	case request.Body.Generate != nil:
+		// Serialize token IDs as little-endian uint32 bytes for cache key generation.
+		ids := request.Body.Generate.TokenIDs
+		buf := make([]byte, len(ids)*4)
+		for i, id := range ids {
+			binary.LittleEndian.PutUint32(buf[i*4:], id)
+		}
+		return getKVCacheBlocksFromRawBytes(buf, blockSizeTokens), nil
+
 	case request.Body.Embeddings != nil:
 		rawBytes, err := json.Marshal(request.Body.Embeddings.Input)
 		if err != nil {

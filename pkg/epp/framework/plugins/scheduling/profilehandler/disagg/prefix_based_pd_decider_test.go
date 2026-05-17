@@ -11,6 +11,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -77,6 +78,17 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 			name:     "empty completions prompt",
 			req:      completionsRequest(""),
 			wantZero: true,
+		},
+		{
+			name: "generate request returns exact token count",
+			req: &scheduling.InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					Generate: &fwkrh.GenerateRequest{
+						TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7},
+					},
+				},
+			},
+			wantMin: 7,
 		},
 	}
 	for _, tt := range tests {

@@ -185,6 +185,35 @@ func TestProduce_UnsupportedBodyType(t *testing.T) {
 	assert.Nil(t, req.Body.TokenizedPrompt)
 }
 
+func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
+	// Generate requests carry pre-tokenized IDs — the tokenizer must NOT be called.
+	tok := &mockTokenizer{
+		renderFunc: func(_ string) ([]uint32, []tokenizerTypes.Offset, error) {
+			t.Error("tokenizer.Render must not be called for generate requests")
+			return nil, nil, nil
+		},
+		renderChatFunc: func(_ *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+			t.Error("tokenizer.RenderChat must not be called for generate requests")
+			return nil, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+
+	tokenIDs := []uint32{1, 2, 3, 4, 5}
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Generate: &fwkrh.GenerateRequest{
+				TokenIDs: tokenIDs,
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, tokenIDs, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Nil(t, req.Body.TokenizedPrompt.MultiModalFeatures)
+}
+
 func TestConvertMMFeaturesRoundTrip(t *testing.T) {
 	src := &tokenization.MultiModalFeatures{
 		MMHashes: map[string][]string{"image": {"h1", "h2"}},

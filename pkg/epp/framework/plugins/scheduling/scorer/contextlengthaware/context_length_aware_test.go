@@ -285,6 +285,42 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
 }
 
+func TestContextLengthAwareGenerateRequest(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	// Generate request carries exact token IDs — estimateContextLength uses len(TokenIDs) directly.
+	tokenIDs := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10} // 10 tokens
+
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "matching-range"},
+			"10.0.0.1",
+			map[string]string{DefaultContextLengthLabel: "5-20"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "non-matching-range"},
+			"10.0.0.2",
+			map[string]string{DefaultContextLengthLabel: "100-200"}),
+	}
+
+	params := &contextLengthAwareParameters{
+		Label:           DefaultContextLengthLabel,
+		EnableFiltering: true,
+	}
+	plugin := NewContextLengthAware("test-generate", params)
+
+	request := &scheduling.InferenceRequest{
+		RequestID:   "test-request",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Generate: &fwkrh.GenerateRequest{
+				TokenIDs: tokenIDs,
+			},
+		},
+	}
+
+	filteredEndpoints := plugin.Filter(ctx, nil, request, endpoints)
+	assert.Equal(t, 1, len(filteredEndpoints))
+	assert.Equal(t, "matching-range", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
+}
+
 func TestContextLengthAwareFallbackWithoutTokenizedPrompt(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 

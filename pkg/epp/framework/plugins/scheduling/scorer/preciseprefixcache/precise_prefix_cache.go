@@ -730,6 +730,8 @@ func (s *Scorer) computeBlockKeys(ctx context.Context,
 	case request.Body.Completions != nil:
 		//nolint:staticcheck // SA1019: legacy path retained for tokenizersPoolConfig configs.
 		keys, err = s.kvCacheIndexer.ComputeBlockKeys(ctx, nil, request.Body.Completions.Prompt.Raw, request.TargetModel)
+	case request.Body.Generate != nil:
+		keys, err = s.kvCacheIndexer.ComputeBlockKeysFromTokens(ctx, request.Body.Generate.TokenIDs, request.TargetModel, nil)
 	default:
 		return nil, nil
 	}
@@ -778,7 +780,8 @@ func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, reques
 
 	traceLogger.Info("Getting scores",
 		"isChatCompletions", request.Body != nil && request.Body.ChatCompletions != nil,
-		"isCompletions", request.Body != nil && request.Body.Completions != nil)
+		"isCompletions", request.Body != nil && request.Body.Completions != nil,
+		"isGenerate", request.Body != nil && request.Body.Generate != nil)
 
 	// Prefer pre-tokenized input from the tokenizer DataProducer plugin.
 	if request.Body != nil {
@@ -852,6 +855,25 @@ func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, reques
 			return nil, 0, fmt.Errorf("failed to score block keys for completions: %w", err)
 		}
 		return scores, len(blockKeys), nil
+	}
+
+	// For generate requests, token IDs are already available — score directly.
+	if request.Body != nil && request.Body.Generate != nil {
+		tokenIDs := request.Body.Generate.TokenIDs
+		traceLogger.Info("Scoring generate request token IDs directly", "tokenCount", len(tokenIDs))
+
+		scores, err := s.kvCacheIndexer.ScoreTokens(ctx, tokenIDs, request.TargetModel, nil, nil)
+		if err != nil {
+			if errors.Is(err, kvcache.ErrInternalTokenizationDisabled) {
+				return map[string]float64{}, 0, nil
+			}
+			return nil, 0, fmt.Errorf("failed to get endpoint scores for generate: %w", err)
+		}
+		totalBlocks := 0
+		if s.blockSizeTokens > 0 {
+			totalBlocks = len(tokenIDs) / s.blockSizeTokens
+		}
+		return scores, totalBlocks, nil
 	}
 
 	return nil, 0, errors.New("no valid input found in request")
