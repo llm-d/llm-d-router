@@ -177,9 +177,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 			}
 			weightedScorePerEndpoint[endpoint] += enforceScoreRange(score) * scorer.Weight()
 		}
-		if debugEnabled {
-			debug.Info("Completed running scorer plugin successfully", "plugin", scorer.TypedName())
-		}
+		debug.Info("Completed running scorer plugin successfully", "plugin", scorer.TypedName())
 	}
 	logger.V(logutil.VERBOSE).Info("Completed running scorer plugins successfully")
 
