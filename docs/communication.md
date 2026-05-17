@@ -248,7 +248,7 @@ X-Request-ID: <request_id>
       {"offset": 1, "length": 3},
       {"offset": 4, "length": 3}
     ]},
-    "kwargs_data": null
+    "kwargs_data": {"image": ["<base64-encoded-pixel-tensor-1>", "<base64-encoded-pixel-tensor-2>"]}
   },
   "ec_transfer_params": {
     "image": [
@@ -262,7 +262,7 @@ X-Request-ID: <request_id>
 ```
 
 **Notes:**
-- `kwargs_data` is explicitly `null` - this signals the prefill worker to fetch encoded data from the EC cache using `ec_transfer_params`
+- `kwargs_data` carries the same per-image base64 tensors from the render step (same values sent to the encode stage) — the prefill worker needs them to compute mRoPE positional embeddings for the visual tokens
 - `ec_transfer_params` is structured as per-modality: `{"image": [params_0, params_1, ...]}`
 - `kv_transfer_params.do_remote_decode = true` tells the prefill worker to store KV cache for remote decode
 - `mm_placeholders` use the original offsets from the render response (positions in the full token sequence)

@@ -51,8 +51,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		Model:     "llama-3",
 		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
-			{Index: 1, Hash: "hash-b", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
+			{Index: 0, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Index: 1, Hash: "hash-b", KwargsData: "dGVuc29yLWI=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
 		},
 		ECTransferParams: []map[string]any{
 			{"hash-a": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},
@@ -96,9 +96,14 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		t.Fatalf("unexpected mm_hashes: %v", imageHashes)
 	}
 
-	// Verify kwargs_data is null
-	if features["kwargs_data"] != nil {
-		t.Fatalf("expected kwargs_data=null in prefill, got %v", features["kwargs_data"])
+	// Verify kwargs_data carries per-image base64 tensors
+	kwargsData, ok := features["kwargs_data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected kwargs_data map in prefill, got %T", features["kwargs_data"])
+	}
+	imageKwargs, _ := kwargsData["image"].([]any)
+	if len(imageKwargs) != 2 || imageKwargs[0] != "dGVuc29yLWE=" || imageKwargs[1] != "dGVuc29yLWI=" {
+		t.Fatalf("expected kwargs_data.image=[dGVuc29yLWE=,dGVuc29yLWI=], got %v", imageKwargs)
 	}
 
 	// Verify ec_transfer_params has per-modality wrapped list (doc shape)
