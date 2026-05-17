@@ -34,7 +34,7 @@ var sglangBootstrapPort = func() int {
 // bootstrap channel to the prefill pod.
 type sglangKV struct{}
 
-func (sglangKV) Name() string { return connector.NameSGLang }
+func (sglangKV) Name() string { return connector.KVSGLang }
 
 func (sglangKV) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any {
 	roomID := time.Now().UnixNano() + int64(rand.IntN(1000))

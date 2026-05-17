@@ -12,7 +12,7 @@ import (
 // list on the prefill request: {"image": [{"hash1": {...}}, ...]}.
 type nixlV2 struct{}
 
-func (nixlV2) Name() string { return connector.NameNIXLv2 }
+func (nixlV2) Name() string { return connector.ECNIXLv2 }
 
 func (nixlV2) MergeEncodeResponse(reqCtx *pipeline.RequestContext, encResp map[string]any) {
 	if len(encResp) == 0 {

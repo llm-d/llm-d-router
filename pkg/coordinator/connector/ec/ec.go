@@ -15,7 +15,7 @@ import (
 
 // DefaultECConnectorName is the EC connector selected when an empty string is
 // passed to Build. Defaults to shared_storage (no-op on the wire).
-const DefaultECConnectorName = connector.NameSharedStorage
+const DefaultECConnectorName = connector.ECSharedStorage
 
 var logger = ctrl.Log.WithName("ec")
 
@@ -51,10 +51,10 @@ func Build(name string) (Connector, error) {
 		name = DefaultECConnectorName
 	}
 	switch name {
-	case connector.NameNIXLv2:
+	case connector.ECNIXLv2:
 		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return nixlV2{}, nil
-	case connector.NameSharedStorage:
+	case connector.ECSharedStorage:
 		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return sharedStorage{}, nil
 	default:

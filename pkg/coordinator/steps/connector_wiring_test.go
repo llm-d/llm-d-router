@@ -25,7 +25,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 		denyFields []string       // must NOT be present
 	}{
 		{
-			connector: connector.NameNIXLv2,
+			connector: connector.KVNIXLv2,
 			wantFields: map[string]any{
 				"do_remote_decode":  true,
 				"do_remote_prefill": false,
@@ -36,7 +36,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 			},
 		},
 		{
-			connector:  connector.NameSharedStorage,
+			connector:  connector.KVSharedStorage,
 			wantFields: map[string]any{"do_remote_decode": true},
 			denyFields: []string{"remote_engine_id", "remote_host", "remote_block_ids", "remote_port"},
 		},
@@ -56,7 +56,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 
 			gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
 			step, err := NewPrefillStep(map[string]any{
-				"gateway_path": gateway.DefaultGeneratePath,
+				"gateway_path":   gateway.DefaultGeneratePath,
 				ParamKVConnector: tc.connector,
 			})
 			if err != nil {
@@ -107,14 +107,14 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 		denyFields []string
 	}{
 		{
-			connector: connector.NameNIXLv2,
+			connector: connector.KVNIXLv2,
 			wantFields: map[string]any{
 				"do_remote_prefill": true,
 				"block_id":          "from-prefill",
 			},
 		},
 		{
-			connector:  connector.NameSharedStorage,
+			connector:  connector.KVSharedStorage,
 			wantFields: map[string]any{"do_remote_prefill": true},
 			denyFields: []string{"block_id"},
 		},

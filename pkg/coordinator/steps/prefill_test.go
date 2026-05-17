@@ -38,8 +38,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
 	step, err := NewPrefillStep(map[string]any{
-		"gateway_path": gateway.DefaultGeneratePath,
-		ParamECConnector: connector.NameNIXLv2,
+		"gateway_path":   gateway.DefaultGeneratePath,
+		ParamECConnector: connector.ECNIXLv2,
 	})
 	if err != nil {
 		t.Fatal(err)

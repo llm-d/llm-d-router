@@ -66,9 +66,9 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
 	step, err := NewEncodeStep(map[string]any{
-		"gateway_path": gateway.DefaultGeneratePath,
-		"max_parallel": 4,
-		ParamECConnector: connector.NameNIXLv2,
+		"gateway_path":   gateway.DefaultGeneratePath,
+		"max_parallel":   4,
+		ParamECConnector: connector.ECNIXLv2,
 	})
 	if err != nil {
 		t.Fatal(err)

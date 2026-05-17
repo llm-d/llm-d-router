@@ -9,12 +9,12 @@ import (
 )
 
 func TestSGLangKV_Params(t *testing.T) {
-	c, err := Build(connector.NameSGLang)
+	c, err := Build(connector.KVSGLang)
 	if err != nil {
-		t.Fatalf("Build(%q): %v", connector.NameSGLang, err)
+		t.Fatalf("Build(%q): %v", connector.KVSGLang, err)
 	}
-	if c.Name() != connector.NameSGLang {
-		t.Fatalf("Name() = %q, want %q", c.Name(), connector.NameSGLang)
+	if c.Name() != connector.KVSGLang {
+		t.Fatalf("Name() = %q, want %q", c.Name(), connector.KVSGLang)
 	}
 
 	reqCtx := &pipeline.RequestContext{
@@ -73,7 +73,7 @@ func TestConnectors_KVParams(t *testing.T) {
 		wantDecode     map[string]any
 	}{
 		{
-			name: connector.NameNIXLv2,
+			name: connector.KVNIXLv2,
 			decodeIncoming: map[string]any{
 				"block_id":  "block-999",
 				"peer_host": "10.0.0.42",
@@ -95,7 +95,7 @@ func TestConnectors_KVParams(t *testing.T) {
 			},
 		},
 		{
-			name:           connector.NameSharedStorage,
+			name:           connector.KVSharedStorage,
 			decodeIncoming: map[string]any{"ignored": "field"},
 			wantPrefill:    map[string]any{"do_remote_decode": true},
 			wantDecode:     map[string]any{"do_remote_prefill": true},
