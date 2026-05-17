@@ -23,10 +23,10 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 		ecConnector     string
 		wantECInPrefill bool // ec_transfer_params should be present in prefill body
 	}{
-		{connector.NameNIXLv2, connector.NameNIXLv2, true},
-		{connector.NameNIXLv2, connector.NameSharedStorage, false},
-		{connector.NameSharedStorage, connector.NameNIXLv2, true},
-		{connector.NameSharedStorage, connector.NameSharedStorage, false},
+		{connector.KVNIXLv2, connector.ECNIXLv2, true},
+		{connector.KVNIXLv2, connector.ECSharedStorage, false},
+		{connector.KVSharedStorage, connector.ECNIXLv2, true},
+		{connector.KVSharedStorage, connector.ECSharedStorage, false},
 	}
 
 	for _, tc := range cases {
@@ -241,8 +241,8 @@ func TestFullPipeline_Integration(t *testing.T) {
 	stepConfigs := []config.StepConfig{
 		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
 		{Type: "render", Params: map[string]any{"endpoint": "/v1/chat/completions/render"}},
-		{Type: "encode", Params: map[string]any{steps.ParamGatewayPath: gateway.DefaultGeneratePath, steps.ParamECConnector: connector.NameNIXLv2}},
-		{Type: "prefill", Params: map[string]any{steps.ParamGatewayPath: gateway.DefaultGeneratePath, steps.ParamECConnector: connector.NameNIXLv2}},
+		{Type: "encode", Params: map[string]any{steps.ParamGatewayPath: gateway.DefaultGeneratePath, steps.ParamECConnector: connector.ECNIXLv2}},
+		{Type: "prefill", Params: map[string]any{steps.ParamGatewayPath: gateway.DefaultGeneratePath, steps.ParamECConnector: connector.ECNIXLv2}},
 		{Type: "decode", Params: map[string]any{}},
 	}
 

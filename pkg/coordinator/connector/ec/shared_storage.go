@@ -10,7 +10,7 @@ import (
 // reads them back, so no ec_transfer_params is emitted on the wire.
 type sharedStorage struct{}
 
-func (sharedStorage) Name() string { return connector.NameSharedStorage }
+func (sharedStorage) Name() string { return connector.ECSharedStorage }
 
 func (sharedStorage) MergeEncodeResponse(_ *pipeline.RequestContext, _ map[string]any) {}
 

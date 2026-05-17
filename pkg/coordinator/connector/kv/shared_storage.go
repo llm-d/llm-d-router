@@ -11,7 +11,7 @@ import (
 // writes to.
 type sharedStorage struct{}
 
-func (sharedStorage) Name() string { return connector.NameSharedStorage }
+func (sharedStorage) Name() string { return connector.KVSharedStorage }
 
 func (sharedStorage) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any {
 	params := map[string]any{"do_remote_decode": true}
