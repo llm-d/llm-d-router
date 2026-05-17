@@ -128,7 +128,7 @@ func (p *InFlightLoadProducer) ExtractEndpoint(ctx context.Context, event datala
 	return nil
 }
 
-func (p *InFlightLoadProducer) PrepareRequestData(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+func (p *InFlightLoadProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	for _, e := range endpoints {
 		endpointID := e.GetMetadata().NamespacedName.String()
 		e.Put(p.dk.String(), &attrconcurrency.InFlightLoad{
