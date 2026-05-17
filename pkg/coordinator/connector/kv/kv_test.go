@@ -19,8 +19,8 @@ func TestBuild_EmptyReturnsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Name() != DefaultName {
-		t.Fatalf("default = %q, want %q", c.Name(), DefaultName)
+	if c.Name() != DefaultKVConnectorName {
+		t.Fatalf("default = %q, want %q", c.Name(), DefaultKVConnectorName)
 	}
 }
 

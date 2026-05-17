@@ -2,6 +2,7 @@ package kv
 
 import (
 	"github.com/llm-d/coordinator/pkg/connector"
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -13,9 +14,13 @@ type sharedStorage struct{}
 func (sharedStorage) Name() string { return connector.NameSharedStorage }
 
 func (sharedStorage) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any {
-	return map[string]any{"do_remote_decode": true}
+	params := map[string]any{"do_remote_decode": true}
+	logger.V(logging.TRACE).Info("preparing prefill kv params", "params", params)
+	return params
 }
 
 func (sharedStorage) PrepareDecodeKVParams(_ *pipeline.RequestContext) map[string]any {
-	return map[string]any{"do_remote_prefill": true}
+	params := map[string]any{"do_remote_prefill": true}
+	logger.V(logging.TRACE).Info("preparing decode kv params", "params", params)
+	return params
 }

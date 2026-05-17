@@ -6,9 +6,18 @@ package ec
 import (
 	"fmt"
 
+	ctrl "sigs.k8s.io/controller-runtime"
+
 	"github.com/llm-d/coordinator/pkg/connector"
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
+
+// DefaultECConnectorName is the EC connector selected when an empty string is
+// passed to Build. Defaults to shared_storage (no-op on the wire).
+const DefaultECConnectorName = connector.NameSharedStorage
+
+var logger = ctrl.Log.WithName("ec")
 
 // Connector controls how encoder cache (vision encoder embeddings) is
 // transferred from encoder pods to the prefill consumer pod. Two flavors:
@@ -36,19 +45,17 @@ type Connector interface {
 	PreparePrefillECParams(reqCtx *pipeline.RequestContext) map[string]any
 }
 
-// DefaultName is the EC connector name selected when an empty string is
-// passed to Build. Defaults to shared_storage (no-op on the wire).
-const DefaultName = connector.NameSharedStorage
-
-// Build returns the named EC connector. An empty name selects DefaultName.
+// Build returns the named EC connector. An empty name selects DefaultECConnectorName.
 func Build(name string) (Connector, error) {
 	if name == "" {
-		name = DefaultName
+		name = DefaultECConnectorName
 	}
 	switch name {
 	case connector.NameNIXLv2:
+		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return nixlV2{}, nil
 	case connector.NameSharedStorage:
+		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return sharedStorage{}, nil
 	default:
 		return nil, fmt.Errorf("unknown ec_connector: %q", name)

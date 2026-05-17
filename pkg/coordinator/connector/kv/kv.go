@@ -8,9 +8,18 @@ package kv
 import (
 	"fmt"
 
+	ctrl "sigs.k8s.io/controller-runtime"
+
 	"github.com/llm-d/coordinator/pkg/connector"
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
+
+// DefaultKVConnectorName is the KV connector selected when an empty string is
+// passed to Build.
+const DefaultKVConnectorName = connector.NameNIXLv2
+
+var logger = ctrl.Log.WithName("kv")
 
 // Connector controls the kv_transfer_params wire shape on the prefill and
 // decode requests. Implementations are stateless and safe to share across
@@ -26,19 +35,17 @@ type Connector interface {
 	PrepareDecodeKVParams(reqCtx *pipeline.RequestContext) map[string]any
 }
 
-// DefaultName is the connector name selected when an empty string is passed
-// to Build.
-const DefaultName = connector.NameNIXLv2
-
-// Build returns the KV connector for name. An empty name selects DefaultName.
+// Build returns the KV connector for name. An empty name selects DefaultKVConnectorName.
 func Build(name string) (Connector, error) {
 	if name == "" {
-		name = DefaultName
+		name = DefaultKVConnectorName
 	}
 	switch name {
 	case connector.NameNIXLv2:
+		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return nixlV2{}, nil
 	case connector.NameSharedStorage:
+		logger.V(logging.DEFAULT).Info("using connector", "name", name)
 		return sharedStorage{}, nil
 	default:
 		return nil, fmt.Errorf("unknown connector: %q", name)

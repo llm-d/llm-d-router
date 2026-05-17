@@ -2,6 +2,7 @@ package ec
 
 import (
 	"github.com/llm-d/coordinator/pkg/connector"
+	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -18,11 +19,14 @@ func (nixlV2) MergeEncodeResponse(reqCtx *pipeline.RequestContext, encResp map[s
 		return
 	}
 	reqCtx.ECTransferParams = append(reqCtx.ECTransferParams, encResp)
+	logger.V(logging.TRACE).Info("merged encode response", "total", len(reqCtx.ECTransferParams))
 }
 
 func (nixlV2) PreparePrefillECParams(reqCtx *pipeline.RequestContext) map[string]any {
 	if len(reqCtx.ECTransferParams) == 0 {
 		return nil
 	}
-	return map[string]any{"image": reqCtx.ECTransferParams}
+	params := map[string]any{"image": reqCtx.ECTransferParams}
+	logger.V(logging.TRACE).Info("preparing prefill ec params", "images", len(reqCtx.ECTransferParams))
+	return params
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/connector"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -86,8 +87,8 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 
 	// Run encode step (nixl EC connector merges per-hash ec_transfer_params)
 	encodeStep, _ := NewEncodeStep(map[string]any{
-		"gateway_path": "/inference/v1/generate",
-		"ec_connector": "nixlv2",
+		"gateway_path": gateway.DefaultGeneratePath,
+		"ec_connector": connector.NameNIXLv2,
 	})
 	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
