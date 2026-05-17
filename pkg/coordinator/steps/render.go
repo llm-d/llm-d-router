@@ -105,6 +105,7 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
 	}
 
+	logger.V(logging.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs))
 	logger.V(logging.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))
 	return nil
 }
