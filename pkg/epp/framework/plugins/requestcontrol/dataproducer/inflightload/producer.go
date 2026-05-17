@@ -45,12 +45,12 @@ const (
 // Config controls optional behaviors of InFlightLoadProducer.
 type Config struct {
 	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
-	// the in-flight token counter. Defaults to true to preserve historical behavior.
+	// the in-flight token counter. Defaults to false.
 	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
 }
 
 func defaultConfig() Config {
-	return Config{AddEstimatedOutputTokens: true}
+	return Config{AddEstimatedOutputTokens: false}
 }
 
 func InFlightLoadProducerFactory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
