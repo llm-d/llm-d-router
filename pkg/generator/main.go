@@ -35,8 +35,6 @@ import (
 func main() {
 	roots, err := loader.LoadRoots(
 		"k8s.io/apimachinery/pkg/runtime/schema", // Needed to parse generated register functions.
-		"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha1",
-		"sigs.k8s.io/gateway-api-inference-extension/api/v1",
 		"github.com/llm-d/llm-d-router/apix/v1alpha2",
 	)
 	if err != nil {

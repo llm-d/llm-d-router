@@ -22,6 +22,7 @@ SCRIPT_ROOT=$(dirname "${BASH_SOURCE}")/..
 GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
 GKE_GATEWAY_API_VERSION="${GKE_GATEWAY_API_VERSION:-v1.4.0}"
 ISTIO_VERSION="${ISTIO_VERSION:-1.26.2}"
+GIE_VERSION="${GIE_VERSION:-v1.5.0}"
 KUBECTL_VALIDATE="${KUBECTL_VALIDATE:-${SCRIPT_ROOT}/bin/kubectl-validate}"
 TEMP_DIR=$(mktemp -d)
 
@@ -36,8 +37,10 @@ fetch_crds() {
 }
 
 main() {
-  # Use local 'config/crd', run "make generate" or "hack/update-codegen.sh" to fetch inferencepool, inferencepoolimport from remote
+  # Use local 'config/crd', run "make generate" or "hack/update-codegen.sh" to regenerate llm-d CRDs
   cp "${SCRIPT_ROOT}/config/crd/bases/"*.yaml "${TEMP_DIR}/"
+  # GIE (Gateway API Inference Extension) CRDs - InferencePool is owned by upstream GIE
+  fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${GIE_VERSION}/config/crd/bases/inference.networking.k8s.io_inferencepools.yaml"
   # GW API CRD
   fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/refs/tags/${GATEWAY_API_VERSION}/config/crd/standard/gateway.networking.k8s.io_gatewayclasses.yaml"
   fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/refs/tags/${GATEWAY_API_VERSION}/config/crd/standard/gateway.networking.k8s.io_gateways.yaml"

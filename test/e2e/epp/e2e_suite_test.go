@@ -91,7 +91,6 @@ var (
 		"inferencepools.inference.networking.k8s.io",
 		"inferenceobjectives.inference.networking.x-k8s.io",
 		"inferencemodelrewrites.inference.networking.x-k8s.io",
-		"inferencepoolimports.inference.networking.x-k8s.io",
 	}
 )
 
