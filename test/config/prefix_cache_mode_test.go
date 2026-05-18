@@ -43,7 +43,7 @@ schedulingProfiles:
 		},
 	}
 	ctx := testutils.NewTestContext(t)
-	// Register llm-d-inference-scheduler plugins
+	// Register llm-d-router plugins
 	plugins.RegisterAllPlugins()
 
 	for _, test := range tests {

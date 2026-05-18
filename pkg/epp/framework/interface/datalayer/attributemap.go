@@ -89,3 +89,21 @@ func (a *Attributes) Clone() AttributeMap {
 	})
 	return clone
 }
+
+// ReadAttribute retrieves attribute with the given key from AttributeMap and asserts it to type T.
+// Second return value is 'false' if the key is not found or the type assertion fails.
+func ReadAttribute[T Cloneable](attributeMap AttributeMap, key string) (T, bool) {
+	var zero T
+
+	raw, ok := attributeMap.Get(key)
+	if !ok {
+		return zero, false
+	}
+
+	val, ok := raw.(T)
+	if !ok {
+		return zero, false
+	}
+
+	return val, true
+}

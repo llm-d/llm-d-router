@@ -1,6 +1,6 @@
 # Metrics
 
-The `llm-d-inference-scheduler` exposes the following Prometheus metrics to monitor its behavior and performance, particularly concerning Encode/Prefill/Decode disaggregation.
+The `llm-d-router` exposes the following Prometheus metrics to monitor its behavior and performance, particularly concerning Encode/Prefill/Decode disaggregation.
 
 All metrics are in the `llm_d_inference_scheduler` subsystem.
 

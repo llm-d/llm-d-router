@@ -15,11 +15,11 @@ assignees: ''
 
 ## Introduction
 
-This document defines the process for releasing llm-d-inference-scheduler.
+This document defines the process for releasing llm-d-router.
 
 ## Prerequisites
 
-1. Permissions to push to the llm-d-inference-scheduler repository.
+1. Permissions to push to the llm-d-router repository.
 
 1. Set the required environment variables based on the expected release number:
 
@@ -35,10 +35,10 @@ This document defines the process for releasing llm-d-inference-scheduler.
    ```shell
    export RC=1
    ```
-1. If needed, clone the llm-d-inference-scheduler [repo].
+1. If needed, clone the llm-d-router [repo].
 
    ```shell
-   git clone -o ${REMOTE} git@github.com:llm-d/llm-d-inference-scheduler.git
+   git clone -o ${REMOTE} git@github.com:llm-d/llm-d-router.git
    ```
 
 ## Release Process
@@ -62,7 +62,7 @@ This document defines the process for releasing llm-d-inference-scheduler.
      git checkout -b release-${MAJOR}.${MINOR} ${REMOTE}/release-${MAJOR}.${MINOR}
      ```
 
-1. Push your release branch to the llm-d-inference-scheduler remote.
+1. Push your release branch to the llm-d-router remote.
 
     ```shell
     git push ${REMOTE} release-${MAJOR}.${MINOR}
@@ -75,16 +75,16 @@ This document defines the process for releasing llm-d-inference-scheduler.
    For a release candidate:
 
     ```shell
-    git tag -s -a v${MAJOR}.${MINOR}.${PATCH}-rc.${RC} -m 'llm-d-inference-scheduler v${MAJOR}.${MINOR}.${PATCH}-rc.${RC} Release Candidate'
+    git tag -s -a v${MAJOR}.${MINOR}.${PATCH}-rc.${RC} -m 'llm-d-router v${MAJOR}.${MINOR}.${PATCH}-rc.${RC} Release Candidate'
     ```
 
    For a major, minor or patch release:
 
     ```shell
-    git tag -s -a v${MAJOR}.${MINOR}.${PATCH} -m 'llm-d-inference-scheduler v${MAJOR}.${MINOR}.${PATCH} Release'
+    git tag -s -a v${MAJOR}.${MINOR}.${PATCH} -m 'llm-d-router v${MAJOR}.${MINOR}.${PATCH} Release'
     ```
 
-1. Push the tag to the llm-d-inference-scheduler repo.
+1. Push the tag to the llm-d-router repo.
 
    For a release candidate:
 
@@ -107,7 +107,7 @@ This document defines the process for releasing llm-d-inference-scheduler.
     1. Choose the tag that you created for the release.
     1. Use the tag as the release title, i.e. `v0.1.0` refer to previous release for the content of the release body.
     1. Click "Generate release notes" and preview the release body.
-    1. Go to Gateway Inference Extension latest release and make sure to include the highlights in llm-d-inference-scheduler as well.
+    1. Go to Gateway Inference Extension latest release and make sure to include the highlights in llm-d-router as well.
     1. If this is a release candidate, select the "This is a pre-release" checkbox.
 1. If you find any bugs in this process, create an [issue].
 
@@ -118,14 +118,14 @@ Use the following steps to announce the release.
 1. Send an announcement email to `llm-d-contributors@googlegroups.com` with the subject:
 
    ```shell
-   [ANNOUNCE] llm-d-inference-scheduler v${MAJOR}.${MINOR}.${PATCH} is released
+   [ANNOUNCE] llm-d-router v${MAJOR}.${MINOR}.${PATCH} is released
    ```
 
 1. Add a link to the final release in this issue.
 
 1. Close this issue.
 
-[repo]: https://github.com/llm-d/llm-d-inference-scheduler
-[ghcr registry]: https://github.com/llm-d/llm-d-inference-scheduler/pkgs/container/llm-d-inference-scheduler
-[new release]: https://github.com/llm-d/llm-d-inference-scheduler/releases/new
-[issue]: https://github.com/llm-d/llm-d-inference-scheduler/issues/new/choose
+[repo]: https://github.com/llm-d/llm-d-router
+[ghcr registry]: https://github.com/llm-d/llm-d-router/pkgs/container/llm-d-inference-scheduler # TODO: we need udpate this once image are pushed with new name
+[new release]: https://github.com/llm-d/llm-d-router/releases/new
+[issue]: https://github.com/llm-d/llm-d-router/issues/new/choose

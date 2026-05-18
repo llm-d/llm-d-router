@@ -56,7 +56,7 @@ func run() int {
 		}()
 	}
 
-	// Register llm-d-inference-scheduler plugins
+	// Register llm-d-router plugins
 	plugins.RegisterAllPlugins()
 
 	// Note: GIE built-in plugins are automatically registered by the runner
