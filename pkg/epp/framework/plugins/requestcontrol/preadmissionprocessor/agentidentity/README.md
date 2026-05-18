@@ -7,13 +7,13 @@ Resolves a per-session identity from agent-specific HTTP headers and writes it i
 
 ## What It Does
 
-The plugin runs after request assembly and before admission control. If the request does not already carry an explicit fairness ID (`x-gateway-inference-flow-fairness-id`), it inspects a fixed set of agent session headers and copies the first non-empty value into `FairnessID`. The flow-control layer keys its queues on `FlowKey{ID: FairnessID, Priority}`, so this turns "all turns from one agent session" into "all turns share one queue."
+The plugin runs after request assembly and before admission control. If the request does not already carry an explicit fairness ID (`x-gateway-inference-fairness-id`), it inspects a fixed set of agent session headers and copies the first non-empty value into `FairnessID`. The flow-control layer keys its queues on `FlowKey{ID: FairnessID, Priority}`, so this turns "all turns from one agent session" into "all turns share one queue."
 
 Without it, every request from a given agent session falls into the default fairness queue alongside unrelated traffic, and per-session fairness, prefix-cache affinity, and per-tenant rate limiting all collapse to per-request granularity.
 
 ## How It Works
 
-1. If `request.FairnessID` is already set to something other than `metadata.DefaultFairnessID`, return immediately — an explicit upstream `x-gateway-inference-flow-fairness-id` always wins over a derived one.
+1. If `request.FairnessID` is already set to something other than `metadata.DefaultFairnessID`, return immediately — an explicit upstream `x-gateway-inference-fairness-id` always wins over a derived one.
 2. Otherwise, walk the priority list of agent session headers and copy the first non-empty match into `request.FairnessID`:
    1. `x-claude-code-session-id` (Claude Code)
    2. `x-session-affinity` (OpenCode)
