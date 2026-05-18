@@ -41,10 +41,14 @@ const PluginType = "file-discovery"
 
 // EndpointEntry is the YAML/JSON representation of a single endpoint.
 type EndpointEntry struct {
-	Name        string            `json:"name"                  yaml:"name"`
-	Namespace   string            `json:"namespace,omitempty"   yaml:"namespace,omitempty"`
-	Address     string            `json:"address"               yaml:"address"`
-	Port        string            `json:"port"                  yaml:"port"`
+	Name      string `json:"name"                  yaml:"name"`
+	Namespace string `json:"namespace,omitempty"   yaml:"namespace,omitempty"`
+	Address   string `json:"address"               yaml:"address"`
+	Port      string `json:"port"                  yaml:"port"`
+	// MetricsHost is the host:port the EPP scrapes for Prometheus metrics
+	// (e.g., vLLM /metrics). Set this when the model server exposes metrics
+	// on a different port than its inference port. Optional; defaults to
+	// "address:port" (i.e., scrape metrics from the inference port).
 	MetricsHost string            `json:"metricsHost,omitempty" yaml:"metricsHost,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"      yaml:"labels,omitempty"`
 }
