@@ -82,9 +82,6 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	var rawResponse string
 
 	switch cc.Connector {
-	case "nixl":
-		rawResponse = `{"remote_block_ids":[1, 2, 3], "remote_engine_id": "5b5fb28f-3f30-4bdd-9a36-958d52459200"}`
-
 	case "nixlv2":
 		switch cc.Role {
 		case RoleDecode:
