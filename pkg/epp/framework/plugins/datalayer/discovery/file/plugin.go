@@ -58,9 +58,16 @@ type EndpointsFile struct {
 	Endpoints []EndpointEntry `json:"endpoints" yaml:"endpoints"`
 }
 
+// params is the user-facing configuration for the file-discovery plugin.
+// It is unmarshalled from the plugin's "parameters" block in the EPP config.
 type params struct {
-	Path      string `json:"path"`
-	WatchFile bool   `json:"watchFile"`
+	// Path is the absolute path to the YAML/JSON file listing endpoints.
+	// Required.
+	Path string `json:"path"`
+	// WatchFile enables hot-reload via fsnotify: edits, atomic renames, and
+	// ConfigMap-style symlink swaps trigger a reload of the file. When
+	// false (default), the file is read once at startup and never re-read.
+	WatchFile bool `json:"watchFile"`
 }
 
 // FileDiscovery implements EndpointDiscovery by reading a static endpoints file.
