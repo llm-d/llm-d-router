@@ -36,7 +36,7 @@ the same `vllm` block.
 | Parameter        | Default                 | Description                                                       |
 | ---------------- | ----------------------- | ----------------------------------------------------------------- |
 | `modelName`      | – (required)            | Model whose tokenizer should be loaded / sent in render requests. |
-| `vllm.url`       | `http://localhost:8000` | Base URL of the vLLM render endpoint, plain HTTP only (no TLS), no trailing slash. |
+| `vllm.url`       | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).         |
 | `vllm.timeout`   | `5s`                    | Per-request timeout for text-only requests.                       |
 | `vllm.mmTimeout` | `30s`                   | Per-request timeout for multimodal requests.                      |
 
@@ -113,7 +113,7 @@ After:
   parameters:
     modelName: "${MODEL_NAME}"
     vllm:
-      url: "http://localhost:8000"   # or a shared render Service; plain HTTP only
+      url: "http://localhost:8000"   # or a shared render Service
 ```
 
 See the [Deployment](#deployment) section above for sidecar vs shared-Service

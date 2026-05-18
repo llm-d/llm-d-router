@@ -47,9 +47,8 @@ const (
 	maxErrorBodySnippetBytes = 1024
 )
 
-// vllmConfig configures the vLLM /render backend. Only plain HTTP is
-// supported (no TLS). Future protocol fields (e.g., grpc) can be added
-// alongside url.
+// vllmConfig configures the vLLM /render backend. Future protocol fields
+// (e.g., grpc) can be added alongside url.
 type vllmConfig struct {
 	// URL is the base URL of the vLLM render endpoint (no trailing slash).
 	// Can be a loopback sidecar or a dedicated Service.
