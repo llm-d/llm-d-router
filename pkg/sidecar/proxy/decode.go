@@ -26,10 +26,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 const (
