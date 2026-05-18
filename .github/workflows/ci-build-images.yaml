@@ -15,9 +15,6 @@ on:
       prerelease:
         required: true
         type: string
-    secrets:
-      GHCR_TOKEN:
-        required: true
 
 permissions:
   contents: read
@@ -38,7 +35,7 @@ jobs:
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.epp-image-name }}
           registry: ghcr.io/llm-d
-          github-token: ${{ secrets.GHCR_TOKEN }}
+          github-token: ${{ github.token }}
           prerelease: ${{ inputs.prerelease }}
 
       - name: Run Trivy scan on EPP image
@@ -59,7 +56,7 @@ jobs:
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.sidecar-image-name }}
           registry: ghcr.io/llm-d
-          github-token: ${{ secrets.GHCR_TOKEN }}
+          github-token: ${{ github.token }}
           prerelease: ${{ inputs.prerelease }}
 
       - name: Run Trivy scan on sidecar image
