@@ -72,7 +72,7 @@ func writeTemp(t *testing.T, content string) string {
 }
 
 func newFD(path string, watch bool) *FileDiscovery {
-	return &FileDiscovery{path: path, watchFile: watch, current: make(map[types.NamespacedName]struct{})}
+	return &FileDiscovery{path: path, watchFile: watch, endpoints: make(map[types.NamespacedName]struct{})}
 }
 
 const validYAML = `

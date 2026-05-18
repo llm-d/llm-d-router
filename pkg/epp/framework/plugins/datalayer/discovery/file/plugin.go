@@ -75,7 +75,11 @@ type FileDiscovery struct {
 	typedName fwkplugin.TypedName
 	path      string
 	watchFile bool
-	current   map[types.NamespacedName]struct{}
+	// endpoints is the set of endpoint identities applied to the datastore
+	// from the last successful load. Used as a key set only -- values are
+	// zero-byte structs. Compared against the entries parsed during a
+	// reload to compute which endpoints to delete from the datastore.
+	endpoints map[types.NamespacedName]struct{}
 }
 
 var _ fwkdl.EndpointDiscovery = (*FileDiscovery)(nil)
@@ -98,7 +102,7 @@ func Factory(name string, parameters json.RawMessage, _ fwkplugin.Handle) (fwkpl
 		typedName: fwkplugin.TypedName{Type: PluginType, Name: name},
 		path:      p.Path,
 		watchFile: p.WatchFile,
-		current:   make(map[types.NamespacedName]struct{}),
+		endpoints: make(map[types.NamespacedName]struct{}),
 	}, nil
 }
 
@@ -217,11 +221,11 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 		notifier.Upsert(meta)
 	}
 
-	for id := range f.current {
+	for id := range f.endpoints {
 		if _, ok := incoming[id]; !ok {
 			notifier.Delete(id)
 		}
 	}
-	f.current = incoming
+	f.endpoints = incoming
 	return errors.Join(errs...)
 }
