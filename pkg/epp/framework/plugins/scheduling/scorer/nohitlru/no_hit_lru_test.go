@@ -281,8 +281,7 @@ func TestNoHitLRUPreferLeastRecentlyUsedAfterColdRequests(t *testing.T) {
 			&fwkdl.Metrics{},
 			nil,
 		)
-		key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(prefix.PrefixCacheScorerPluginType).String()
-		w.Put(key, attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
+		w.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
 		return []scheduling.Endpoint{w, endpointB, endpointC}
 	}
 

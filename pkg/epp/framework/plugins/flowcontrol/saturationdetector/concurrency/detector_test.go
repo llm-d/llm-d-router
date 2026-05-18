@@ -661,9 +661,11 @@ func (f *liveSchedulingEndpoint) Get(key string) (datalayer.Cloneable, bool) {
 	return nil, false
 }
 func (f *liveSchedulingEndpoint) Put(string, datalayer.Cloneable) {}
-func (f *liveSchedulingEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadDataKey.String()} }
-func (f *liveSchedulingEndpoint) String() string                  { return f.id }
-func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap   { return f }
+func (f *liveSchedulingEndpoint) Keys() []string {
+	return []string{attrconcurrency.InFlightLoadDataKey.String()}
+}
+func (f *liveSchedulingEndpoint) String() string                { return f.id }
+func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
 
 func makeTokenRequest(requestID, prompt string) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{

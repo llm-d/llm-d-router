@@ -45,6 +45,8 @@ type Config struct {
 	// when both tiers have endpoints. This ensures overloaded endpoints get
 	// occasional traffic for recovery. Range: [0, 1]. Default: 0.01 (1%).
 	EpsilonExploreNeg float64 `json:"epsilonExploreNeg,omitempty"`
+
+	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -52,8 +54,9 @@ var DefaultConfig = Config{
 }
 
 type Plugin struct {
-	typedName fwkplugin.TypedName
-	config    Config
+	typedName                    fwkplugin.TypedName
+	config                       Config
+	latencyPredictionInfoDataKey fwkplugin.DataKey
 }
 
 func Factory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -67,8 +70,9 @@ func Factory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fw
 		return nil, fmt.Errorf("epsilonExploreNeg must be in [0, 1], got %f", config.EpsilonExploreNeg)
 	}
 	return &Plugin{
-		typedName: fwkplugin.TypedName{Type: PluginType, Name: name},
-		config:    config,
+		typedName:                    fwkplugin.TypedName{Type: PluginType, Name: name},
+		config:                       config,
+		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 	}, nil
 }
 
@@ -90,7 +94,7 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.CycleState, _ *fwksched
 
 	var positive, negative, noPrediction []fwksched.Endpoint
 	for _, ep := range endpoints {
-		raw, ok := ep.Get(attrlatency.LatencyPredictionInfoDataKey.String())
+		raw, ok := ep.Get(p.latencyPredictionInfoDataKey.String())
 		if !ok {
 			noPrediction = append(noPrediction, ep)
 			continue
@@ -139,6 +143,6 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.CycleState, _ *fwksched
 
 func (p *Plugin) Consumes() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
-		attrlatency.LatencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
+		p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
 	}
 }

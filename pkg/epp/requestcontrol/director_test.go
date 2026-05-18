@@ -57,14 +57,8 @@ import (
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
 
-type mockDataKey struct {
-	fwkplugin.BaseDataKey
-}
-
 var (
-	mockProducedDataKey fwkplugin.DataKey = mockDataKey{
-		BaseDataKey: fwkplugin.NewBaseDataKey("producedDataKey", "mock-producer"),
-	}
+	mockProducedDataKey = fwkplugin.NewDataKey("producedDataKey", "mock-producer")
 )
 
 // --- Mocks ---

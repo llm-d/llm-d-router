@@ -22,30 +22,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-type testDataKey struct {
-	dataType     string
-	producerName string
-}
-
-func (t testDataKey) DataType() string     { return t.dataType }
-func (t testDataKey) ProducerName() string { return t.producerName }
-func (t testDataKey) WithNonEmptyProducerName(name string) DataKey {
-	if name != "" {
-		t.producerName = name
-	}
-	return t
-}
-func (t testDataKey) String() string {
-	return t.dataType + "/" + t.producerName
-}
-
-func newTestDataKey(dataType, defaultProducerName string) testDataKey {
-	return testDataKey{
-		dataType:     dataType,
-		producerName: defaultProducerName,
-	}
-}
-
 func TestDataKey_String(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -54,33 +30,24 @@ func TestDataKey_String(t *testing.T) {
 	}{
 		{
 			name:     "Unscoped uses DefaultProducerType",
-			key:      newTestDataKey("KeyA", "ProdTypeA"),
+			key:      NewDataKey("KeyA", "ProdTypeA"),
 			expected: "KeyA/ProdTypeA",
 		},
 		{
 			name:     "Scoped uses ProducerName",
-			key:      newTestDataKey("KeyA", "ProdTypeA").WithNonEmptyProducerName("ProdNameA"),
+			key:      NewDataKey("KeyA", "ProdTypeA").WithNonEmptyProducerName("ProdNameA"),
 			expected: "KeyA/ProdNameA",
 		},
 		{
 			name:     "Scoped with empty name does not override",
-			key:      newTestDataKey("KeyA", "ProdTypeA").WithNonEmptyProducerName(""),
+			key:      NewDataKey("KeyA", "ProdTypeA").WithNonEmptyProducerName(""),
 			expected: "KeyA/ProdTypeA",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Cast to FrameworkDataKey to call String() if we want, or use SerializeDataKey.
-			// Since testDataKey implements String(), but interface DataKey doesn't have it,
-			// we must cast or call SerializeDataKey.
-			if stringer, ok := tt.key.(interface{ String() string }); ok {
-				assert.Equal(t, tt.expected, stringer.String())
-			} else {
-				t.Fatalf("key does not implement String()")
-			}
+			assert.Equal(t, tt.expected, tt.key.String())
 		})
 	}
 }
-
-

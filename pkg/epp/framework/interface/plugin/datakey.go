@@ -18,23 +18,16 @@ package plugin
 
 import "fmt"
 
-// DataKey is the public interface for plugins to express data dependencies.
-// It only requires String() for unique identification (format: "DataType/ProducerName").
-type DataKey interface {
-	String() string
-}
-
-// BaseDataKey provides a default implementation of DataKey.
-// Concrete key types should embed this struct.
-type BaseDataKey struct {
+// DataKey uniquely identifies the data for data producer/consumer.
+type DataKey struct {
 	dataType     string
 	producerName string
 }
 
-// NewBaseDataKey creates a new BaseDataKey.
+// NewDataKey creates a new DataKey.
 // The defaultProducerName is passed as the initial producerName.
-func NewBaseDataKey(dataType, defaultProducerName string) BaseDataKey {
-	return BaseDataKey{
+func NewDataKey(dataType, defaultProducerName string) DataKey {
+	return DataKey{
 		dataType:     dataType,
 		producerName: defaultProducerName,
 	}
@@ -42,14 +35,14 @@ func NewBaseDataKey(dataType, defaultProducerName string) BaseDataKey {
 
 // WithNonEmptyProducerName returns a copy of the key with the specified producer name
 // if the name is not empty, otherwise returns the key unchanged.
-func (b BaseDataKey) WithNonEmptyProducerName(name string) BaseDataKey {
+func (dk DataKey) WithNonEmptyProducerName(name string) DataKey {
 	if name != "" {
-		b.producerName = name
+		dk.producerName = name
 	}
-	return b
+	return dk
 }
 
 // String serializes the key to "DataType/ProducerName".
-func (b BaseDataKey) String() string {
-	return fmt.Sprintf("%s/%s", b.dataType, b.producerName)
+func (dk DataKey) String() string {
+	return fmt.Sprintf("%s/%s", dk.dataType, dk.producerName)
 }

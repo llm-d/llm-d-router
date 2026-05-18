@@ -380,17 +380,6 @@ schedulingProfiles:
   - pluginRef: non-existent-plugin
 `
 
-// errorUndefinedSaturationDetectorPluginText references a plugin that is not defined.
-const errorUndefinedSaturationDetectorPluginText = `
-apiVersion: llm-d.ai/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- name: test1
-  type: test-plugin
-saturationDetector:
-  pluginRef: unknown-plugin
-`
-
 // errorDuplicatePluginText defines the same plugin name twice.
 const errorDuplicatePluginText = `
 apiVersion: llm-d.ai/v1alpha1

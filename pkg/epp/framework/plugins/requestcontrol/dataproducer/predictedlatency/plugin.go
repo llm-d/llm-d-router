@@ -39,6 +39,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	latencyproducerconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/constants"
 )
 
@@ -71,6 +72,7 @@ type PredictedLatency struct {
 	sloContextStore       *ttlcache.Cache[string, *predictedLatencyCtx] // TTL cache for request contexts
 	config                Config
 	prefillTokensInFlight sync.Map // Key: endpoint NamespacedName.String(), Value: *atomic.Int64
+	prefixMatchDataKey    plugin.DataKey
 }
 
 // endpointCounter returns the atomic counter for the given endpoint key, creating it if necessary.
@@ -123,7 +125,8 @@ type Config struct {
 	// Produce. Set to false to disable predictions (training-only mode).
 	// When false, the predictor still collects training data but does not call the
 	// sidecar for predictions. Default: true.
-	PredictInProduce bool `json:"predictInProduce,omitempty"`
+	PredictInProduce            bool   `json:"predictInProduce,omitempty"`
+	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -178,9 +181,10 @@ func (c *Config) validate() error {
 
 func NewPredictedLatency(config Config, predictor latencypredictor.PredictorInterface) *PredictedLatency {
 	predictedLatency := &PredictedLatency{
-		typedName:        plugin.TypedName{Type: LatencyDataProviderPluginType, Name: LatencyDataProviderPluginType},
-		latencypredictor: predictor,
-		config:           config,
+		typedName:          plugin.TypedName{Type: LatencyDataProviderPluginType, Name: LatencyDataProviderPluginType},
+		latencypredictor:   predictor,
+		config:             config,
+		prefixMatchDataKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 	}
 
 	predictedLatency.sloContextStore = ttlcache.New(

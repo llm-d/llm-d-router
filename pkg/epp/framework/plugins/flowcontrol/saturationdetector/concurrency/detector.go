@@ -66,8 +66,9 @@ var (
 
 // detector implements a saturation detector and scheduling filter based on active request concurrency.
 type detector struct {
-	config    config
-	typedName fwkplugin.TypedName
+	config              config
+	typedName           fwkplugin.TypedName
+	inFlightLoadDataKey fwkplugin.DataKey
 }
 
 // newDetector creates a new instance of the Concurrency Detector.
@@ -91,8 +92,9 @@ func newDetector(name string, cfg config, logger logr.Logger) *detector {
 	}
 
 	return &detector{
-		config:    cfg,
-		typedName: typedName,
+		config:              cfg,
+		typedName:           typedName,
+		inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.inFlightLoadProducerName),
 	}
 }
 
@@ -103,12 +105,12 @@ func (d *detector) TypedName() fwkplugin.TypedName {
 
 func (d *detector) Consumes() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
-		attrconcurrency.InFlightLoadDataKey: attrconcurrency.InFlightLoad{},
+		d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{},
 	}
 }
 
 func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLoad {
-	if val, ok := m.Get(attrconcurrency.InFlightLoadDataKey.String()); ok {
+	if val, ok := m.Get(d.inFlightLoadDataKey.String()); ok {
 		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
 			return load
 		}

@@ -31,7 +31,8 @@ import (
 
 // Config defines the configuration for the prefix cache scorer plugin.
 type Config struct {
-	PrefixMatchInfoDataProducer string `json:"prefixMatchInfoDataProducer,omitempty"`
+	// The name of the data producer that produces PrefixCacheMatchInfo.
+	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
 }
 
 // Plugin implements the prefix cache aware scoring logic.
@@ -59,7 +60,7 @@ func PrefixCachePluginFactory(name string, rawParameters json.RawMessage, handle
 		}
 	}
 
-	p, err := New(handle.Context(), cfg.PrefixMatchInfoDataProducer)
+	p, err := New(handle.Context(), cfg.PrefixMatchInfoProducerName)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +79,7 @@ func New(_ context.Context, producerName string) (*Plugin, error) {
 		},
 		prefixMatchDataKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName),
 	}, nil
-}	
+}
 
 // TypedName returns the type and name of this plugin instance.
 func (p *Plugin) TypedName() plugin.TypedName {

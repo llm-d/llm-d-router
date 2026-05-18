@@ -34,30 +34,6 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-type testDataKey struct {
-	dataType     string
-	producerName string
-}
-
-func (t testDataKey) DataType() string     { return t.dataType }
-func (t testDataKey) ProducerName() string { return t.producerName }
-func (t testDataKey) WithNonEmptyProducerName(name string) fwkplugin.DataKey {
-	if name != "" {
-		t.producerName = name
-	}
-	return t
-}
-func (t testDataKey) String() string {
-	return t.dataType + "/" + t.producerName
-}
-
-func newTestDataKey(dataType, defaultProducerName string) fwkplugin.DataKey {
-	return testDataKey{
-		dataType:     dataType,
-		producerName: defaultProducerName,
-	}
-}
-
 const mockProducedDataKey = "mockProducedData"
 
 type mockDataProducerP struct {
@@ -130,7 +106,7 @@ func (m *MockSchedulingPlugin) Consumes() map[fwkplugin.DataKey]any {
 }
 
 func TestValidatePluginExecutionOrder(t *testing.T) {
-	dkA := newTestDataKey("keyA", "mock")
+	dkA := fwkplugin.NewDataKey("keyA", "mock")
 	// Request control plugin that produces data.
 	pluginA := &mockDataProducerP{name: "A", produces: map[fwkplugin.DataKey]any{dkA: nil}}
 	// Flow control plugin.
@@ -177,12 +153,12 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 }
 
 func TestDAGAndTopologicalOrder(t *testing.T) {
-	dkA := newTestDataKey("keyA", "mock")
-	dkB := newTestDataKey("keyB", "mock")
-	dkX := newTestDataKey("keyX", "mock")
-	dkY := newTestDataKey("keyY", "mock")
-	dkZ := newTestDataKey("keyZ", "mock")
-	dkP := newTestDataKey("keyP", "mock")
+	dkA := fwkplugin.NewDataKey("keyA", "mock")
+	dkB := fwkplugin.NewDataKey("keyB", "mock")
+	dkX := fwkplugin.NewDataKey("keyX", "mock")
+	dkY := fwkplugin.NewDataKey("keyY", "mock")
+	dkZ := fwkplugin.NewDataKey("keyZ", "mock")
+	dkP := fwkplugin.NewDataKey("keyP", "mock")
 
 	pluginA := &mockDataProducerP{name: "A", produces: map[fwkplugin.DataKey]any{dkA: nil}}
 	pluginB := &mockDataProducerP{name: "B", consumes: map[fwkplugin.DataKey]any{dkA: nil}, produces: map[fwkplugin.DataKey]any{dkB: nil}}
@@ -318,10 +294,10 @@ func TestCreateMissingDataProducers(t *testing.T) {
 	nonProducerType := "non-producer"
 	failingType := "failing"
 
-	keyA := newTestDataKey("keyA", producerTypeA)
-	keyB := newTestDataKey("keyB", producerTypeB)
-	keyAFailing := newTestDataKey("keyA", failingType)
-	keyANonProducer := newTestDataKey("keyA", nonProducerType)
+	keyA := fwkplugin.NewDataKey("keyA", producerTypeA)
+	keyB := fwkplugin.NewDataKey("keyB", producerTypeB)
+	keyAFailing := fwkplugin.NewDataKey("keyA", failingType)
+	keyANonProducer := fwkplugin.NewDataKey("keyA", nonProducerType)
 
 	// A DataProducer that produces keyA.
 	producerAFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -342,8 +318,6 @@ func TestCreateMissingDataProducers(t *testing.T) {
 	failingFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return nil, errors.New("requires params")
 	})
-
-	handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
 
 	testCases := []struct {
 		name                    string
@@ -420,7 +394,12 @@ func TestCreateMissingDataProducers(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := CreateMissingDataProducers(context.Background(), tc.existingPlugins, tc.defaultProducerRegistry, tc.factoryRegistry, handle)
+			handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+			for _, p := range tc.existingPlugins {
+				handle.AddPlugin(p.TypedName().Name, p)
+			}
+
+			err := CreateMissingDataProducers(context.Background(), tc.defaultProducerRegistry, tc.factoryRegistry, handle)
 
 			if tc.wantErr {
 				assert.Error(t, err)
@@ -430,9 +409,18 @@ func TestCreateMissingDataProducers(t *testing.T) {
 
 			// The auto-created plugin is named after its registry type (the pluginType
 			// passed to the factory), so we compare by name.
-			gotNames := make([]string, 0, len(result))
-			for _, p := range result {
-				gotNames = append(gotNames, p.TypedName().Name)
+			var gotNames []string
+			for _, p := range handle.GetAllPlugins() {
+				isExisting := false
+				for _, ep := range tc.existingPlugins {
+					if ep.TypedName() == p.TypedName() {
+						isExisting = true
+						break
+					}
+				}
+				if !isExisting {
+					gotNames = append(gotNames, p.TypedName().Name)
+				}
 			}
 
 			assert.ElementsMatch(t, tc.wantTypes, gotNames)

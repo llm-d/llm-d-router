@@ -73,7 +73,8 @@ type apiConfig struct {
 	// combined with Headroom, the per-endpoint filtering limits (for routing).
 	//
 	// Defaults to 1000000 if unset.
-	MaxTokenConcurrency *int64 `json:"maxTokenConcurrency,omitempty"`
+	MaxTokenConcurrency      *int64 `json:"maxTokenConcurrency,omitempty"`
+	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
 }
 
 // concurrencyMode is the concurrency detection mode.
@@ -99,10 +100,11 @@ const (
 
 // config is the internal, fully-validated configuration used by the detector.
 type config struct {
-	maxConcurrency      int64
-	headroom            float64
-	mode                concurrencyMode
-	maxTokenConcurrency int64
+	maxConcurrency           int64
+	headroom                 float64
+	mode                     concurrencyMode
+	maxTokenConcurrency      int64
+	inFlightLoadProducerName string
 }
 
 // buildConfig applies the configuration lifecycle (defaulting and validation) and translates the
@@ -121,10 +123,11 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 	}
 
 	return &config{
-		maxConcurrency:      *safeCfg.MaxConcurrency,
-		headroom:            *safeCfg.Headroom,
-		mode:                *safeCfg.ConcurrencyMode,
-		maxTokenConcurrency: *safeCfg.MaxTokenConcurrency,
+		maxConcurrency:           *safeCfg.MaxConcurrency,
+		headroom:                 *safeCfg.Headroom,
+		mode:                     *safeCfg.ConcurrencyMode,
+		maxTokenConcurrency:      *safeCfg.MaxTokenConcurrency,
+		inFlightLoadProducerName: safeCfg.InFlightLoadProducerName,
 	}, nil
 }
 

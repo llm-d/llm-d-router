@@ -32,4 +32,3 @@ type TypedName struct {
 func (tn TypedName) String() string {
 	return tn.Name + separator + tn.Type
 }
-

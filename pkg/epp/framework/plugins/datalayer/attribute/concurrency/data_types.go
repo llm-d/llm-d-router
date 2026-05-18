@@ -22,7 +22,7 @@ import (
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 )
 
-var InFlightLoadDataKey = plugin.NewBaseDataKey("InFlightLoadDataKey", inflightloadconstants.InFlightLoadProducerType)
+var InFlightLoadDataKey = plugin.NewDataKey("InFlightLoadDataKey", inflightloadconstants.InFlightLoadProducerType)
 
 // InFlightLoad captures the current real-time load of an endpoint as tracked by the EPP.
 type InFlightLoad struct {

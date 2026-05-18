@@ -28,7 +28,7 @@ plugins:
 Configuring multiple named instances (e.g., for tiered caching with different parameters):
 ```yaml
 plugins:
-  - name: hbmPrefixProducer
+  - name: gpuPrefixProducer
     type: approx-prefix-cache-producer
     parameters:
       blockSizeTokens: 16
@@ -36,6 +36,14 @@ plugins:
     type: approx-prefix-cache-producer
     parameters:
       blockSizeTokens: 64
+  - name: gpuPrefixScorer
+    type: prefix-cache-scorer
+    parameters:
+      prefixMatchInfoProducerName: gpuPrefixProducer
+  - name: cpuPrefixScorer
+    type: prefix-cache-scorer
+    parameters:
+      prefixMatchInfoProducerName: cpuPrefixProducer
 ```
 
 ---

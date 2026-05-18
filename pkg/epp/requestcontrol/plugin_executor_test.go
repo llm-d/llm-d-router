@@ -31,9 +31,9 @@ import (
 )
 
 var (
-	testKeyA    fwkplugin.DataKey = mockDataKey{BaseDataKey: fwkplugin.NewBaseDataKey("keyA", "producerA")}
-	testKeyB    fwkplugin.DataKey = mockDataKey{BaseDataKey: fwkplugin.NewBaseDataKey("keyB", "producerB")}
-	testKeyFail fwkplugin.DataKey = mockDataKey{BaseDataKey: fwkplugin.NewBaseDataKey("keyFail", "producerFail")}
+	testKeyA    = fwkplugin.NewDataKey("keyA", "producerA")
+	testKeyB    = fwkplugin.NewDataKey("keyB", "producerB")
+	testKeyFail = fwkplugin.NewDataKey("keyFail", "producerFail")
 )
 
 var _ fwkrc.DataProducer = &executorMockDataProducerPlugin{}

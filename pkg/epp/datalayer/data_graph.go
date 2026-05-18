@@ -68,17 +68,12 @@ func ValidateAndOrderDataDependencies(plugins []plugin.Plugin) ([]string, error)
 // defaultProducerRegistry maps a data key to the plugin type that is its default producer.
 // factoryRegistry maps a plugin type to its factory function.
 // Only entries whose type is not already present in plugins are considered.
-func CreateMissingDataProducers(ctx context.Context, plugins []plugin.Plugin, defaultProducerRegistry map[string]string, factoryRegistry map[string]plugin.FactoryFunc, handle plugin.Handle) ([]plugin.Plugin, error) {
+func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map[string]string, factoryRegistry map[string]plugin.FactoryFunc, handle plugin.Handle) error {
 	logger := log.FromContext(ctx)
-	// Collect plugin instances already present so we don't create duplicates.
-	existingPlugins := make(map[plugin.TypedName]bool)
-	for _, p := range plugins {
-		existingPlugins[p.TypedName()] = true
-	}
 
 	// Collect all keys already produced by existing plugins.
 	producedKeys := make(map[string]bool)
-	for _, p := range plugins {
+	for _, p := range handle.GetAllPlugins() {
 		if producer, ok := p.(plugin.ProducerPlugin); ok {
 			for key := range producer.Produces() {
 				producedKeys[key.String()] = true
@@ -88,7 +83,7 @@ func CreateMissingDataProducers(ctx context.Context, plugins []plugin.Plugin, de
 
 	// Build the set of keys that are consumed but not yet produced.
 	missingKeys := make(map[string]bool)
-	for _, p := range plugins {
+	for _, p := range handle.GetAllPlugins() {
 		if consumer, ok := p.(plugin.ConsumerPlugin); ok {
 			for key := range consumer.Consumes() {
 				if !producedKeys[key.String()] {
@@ -100,38 +95,28 @@ func CreateMissingDataProducers(ctx context.Context, plugins []plugin.Plugin, de
 
 	logger.Info("Missing data keys", "missingKeys", missingKeys)
 
-	if len(missingKeys) == 0 {
-		return nil, nil
-	}
-
-	// For each missing key, look up its default producer type and collect unique types to instantiate.
-	// A single producer type may satisfy multiple missing keys; deduplicate by type.
-	neededTypes := make(map[string]string)
 	for key := range missingKeys {
-		pluginType, ok := defaultProducerRegistry[key]
-		if !ok || existingPlugins[plugin.TypedName{Type: pluginType, Name: pluginType}] {
+		defaultProducerNameOrType, ok := defaultProducerRegistry[key]
+		if !ok {
+			return fmt.Errorf("no default producer found for missing data key: %v", key)
+		}
+		if handle.Plugin(defaultProducerNameOrType) != nil {
+			// The plugin is already created. This can happen when a producer produces multiple data keys.
 			continue
 		}
-		neededTypes[pluginType] = key
-	}
-
-	var plgns []plugin.Plugin
-	for key := range missingKeys {
-		pluginType, ok := defaultProducerRegistry[key]
-		factory, ok := factoryRegistry[pluginType]
+		factory, ok := factoryRegistry[defaultProducerNameOrType]
 		if !ok {
-			continue
+			return fmt.Errorf("factory not found for default producer: %v", defaultProducerNameOrType)
 		}
 		// pass nil params as this is default instantiation.
-		candidate, err := factory(pluginType, nil, handle)
+		plugin, err := factory(defaultProducerNameOrType, nil, handle)
 		if err != nil {
-			return nil, fmt.Errorf("failed to instantiate data producer %q: %w", pluginType, err)
+			return fmt.Errorf("failed to instantiate data producer %q: %w", defaultProducerNameOrType, err)
 		}
-		plgns = append(plgns, candidate)
-		existingPlugins[candidate.TypedName()] = true
+		handle.AddPlugin(plugin.TypedName().Name, plugin)
 	}
 
-	return plgns, nil
+	return nil
 }
 
 // Define constants for layer execution order. Lower value means earlier execution.

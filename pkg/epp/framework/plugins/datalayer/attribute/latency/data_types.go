@@ -22,7 +22,7 @@ import (
 	latencyproducerconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/constants"
 )
 
-var LatencyPredictionInfoDataKey = plugin.NewBaseDataKey("LatencyPredictionInfoDataKey", latencyproducerconstants.LatencyDataProviderPluginType)
+var LatencyPredictionInfoDataKey = plugin.NewDataKey("LatencyPredictionInfoDataKey", latencyproducerconstants.LatencyDataProviderPluginType)
 
 // TODO: Split LatencyPredictionInfo into two attribute keys:
 //

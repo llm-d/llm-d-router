@@ -56,7 +56,7 @@ const (
 	tokenizedPromptKeyID = "TokenizedPrompt"
 )
 
-var TokenizedPromptDataKey = plugin.NewBaseDataKey(tokenizedPromptKeyID, PluginType)
+var TokenizedPromptDataKey = plugin.NewDataKey(tokenizedPromptKeyID, PluginType)
 
 // tokenizerPluginConfig holds the configuration for the tokenizer plugin.
 //

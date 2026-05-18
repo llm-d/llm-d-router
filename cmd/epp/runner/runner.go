@@ -641,19 +641,14 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	r.schedulerConfig = cfg.SchedulerConfig
 
-	// Add requestControl plugins
-	r.requestControlConfig.AddPlugins(handle.GetAllPlugins()...)
-
 	// Auto-create any DataProducer plugins that are needed by consumers already in
 	// the config but not yet satisfied by an existing producer.
-	dataProducers, err := datalayer.CreateMissingDataProducers(ctx, handle.GetAllPlugins(), fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle)
-	if err != nil {
+	if err := datalayer.CreateMissingDataProducers(ctx, fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle); err != nil {
 		return nil, fmt.Errorf("failed to create missing data producers - %w", err)
 	}
-	for _, p := range dataProducers {
-		handle.AddPlugin(p.TypedName().Name, p)
-	}
-	r.requestControlConfig.AddPlugins(dataProducers...)
+
+	// Add requestControl plugins
+	r.requestControlConfig.AddPlugins(handle.GetAllPlugins()...)
 
 	// Let plugins declare their datalayer source/extractor dependencies before Configure().
 	for _, p := range handle.GetAllPlugins() {

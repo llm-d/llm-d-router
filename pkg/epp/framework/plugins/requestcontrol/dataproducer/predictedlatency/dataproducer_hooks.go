@@ -42,7 +42,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 	var prefixCacheScore float64
 	for _, endpoint := range endpoints {
 
-		if prefixCacheInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String()); ok {
+		if prefixCacheInfoRaw, ok := endpoint.Get(pl.prefixMatchDataKey.String()); ok {
 			prefixCacheInfo := prefixCacheInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
 			prefixCacheScore = float64(prefixCacheInfo.MatchBlocks()) / float64(prefixCacheInfo.TotalBlocks())
 			if !math.IsNaN(prefixCacheScore) {
@@ -115,5 +115,5 @@ func (pl *PredictedLatency) Produces() map[plugin.DataKey]any {
 }
 
 func (pl *PredictedLatency) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{}}
+	return map[plugin.DataKey]any{pl.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}}
 }
