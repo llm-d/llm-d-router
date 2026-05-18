@@ -33,14 +33,14 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrmm "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
-	tokenproducer "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
@@ -203,7 +203,7 @@ func itemsFromTokenizedPrompt(features []fwkrh.MultiModalFeature) []attrmm.Match
 		if feature.Hash == "" {
 			continue
 		}
-		addItem(itemsByHash, feature.Hash, 1)
+		addItem(itemsByHash, feature.Hash)
 	}
 	return sortedItems(itemsByHash)
 }
@@ -221,11 +221,11 @@ func itemsFromChat(request *fwkrh.ChatCompletionsRequest) []attrmm.MatchItem {
 func addBlockItem(itemsByHash map[string]attrmm.MatchItem, block fwkrh.ContentBlock) {
 	switch {
 	case block.ImageURL.URL != "":
-		addItem(itemsByHash, contentHash("image_url", block.ImageURL.URL), 1)
+		addItem(itemsByHash, contentHash("image_url", block.ImageURL.URL))
 	case block.VideoURL.URL != "":
-		addItem(itemsByHash, contentHash("video_url", block.VideoURL.URL), 1)
+		addItem(itemsByHash, contentHash("video_url", block.VideoURL.URL))
 	case block.InputAudio.Data != "":
-		addItem(itemsByHash, contentHash("input_audio", block.InputAudio.Format+":"+block.InputAudio.Data), 1)
+		addItem(itemsByHash, contentHash("input_audio", block.InputAudio.Format+":"+block.InputAudio.Data))
 	}
 }
 
@@ -234,8 +234,8 @@ func contentHash(kind, identifier string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func addItem(itemsByHash map[string]attrmm.MatchItem, hash string, size int) {
-	itemsByHash[hash] = attrmm.MatchItem{Hash: hash, Size: size}
+func addItem(itemsByHash map[string]attrmm.MatchItem, hash string) {
+	itemsByHash[hash] = attrmm.MatchItem{Hash: hash, Size: 1}
 }
 
 func sortedItems(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {

@@ -24,9 +24,9 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrmm "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 )
 
 func TestFactory(t *testing.T) {
@@ -47,9 +47,9 @@ func TestScorerConsumesMatchInfo(t *testing.T) {
 
 func TestScoreFromProducedMatchInfo(t *testing.T) {
 	scorer := New()
-	endpointA := newEndpoint("default", "pod-a")
-	endpointB := newEndpoint("default", "pod-b")
-	endpointC := newEndpoint("default", "pod-c")
+	endpointA := newEndpoint("pod-a")
+	endpointB := newEndpoint("pod-b")
+	endpointC := newEndpoint("pod-c")
 	requestItems := []attrmm.MatchItem{{Hash: "image", Size: 80}, {Hash: "icon", Size: 20}}
 	endpointA.Put(attrmm.EncoderCacheMatchInfoKey, attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "image", Size: 80}}, requestItems))
 	endpointB.Put(attrmm.EncoderCacheMatchInfoKey, attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "icon", Size: 20}}, requestItems))
@@ -64,8 +64,8 @@ func TestScoreFromProducedMatchInfo(t *testing.T) {
 
 func TestScoreMissingOrInvalidMatchInfoReturnsZero(t *testing.T) {
 	scorer := New()
-	endpointA := newEndpoint("default", "pod-a")
-	endpointB := newEndpoint("default", "pod-b")
+	endpointA := newEndpoint("pod-a")
+	endpointB := newEndpoint("pod-b")
 	endpointB.Put(attrmm.EncoderCacheMatchInfoKey, attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "image", Size: 1}}, nil))
 
 	scores := scorer.Score(context.Background(), scheduling.NewCycleState(), nil, []scheduling.Endpoint{endpointA, endpointB})
@@ -74,10 +74,10 @@ func TestScoreMissingOrInvalidMatchInfoReturnsZero(t *testing.T) {
 	assert.Equal(t, 0.0, scores[endpointB])
 }
 
-func newEndpoint(namespace, name string) scheduling.Endpoint {
+func newEndpoint(name string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Namespace: namespace, Name: name},
+			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: name},
 		},
 		&fwkdl.Metrics{},
 		nil,
