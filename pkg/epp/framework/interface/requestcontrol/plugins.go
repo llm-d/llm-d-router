@@ -25,11 +25,11 @@ import (
 )
 
 const (
-	PreAdmissionProcessorExtensionPoint = "PreAdmissionProcessor"
-	PreRequestExtensionPoint            = "PreRequest"
-	ResponseReceivedExtensionPoint      = "ResponseReceived"
-	ResponseStreamingExtensionPoint     = "ResponseStreaming"
-	ResponseCompleteExtensionPoint      = "ResponseComplete"
+	PreAdmissionExtensionPoint      = "PreAdmission"
+	PreRequestExtensionPoint        = "PreRequest"
+	ResponseReceivedExtensionPoint  = "ResponseReceived"
+	ResponseStreamingExtensionPoint = "ResponseStreaming"
+	ResponseCompleteExtensionPoint  = "ResponseComplete"
 )
 
 // PreRequest is called by the director after a getting result from scheduling layer and

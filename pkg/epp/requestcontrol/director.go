@@ -507,7 +507,7 @@ func (d *Director) runPreAdmissionProcessors(ctx context.Context, request *fwksc
 		if err := plugin.ProcessPreAdmission(ctx, request); err != nil {
 			return err
 		}
-		metrics.RecordPluginProcessingLatency(fwkrc.PreAdmissionProcessorExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		metrics.RecordPluginProcessingLatency(fwkrc.PreAdmissionExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
 		loggerDebug.Info("Completed running PreAdmissionProcessor plugin successfully", "plugin", plugin.TypedName())
 	}
 	return nil
