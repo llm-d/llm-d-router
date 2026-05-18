@@ -13,7 +13,7 @@ This document describes the architecture and request lifecycle for enabling **di
 > The Encode (E) stage is only relevant for requests with multimodal content (images, video, or audio). For text-only requests, the encode stage is skipped regardless of the configured topology.
 
 > [!WARNING]
-> Encode disaggregation (E/PD and E/P/D) is under active development in both vLLM and llm-d-inference-scheduler. 
+> Encode disaggregation (E/PD and E/P/D) is under active development in both vLLM and llm-d-router.
 > The implementation described here is a proof of concept (PoC) and is subject to change.
 
 All topologies are driven by the unified `disagg-profile-handler` plugin, which selects active stages based on configuration, the user request (e.g., presence of multimodal content), and the system status (e.g., KV-cache hit ratio on the selected decode pod). The architecture aims to improve flexibility, scalability, and performance by enabling separation of inference stages onto different workers.

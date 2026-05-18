@@ -37,15 +37,15 @@ import (
 )
 
 const (
-	defaultServiceName = "llm-d-inference-scheduler"
+	defaultServiceName = "llm-d-router"
 
 	// instrumentationName identifies this instrumentation library in traces.
-	instrumentationName = "llm-d-inference-scheduler"
+	instrumentationName = "llm-d-router"
 )
 
 // InitTracing initializes OpenTelemetry tracing with OTLP exporter.
 // Configuration is done via environment variables:
-// - OTEL_SERVICE_NAME: Service name for tracing (default: llm-d-inference-scheduler)
+// - OTEL_SERVICE_NAME: Service name for tracing (default: llm-d-router)
 // - OTEL_EXPORTER_OTLP_ENDPOINT: OTLP collector endpoint (default: http://localhost:4317)
 // - OTEL_TRACES_SAMPLER: Sampling strategy (default: parentbased_traceidratio)
 // - OTEL_TRACES_SAMPLER_ARG: Sampling ratio (default: 0.1 for 10%)
@@ -123,7 +123,7 @@ func InitTracing(ctx context.Context) (func(context.Context) error, error) {
 	return tp.Shutdown, nil
 }
 
-// Tracer returns a tracer for the inference scheduler.
+// Tracer returns a tracer for the llm-d router.
 // The tracer is identified by the instrumentation library name, which is
 // distinct from the service name set during InitTracing().
 func Tracer() trace.Tracer {
