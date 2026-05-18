@@ -68,7 +68,7 @@ var (
 	)
 )
 
-// GetCollectors returns all custom collectors for the llm-d-inference-scheduler.
+// GetCollectors returns all custom collectors for the llm-d-router.
 func GetCollectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		SchedulerPDDecisionCount,
