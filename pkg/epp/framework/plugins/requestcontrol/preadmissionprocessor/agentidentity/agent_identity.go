@@ -72,13 +72,5 @@ func (p *Plugin) ProcessPreAdmission(_ context.Context, request *scheduling.Infe
 		}
 	}
 
-	// TODO(#1031): OpenAI Responses API `previous_response_id` is intentionally
-	// not used here. It references the prior turn's response, not the chain, so
-	// every turn would map to a different FairnessID and fall into a separate
-	// fairness queue. A correct implementation needs a ResponseBody hook on this
-	// plugin that records `response.id -> rootID` and folds `previous_response_id`
-	// back to its root at request time. That requires exposing response body
-	// bytes (or the extracted `id`) on requestcontrol.Response, which is out of
-	// scope for this change.
 	return nil
 }
