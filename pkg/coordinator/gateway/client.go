@@ -88,6 +88,16 @@ func (c *Client) Post(ctx context.Context, path string, body []byte, headers map
 	return c.Request(ctx, http.MethodPost, path, body, headers)
 }
 
+// BaseURL returns the gateway base URL (e.g. "http://envoy-gateway:80").
+func (c *Client) BaseURL() string {
+	return c.baseURL
+}
+
+// Transport returns the underlying HTTP transport for reuse by reverse proxies.
+func (c *Client) Transport() http.RoundTripper {
+	return c.httpClient.Transport
+}
+
 // redactBody parses JSON and replaces string values longer than 50 chars with
 // "..." so tensor blobs don't drown out the structural fields.
 func redactBody(data []byte) any {

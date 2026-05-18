@@ -1,11 +1,13 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -15,7 +17,6 @@ import (
 	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
-	"github.com/llm-d/coordinator/pkg/server"
 )
 
 const DecodeStepName = "decode"
@@ -63,23 +64,30 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	path := fmt.Sprintf("%s%s", gateway.DecodePrefix, reqCtx.OriginalPath)
 	logger.V(logutil.DEFAULT).Info("sending request", "path", path, "stream", reqCtx.Stream)
 
-	resp, err := s.gwClient.Post(ctx, path, bodyBytes, map[string]string{
-		reqcommon.RequestIDHeaderKey: reqCtx.RequestID,
-	})
+	upstreamURL, err := url.Parse(s.gwClient.BaseURL() + path)
 	if err != nil {
-		return fmt.Errorf("decode: request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode/100 != 2 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("decode: HTTP %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("decode: parse url: %w", err)
 	}
 
-	if reqCtx.Stream {
-		return s.streamResponse(reqCtx, resp)
+	proxyReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("decode: creating request: %w", err)
 	}
-	return s.bufferResponse(reqCtx, resp)
+	proxyReq.ContentLength = int64(len(bodyBytes))
+	proxyReq.Header.Set("Content-Type", "application/json")
+	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
+
+	proxy := &httputil.ReverseProxy{
+		Director:      func(_ *http.Request) {},
+		FlushInterval: -1,
+		Transport:     s.gwClient.Transport(),
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
+			logger.Error(proxyErr, "proxy error")
+			w.WriteHeader(http.StatusBadGateway)
+		},
+	}
+	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
+	return nil
 }
 
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
@@ -112,24 +120,4 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 			}
 		}
 	}
-}
-
-func (s *DecodeStep) streamResponse(reqCtx *pipeline.RequestContext, resp *http.Response) error {
-	server.SetSSEHeaders(reqCtx.ResponseWriter)
-	reqCtx.ResponseWriter.WriteHeader(http.StatusOK)
-	reqCtx.Flusher.Flush()
-
-	return server.StreamSSE(reqCtx.ResponseWriter, reqCtx.Flusher, resp.Body)
-}
-
-func (s *DecodeStep) bufferResponse(reqCtx *pipeline.RequestContext, resp *http.Response) error {
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("decode: reading response: %w", err)
-	}
-
-	reqCtx.ResponseWriter.Header().Set("Content-Type", "application/json")
-	reqCtx.ResponseWriter.WriteHeader(http.StatusOK)
-	_, err = reqCtx.ResponseWriter.Write(respBody)
-	return err
 }

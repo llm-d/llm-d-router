@@ -69,6 +69,32 @@ func TestPipeline_AbortsOnError(t *testing.T) {
 	}
 }
 
+func TestPipeline_StopsOnErrPipelineDone(t *testing.T) {
+	executed := map[string]bool{}
+	steps := []Step{
+		&mockStep{name: "a", fn: func(_ context.Context, _ *RequestContext) error {
+			executed["a"] = true
+			return ErrPipelineDone
+		}},
+		&mockStep{name: "b", fn: func(_ context.Context, _ *RequestContext) error {
+			executed["b"] = true
+			return nil
+		}},
+	}
+
+	p := New(steps)
+	err := p.Execute(context.Background(), &RequestContext{})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !executed["a"] {
+		t.Fatal("step a should have executed")
+	}
+	if executed["b"] {
+		t.Fatal("step b should NOT have executed after ErrPipelineDone")
+	}
+}
+
 func TestPipeline_RespectsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

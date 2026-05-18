@@ -2,12 +2,17 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 )
+
+// ErrPipelineDone is returned by a step to signal successful early exit.
+// The pipeline treats this as success and stops executing further steps.
+var ErrPipelineDone = errors.New("pipeline done")
 
 // Pipeline orchestrates the sequential execution of steps.
 type Pipeline struct {
@@ -29,6 +34,9 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		}
 		logger.V(logutil.TRACE).Info("step starting", "step", step.Name())
 		if err := step.Execute(ctx, reqCtx); err != nil {
+			if errors.Is(err, ErrPipelineDone) {
+				return nil
+			}
 			return fmt.Errorf("step %q failed: %w", step.Name(), err)
 		}
 		logger.V(logutil.TRACE).Info("step complete", "step", step.Name())

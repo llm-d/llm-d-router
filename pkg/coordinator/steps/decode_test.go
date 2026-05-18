@@ -219,7 +219,17 @@ func TestDecodeStep_GatewayError(t *testing.T) {
 	}
 
 	err := step.Execute(context.Background(), reqCtx)
-	if err == nil {
-		t.Fatal("expected error for 502 response")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	result := recorder.Result()
+	if result.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", result.StatusCode)
+	}
+
+	respBody, _ := io.ReadAll(result.Body)
+	if !strings.Contains(string(respBody), "upstream unavailable") {
+		t.Fatalf("expected error body forwarded, got: %s", string(respBody))
 	}
 }
