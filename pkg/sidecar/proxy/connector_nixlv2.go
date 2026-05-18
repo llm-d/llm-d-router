@@ -130,8 +130,34 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// 2. Forward request to prefiller
 	s.logger.V(4).Info("sending prefill request", "to", prefillPodHostPort)
 	s.logger.V(5).Info("Prefill request", "body", string(pbody))
-	pw := &bufferedResponseWriter{}
-	prefillHandler.ServeHTTP(pw, preq)
+
+	// Retry on 5xx: transient failures (e.g. connection reset → 502) are
+	// common when the prefill pod's accept queue overflows under load.
+	// Retrying the same host avoids expensive local prefill on decode.
+	var pw *bufferedResponseWriter
+	for attempt := 0; ; attempt++ {
+		pw = &bufferedResponseWriter{}
+		preq.Body = io.NopCloser(bytes.NewReader(pbody))
+		preq.ContentLength = int64(len(pbody))
+		prefillHandler.ServeHTTP(pw, preq)
+
+		if !isHTTPError(pw.statusCode) {
+			break
+		}
+		if !shouldFallbackToDecode(pw) {
+			break
+		}
+		if attempt >= s.config.PrefillMaxRetries {
+			break
+		}
+
+		s.logger.Info("retrying prefill request",
+			"attempt", attempt+1,
+			"target", prefillPodHostPort,
+			"request_id", uuidStr,
+			"previous_code", pw.statusCode)
+		time.Sleep(s.config.PrefillRetryBackoff)
+	}
 
 	prefillDuration := time.Since(prefillStart)
 	prefillSpan.SetAttributes(
