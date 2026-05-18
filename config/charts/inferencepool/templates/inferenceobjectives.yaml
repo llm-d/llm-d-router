@@ -10,6 +10,6 @@ metadata:
 spec:
   priority: {{ .priority }}
   poolRef:
-    group: {{ .Values.inferenceExtension.poolGroup | default "inference.networking.k8s.io" }}
+    group: {{ index (split "/" $.Values.inferencePool.apiVersion) 0 }}
     name: {{ $.Release.Name }}
 {{- end }}

@@ -196,6 +196,8 @@ type TestHarness struct {
 	// Internal handles for cleanup
 	grpcConn       *grpc.ClientConn
 	metricsBackend metricsBackend
+
+	Runner *eppRunner.Runner
 }
 
 // hasCRDs returns true when the harness is running in a mode that has CRD support.
@@ -242,6 +244,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 	var mgr ctrl.Manager
 	var dataStore datastore.Datastore
 	var err error
+	var runner *eppRunner.Runner
 
 	if config.useDataLayer {
 		// Shorten the Prometheus refresh interval so WaitForReadyPodsMetric (10s timeout)
@@ -253,12 +256,12 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 			Type: mockDataSourceType,
 			Name: mockDataSourceType,
 		})
-		mgr, dataStore, err = eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, fakePmc, mockDataSource)
+		runner, mgr, dataStore, err = eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, fakePmc, mockDataSource)
 		require.NoError(t, err, "failed to create manager")
 		backend = &mockDataSourceBackend{mockDataSource: mockDataSource, fakePmc: fakePmc}
 	} else {
 		// Standard path: use FakePodMetricsClient directly.
-		mgr, dataStore, err = eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, fakePmc, nil)
+		runner, mgr, dataStore, err = eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, fakePmc, nil)
 		require.NoError(t, err, "failed to create manager")
 		backend = &fakePmcBackend{fakePmc: fakePmc}
 	}
@@ -308,6 +311,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 		tp:                 tp,
 		grpcConn:           conn,
 		metricsBackend:     backend,
+		Runner:             runner,
 	}
 
 	// 8. Register Cleanup
