@@ -1,4 +1,5 @@
 2026-05-17 https://github.com/llm-d/llm-d-router/pull/822 Introduce chunked decode via a sidecar CLI flag, splitting long token generation into multiple bounded iterations. To enable add `--decode-chunk-size=<size>`. The chunk size should relatively large (512 or more) and be a multiple of the block size.
+2026-05-14 https://github.com/llm-d/llm-d-router/pull/916 Use prefiller cached token usage for NIXL P/D responses.
 2026-05-13 https://github.com/llm-d/llm-d-router/pull/959 Add probabilistic-admitter plugin for binary-tier probabilistic load shedding of low-priority inference requests under cluster saturation.
 2026-05-13 https://github.com/llm-d/llm-d-inference-scheduler/pull/890 Adds new configuration option for the `tokens-producer` plugin. Existing configurations are unaffected.
 2026-05-07 https://github.com/llm-d/llm-d-inference-scheduler/pull/931 active-request-scorer now uses inflight-load-producer for in-flight request tracking; requestTimeout is deprecated and ignored, and idleThreshold/maxBusyScore configure idle/busy endpoint scoring.
