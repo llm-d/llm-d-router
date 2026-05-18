@@ -168,8 +168,8 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	defer func() { _ = r.Body.Close() }()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest) // TODO: check FastAPI error code when failing to read body
-				_, _ = w.Write([]byte(err.Error()))
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(err.Error()))
 		return nil, nil, false
 	}
 	var parsed map[string]any
@@ -181,6 +181,7 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	}
 	return raw, parsed, true
 }
+
 
 func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *http.Request {
 	cloned := r.Clone(ctx)
