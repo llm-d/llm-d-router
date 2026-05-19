@@ -33,6 +33,8 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 const (
@@ -68,23 +70,12 @@ const (
 	requestFieldBootstrapPort = "bootstrap_port"
 	requestFieldBootstrapRoom = "bootstrap_room"
 
-	// KVConnectorNIXLV2 enables the P/D KV NIXL v2 protocol
-	KVConnectorNIXLV2 = "nixlv2"
-
-	// KVConnectorSharedStorage enables the P/D KV Shared Storage protocol
-	KVConnectorSharedStorage = "shared-storage"
-
-	// KVConnectorSGLang enables SGLang the P/D KV disaggregation protocol
-	KVConnectorSGLang = "sglang"
-
-	// ECExampleConnector enables the Encoder disaggregation protocol (E/PD, E/P/D)
-	ECExampleConnector = "ec-example"
-
-	// DefaultPoolGroup is the default pool group name
-	DefaultPoolGroup = "inference.networking.k8s.io"
-
-	// LegacyPoolGroup is the legacy pool group name
-	LegacyPoolGroup = "inference.networking.x-k8s.io"
+	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
+	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
+	KVConnectorSGLang        = constants.KVConnectorSGLang
+	ECExampleConnector       = constants.ECExampleConnector
+	DefaultPoolGroup         = constants.DefaultPoolGroup
+	LegacyPoolGroup          = constants.LegacyPoolGroup
 )
 
 // APIType represents the type of OpenAI API being used.

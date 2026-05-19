@@ -182,7 +182,6 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	return raw, parsed, true
 }
 
-
 func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *http.Request {
 	cloned := r.Clone(ctx)
 	cloned.Body = io.NopCloser(bytes.NewReader(body))
