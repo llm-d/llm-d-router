@@ -387,7 +387,7 @@ func (s *Scorer) Produce(ctx context.Context,
 		}
 		addr := fmt.Sprintf("%s:%s", md.Address, md.Port)
 		matchLen := int(scores[addr])
-		ep.Put(s.prefixMatchDataKey, attrprefix.NewPrefixCacheMatchInfo(matchLen, len(blockKeys), blockSize))
+		ep.Put(s.prefixMatchDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, len(blockKeys), blockSize))
 	}
 
 	// 6. Save to PluginState for Score() and PreRequest()
@@ -492,7 +492,7 @@ func (s *Scorer) Score(ctx context.Context, cycleState *scheduling.CycleState, r
 				matchBlocks = 1
 			}
 		}
-		endpoint.Put(s.prefixMatchDataKey, attrprefix.NewPrefixCacheMatchInfo(matchBlocks, 1, 1))
+		endpoint.Put(s.prefixMatchDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(matchBlocks, 1, 1))
 	}
 
 	normalizedScores := absoluteScoredPods(endpoints, endpointToKey, scores, totalBlocks)
