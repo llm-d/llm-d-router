@@ -64,6 +64,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	proxyReq.ContentLength = int64(len(bodyBytes))
 	proxyReq.Header.Set("Content-Type", "application/json")
 	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
+	proxyReq.Header.Set("Prefer", "if-available")
 
 	var cacheMiss bool
 	proxy := &httputil.ReverseProxy{
