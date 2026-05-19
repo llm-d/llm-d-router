@@ -60,10 +60,25 @@ func TestProcessPreAdmission(t *testing.T) {
 			wantFairnessID: "oc-session-1",
 		},
 		{
-			name:           "codex session header",
+			name:           "codex session header (hyphenated, >= 0.131.0)",
 			fairnessID:     metadata.DefaultFairnessID,
 			headers:        map[string]string{CodexSessionHeader: "codex-session-1"},
 			wantFairnessID: "codex-session-1",
+		},
+		{
+			name:           "codex legacy session header (underscored, <= 0.130.x)",
+			fairnessID:     metadata.DefaultFairnessID,
+			headers:        map[string]string{CodexSessionHeaderLegacy: "codex-legacy-1"},
+			wantFairnessID: "codex-legacy-1",
+		},
+		{
+			name:       "priority order: codex hyphenated wins over legacy underscored",
+			fairnessID: metadata.DefaultFairnessID,
+			headers: map[string]string{
+				CodexSessionHeader:       "codex-new",
+				CodexSessionHeaderLegacy: "codex-old",
+			},
+			wantFairnessID: "codex-new",
 		},
 		{
 			name:       "priority order: claude code wins over opencode",

@@ -32,7 +32,11 @@ const (
 
 	ClaudeCodeSessionHeader = "x-claude-code-session-id"
 	OpenCodeSessionHeader   = "x-session-affinity"
-	CodexSessionHeader      = "session_id"
+	// CodexSessionHeader is the current (Codex >= 0.131.0) hyphenated form.
+	CodexSessionHeader = "session-id"
+	// CodexSessionHeaderLegacy is the underscored form used by Codex 0.130.x;
+	// kept as a fallback for the brief window before users upgrade.
+	CodexSessionHeaderLegacy = "session_id"
 )
 
 // priorityHeaders is the ordered list of headers to check for agent identity.
@@ -41,6 +45,7 @@ var priorityHeaders = []string{
 	ClaudeCodeSessionHeader,
 	OpenCodeSessionHeader,
 	CodexSessionHeader,
+	CodexSessionHeaderLegacy,
 }
 
 // PluginFactory is the factory function for the agent identity plugin.
