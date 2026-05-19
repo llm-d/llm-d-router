@@ -120,13 +120,13 @@ func parseHTTPDuration(s string, def time.Duration) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
+
 // Render calls /v1/completions/render. The PayloadMap is forwarded verbatim
 // (preserving backend-specific fields such as reasoning) with the configured
-// model name stamped in. Char offsets are not provided by vLLM's render
-// endpoint and the upstream call site discards them, so we return nil.
+// model name stamped in. Char offsets are not returned by vLLM's render endpoint.
 func (r *vllmHTTPRenderer) Render(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error) {
-	pm, ok := payload.(fwkrh.PayloadMap)
-	if !ok || pm == nil {
+	pm, ok := payload.AsMap()
+	if !ok {
 		return nil, nil, errors.New("vLLM HTTP tokenizer requires a parsed PayloadMap")
 	}
 	body := maps.Clone(pm)
@@ -148,8 +148,8 @@ func (r *vllmHTTPRenderer) postCompletionsRender(ctx context.Context, body any) 
 // RenderChat calls /v1/chat/completions/render. The PayloadMap is forwarded
 // verbatim with the configured model name stamped in.
 func (r *vllmHTTPRenderer) RenderChat(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
-	pm, ok := payload.(fwkrh.PayloadMap)
-	if !ok || pm == nil {
+	pm, ok := payload.AsMap()
+	if !ok {
 		return nil, nil, errors.New("vLLM HTTP tokenizer requires a parsed PayloadMap")
 	}
 	body := maps.Clone(pm)
@@ -165,13 +165,14 @@ func (r *vllmHTTPRenderer) postChatRender(ctx context.Context, body any, timeout
 	return resp.TokenIDs, toKVCacheMM(resp.Features), nil
 }
 
-func (r *vllmHTTPRenderer) chatTimeout(pm fwkrh.PayloadMap) time.Duration {
-	msgs, _ := pm["messages"].([]any)
-	for _, m := range msgs {
-		if msg, ok := m.(map[string]any); ok {
-			if _, isArray := msg["content"].([]any); isArray {
-				return r.mmTimeout
-			}
+func (r *vllmHTTPRenderer) chatTimeout(payload fwkrh.PayloadMap) time.Duration {
+	var chat fwkrh.ChatCompletionsRequest
+	if data, err := json.Marshal(payload); err == nil {
+		_ = json.Unmarshal(data, &chat)
+	}
+	for _, msg := range chat.Messages {
+		if len(msg.Content.Structured) > 0 {
+			return r.mmTimeout
 		}
 	}
 	return r.timeout
