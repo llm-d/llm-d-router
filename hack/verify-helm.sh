@@ -92,6 +92,14 @@ for key in "${!test_cases_inference_pool[@]}"; do
     echo "Kubectl validation failed for test: ${key}"
     exit 1
   fi
+
+  if [ "${key}" == "triton" ]; then
+    if ! grep -q "passthrough-parser" "${output_dir}/inferencepool/templates/inferenceextension.yaml"; then
+      echo "Validation failed: passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
   echo "Test case ${key} passed validation."
 done
 
@@ -103,6 +111,7 @@ test_cases_standalone["gke-provider"]="--set provider.name=gke --set inferenceEx
 test_cases_standalone["latency-predictor"]="--set inferenceExtension.latencyPredictor.enabled=true --set inferenceExtension.endpointsServer.endpointSelector='app=llm-instance-gateway' --set inferenceExtension.endpointsServer.createInferencePool=false"
 test_cases_standalone["inferencepool"]="--set inferenceExtension.endpointsServer.createInferencePool=true --set inferencePool.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_standalone["agentgateway"]="--set inferenceExtension.sidecar.proxyType=agentgateway --set inferenceExtension.sidecar.agentgateway.service.name=llm-instance-gateway --set 'inferenceExtension.sidecar.agentgateway.service.ports[0]=8000' --set inferenceExtension.endpointsServer.endpointSelector='app=llm-instance-gateway' --set inferenceExtension.endpointsServer.createInferencePool=false --set 'inferenceExtension.endpointsServer.targetPorts[0]=8000'"
+test_cases_standalone["triton"]="--set inferenceExtension.endpointsServer.modelServerType=triton --set inferenceExtension.endpointsServer.endpointSelector=app=llm-instance-gateway --set inferenceExtension.endpointsServer.createInferencePool=false"
 
 
 echo "Processing dependencies for standalone chart..."

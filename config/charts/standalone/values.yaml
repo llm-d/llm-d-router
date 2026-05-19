@@ -32,7 +32,7 @@ inferenceExtension:
     targetPorts:
       - 8000
     # unused when createInferencePool is true
-    modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve
+    modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton
     # unused when createInferencePool is true
     modelServerProtocol: http # http, grpc
 
@@ -397,7 +397,7 @@ inferenceExtension:
 inferencePool:
   targetPorts:
     - number: 8000
-  modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve
+  modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton
   modelServerProtocol: http # http, grpc
   apiVersion: inference.networking.k8s.io/v1
   # modelServers: # REQUIRED
