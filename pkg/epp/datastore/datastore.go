@@ -34,11 +34,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	podutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pod"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	podutil "github.com/llm-d/llm-d-router/pkg/epp/util/pod"
 )
 
 var (

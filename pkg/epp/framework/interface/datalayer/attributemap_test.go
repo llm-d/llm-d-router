@@ -31,6 +31,14 @@ func (d *dummy) Clone() Cloneable {
 	return &dummy{Text: d.Text}
 }
 
+type anotherDummy struct {
+	Number int
+}
+
+func (d *anotherDummy) Clone() Cloneable {
+	return &anotherDummy{Number: d.Number}
+}
+
 func TestExpectPutThenGetToMatch(t *testing.T) {
 	attrs := NewAttributes()
 	original := &dummy{"foo"}
@@ -71,4 +79,26 @@ func TestCloneReturnsCopy(t *testing.T) {
 	if diff := cmp.Diff(kOrig, kClone); diff != "" {
 		t.Errorf("Unexpected output (-want +got): %v", diff)
 	}
+}
+
+func TestReadAttribute(t *testing.T) {
+	// successful retrieval
+	attrs := NewAttributes()
+	original := &dummy{"foo"}
+	attrs.Put("a", original)
+
+	got, ok := ReadAttribute[*dummy](attrs, "a")
+	assert.True(t, ok, "expected key to exist and value to be of type *dummy")
+	assert.NotSame(t, original, got, "expected Get to return a clone, not original")
+	assert.Equal(t, "foo", got.Text)
+
+	// missing key
+	_, ok = ReadAttribute[*dummy](attrs, "b")
+	assert.False(t, ok, "expected key not to exist")
+
+	// type mismatch
+	other, ok := ReadAttribute[*anotherDummy](attrs, "a")
+	assert.False(t, ok, "expected type mismatch")
+	assert.Nil(t, other) // zero value of pointer is nil
+
 }

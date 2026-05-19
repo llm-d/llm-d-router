@@ -6,7 +6,7 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 type endpointToKeyFunc func(endpoint scheduling.Endpoint) (string, bool)

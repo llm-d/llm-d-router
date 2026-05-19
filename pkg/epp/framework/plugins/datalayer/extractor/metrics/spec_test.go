@@ -28,7 +28,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"k8s.io/utils/ptr"
 
-	sourcemetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics"
+	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
 // --- Test Helpers ---

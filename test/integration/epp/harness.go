@@ -46,17 +46,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	eppRunner "github.com/llm-d/llm-d-inference-scheduler/cmd/epp/runner"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	dlmocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/mocks"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
-	eppServer "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/server"
-	testutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/testing"
-	integration "github.com/llm-d/llm-d-inference-scheduler/test/integration"
+	eppRunner "github.com/llm-d/llm-d-router/cmd/epp/runner"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	dlmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
 // Global State (Initialized in TestMain)
@@ -196,6 +196,8 @@ type TestHarness struct {
 	// Internal handles for cleanup
 	grpcConn       *grpc.ClientConn
 	metricsBackend metricsBackend
+
+	Runner *eppRunner.Runner
 }
 
 // hasCRDs returns true when the harness is running in a mode that has CRD support.
@@ -242,6 +244,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 	var mgr ctrl.Manager
 	var dataStore datastore.Datastore
 	var err error
+	var runner *eppRunner.Runner
 
 	if config.useDataLayer {
 		// Shorten the Prometheus refresh interval so WaitForReadyPodsMetric (10s timeout)
@@ -253,12 +256,12 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 			Type: mockDataSourceType,
 			Name: mockDataSourceType,
 		})
-		mgr, dataStore, err = eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, fakePmc, mockDataSource)
+		runner, mgr, dataStore, err = eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, fakePmc, mockDataSource)
 		require.NoError(t, err, "failed to create manager")
 		backend = &mockDataSourceBackend{mockDataSource: mockDataSource, fakePmc: fakePmc}
 	} else {
 		// Standard path: use FakePodMetricsClient directly.
-		mgr, dataStore, err = eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, fakePmc, nil)
+		runner, mgr, dataStore, err = eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, fakePmc, nil)
 		require.NoError(t, err, "failed to create manager")
 		backend = &fakePmcBackend{fakePmc: fakePmc}
 	}
@@ -308,6 +311,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 		tp:                 tp,
 		grpcConn:           conn,
 		metricsBackend:     backend,
+		Runner:             runner,
 	}
 
 	// 8. Register Cleanup

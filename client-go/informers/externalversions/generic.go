@@ -5,7 +5,7 @@ package externalversions
 import (
 	fmt "fmt"
 
-	v1alpha2 "github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
+	v1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
 )

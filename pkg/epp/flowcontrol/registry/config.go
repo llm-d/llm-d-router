@@ -24,14 +24,14 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	configapi "github.com/llm-d/llm-d-inference-scheduler/apix/config/v1alpha1"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/framework/plugins/queue"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 )
 
 // --- Defaults ---

@@ -38,13 +38,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/mocks"
-	poolutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/testing"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
 
 // mockEndpointFactory is a minimal EndpointFactory for EndpointUpsert/Delete tests.

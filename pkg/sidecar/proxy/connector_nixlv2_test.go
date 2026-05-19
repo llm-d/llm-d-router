@@ -26,7 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 const (

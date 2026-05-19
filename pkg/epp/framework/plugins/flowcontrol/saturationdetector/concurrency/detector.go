@@ -28,12 +28,12 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrconcurrency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 )
 
 const (
@@ -108,11 +108,10 @@ func (d *detector) Consumes() map[string]any {
 }
 
 func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLoad {
-	if val, ok := m.Get(attrconcurrency.InFlightLoadKey); ok {
-		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
-			return load
-		}
+	if val, ok := datalayer.ReadAttribute[*attrconcurrency.InFlightLoad](m, attrconcurrency.InFlightLoadKey); ok {
+		return val
 	}
+
 	return &attrconcurrency.InFlightLoad{}
 }
 

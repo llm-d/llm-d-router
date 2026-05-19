@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "llm-d-inference-scheduler.name" . }}
+  name: {{ include "llm-d-router.name" . }}
   namespace: {{ .Release.Namespace }}
 data:
   default-plugins.yaml: |
@@ -92,7 +92,7 @@ data:
   {{- end }}
   
 ---
-{{- $sidecar := include "llm-d-inference-scheduler.sidecar" . | fromYaml | default dict }}
+{{- $sidecar := include "llm-d-router.sidecar" . | fromYaml | default dict }}
 {{- if and $sidecar.enabled $sidecar.configMap }}
 apiVersion: v1
 kind: ConfigMap
@@ -100,14 +100,14 @@ metadata:
   name: {{ $sidecar.configMap.name }}
   namespace: {{ .Release.Namespace }}
 data:
-  {{- include "llm-d-inference-scheduler.sidecarConfigMapData" . | nindent 2 }}
+  {{- include "llm-d-router.sidecarConfigMapData" . | nindent 2 }}
 {{- end }}
 ---
 {{- if .Values.inferenceExtension.latencyPredictor.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "llm-d-inference-scheduler.name" . }}-latency-predictor-training
+  name: {{ include "llm-d-router.name" . }}-latency-predictor-training
   namespace: {{ .Release.Namespace }}
 data:
   {{- range $key, $value := .Values.inferenceExtension.latencyPredictor.trainingServer.config }}
@@ -117,7 +117,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "llm-d-inference-scheduler.name" . }}-latency-predictor-prediction
+  name: {{ include "llm-d-router.name" . }}-latency-predictor-prediction
   namespace: {{ .Release.Namespace }}
 data:
   {{- range $key, $value := .Values.inferenceExtension.latencyPredictor.predictionServers.config }}

@@ -4,10 +4,10 @@
 kind: Role
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: {{ include "llm-d-inference-scheduler.name" . }}-leader-election
+  name: {{ include "llm-d-router.name" . }}-leader-election
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "llm-d-inference-scheduler.labels" . | nindent 4 }}
+    {{- include "llm-d-router.labels" . | nindent 4 }}
 rules:
 - apiGroups: [ "coordination.k8s.io" ]
   resources: [ "leases" ]
@@ -19,15 +19,15 @@ rules:
 kind: RoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: {{ include "llm-d-inference-scheduler.name" . }}-leader-election-binding
+  name: {{ include "llm-d-router.name" . }}-leader-election-binding
   namespace: {{ .Release.Namespace }}
 subjects:
 - kind: ServiceAccount
-  name: {{ include "llm-d-inference-scheduler.name" . }}
+  name: {{ include "llm-d-router.name" . }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "llm-d-inference-scheduler.name" . }}-leader-election
+  name: {{ include "llm-d-router.name" . }}-leader-election
 ---
 {{- end }}
 {{- end }}

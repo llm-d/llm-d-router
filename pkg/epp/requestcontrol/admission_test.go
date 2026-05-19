@@ -24,15 +24,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts/mocks"
-	fctypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/types"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/handlers"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
+	fctypes "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 )
 
 // --- Mocks ---

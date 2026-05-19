@@ -13,13 +13,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/scorer/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
+	"github.com/llm-d/llm-d-router/pkg/metrics"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 const (

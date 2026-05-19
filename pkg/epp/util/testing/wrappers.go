@@ -21,7 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
 // DefaultTestPort is the standard port used for mock model servers in tests.

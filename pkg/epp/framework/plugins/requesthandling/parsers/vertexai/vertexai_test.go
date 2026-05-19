@@ -26,7 +26,7 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"google.golang.org/genproto/googleapis/api/httpbody"
 	"google.golang.org/protobuf/proto"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"

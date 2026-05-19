@@ -42,5 +42,3 @@ jobs:
       sidecar-image-name: ${{ needs.set-params.outputs.sidecar_name }}
       tag: ${{ needs.set-params.outputs.tag }}
       prerelease: "true"
-    secrets:
-      GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}

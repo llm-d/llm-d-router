@@ -49,29 +49,29 @@ linters:
     importas:
       no-unaliased: false # unaliased imports are allowed; only enforce when an alias is used
       alias:
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling
           alias: fwksched
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol
           alias: fwkrc
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol
           alias: fwkfc
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks
           alias: fwkfcmocks
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin
           alias: fwkplugin
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix
           alias: attrprefix
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/metrics
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics
           alias: extractormetrics
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics
           alias: sourcemetrics
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pool
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/util/pool
           alias: poolutil
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/testing
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/util/testing
           alias: testutil
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/pkg/common/error
+        - pkg: github.com/llm-d/llm-d-router/pkg/common/error
           alias: errcommon
-        - pkg: github.com/llm-d/llm-d-inference-scheduler/test/utils/igw
+        - pkg: github.com/llm-d/llm-d-router/test/utils/igw
           alias: igwtestutils
     revive: # see https://github.com/mgechev/revive#available-rules for all options
       rules:

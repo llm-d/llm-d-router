@@ -25,10 +25,10 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/utils/clock"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/framework/plugins/queue"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
 // propagateStatsDeltaFunc defines the callback function used to propagate statistics changes (deltas) up the hierarchy

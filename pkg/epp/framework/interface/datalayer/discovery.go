@@ -21,7 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // DiscoveryEndpointStore is the narrow interface required by NewDiscoveryNotifier.

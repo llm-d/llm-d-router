@@ -31,7 +31,7 @@ import (
 	"testing"
 	"time"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 func TestCertReloader_InitialLoad(t *testing.T) {

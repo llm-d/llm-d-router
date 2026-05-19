@@ -19,7 +19,7 @@ package scheduling
 import (
 	"fmt"
 
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // NewSchedulerConfig creates a new SchedulerConfig object and returns its pointer.

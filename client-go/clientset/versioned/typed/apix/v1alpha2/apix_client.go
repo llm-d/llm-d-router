@@ -5,8 +5,8 @@ package v1alpha2
 import (
 	http "net/http"
 
-	apixv1alpha2 "github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	scheme "github.com/llm-d/llm-d-inference-scheduler/client-go/clientset/versioned/scheme"
+	apixv1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
+	scheme "github.com/llm-d/llm-d-router/client-go/clientset/versioned/scheme"
 	rest "k8s.io/client-go/rest"
 )
 

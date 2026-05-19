@@ -20,8 +20,8 @@ package filtering
 import (
 	"encoding/json"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // SheddableFilterType only admits sheddable requests (priority < 0) into the eviction queue.

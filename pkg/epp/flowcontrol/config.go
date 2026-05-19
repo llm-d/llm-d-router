@@ -19,11 +19,11 @@ package flowcontrol
 import (
 	"fmt"
 
-	configapi "github.com/llm-d/llm-d-inference-scheduler/apix/config/v1alpha1"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/controller"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/registry"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const FeatureGate = "flowControl"

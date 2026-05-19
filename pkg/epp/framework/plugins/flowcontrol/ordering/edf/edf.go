@@ -24,8 +24,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // EDFOrderingPolicyType is the registration type for the EDF ordering policy.
