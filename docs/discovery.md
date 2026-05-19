@@ -193,10 +193,8 @@ The file may be YAML or JSON.  YAML is recommended for readability.
 endpoints:
   - name: <string>              # required -- unique within the file
     namespace: <string>         # optional -- defaults to "default"
-    address: <IPv4 or IPv6>     # required -- must be a valid IP address
+    address: <IPv4>             # required -- must be a valid IPv4 address
     port: <string>              # required -- integer 1-65535 as a string
-    metricsHost: <string>       # optional -- host:port for metrics scraping
-                                #            defaults to address:port
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
 ```
@@ -214,7 +212,6 @@ endpoints:
   - name: vllm-1
     address: "10.0.0.2"
     port: "8000"
-    metricsHost: "10.0.0.2:9090"   # scrape metrics from a different port
     labels:
       model: llama-3-8b
 ```
@@ -243,7 +240,7 @@ endpoints:
 
 **Constraints:**
 
-- `address` must parse as a valid IP address (`net.ParseIP`).
+- `address` must be a literal IPv4 address (IPv6 is not supported).
 - `port` must be a decimal integer in the range 1-65535.
 - The file must not exceed 1 MiB.
 - Duplicate names within the same namespace result in the last `Upsert`
