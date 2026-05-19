@@ -74,6 +74,7 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/vtc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	slodeadline "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
@@ -543,6 +544,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Flow Control plugins
 	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, globalstrict.GlobalStrictFairnessPolicyFactory)
 	fwkplugin.Register(roundrobin.RoundRobinFairnessPolicyType, roundrobin.RoundRobinFairnessPolicyFactory)
+	fwkplugin.Register(vtc.VTCFairnessPolicyType, vtc.VTCFairnessPolicyFactory)
 	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, fcfs.FCFSOrderingPolicyFactory)
 	fwkplugin.Register(edf.EDFOrderingPolicyType, edf.EDFOrderingPolicyFactory)
 	fwkplugin.Register(slodeadline.SLODeadlineOrderingPolicyType, slodeadline.SLODeadlineOrderingPolicyFactory)
