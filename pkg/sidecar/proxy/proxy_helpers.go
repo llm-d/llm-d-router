@@ -165,7 +165,7 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 // map. On failure it writes the appropriate HTTP error response and returns
 // ok=false so the caller can simply return.
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
-	defer r.Body.Close() //nolint:errcheck
+	defer func() { _ = r.Body.Close() }()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest) // TODO: check FastAPI error code when failing to read body
