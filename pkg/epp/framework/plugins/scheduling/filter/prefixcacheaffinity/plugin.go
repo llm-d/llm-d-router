@@ -29,11 +29,11 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
-	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 const (
@@ -56,6 +56,9 @@ type Config struct {
 	// endpoint's predicted TTFT by more than this value, all endpoints are kept.
 	// Set to 0 to always stick. Default: 5000.
 	MaxTTFTPenaltyMs float64 `json:"maxTTFTPenaltyMs,omitempty"`
+
+	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
+	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -65,8 +68,10 @@ var DefaultConfig = Config{
 }
 
 type Plugin struct {
-	typedName fwkplugin.TypedName
-	config    Config
+	typedName                    fwkplugin.TypedName
+	config                       Config
+	prefixMatchDataKey           fwkplugin.DataKey
+	latencyPredictionInfoDataKey fwkplugin.DataKey
 }
 
 func Factory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -80,8 +85,10 @@ func Factory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fw
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return &Plugin{
-		typedName: fwkplugin.TypedName{Type: PluginType, Name: name},
-		config:    config,
+		typedName:                    fwkplugin.TypedName{Type: PluginType, Name: name},
+		config:                       config,
+		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
+		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 	}, nil
 }
 
@@ -119,7 +126,7 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.CycleState, _ *fwksched
 	// Find sticky and non-sticky endpoints.
 	var sticky, nonSticky []fwksched.Endpoint
 	for _, ep := range endpoints {
-		if prefixCacheScore(ep) >= p.config.AffinityThreshold {
+		if p.prefixCacheScore(ep) >= p.config.AffinityThreshold {
 			sticky = append(sticky, ep)
 		} else {
 			nonSticky = append(nonSticky, ep)
@@ -135,8 +142,8 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.CycleState, _ *fwksched
 
 	// TTFT load gate: break stickiness if sticky endpoints are too slow.
 	if p.config.MaxTTFTPenaltyMs > 0 && len(nonSticky) > 0 {
-		bestStickyTTFT := bestTTFT(sticky)
-		bestNonStickyTTFT := bestTTFT(nonSticky)
+		bestStickyTTFT := p.bestTTFT(sticky)
+		bestNonStickyTTFT := p.bestTTFT(nonSticky)
 		if bestStickyTTFT-bestNonStickyTTFT > p.config.MaxTTFTPenaltyMs {
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate broken",
 				"bestStickyTTFT", bestStickyTTFT, "bestNonStickyTTFT", bestNonStickyTTFT,
@@ -150,15 +157,15 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.CycleState, _ *fwksched
 	return sticky
 }
 
-func (p *Plugin) Consumes() map[string]any {
-	return map[string]any{
-		attrlatency.LatencyPredictionInfoKey: attrlatency.LatencyPredictionInfo{},
-		attrprefix.PrefixCacheMatchInfoKey:   attrprefix.PrefixCacheMatchInfo{},
+func (p *Plugin) Consumes() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{
+		p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
+		p.prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfo{},
 	}
 }
 
-func prefixCacheScore(ep fwksched.Endpoint) float64 {
-	if raw, ok := ep.Get(attrprefix.PrefixCacheMatchInfoKey); ok {
+func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {
+	if raw, ok := ep.Get(p.prefixMatchDataKey.String()); ok {
 		info := raw.(*attrprefix.PrefixCacheMatchInfo)
 		if info.TotalBlocks() > 0 {
 			score := float64(info.MatchBlocks()) / float64(info.TotalBlocks())
@@ -170,10 +177,10 @@ func prefixCacheScore(ep fwksched.Endpoint) float64 {
 	return 0
 }
 
-func bestTTFT(endpoints []fwksched.Endpoint) float64 {
+func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) float64 {
 	best := math.MaxFloat64
 	for _, ep := range endpoints {
-		if raw, ok := ep.Get(attrlatency.LatencyPredictionInfoKey); ok {
+		if raw, ok := ep.Get(p.latencyPredictionInfoDataKey.String()); ok {
 			info := raw.(*attrlatency.LatencyPredictionInfo)
 			if info.TTFT() < best {
 				best = info.TTFT()

@@ -68,7 +68,7 @@ Variables substituted at deploy time via `envsubst` or Go test `substituteMany`:
 | `DISAGG_P` | Deploy a separate Prefill pod (`true`/`false`) | `false` |
 | `VLLM_SIM_MODE` | Simulator response mode: `echo` (returns input) or `random` (random sentences) | `echo` |
 | `VLLM_IMAGE` | vLLM container image (simulator or real) | `ghcr.io/llm-d/llm-d-inference-sim:v0.8.2` |
-| `SIDECAR_IMAGE` | Routing sidecar image | `ghcr.io/llm-d/llm-d-routing-sidecar:dev` |
+| `SIDECAR_IMAGE` | Routing sidecar image | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` |
 | `UDS_TOKENIZER_IMAGE` | UDS tokenizer sidecar image | `ghcr.io/llm-d/llm-d-uds-tokenizer:dev` |
 | `MODEL_NAME` | Model name passed to vLLM. Can be a real HuggingFace model (e.g. `TinyLlama/TinyLlama-1.1B-Chat-v1.0`, `Qwen/Qwen3-VL-2B-Instruct`) or an arbitrary name when using the simulator (e.g. `food-review`) | `food-review` |
 | `POOL_NAME` | InferencePool name | `food-review-inference-pool` |

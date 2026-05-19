@@ -31,11 +31,11 @@ import (
 	tokenizerTypes "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 type tokenizer interface {
@@ -53,10 +53,10 @@ const (
 	// Deprecated: use PluginType ("token-producer") instead.
 	LegacyPluginType = "tokenizer"
 
-	// TokenizedPromptKey is the data key advertised by this plugin to indicate
-	// that it produces tokenized prompt data on InferenceRequestBody.TokenizedPrompt.
-	TokenizedPromptKey = "TokenizedPrompt"
+	tokenizedPromptKeyID = "TokenizedPrompt"
 )
+
+var TokenizedPromptDataKey = plugin.NewDataKey(tokenizedPromptKeyID, PluginType)
 
 // tokenizerPluginConfig holds the configuration for the tokenizer plugin.
 //
@@ -89,12 +89,12 @@ func PluginFactory(name string, rawParameters json.RawMessage, handle plugin.Han
 		return nil, fmt.Errorf("invalid configuration for '%s' plugin: only one of 'udsTokenizerConfig' or 'vllm' may be set", PluginType)
 	}
 
-	p, err := NewPlugin(handle.Context(), &config)
+	p, err := NewPlugin(handle.Context(), name, &config)
 	if err != nil {
 		return nil, err
 	}
 
-	return p.WithName(name), nil
+	return p, nil
 }
 
 // LegacyPluginFactory wraps PluginFactory for the deprecated `tokenizer` type
@@ -113,7 +113,7 @@ func LegacyPluginFactory(name string, rawParameters json.RawMessage, handle plug
 // NewPlugin creates a new tokenizer plugin instance and constructs the
 // configured backend. vllm is the default; udsTokenizerConfig is selected
 // only when explicitly enabled (its socketFile is set).
-func NewPlugin(ctx context.Context, config *tokenizerPluginConfig) (*Plugin, error) {
+func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) (*Plugin, error) {
 	var tk tokenizer
 	switch {
 	case config.TokenizerConfig.IsEnabled():
@@ -135,8 +135,9 @@ func NewPlugin(ctx context.Context, config *tokenizerPluginConfig) (*Plugin, err
 	}
 
 	return &Plugin{
-		typedName: plugin.TypedName{Type: PluginType},
+		typedName: plugin.TypedName{Type: PluginType, Name: name},
 		tokenizer: tk,
+		dk:        TokenizedPromptDataKey.WithNonEmptyProducerName(name),
 	}, nil
 }
 
@@ -145,6 +146,7 @@ func NewPlugin(ctx context.Context, config *tokenizerPluginConfig) (*Plugin, err
 type Plugin struct {
 	typedName plugin.TypedName
 	tokenizer tokenizer
+	dk        plugin.DataKey
 }
 
 // compile-time assertion.
@@ -155,15 +157,9 @@ func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-// WithName sets the name of the plugin.
-func (p *Plugin) WithName(name string) *Plugin {
-	p.typedName.Name = name
-	return p
-}
-
 // Produces returns the data keys this plugin produces.
-func (p *Plugin) Produces() map[string]any {
-	return map[string]any{TokenizedPromptKey: fwkrh.TokenizedPrompt{}}
+func (p *Plugin) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedPrompt{}}
 }
 
 // Produce tokenizes the request prompt and stores the result on

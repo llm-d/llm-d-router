@@ -5,9 +5,9 @@ package v1alpha2
 import (
 	context "context"
 
-	apixv1alpha2 "github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	applyconfigurationapixv1alpha2 "github.com/llm-d/llm-d-inference-scheduler/client-go/applyconfiguration/apix/v1alpha2"
-	scheme "github.com/llm-d/llm-d-inference-scheduler/client-go/clientset/versioned/scheme"
+	apixv1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
+	applyconfigurationapixv1alpha2 "github.com/llm-d/llm-d-router/client-go/applyconfiguration/apix/v1alpha2"
+	scheme "github.com/llm-d/llm-d-router/client-go/clientset/versioned/scheme"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"

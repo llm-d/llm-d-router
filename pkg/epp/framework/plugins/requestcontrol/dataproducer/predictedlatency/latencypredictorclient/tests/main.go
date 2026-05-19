@@ -30,7 +30,7 @@ import (
 	"time"
 
 	"github.com/go-logr/stdr"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"golang.org/x/time/rate"
 )
 

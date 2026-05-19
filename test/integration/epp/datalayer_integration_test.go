@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/testing/protocmp"
 
-	integration "github.com/llm-d/llm-d-inference-scheduler/test/integration"
+	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
 // TestFullDuplexStreamed_DataLayer runs integration tests through the datalayer metrics pipeline.

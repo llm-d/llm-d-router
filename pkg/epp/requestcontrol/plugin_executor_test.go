@@ -25,9 +25,15 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+)
+
+var (
+	testKeyA    = fwkplugin.NewDataKey("keyA", "producerA")
+	testKeyB    = fwkplugin.NewDataKey("keyB", "producerB")
+	testKeyFail = fwkplugin.NewDataKey("keyFail", "producerFail")
 )
 
 var _ fwkrc.DataProducer = &executorMockDataProducerPlugin{}
@@ -55,7 +61,7 @@ func (m *executorMockDataProducerPlugin) Produce(ctx context.Context, request *f
 	return m.returnErr
 }
 
-func (m *executorMockDataProducerPlugin) Produces() map[string]any {
+func (m *executorMockDataProducerPlugin) Produces() map[fwkplugin.DataKey]any {
 	return nil
 }
 
@@ -82,7 +88,7 @@ func (p *ctxObservingPlugin) Produce(ctx context.Context, _ *fwksched.InferenceR
 	return ctx.Err()
 }
 
-func (p *ctxObservingPlugin) Produces() map[string]any { return nil }
+func (p *ctxObservingPlugin) Produces() map[fwkplugin.DataKey]any { return nil }
 
 // TestDataProducerPluginsWithTimeout_CancelsPluginContext verifies that the
 // child context passed to plugins is cancelled with DeadlineExceeded when the
@@ -211,8 +217,8 @@ func TestDataProducerPluginsWithTimeout(t *testing.T) {
 
 type dagTestPlugin struct {
 	executorMockDataProducerPlugin
-	produces map[string]any
-	consumes map[string]any
+	produces map[fwkplugin.DataKey]any
+	consumes map[fwkplugin.DataKey]any
 	execTime time.Time
 	mu       sync.Mutex
 }
@@ -224,42 +230,42 @@ func (p *dagTestPlugin) Produce(ctx context.Context, request *fwksched.Inference
 	return p.executorMockDataProducerPlugin.Produce(ctx, request, endpoints)
 }
 
-func (p *dagTestPlugin) Produces() map[string]any {
+func (p *dagTestPlugin) Produces() map[fwkplugin.DataKey]any {
 	return p.produces
 }
 
-func (p *dagTestPlugin) Consumes() map[string]any {
+func (p *dagTestPlugin) Consumes() map[fwkplugin.DataKey]any {
 	return p.consumes
 }
 
 func TestExecutePluginsAsDAG(t *testing.T) {
 	pluginA := &dagTestPlugin{
 		executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "A", delay: 20 * time.Millisecond},
-		produces:                       map[string]any{"keyA": nil},
+		produces:                       map[fwkplugin.DataKey]any{testKeyA: nil},
 	}
 	pluginB := &dagTestPlugin{
 		executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "B"},
-		consumes:                       map[string]any{"keyA": nil},
-		produces:                       map[string]any{"keyB": nil},
+		consumes:                       map[fwkplugin.DataKey]any{testKeyA: nil},
+		produces:                       map[fwkplugin.DataKey]any{testKeyB: nil},
 	}
 	pluginC := &dagTestPlugin{
 		executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "C"},
-		consumes:                       map[string]any{"keyB": nil},
+		consumes:                       map[fwkplugin.DataKey]any{testKeyB: nil},
 	}
 	pluginD := &dagTestPlugin{
 		executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "D"},
-		consumes:                       map[string]any{"keyA": nil},
+		consumes:                       map[fwkplugin.DataKey]any{testKeyA: nil},
 	}
 	pluginE := &dagTestPlugin{
 		executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "E"},
 	}
 	pluginFail := &dagTestPlugin{
 		executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "Fail", returnErr: errors.New("plugin failed")},
-		produces:                       map[string]any{"keyFail": nil},
+		produces:                       map[fwkplugin.DataKey]any{testKeyFail: nil},
 	}
 	pluginDependsOnFail := &dagTestPlugin{
 		executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "DependsOnFail"},
-		consumes:                       map[string]any{"keyFail": nil},
+		consumes:                       map[fwkplugin.DataKey]any{testKeyFail: nil},
 	}
 
 	testCases := []struct {

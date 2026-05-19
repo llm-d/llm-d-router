@@ -3,10 +3,10 @@
 package fake
 
 import (
-	applyconfiguration "github.com/llm-d/llm-d-inference-scheduler/client-go/applyconfiguration"
-	clientset "github.com/llm-d/llm-d-inference-scheduler/client-go/clientset/versioned"
-	xinferencev1alpha2 "github.com/llm-d/llm-d-inference-scheduler/client-go/clientset/versioned/typed/apix/v1alpha2"
-	fakexinferencev1alpha2 "github.com/llm-d/llm-d-inference-scheduler/client-go/clientset/versioned/typed/apix/v1alpha2/fake"
+	applyconfiguration "github.com/llm-d/llm-d-router/client-go/applyconfiguration"
+	clientset "github.com/llm-d/llm-d-router/client-go/clientset/versioned"
+	xinferencev1alpha2 "github.com/llm-d/llm-d-router/client-go/clientset/versioned/typed/apix/v1alpha2"
+	fakexinferencev1alpha2 "github.com/llm-d/llm-d-router/client-go/clientset/versioned/typed/apix/v1alpha2/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"

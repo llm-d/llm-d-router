@@ -13,7 +13,7 @@ This document describes the architecture and request lifecycle for enabling **di
 > The Encode (E) stage is only relevant for requests with multimodal content (images, video, or audio). For text-only requests, the encode stage is skipped regardless of the configured topology.
 
 > [!WARNING]
-> Encode disaggregation (E/PD and E/P/D) is under active development in both vLLM and llm-d-inference-scheduler. 
+> Encode disaggregation (E/PD and E/P/D) is under active development in both vLLM and llm-d-router.
 > The implementation described here is a proof of concept (PoC) and is subject to change.
 
 All topologies are driven by the unified `disagg-profile-handler` plugin, which selects active stages based on configuration, the user request (e.g., presence of multimodal content), and the system status (e.g., KV-cache hit ratio on the selected decode pod). The architecture aims to improve flexibility, scalability, and performance by enabling separation of inference stages onto different workers.
@@ -516,8 +516,7 @@ Custom profile names (if your scheduling profiles are not named `decode`/`prefil
 ---
 
 ## References
-- vLLM: [Disaggregated Prefill V1](https://docs.vllm.ai/en/stable/examples/offline_inference/disaggregated-prefill-v1/)
-- vLLM: [Disaggregated Prefill](https://docs.vllm.ai/en/stable/examples/offline_inference/disaggregated_prefill/)
+- vLLM: [Disaggregated Prefill](https://docs.vllm.ai/en/latest/features/disagg_prefill/)
 - vLLM: [Encode Prefill Decode Disaggregation Design](https://docs.google.com/document/d/1aed8KtC6XkXtdoV87pWT0a8OJlZ-CpnuLLzmR8l9BAE/edit?tab=t.0#heading=h.9xkkijtnbbje)
 - vLLM: [Disaggregated Encoder](https://docs.vllm.ai/en/latest/features/disagg_encoder/)
 - vLLM: [[RFC]: Prototype Separating Vision Encoder to Its Own Worker](https://github.com/vllm-project/vllm/issues/20799)}

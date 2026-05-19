@@ -14,7 +14,7 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Set a default CLUSTER_NAME if not provided
-: "${CLUSTER_NAME:=llm-d-inference-scheduler-dev}"
+: "${CLUSTER_NAME:=llm-d-router-dev}"
 
 # Set the host port to map to the Gateway's inbound port (30080)
 : "${GATEWAY_HOST_PORT:=30080}"
@@ -33,7 +33,7 @@ export VLLM_IMAGE="${VLLM_IMAGE:-${IMAGE_REGISTRY}/llm-d-inference-sim:${VLLM_SI
 export EPP_TAG="${EPP_TAG:-dev}"
 
 # Set a default EPP_IMAGE if not provided
-EPP_IMAGE="${EPP_IMAGE:-${IMAGE_REGISTRY}/llm-d-inference-scheduler:${EPP_TAG}}"
+EPP_IMAGE="${EPP_IMAGE:-${IMAGE_REGISTRY}/llm-d-router-endpoint-picker:${EPP_TAG}}"
 export EPP_IMAGE
 
 # Set the model name to deploy.
@@ -59,7 +59,7 @@ export EPP_NAME="${EPP_NAME:-${MODEL_NAME_SAFE}-endpoint-picker}"
 export SIDECAR_TAG="${SIDECAR_TAG:-dev}"
 
 # Set a default SIDECAR_IMAGE if not provided
-SIDECAR_IMAGE="${SIDECAR_IMAGE:-${IMAGE_REGISTRY}/llm-d-routing-sidecar:${SIDECAR_TAG}}"
+SIDECAR_IMAGE="${SIDECAR_IMAGE:-${IMAGE_REGISTRY}/llm-d-router-disagg-sidecar:${SIDECAR_TAG}}"
 export SIDECAR_IMAGE
 
 # Set the default UDS tokenizer image tag

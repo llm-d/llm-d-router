@@ -5,18 +5,27 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  pull_request_target:
+    branches: [ main ]
+    types: [ opened, synchronize, reopened ]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   lychee:
     name: Check Markdown Links
+    # pull_request_target fires even when GITHUB_TOKEN creates the PR (e.g. the
+    # release-notes bot). pull_request does not. We register pull_request_target
+    # so bot-created PRs get a "skipped" conclusion that satisfies branch
+    # protection, but we skip all real work: pull_request already covers human
+    # PRs, and running twice would cause the concurrency group to cancel one run.
+    if: github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
 
     steps:

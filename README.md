@@ -1,6 +1,6 @@
-[![Go Report Card](https://goreportcard.com/badge/github.com/llm-d/llm-d-inference-scheduler)](https://goreportcard.com/report/github.com/llm-d/llm-d-inference-scheduler)
-[![Go Reference](https://pkg.go.dev/badge/github.com/llm-d/llm-d-inference-scheduler.svg)](https://pkg.go.dev/github.com/llm-d/llm-d-inference-scheduler)
-[![License](https://img.shields.io/github/license/llm-d/llm-d-inference-scheduler)](/LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/llm-d/llm-d-router)](https://goreportcard.com/report/github.com/llm-d/llm-d-router)
+[![Go Reference](https://pkg.go.dev/badge/github.com/llm-d/llm-d-router.svg)](https://pkg.go.dev/github.com/llm-d/llm-d-router)
+[![License](https://img.shields.io/github/license/llm-d/llm-d-router)](/LICENSE)
 [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://llm-d.slack.com/archives/C08SBNRRSBD)
 
 # llm-d Router
@@ -70,6 +70,8 @@ To ensure clarity across the project, we use the following standard terminology:
 
 ## Contributing
 
+Start with the [llm-d organization contributing guide][org-contributing] for project-wide guidelines, code of conduct, and community resources.
+
 Our community meeting is bi-weekly at Wednesday 10AM PDT ([Google Meet], [Meeting Notes]).
 
 We currently utilize the [#sig-router] channel in llm-d Slack workspace for communications.
@@ -80,8 +82,9 @@ maintainers can do an assessment, and work on the details with you. See
 
 Contributions are welcome!
 
-[create an issue]:https://github.com/llm-d/llm-d-inference-scheduler/issues/new
-[discussion]:https://github.com/llm-d/llm-d-inference-scheduler/discussions/new?category=q-a
+[org-contributing]:https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md
+[create an issue]:https://github.com/llm-d/llm-d-router/issues/new
+[discussion]:https://github.com/llm-d/llm-d-router/discussions/new?category=q-a
 [Slack]:https://llm-d.slack.com/
 [Google Meet]:https://meet.google.com/zij-zekm-jvt
 [Meeting Notes]:https://docs.google.com/document/d/1Pf3x7ZM8nNpU56nt6CzePAOmFZ24NXDeXyaYb565Wq4

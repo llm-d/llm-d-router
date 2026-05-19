@@ -27,19 +27,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkfcmocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const mockProducedDataKey = "mockProducedData"
 
 type mockDataProducerP struct {
 	name     string
-	produces map[string]any
-	consumes map[string]any
+	produces map[fwkplugin.DataKey]any
+	consumes map[fwkplugin.DataKey]any
 }
 
 type mockProducedDataType struct {
@@ -54,11 +54,11 @@ func (m *mockDataProducerP) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
 }
 
-func (m *mockDataProducerP) Produces() map[string]any {
+func (m *mockDataProducerP) Produces() map[fwkplugin.DataKey]any {
 	return m.produces
 }
 
-func (m *mockDataProducerP) Consumes() map[string]any {
+func (m *mockDataProducerP) Consumes() map[fwkplugin.DataKey]any {
 	return m.consumes
 }
 
@@ -71,47 +71,48 @@ func (m *mockDataProducerP) Produce(ctx context.Context, request *fwksched.Infer
 // allowing tests to simulate a plugin whose registry type is already present.
 type typedMockPlugin struct {
 	typeName string
-	produces map[string]any
+	produces map[fwkplugin.DataKey]any
 }
 
 func (m *typedMockPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.typeName, Type: m.typeName}
 }
 
-func (m *typedMockPlugin) Produces() map[string]any { return m.produces }
+func (m *typedMockPlugin) Produces() map[fwkplugin.DataKey]any { return m.produces }
 func (m *typedMockPlugin) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	return nil
 }
 
 type MockConsumerFairnessPolicy struct {
 	fwkfcmocks.MockFairnessPolicy
-	consumes map[string]any
+	consumes map[fwkplugin.DataKey]any
 }
 
-func (m *MockConsumerFairnessPolicy) Consumes() map[string]any {
+func (m *MockConsumerFairnessPolicy) Consumes() map[fwkplugin.DataKey]any {
 	return m.consumes
 }
 
 type MockSchedulingPlugin struct {
 	fwksched.Scorer
-	consumes map[string]any
+	consumes map[fwkplugin.DataKey]any
 }
 
 func (m *MockSchedulingPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: "MockSchedulingPlugin", Type: "mock"}
 }
 
-func (m *MockSchedulingPlugin) Consumes() map[string]any {
+func (m *MockSchedulingPlugin) Consumes() map[fwkplugin.DataKey]any {
 	return m.consumes
 }
 
 func TestValidatePluginExecutionOrder(t *testing.T) {
+	dkA := fwkplugin.NewDataKey("keyA", "mock")
 	// Request control plugin that produces data.
-	pluginA := &mockDataProducerP{name: "A", produces: map[string]any{"keyA": nil}}
+	pluginA := &mockDataProducerP{name: "A", produces: map[fwkplugin.DataKey]any{dkA: nil}}
 	// Flow control plugin.
-	consumerFairnessPolicyPlugin := MockConsumerFairnessPolicy{consumes: map[string]any{"keyA": nil}}
+	consumerFairnessPolicyPlugin := MockConsumerFairnessPolicy{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
 	// Scheduling plugin.
-	consumerSchedulingPlugin := MockSchedulingPlugin{consumes: map[string]any{"keyA": nil}}
+	consumerSchedulingPlugin := MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
 	if _, ok := any(pluginA).(fwkrc.DataProducer); !ok {
 		t.Fatalf("pluginA should implement DataProducer")
 	}
@@ -152,23 +153,30 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 }
 
 func TestDAGAndTopologicalOrder(t *testing.T) {
-	pluginA := &mockDataProducerP{name: "A", produces: map[string]any{"keyA": nil}}
-	pluginB := &mockDataProducerP{name: "B", consumes: map[string]any{"keyA": nil}, produces: map[string]any{"keyB": nil}}
-	pluginC := &mockDataProducerP{name: "C", consumes: map[string]any{"keyB": nil}}
-	pluginD := &mockDataProducerP{name: "D", consumes: map[string]any{"keyA": nil}}
+	dkA := fwkplugin.NewDataKey("keyA", "mock")
+	dkB := fwkplugin.NewDataKey("keyB", "mock")
+	dkX := fwkplugin.NewDataKey("keyX", "mock")
+	dkY := fwkplugin.NewDataKey("keyY", "mock")
+	dkZ := fwkplugin.NewDataKey("keyZ", "mock")
+	dkP := fwkplugin.NewDataKey("keyP", "mock")
+
+	pluginA := &mockDataProducerP{name: "A", produces: map[fwkplugin.DataKey]any{dkA: nil}}
+	pluginB := &mockDataProducerP{name: "B", consumes: map[fwkplugin.DataKey]any{dkA: nil}, produces: map[fwkplugin.DataKey]any{dkB: nil}}
+	pluginC := &mockDataProducerP{name: "C", consumes: map[fwkplugin.DataKey]any{dkB: nil}}
+	pluginD := &mockDataProducerP{name: "D", consumes: map[fwkplugin.DataKey]any{dkA: nil}}
 	pluginE := &mockDataProducerP{name: "E"} // No dependencies
 
 	// Cycle plugins
-	pluginX := &mockDataProducerP{name: "X", produces: map[string]any{"keyX": nil}, consumes: map[string]any{"keyY": nil}}
-	pluginY := &mockDataProducerP{name: "Y", produces: map[string]any{"keyY": nil}, consumes: map[string]any{"keyX": nil}}
+	pluginX := &mockDataProducerP{name: "X", produces: map[fwkplugin.DataKey]any{dkX: nil}, consumes: map[fwkplugin.DataKey]any{dkY: nil}}
+	pluginY := &mockDataProducerP{name: "Y", produces: map[fwkplugin.DataKey]any{dkY: nil}, consumes: map[fwkplugin.DataKey]any{dkX: nil}}
 
 	// Data type mismatch plugin.
-	pluginZ1 := &mockDataProducerP{name: "Z1", produces: map[string]any{"keyZ": int(0)}}
-	pluginZ2 := &mockDataProducerP{name: "Z2", consumes: map[string]any{"keyZ": string("")}}
+	pluginZ1 := &mockDataProducerP{name: "Z1", produces: map[fwkplugin.DataKey]any{dkZ: int(0)}}
+	pluginZ2 := &mockDataProducerP{name: "Z2", consumes: map[fwkplugin.DataKey]any{dkZ: string("")}}
 
 	// Same type different pointers.
-	pluginP1 := &mockDataProducerP{name: "P1", produces: map[string]any{"keyP": &mockProducedDataType{}}}
-	pluginP2 := &mockDataProducerP{name: "P2", consumes: map[string]any{"keyP": &mockProducedDataType{}}}
+	pluginP1 := &mockDataProducerP{name: "P1", produces: map[fwkplugin.DataKey]any{dkP: &mockProducedDataType{}}}
+	pluginP2 := &mockDataProducerP{name: "P2", consumes: map[fwkplugin.DataKey]any{dkP: &mockProducedDataType{}}}
 
 	testCases := []struct {
 		name        string
@@ -281,36 +289,35 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 }
 
 func TestCreateMissingDataProducers(t *testing.T) {
-	const (
-		keyA = "keyA"
-		keyB = "keyB"
-	)
+	producerTypeA := "producer-a"
+	producerTypeB := "producer-b"
+	nonProducerType := "non-producer"
+	failingType := "failing"
+
+	keyA := fwkplugin.NewDataKey("keyA", producerTypeA)
+	keyB := fwkplugin.NewDataKey("keyB", producerTypeB)
+	keyAFailing := fwkplugin.NewDataKey("keyA", failingType)
+	keyANonProducer := fwkplugin.NewDataKey("keyA", nonProducerType)
 
 	// A DataProducer that produces keyA.
-	producerTypeA := "producer-a"
 	producerAFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
-		return &mockDataProducerP{name: name, produces: map[string]any{keyA: nil}}, nil
+		return &mockDataProducerP{name: name, produces: map[fwkplugin.DataKey]any{keyA: nil}}, nil
 	})
 
 	// A DataProducer that produces keyB.
-	producerTypeB := "producer-b"
 	producerBFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
-		return &mockDataProducerP{name: name, produces: map[string]any{keyB: nil}}, nil
+		return &mockDataProducerP{name: name, produces: map[fwkplugin.DataKey]any{keyB: nil}}, nil
 	})
 
 	// A non-ProducerPlugin registry entry (e.g. a scheduling scorer).
-	nonProducerType := "non-producer"
 	nonProducerFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
-		return &MockSchedulingPlugin{consumes: map[string]any{keyA: nil}}, nil
+		return &MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyA: nil}}, nil
 	})
 
 	// A factory that always fails.
-	failingType := "failing"
 	failingFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return nil, errors.New("requires params")
 	})
-
-	handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
 
 	testCases := []struct {
 		name                    string
@@ -323,57 +330,55 @@ func TestCreateMissingDataProducers(t *testing.T) {
 		{
 			name: "creates producer for missing consumed key",
 			existingPlugins: []fwkplugin.Plugin{
-				&MockSchedulingPlugin{consumes: map[string]any{keyA: nil}},
+				&MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyA: nil}},
 			},
-			defaultProducerRegistry: map[string]string{keyA: producerTypeA},
+			defaultProducerRegistry: map[string]string{keyA.String(): producerTypeA},
 			factoryRegistry:         map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
 			wantTypes:               []string{producerTypeA},
 		},
 		{
 			name: "no missing keys - nothing created",
 			existingPlugins: []fwkplugin.Plugin{
-				&mockDataProducerP{name: "existing-a", produces: map[string]any{keyA: nil}},
-				&MockSchedulingPlugin{consumes: map[string]any{keyA: nil}},
+				&mockDataProducerP{name: "existing-a", produces: map[fwkplugin.DataKey]any{keyA: nil}},
+				&MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyA: nil}},
 			},
-			defaultProducerRegistry: map[string]string{keyA: producerTypeA},
-			factoryRegistry:         map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
-			wantTypes:               nil,
+			factoryRegistry: map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
+			wantTypes:       nil,
 		},
 		{
 			name: "producer already present by type - not duplicated",
 			existingPlugins: []fwkplugin.Plugin{
 				// Simulate a plugin whose type matches the registry key.
-				&typedMockPlugin{typeName: producerTypeA, produces: map[string]any{keyA: nil}},
-				&MockSchedulingPlugin{consumes: map[string]any{keyA: nil}},
+				&typedMockPlugin{typeName: producerTypeA, produces: map[fwkplugin.DataKey]any{keyA: nil}},
+				&MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyA: nil}},
 			},
-			defaultProducerRegistry: map[string]string{keyA: producerTypeA},
-			factoryRegistry:         map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
-			wantTypes:               nil,
+			factoryRegistry: map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
+			wantTypes:       nil,
 		},
 		{
 			name: "failing factory returns error",
 			existingPlugins: []fwkplugin.Plugin{
-				&MockSchedulingPlugin{consumes: map[string]any{keyA: nil}},
+				&MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyAFailing: nil}},
 			},
-			defaultProducerRegistry: map[string]string{keyA: failingType},
+			defaultProducerRegistry: map[string]string{keyAFailing.String(): failingType},
 			factoryRegistry:         map[string]fwkplugin.FactoryFunc{failingType: failingFactory},
 			wantErr:                 true,
 		},
 		{
-			name: "non-ProducerPlugin registry entry is skipped",
+			name: "non-ProducerPlugin registry entry is invalid",
 			existingPlugins: []fwkplugin.Plugin{
-				&MockSchedulingPlugin{consumes: map[string]any{keyA: nil}},
+				&MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyANonProducer: nil}},
 			},
-			defaultProducerRegistry: map[string]string{keyA: nonProducerType},
+			defaultProducerRegistry: map[string]string{keyANonProducer.String(): nonProducerType},
 			factoryRegistry:         map[string]fwkplugin.FactoryFunc{nonProducerType: nonProducerFactory},
-			wantTypes:               nil,
+			wantErr:                 true,
 		},
 		{
 			name: "only relevant producer is created among multiple registry entries",
 			existingPlugins: []fwkplugin.Plugin{
-				&MockSchedulingPlugin{consumes: map[string]any{keyA: nil}},
+				&MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyA: nil}},
 			},
-			defaultProducerRegistry: map[string]string{keyA: producerTypeA, keyB: producerTypeB},
+			defaultProducerRegistry: map[string]string{keyA.String(): producerTypeA},
 			factoryRegistry: map[string]fwkplugin.FactoryFunc{
 				producerTypeA: producerAFactory,
 				producerTypeB: producerBFactory,
@@ -381,17 +386,21 @@ func TestCreateMissingDataProducers(t *testing.T) {
 			wantTypes: []string{producerTypeA},
 		},
 		{
-			name:                    "no consumers - nothing created",
-			existingPlugins:         []fwkplugin.Plugin{},
-			defaultProducerRegistry: map[string]string{keyA: producerTypeA},
-			factoryRegistry:         map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
-			wantTypes:               nil,
+			name:            "no consumers - nothing created",
+			existingPlugins: []fwkplugin.Plugin{},
+			factoryRegistry: map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
+			wantTypes:       nil,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := CreateMissingDataProducers(tc.existingPlugins, tc.defaultProducerRegistry, tc.factoryRegistry, handle)
+			handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+			for _, p := range tc.existingPlugins {
+				handle.AddPlugin(p.TypedName().Name, p)
+			}
+
+			err := CreateMissingDataProducers(context.Background(), tc.defaultProducerRegistry, tc.factoryRegistry, handle)
 
 			if tc.wantErr {
 				assert.Error(t, err)
@@ -401,9 +410,18 @@ func TestCreateMissingDataProducers(t *testing.T) {
 
 			// The auto-created plugin is named after its registry type (the pluginType
 			// passed to the factory), so we compare by name.
-			gotNames := make([]string, 0, len(result))
-			for _, p := range result {
-				gotNames = append(gotNames, p.TypedName().Name)
+			var gotNames []string
+			for _, p := range handle.GetAllPlugins() {
+				isExisting := false
+				for _, ep := range tc.existingPlugins {
+					if ep.TypedName() == p.TypedName() {
+						isExisting = true
+						break
+					}
+				}
+				if !isExisting {
+					gotNames = append(gotNames, p.TypedName().Name)
+				}
 			}
 
 			assert.ElementsMatch(t, tc.wantTypes, gotNames)

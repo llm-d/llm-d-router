@@ -22,9 +22,9 @@ import (
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 )
 
 func makeLatencyScorerEndpoint(name string, kvCache float64, queueSize, runningReqs int) fwksched.Endpoint {
@@ -40,7 +40,7 @@ func makeLatencyScorerEndpoint(name string, kvCache float64, queueSize, runningR
 }
 
 func setLatencyPrediction(ep fwksched.Endpoint, ttftValid, tpotValid bool, ttftHeadroom, tpotHeadroom, ttft, tpot float64) {
-	ep.Put(attrlatency.LatencyPredictionInfoKey,
+	ep.Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 		attrlatency.NewLatencyPredictionInfo(ttftValid, tpotValid, ttftHeadroom, tpotHeadroom, ttft, tpot, 0))
 }
 
@@ -140,9 +140,9 @@ func TestScoreIdlePodPreference(t *testing.T) {
 
 	// Same predictions — both negative, same deficit.
 	// Use dispatch count for idle detection (matches EPP internal queue).
-	epBusy.Put(attrlatency.LatencyPredictionInfoKey,
+	epBusy.Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 		attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 5))
-	epIdle.Put(attrlatency.LatencyPredictionInfoKey,
+	epIdle.Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 		attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 
 	endpoints := []fwksched.Endpoint{epBusy, epIdle}

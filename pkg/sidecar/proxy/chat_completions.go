@@ -26,8 +26,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -180,6 +180,10 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 
 		s.logger.V(4).Info("no prefiller or encoder, using decoder only")
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
+			if s.config.DecodeChunkSize > 0 && r.URL.Path == ChatCompletionsPath {
+				s.runChunkedDecode(w, r)
+				return
+			}
 			s.decoderProxy.ServeHTTP(w, r)
 		}
 	}

@@ -29,10 +29,9 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/llm-d/llm-d-inference-scheduler/cmd/epp/runner"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/cmd/epp/runner"
+	"github.com/llm-d/llm-d-router/pkg/metrics"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 func main() {
@@ -55,9 +54,6 @@ func run() int {
 			}
 		}()
 	}
-
-	// Register llm-d-inference-scheduler plugins
-	plugins.RegisterAllPlugins()
 
 	// Note: GIE built-in plugins are automatically registered by the runner
 	// when it processes configuration in runner.parsePluginsConfiguration()

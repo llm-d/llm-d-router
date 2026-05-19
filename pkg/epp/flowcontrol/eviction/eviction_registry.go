@@ -20,7 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 )
 
 // evictionEntry holds the eviction channel and an optional reason for the eviction.

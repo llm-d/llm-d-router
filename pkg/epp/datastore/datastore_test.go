@@ -38,14 +38,29 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/mocks"
-	poolutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/testing"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
+
+// mockEndpointFactory is a minimal EndpointFactory for EndpointUpsert/Delete tests.
+// When returnNil is true, NewEndpoint returns nil (simulating a duplicate-start race).
+type mockEndpointFactory struct {
+	returnNil bool
+}
+
+func (f *mockEndpointFactory) NewEndpoint(_ context.Context, meta *fwkdl.EndpointMetadata, _ datalayer.PoolInfo) fwkdl.Endpoint {
+	if f.returnNil {
+		return nil
+	}
+	return fwkdl.NewEndpoint(meta, fwkdl.NewMetrics())
+}
+
+func (f *mockEndpointFactory) ReleaseEndpoint(_ fwkdl.Endpoint) {}
 
 func TestPoolGet_NoDeadlockWithConcurrentWrite(t *testing.T) {
 	pool := &datalayer.EndpointPool{
@@ -1329,4 +1344,63 @@ func TestExtractActivePorts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---- EndpointUpsert / EndpointDelete tests -----------------------------------
+
+func TestEndpointUpsert_NewEndpoint(t *testing.T) {
+	const addr, port = "10.0.0.1", "8000"
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Port: port})
+
+	eps := ds.PodList(AllPodsPredicate)
+	assert.Len(t, eps, 1)
+	assert.Equal(t, addr, eps[0].GetMetadata().Address)
+}
+
+func TestEndpointUpsert_UpdateExisting(t *testing.T) {
+	const addr1, addr2 = "10.0.0.1", "10.0.0.2"
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr1})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr2})
+
+	eps := ds.PodList(AllPodsPredicate)
+	assert.Len(t, eps, 1)
+	assert.Equal(t, addr2, eps[0].GetMetadata().Address)
+}
+
+func TestEndpointUpsert_NewEndpointFactoryReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{returnNil: true}, 0)
+	meta := &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Name: "ep1", Namespace: "default"}}
+
+	assert.NotPanics(t, func() { ds.EndpointUpsert(ctx, meta) })
+	assert.Empty(t, ds.PodList(AllPodsPredicate))
+}
+
+func TestEndpointDelete_Existing(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id})
+	assert.Len(t, ds.PodList(AllPodsPredicate), 1)
+
+	ds.EndpointDelete(id)
+	assert.Empty(t, ds.PodList(AllPodsPredicate))
+}
+
+func TestEndpointDelete_Missing(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+
+	assert.NotPanics(t, func() {
+		ds.EndpointDelete(types.NamespacedName{Name: "nonexistent", Namespace: "default"})
+	})
 }

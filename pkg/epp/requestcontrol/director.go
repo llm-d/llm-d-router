@@ -33,26 +33,27 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkrc "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/handlers"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
 	// TODO(https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2081):
 	// Make this timeout configurable per-plugin or globally via the Director configuration to support plugins with
 	// varying latency profiles.
-	dataProducerTimeout = 400 * time.Millisecond
+	dataProducerTimeout       = 400 * time.Millisecond
+	responseBodyQueueCapacity = 100
 )
 
 // Datastore defines the interface required by the Director.
@@ -99,8 +100,37 @@ type responseBodyWork struct {
 // It ensures chunks are processed in order via a channel while keeping plugin execution
 // off the critical streaming path.
 type responseBodyQueue struct {
-	ch   chan responseBodyWork
-	done chan struct{} // closed when the processing goroutine exits
+	ch     chan responseBodyWork
+	done   chan struct{} // closed when the processing goroutine exits
+	mu     sync.Mutex
+	closed bool
+}
+
+func newResponseBodyQueue() *responseBodyQueue {
+	return &responseBodyQueue{
+		ch:   make(chan responseBodyWork, responseBodyQueueCapacity),
+		done: make(chan struct{}),
+	}
+}
+
+func (q *responseBodyQueue) enqueue(work responseBodyWork) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return false
+	}
+	q.ch <- work
+	return true
+}
+
+func (q *responseBodyQueue) closeAndWait() {
+	q.mu.Lock()
+	if !q.closed {
+		q.closed = true
+		close(q.ch)
+	}
+	q.mu.Unlock()
+	<-q.done
 }
 
 // Director orchestrates the request handling flow after initial parsing by the handler.
@@ -123,9 +153,10 @@ type Director struct {
 	// and value types cannot be nil.
 	defaultPriority int32
 
-	// responseBodyQueues maps request IDs to their async processing channels.
-	// Each request gets a dedicated channel and goroutine to ensure chunks are
-	// processed in order while not blocking the streaming response path.
+	// responseBodyQueues maps request contexts to their async processing channels.
+	// Each request gets a dedicated channel and goroutine to ensure chunks are processed in order while not blocking the
+	// streaming response path. The request context key avoids coupling independent streams that reuse the same
+	// x-request-id header.
 	responseBodyQueues sync.Map
 }
 
@@ -149,7 +180,7 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 // HandleRequest orchestrates the request lifecycle.
 // It always returns the requestContext even in the error case, as the request context is used in error handling.
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*handlers.RequestContext, error) {
-	tracer := otel.Tracer("llm-d-inference-scheduler")
+	tracer := otel.Tracer("llm-d-router")
 	ctx, span := tracer.Start(ctx, "gateway.request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
 	defer span.End()
 
@@ -395,10 +426,9 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	if endOfStream {
 		// Drain the async queue: close the channel and wait for the goroutine to finish
 		// processing all previously queued chunks before running the final chunk synchronously.
-		if val, ok := d.responseBodyQueues.LoadAndDelete(requestID); ok {
+		if val, ok := d.responseBodyQueues.LoadAndDelete(reqCtx); ok {
 			q := val.(*responseBodyQueue)
-			close(q.ch)
-			<-q.done // wait for all queued chunks to be processed
+			q.closeAndWait()
 		}
 		// Run the final chunk synchronously so DynamicMetadata is available for the response.
 		d.runResponseBodyPlugins(ctx, reqCtx.SchedulingRequest, response, reqCtx.TargetPod)
@@ -411,20 +441,26 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 			response:       response,
 			targetEndpoint: reqCtx.TargetPod,
 		}
-		if val, ok := d.responseBodyQueues.Load(requestID); ok {
-			val.(*responseBodyQueue).ch <- work
-		} else {
-			q := &responseBodyQueue{
-				ch:   make(chan responseBodyWork, 100),
-				done: make(chan struct{}),
-			}
-			d.responseBodyQueues.Store(requestID, q)
-			go d.processResponseBodyQueue(q)
-			q.ch <- work
+		q := d.loadOrCreateResponseBodyQueue(reqCtx)
+		if !q.enqueue(work) {
+			logger.V(logutil.DEBUG).Info("Skipping response body chunk because the async queue is closed", "requestID", requestID)
 		}
 	}
 	logger.V(logutil.TRACE).Info("Exiting HandleResponseBodyChunk")
 	return reqCtx
+}
+
+func (d *Director) loadOrCreateResponseBodyQueue(reqCtx *handlers.RequestContext) *responseBodyQueue {
+	if val, ok := d.responseBodyQueues.Load(reqCtx); ok {
+		return val.(*responseBodyQueue)
+	}
+	q := newResponseBodyQueue()
+	val, loaded := d.responseBodyQueues.LoadOrStore(reqCtx, q)
+	if loaded {
+		return val.(*responseBodyQueue)
+	}
+	go d.processResponseBodyQueue(q)
+	return q
 }
 
 func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {

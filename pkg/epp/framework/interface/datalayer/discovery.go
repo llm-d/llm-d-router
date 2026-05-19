@@ -21,31 +21,31 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
-// DiscoveryBackendStore is the narrow interface required by NewDiscoveryNotifier.
-// Any store that implements BackendUpsert and BackendDelete satisfies it.
-type DiscoveryBackendStore interface {
-	BackendUpsert(ctx context.Context, meta *EndpointMetadata)
-	BackendDelete(id types.NamespacedName)
+// DiscoveryEndpointStore is the narrow interface required by NewDiscoveryNotifier.
+// Any store that implements EndpointUpsert and EndpointDelete satisfies it.
+type DiscoveryEndpointStore interface {
+	EndpointUpsert(ctx context.Context, meta *EndpointMetadata)
+	EndpointDelete(id types.NamespacedName)
 }
 
-// NewDiscoveryNotifier wraps a DiscoveryBackendStore as a DiscoveryNotifier.
-func NewDiscoveryNotifier(store DiscoveryBackendStore) DiscoveryNotifier {
+// NewDiscoveryNotifier wraps a DiscoveryEndpointStore as a DiscoveryNotifier.
+func NewDiscoveryNotifier(store DiscoveryEndpointStore) DiscoveryNotifier {
 	return &discoveryNotifier{store: store}
 }
 
 type discoveryNotifier struct {
-	store DiscoveryBackendStore
+	store DiscoveryEndpointStore
 }
 
 func (n *discoveryNotifier) Upsert(endpoint *EndpointMetadata) {
-	n.store.BackendUpsert(context.Background(), endpoint)
+	n.store.EndpointUpsert(context.Background(), endpoint)
 }
 
 func (n *discoveryNotifier) Delete(id types.NamespacedName) {
-	n.store.BackendDelete(id)
+	n.store.EndpointDelete(id)
 }
 
 // EndpointDiscovery discovers inference endpoints and drives their lifecycle in the datastore.

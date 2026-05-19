@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	configapi "github.com/llm-d/llm-d-inference-scheduler/apix/config/v1alpha1"
+	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
 )
 
 func TestNewConfig(t *testing.T) {

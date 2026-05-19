@@ -27,11 +27,11 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
-	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 const (
@@ -78,6 +78,9 @@ type Config struct {
 	CompositeKVWeight     float64 `json:"compositeKVWeight,omitempty"`
 	CompositeQueueWeight  float64 `json:"compositeQueueWeight,omitempty"`
 	CompositePrefixWeight float64 `json:"compositePrefixWeight,omitempty"`
+
+	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
+	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -99,15 +102,19 @@ var DefaultConfig = Config{
 //   - Range-based weight re-normalization when one dimension has zero range
 //   - Composite fallback when no predictions available
 type Plugin struct {
-	typedName fwkplugin.TypedName
-	config    Config
+	typedName                    fwkplugin.TypedName
+	config                       Config
+	latencyPredictionInfoDataKey fwkplugin.DataKey
+	prefixMatchDataKey           fwkplugin.DataKey
 }
 
 // NewPlugin creates a Plugin with the given config. Used for testing.
 func NewPlugin(config Config) *Plugin {
 	return &Plugin{
-		typedName: fwkplugin.TypedName{Type: LatencyScorerType, Name: LatencyScorerType},
-		config:    config,
+		typedName:                    fwkplugin.TypedName{Type: LatencyScorerType, Name: LatencyScorerType},
+		config:                       config,
+		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
+		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 	}
 }
 
@@ -119,8 +126,10 @@ func Factory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fw
 		}
 	}
 	return &Plugin{
-		typedName: fwkplugin.TypedName{Type: LatencyScorerType, Name: name},
-		config:    config,
+		typedName:                    fwkplugin.TypedName{Type: LatencyScorerType, Name: name},
+		config:                       config,
+		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
+		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 	}, nil
 }
 
@@ -153,7 +162,7 @@ func (s *Plugin) Score(ctx context.Context, _ *fwksched.CycleState, _ *fwksched.
 	hasPredictions := false
 	for _, ep := range endpoints {
 		d := epData{endpoint: ep}
-		if raw, ok := ep.Get(attrlatency.LatencyPredictionInfoKey); ok {
+		if raw, ok := ep.Get(s.latencyPredictionInfoDataKey.String()); ok {
 			info := raw.(*attrlatency.LatencyPredictionInfo)
 			d.info = info
 			d.ttftHeadroom = info.TTFTHeadroom()
@@ -351,7 +360,7 @@ func (s *Plugin) compositeScores(ctx context.Context, endpoints []fwksched.Endpo
 		}
 
 		kvFree := 1.0 - ep.GetMetrics().KVCacheUsagePercent
-		prefix := prefixCacheScore(ep)
+		prefix := s.prefixCacheScore(ep)
 
 		composite := wkv*kvFree + wq*relQueue + wpref*prefix
 		w := int(math.Round(float64(minWeight) + float64(wMax-minWeight)*composite))
@@ -366,10 +375,10 @@ func (s *Plugin) compositeScores(ctx context.Context, endpoints []fwksched.Endpo
 	return scores
 }
 
-func (s *Plugin) Consumes() map[string]any {
-	return map[string]any{
-		attrlatency.LatencyPredictionInfoKey: attrlatency.LatencyPredictionInfo{},
-		attrprefix.PrefixCacheMatchInfoKey:   attrprefix.PrefixCacheMatchInfo{},
+func (s *Plugin) Consumes() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{
+		s.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
+		s.prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfo{},
 	}
 }
 
@@ -381,8 +390,8 @@ func normalizedWeights(a, b float64) (float64, float64) {
 	return a / sum, b / sum
 }
 
-func prefixCacheScore(ep fwksched.Endpoint) float64 {
-	if raw, ok := ep.Get(attrprefix.PrefixCacheMatchInfoKey); ok {
+func (s *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {
+	if raw, ok := ep.Get(s.prefixMatchDataKey.String()); ok {
 		info := raw.(*attrprefix.PrefixCacheMatchInfo)
 		if info.TotalBlocks() > 0 {
 			score := float64(info.MatchBlocks()) / float64(info.TotalBlocks())

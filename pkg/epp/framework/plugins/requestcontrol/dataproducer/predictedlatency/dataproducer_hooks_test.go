@@ -22,19 +22,20 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
-	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 func TestProducesConsumes(t *testing.T) {
-	pl := NewPredictedLatency(DefaultConfig, nil)
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, DefaultConfig, nil)
 
 	produces := pl.Produces()
-	assert.Contains(t, produces, attrlatency.LatencyPredictionInfoKey)
+	expectedProduceKey := attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(pl.TypedName().Name)
+	assert.Contains(t, produces, expectedProduceKey)
 
 	consumes := pl.Consumes()
-	assert.Contains(t, consumes, attrprefix.PrefixCacheMatchInfoKey)
+	assert.Contains(t, consumes, attrprefix.PrefixCacheMatchInfoDataKey)
 }
 
 // TestProduce_CancelledContextDoesNotPublish verifies that when the
@@ -45,7 +46,7 @@ func TestProducesConsumes(t *testing.T) {
 func TestProduce_CancelledContextDoesNotPublish(t *testing.T) {
 	cfg := DefaultConfig
 	cfg.PredictInProduce = false // skip the prediction sidecar path
-	pl := NewPredictedLatency(cfg, nil)
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, cfg, nil)
 
 	request := createTestInferenceRequest("cancel-test", 0, 0)
 	endpoint := createTestEndpoint("pod-a", 0.1, 0, 0)
@@ -65,7 +66,7 @@ func TestProduce_CancelledContextDoesNotPublish(t *testing.T) {
 func TestProduce_LiveContextPublishes(t *testing.T) {
 	cfg := DefaultConfig
 	cfg.PredictInProduce = false
-	pl := NewPredictedLatency(cfg, nil)
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, cfg, nil)
 
 	request := createTestInferenceRequest("live-test", 0, 0)
 	endpoint := createTestEndpoint("pod-a", 0.1, 0, 0)

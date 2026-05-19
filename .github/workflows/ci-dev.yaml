@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       project_name: ${{ steps.version.outputs.project_name }}
+      epp_name: ${{ steps.version.outputs.epp_name }}
       sidecar_name: ${{ steps.version.outputs.sidecar_name }}
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -25,7 +26,8 @@ jobs:
         run: |
           repo="${GITHUB_REPOSITORY##*/}"
           echo "project_name=${repo}-dev" >> "$GITHUB_OUTPUT"
-          echo "sidecar_name=llm-d-routing-sidecar-dev" >> "$GITHUB_OUTPUT"
+          echo "epp_name=${repo}-endpoint-picker-dev" >> "$GITHUB_OUTPUT"
+          echo "sidecar_name=${repo}-disagg-sidecar-dev" >> "$GITHUB_OUTPUT"
 
       - name: Set branch name as tag
         id: tag
@@ -36,9 +38,7 @@ jobs:
     needs: set-params
     uses: ./.github/workflows/ci-build-images.yaml
     with:
-      epp-image-name: ${{ needs.set-params.outputs.project_name }}
+      epp-image-name: ${{ needs.set-params.outputs.epp_name }}
       sidecar-image-name: ${{ needs.set-params.outputs.sidecar_name }}
       tag: ${{ needs.set-params.outputs.tag }}
       prerelease: "true"
-    secrets:
-      GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}

@@ -22,9 +22,9 @@ import (
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 )
 
 func makeLatencyAdmissionEndpoint(name string, kvCache float64, runningRequests int) fwksched.Endpoint {
@@ -81,7 +81,7 @@ func TestAdmitRequest(t *testing.T) {
 			},
 			setupFn: func(endpoints []fwksched.Endpoint) {
 				// All invalid predictions
-				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 			},
 			wantErr: false,
@@ -102,9 +102,9 @@ func TestAdmitRequest(t *testing.T) {
 				makeLatencyAdmissionEndpoint("pod2", 0.4, 3),
 			},
 			setupFn: func(endpoints []fwksched.Endpoint) {
-				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
-				endpoints[1].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
 			wantErr: true,
@@ -117,9 +117,9 @@ func TestAdmitRequest(t *testing.T) {
 				makeLatencyAdmissionEndpoint("pod2", 0.4, 0), // idle
 			},
 			setupFn: func(endpoints []fwksched.Endpoint) {
-				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
-				endpoints[1].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
 			wantErr: false,
@@ -132,9 +132,9 @@ func TestAdmitRequest(t *testing.T) {
 				makeLatencyAdmissionEndpoint("pod2", 0.01, 3), // cold
 			},
 			setupFn: func(endpoints []fwksched.Endpoint) {
-				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
-				endpoints[1].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
 			wantErr: false,
@@ -147,9 +147,9 @@ func TestAdmitRequest(t *testing.T) {
 				makeLatencyAdmissionEndpoint("pod2", 0.4, 3),
 			},
 			setupFn: func(endpoints []fwksched.Endpoint) {
-				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
-				endpoints[1].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(true, true, 20, 5, 80, 25, 0)) // valid
 			},
 			wantErr: false,

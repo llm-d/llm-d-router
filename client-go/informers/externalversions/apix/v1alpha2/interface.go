@@ -3,7 +3,7 @@
 package v1alpha2
 
 import (
-	internalinterfaces "github.com/llm-d/llm-d-inference-scheduler/client-go/informers/externalversions/internalinterfaces"
+	internalinterfaces "github.com/llm-d/llm-d-router/client-go/informers/externalversions/internalinterfaces"
 )
 
 // Interface provides access to all the informers in this group version.

@@ -24,17 +24,17 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// fakeStore records calls to BackendUpsert and BackendDelete for assertion.
+// fakeStore records calls to EndpointUpsert and EndpointDelete for assertion.
 type fakeStore struct {
 	upserted []*EndpointMetadata
 	deleted  []types.NamespacedName
 }
 
-func (f *fakeStore) BackendUpsert(_ context.Context, meta *EndpointMetadata) {
+func (f *fakeStore) EndpointUpsert(_ context.Context, meta *EndpointMetadata) {
 	f.upserted = append(f.upserted, meta)
 }
 
-func (f *fakeStore) BackendDelete(id types.NamespacedName) {
+func (f *fakeStore) EndpointDelete(id types.NamespacedName) {
 	f.deleted = append(f.deleted, id)
 }
 

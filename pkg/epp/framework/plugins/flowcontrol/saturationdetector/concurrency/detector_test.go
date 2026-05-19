@@ -26,13 +26,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrconcurrency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 )
 
 // localRegistry is a thread-safe storage for simulated endpoint load.
@@ -619,13 +619,13 @@ func (e *liveEndpoint) String() string                               { return e.
 
 // liveEndpoint also implements AttributeMap.
 func (e *liveEndpoint) Get(key string) (datalayer.Cloneable, bool) {
-	if key == attrconcurrency.InFlightLoadKey {
+	if key == attrconcurrency.InFlightLoadDataKey.String() {
 		return e.reg.get(e.id), true
 	}
 	return nil, false
 }
 func (e *liveEndpoint) Put(string, datalayer.Cloneable) {}
-func (e *liveEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadKey} }
+func (e *liveEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadDataKey.String()} }
 func (e *liveEndpoint) Clone() datalayer.AttributeMap   { return e }
 
 func newFakeEndpoint(reg *localRegistry, name string) datalayer.Endpoint {
@@ -655,15 +655,17 @@ func newStubSchedulingEndpoint(reg *localRegistry, name string) *liveSchedulingE
 
 func (f *liveSchedulingEndpoint) GetMetadata() *datalayer.EndpointMetadata { return f.metadata }
 func (f *liveSchedulingEndpoint) Get(key string) (datalayer.Cloneable, bool) {
-	if key == attrconcurrency.InFlightLoadKey {
+	if key == attrconcurrency.InFlightLoadDataKey.String() {
 		return f.reg.get(f.id), true
 	}
 	return nil, false
 }
 func (f *liveSchedulingEndpoint) Put(string, datalayer.Cloneable) {}
-func (f *liveSchedulingEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadKey} }
-func (f *liveSchedulingEndpoint) String() string                  { return f.id }
-func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap   { return f }
+func (f *liveSchedulingEndpoint) Keys() []string {
+	return []string{attrconcurrency.InFlightLoadDataKey.String()}
+}
+func (f *liveSchedulingEndpoint) String() string                { return f.id }
+func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
 
 func makeTokenRequest(requestID, prompt string) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{

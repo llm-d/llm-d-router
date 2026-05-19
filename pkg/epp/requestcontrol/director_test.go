@@ -39,26 +39,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/apix/v1alpha2"
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/openai"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/handlers"
-	poolutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/testing"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
 
-const (
-	mockProducedDataKey = "producedDataKey"
+var (
+	mockProducedDataKey = fwkplugin.NewDataKey("producedDataKey", "mock-producer")
 )
 
 // --- Mocks ---
@@ -79,7 +79,7 @@ type mockScheduler struct {
 
 func (m *mockScheduler) Schedule(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.SchedulingResult, error) {
 	if endpoints != nil && m.dataProduced {
-		data, ok := endpoints[0].Get(mockProducedDataKey)
+		data, ok := endpoints[0].Get(mockProducedDataKey.String())
 		if !ok || data.(mockProducedDataType).value != 42 {
 			return nil, errors.New("expected produced data not found in pod")
 		}
@@ -111,32 +111,32 @@ func (ds *mockDatastore) PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.En
 
 type mockDataProducerPlugin struct {
 	name     string
-	produces map[string]any
-	consumes map[string]any
+	produces map[fwkplugin.DataKey]any
+	consumes map[fwkplugin.DataKey]any
 }
 
 func (m *mockDataProducerPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
 }
 
-func (m *mockDataProducerPlugin) Produces() map[string]any {
+func (m *mockDataProducerPlugin) Produces() map[fwkplugin.DataKey]any {
 	return m.produces
 }
 
-func (m *mockDataProducerPlugin) Consumes() map[string]any {
+func (m *mockDataProducerPlugin) Consumes() map[fwkplugin.DataKey]any {
 	return m.consumes
 }
 
 func (m *mockDataProducerPlugin) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	endpoints[0].Put(mockProducedDataKey, mockProducedDataType{value: 42})
+	endpoints[0].Put(mockProducedDataKey.String(), mockProducedDataType{value: 42})
 	return nil
 }
 
 func newMockDataProducerPlugin(name string) *mockDataProducerPlugin {
 	return &mockDataProducerPlugin{
 		name:     name,
-		produces: map[string]any{mockProducedDataKey: 0},
-		consumes: map[string]any{},
+		produces: map[fwkplugin.DataKey]any{mockProducedDataKey: 0},
+		consumes: map[fwkplugin.DataKey]any{},
 	}
 }
 
@@ -1281,38 +1281,16 @@ func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
 
 	const numChunks = 50
+	reqCtx := newResponseBodyTestRequestContext("ordering-test-request", 0)
 
 	for i := range numChunks {
-		reqCtx := &handlers.RequestContext{
-			Request: &handlers.Request{
-				Headers: map[string]string{
-					// All chunks share the same request ID so they go through the same queue.
-					reqcommon.RequestIDHeaderKey: "ordering-test-request",
-				},
-			},
-			Response: &handlers.Response{
-				Headers: map[string]string{},
-			},
-			TargetPod: &fwkdl.EndpointMetadata{},
-			Usage:     fwkrh.Usage{CompletionTokens: i},
-		}
+		reqCtx.Usage = fwkrh.Usage{CompletionTokens: i}
 		director.HandleResponseBody(ctx, reqCtx, false)
 	}
 
 	// Send final chunk to drain the queue.
-	finalReqCtx := &handlers.RequestContext{
-		Request: &handlers.Request{
-			Headers: map[string]string{
-				reqcommon.RequestIDHeaderKey: "ordering-test-request",
-			},
-		},
-		Response: &handlers.Response{
-			Headers: map[string]string{},
-		},
-		TargetPod: &fwkdl.EndpointMetadata{},
-		Usage:     fwkrh.Usage{CompletionTokens: numChunks},
-	}
-	director.HandleResponseBody(ctx, finalReqCtx, true)
+	reqCtx.Usage = fwkrh.Usage{CompletionTokens: numChunks}
+	director.HandleResponseBody(ctx, reqCtx, true)
 
 	// Total calls: numChunks async + 1 sync final.
 	plugin.mu.Lock()
@@ -1326,6 +1304,71 @@ func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 	for i, tokens := range tokenCounts {
 		assert.Equal(t, i, tokens, "chunk %d was processed out of order", i)
 	}
+}
+
+func TestDirector_HandleResponseBody_DuplicateRequestIDQueuesAreIndependent(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	plugin := newBlockingResponseStreamingPlugin()
+	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
+
+	const requestID = "duplicate-request-id"
+	firstReqCtx := newResponseBodyTestRequestContext(requestID, 0)
+	secondReqCtx := newResponseBodyTestRequestContext(requestID, 0)
+
+	director.HandleResponseBody(ctx, firstReqCtx, false)
+	require.Eventually(t, func() bool {
+		return plugin.started()
+	}, time.Second, 10*time.Millisecond, "first request should start processing")
+
+	for i := range responseBodyQueueCapacity {
+		firstReqCtx.Usage = fwkrh.Usage{CompletionTokens: i + 1}
+		director.HandleResponseBody(ctx, firstReqCtx, false)
+	}
+
+	secondDone := make(chan any, 1)
+	go func() {
+		defer func() {
+			secondDone <- recover()
+		}()
+		director.HandleResponseBody(ctx, secondReqCtx, false)
+	}()
+
+	secondCompletedBeforeFinal := false
+	select {
+	case panicValue := <-secondDone:
+		require.Nil(t, panicValue, "second request with duplicate request ID should not panic")
+		secondCompletedBeforeFinal = true
+	case <-time.After(time.Second):
+	}
+
+	firstFinalDone := make(chan any, 1)
+	go func() {
+		defer func() {
+			firstFinalDone <- recover()
+		}()
+		director.HandleResponseBody(ctx, firstReqCtx, true)
+	}()
+
+	if !secondCompletedBeforeFinal {
+		select {
+		case panicValue := <-secondDone:
+			require.Nil(t, panicValue, "second request with duplicate request ID should not panic")
+		case <-time.After(time.Second):
+			t.Fatal("second request with duplicate request ID should not remain blocked")
+		}
+	}
+	require.True(t, secondCompletedBeforeFinal, "second request with duplicate request ID should not block behind the first request queue")
+
+	plugin.release()
+
+	select {
+	case panicValue := <-firstFinalDone:
+		require.Nil(t, panicValue, "first request final chunk should not panic")
+	case <-time.After(time.Second):
+		t.Fatal("first request final chunk should drain")
+	}
+
+	director.HandleResponseBody(ctx, secondReqCtx, true)
 }
 
 // orderTrackingPlugin records the CompletionTokens from each ResponseBody call to verify ordering.
@@ -1405,4 +1448,109 @@ func (p *testResponseStreaming) ResponseBody(_ context.Context, _ *fwksched.Infe
 	// Maintain legacy fields for compatibility
 	p.lastRespOnStreaming = response
 	p.lastTargetPodOnStreaming = targetPod.NamespacedName.String()
+}
+
+func TestResponseBodyQueue_CloseWaitsForBlockedEnqueue(t *testing.T) {
+	q := newResponseBodyQueue()
+	close(q.done)
+
+	for range responseBodyQueueCapacity {
+		require.True(t, q.enqueue(responseBodyWork{}))
+	}
+
+	enqueueDone := make(chan any, 1)
+	go func() {
+		defer func() {
+			enqueueDone <- recover()
+		}()
+		q.enqueue(responseBodyWork{})
+	}()
+
+	require.Eventually(t, func() bool {
+		if q.mu.TryLock() {
+			q.mu.Unlock()
+			return false
+		}
+		return true
+	}, time.Second, 10*time.Millisecond, "enqueue should block while the queue is full")
+
+	closeDone := make(chan any, 1)
+	go func() {
+		defer func() {
+			closeDone <- recover()
+		}()
+		q.closeAndWait()
+	}()
+
+	<-q.ch
+
+	select {
+	case panicValue := <-enqueueDone:
+		require.Nil(t, panicValue, "enqueue should not panic when close waits")
+	case <-time.After(time.Second):
+		t.Fatal("enqueue should finish after queue space is available")
+	}
+
+	select {
+	case panicValue := <-closeDone:
+		require.Nil(t, panicValue, "close should not panic")
+	case <-time.After(time.Second):
+		t.Fatal("close should finish after enqueue completes")
+	}
+
+	require.False(t, q.enqueue(responseBodyWork{}), "enqueue should fail after the queue is closed")
+}
+
+type blockingResponseStreamingPlugin struct {
+	typedName fwkplugin.TypedName
+	once      sync.Once
+	startedCh chan struct{}
+	releaseCh chan struct{}
+}
+
+func newBlockingResponseStreamingPlugin() *blockingResponseStreamingPlugin {
+	return &blockingResponseStreamingPlugin{
+		typedName: fwkplugin.TypedName{Type: testPostStreamingType, Name: "blocking"},
+		startedCh: make(chan struct{}),
+		releaseCh: make(chan struct{}),
+	}
+}
+
+func (p *blockingResponseStreamingPlugin) TypedName() fwkplugin.TypedName {
+	return p.typedName
+}
+
+func (p *blockingResponseStreamingPlugin) ResponseBody(_ context.Context, _ *fwksched.InferenceRequest, _ *fwkrc.Response, _ *fwkdl.EndpointMetadata) {
+	p.once.Do(func() {
+		close(p.startedCh)
+	})
+	<-p.releaseCh
+}
+
+func (p *blockingResponseStreamingPlugin) started() bool {
+	select {
+	case <-p.startedCh:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *blockingResponseStreamingPlugin) release() {
+	close(p.releaseCh)
+}
+
+func newResponseBodyTestRequestContext(requestID string, completionTokens int) *handlers.RequestContext {
+	return &handlers.RequestContext{
+		Request: &handlers.Request{
+			Headers: map[string]string{
+				reqcommon.RequestIDHeaderKey: requestID,
+			},
+		},
+		Response: &handlers.Response{
+			Headers: map[string]string{},
+		},
+		TargetPod: &fwkdl.EndpointMetadata{},
+		Usage:     fwkrh.Usage{CompletionTokens: completionTokens},
+	}
 }

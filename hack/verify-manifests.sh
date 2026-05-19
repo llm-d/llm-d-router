@@ -19,9 +19,8 @@ set -o nounset
 set -o pipefail
 
 SCRIPT_ROOT=$(dirname "${BASH_SOURCE}")/..
-GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.3.0}"
+GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
 GKE_GATEWAY_API_VERSION="${GKE_GATEWAY_API_VERSION:-v1.4.0}"
-GIE_VERSION="${GIE_VERSION:-v1.4.0}"
 ISTIO_VERSION="${ISTIO_VERSION:-1.26.2}"
 KUBECTL_VALIDATE="${KUBECTL_VALIDATE:-${SCRIPT_ROOT}/bin/kubectl-validate}"
 TEMP_DIR=$(mktemp -d)
@@ -37,22 +36,16 @@ fetch_crds() {
 }
 
 main() {
-  fetch_gie_crd() {
-    local name="$1"
-    fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${GIE_VERSION}/config/crd/bases/${name}"
-  }
-
-  fetch_gie_crd "inference.networking.k8s.io_inferencepools.yaml"
-  fetch_gie_crd "inference.networking.x-k8s.io_inferencemodelrewrites.yaml"
-  fetch_gie_crd "inference.networking.x-k8s.io_inferenceobjectives.yaml"
-  fetch_gie_crd "inference.networking.x-k8s.io_inferencepoolimports.yaml"
-
-  # Download external CRDs for validation
+  # Use local 'config/crd', run "make generate" or "hack/update-codegen.sh" to fetch inferencepool, inferencepoolimport from remote
+  cp "${SCRIPT_ROOT}/config/crd/bases/"*.yaml "${TEMP_DIR}/"
+  # GW API CRD
   fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/refs/tags/${GATEWAY_API_VERSION}/config/crd/standard/gateway.networking.k8s.io_gatewayclasses.yaml"
   fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/refs/tags/${GATEWAY_API_VERSION}/config/crd/standard/gateway.networking.k8s.io_gateways.yaml"
   fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/refs/tags/${GATEWAY_API_VERSION}/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml"
+  # GKE CRD
   fetch_crds "https://raw.githubusercontent.com/GoogleCloudPlatform/gke-gateway-api/refs/tags/${GKE_GATEWAY_API_VERSION}/config/crd/networking.gke.io_gcpbackendpolicies.yaml"
   fetch_crds "https://raw.githubusercontent.com/GoogleCloudPlatform/gke-gateway-api/refs/tags/${GKE_GATEWAY_API_VERSION}/config/crd/networking.gke.io_healthcheckpolicies.yaml"
+  # Istio CRD
   fetch_crds "https://raw.githubusercontent.com/istio/istio/refs/tags/${ISTIO_VERSION}/manifests/charts/base/files/crd-all.gen.yaml"
 
   # Run the install command in case this script runs from a different bash
