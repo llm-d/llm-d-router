@@ -59,7 +59,7 @@ func TestInFlightLoadProducer_Produce(t *testing.T) {
 	ctx := context.Background()
 	endpoints := []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}
 
-	err := producer.PrepareRequestData(ctx, nil, endpoints)
+	err := producer.Produce(ctx, nil, endpoints)
 	require.NoError(t, err)
 
 	// Verify AttributeMap population
@@ -334,7 +334,7 @@ func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
 	//   uncached_input = (2-1)*4 + max(0, 8-2*4) = 4
 	//   total tokens = 4 + 12 = 16
 	endpoint := newStubSchedulingEndpoint(endpointName)
-	endpoint.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
 
 	req := makeTokenRequest("req-prefix", "12345678901234567890123456789012")
 	res := &fwksched.SchedulingResult{
@@ -377,9 +377,9 @@ func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
 
 	// 8 input tokens, output 12.
 	epA := newStubSchedulingEndpoint(podA)
-	epA.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(2, 2, 4)) // fully cached
+	epA.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(2, 2, 4)) // fully cached
 	epB := newStubSchedulingEndpoint(podB)
-	epB.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(0, 2, 4)) // none cached
+	epB.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(0, 2, 4)) // none cached
 
 	req := makeTokenRequest("req-multi-cache", "12345678901234567890123456789012")
 	res := &fwksched.SchedulingResult{
