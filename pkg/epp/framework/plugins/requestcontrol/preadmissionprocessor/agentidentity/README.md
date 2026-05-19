@@ -14,17 +14,18 @@ Without it, every request from a given agent session falls into the default fair
 ## How It Works
 
 1. If `request.FairnessID` is already set to something other than `metadata.DefaultFairnessID`, return immediately — an explicit upstream `x-gateway-inference-fairness-id` always wins over a derived one.
-2. Otherwise, walk the priority list of agent session headers and copy the first non-empty match into `request.FairnessID`:
+2. Otherwise, walk the priority list of agent session headers and copy the first non-empty match into `request.FairnessID`. Operator-supplied entries from `additionalSessionHeaders` come first, followed by the built-in defaults in this order:
    1. `x-claude-code-session-id` (Claude Code)
    2. `x-session-affinity` (OpenCode)
-   3. `session_id` (Codex)
+   3. `session-id` (Codex)
+   4. `session_id` (Codex, legacy underscored fallback)
 3. If nothing matches, leave `FairnessID` as the default and return — the request is still admitted, just into the shared default queue.
 
 The plugin is stateless and safe under concurrent use.
 
 ## Inputs Consumed
 
-- `scheduling.InferenceRequest.Headers` — read-only lookup of the three session headers above. Keys are expected lowercase (Envoy normalizes inbound headers).
+- `scheduling.InferenceRequest.Headers` — read-only lookup of the session headers above (built-in defaults plus any from `additionalSessionHeaders`). Keys are expected lowercase (Envoy normalizes inbound headers).
 - `scheduling.InferenceRequest.FairnessID` — read to detect an upstream override; written when an agent header matches.
 
 ## Configuration
@@ -34,19 +35,32 @@ The plugin is stateless and safe under concurrent use.
 
 ### Parameters
 
-The plugin takes no parameters. The factory accepts and ignores its `parameters` argument.
-
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| _(none)_ | — | — | — | — |
+| `additionalSessionHeaders` | `[]string` | No | `[]` | Extra header names to check before the built-in defaults. Order is preserved; the first non-empty match wins. Use this to support a new agent, or to track an upstream rename, without a code change. |
 
 ### Examples
+
+Default configuration — no parameters, only the built-in headers are checked:
 
 ```yaml
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 plugins:
   - type: agent-identity
+```
+
+With additional headers — checked before the built-in defaults (header names are arbitrary; substitute whatever the agent actually emits):
+
+```yaml
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: agent-identity
+    parameters:
+      additionalSessionHeaders:
+        - x-my-agent-session
+        - x-another-agent-id
 ```
 
 ### Per-agent client setup
@@ -60,10 +74,10 @@ Claude Code speaks Anthropic's Messages API. llm-d's gateway exposes the OpenAI 
 ```yaml
 # ~/.litellm/config.yaml
 model_list:
-  - model_name: claude-sonnet-4-5
+  - model_name: <client-facing-model-name>
     litellm_params:
-      model: hosted_vllm/meta-llama/Llama-3.1-8B-Instruct
-      api_base: http://<llmd-gateway>:8080/v1
+      model: hosted_vllm/<upstream-model-name>
+      api_base: http://<llmd-gateway>/v1
 
 litellm_settings:
   forward_client_headers_to_llm_api: true
@@ -71,14 +85,16 @@ litellm_settings:
 
 `forward_client_headers_to_llm_api: true` is **required** — without it LiteLLM strips `x-claude-code-session-id` (and every other `x-*` header) on the way to the upstream, and the plugin sees nothing.
 
-Then point Claude Code at LiteLLM:
+Then point Claude Code at LiteLLM and launch it:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://<litellm-host>:4000
 export ANTHROPIC_AUTH_TOKEN=<litellm-master-key>
+export ANTHROPIC_MODEL=<client-facing-model-name>
+claude
 ```
 
-Claude Code emits `x-claude-code-session-id` automatically on every outbound request — no further client config needed.
+`<client-facing-model-name>` must match the `model_name` declared in the LiteLLM `model_list` above. Claude Code emits `x-claude-code-session-id` automatically on every outbound request — no further client config needed.
 
 #### OpenCode — **No LiteLLM required**
 
@@ -93,11 +109,11 @@ OpenCode uses Vercel's AI SDK with `@ai-sdk/openai-compatible` and speaks OpenAI
       "npm": "@ai-sdk/openai-compatible",
       "name": "llmd-local",
       "options": {
-        "baseURL": "http://<llmd-gateway>:8080/v1",
+        "baseURL": "http://<llmd-gateway>/v1",
         "apiKey": "dummy"
       },
       "models": {
-        "meta-llama/Llama-3.1-8B-Instruct": { "name": "Llama 3.1 8B Instruct" }
+        "<upstream-model-name>": { "name": "<display-name>" }
       }
     }
   }
@@ -108,14 +124,12 @@ OpenCode emits `x-session-affinity` automatically on every outbound request.
 
 #### Codex — **No LiteLLM required**
 
-Codex emits `session_id` (literal underscore form, no `x-` prefix) automatically on every outbound request. Note that Envoy rejects underscore headers by default — the gateway must be configured with `headers_with_underscores_action: ALLOW` for `session_id` to reach the EPP.
+Codex emits a session header automatically on every outbound request. Current builds use the hyphenated `session-id` (no `x-` prefix); older builds use the underscored `session_id` form, which the plugin still recognizes as a fallback.
 
 ## Limitations
 
-- **Default-queue fall-through is silent.** Requests from agents that don't match any of the three headers land in the default fairness queue without any indication. This is by design (the plugin is non-fatal), but operators should not assume the absence of errors means every client is being identified.
+- **Default-queue fall-through is silent.** Requests from agents that don't match any of the configured headers land in the default fairness queue without any indication. This is by design (the plugin is non-fatal), but operators should not assume the absence of errors means every client is being identified.
 - **Codex `previous_response_id` is not used.** It references the prior turn's response, not the chain root, so keying on it would shard one conversation across many queues. Correctly folding it back to the root requires a `ResponseBody` hook recording `response.id → root` mappings, which this plugin does not implement.
-- **One header per agent.** Supports exactly the three agents above. Adding a new agent means adding to `priorityHeaders`.
-- **Last-write-wins across multiple plugins.** If multiple `PreAdmissionProcessor` plugins are registered and write `FairnessID`, the order in which they run determines the result. The director runs them in registration order.
 
 ## Related Documentation
 - Claude Code session header (official): <https://code.claude.com/docs/en/llm-gateway> — the `X-Claude-Code-Session-Id` row in "Request headers Claude Code includes."
