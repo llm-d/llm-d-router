@@ -2,16 +2,33 @@
 
 This document describes the request and response formats for each stage of the coordinator pipeline. The pipeline implements the vLLM disaggregated serving protocol for multimodal inference.
 
+## Table of Contents
+
+- [Pipeline Overview](#pipeline-overview)
+- [Stage 1: replace-media-urls](#stage-1-replace-media-urls)
+- [Stage 2: render](#stage-2-render)
+- [Stage 3: conditional-decode](#stage-3-conditional-decode)
+- [Stage 4: encode (fan-out, one per image)](#stage-4-encode-fan-out-one-per-image)
+- [Stage 5: prefill](#stage-5-prefill)
+- [Stage 6: decode](#stage-6-decode)
+- [Gateway Path Routing](#gateway-path-routing)
+- [Text-Only Requests (no images)](#text-only-requests-no-images)
+- [Questions](#questions)
+
 ## Pipeline Overview
 
 ```
-Client Request (/v1/chat/completions)
+Client Request (/v1/chat/completions or /v1/completions)
     |
     v
 [replace-media-urls] - Downloads images, converts to base64 data URIs
     |
     v
 [render] - Tokenizes prompt, produces token_ids and per-image metadata
+    |
+    v
+[conditional-decode] - Attempts decode with token_ids;
+    |                     if 412, continues pipeline; otherwise returns response
     |
     v
 [encode] - Fan-out: one request per image, runs ViT encoder
@@ -141,7 +158,81 @@ Body is the full `reqCtx.Body` (with data URIs from stage 1):
 
 ---
 
-## Stage 3: encode (fan-out, one per image)
+## Stage 3: conditional-decode
+
+The coordinator attempts an early decode immediately after rendering. This allows the decode worker to serve the request directly if it already has the KV cache available (e.g., from a previous prefill), skipping the encode and prefill stages entirely.
+
+The coordinator adds the `Prefer: if-available` HTTP header to signal that the decode worker should only proceed if the KV cache is already available. If it responds with 412 Precondition Failed, the pipeline continues as normal.
+
+### Request (/v1/completions)
+
+```
+POST <gateway>/decode/v1/completions
+Content-Type: application/json
+X-Request-ID: <request_id>
+Prefer: if-available
+```
+
+Since completions requests do not support multimedia content, the render response will not include `mm_placeholders` or `kwargs_data` -- only `token_ids` are produced. The original `prompt` field is replaced by the `token_ids` from the render response:
+
+```json
+{
+  "model": "llava-v1.5-7b",
+  "stream": false,
+  "prompt": [1, 2345, 6789, 101, 202, 303]
+}
+```
+
+### Request (/v1/chat/completions)
+
+```
+POST <gateway>/decode/v1/chat/completions
+Content-Type: application/json
+X-Request-ID: <request_id>
+Prefer: if-available
+```
+
+The original request body is sent as-is, with `token_ids` from the render response added:
+
+```json
+{
+  "model": "llava-v1.5-7b",
+  "stream": false,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe these images"},
+        {
+          "type": "image_url",
+          "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQ..."}
+        }
+      ]
+    }
+  ],
+  "token_ids": [1, 32000, 32000, 32000, 2345, 6789]
+}
+```
+
+**Notes:**
+- The `Prefer: if-available` header signals to the decode worker that this is a conditional request -- it should only proceed if the KV cache is already available
+- For `/v1/completions`: the original text `prompt` is replaced with the `token_ids` array from the render response
+- For `/v1/chat/completions`: the original request body is preserved and `token_ids` is added as an additional top-level field
+- All other fields from the original request body (e.g., `sampling_params`, `stream`, `model`) are preserved
+
+### Response Handling
+
+| Status Code | Action |
+|-------------|--------|
+| 412 Precondition Failed | KV cache not available. Pipeline continues with encode/prefill/decode as normal. |
+| 2xx (success) | Response is propagated directly to the client. Pipeline processing stops. |
+| Any other error | Generic error response is propagated to the client. Pipeline processing stops. |
+
+**Note:** The 412 response may include additional hints in the response body or response headers (e.g., scheduling suggestions or cache locality information). These hints are not yet consumed by the coordinator and will be defined/integrated later.
+
+---
+
+## Stage 4: encode (fan-out, one per image)
 
 Sends one encode request per multimodal entry. Each request contains only the BOS token plus placeholder tokens for that specific image. The encoder runs ViT and stores the result in the EC (Embedding Cache).
 
@@ -193,7 +284,7 @@ Standard GenerateResponse with `ec_transfer_params` keyed by the image's mm_hash
 
 ```json
 {
-  "request_id": "req-abc-123",
+  "request_id": "generate-tokens-abc123",
   "choices": [],
   "ec_transfer_params": {
     "abc123hash": {
@@ -225,7 +316,7 @@ The `ec_transfer_params` map is keyed by mm_hash, with each value containing:
 
 ---
 
-## Stage 4: prefill
+## Stage 5: prefill
 
 Sends a single prefill request with the full token sequence, all image metadata, and the EC transfer parameters from the encode stage. The prefill worker computes KV cache and stores it for the decode worker.
 
@@ -307,7 +398,7 @@ Standard GenerateResponse with `kv_transfer_params`:
 
 ```json
 {
-  "request_id": "req-abc-123",
+  "request_id": "generate-tokens-abc123",
   "choices": [],
   "kv_transfer_params": {
     "block_id": "block-999",
@@ -323,9 +414,9 @@ Standard GenerateResponse with `kv_transfer_params`:
 
 ---
 
-## Stage 5: decode
+## Stage 6: decode
 
-Forwards the original client request body (enriched with `kv_transfer_params` and per-image `uuid` fields) to the decode worker. Supports both streaming (SSE) and buffered responses.
+Forwards the original client request body (enriched with `token_ids`, `kv_transfer_params`, and per-image `uuid` fields) to the decode worker. Supports both streaming (SSE) and buffered responses.
 
 ### Request
 
@@ -359,6 +450,23 @@ Example for `/v1/chat/completions`:
       ]
     }
   ],
+  "token_ids": [1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789, ...],
+  "kv_transfer_params": {
+    "block_id": "block-999",
+    "peer_host": "10.0.0.42",
+    "peer_port": 7777,
+    "do_remote_prefill": true
+  }
+}
+```
+
+Example for `/v1/completions`:
+
+```json
+{
+  "model": "llava-v1.5-7b",
+  "stream": false,
+  "prompt": [1, 2345, 6789, 101, 202, 303],
   "kv_transfer_params": {
     "block_id": "block-999",
     "peer_host": "10.0.0.42",
@@ -369,6 +477,8 @@ Example for `/v1/chat/completions`:
 ```
 
 **Notes:**
+- For `/v1/chat/completions`: `token_ids` is added as an additional top-level field alongside the original request body
+- For `/v1/completions`: the original text `prompt` is replaced with the `token_ids` array from the render response
 - `uuid` is added to each `image_url` content part (value is the mm_hash from the render step) for multimodal cache lookup
 - `image_url` retains the original base64 data URI from the replace-media-urls step so the decode worker can process images and produce the correct token sequence (matching what prefill computed)
 - `kv_transfer_params` is injected at the top level of the request body
@@ -428,9 +538,9 @@ The coordinator uses path prefixes to route requests through the Envoy gateway t
 
 | Stage   | Path Format                         | Example                           |
 |---------|-------------------------------------|-----------------------------------|
-| Encode  | `/encode<gateway_path>`             | `/encode/inference/v1/generate`   |
-| Prefill | `/prefill<gateway_path>`            | `/prefill/inference/v1/generate`  |
-| Decode  | `/decode<original_client_path>`     | `/decode/v1/chat/completions`     |
+| Encode  | `/encode/<gateway_path>`             | `/encode/inference/v1/generate`   |
+| Prefill | `/prefill/<gateway_path>`            | `/prefill/inference/v1/generate`  |
+| Decode  | `/decode/<original_client_path>`     | `/decode/v1/chat/completions` or  `/decode/v1/completions`  |
 
 The `gateway_path` is configurable per step (defaults to `/inference/v1/generate`).
 

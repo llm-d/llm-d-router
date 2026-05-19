@@ -19,9 +19,11 @@ import (
 func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	var receivedPath string
 	var receivedBody map[string]any
+	var receivedPreferHeader string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
+		receivedPreferHeader = r.Header.Get("Prefer")
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &receivedBody)
 
@@ -60,6 +62,9 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	}
 	if receivedBody["model"] != "test-model" {
 		t.Fatalf("expected model test-model in request body, got %v", receivedBody["model"])
+	}
+	if receivedPreferHeader != "if-available" {
+		t.Fatalf("expected Prefer: if-available header, got %q", receivedPreferHeader)
 	}
 
 	result := recorder.Result()
