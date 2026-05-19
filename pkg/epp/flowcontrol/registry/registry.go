@@ -469,15 +469,16 @@ func (fr *FlowRegistry) buildFlowComponents(key flowcontrol.FlowKey) (*flowCompo
 
 // propagateStatsDelta is the top-level, lock-free aggregator for all statistics.
 func (fr *FlowRegistry) propagateStatsDelta(priority int, lenDelta, byteSizeDelta int64) {
-	rawBand, _ := fr.priorityBands.Load(priority)
-	band := rawBand.(*priorityBand)
-	band.len.Add(lenDelta)
-	band.byteSize.Add(byteSizeDelta)
+	if rawBand, ok := fr.priorityBands.Load(priority); rawBand != nil && ok {
+		band := rawBand.(*priorityBand)
+		band.len.Add(lenDelta)
+		band.byteSize.Add(byteSizeDelta)
 
-	val, _ := fr.perPriorityBandStats.Load(priority)
-	stats := val.(*bandStats)
-	stats.len.Add(lenDelta)
-	stats.byteSize.Add(byteSizeDelta)
-	fr.totalLen.Add(lenDelta)
-	fr.totalByteSize.Add(byteSizeDelta)
+		val, _ := fr.perPriorityBandStats.Load(priority)
+		stats := val.(*bandStats)
+		stats.len.Add(lenDelta)
+		stats.byteSize.Add(byteSizeDelta)
+		fr.totalLen.Add(lenDelta)
+		fr.totalByteSize.Add(byteSizeDelta)
+	}
 }

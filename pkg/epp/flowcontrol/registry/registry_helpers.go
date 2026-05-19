@@ -150,6 +150,8 @@ func (fr *FlowRegistry) AllOrderedPriorityLevels() []int {
 
 // synchronizeFlow is the internal administrative method for creating a flow instance.
 // It is an idempotent "create if not exists" operation.
+// The priorityBand of the request is guaranteed to exist during the call to synchronizeFlow
+// by ensureFlowInfrastructure.
 func (fr *FlowRegistry) synchronizeFlow(
 	key flowcontrol.FlowKey,
 	policy flowcontrol.OrderingPolicy,
