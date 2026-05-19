@@ -32,7 +32,10 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
-var ErrSourceTypeCollision = errors.New("source type registered across variants")
+var (
+	ErrSourceTypeCollision    = errors.New("source type registered across variants")
+	ErrDuplicateExtractorType = errors.New("duplicate extractor type configured for the same source")
+)
 
 type sourceVariant string
 
@@ -382,6 +385,16 @@ func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger,
 // expected Extractor type, source output and extractor input type compatibility and
 // optionally source specific validation.
 func (r *Runtime) validateSourceExtractors(src fwkdl.DataSource, extractors []fwkdl.ExtractorBase, disallowedExtractorType string) error {
+	seenTypes := make(map[string]struct{}, len(extractors))
+	for _, ext := range extractors {
+		extType := ext.TypedName().Type
+		if _, dup := seenTypes[extType]; dup {
+			return fmt.Errorf("%w: source=%s, extractor type=%s",
+				ErrDuplicateExtractorType, src.TypedName().String(), extType)
+		}
+		seenTypes[extType] = struct{}{}
+	}
+
 	for _, ext := range extractors {
 		// check if disallowed extractor type
 		if disallowedExtractorType != "" && ext.TypedName().Type == disallowedExtractorType {

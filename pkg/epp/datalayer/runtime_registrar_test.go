@@ -179,6 +179,26 @@ func TestConfigure_DedupByExtractorType(t *testing.T) {
 	assert.Equal(t, "config-ext", exts[0].TypedName().Name)
 }
 
+// Pins rejection of duplicate-Type extractors per source. Append dedups silently otherwise.
+func TestConfigure_DuplicateExtractorTypePerSource(t *testing.T) {
+	r := NewRuntime(0)
+	logger := newTestLogger(t)
+
+	src := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-src")
+	ext1 := extractormocks.NewEndpointExtractor("ext-1")
+	ext2 := extractormocks.NewEndpointExtractor("ext-2")
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{{
+			Plugin:     src,
+			Extractors: []fwkdl.ExtractorBase{ext1, ext2},
+		}},
+	}
+
+	err := r.Configure(cfg, false, "", logger)
+	require.ErrorIs(t, err, ErrDuplicateExtractorType)
+}
+
 // TestConfigure_CrossVariantCollisionNoPending pins the behavior added by
 // validateNoCrossVariantCollisions: two sources sharing a SourceType across
 // different variants must fail Configure even when no pending extractor
