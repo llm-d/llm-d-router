@@ -236,7 +236,7 @@ func TestPDSchedule(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			//  initialize scheduler with config
-			prefixScorer, err := prefix.New(ctx, "")
+			prefixScorer, err := prefix.New(ctx, prefix.PrefixCacheScorerPluginType, "")
 			assert.NoError(t, err, "Prefix plugin creation returned unexpected error")
 
 			prefillSchedulerProfile := scheduling.NewSchedulerProfile().

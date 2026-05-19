@@ -82,12 +82,12 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 	}
 
 	// Build the set of keys that are consumed but not yet produced.
-	missingKeys := make(map[string]bool)
+	missingKeys := make(map[string]string)
 	for _, p := range handle.GetAllPlugins() {
 		if consumer, ok := p.(plugin.ConsumerPlugin); ok {
 			for key := range consumer.Consumes() {
 				if !producedKeys[key.String()] {
-					missingKeys[key.String()] = true
+					missingKeys[key.String()] = consumer.TypedName().Name
 				}
 			}
 		}
@@ -95,10 +95,10 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 
 	logger.Info("Missing data keys", "missingKeys", missingKeys)
 
-	for key := range missingKeys {
+	for key, consumerName := range missingKeys {
 		defaultProducerNameOrType, ok := defaultProducerRegistry[key]
 		if !ok {
-			return fmt.Errorf("no default producer found for missing data key: %v", key)
+			return fmt.Errorf("no default producer found for missing data key: %v, which is consumed by: %v", key, consumerName)
 		}
 		if handle.Plugin(defaultProducerNameOrType) != nil {
 			// The plugin is already created. This can happen when a producer produces multiple data keys.
@@ -106,15 +106,15 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 		}
 		factory, ok := factoryRegistry[defaultProducerNameOrType]
 		if !ok {
-			return fmt.Errorf("factory not found for default producer: %v", defaultProducerNameOrType)
+			return fmt.Errorf("factory not found for default producer: %v, this is required by datakey: %v, which is consumed by: %v", defaultProducerNameOrType, key, consumerName)
 		}
 		// pass nil params as this is default instantiation.
 		plg, err := factory(defaultProducerNameOrType, nil, handle)
 		if err != nil {
-			return fmt.Errorf("failed to instantiate data producer %q: %w", defaultProducerNameOrType, err)
+			return fmt.Errorf("failed to instantiate data producer %q: %w, this is required by datakey: %v, which is consumed by: %v", defaultProducerNameOrType, err, key, consumerName)
 		}
 		if _, ok := plg.(plugin.ProducerPlugin); !ok {
-			return fmt.Errorf("auto-created default entry %q is not a ProducerPlugin", defaultProducerNameOrType)
+			return fmt.Errorf("auto-created default entry %q is not a ProducerPlugin, this is required by datakey: %v, which is consumed by: %v", defaultProducerNameOrType, key, consumerName)
 		}
 		handle.AddPlugin(plg.TypedName().Name, plg)
 	}

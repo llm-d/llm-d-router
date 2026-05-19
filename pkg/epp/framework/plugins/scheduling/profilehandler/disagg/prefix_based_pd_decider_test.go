@@ -303,7 +303,14 @@ func TestConsumes(t *testing.T) {
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 0})
 	require.NoError(t, err)
 
-	handler, err := NewPdProfileHandler("prefill", "decode", PrefixBasedPDDeciderPluginType, "test", 0, decider)
+	handler, err := NewPdProfileHandler(
+		"test-handler",
+		pdProfileHandlerParameters{
+			PrefillProfile: "prefill",
+			DecodeProfile:  "decode",
+		},
+		decider,
+	)
 	require.NoError(t, err)
 
 	consumed := handler.Consumes()

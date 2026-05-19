@@ -59,7 +59,7 @@ func BenchmarkSchedule(b *testing.B) {
 
 	kvCacheUtilizationScorer := kvcacheutilization.NewKVCacheUtilizationScorer()
 	queueingScorer := queuedepth.NewQueueScorer()
-	prefixCacheScorer, err := schedprefix.New(ctx, "")
+	prefixCacheScorer, err := schedprefix.New(ctx, schedprefix.PrefixCacheScorerPluginType, "")
 	if err != nil {
 		b.Fatalf("prefix scorer setup: %v", err)
 	}

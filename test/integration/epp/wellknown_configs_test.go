@@ -59,46 +59,45 @@ schedulingProfiles:
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
 		},
 	},
-	// TODO: Enable this test case once the bug #1069 is fixed.
-	// 	"tiered-prefix-cache-cpu": {
-	// 		yaml: `
-	// apiVersion: llm-d.ai/v1alpha1
-	// kind: EndpointPickerConfig
-	// plugins:
-	// - type: approx-prefix-cache-producer
-	//   name: cpu-prefix-cache-producer
-	//   parameters:
-	//     autoTune: false
-	//     lruCapacityPerServer: 1000
-	// - type: queue-scorer
-	// - type: kv-cache-utilization-scorer
-	// - type: prefix-cache-scorer
-	//   name: gpu-prefix-cache-scorer
-	// - type: prefix-cache-scorer
-	//   name: cpu-prefix-cache-scorer
-	//   parameters:
-	//     producer: cpu-prefix-cache-producer
-	// schedulingProfiles:
-	// - name: default
-	//   plugins:
-	//   - pluginRef: queue-scorer
-	//     weight: 2
-	//   - pluginRef: kv-cache-utilization-scorer
-	//     weight: 2.0
-	//   - pluginRef: gpu-prefix-cache-scorer
-	//     weight: 1.0
-	//   - pluginRef: cpu-prefix-cache-scorer
-	//     weight: 1.0
-	// `,
-	// 		expectedPlugins: []configapi.PluginSpec{
-	// 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"}, // this one is auto configured.
-	// 			{Name: "cpu-prefix-cache-producer", Type: "approx-prefix-cache-producer"},    // this one is configured manually.
-	// 			{Name: "queue-scorer", Type: "queue-scorer"},
-	// 			{Name: "kv-cache-utilization-scorer", Type: "kv-cache-utilization-scorer"},
-	// 			{Name: "gpu-prefix-cache-scorer", Type: "prefix-cache-scorer"},
-	// 			{Name: "cpu-prefix-cache-scorer", Type: "prefix-cache-scorer"},
-	// 		},
-	// 	},
+	"tiered-prefix-cache-cpu": {
+		yaml: `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: approx-prefix-cache-producer
+  name: cpu-prefix-cache-producer
+  parameters:
+    autoTune: false
+    lruCapacityPerServer: 1000
+- type: queue-scorer
+- type: kv-cache-utilization-scorer
+- type: prefix-cache-scorer
+  name: gpu-prefix-cache-scorer
+- type: prefix-cache-scorer
+  name: cpu-prefix-cache-scorer
+  parameters:
+    producer: cpu-prefix-cache-producer
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: queue-scorer
+    weight: 2
+  - pluginRef: kv-cache-utilization-scorer
+    weight: 2.0
+  - pluginRef: gpu-prefix-cache-scorer
+    weight: 1.0
+  - pluginRef: cpu-prefix-cache-scorer
+    weight: 1.0
+`,
+		expectedPlugins: []configapi.PluginSpec{
+			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"}, // this one is auto configured.
+			{Name: "cpu-prefix-cache-producer", Type: "approx-prefix-cache-producer"},    // this one is configured manually.
+			{Name: "queue-scorer", Type: "queue-scorer"},
+			{Name: "kv-cache-utilization-scorer", Type: "kv-cache-utilization-scorer"},
+			{Name: "gpu-prefix-cache-scorer", Type: "prefix-cache-scorer"},
+			{Name: "cpu-prefix-cache-scorer", Type: "prefix-cache-scorer"},
+		},
+	},
 	"pd-disaggregation": {
 		yaml: `
 apiVersion: llm-d.ai/v1alpha1

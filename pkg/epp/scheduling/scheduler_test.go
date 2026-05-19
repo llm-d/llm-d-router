@@ -40,7 +40,7 @@ import (
 func TestSchedule(t *testing.T) {
 	kvCacheUtilizationScorer := kvcacheutilization.NewKVCacheUtilizationScorer()
 	queueingScorer := queuedepth.NewQueueScorer()
-	prefixCacheScorer, err := schedprefix.New(context.Background(), "approx-prefix-cache-producer")
+	prefixCacheScorer, err := schedprefix.New(context.Background(), schedprefix.PrefixCacheScorerPluginType, "approx-prefix-cache-producer")
 	assert.NoError(t, err)
 	loraAffinityScorer := loraaffinity.NewLoraAffinityScorer()
 

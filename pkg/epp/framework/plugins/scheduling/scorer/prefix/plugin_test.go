@@ -30,7 +30,7 @@ import (
 
 func TestPrefixPluginScore(t *testing.T) {
 	producerName := "approx-prefix-cache-producer"
-	p, _ := New(context.Background(), producerName)
+	p, _ := New(context.Background(), PrefixCacheScorerPluginType, producerName)
 
 	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
 

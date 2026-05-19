@@ -318,11 +318,11 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			handler, err := NewPdProfileHandler(
-				defaultPrefillProfile,
-				defaultDecodeProfile,
-				tt.prefixPluginType,
-				tt.prefixPluginName,
-				0,
+				"test-handler",
+				pdProfileHandlerParameters{
+					PrefillProfile: defaultPrefillProfile,
+					DecodeProfile:  defaultDecodeProfile,
+				},
 				deciderPlugin,
 			)
 			assert.NoError(t, err)
@@ -418,11 +418,11 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 			assert.NoError(t, err)
 
 			handler, err := NewPdProfileHandler(
-				defaultPrefillProfile,
-				defaultDecodeProfile,
-				prefix.PrefixCacheScorerPluginType,
-				prefix.PrefixCacheScorerPluginType,
-				0,
+				"test-handler",
+				pdProfileHandlerParameters{
+					PrefillProfile: defaultPrefillProfile,
+					DecodeProfile:  defaultDecodeProfile,
+				},
 				deciderPlugin,
 			)
 			assert.NoError(t, err)
@@ -518,11 +518,12 @@ func TestPdProfileHandler_ProcessResults(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			handler, err := NewPdProfileHandler(
-				defaultPrefillProfile,
-				defaultDecodeProfile,
-				prefix.PrefixCacheScorerPluginType,
-				prefix.PrefixCacheScorerPluginType,
-				tt.primaryPort,
+				"test-handler",
+				pdProfileHandlerParameters{
+					PrefillProfile: defaultPrefillProfile,
+					DecodeProfile:  defaultDecodeProfile,
+					PrimaryPort:    tt.primaryPort,
+				},
 				deciderPlugin,
 			)
 			assert.NoError(t, err)

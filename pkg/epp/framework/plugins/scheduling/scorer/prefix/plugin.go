@@ -60,22 +60,19 @@ func PrefixCachePluginFactory(name string, rawParameters json.RawMessage, handle
 		}
 	}
 
-	p, err := New(handle.Context(), cfg.PrefixMatchInfoProducerName)
+	p, err := New(handle.Context(), name, cfg.PrefixMatchInfoProducerName)
 	if err != nil {
 		return nil, err
-	}
-	if name != "" {
-		p = p.WithName(name)
 	}
 	return p, nil
 }
 
 // New initializes a new prefix Plugin.
-func New(_ context.Context, producerName string) (*Plugin, error) {
+func New(_ context.Context, name string, producerName string) (*Plugin, error) {
 	return &Plugin{
 		typedName: plugin.TypedName{
 			Type: PrefixCacheScorerPluginType,
-			Name: PrefixCacheScorerPluginType,
+			Name: name,
 		},
 		prefixMatchDataKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName),
 	}, nil
@@ -89,12 +86,6 @@ func (p *Plugin) TypedName() plugin.TypedName {
 // Category returns the preference the scorer applies (Affinity).
 func (p *Plugin) Category() fwksched.ScorerCategory {
 	return fwksched.Affinity
-}
-
-// WithName sets the name of the plugin instance.
-func (p *Plugin) WithName(name string) *Plugin {
-	p.typedName.Name = name
-	return p
 }
 
 // Produces returns the data produced by the plugin.
