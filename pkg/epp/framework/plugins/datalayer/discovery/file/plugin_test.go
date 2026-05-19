@@ -264,15 +264,19 @@ func TestStart_WatchFileReloadsOnWrite(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- fd.Start(ctx, notifier) }()
 
-	time.Sleep(100 * time.Millisecond)
-	require.NoError(t, os.WriteFile(path, []byte(`
+	newContent := []byte(`
 endpoints:
   - name: ep3
     address: "10.0.0.3"
     port: "9000"
-`), 0o600))
-
-	assert.Eventually(t, func() bool {
+`)
+	// Re-touch the file each poll so the write that lands after the watcher
+	// is attached is the one that triggers the reload. Avoids racing on the
+	// gap between Start()'s initial load and watcher.Add().
+	require.Eventually(t, func() bool {
+		if err := os.WriteFile(path, newContent, 0o600); err != nil {
+			return false
+		}
 		notifier.mu.Lock()
 		defer notifier.mu.Unlock()
 		for _, m := range notifier.upserted {
