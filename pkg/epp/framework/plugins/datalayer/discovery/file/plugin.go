@@ -45,11 +45,13 @@ type EndpointEntry struct {
 	Namespace string `json:"namespace,omitempty"   yaml:"namespace,omitempty"`
 	Address   string `json:"address"               yaml:"address"`
 	Port      string `json:"port"                  yaml:"port"`
-	// MetricsHost is the host:port the EPP scrapes for Prometheus metrics
+	// MetricsPort is the port the EPP scrapes for Prometheus metrics
 	// (e.g., vLLM /metrics). Set this when the model server exposes metrics
-	// on a different port than its inference port. Optional; defaults to
-	// "address:port" (i.e., scrape metrics from the inference port).
-	MetricsHost string            `json:"metricsHost,omitempty" yaml:"metricsHost,omitempty"`
+	// on a different port than its inference port. Metrics are always
+	// scraped from Address (same IP that serves inference); only the port
+	// can differ. Optional; defaults to Port (i.e., scrape metrics from
+	// the inference port).
+	MetricsPort int               `json:"metricsPort,omitempty" yaml:"metricsPort,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"      yaml:"labels,omitempty"`
 }
 
@@ -202,6 +204,13 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			errs = append(errs, fmt.Errorf("endpoint %q: invalid port %q", e.Name, e.Port))
 			continue
 		}
+		metricsPort := e.MetricsPort
+		if metricsPort == 0 {
+			metricsPort = portNum
+		} else if metricsPort < 1 || metricsPort > 65535 {
+			errs = append(errs, fmt.Errorf("endpoint %q: invalid metricsPort %d", e.Name, e.MetricsPort))
+			continue
+		}
 		ns := e.Namespace
 		if ns == "" {
 			ns = "default"
@@ -211,11 +220,8 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			PodName:        e.Name,
 			Address:        e.Address,
 			Port:           e.Port,
-			MetricsHost:    e.MetricsHost,
+			MetricsHost:    net.JoinHostPort(e.Address, strconv.Itoa(metricsPort)),
 			Labels:         e.Labels,
-		}
-		if meta.MetricsHost == "" {
-			meta.MetricsHost = fmt.Sprintf("%s:%s", e.Address, e.Port)
 		}
 		incoming[meta.NamespacedName] = struct{}{}
 		notifier.Upsert(meta)
