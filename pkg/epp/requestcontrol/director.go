@@ -222,7 +222,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
-	if err := d.runPreAdmissionProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
+	if err := d.runPreAdmissionPlugins(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
 
@@ -496,12 +496,12 @@ func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.I
 	}
 }
 
-func (d *Director) runPreAdmissionProcessors(ctx context.Context, request *fwksched.InferenceRequest) error {
-	if len(d.requestControlPlugins.preAdmissionProcessors) == 0 {
+func (d *Director) runPreAdmissionPlugins(ctx context.Context, request *fwksched.InferenceRequest) error {
+	if len(d.requestControlPlugins.preAdmissionPlugins) == 0 {
 		return nil
 	}
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
-	for _, plugin := range d.requestControlPlugins.preAdmissionProcessors {
+	for _, plugin := range d.requestControlPlugins.preAdmissionPlugins {
 		loggerDebug.Info("Running PreAdmissionProcessor plugin", "plugin", plugin.TypedName())
 		before := time.Now()
 		if err := plugin.ProcessPreAdmission(ctx, request); err != nil {
