@@ -37,6 +37,8 @@ type Parameters struct {
 	// Default: 1.0 (no gap, current behavior)
 	// Example: 0.5 means idle pods get 1.0, busiest pod gets 0.0, least busy gets 0.5
 	MaxBusyScore float64 `json:"maxBusyScore"`
+
+	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
 }
 
 // endpointScores implements logr.Marshaler to lazily convert endpoint keys
@@ -94,17 +96,24 @@ func NewActiveRequest(ctx context.Context, params *Parameters) *ActiveRequest {
 			"maxBusyScore", maxBusyScore)
 	}
 
+	var inFlightLoadProducerName string
+	if params != nil {
+		inFlightLoadProducerName = params.InFlightLoadProducerName
+	}
+
 	return &ActiveRequest{
-		typedName:     plugin.TypedName{Type: ActiveRequestType},
-		idleThreshold: idleThreshold,
-		maxBusyScore:  maxBusyScore,
+		typedName:           plugin.TypedName{Type: ActiveRequestType},
+		idleThreshold:       idleThreshold,
+		maxBusyScore:        maxBusyScore,
+		inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(inFlightLoadProducerName),
 	}
 }
 
 // ActiveRequest scores endpoints based on in-flight request counts produced by
 // the inflight-load-producer data producer.
 type ActiveRequest struct {
-	typedName plugin.TypedName
+	typedName           plugin.TypedName
+	inFlightLoadDataKey plugin.DataKey
 
 	// idleThreshold defines the max request count to be considered idle
 	idleThreshold int
@@ -129,9 +138,9 @@ func (s *ActiveRequest) Category() scheduling.ScorerCategory {
 }
 
 // Consumes returns the in-flight load attribute required for scoring.
-func (s *ActiveRequest) Consumes() map[string]any {
-	return map[string]any{
-		attrconcurrency.InFlightLoadKey: attrconcurrency.InFlightLoad{},
+func (s *ActiveRequest) Consumes() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		s.inFlightLoadDataKey: attrconcurrency.InFlightLoad{},
 	}
 }
 
@@ -145,7 +154,7 @@ func (s *ActiveRequest) Score(ctx context.Context, _ *scheduling.CycleState, _ *
 
 	for _, endpoint := range endpoints {
 		endpointName := endpoint.GetMetadata().NamespacedName.String()
-		count := requestCount(ctx, endpoint)
+		count := s.requestCount(ctx, endpoint)
 		requestCounts[endpoint] = count
 		logCounts[endpointName] = count
 		if count > maxCount {
@@ -172,8 +181,8 @@ func (s *ActiveRequest) Score(ctx context.Context, _ *scheduling.CycleState, _ *
 	return scoredEndpointsMap
 }
 
-func requestCount(ctx context.Context, endpoint scheduling.Endpoint) int64 {
-	val, ok := endpoint.Get(attrconcurrency.InFlightLoadKey)
+func (s *ActiveRequest) requestCount(ctx context.Context, endpoint scheduling.Endpoint) int64 {
+	val, ok := endpoint.Get(s.inFlightLoadDataKey.String())
 	if !ok {
 		return 0
 	}

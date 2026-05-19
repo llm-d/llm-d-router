@@ -29,12 +29,16 @@ import (
 )
 
 func TestPrefixPluginScore(t *testing.T) {
-	p, _ := New(context.Background())
+	producerName := "approx-prefix-cache-producer"
+	p, _ := New(context.Background(), PrefixCacheScorerPluginType, producerName)
+
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
+
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), nil)
-	endpoint1.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
+	endpoint1.Put(key, attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
 
 	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), nil)
-	endpoint2.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(2, 10, 1))
+	endpoint2.Put(key, attrprefix.NewPrefixCacheMatchInfo(2, 10, 1))
 
 	endpoints := []fwksched.Endpoint{endpoint1, endpoint2}
 	scores := p.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)

@@ -18,11 +18,11 @@ package prefix
 
 import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 )
 
-const (
-	PrefixCacheMatchInfoKey = "PrefixCacheMatchInfoKey"
-)
+var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
 
 type PrefixCacheMatchInfo struct {
 	// matched prefix length in blocks

@@ -41,7 +41,7 @@ func TestProduce(t *testing.T) {
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
 	// Test the "initialize if nil" pattern
-	p, err := newDataProducer(context.Background(), config, nil)
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, p.PluginState())
 
@@ -72,8 +72,9 @@ func TestProduce(t *testing.T) {
 	assert.Equal(t, 2, len(state.PrefixHashes)) // "aaaabbbb" with blockSize 4 (1 token * 4 chars) -> 2 blocks
 
 	// Verify pod match info was set (should be 0 match since indexer is empty)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
 	for _, ep := range endpoints {
-		info, ok := ep.Get(attrprefix.PrefixCacheMatchInfoKey)
+		info, ok := ep.Get(key)
 		assert.True(t, ok)
 		prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
 		assert.Equal(t, 0, prefixInfo.MatchBlocks())
@@ -87,7 +88,7 @@ func TestPreRequest(t *testing.T) {
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, _ := newDataProducer(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, nil)
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
 	req1 := &fwksched.InferenceRequest{
@@ -148,12 +149,12 @@ func TestDataProducerValidation(t *testing.T) {
 	}}
 
 	for _, config := range validConfigs {
-		_, err := newDataProducer(context.Background(), config, nil)
+		_, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, nil)
 		assert.NoError(t, err)
 	}
 
 	for _, config := range invalidConfigs {
-		_, err := newDataProducer(context.Background(), config, nil)
+		_, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, nil)
 		assert.Error(t, err)
 	}
 }
@@ -164,7 +165,7 @@ func TestPrefixPluginCompletion(t *testing.T) {
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, _ := newDataProducer(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, nil)
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
 	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
@@ -209,19 +210,20 @@ func TestPrefixPluginCompletion(t *testing.T) {
 	}
 	_ = p.Produce(context.Background(), req3, endpoints)
 
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
 	// Verify pod1 has the correct prefix match info
-	info1, _ := endpoint1.Get(attrprefix.PrefixCacheMatchInfoKey)
+	info1, _ := endpoint1.Get(key)
 	prefixInfo1 := info1.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Equal(t, 1, prefixInfo1.MatchBlocks()) // one block ("aaaa") matches
 	assert.Equal(t, 2, prefixInfo1.TotalBlocks()) // "aaaabbbb" -> 2 blocks
 
 	// Verify pod3 (prefill node) also has the match
-	info3, _ := endpoint3.Get(attrprefix.PrefixCacheMatchInfoKey)
+	info3, _ := endpoint3.Get(key)
 	prefixInfo3 := info3.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Equal(t, 1, prefixInfo3.MatchBlocks())
 
 	// Verify pod2 has no match info
-	info2, _ := endpoint2.Get(attrprefix.PrefixCacheMatchInfoKey)
+	info2, _ := endpoint2.Get(key)
 	prefixInfo2 := info2.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Equal(t, 0, prefixInfo2.MatchBlocks())
 }
@@ -233,7 +235,7 @@ func TestPrefixPluginChatCompletionsGrowth(t *testing.T) {
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, _ := newDataProducer(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, nil)
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint1}
@@ -286,7 +288,8 @@ func TestPrefixPluginChatCompletionsGrowth(t *testing.T) {
 	extendedHashCount := len(state2.PrefixHashes)
 	assert.Greater(t, extendedHashCount, initialHashCount)
 
-	info, _ := endpoint1.Get(attrprefix.PrefixCacheMatchInfoKey)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
+	info, _ := endpoint1.Get(key)
 	prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Greater(t, prefixInfo.MatchBlocks(), 0, "should have prefix cache hit")
 	assert.Equal(t, extendedHashCount, prefixInfo.TotalBlocks())
@@ -299,7 +302,7 @@ func TestPrefixPluginChatCompletionsMultimodalSameUrlMatches(t *testing.T) {
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, _ := newDataProducer(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, nil)
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint1}
@@ -357,7 +360,8 @@ func TestPrefixPluginChatCompletionsMultimodalSameUrlMatches(t *testing.T) {
 		},
 	}
 	_ = p.Produce(context.Background(), req2, endpoints)
-	info, _ := endpoint1.Get(attrprefix.PrefixCacheMatchInfoKey)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
+	info, _ := endpoint1.Get(key)
 	prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
 
 	// Since same prefix hashes are expected to be generated
@@ -371,7 +375,7 @@ func TestPrefixPluginChatCompletionsMultimodalDifferentUrlPartialMatch(t *testin
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, _ := newDataProducer(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, nil)
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint1}
@@ -431,7 +435,8 @@ func TestPrefixPluginChatCompletionsMultimodalDifferentUrlPartialMatch(t *testin
 		},
 	}
 	_ = p.Produce(context.Background(), req2, endpoints)
-	info, _ := endpoint1.Get(attrprefix.PrefixCacheMatchInfoKey)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
+	info, _ := endpoint1.Get(key)
 	prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
 	// Not a full cache hit as the image url has changed
 	assert.Less(t, prefixInfo.MatchBlocks(), prefixInfo.TotalBlocks(), "should not have full prefix cache hit")
@@ -464,7 +469,7 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   1,
 	}
-	p, _ := newDataProducer(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, nil)
 
 	_ = p.Produce(context.Background(), req, endpoints)
 	state, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
@@ -493,7 +498,7 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 		MaxPrefixTokensToMatch: 2,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, err := newDataProducer(context.Background(), cfg, nil)
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, nil)
 	assert.NoError(t, err)
 
 	endpoint := fwksched.NewEndpoint(
@@ -526,7 +531,7 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 		MaxPrefixBlocksToMatch: 3,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p2, err := newDataProducer(context.Background(), cfg2, nil)
+	p2, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg2, nil)
 	assert.NoError(t, err)
 
 	req2 := &fwksched.InferenceRequest{
@@ -554,7 +559,7 @@ func BenchmarkPrefixPluginStress(b *testing.B) {
 		MaxPrefixBlocksToMatch: 50000,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, _ := newDataProducer(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, nil)
 
 	promptLen := []int{1024, 4096, 10000, 50000}
 

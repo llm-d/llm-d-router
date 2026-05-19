@@ -1,6 +1,6 @@
 {{- define "inference-extension.service-monitor" -}}
-{{- $inferenceExtensionMonitoringProviderName := include "llm-d-router.inferenceExtension.monitoring.provider.name" . | lower -}}
-{{- if and .Values.inferenceExtension.monitoring.prometheus.enabled (eq $inferenceExtensionMonitoringProviderName "prometheusoperator") }}
+{{- $monitoringProviderName := include "llm-d-router.monitoring.provider.name" . | lower -}}
+{{- if and .Values.inferenceExtension.monitoring.prometheus.enabled (eq $monitoringProviderName "prometheusoperator") }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

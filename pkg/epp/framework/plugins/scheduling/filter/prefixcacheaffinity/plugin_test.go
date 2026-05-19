@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -37,16 +38,25 @@ func makeEndpoint(name string, prefixMatch int, ttft float64) fwksched.Endpoint 
 	}
 	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	if prefixMatch >= 0 {
-		ep.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(prefixMatch, 100, 16))
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(prefixMatch, 100, 16))
 	}
 	if ttft >= 0 {
-		ep.Put(attrlatency.LatencyPredictionInfoKey, attrlatency.NewLatencyPredictionInfo(true, true, 0, 0, ttft, 0, 0))
+		ep.Put(attrlatency.LatencyPredictionInfoDataKey.String(), attrlatency.NewLatencyPredictionInfo(true, true, 0, 0, ttft, 0, 0))
 	}
 	return ep
 }
 
+func newTestPlugin(config Config) *Plugin {
+	return &Plugin{
+		typedName:                    fwkplugin.TypedName{Type: PluginType, Name: "test"},
+		config:                       config,
+		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
+		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
+	}
+}
+
 func TestFilter_AffinityThresholdDisabled(t *testing.T) {
-	p := &Plugin{config: Config{AffinityThreshold: 0}}
+	p := newTestPlugin(Config{AffinityThreshold: 0})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 0, 10),
 		makeEndpoint("b", 90, 20),
@@ -56,14 +66,14 @@ func TestFilter_AffinityThresholdDisabled(t *testing.T) {
 }
 
 func TestFilter_SingleEndpoint(t *testing.T) {
-	p := &Plugin{config: Config{AffinityThreshold: 0.80}}
+	p := newTestPlugin(Config{AffinityThreshold: 0.80})
 	endpoints := []fwksched.Endpoint{makeEndpoint("a", 90, 10)}
 	result := p.Filter(context.Background(), nil, nil, endpoints)
 	assert.Equal(t, 1, len(result), "single endpoint should always pass")
 }
 
 func TestFilter_NoStickyEndpoints(t *testing.T) {
-	p := &Plugin{config: Config{AffinityThreshold: 0.80, ExplorationProbability: 0}}
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 10, 10),
 		makeEndpoint("b", 20, 20),
@@ -74,7 +84,7 @@ func TestFilter_NoStickyEndpoints(t *testing.T) {
 }
 
 func TestFilter_NarrowToSticky(t *testing.T) {
-	p := &Plugin{config: Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 5000}}
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 5000})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 100),
 		makeEndpoint("b", 85, 120),
@@ -85,7 +95,7 @@ func TestFilter_NarrowToSticky(t *testing.T) {
 }
 
 func TestFilter_TTFTPenaltyBreaksStickiness(t *testing.T) {
-	p := &Plugin{config: Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100}}
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 500),
 		makeEndpoint("b", 10, 50),
@@ -95,7 +105,7 @@ func TestFilter_TTFTPenaltyBreaksStickiness(t *testing.T) {
 }
 
 func TestFilter_ExplorationProbability(t *testing.T) {
-	p := &Plugin{config: Config{AffinityThreshold: 0.80, ExplorationProbability: 1.0}}
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 1.0})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 100),
 		makeEndpoint("b", 10, 50),

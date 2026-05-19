@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
@@ -41,7 +42,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 	var prefixCacheScore float64
 	for _, endpoint := range endpoints {
 
-		if prefixCacheInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoKey); ok {
+		if prefixCacheInfoRaw, ok := endpoint.Get(pl.prefixMatchDataKey.String()); ok {
 			prefixCacheInfo := prefixCacheInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
 			prefixCacheScore = float64(prefixCacheInfo.MatchBlocks()) / float64(prefixCacheInfo.TotalBlocks())
 			if !math.IsNaN(prefixCacheScore) {
@@ -81,7 +82,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 					pred.TPOT,
 					pl.getEndpointRunningRequestCount(pred.Endpoint),
 				)
-				pred.Endpoint.Put(attrlatency.LatencyPredictionInfoKey, latencyInfo)
+				pred.Endpoint.Put(pl.latencyPredictionInfoDataKey.String(), latencyInfo)
 				logger.V(logutil.DEBUG).Info("Stored latency prediction in endpoint",
 					"pod", pred.Endpoint.GetMetadata().NamespacedName.Name,
 					"ttft", pred.TTFT,
@@ -105,12 +106,12 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 	return nil
 }
 
-func (pl *PredictedLatency) Produces() map[string]any {
-	return map[string]any{
-		attrlatency.LatencyPredictionInfoKey: attrlatency.LatencyPredictionInfo{},
+func (pl *PredictedLatency) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		pl.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
 	}
 }
 
-func (pl *PredictedLatency) Consumes() map[string]any {
-	return map[string]any{attrprefix.PrefixCacheMatchInfoKey: attrprefix.PrefixCacheMatchInfo{}}
+func (pl *PredictedLatency) Consumes() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{pl.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}}
 }

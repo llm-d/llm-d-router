@@ -41,7 +41,7 @@ func createTestEndpointWithLabels(name string, kvCacheUsage float64, runningRequ
 func TestValidatePrediction_StreamingMode(t *testing.T) {
 	cfg := DefaultConfig
 	cfg.StreamingMode = true
-	pl := NewPredictedLatency(cfg, nil)
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, cfg, nil)
 
 	tests := []struct {
 		name            string
@@ -118,7 +118,7 @@ func TestValidatePrediction_StreamingMode(t *testing.T) {
 func TestValidatePrediction_NonStreamingMode(t *testing.T) {
 	config := DefaultConfig
 	config.StreamingMode = false
-	pl := NewPredictedLatency(config, nil)
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, config, nil)
 
 	ctx := &predictedLatencyCtx{
 		ttftSLO:    100,
@@ -141,7 +141,7 @@ func TestValidatePrediction_PrefillEndpointNeutralizeTPOT(t *testing.T) {
 	config := DefaultConfig
 	config.EndpointRoleLabel = "role"
 	config.StreamingMode = true
-	pl := NewPredictedLatency(config, nil)
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, config, nil)
 
 	prefillEp := createTestEndpointWithLabels("prefill-pod", 0.3, 0, 0, map[string]string{"role": "prefill"})
 	decodeEp := createTestEndpointWithLabels("decode-pod", 0.3, 0, 0, map[string]string{"role": "decode"})
@@ -210,7 +210,7 @@ func TestValidatePrediction_PrefillEndpointNeutralizeTPOT(t *testing.T) {
 }
 
 func TestUpdateRequestContextWithPredictions(t *testing.T) {
-	pl := NewPredictedLatency(DefaultConfig, nil)
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, DefaultConfig, nil)
 	ctx := &predictedLatencyCtx{
 		predictionsForScheduling: make(map[string]endpointPredictionResult),
 	}

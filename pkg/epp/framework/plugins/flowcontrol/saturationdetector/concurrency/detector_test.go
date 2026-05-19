@@ -619,13 +619,13 @@ func (e *liveEndpoint) String() string                               { return e.
 
 // liveEndpoint also implements AttributeMap.
 func (e *liveEndpoint) Get(key string) (datalayer.Cloneable, bool) {
-	if key == attrconcurrency.InFlightLoadKey {
+	if key == attrconcurrency.InFlightLoadDataKey.String() {
 		return e.reg.get(e.id), true
 	}
 	return nil, false
 }
 func (e *liveEndpoint) Put(string, datalayer.Cloneable) {}
-func (e *liveEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadKey} }
+func (e *liveEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadDataKey.String()} }
 func (e *liveEndpoint) Clone() datalayer.AttributeMap   { return e }
 
 func newFakeEndpoint(reg *localRegistry, name string) datalayer.Endpoint {
@@ -655,15 +655,17 @@ func newStubSchedulingEndpoint(reg *localRegistry, name string) *liveSchedulingE
 
 func (f *liveSchedulingEndpoint) GetMetadata() *datalayer.EndpointMetadata { return f.metadata }
 func (f *liveSchedulingEndpoint) Get(key string) (datalayer.Cloneable, bool) {
-	if key == attrconcurrency.InFlightLoadKey {
+	if key == attrconcurrency.InFlightLoadDataKey.String() {
 		return f.reg.get(f.id), true
 	}
 	return nil, false
 }
 func (f *liveSchedulingEndpoint) Put(string, datalayer.Cloneable) {}
-func (f *liveSchedulingEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadKey} }
-func (f *liveSchedulingEndpoint) String() string                  { return f.id }
-func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap   { return f }
+func (f *liveSchedulingEndpoint) Keys() []string {
+	return []string{attrconcurrency.InFlightLoadDataKey.String()}
+}
+func (f *liveSchedulingEndpoint) String() string                { return f.id }
+func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
 
 func makeTokenRequest(requestID, prompt string) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{

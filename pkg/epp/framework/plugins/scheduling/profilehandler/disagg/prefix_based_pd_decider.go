@@ -120,7 +120,7 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 	}
 	// inspect the decode endpoint to disaggregate if prefill should run or not.
 	// if the non-cached part is short enough - no disaggregation.
-	prefixInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoKey)
+	prefixInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String())
 	if !ok || prefixInfoRaw == nil {
 		logger.Error(nil, "unable to read prefix cache state")
 		return false

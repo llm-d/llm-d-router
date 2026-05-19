@@ -148,12 +148,12 @@ func PluginFactory(name string, rawParameters json.RawMessage,
 		return nil, errors.New("modelName is required when indexerConfig.tokenizersPoolConfig is set")
 	}
 
-	scorer, err := New(handle.Context(), parameters)
+	scorer, err := New(handle.Context(), name, parameters)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create %s plugin: %w", PrecisePrefixCachePluginType, err)
 	}
 
-	return scorer.WithName(name), nil
+	return scorer, nil
 }
 
 // New initializes a new prefix Plugin and returns its pointer.
@@ -165,7 +165,7 @@ func PluginFactory(name string, rawParameters json.RawMessage,
 //
 // If the configuration is invalid or if the indexer fails to initialize,
 // an error is returned.
-func New(ctx context.Context, config PluginConfig) (*Scorer, error) {
+func New(ctx context.Context, name string, config PluginConfig) (*Scorer, error) {
 	if config.TokenProcessorConfig == nil {
 		config.TokenProcessorConfig = kvblock.DefaultTokenProcessorConfig()
 	}
@@ -244,7 +244,7 @@ func New(ctx context.Context, config PluginConfig) (*Scorer, error) {
 	}
 
 	return &Scorer{
-		typedName:          plugin.TypedName{Type: PrecisePrefixCachePluginType},
+		typedName:          plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: name},
 		kvCacheIndexer:     kvCacheIndexer,
 		kvBlockScorer:      kvBlockScorer,
 		subscribersManager: subscribersManager,
@@ -255,6 +255,7 @@ func New(ctx context.Context, config PluginConfig) (*Scorer, error) {
 		blockSizeTokens:    config.TokenProcessorConfig.BlockSize,
 		speculativeEnabled: config.SpeculativeIndexing,
 		subscriberCtx:      ctx,
+		prefixMatchDataKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}, nil
 }
 
@@ -314,17 +315,13 @@ type Scorer struct {
 	// matching the original behavior of `context.Background()` in the
 	// pre-refactor code.
 	subscriberCtx context.Context
+
+	prefixMatchDataKey plugin.DataKey
 }
 
 // TypedName returns the typed name of the plugin.
 func (s *Scorer) TypedName() plugin.TypedName {
 	return s.typedName
-}
-
-// WithName sets the name of the plugin.
-func (s *Scorer) WithName(name string) *Scorer {
-	s.typedName.Name = name
-	return s
 }
 
 // Category returns the preference the scorer applies when scoring candidate endpoints.
@@ -335,9 +332,9 @@ func (s *Scorer) Category() scheduling.ScorerCategory {
 // --- DataProducerPlugin implementation ---
 
 // Produces declares the data keys this plugin writes to endpoints.
-func (s *Scorer) Produces() map[string]any {
-	return map[string]any{
-		attrprefix.PrefixCacheMatchInfoKey: attrprefix.PrefixCacheMatchInfo{},
+func (s *Scorer) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		s.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{},
 	}
 }
 
@@ -390,7 +387,7 @@ func (s *Scorer) Produce(ctx context.Context,
 		}
 		addr := fmt.Sprintf("%s:%s", md.Address, md.Port)
 		matchLen := int(scores[addr])
-		ep.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(matchLen, len(blockKeys), blockSize))
+		ep.Put(s.prefixMatchDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, len(blockKeys), blockSize))
 	}
 
 	// 6. Save to PluginState for Score() and PreRequest()
@@ -495,7 +492,7 @@ func (s *Scorer) Score(ctx context.Context, cycleState *scheduling.CycleState, r
 				matchBlocks = 1
 			}
 		}
-		endpoint.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(matchBlocks, 1, 1))
+		endpoint.Put(s.prefixMatchDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(matchBlocks, 1, 1))
 	}
 
 	normalizedScores := absoluteScoredPods(endpoints, endpointToKey, scores, totalBlocks)

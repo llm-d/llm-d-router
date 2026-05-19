@@ -37,7 +37,8 @@ const (
 type Config struct {
 	// QueueThresholdTokens defines the maximum number of in-flight tokens used for scoring normalization.
 	// Defaults to 4194304 if unset.
-	QueueThresholdTokens int64 `json:"queueThresholdTokens"`
+	QueueThresholdTokens     int64  `json:"queueThresholdTokens"`
+	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
 }
 
 // compile-time type assertion
@@ -46,6 +47,7 @@ var _ fwksched.Scorer = &TokenLoadScorer{}
 type TokenLoadScorer struct {
 	typedName            fwkplugin.TypedName
 	queueThresholdTokens float64
+	inFlightLoadDataKey  fwkplugin.DataKey
 }
 
 func TokenLoadScorerFactory(name string, params json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -64,6 +66,7 @@ func TokenLoadScorerFactory(name string, params json.RawMessage, _ fwkplugin.Han
 	return &TokenLoadScorer{
 		typedName:            fwkplugin.TypedName{Type: TokenLoadScorerType, Name: name},
 		queueThresholdTokens: float64(cfg.QueueThresholdTokens),
+		inFlightLoadDataKey:  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
 	}, nil
 }
 
@@ -75,9 +78,9 @@ func (s *TokenLoadScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-func (s *TokenLoadScorer) Consumes() map[string]any {
-	return map[string]any{
-		attrconcurrency.InFlightLoadKey: attrconcurrency.InFlightLoad{},
+func (s *TokenLoadScorer) Consumes() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{
+		s.inFlightLoadDataKey: attrconcurrency.InFlightLoad{},
 	}
 }
 
@@ -89,7 +92,7 @@ func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.CycleState, _ *
 		endpointID := endpoint.GetMetadata().NamespacedName.String()
 		tokenLoad := 0.0
 
-		if val, ok := endpoint.Get(attrconcurrency.InFlightLoadKey); ok {
+		if val, ok := endpoint.Get(s.inFlightLoadDataKey.String()); ok {
 			if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
 				tokenLoad = float64(load.Tokens)
 			}

@@ -30,11 +30,12 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
-	ApproxPrefixCachePluginType = "approx-prefix-cache-producer"
+	ApproxPrefixCachePluginType = approxprefixconstants.ApproxPrefixCachePluginType
 )
 
 var (
@@ -49,6 +50,7 @@ type dataProducer struct {
 	indexerInst indexerInterface
 	pluginState *plugin.PluginState
 	wg          sync.WaitGroup // Used for waiting on async cache updates in tests.
+	dk          plugin.DataKey
 }
 
 // TypedName returns the type and name of the plugin.
@@ -57,12 +59,12 @@ func (p *dataProducer) TypedName() plugin.TypedName {
 }
 
 // Produces returns the data produced by the plugin.
-func (p *dataProducer) Produces() map[string]any {
-	return map[string]any{attrprefix.PrefixCacheMatchInfoKey: attrprefix.PrefixCacheMatchInfo{}}
+func (p *dataProducer) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
 // newDataProducer returns a new DataProducer plugin.
-func newDataProducer(ctx context.Context, config config, handle plugin.Handle) (*dataProducer, error) {
+func newDataProducer(ctx context.Context, name string, config config, handle plugin.Handle) (*dataProducer, error) {
 	log.FromContext(ctx).V(logutil.DEFAULT).Info("Prefix DataProducer initialized", "config", config)
 
 	//nolint:staticcheck // BlockSize is deprecated, but we check it here to provide a migration path for users.
@@ -81,11 +83,12 @@ func newDataProducer(ctx context.Context, config config, handle plugin.Handle) (
 	p := &dataProducer{
 		typedName: plugin.TypedName{
 			Type: ApproxPrefixCachePluginType,
-			Name: ApproxPrefixCachePluginType,
+			Name: name,
 		},
 		config:      config,
 		indexerInst: indexer,
 		pluginState: plugin.NewPluginState(ctx),
+		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
 	if handle != nil {
@@ -144,7 +147,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 
 	for _, pod := range pods {
 		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().NamespacedName)]
-		pod.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(matchLen, total, blockSize))
+		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, total, blockSize))
 	}
 
 	state := &SchedulingContextState{
@@ -153,8 +156,8 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	}
 
 	// Store the state in shared plugin state for later use in PreRequest.
-	// NOTE: We use the prefix plugin's type name as part of the key so that the scorer can read it.
-	p.pluginState.Write(request.RequestID, plugin.StateKey(ApproxPrefixCachePluginType), state)
+	// NOTE: We use the prefix plugin's name as part of the key so that multiple instances avoid collisions.
+	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
 
 	return nil
 }
@@ -178,7 +181,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	}
 
 	// Read state saved during Produce.
-	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.pluginState, request.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
+	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.pluginState, request.RequestID, plugin.StateKey(p.typedName.Name))
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to read prefix plugin state", "requestID", request.RequestID)
 		return
@@ -254,7 +257,7 @@ func ApproxPrefixCacheFactory(name string, rawParameters json.RawMessage, handle
 	}
 
 	// pluginState will be initialized by newDataProducer as we pass nil here.
-	p, err := newDataProducer(handle.Context(), parameters, handle)
+	p, err := newDataProducer(handle.Context(), name, parameters, handle)
 	if err != nil {
 		return nil, err
 	}

@@ -318,11 +318,11 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			handler, err := NewPdProfileHandler(
-				defaultPrefillProfile,
-				defaultDecodeProfile,
-				tt.prefixPluginType,
-				tt.prefixPluginName,
-				0,
+				"test-handler",
+				pdProfileHandlerParameters{
+					PrefillProfile: defaultPrefillProfile,
+					DecodeProfile:  defaultDecodeProfile,
+				},
 				deciderPlugin,
 			)
 			assert.NoError(t, err)
@@ -333,7 +333,7 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 			for profileName, profileRes := range tt.profileResults {
 				if profileName == defaultDecodeProfile && profileRes != nil {
 					for _, pod := range profileRes.TargetEndpoints {
-						pod.Put(attrprefix.PrefixCacheMatchInfoKey,
+						pod.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
 							attrprefix.NewPrefixCacheMatchInfo(tt.cachedTokens, inputTokens, 1))
 					}
 				}
@@ -418,11 +418,11 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 			assert.NoError(t, err)
 
 			handler, err := NewPdProfileHandler(
-				defaultPrefillProfile,
-				defaultDecodeProfile,
-				prefix.PrefixCacheScorerPluginType,
-				prefix.PrefixCacheScorerPluginType,
-				0,
+				"test-handler",
+				pdProfileHandlerParameters{
+					PrefillProfile: defaultPrefillProfile,
+					DecodeProfile:  defaultDecodeProfile,
+				},
 				deciderPlugin,
 			)
 			assert.NoError(t, err)
@@ -437,7 +437,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 				for profileName, profileRes := range profileResults {
 					if profileName == defaultDecodeProfile && profileRes != nil {
 						for _, endpoint := range profileRes.TargetEndpoints {
-							endpoint.Put(attrprefix.PrefixCacheMatchInfoKey,
+							endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
 								attrprefix.NewPrefixCacheMatchInfo(innerTest.cachedTokens, inputTokens, 1))
 						}
 					}
@@ -518,11 +518,12 @@ func TestPdProfileHandler_ProcessResults(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			handler, err := NewPdProfileHandler(
-				defaultPrefillProfile,
-				defaultDecodeProfile,
-				prefix.PrefixCacheScorerPluginType,
-				prefix.PrefixCacheScorerPluginType,
-				tt.primaryPort,
+				"test-handler",
+				pdProfileHandlerParameters{
+					PrefillProfile: defaultPrefillProfile,
+					DecodeProfile:  defaultDecodeProfile,
+					PrimaryPort:    tt.primaryPort,
+				},
 				deciderPlugin,
 			)
 			assert.NoError(t, err)

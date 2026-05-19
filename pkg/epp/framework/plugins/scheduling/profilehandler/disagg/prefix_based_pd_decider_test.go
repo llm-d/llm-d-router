@@ -44,7 +44,7 @@ func makeTestEndpointBase() scheduling.Endpoint {
 
 func makeTestEndpoint(cachedTokens int) scheduling.Endpoint {
 	ep := makeTestEndpointBase()
-	ep.Put(attrprefix.PrefixCacheMatchInfoKey,
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
 		attrprefix.NewPrefixCacheMatchInfo(cachedTokens, testTotalTokens, testBlockSize))
 	return ep
 }
@@ -291,7 +291,7 @@ func TestDisaggregateWrongPrefixInfoType(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	ep := makeTestEndpointBase()
-	ep.Put(attrprefix.PrefixCacheMatchInfoKey, &notPrefixCacheMatchInfo{})
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), &notPrefixCacheMatchInfo{})
 
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 5})
 	require.NoError(t, err)
@@ -303,11 +303,19 @@ func TestConsumes(t *testing.T) {
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 0})
 	require.NoError(t, err)
 
-	handler, err := NewPdProfileHandler("prefill", "decode", PrefixBasedPDDeciderPluginType, "test", 0, decider)
+	handler, err := NewPdProfileHandler(
+		"test-handler",
+		pdProfileHandlerParameters{
+			PrefillProfile:              "prefill",
+			DecodeProfile:               "decode",
+			PrefixMatchInfoProducerName: "test",
+		},
+		decider,
+	)
 	require.NoError(t, err)
 
 	consumed := handler.Consumes()
-	assert.Contains(t, consumed, attrprefix.PrefixCacheMatchInfoKey)
+	assert.Contains(t, consumed, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 }
 
 func TestWithName(t *testing.T) {

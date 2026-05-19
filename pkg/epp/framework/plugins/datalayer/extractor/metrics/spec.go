@@ -23,11 +23,22 @@ import (
 	"strings"
 
 	dto "github.com/prometheus/client_model/go"
-	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/promql/parser"
+	"github.com/prometheus/common/model"
 
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
+
+// metricSpecRE handles structural parsing: extracts the metric name token and optional label block.
+// Field validation (metric name syntax) is delegated to model.LegacyValidation.IsValidMetricName.
+var metricSpecRE = regexp.MustCompile(`^\s*(\S+?)\s*(?:\{([^}]*)\})?\s*$`)
+
+// labelPairRE handles structural parsing: extracts the key and value from a key="value" label pair
+// (after addQuotesToLabelValues normalisation). Field validation (label name syntax) is delegated
+// to model.LegacyValidation.IsValidLabelName.
+var labelPairRE = regexp.MustCompile(`^\s*(\S+?)\s*=\s*"([^"]*)"\s*$`)
+
+// addQuotesRE is the compiled form of the pattern used by addQuotesToLabelValues.
+var addQuotesRE = regexp.MustCompile(`(\w+)\s*=\s*([^",}\s]+)`)
 
 // Spec represents a single metric's specification.
 type Spec struct {
@@ -44,42 +55,31 @@ func parseStringToSpec(spec string) (*Spec, error) {
 		return nil, nil //nolint:nilnil
 	}
 
-	// Be liberal in accepting inputs that are missing quotes around label values,
-	// allowing both {label=value} and {label=\"value\"} inputs
+	// Normalise unquoted label values so {label=value} and {label="value"} both work.
 	quoted := addQuotesToLabelValues(spec)
-	expr, err := parser.NewParser(parser.Options{}).ParseExpr(quoted)
-	if err != nil {
-		return nil, err
+	m := metricSpecRE.FindStringSubmatch(quoted)
+	if m == nil || !model.LegacyValidation.IsValidMetricName(m[1]) {
+		return nil, fmt.Errorf("not a valid metric specification: %q", spec)
 	}
 
-	// cast to prometheus' VectorSelector to extract metric name and labels
-	if vs, ok := expr.(*parser.VectorSelector); ok {
-		metricLabels := make(map[string]string)
-		for _, matcher := range vs.LabelMatchers {
-			// do not insert pseudo labels (such as __name__, __meta_*, etc.)
-			if matcher.Type == labels.MatchEqual && !strings.HasPrefix(matcher.Name, "__") {
-				metricLabels[matcher.Name] = matcher.Value
+	metricLabels := make(map[string]string)
+	if labelBlock := strings.TrimSpace(m[2]); labelBlock != "" {
+		for _, pair := range strings.Split(labelBlock, ",") {
+			lm := labelPairRE.FindStringSubmatch(pair)
+			if lm == nil || !model.LegacyValidation.IsValidLabelName(lm[1]) {
+				return nil, fmt.Errorf("invalid label pair %q in specification: %q", pair, spec)
 			}
+			metricLabels[lm[1]] = lm[2]
 		}
-
-		if vs.Name == "" {
-			return nil, fmt.Errorf("empty metric name in specification: %q", spec)
-		}
-		return &Spec{
-			Name:   vs.Name,
-			Labels: metricLabels,
-		}, nil
 	}
 
-	return nil, errors.New("not a valid metric specification")
+	return &Spec{Name: m[1], Labels: metricLabels}, nil
 }
 
-// addQuotesToLabelValues wraps label values with quotes, if missing.
-// TODO: compile regexp once as file scoped var? Seems that this won't be
-// a performance hot spot.
+// addQuotesToLabelValues wraps label values with quotes, if missing,
+// allowing both {label=value} and {label="value"} inputs.
 func addQuotesToLabelValues(input string) string {
-	re := regexp.MustCompile(`(\w+)\s*=\s*([^",}\s]+)`)
-	return re.ReplaceAllString(input, `$1="$2"`)
+	return addQuotesRE.ReplaceAllString(input, `$1="$2"`)
 }
 
 // extract the metric family is common to standard and LoRA spec's.

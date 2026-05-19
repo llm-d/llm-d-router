@@ -516,7 +516,7 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 				},
 			}
 
-			prefixCacheScorer, err := New(ctx, PluginConfig{
+			prefixCacheScorer, err := New(ctx, PrecisePrefixCachePluginType, PluginConfig{
 				IndexerConfig:  kvcacheConfig,
 				KVEventsConfig: kvevents.DefaultConfig(),
 			})
@@ -759,7 +759,7 @@ func TestMMPipeline_ScoreTokensWithExtraFeatures_UDS(t *testing.T) {
 		},
 	}
 
-	prefixCacheScorer, err := New(ctx, PluginConfig{
+	prefixCacheScorer, err := New(ctx, PrecisePrefixCachePluginType, PluginConfig{
 		IndexerConfig:  kvcacheConfig,
 		KVEventsConfig: kvevents.DefaultConfig(),
 	})

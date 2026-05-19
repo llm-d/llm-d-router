@@ -29,7 +29,7 @@ func newTestEndpoint(name string, queueSize int) scheduling.Endpoint {
 
 func newTestEndpointWithLoad(name string, requests int64) scheduling.Endpoint {
 	ep := newTestEndpoint(name, 0)
-	ep.Put(attrconcurrency.InFlightLoadKey, &attrconcurrency.InFlightLoad{Requests: requests})
+	ep.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Requests: requests})
 	return ep
 }
 
@@ -147,7 +147,7 @@ func TestActiveRequestScorer_Consumes(t *testing.T) {
 	consumes := scorer.Consumes()
 
 	require.Len(t, consumes, 1)
-	assert.Equal(t, attrconcurrency.InFlightLoad{}, consumes[attrconcurrency.InFlightLoadKey])
+	assert.Equal(t, attrconcurrency.InFlightLoad{}, consumes[attrconcurrency.InFlightLoadDataKey])
 }
 
 func TestActiveRequestScorer_TypedName(t *testing.T) {
@@ -187,7 +187,7 @@ func TestActiveRequest_IdleThresholdAndMaxBusyScore(t *testing.T) {
 		assert.Equal(t, 1.0, scores[podA])
 		assert.Equal(t, 1.0, scores[podB])
 
-		podA.Put(attrconcurrency.InFlightLoadKey, &attrconcurrency.InFlightLoad{Requests: 1})
+		podA.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Requests: 1})
 
 		scores = scorer.Score(ctx, nil, nil, []scheduling.Endpoint{podA, podB})
 		assert.Equal(t, 0.0, scores[podA], "Busy pod scores 0.0 in binary mode")
@@ -215,7 +215,7 @@ func TestActiveRequest_IdleThresholdAndMaxBusyScore(t *testing.T) {
 func inFlightRequests(t *testing.T, endpoint scheduling.Endpoint) int64 {
 	t.Helper()
 
-	val, ok := endpoint.Get(attrconcurrency.InFlightLoadKey)
+	val, ok := endpoint.Get(attrconcurrency.InFlightLoadDataKey.String())
 	require.True(t, ok)
 	load, ok := val.(*attrconcurrency.InFlightLoad)
 	require.True(t, ok)

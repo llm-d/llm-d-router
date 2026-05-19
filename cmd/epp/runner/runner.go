@@ -63,7 +63,9 @@ import (
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
+	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
@@ -78,24 +80,34 @@ import (
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/random"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/weightedrandom"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/dataparallel"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/activerequest"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/contextlengthaware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	latencyscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/latency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loadaware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loraaffinity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/nohitlru"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/runningrequests"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/tokenload"
 	testfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/test/filter"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
@@ -137,6 +149,7 @@ type Runner struct {
 	customCollectors     []prometheus.Collector
 	parser               fwkrh.Parser
 	dlRuntime            *datalayer.Runtime
+	PluginHandle         fwkplugin.Handle
 }
 
 // WithExecutableName sets the name of the executable containing the runner.
@@ -191,7 +204,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	logutil.InitLogging(&opts.ZapOptions)
 
 	if opts.Tracing {
-		err := tracing.InitTracing(ctx, setupLog, "llm-d-inference-scheduler/epp")
+		err := tracing.InitTracing(ctx, setupLog, "llm-d-router/epp")
 		if err != nil {
 			return fmt.Errorf("failed to init tracing %w", err)
 		}
@@ -247,6 +260,8 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		setupLog.Error(err, "Failed to parse configuration")
 		return nil, nil, err
 	}
+	setupLog.Info("Raw config after phase one", "config", rawConfig)
+
 	useNewMetrics := !r.featureGates[datalayer.EnableLegacyMetricsFeatureGate]
 	epf := r.setupMetricsCollection(useNewMetrics, opts, pmc)
 	gknn, err := extractGKNN(opts.PoolName, opts.PoolGroup, opts.PoolNamespace, opts.EndpointSelector)
@@ -273,6 +288,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		setupLog.Error(err, "Failed to parse configuration")
 		return nil, nil, err
 	}
+	setupLog.Info("EPP config after phase two", "config", eppConfig)
 
 	// --- Setup Metrics Server ---
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
@@ -461,16 +477,47 @@ func setupDatastore(ctx context.Context, epFactory datalayer.EndpointFactory, mo
 
 // registerInTreePlugins registers the factory functions of all known plugins
 func (r *Runner) registerInTreePlugins() {
+	// bylabel role filters
+	fwkplugin.Register(bylabel.LabelSelectorFilterType, bylabel.SelectorFactory)
+	fwkplugin.Register(bylabel.ByLabelSelectorType, bylabel.DeprecatedSelectorFactory) //nolint:staticcheck
+	fwkplugin.Register(bylabel.ByLabelType, bylabel.Factory)                           //nolint:staticcheck
+	fwkplugin.Register(bylabel.EncodeRoleType, bylabel.EncodeRoleFactory)
+	fwkplugin.Register(bylabel.DecodeRoleType, bylabel.DecodeRoleFactory)
+	fwkplugin.Register(bylabel.PrefillRoleType, bylabel.PrefillRoleFactory)
+
+	// dataparallel profile handler
+	fwkplugin.Register(dataparallel.DataParallelProfileHandlerType, dataparallel.ProfileHandlerFactory)
+
+	// extra scheduling scorers
+	fwkplugin.Register(loadaware.LoadAwareType, loadaware.Factory)
+	fwkplugin.Register(sessionaffinity.SessionAffinityType, sessionaffinity.Factory)
+	fwkplugin.Register(contextlengthaware.ContextLengthAwareType, contextlengthaware.Factory)
+
+	// data layer models source/extractor
+	fwkplugin.Register(srcmodels.ModelsDataSourceType, srcmodels.ModelDataSourceFactory)
+	fwkplugin.Register(extmodels.ModelsExtractorType, extmodels.ModelServerExtractorFactory)
+
 	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, prefix.PrefixCachePluginFactory)
 	fwkplugin.Register(maxscore.MaxScorePickerType, maxscore.MaxScorePickerFactory)
 	fwkplugin.Register(random.RandomPickerType, random.RandomPickerFactory)
 	fwkplugin.Register(weightedrandom.WeightedRandomPickerType, weightedrandom.WeightedRandomPickerFactory)
 	fwkplugin.Register(single.SingleProfileHandlerType, single.SingleProfileHandlerFactory)
+	fwkplugin.Register(disagg.DisaggHeadersHandlerType, disagg.HeadersHandlerFactory) //nolint:staticcheck // intentional: keep backward compatibility
+	fwkplugin.Register(disagg.PrefillHeaderHandlerType, disagg.HeadersHandlerFactory) //nolint:staticcheck // intentional: keep backward compatibility
+	fwkplugin.Register(disagg.PdProfileHandlerType, disagg.PdProfileHandlerFactory)   //nolint:staticcheck // intentional: keep backward compatibility
+	fwkplugin.Register(disagg.DisaggProfileHandlerType, disagg.HandlerFactory)
+	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, disagg.AlwaysDisaggPDDeciderPluginFactory)
+	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, disagg.PrefixBasedPDDeciderPluginFactory)
+	fwkplugin.Register(disagg.AlwaysDisaggMulimodalPluginType, disagg.AlwaysDisaggMulimodalDeciderPluginFactory)
 	fwkplugin.Register(kvcacheutilization.KvCacheUtilizationScorerType, kvcacheutilization.KvCacheUtilizationScorerFactory)
 	fwkplugin.Register(queuedepth.QueueScorerType, queuedepth.QueueScorerFactory)
 	fwkplugin.Register(runningrequests.RunningRequestsSizeScorerType, runningrequests.RunningRequestsSizeScorerFactory)
 	fwkplugin.Register(loraaffinity.LoraAffinityScorerType, loraaffinity.LoraAffinityScorerFactory)
 	fwkplugin.Register(tokenload.TokenLoadScorerType, tokenload.TokenLoadScorerFactory)
+	fwkplugin.Register(nohitlru.NoHitLRUType, nohitlru.Factory)
+	fwkplugin.Register(activerequest.ActiveRequestType, activerequest.Factory)
+	fwkplugin.Register(preciseprefixcache.PrecisePrefixCachePluginType, preciseprefixcache.PluginFactory)
+
 	// Flow Control plugins
 	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, globalstrict.GlobalStrictFairnessPolicyFactory)
 	fwkplugin.Register(roundrobin.RoundRobinFairnessPolicyType, roundrobin.RoundRobinFairnessPolicyFactory)
@@ -480,9 +527,11 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, usagelimits.StaticPolicyFactory)
 
 	// Register Request level data producer plugins as defaults for their respective data keys.
-	fwkplugin.RegisterAsDefaultProducer(reqdataprodprefix.ApproxPrefixCachePluginType, reqdataprodprefix.ApproxPrefixCacheFactory, attrprefix.PrefixCacheMatchInfoKey)
-	fwkplugin.RegisterAsDefaultProducer(inflightload.InFlightLoadProducerType, inflightload.InFlightLoadProducerFactory, attrconcurrency.InFlightLoadKey)
-	fwkplugin.RegisterAsDefaultProducer(latencyproducer.LatencyDataProviderPluginType, latencyproducer.PredictedLatencyFactory, attrlatency.LatencyPredictionInfoKey)
+	fwkplugin.RegisterAsDefaultProducer(reqdataprodprefix.ApproxPrefixCachePluginType, reqdataprodprefix.ApproxPrefixCacheFactory, attrprefix.PrefixCacheMatchInfoDataKey)
+	fwkplugin.RegisterAsDefaultProducer(inflightload.InFlightLoadProducerType, inflightload.InFlightLoadProducerFactory, attrconcurrency.InFlightLoadDataKey)
+	fwkplugin.RegisterAsDefaultProducer(latencyproducer.LatencyDataProviderPluginType, latencyproducer.PredictedLatencyFactory, attrlatency.LatencyPredictionInfoDataKey)
+	fwkplugin.Register(tokenizer.PluginType, tokenizer.PluginFactory)
+	fwkplugin.Register(tokenizer.LegacyPluginType, tokenizer.LegacyPluginFactory) //nolint:staticcheck // intentional: keep backward compatibility
 
 	// Latency predictor plugins
 	fwkplugin.Register(latencyslo.LatencyAdmissionPluginType, latencyslo.LatencyAdmissionFactory)
@@ -492,6 +541,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(prefixcacheaffinity.PluginType, prefixcacheaffinity.Factory)
 	fwkplugin.Register(sloheadroomtier.PluginType, sloheadroomtier.Factory)
 	fwkplugin.Register(latencyscorer.LatencyScorerType, latencyscorer.Factory)
+	fwkplugin.Register(bylabel.PrefillRoleType, bylabel.PrefillRoleFactory)
+	fwkplugin.Register(bylabel.DecodeRoleType, bylabel.DecodeRoleFactory)
 
 	// register filter for test purpose only (used in conformance tests)
 	fwkplugin.Register(testfilter.HeaderBasedTestingFilterType, testfilter.HeaderBasedTestingFilterFactory)
@@ -575,6 +626,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	applyDeprecatedEnvFeatureGate(enableExperimentalFlowControlLayer, "Flow Control layer", flowcontrol.FeatureGate, rawConfig)
 
 	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds))
+	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 
 	if err != nil {
@@ -583,19 +635,14 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	r.schedulerConfig = cfg.SchedulerConfig
 
-	// Add requestControl plugins
-	r.requestControlConfig.AddPlugins(handle.GetAllPlugins()...)
-
 	// Auto-create any DataProducer plugins that are needed by consumers already in
 	// the config but not yet satisfied by an existing producer.
-	dataProducers, err := datalayer.CreateMissingDataProducers(handle.GetAllPlugins(), fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle)
-	if err != nil {
+	if err := datalayer.CreateMissingDataProducers(ctx, fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle); err != nil {
 		return nil, fmt.Errorf("failed to create missing data producers - %w", err)
 	}
-	for _, p := range dataProducers {
-		handle.AddPlugin(p.TypedName().Name, p)
-	}
-	r.requestControlConfig.AddPlugins(dataProducers...)
+
+	// Add requestControl plugins
+	r.requestControlConfig.AddPlugins(handle.GetAllPlugins()...)
 
 	// Let plugins declare their datalayer source/extractor dependencies before Configure().
 	for _, p := range handle.GetAllPlugins() {

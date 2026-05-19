@@ -152,7 +152,7 @@ func createTestInferenceRequestWithBody(reqID string, ttftSLO, tpotSLO float64, 
 func TestPredictedLatency_TypedName(t *testing.T) {
 	predictor := &mockPredictor{}
 	cfg := DefaultConfig
-	router := NewPredictedLatency(cfg, predictor)
+	router := NewPredictedLatency(LatencyDataProviderPluginType, cfg, predictor)
 
 	tn := router.TypedName()
 	assert.Equal(t, "predicted-latency-producer", tn.Type, "Type should be latency-predictor")
@@ -162,10 +162,8 @@ func TestPredictedLatency_TypedName(t *testing.T) {
 func TestPredictedLatency_WithName(t *testing.T) {
 	predictor := &mockPredictor{}
 	cfg := DefaultConfig
-	router := NewPredictedLatency(cfg, predictor)
-
 	customName := "custom-router"
-	router = router.WithName(customName)
+	router := NewPredictedLatency(customName, cfg, predictor)
 
 	tn := router.TypedName()
 	assert.Equal(t, "predicted-latency-producer", tn.Type, "Type should remain latency-predictor")
@@ -217,7 +215,7 @@ func TestPredictedLatency_GetPodRunningRequestCount(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			predictor := &mockPredictor{}
 			cfg := DefaultConfig
-			router := NewPredictedLatency(cfg, predictor)
+			router := NewPredictedLatency(LatencyDataProviderPluginType, cfg, predictor)
 			pod := createTestEndpoint("test-pod", 0.5, 2, 1)
 
 			tt.setupRequests(router, pod)
@@ -273,7 +271,7 @@ func TestPredictedLatency_GetPodMinTPOTSLO(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			predictor := &mockPredictor{}
 			cfg := DefaultConfig
-			router := NewPredictedLatency(cfg, predictor)
+			router := NewPredictedLatency(LatencyDataProviderPluginType, cfg, predictor)
 			pod := createTestEndpoint("test-pod", 0.5, 2, 1)
 
 			tt.setupRequests(router, pod)
@@ -378,7 +376,7 @@ func TestPredictedLatencyFactoryInvalidJSON(t *testing.T) {
 func TestSloContextStoreEviction(t *testing.T) {
 	config := DefaultConfig
 	config.ContextTTL = 100 * time.Millisecond
-	pl := NewPredictedLatency(config, nil)
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, config, nil)
 
 	requestID := "test-req-id"
 	endpointName := types.NamespacedName{Name: "test-model", Namespace: "default"}

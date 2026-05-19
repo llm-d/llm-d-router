@@ -109,7 +109,7 @@ func injectPrefixCache(profileResults map[string]*scheduling.ProfileRunResult, c
 		return
 	}
 	for _, ep := range res.TargetEndpoints {
-		ep.Put(attrprefix.PrefixCacheMatchInfoKey,
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
 			attrprefix.NewPrefixCacheMatchInfo(cachedTokens, inputTokens, 1))
 	}
 }

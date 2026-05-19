@@ -43,7 +43,9 @@ const (
 var _ requestcontrol.Admitter = &LatencyAdmission{}
 
 // LatencyAdmissionConfig holds configuration for the latency admission plugin.
-type LatencyAdmissionConfig struct{}
+type LatencyAdmissionConfig struct {
+	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
+}
 
 var LatencyAdmissionDefaultConfig = LatencyAdmissionConfig{}
 
@@ -51,8 +53,9 @@ var LatencyAdmissionDefaultConfig = LatencyAdmissionConfig{}
 // It reads latency predictions from endpoint attributes (published by the data provider)
 // and makes an independent admission decision.
 type LatencyAdmission struct {
-	typedName fwkplugin.TypedName
-	config    LatencyAdmissionConfig
+	typedName                    fwkplugin.TypedName
+	config                       LatencyAdmissionConfig
+	latencyPredictionInfoDataKey fwkplugin.DataKey
 }
 
 // LatencyAdmissionFactory creates a new LatencyAdmission plugin instance.
@@ -69,8 +72,9 @@ func LatencyAdmissionFactory(name string, rawParameters json.RawMessage, _ fwkpl
 // NewLatencyAdmission creates a new LatencyAdmission plugin.
 func NewLatencyAdmission(config LatencyAdmissionConfig) *LatencyAdmission {
 	return &LatencyAdmission{
-		typedName: fwkplugin.TypedName{Type: LatencyAdmissionPluginType, Name: LatencyAdmissionPluginType},
-		config:    config,
+		typedName:                    fwkplugin.TypedName{Type: LatencyAdmissionPluginType, Name: LatencyAdmissionPluginType},
+		config:                       config,
+		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 	}
 }
 
@@ -84,9 +88,9 @@ func (p *LatencyAdmission) TypedName() fwkplugin.TypedName {
 }
 
 // Consumes declares that this plugin reads latency prediction data from endpoints.
-func (p *LatencyAdmission) Consumes() map[string]any {
-	return map[string]any{
-		attrlatency.LatencyPredictionInfoKey: attrlatency.LatencyPredictionInfo{},
+func (p *LatencyAdmission) Consumes() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{
+		p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
 	}
 }
 
@@ -134,7 +138,7 @@ func (p *LatencyAdmission) AdmitRequest(ctx context.Context, request *fwksched.I
 		}
 
 		// Valid prediction: both TTFT and TPOT within SLO.
-		if latencyInfoRaw, ok := endpoint.Get(attrlatency.LatencyPredictionInfoKey); ok {
+		if latencyInfoRaw, ok := endpoint.Get(p.latencyPredictionInfoDataKey.String()); ok {
 			hasPredictions = true
 			latencyInfo := latencyInfoRaw.(*attrlatency.LatencyPredictionInfo)
 			if latencyInfo.IsValid() {

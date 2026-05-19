@@ -57,7 +57,7 @@ If inferenceExtension.monitoring.provider.name is unset/empty, default to
 prometheusoperator. For backwards compatibility, provider.name=gke still maps
 to gmp when no monitoring provider is explicitly set.
 */}}
-{{- define "llm-d-router.inferenceExtension.monitoring.provider.name" -}}
+{{- define "llm-d-router.monitoring.provider.name" -}}
 {{- $monitoring := .Values.inferenceExtension.monitoring | default dict -}}
 {{- $mp := index $monitoring "provider" | default dict -}}
 {{- $mpName := index $mp "name" | default "" -}}
@@ -79,10 +79,10 @@ When inferenceExtension.monitoring.provider.name is unset/empty, use defaults.
 For backwards compatibility, provider.gke.autopilot is still honored when
 provider.name=gke and no monitoring provider is explicitly set.
 */}}
-{{- define "llm-d-router.inferenceExtension.monitoring.provider" -}}
+{{- define "llm-d-router.monitoring.provider" -}}
 {{- $monitoring := .Values.inferenceExtension.monitoring | default dict -}}
 {{- $mp := index $monitoring "provider" | default dict -}}
-{{- $mpName := include "llm-d-router.inferenceExtension.monitoring.provider.name" . -}}
+{{- $mpName := include "llm-d-router.monitoring.provider.name" . -}}
 {{- $gatewayProvider := .Values.provider | default dict -}}
 {{- $gatewayProviderName := index $gatewayProvider "name" | default "" -}}
 {{- $resolved := dict "name" $mpName -}}

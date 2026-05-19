@@ -57,8 +57,8 @@ import (
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
 
-const (
-	mockProducedDataKey = "producedDataKey"
+var (
+	mockProducedDataKey = fwkplugin.NewDataKey("producedDataKey", "mock-producer")
 )
 
 // --- Mocks ---
@@ -79,7 +79,7 @@ type mockScheduler struct {
 
 func (m *mockScheduler) Schedule(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.SchedulingResult, error) {
 	if endpoints != nil && m.dataProduced {
-		data, ok := endpoints[0].Get(mockProducedDataKey)
+		data, ok := endpoints[0].Get(mockProducedDataKey.String())
 		if !ok || data.(mockProducedDataType).value != 42 {
 			return nil, errors.New("expected produced data not found in pod")
 		}
@@ -111,32 +111,32 @@ func (ds *mockDatastore) PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.En
 
 type mockDataProducerPlugin struct {
 	name     string
-	produces map[string]any
-	consumes map[string]any
+	produces map[fwkplugin.DataKey]any
+	consumes map[fwkplugin.DataKey]any
 }
 
 func (m *mockDataProducerPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
 }
 
-func (m *mockDataProducerPlugin) Produces() map[string]any {
+func (m *mockDataProducerPlugin) Produces() map[fwkplugin.DataKey]any {
 	return m.produces
 }
 
-func (m *mockDataProducerPlugin) Consumes() map[string]any {
+func (m *mockDataProducerPlugin) Consumes() map[fwkplugin.DataKey]any {
 	return m.consumes
 }
 
 func (m *mockDataProducerPlugin) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	endpoints[0].Put(mockProducedDataKey, mockProducedDataType{value: 42})
+	endpoints[0].Put(mockProducedDataKey.String(), mockProducedDataType{value: 42})
 	return nil
 }
 
 func newMockDataProducerPlugin(name string) *mockDataProducerPlugin {
 	return &mockDataProducerPlugin{
 		name:     name,
-		produces: map[string]any{mockProducedDataKey: 0},
-		consumes: map[string]any{},
+		produces: map[fwkplugin.DataKey]any{mockProducedDataKey: 0},
+		consumes: map[fwkplugin.DataKey]any{},
 	}
 }
 

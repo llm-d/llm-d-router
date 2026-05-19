@@ -32,10 +32,11 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 )
 
 const (
-	InFlightLoadProducerType = "inflight-load-producer"
+	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
 	profilePrefill           = "prefill"
 )
 
@@ -45,6 +46,7 @@ func InFlightLoadProducerFactory(name string, _ json.RawMessage, _ fwkplugin.Han
 		requestTracker: newConcurrencyTracker(),
 		tokenTracker:   newConcurrencyTracker(),
 		tokenEstimator: NewSimpleTokenEstimator(),
+		dk:             attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 	}, nil
 }
 
@@ -61,6 +63,7 @@ type InFlightLoadProducer struct {
 	requestTracker *concurrencyTracker
 	tokenTracker   *concurrencyTracker
 	tokenEstimator TokenEstimator
+	dk             fwkplugin.DataKey
 }
 
 func (p *InFlightLoadProducer) TypedName() fwkplugin.TypedName {
@@ -99,7 +102,7 @@ func (p *InFlightLoadProducer) ExtractEndpoint(ctx context.Context, event datala
 func (p *InFlightLoadProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	for _, e := range endpoints {
 		endpointID := e.GetMetadata().NamespacedName.String()
-		e.Put(attrconcurrency.InFlightLoadKey, &attrconcurrency.InFlightLoad{
+		e.Put(p.dk.String(), &attrconcurrency.InFlightLoad{
 			Tokens:   p.tokenTracker.get(endpointID),
 			Requests: p.requestTracker.get(endpointID),
 		})
@@ -177,9 +180,9 @@ func (p *InFlightLoadProducer) release(endpoint fwksched.Endpoint, request *fwks
 	p.tokenTracker.add(eid, -tokens)
 }
 
-func (p *InFlightLoadProducer) Produces() map[string]any {
-	return map[string]any{
-		attrconcurrency.InFlightLoadKey: attrconcurrency.InFlightLoad{},
+func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{
+		p.dk: attrconcurrency.InFlightLoad{},
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 )
@@ -34,21 +35,29 @@ func makeEndpoint(name string, ttftHeadroom, tpotHeadroom float64, hasPrediction
 	}
 	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	if hasPrediction {
-		ep.Put(attrlatency.LatencyPredictionInfoKey, attrlatency.NewLatencyPredictionInfo(
+		ep.Put(attrlatency.LatencyPredictionInfoDataKey.String(), attrlatency.NewLatencyPredictionInfo(
 			ttftHeadroom >= 0, tpotHeadroom >= 0, ttftHeadroom, tpotHeadroom, 100, 10, 0))
 	}
 	return ep
 }
 
+func newTestPlugin(config Config) *Plugin {
+	return &Plugin{
+		typedName:                    fwkplugin.TypedName{Type: PluginType, Name: "test"},
+		config:                       config,
+		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
+	}
+}
+
 func TestFilter_SingleEndpoint(t *testing.T) {
-	p := &Plugin{config: DefaultConfig}
+	p := newTestPlugin(DefaultConfig)
 	endpoints := []fwksched.Endpoint{makeEndpoint("a", 10, 5, true)}
 	result := p.Filter(context.Background(), nil, nil, endpoints)
 	assert.Equal(t, 1, len(result))
 }
 
 func TestFilter_NoPredictions(t *testing.T) {
-	p := &Plugin{config: DefaultConfig}
+	p := newTestPlugin(DefaultConfig)
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 0, 0, false),
 		makeEndpoint("b", 0, 0, false),
@@ -58,7 +67,7 @@ func TestFilter_NoPredictions(t *testing.T) {
 }
 
 func TestFilter_AllPositive(t *testing.T) {
-	p := &Plugin{config: Config{EpsilonExploreNeg: 0}}
+	p := newTestPlugin(Config{EpsilonExploreNeg: 0})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 100, 50, true),
 		makeEndpoint("b", 200, 80, true),
@@ -68,7 +77,7 @@ func TestFilter_AllPositive(t *testing.T) {
 }
 
 func TestFilter_AllNegative(t *testing.T) {
-	p := &Plugin{config: Config{EpsilonExploreNeg: 0}}
+	p := newTestPlugin(Config{EpsilonExploreNeg: 0})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", -100, -50, true),
 		makeEndpoint("b", -200, -80, true),
@@ -78,7 +87,7 @@ func TestFilter_AllNegative(t *testing.T) {
 }
 
 func TestFilter_BothTiers_SelectPositive(t *testing.T) {
-	p := &Plugin{config: Config{EpsilonExploreNeg: 0}} // never explore
+	p := newTestPlugin(Config{EpsilonExploreNeg: 0}) // never explore
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("pos1", 100, 50, true),
 		makeEndpoint("pos2", 200, 80, true),
@@ -90,7 +99,7 @@ func TestFilter_BothTiers_SelectPositive(t *testing.T) {
 }
 
 func TestFilter_BothTiers_EpsilonExploreNeg(t *testing.T) {
-	p := &Plugin{config: Config{EpsilonExploreNeg: 1.0}} // always explore
+	p := newTestPlugin(Config{EpsilonExploreNeg: 1.0}) // always explore
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("pos1", 100, 50, true),
 		makeEndpoint("neg1", -100, -50, true),
@@ -101,7 +110,7 @@ func TestFilter_BothTiers_EpsilonExploreNeg(t *testing.T) {
 }
 
 func TestFilter_NoPredictionGoesToNegative(t *testing.T) {
-	p := &Plugin{config: Config{EpsilonExploreNeg: 1.0}} // always explore neg
+	p := newTestPlugin(Config{EpsilonExploreNeg: 1.0}) // always explore neg
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("pos1", 100, 50, true),
 		makeEndpoint("nopred", 0, 0, false),

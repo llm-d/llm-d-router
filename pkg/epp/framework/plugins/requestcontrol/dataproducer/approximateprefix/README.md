@@ -14,13 +14,36 @@ For each request, the plugin hashes the prompt into fixed-size blocks and looks 
 - `lruCapacityPerServer` (int, optional, default: `0`): Default per-pod LRU index capacity when endpoint metrics are unavailable.
 - `blockSize` (int, optional): Deprecated — character-based block size. Use `blockSizeTokens` instead.
 
-**Configuration Example:**
+**Configuration Examples:**
+
+Standard single instance:
 ```yaml
 plugins:
   - type: approx-prefix-cache-producer
     parameters:
       autoTune: true
       lruCapacityPerServer: 1000
+```
+
+Configuring multiple named instances (e.g., for tiered caching with different parameters):
+```yaml
+plugins:
+  - name: gpuPrefixProducer
+    type: approx-prefix-cache-producer
+    parameters:
+      blockSizeTokens: 16
+  - name: cpuPrefixProducer
+    type: approx-prefix-cache-producer
+    parameters:
+      blockSizeTokens: 64
+  - name: gpuPrefixScorer
+    type: prefix-cache-scorer
+    parameters:
+      prefixMatchInfoProducerName: gpuPrefixProducer
+  - name: cpuPrefixScorer
+    type: prefix-cache-scorer
+    parameters:
+      prefixMatchInfoProducerName: cpuPrefixProducer
 ```
 
 ---

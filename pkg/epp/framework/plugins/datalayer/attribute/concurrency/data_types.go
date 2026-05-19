@@ -18,11 +18,11 @@ package concurrency
 
 import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 )
 
-const (
-	InFlightLoadKey = "InFlightLoadKey"
-)
+var InFlightLoadDataKey = plugin.NewDataKey("InFlightLoadDataKey", inflightloadconstants.InFlightLoadProducerType)
 
 // InFlightLoad captures the current real-time load of an endpoint as tracked by the EPP.
 type InFlightLoad struct {
