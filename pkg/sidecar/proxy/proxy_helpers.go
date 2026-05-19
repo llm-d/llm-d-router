@@ -189,6 +189,17 @@ func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *ht
 	return cloned
 }
 
+// normalizeHostPort returns the host part of a host:port string. If parsing
+// fails (e.g. no port), the input is returned as-is.
+func normalizeHostPort(hostPort string) string {
+	host, _, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		// If net.SplitHostPort fails, it's likely just a hostname without port
+		return hostPort
+	}
+	return host
+}
+
 // isHTTPError returns true if the status code indicates an error (not in the 2xx range).
 func isHTTPError(statusCode int) bool {
 	return statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices

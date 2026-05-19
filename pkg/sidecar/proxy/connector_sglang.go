@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -184,7 +183,7 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 	}
 
 	// Generate bootstrap host from prefill host
-	bootstrapHost := s.getBootstrapHost(prefillHostPort)
+	bootstrapHost := normalizeHostPort(prefillHostPort)
 
 	// Add bootstrap information
 	modifiedRequest[requestFieldBootstrapHost] = bootstrapHost
@@ -215,10 +214,4 @@ func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, er
 
 func (s *Server) generateSGLangRoomID() int64 {
 	return time.Now().UnixNano() + int64(rand.IntN(1000))
-}
-
-func (s *Server) getBootstrapHost(prefillHostPort string) string {
-	// Extract hostname from prefill host
-	parts := strings.Split(prefillHostPort, ":")
-	return parts[0]
 }

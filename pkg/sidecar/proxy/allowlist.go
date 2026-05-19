@@ -19,7 +19,6 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
@@ -203,7 +202,7 @@ func (av *AllowlistValidator) IsAllowed(hostPort string) bool {
 	}
 
 	// Clean up the hostPort input
-	hostPort = av.normalizeHostPort(hostPort)
+	hostPort = normalizeHostPort(hostPort)
 
 	av.allowedTargetsMu.RLock()
 	defer av.allowedTargetsMu.RUnlock()
@@ -211,20 +210,6 @@ func (av *AllowlistValidator) IsAllowed(hostPort string) bool {
 	allowed := av.allowedTargets.Has(hostPort)
 	av.logger.V(4).Info("allowlist check", "hostPort", hostPort, "allowed", allowed)
 	return allowed
-}
-
-// normalizeHostPort extracts the host part from a host:port string
-func (av *AllowlistValidator) normalizeHostPort(hostPort string) string {
-	// Use net.SplitHostPort to handle IPv6 addresses and ports
-	host, _, err := net.SplitHostPort(hostPort)
-	if err != nil {
-		// If net.SplitHostPort fails, it's likely just a hostname without port
-		av.logger.V(5).Info("could not parse host:port, treating as hostname",
-			"input", hostPort,
-			"error", err.Error())
-		return hostPort
-	}
-	return host
 }
 
 // onInferencePoolAdd handles new InferencePool resources
