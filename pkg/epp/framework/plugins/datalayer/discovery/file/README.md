@@ -44,8 +44,6 @@ endpoints:
     namespace: <string>         # optional -- defaults to "default"
     address: <IPv4>             # required -- must be a valid IPv4 address
     port: <string>              # required -- integer 1-65535 as a string
-    metricsPort: <int>          # optional -- port for metrics scraping
-                                #             (defaults to `port`)
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
 ```
@@ -87,7 +85,6 @@ endpoints:
   - name: vllm-1
     address: "10.0.0.2"
     port: "8000"
-    metricsPort: 9090   # scrape metrics on a different port than inference
 ```
 
 ## Limitations
@@ -95,8 +92,8 @@ endpoints:
 - The endpoints file is capped at 1 MiB.
 - `address` must be a literal IPv4 address. Hostnames are not resolved;
   IPv6 is not supported.
-- Metrics are scraped from the same IP that serves inference (`address`).
-  Only the port can differ, via `metricsPort`.
+- Metrics are scraped from `address:port` (same host and port that serves
+  inference); separate metrics endpoints are not supported.
 - File-discovery mode runs the EPP without a Kubernetes controller manager,
   so several K8s-only features are inactive: the `InferenceModelRewrite`
   and `InferenceObjective` reconcilers do not run, and any

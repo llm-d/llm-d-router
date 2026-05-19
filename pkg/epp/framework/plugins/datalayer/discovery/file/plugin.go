@@ -41,18 +41,11 @@ const PluginType = "file-discovery"
 
 // EndpointEntry is the YAML/JSON representation of a single endpoint.
 type EndpointEntry struct {
-	Name      string `json:"name"                  yaml:"name"`
-	Namespace string `json:"namespace,omitempty"   yaml:"namespace,omitempty"`
-	Address   string `json:"address"               yaml:"address"`
-	Port      string `json:"port"                  yaml:"port"`
-	// MetricsPort is the port the EPP scrapes for Prometheus metrics
-	// (e.g., vLLM /metrics). Set this when the model server exposes metrics
-	// on a different port than its inference port. Metrics are always
-	// scraped from Address (same IP that serves inference); only the port
-	// can differ. Optional; defaults to Port (i.e., scrape metrics from
-	// the inference port).
-	MetricsPort int               `json:"metricsPort,omitempty" yaml:"metricsPort,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"      yaml:"labels,omitempty"`
+	Name      string            `json:"name"                yaml:"name"`
+	Namespace string            `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Address   string            `json:"address"             yaml:"address"`
+	Port      string            `json:"port"                yaml:"port"`
+	Labels    map[string]string `json:"labels,omitempty"    yaml:"labels,omitempty"`
 }
 
 // EndpointsFile is the top-level structure of the endpoints YAML/JSON file.
@@ -199,16 +192,8 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			errs = append(errs, fmt.Errorf("endpoint %q: invalid IPv4 address %q", e.Name, e.Address))
 			continue
 		}
-		portNum, err := strconv.Atoi(e.Port)
-		if err != nil || portNum < 1 || portNum > 65535 {
+		if portNum, err := strconv.Atoi(e.Port); err != nil || portNum < 1 || portNum > 65535 {
 			errs = append(errs, fmt.Errorf("endpoint %q: invalid port %q", e.Name, e.Port))
-			continue
-		}
-		metricsPort := e.MetricsPort
-		if metricsPort == 0 {
-			metricsPort = portNum
-		} else if metricsPort < 1 || metricsPort > 65535 {
-			errs = append(errs, fmt.Errorf("endpoint %q: invalid metricsPort %d", e.Name, e.MetricsPort))
 			continue
 		}
 		ns := e.Namespace
@@ -220,7 +205,7 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			PodName:        e.Name,
 			Address:        e.Address,
 			Port:           e.Port,
-			MetricsHost:    net.JoinHostPort(e.Address, strconv.Itoa(metricsPort)),
+			MetricsHost:    net.JoinHostPort(e.Address, e.Port),
 			Labels:         e.Labels,
 		}
 		incoming[meta.NamespacedName] = struct{}{}

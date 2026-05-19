@@ -138,7 +138,7 @@ endpoints:
 	assert.Equal(t, "default", notifier.upserted[0].NamespacedName.Namespace)
 }
 
-func TestStart_MetricsHostDefaultsToAddressPort(t *testing.T) {
+func TestStart_MetricsHostIsAddressPort(t *testing.T) {
 	path := writeTemp(t, `
 endpoints:
   - name: ep1
@@ -151,43 +151,6 @@ endpoints:
 
 	require.NoError(t, newFD(path, false).Start(ctx, notifier))
 	assert.Equal(t, "10.0.0.1:8000", notifier.upserted[0].MetricsHost)
-}
-
-func TestStart_MetricsPortExplicit(t *testing.T) {
-	path := writeTemp(t, `
-endpoints:
-  - name: ep1
-    address: "10.0.0.1"
-    port: "8000"
-    metricsPort: 9090
-`)
-	notifier := &recordingNotifier{}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	require.NoError(t, newFD(path, false).Start(ctx, notifier))
-	assert.Equal(t, "10.0.0.1:9090", notifier.upserted[0].MetricsHost)
-}
-
-func TestStart_InvalidMetricsPort_ReturnsError(t *testing.T) {
-	path := writeTemp(t, `
-endpoints:
-  - name: ep-bad
-    address: "10.0.0.1"
-    port: "8000"
-    metricsPort: 99999
-  - name: ep-good
-    address: "10.0.0.2"
-    port: "8000"
-`)
-	notifier := &recordingNotifier{}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	err := newFD(path, false).Start(ctx, notifier)
-	require.Error(t, err)
-	assert.ErrorContains(t, err, "invalid metricsPort")
-	assert.Equal(t, []string{"default/ep-good"}, notifier.upsertedNames())
 }
 
 func TestStart_MissingFile(t *testing.T) {
