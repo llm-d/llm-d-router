@@ -18,14 +18,19 @@ package tokenizer
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
+
+	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
 )
 
 // udsTokenizerAdapter adapts the kvc UdsTokenizer (which has no ctx in its
-// signature) to the local ctx-aware tokenizer interface. The ctx is unused by
-// the underlying gRPC client, but accepted for interface uniformity.
+// signature) to the local ctx-aware tokenizer interface. Both ctx and the
+// RequestPayload-to-RenderChatRequest conversion are handled in the adapter.
 type udsTokenizerAdapter struct {
 	t *tokenization.UdsTokenizer
 }
@@ -38,10 +43,35 @@ func newUDSTokenizer(ctx context.Context, cfg *tokenization.UdsTokenizerConfig, 
 	return &udsTokenizerAdapter{t: uds}, nil
 }
 
-func (a *udsTokenizerAdapter) Render(_ context.Context, prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
+func (a *udsTokenizerAdapter) Render(_ context.Context, payload fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error) {
+	pm, ok := payload.AsMap()
+	if !ok {
+		return nil, nil, errors.New("UDS tokenizer requires a parsed PayloadMap")
+	}
+	prompt, _ := pm["prompt"].(string)
 	return a.t.Render(prompt)
 }
 
-func (a *udsTokenizerAdapter) RenderChat(_ context.Context, req *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+func (a *udsTokenizerAdapter) RenderChat(_ context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	pm, ok := payload.AsMap()
+	if !ok {
+		return nil, nil, errors.New("UDS tokenizer requires a parsed PayloadMap")
+	}
+	req, err := renderChatRequestFromPayload(pm)
+	if err != nil {
+		return nil, nil, err
+	}
 	return a.t.RenderChat(req)
+}
+
+func renderChatRequestFromPayload(pm fwkrh.PayloadMap) (*tokenizerTypes.RenderChatRequest, error) {
+	data, err := json.Marshal(pm)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+	var chat fwkrh.ChatCompletionsRequest
+	if err := json.Unmarshal(data, &chat); err != nil {
+		return nil, fmt.Errorf("unmarshal chat request: %w", err)
+	}
+	return ChatCompletionsToRenderChatRequest(&chat), nil
 }
