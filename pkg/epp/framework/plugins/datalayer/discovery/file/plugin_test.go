@@ -205,7 +205,18 @@ endpoints:
     port: "8000"
 `)
 	err := newFD(path, false).Start(context.Background(), &recordingNotifier{})
-	assert.ErrorContains(t, err, "invalid address")
+	assert.ErrorContains(t, err, "invalid IPv4 address")
+}
+
+func TestStart_RejectsIPv6(t *testing.T) {
+	path := writeTemp(t, `
+endpoints:
+  - name: ep1
+    address: "::1"
+    port: "8000"
+`)
+	err := newFD(path, false).Start(context.Background(), &recordingNotifier{})
+	assert.ErrorContains(t, err, "invalid IPv4 address")
 }
 
 func TestStart_InvalidPort(t *testing.T) {

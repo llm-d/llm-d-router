@@ -42,7 +42,7 @@ plugin's `path` parameter.
 endpoints:
   - name: <string>              # required -- unique within the file
     namespace: <string>         # optional -- defaults to "default"
-    address: <IPv4 or IPv6>     # required -- must be a valid IP address
+    address: <IPv4>             # required -- must be a valid IPv4 address
     port: <string>              # required -- integer 1-65535 as a string
     metricsPort: <int>          # optional -- port for metrics scraping
                                 #             (defaults to `port`)
@@ -93,8 +93,8 @@ endpoints:
 ## Limitations
 
 - The endpoints file is capped at 1 MiB.
-- `address` must be a literal IPv4 or IPv6 address. Hostnames are not
-  resolved.
+- `address` must be a literal IPv4 address. Hostnames are not resolved;
+  IPv6 is not supported.
 - Metrics are scraped from the same IP that serves inference (`address`).
   Only the port can differ, via `metricsPort`.
 - File-discovery mode runs the EPP without a Kubernetes controller manager,

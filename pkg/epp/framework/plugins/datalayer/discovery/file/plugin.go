@@ -195,8 +195,8 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 	incoming := make(map[types.NamespacedName]struct{}, len(ef.Endpoints))
 	var errs []error
 	for _, e := range ef.Endpoints {
-		if net.ParseIP(e.Address) == nil {
-			errs = append(errs, fmt.Errorf("endpoint %q: invalid address %q", e.Name, e.Address))
+		if ip := net.ParseIP(e.Address); ip == nil || ip.To4() == nil {
+			errs = append(errs, fmt.Errorf("endpoint %q: invalid IPv4 address %q", e.Name, e.Address))
 			continue
 		}
 		portNum, err := strconv.Atoi(e.Port)
