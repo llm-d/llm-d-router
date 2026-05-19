@@ -120,7 +120,6 @@ func parseHTTPDuration(s string, def time.Duration) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-
 // Render calls /v1/completions/render. The PayloadMap is forwarded verbatim
 // (preserving backend-specific fields such as reasoning) with the configured
 // model name stamped in. Char offsets are not returned by vLLM's render endpoint.
