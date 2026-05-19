@@ -57,12 +57,6 @@ func (p *dataProducer) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-// WithName sets the name of the plugin instance.
-func (p *dataProducer) WithName(name string) *dataProducer {
-	p.typedName.Name = name
-	return p
-}
-
 // Produces returns the data produced by the plugin.
 func (p *dataProducer) Produces() map[plugin.DataKey]any {
 	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(p.typedName.Name)
@@ -70,7 +64,7 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 }
 
 // newDataProducer returns a new DataProducer plugin.
-func newDataProducer(ctx context.Context, config config, handle plugin.Handle) (*dataProducer, error) {
+func newDataProducer(ctx context.Context, name, config config, handle plugin.Handle) (*dataProducer, error) {
 	log.FromContext(ctx).V(logutil.DEFAULT).Info("Prefix DataProducer initialized", "config", config)
 
 	//nolint:staticcheck // BlockSize is deprecated, but we check it here to provide a migration path for users.
@@ -89,7 +83,7 @@ func newDataProducer(ctx context.Context, config config, handle plugin.Handle) (
 	p := &dataProducer{
 		typedName: plugin.TypedName{
 			Type: ApproxPrefixCachePluginType,
-			Name: ApproxPrefixCachePluginType,
+			Name: name,
 		},
 		config:      config,
 		indexerInst: indexer,
@@ -263,13 +257,9 @@ func ApproxPrefixCacheFactory(name string, rawParameters json.RawMessage, handle
 	}
 
 	// pluginState will be initialized by newDataProducer as we pass nil here.
-	p, err := newDataProducer(handle.Context(), parameters, handle)
+	p, err := newDataProducer(handle.Context(), name, parameters, handle)
 	if err != nil {
 		return nil, err
-	}
-
-	if name != "" {
-		p = p.WithName(name)
 	}
 
 	return p, nil
