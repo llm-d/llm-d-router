@@ -21,6 +21,7 @@ package agentidentity
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -39,25 +40,58 @@ const (
 	CodexSessionHeaderLegacy = "session_id"
 )
 
-// priorityHeaders is the ordered list of headers to check for agent identity.
-// One canonical session header per supported agent; first non-empty value wins.
-var priorityHeaders = []string{
+// defaultPriorityHeaders is the built-in ordered list, always checked. User-
+// supplied headers from Parameters.AdditionalSessionHeaders are inserted
+// before this list so operators can prepend higher-priority entries without
+// losing the defaults.
+var defaultPriorityHeaders = []string{
 	ClaudeCodeSessionHeader,
 	OpenCodeSessionHeader,
 	CodexSessionHeader,
 	CodexSessionHeaderLegacy,
 }
 
+// Parameters is the user-facing plugin configuration block.
+//
+// Example configmap entry that adds a new header upstream just renamed to,
+// without losing the built-in defaults:
+//
+//	- type: agent-identity
+//	  parameters:
+//	    additionalSessionHeaders:
+//	      - x-new-codex-session-header
+type Parameters struct {
+	// AdditionalSessionHeaders is prepended to the built-in default list.
+	// Order is preserved; the request-time loop short-circuits on first match.
+	AdditionalSessionHeaders []string `json:"additionalSessionHeaders,omitempty"`
+}
+
 // PluginFactory is the factory function for the agent identity plugin.
-func PluginFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func PluginFactory(name string, raw json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+	var params Parameters
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, fmt.Errorf("agent-identity: failed to unmarshal parameters: %w", err)
+		}
+	}
+
 	return &Plugin{
-		typedName: plugin.TypedName{Type: PluginType, Name: name},
+		typedName:       plugin.TypedName{Type: PluginType, Name: name},
+		priorityHeaders: mergeHeaders(params.AdditionalSessionHeaders, defaultPriorityHeaders),
 	}, nil
+}
+
+// mergeHeaders returns extras followed by defaults. Duplicates and empty
+// strings are left in — the request-time loop short-circuits on first match,
+// so the cost is one extra map lookup per duplicate.
+func mergeHeaders(extras, defaults []string) []string {
+	return append(append([]string{}, extras...), defaults...)
 }
 
 // Plugin resolves agent identity from provider-specific headers into FairnessID.
 type Plugin struct {
-	typedName plugin.TypedName
+	typedName       plugin.TypedName
+	priorityHeaders []string
 }
 
 func (p *Plugin) TypedName() plugin.TypedName {
@@ -69,8 +103,7 @@ func (p *Plugin) ProcessPreAdmission(_ context.Context, request *scheduling.Infe
 		return nil
 	}
 
-	// Check headers in priority order.
-	for _, header := range priorityHeaders {
+	for _, header := range p.priorityHeaders {
 		if id := request.Headers[header]; id != "" {
 			request.FairnessID = id
 			return nil

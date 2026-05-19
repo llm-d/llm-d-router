@@ -18,6 +18,8 @@ package agentidentity
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"testing"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -25,8 +27,20 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
+// newDefaultPlugin builds a Plugin with no parameters — the built-in defaults.
+// All ProcessPreAdmission tests below use this so they exercise the same code
+// path as production-default configs.
+func newDefaultPlugin(t *testing.T) *Plugin {
+	t.Helper()
+	pi, err := PluginFactory("test", nil, nil)
+	if err != nil {
+		t.Fatalf("PluginFactory: %v", err)
+	}
+	return pi.(*Plugin)
+}
+
 func TestProcessPreAdmission(t *testing.T) {
-	p := &Plugin{}
+	p := newDefaultPlugin(t)
 
 	tests := []struct {
 		name           string
@@ -149,5 +163,91 @@ func TestProcessPreAdmission(t *testing.T) {
 				t.Errorf("FairnessID = %q, want %q", req.FairnessID, tt.wantFairnessID)
 			}
 		})
+	}
+}
+
+func TestPluginFactory_PriorityHeaders(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    []string
+		wantErr bool
+	}{
+		{
+			name: "nil parameters → defaults only",
+			raw:  "",
+			want: defaultPriorityHeaders,
+		},
+		{
+			name: "empty additionalSessionHeaders → defaults only",
+			raw:  `{"additionalSessionHeaders":[]}`,
+			want: defaultPriorityHeaders,
+		},
+		{
+			name: "extras prepended before defaults",
+			raw:  `{"additionalSessionHeaders":["x-custom-1","x-custom-2"]}`,
+			want: append([]string{"x-custom-1", "x-custom-2"}, defaultPriorityHeaders...),
+		},
+		{
+			name:    "malformed json → factory error",
+			raw:     `{"additionalSessionHeaders": not-json}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pi, err := PluginFactory("test", json.RawMessage(tt.raw), nil)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PluginFactory: %v", err)
+			}
+			got := pi.(*Plugin).priorityHeaders
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("priorityHeaders mismatch:\n got=%v\nwant=%v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProcessPreAdmission_CustomHeader proves end-to-end that a header added
+// via additionalSessionHeaders is honored at request time.
+func TestProcessPreAdmission_CustomHeader(t *testing.T) {
+	pi, err := PluginFactory("test",
+		json.RawMessage(`{"additionalSessionHeaders":["x-tenant-id"]}`), nil)
+	if err != nil {
+		t.Fatalf("PluginFactory: %v", err)
+	}
+	p := pi.(*Plugin)
+
+	req := &scheduling.InferenceRequest{
+		FairnessID: metadata.DefaultFairnessID,
+		Headers:    map[string]string{"x-tenant-id": "tenant-42"},
+	}
+	if err := p.ProcessPreAdmission(context.Background(), req); err != nil {
+		t.Fatalf("ProcessPreAdmission: %v", err)
+	}
+	if req.FairnessID != "tenant-42" {
+		t.Errorf("FairnessID = %q, want %q", req.FairnessID, "tenant-42")
+	}
+
+	// And it wins over a default-bucket header (because it is prepended).
+	req2 := &scheduling.InferenceRequest{
+		FairnessID: metadata.DefaultFairnessID,
+		Headers: map[string]string{
+			"x-tenant-id":           "tenant-42",
+			ClaudeCodeSessionHeader: "claude-session",
+		},
+	}
+	if err := p.ProcessPreAdmission(context.Background(), req2); err != nil {
+		t.Fatalf("ProcessPreAdmission: %v", err)
+	}
+	if req2.FairnessID != "tenant-42" {
+		t.Errorf("FairnessID = %q, want %q (custom should win)", req2.FairnessID, "tenant-42")
 	}
 }
