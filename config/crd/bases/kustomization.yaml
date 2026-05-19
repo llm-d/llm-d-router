@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- inference.networking.k8s.io_inferencepools.yaml
+- inference.networking.x-k8s.io_inferencemodelrewrites.yaml
+- inference.networking.x-k8s.io_inferenceobjectives.yaml
+- inference.networking.x-k8s.io_inferencepoolimports.yaml
