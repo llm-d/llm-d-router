@@ -491,7 +491,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(decodeReq).To(HaveKey(requestFieldKVTransferParams))
 	})
 
-	It("should fallback to decode without kv_transfer_params when retries are disabled", func() {
+	It("should return error to client when retries are disabled and prefill fails", func() {
 		testInfo.prefillHandler.FailForFirstN = 1
 		testInfo.prefillHandler.FailStatusCode = http.StatusBadGateway
 		testInfo.proxy.config.PrefillMaxRetries = 0
@@ -505,18 +505,18 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		rp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
 		defer rp.Body.Close()
-		Expect(rp.StatusCode).To(Equal(http.StatusOK))
+
+		By("verifying the error is returned to the client")
+		Expect(rp.StatusCode).To(Equal(http.StatusBadGateway))
 
 		By("verifying prefill was called only once (no retry)")
 		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 
-		By("verifying decode was called via fallback (without kv_transfer_params)")
-		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
-		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
-		Expect(decodeReq).ToNot(HaveKey(requestFieldKVTransferParams))
+		By("verifying decode was NOT called")
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
 	})
 
-	It("should fallback to decode after exhausting all retries", func() {
+	It("should return error to client after exhausting all retries", func() {
 		testInfo.prefillHandler.FailForFirstN = 100
 		testInfo.prefillHandler.FailStatusCode = http.StatusBadGateway
 		testInfo.proxy.config.PrefillMaxRetries = 2
@@ -531,15 +531,41 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		rp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
 		defer rp.Body.Close()
-		Expect(rp.StatusCode).To(Equal(http.StatusOK))
+
+		By("verifying the error is returned to the client")
+		Expect(rp.StatusCode).To(Equal(http.StatusBadGateway))
 
 		By("verifying prefill was called 3 times (1 initial + 2 retries)")
 		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 3))
 
-		By("verifying decode was called via fallback")
-		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
-		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
-		Expect(decodeReq).ToNot(HaveKey(requestFieldKVTransferParams))
+		By("verifying decode was NOT called")
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+	})
+
+	It("should not retry on non-retryable 500 and return error to client", func() {
+		testInfo.prefillHandler.FailForFirstN = 1
+		testInfo.prefillHandler.FailStatusCode = http.StatusInternalServerError
+		testInfo.proxy.config.PrefillMaxRetries = 2
+		testInfo.proxy.config.PrefillRetryBackoff = time.Millisecond
+
+		proxyBaseAddr := startProxy()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		By("verifying the error is returned to the client")
+		Expect(rp.StatusCode).To(Equal(http.StatusInternalServerError))
+
+		By("verifying prefill was called only once (no retry despite PrefillMaxRetries=2)")
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+
+		By("verifying decode was NOT called")
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
 	})
 
 	It("should preserve stream settings in responses API request", func() {
