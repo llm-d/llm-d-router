@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,18 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package request
+package plugin
 
-import (
-	"testing"
+import "github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stretchr/testify/assert"
-)
-
-func TestGetHeader(t *testing.T) {
-	headers := map[string]string{"X-LLM-D-SLO-TTFT-MS": "42", "Other": "x"}
-	assert.Equal(t, "42", GetHeader(headers, "X-LLM-D-SLO-TTFT-MS"))
-	assert.Equal(t, "42", GetHeader(headers, "x-llm-d-slo-ttft-ms"))
-	assert.Equal(t, "", GetHeader(headers, "missing"))
-	assert.Equal(t, "", GetHeader(nil, "k"))
+// MetricsRecorder provides plugins access to metric registration without
+// depending on package-level metric recording functions.
+type MetricsRecorder interface {
+	prometheus.Registerer
 }

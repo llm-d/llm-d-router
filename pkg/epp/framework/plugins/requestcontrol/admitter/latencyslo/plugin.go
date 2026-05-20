@@ -30,13 +30,14 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
 	LatencyAdmissionPluginType = "latency-slo-admitter"
 
-	ttftSLOHeaderKey = "x-slo-ttft-ms"
-	tpotSLOHeaderKey = "x-slo-tpot-ms"
+	ttftSLOHeaderKey = metadata.TTFTSLOHeaderKey
+	tpotSLOHeaderKey = metadata.TPOTSLOHeaderKey
 )
 
 // compile-time validation
@@ -112,8 +113,10 @@ func (p *LatencyAdmission) AdmitRequest(ctx context.Context, request *fwksched.I
 	}
 
 	// Check if SLOs are set — if not, we can't determine validity, so admit.
-	ttftSLO := parseFloatHeaderValue(request.Headers[ttftSLOHeaderKey])
-	tpotSLO := parseFloatHeaderValue(request.Headers[tpotSLOHeaderKey])
+	ttftSLOHeader, _ := metadata.GetLowerCaseHeaderValue(request.Headers, ttftSLOHeaderKey)
+	tpotSLOHeader, _ := metadata.GetLowerCaseHeaderValue(request.Headers, tpotSLOHeaderKey)
+	ttftSLO := parseFloatHeaderValue(ttftSLOHeader)
+	tpotSLO := parseFloatHeaderValue(tpotSLOHeader)
 	hasSLO := ttftSLO > 0 || tpotSLO > 0
 	if !hasSLO {
 		return nil

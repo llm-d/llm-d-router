@@ -1,3 +1,4 @@
+{{ include "llm-d-router.validations.epp.resources" $ }}
 {{ include "inference-extension.config" . }}
 {{ include "inference-extension.deployment" . }}
 {{ include "inference-extension.lead-election-rbac" . }}
