@@ -50,9 +50,9 @@ const (
 	LatencyDataProviderPluginType = latencyproducerconstants.LatencyDataProviderPluginType
 
 	// TTFTSLOHeaderKey is the header key for the TTFT SLO.
-	TTFTSLOHeaderKey = "x-slo-ttft-ms"
+	TTFTSLOHeaderKey = "x-llm-d-slo-ttft-ms"
 	// TPOTSLOHeaderKey is the header key for the TPOT SLO.
-	TPOTSLOHeaderKey = "x-slo-tpot-ms"
+	TPOTSLOHeaderKey = "x-llm-d-slo-tpot-ms"
 
 	// ExperimentalDefaultPrefillProfile is the default profile name for prefill endpoints in disaggregated serving.
 	ExperimentalDefaultPrefillProfile = "prefill"

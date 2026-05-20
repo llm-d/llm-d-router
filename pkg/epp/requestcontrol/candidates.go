@@ -94,7 +94,7 @@ func NewDatastoreEndpointCandidates(ds Datastore, opts ...EndpointCandidatesOpti
 //
 // It supports:
 // 1. Returning all endpoint candidates if no specific subset filter is present.
-// 2. Returning a filtered list of endpoint candidates if "x-gateway-destination-endpoint-subset" is present.
+// 2. Returning a filtered list of endpoint candidates if "x-llm-d-gateway-destination-endpoint-subset" is present.
 func (d *DatastoreEndpointCandidates) Locate(ctx context.Context, requestMetadata map[string]any) []fwkdl.Endpoint {
 	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
 
@@ -254,7 +254,7 @@ func (c *CachedEndpointCandidates) Locate(ctx context.Context, requestMetadata m
 }
 
 // generateCacheKey creates a deterministic string key representing the endpoint selection criteria.
-// It handles the "x-gateway-destination-endpoint-subset" structure specifically.
+// It handles the "x-llm-d-gateway-destination-endpoint-subset" structure specifically.
 func (c *CachedEndpointCandidates) generateCacheKey(reqMetadata map[string]any) string {
 	// No Metadata -> All Endpoints
 	if reqMetadata == nil {

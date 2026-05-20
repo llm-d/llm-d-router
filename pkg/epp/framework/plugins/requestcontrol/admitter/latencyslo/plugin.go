@@ -35,8 +35,8 @@ import (
 const (
 	LatencyAdmissionPluginType = "latency-slo-admitter"
 
-	ttftSLOHeaderKey = "x-slo-ttft-ms"
-	tpotSLOHeaderKey = "x-slo-tpot-ms"
+	ttftSLOHeaderKey = "x-llm-d-slo-ttft-ms"
+	tpotSLOHeaderKey = "x-llm-d-slo-tpot-ms"
 )
 
 // compile-time validation
