@@ -215,7 +215,7 @@ sequenceDiagram
 
 ## Future Considerations
 
-- Cache coordinate (we can talk about 3 different types of cache: KV-cache, embeddings, and multimedia content)
+- Cache coordination (we can talk about 3 different types of cache: KV-cache, embeddings, and multimedia content)
 - Pre-allocation of kv blocks in the decode node, push cache from the prefill to the decode worker during calculation
 - More sophisticated encode worker selection (e.g., load-aware scheduling, cache content, locality-aware placement)
 

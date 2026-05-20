@@ -75,7 +75,7 @@ The design enables:
 
 ## Configuration
 
-The llm-d EPP relies on a YAML-based configuration—provided either as a file or an in-line parameter—to determine which lifecycle hooks (plugins) are active.
+The llm-d Endpoint Picker relies on a YAML-based configuration—provided either as a file or an in-line parameter—to determine which lifecycle hooks (plugins) are active.
 
 Specifically, this configuration establishes the following components:
 
