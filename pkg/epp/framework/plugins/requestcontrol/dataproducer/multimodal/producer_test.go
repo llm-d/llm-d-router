@@ -193,6 +193,7 @@ func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}, {Hash: "hash-c", Size: 1}})
 
 	producer.PreRequest(context.Background(), request, schedulingResult(endpointC))
+	producer.wg.Wait()
 
 	cache := producer.cacheSnapshot()
 	assert.Contains(t, cache["hash-a"], podA.String())
@@ -209,6 +210,7 @@ func TestLRUEviction(t *testing.T) {
 		request := requestWithHashes(hash, map[string]int{hash: 1})
 		require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpoint}))
 		producer.PreRequest(context.Background(), request, schedulingResult(endpoint))
+		producer.wg.Wait()
 	}
 
 	cache := producer.cacheSnapshot()
@@ -223,6 +225,12 @@ func TestStalePodCleanup(t *testing.T) {
 	producer := newTestProducer(t, nil, func() []k8stypes.NamespacedName { return []k8stypes.NamespacedName{podA} })
 	producer.putCacheEntry("hash-a", podA, podB)
 
+	// Simulate the periodic cleanup loop firing.
+	producer.removeStalePods()
+
+	assert.NotContains(t, producer.cacheSnapshot()["hash-a"], podB.String())
+	assert.Contains(t, producer.cacheSnapshot()["hash-a"], podA.String())
+
 	endpointA := newEndpoint(podA)
 	endpointB := newEndpoint(podB)
 	require.NoError(t, producer.Produce(context.Background(), requestWithHashes("req", map[string]int{"hash-a": 1}), []scheduling.Endpoint{endpointA, endpointB}))
@@ -233,7 +241,6 @@ func TestStalePodCleanup(t *testing.T) {
 	assertMatchInfo(t, endpointB,
 		nil,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}})
-	assert.NotContains(t, producer.cacheSnapshot()["hash-a"], podB.String())
 }
 
 func TestProducerEndpointExtractorInterfaceContract(t *testing.T) {

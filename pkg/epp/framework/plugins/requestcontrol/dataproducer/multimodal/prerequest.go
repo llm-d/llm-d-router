@@ -47,22 +47,26 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		return
 	}
 
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	for _, item := range state.items {
-		pods := map[string]struct{}{}
-		if existing, ok := p.cache.Get(item.Hash); ok {
-			pods = maps.Clone(existing)
-		}
-		for _, endpoint := range targets {
-			if metadata := endpoint.GetMetadata(); metadata != nil {
-				pods[metadata.NamespacedName.String()] = struct{}{}
+	items := state.items
+	// Update cache asynchronously to avoid blocking the request path.
+	p.wg.Go(func() {
+		p.mutex.Lock()
+		defer p.mutex.Unlock()
+		for _, item := range items {
+			pods := map[string]struct{}{}
+			if existing, ok := p.cache.Get(item.Hash); ok {
+				pods = maps.Clone(existing)
+			}
+			for _, endpoint := range targets {
+				if metadata := endpoint.GetMetadata(); metadata != nil {
+					pods[metadata.NamespacedName.String()] = struct{}{}
+				}
+			}
+			if len(pods) > 0 {
+				p.cache.Add(item.Hash, pods)
 			}
 		}
-		if len(pods) > 0 {
-			p.cache.Add(item.Hash, pods)
-		}
-	}
+	})
 }
 
 func targetEndpoints(schedulingResult *scheduling.SchedulingResult) []scheduling.Endpoint {

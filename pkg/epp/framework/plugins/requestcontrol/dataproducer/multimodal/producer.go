@@ -29,6 +29,7 @@ import (
 	"reflect"
 	"sort"
 	"sync"
+	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -51,7 +52,8 @@ const (
 	// ProducedKey is the data key emitted by this producer.
 	ProducedKey = attrmm.EncoderCacheMatchInfoKey
 
-	defaultCacheSize = 10000
+	defaultCacheSize       = 10000
+	podCleanupInterval     = 2 * time.Minute
 )
 
 var (
@@ -86,6 +88,7 @@ type Producer struct {
 	pluginState *plugin.PluginState
 	podList     func() []k8stypes.NamespacedName
 	mutex       sync.RWMutex
+	wg          sync.WaitGroup
 }
 
 type requestState struct {
@@ -111,12 +114,29 @@ func New(ctx context.Context, name string, params *Parameters, podList func() []
 		return nil, fmt.Errorf("failed to create multimodal encoder-cache LRU with size %d: %w", cacheSize, err)
 	}
 
-	return &Producer{
+	p := &Producer{
 		typedName:   plugin.TypedName{Type: ProducerType, Name: name},
 		cache:       cache,
 		pluginState: plugin.NewPluginState(ctx),
 		podList:     podList,
-	}, nil
+	}
+	if podList != nil {
+		go p.cleanupLoop(ctx)
+	}
+	return p, nil
+}
+
+func (p *Producer) cleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(podCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.removeStalePods()
+		}
+	}
 }
 
 // TypedName returns the plugin type/name.
@@ -151,8 +171,6 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 	if request != nil && request.RequestID != "" {
 		p.pluginState.Write(request.RequestID, plugin.StateKey(ProducerType), &requestState{items: requestItems})
 	}
-	// TODO(#1144): Removal of stale pods should happen in background for better performance.
-	p.removeStalePods()
 	for _, endpoint := range endpoints {
 		metadata := endpoint.GetMetadata()
 		if metadata == nil {
