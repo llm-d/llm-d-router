@@ -5,56 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"strings"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 )
 
-const (
-	ModelsAttributeKey  = "/v1/models"
-	ModelsExtractorType = "models-data-extractor"
-)
+// ModelExtractor is not a requesthandling.DataProducer as data here is produced
+// asynchronously and not tied to incoming requests
+var _ fwkplugin.ProducerPlugin = &ModelExtractor{}
 
-// ModelDataCollection defines models' data returned from /v1/models API
-type ModelDataCollection []ModelData
-
-// ModelData defines model's data returned from /v1/models API
-type ModelData struct {
-	ID     string `json:"id"`
-	Parent string `json:"parent,omitempty"`
-}
-
-// String returns a string representation of the model info
-func (m *ModelData) String() string {
-	return fmt.Sprintf("%+v", *m)
-}
-
-// Clone returns a full copy of the object
-func (m ModelDataCollection) Clone() fwkdl.Cloneable {
-	if m == nil {
-		return nil
-	}
-	clone := make([]ModelData, len(m))
-	copy(clone, m)
-	return (*ModelDataCollection)(&clone)
-}
-
-func (m ModelDataCollection) String() string {
-	if m == nil {
-		return "[]"
-	}
-	parts := make([]string, len(m))
-	for i, p := range m {
-		parts[i] = p.String()
-	}
-	return "[" + strings.Join(parts, ", ") + "]"
-}
+var _ fwkdl.Extractor = &ModelExtractor{}
 
 // ModelResponse is the response from /v1/models API
 type ModelResponse struct {
-	Object string      `json:"object"`
-	Data   []ModelData `json:"data"`
+	Object string                 `json:"object"`
+	Data   []attrmodels.ModelData `json:"data"`
 }
 
 // ModelsResponseType is the type of models response
@@ -65,15 +31,17 @@ var (
 // ModelExtractor implements the models extraction.
 type ModelExtractor struct {
 	typedName fwkplugin.TypedName
+	dk        fwkplugin.DataKey
 }
 
 // NewModelExtractor returns a new model extractor.
 func NewModelExtractor() *ModelExtractor {
 	return &ModelExtractor{
 		typedName: fwkplugin.TypedName{
-			Type: ModelsExtractorType,
-			Name: ModelsExtractorType,
+			Type: attrmodels.ModelsExtractorType,
+			Name: attrmodels.ModelsExtractorType,
 		},
+		dk: attrmodels.ModelsAttributeKey.WithNonEmptyProducerName(attrmodels.ModelsExtractorType),
 	}
 }
 
@@ -103,6 +71,13 @@ func (me *ModelExtractor) Extract(_ context.Context, data any, ep fwkdl.Endpoint
 		return fmt.Errorf("unexpected input in Extract: %T", data)
 	}
 
-	ep.GetAttributes().Put(ModelsAttributeKey, ModelDataCollection(models.Data))
+	ep.GetAttributes().Put(me.dk.String(), attrmodels.ModelDataCollection(models.Data))
 	return nil
+}
+
+// Produces returns data produced by the producer.
+// This is a map from data key (string) produced to
+// the data type of the key (represented as data with default value casted as any field).
+func (me *ModelExtractor) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{me.dk: attrmodels.ModelDataCollection{}}
 }

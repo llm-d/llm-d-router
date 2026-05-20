@@ -7,6 +7,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 )
 
 func TestExtractorExtract(t *testing.T) {
@@ -59,7 +60,7 @@ func TestExtractorExtract(t *testing.T) {
 			name: "valid models response",
 			data: &ModelResponse{
 				Object: "list",
-				Data: []ModelData{
+				Data: []attrmodels.ModelData{
 					{
 						ID: model,
 					},
@@ -74,6 +75,7 @@ func TestExtractorExtract(t *testing.T) {
 		},
 	}
 
+	key := attrmodels.ModelsAttributeKey.WithNonEmptyProducerName(attrmodels.ModelsExtractorType).String()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defer func() {
@@ -83,12 +85,12 @@ func TestExtractorExtract(t *testing.T) {
 			}()
 
 			attr := ep.GetAttributes()
-			before, ok := attr.Get(ModelsAttributeKey)
+			before, ok := attr.Get(key)
 			if ok && before != nil {
 				t.Error("expected empty attributes")
 			}
 			err := extractor.Extract(ctx, tt.data, ep)
-			after, ok := attr.Get(ModelsAttributeKey)
+			after, ok := attr.Get(key)
 			if !ok && tt.updated {
 				t.Error("expected updated attributes")
 			}
