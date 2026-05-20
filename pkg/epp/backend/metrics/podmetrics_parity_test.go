@@ -36,6 +36,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	sourcehttp "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
@@ -356,9 +357,9 @@ func parseWithDatalayerMetrics(ctx context.Context, t *testing.T, urlStr string)
 		return nil, fmt.Errorf("failed to create data source: %w", err)
 	}
 
-	dataSource, ok := plugin.(fwkdl.PollingDataSource)
+	dataSource, ok := plugin.(*sourcehttp.HTTPDataSource[sourcemetrics.PrometheusMetricMap])
 	if !ok {
-		return nil, errors.New("plugin is not a PollingDataSource")
+		return nil, errors.New("plugin is not the expected HTTPDataSource[PrometheusMetricMap]")
 	}
 
 	metadata := &fwkdl.EndpointMetadata{
@@ -375,8 +376,7 @@ func parseWithDatalayerMetrics(ctx context.Context, t *testing.T, urlStr string)
 		return endpoint.GetMetrics(), err
 	}
 	if data != nil {
-		err = extractor.Extract(ctx, data, endpoint)
-		if err != nil {
+		if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: endpoint}); err != nil {
 			return endpoint.GetMetrics(), err
 		}
 	}

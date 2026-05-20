@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2025 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,115 +17,19 @@ limitations under the License.
 package datalayer
 
 import (
-	"reflect"
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	extractormocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
-
-var (
-	extractorType             = reflect.TypeFor[fwkdl.Extractor]()
-	notificationextractorType = reflect.TypeFor[fwkdl.NotificationExtractor]()
-)
-
-func TestValidateInputTypeCompatible(t *testing.T) {
-	type rawStruct struct{}
-	type iface interface{ Foo() }
-
-	tests := []struct {
-		name   string
-		output reflect.Type
-		input  reflect.Type
-		valid  bool
-	}{
-		{"exact match", typeOfT(rawStruct{}), typeOfT(rawStruct{}), true},
-		{"input is interface{}", typeOfT(rawStruct{}), typeOfT((*any)(nil)), true},
-		{"nil types are not allowed", typeOfT(rawStruct{}), typeOfT(nil), false},
-		{"output does not implement input", typeOfT(rawStruct{}), typeOfT((*iface)(nil)), false},
-	}
-
-	for _, tt := range tests {
-		err := validateInputTypeCompatible(tt.output, tt.input)
-		if tt.valid {
-			assert.NoError(t, err, "%s: expected valid extractor type", tt.name)
-		} else {
-			assert.Error(t, err, "%s: expected invalid extractor type", tt.name)
-		}
-	}
-}
-
-func TestValidateExtractorCompatible(t *testing.T) {
-	type notExtractor struct{}
-
-	tests := []struct {
-		name         string
-		extType      reflect.Type
-		expectedType reflect.Type
-		valid        bool
-		errContains  string
-	}{
-		{
-			name:         "nil extractor type",
-			extType:      nil,
-			expectedType: extractorType,
-			valid:        false,
-			errContains:  "can't be nil",
-		},
-		{
-			name:         "nil expected type",
-			extType:      reflect.TypeFor[*notExtractor](),
-			expectedType: nil,
-			valid:        false,
-			errContains:  "can't be nil",
-		},
-		{
-			name:         "expected type not interface",
-			extType:      reflect.TypeFor[*notExtractor](),
-			expectedType: reflect.TypeFor[string](),
-			valid:        false,
-			errContains:  "must be an interface",
-		},
-		{
-			name:         "does not implement interface",
-			extType:      reflect.TypeFor[*notExtractor](),
-			expectedType: extractorType,
-			valid:        false,
-			errContains:  "does not implement interface",
-		},
-	}
-
-	for _, tt := range tests {
-		err := validateExtractorCompatible(tt.extType, tt.expectedType)
-		if tt.valid {
-			assert.NoError(t, err, "%s: expected valid", tt.name)
-		} else {
-			assert.Error(t, err, "%s: expected error", tt.name)
-			if tt.errContains != "" {
-				assert.Contains(t, err.Error(), tt.errContains, "%s: error should contain", tt.name)
-			}
-		}
-	}
-}
-
-func TestTypeConstants(t *testing.T) {
-	assert.True(t, extractorType.Kind() == reflect.Interface, "extractorType should be an interface")
-	assert.True(t, notificationextractorType.Kind() == reflect.Interface, "notificationextractorType should be an interface")
-}
-
-func typeOfT(v any) reflect.Type {
-	t := reflect.TypeOf(v)
-	if t == nil {
-		return nil
-	}
-	if t.Kind() == reflect.Pointer {
-		return t.Elem()
-	}
-	return t
-}
 
 func TestRuntimeConfigureWithNilExtractor(t *testing.T) {
 	logger := newTestLogger(t)
@@ -148,7 +52,7 @@ func TestRuntimeConfigureDuplicateGVKFails(t *testing.T) {
 	logger := newTestLogger(t)
 	r := NewRuntime(1)
 
-	// Create two notification sources with the same GVK
+	// Two notification sources with the same GVK must fail at Configure.
 	gvk := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
 	src1 := mocks.NewNotificationSource("test", "source1", gvk)
 	src2 := mocks.NewNotificationSource("test", "source2", gvk)
@@ -163,4 +67,82 @@ func TestRuntimeConfigureDuplicateGVKFails(t *testing.T) {
 	err := r.Configure(cfg, false, "", logger)
 	assert.Error(t, err, "Configure should fail with duplicate GVK")
 	assert.Contains(t, err.Error(), "duplicate", "Error should mention duplicate GVK")
+}
+
+// NotificationSource and EndpointSource dispatch sites type-assert the
+// extractor without checking ok. A mismatched extractor type would panic at
+// the first event or be silently ignored at dispatch. Configure must catch it.
+func TestRuntimeConfigure_NotificationSource_RequiresNotificationExtractor(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(1)
+
+	gvk := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
+	src := mocks.NewNotificationSource("notif-src", "notif", gvk)
+	// A polling extractor is NOT a NotificationExtractor.
+	wrongExt := extractormocks.NewPollingExtractor("polling-ext")
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{Plugin: src, Extractors: []fwkplugin.Plugin{wrongExt}},
+		},
+	}
+
+	err := r.Configure(cfg, false, "", logger)
+	require.Error(t, err, "Configure must reject a non-NotificationExtractor for a notification source")
+	assert.Contains(t, err.Error(), "NotificationExtractor")
+}
+
+func TestRuntimeConfigure_EndpointSource_RequiresEndpointExtractor(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(1)
+
+	src := notifications.NewEndpointDataSource("endpoint-src", "endpoint")
+	wrongExt := extractormocks.NewPollingExtractor("polling-ext")
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{Plugin: src, Extractors: []fwkplugin.Plugin{wrongExt}},
+		},
+	}
+
+	err := r.Configure(cfg, false, "", logger)
+	require.Error(t, err, "Configure must reject a non-EndpointExtractor for an endpoint source")
+	assert.Contains(t, err.Error(), "EndpointExtractor")
+}
+
+// multiVariantSource implements two variant interfaces. The registerSource
+// type-switch routes by first match; without an explicit guard the source
+// would silently land in whichever case comes first.
+type multiVariantSource struct {
+	typedName fwkplugin.TypedName
+	gvk       schema.GroupVersionKind
+}
+
+func (m *multiVariantSource) TypedName() fwkplugin.TypedName                     { return m.typedName }
+func (m *multiVariantSource) GVK() schema.GroupVersionKind                       { return m.gvk }
+func (m *multiVariantSource) Dispatch(_ context.Context, _ fwkdl.Endpoint) error { return nil }
+func (m *multiVariantSource) AppendExtractor(_ fwkplugin.Plugin) error           { return nil }
+func (m *multiVariantSource) Notify(_ context.Context, event fwkdl.NotificationEvent) (*fwkdl.NotificationEvent, error) {
+	// Body never runs in this test. Configure rejects the source for
+	// implementing multiple variants before any Notify call. Echo the
+	// event so the return satisfies nilnil.
+	return &event, nil
+}
+
+func TestRuntimeConfigure_SourceImplementingMultipleVariants_Rejected(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(1)
+
+	src := &multiVariantSource{
+		typedName: fwkplugin.TypedName{Type: "ambiguous", Name: "ambiguous"},
+		gvk:       schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"},
+	}
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{{Plugin: src}},
+	}
+
+	err := r.Configure(cfg, false, "", logger)
+	require.Error(t, err, "a source that implements multiple variant interfaces must be rejected")
+	assert.Contains(t, err.Error(), "multiple variant")
 }

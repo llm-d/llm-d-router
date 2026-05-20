@@ -146,37 +146,85 @@ func TestConfigure_WarnPolicyMissingSource(t *testing.T) {
 	require.NoError(t, err, "Warn policy should not return error when source is absent")
 }
 
-func TestConfigure_DedupByExtractorType(t *testing.T) {
-	// (g) dedup: extractor type already wired via config → code registration is a no-op
+func TestConfigure_PendingRegistrationYieldsToConfigByType(t *testing.T) {
+	cases := []struct {
+		name       string
+		configExt  *extractormocks.EndpointExtractor
+		pendingExt *extractormocks.EndpointExtractor
+		wantNames  []string // expected bound extractor names, in order
+	}{
+		{
+			name:       "same type → pending yields to config",
+			configExt:  extractormocks.NewEndpointExtractor("config-ext"),
+			pendingExt: extractormocks.NewEndpointExtractor("code-ext"),
+			wantNames:  []string{"config-ext"},
+		},
+		{
+			name:       "different type → both bound (no yield)",
+			configExt:  extractormocks.NewEndpointExtractor("config-ext"),
+			pendingExt: extractormocks.NewEndpointExtractor("code-ext").WithType("other-extractor-type"),
+			wantNames:  []string{"config-ext", "code-ext"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRuntime(0)
+			logger := newTestLogger(t)
+			src := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-src")
+
+			cfg := &Config{
+				Sources: []DataSourceConfig{{
+					Plugin:     src,
+					Extractors: []fwkplugin.Plugin{tc.configExt},
+				}},
+			}
+
+			require.NoError(t, r.Register(fwkdl.PendingRegistration{
+				Owner:      fwkplugin.TypedName{Type: "test-plugin", Name: "test"},
+				SourceType: notifications.EndpointNotificationSourceType,
+				Extractor:  tc.pendingExt,
+			}))
+
+			require.NoError(t, r.Configure(cfg, false, "", logger))
+
+			exts, ok := r.extractors.Get("ep-src")
+			require.True(t, ok)
+			gotNames := make([]string, len(exts))
+			for i, e := range exts {
+				gotNames[i] = e.TypedName().Name
+			}
+			assert.Equal(t, tc.wantNames, gotNames)
+		})
+	}
+}
+
+func TestConfigure_PendingVsPending_FirstWinsOnSameType(t *testing.T) {
 	r := NewRuntime(0)
 	logger := newTestLogger(t)
 
-	src := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-src")
-	extFromConfig := extractormocks.NewEndpointExtractor("config-ext")
-	extFromCode := extractormocks.NewEndpointExtractor("code-ext")
+	defaultSrc := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, notifications.EndpointNotificationSourceType)
+	first := extractormocks.NewEndpointExtractor("first-pending")
+	second := extractormocks.NewEndpointExtractor("second-pending")
 
-	// User config wires extFromConfig to src.
-	cfg := &Config{
-		Sources: []DataSourceConfig{{
-			Plugin:     src,
-			Extractors: []fwkdl.ExtractorBase{extFromConfig},
-		}},
-	}
-
-	// Code registers extFromCode — same type as extFromConfig ("mock-endpoint-extractor").
 	require.NoError(t, r.Register(fwkdl.PendingRegistration{
-		Owner:      fwkplugin.TypedName{Type: "test-plugin", Name: "test"},
+		Owner:         fwkplugin.TypedName{Type: "plugin-a", Name: "a"},
+		SourceType:    notifications.EndpointNotificationSourceType,
+		Extractor:     first,
+		DefaultSource: defaultSrc,
+	}))
+	require.NoError(t, r.Register(fwkdl.PendingRegistration{
+		Owner:      fwkplugin.TypedName{Type: "plugin-b", Name: "b"},
 		SourceType: notifications.EndpointNotificationSourceType,
-		Extractor:  extFromCode,
+		Extractor:  second,
 	}))
 
-	err := r.Configure(cfg, false, "", logger)
-	require.NoError(t, err)
+	require.NoError(t, r.Configure(nil, false, "", logger))
 
-	exts, ok := r.extractors.Get("ep-src")
+	exts, ok := r.extractors.Get(notifications.EndpointNotificationSourceType)
 	require.True(t, ok)
-	require.Len(t, exts, 1, "code registration should be deduped; only config extractor present")
-	assert.Equal(t, "config-ext", exts[0].TypedName().Name)
+	require.Len(t, exts, 1, "second pending must yield to first when Types collide")
+	assert.Equal(t, "first-pending", exts[0].TypedName().Name)
 }
 
 // Pins rejection of duplicate-Type extractors per source. Append dedups silently otherwise.
@@ -191,7 +239,7 @@ func TestConfigure_DuplicateExtractorTypePerSource(t *testing.T) {
 	cfg := &Config{
 		Sources: []DataSourceConfig{{
 			Plugin:     src,
-			Extractors: []fwkdl.ExtractorBase{ext1, ext2},
+			Extractors: []fwkplugin.Plugin{ext1, ext2},
 		}},
 	}
 

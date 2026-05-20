@@ -155,7 +155,7 @@ func TestInFlightLoadProducer_NotificationCleanup(t *testing.T) {
 		Endpoint: newStubSchedulingEndpoint(endpointName),
 	}
 
-	err := producer.ExtractEndpoint(ctx, eventEndpoint)
+	err := producer.Extract(ctx, eventEndpoint)
 	require.NoError(t, err)
 
 	// Verify Cleanup
@@ -597,14 +597,14 @@ func TestInFlightLoadProducer_PanicSafety(t *testing.T) {
 	t.Run("ExtractEndpoint", func(t *testing.T) {
 		// 1. Nil Endpoint
 		require.NotPanics(t, func() {
-			_ = producer.ExtractEndpoint(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: nil})
+			_ = producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: nil})
 		})
 
 		// 2. Nil Metadata
 		stub := newStubSchedulingEndpoint("nil-meta")
 		stub.metadata = nil
 		require.NotPanics(t, func() {
-			_ = producer.ExtractEndpoint(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: stub})
+			_ = producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: stub})
 		})
 	})
 

@@ -21,7 +21,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"testing"
 	"time"
 
@@ -34,6 +33,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	httpds "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
@@ -87,12 +87,12 @@ func TestRuntimePollingDispatch(t *testing.T) {
 			ext := mocks.NewPollingExtractor("test-extractor")
 
 			httpSrc, err := httpds.NewHTTPDataSource("http", "/metrics", true, "test-http", "test-source",
-				parsePrometheusMetrics, reflect.TypeFor[fwkdl.Metrics]())
+				parsePrometheusMetrics)
 			require.NoError(t, err)
 
 			cfg := &datalayer.Config{
 				Sources: []datalayer.DataSourceConfig{
-					{Plugin: httpSrc, Extractors: []fwkdl.ExtractorBase{ext}},
+					{Plugin: httpSrc, Extractors: []fwkplugin.Plugin{ext}},
 				},
 			}
 
@@ -139,12 +139,12 @@ func TestRuntimePollingMultipleExtractors(t *testing.T) {
 	ext2 := mocks.NewPollingExtractor("extractor-2")
 
 	httpSrc, err := httpds.NewHTTPDataSource("http", "/metrics", true, "test-http", "test-source",
-		parsePrometheusMetrics, reflect.TypeFor[fwkdl.Metrics]())
+		parsePrometheusMetrics)
 	require.NoError(t, err)
 
 	cfg := &datalayer.Config{
 		Sources: []datalayer.DataSourceConfig{
-			{Plugin: httpSrc, Extractors: []fwkdl.ExtractorBase{ext1, ext2}},
+			{Plugin: httpSrc, Extractors: []fwkplugin.Plugin{ext1, ext2}},
 		},
 	}
 
@@ -188,12 +188,12 @@ func TestRuntimePollingEndpointLifecycle(t *testing.T) {
 	ext := mocks.NewPollingExtractor("lifecycle-extractor")
 
 	httpSrc, err := httpds.NewHTTPDataSource("http", "/metrics", true, "test-http", "test-source",
-		parsePrometheusMetrics, reflect.TypeFor[fwkdl.Metrics]())
+		parsePrometheusMetrics)
 	require.NoError(t, err)
 
 	cfg := &datalayer.Config{
 		Sources: []datalayer.DataSourceConfig{
-			{Plugin: httpSrc, Extractors: []fwkdl.ExtractorBase{ext}},
+			{Plugin: httpSrc, Extractors: []fwkplugin.Plugin{ext}},
 		},
 	}
 
@@ -242,7 +242,7 @@ func TestRuntimePollingWithoutExtractors(t *testing.T) {
 	r := datalayer.NewRuntime(50 * time.Millisecond)
 
 	httpSrc, err := httpds.NewHTTPDataSource("http", "/metrics", true, "test-http", "test-source",
-		parsePrometheusMetrics, reflect.TypeFor[fwkdl.Metrics]())
+		parsePrometheusMetrics)
 	require.NoError(t, err)
 
 	cfg := &datalayer.Config{
@@ -281,12 +281,12 @@ func TestRuntimePollingHTTPError(t *testing.T) {
 	ext := mocks.NewPollingExtractor("error-extractor")
 
 	httpSrc, err := httpds.NewHTTPDataSource("http", "/metrics", true, "test-http", "test-source",
-		parsePrometheusMetrics, reflect.TypeFor[fwkdl.Metrics]())
+		parsePrometheusMetrics)
 	require.NoError(t, err)
 
 	cfg := &datalayer.Config{
 		Sources: []datalayer.DataSourceConfig{
-			{Plugin: httpSrc, Extractors: []fwkdl.ExtractorBase{ext}},
+			{Plugin: httpSrc, Extractors: []fwkplugin.Plugin{ext}},
 		},
 	}
 
@@ -330,12 +330,12 @@ func createTestMetricsServer(t *testing.T, metrics map[string]float64) *httptest
 	return httptest.NewServer(handler)
 }
 
-func parsePrometheusMetrics(reader io.Reader) (any, error) {
-	metrics := &fwkdl.Metrics{}
+func parsePrometheusMetrics(reader io.Reader) (fwkdl.Metrics, error) {
+	var metrics fwkdl.Metrics
 	parser := expfmt.NewTextParser(model.LegacyValidation)
 	metricFamilies, err := parser.TextToMetricFamilies(reader)
 	if err != nil {
-		return nil, err
+		return metrics, err
 	}
 
 	for _, mf := range metricFamilies {

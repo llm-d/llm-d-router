@@ -177,7 +177,7 @@ func (p *InFlightLoadProducer) RegisterDependencies(r datalayer.Registrar) error
 
 // Extract handles endpoint deletion events to prune stateful trackers.
 func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.EndpointEvent) error {
-	if event.Type != datalayer.EventDelete || event.Endpoint == nil {
+	if event.Type != datalayer.EventDelete || event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
 		return nil
 	}
 

@@ -30,6 +30,7 @@ var _ fwkdl.EndpointExtractor = (*EndpointExtractor)(nil)
 // It records all events it receives and provides helper methods for test assertions.
 type EndpointExtractor struct {
 	name       string
+	typeName   string
 	events     []fwkdl.EndpointEvent
 	mu         sync.Mutex
 	extractErr error
@@ -37,7 +38,7 @@ type EndpointExtractor struct {
 
 // NewEndpointExtractor creates a new mock EndpointExtractor with the given name.
 func NewEndpointExtractor(name string) *EndpointExtractor {
-	return &EndpointExtractor{name: name}
+	return &EndpointExtractor{name: name, typeName: "mock-endpoint-extractor"}
 }
 
 // WithExtractError configures the extractor to return an error on Extract.
@@ -46,8 +47,15 @@ func (m *EndpointExtractor) WithExtractError(err error) *EndpointExtractor {
 	return m
 }
 
+// WithType overrides the extractor's TypedName().Type for tests that need
+// distinct Types (e.g. covering yield-vs-bind branches in runtime.Configure).
+func (m *EndpointExtractor) WithType(typeName string) *EndpointExtractor {
+	m.typeName = typeName
+	return m
+}
+
 func (m *EndpointExtractor) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Type: "mock-endpoint-extractor", Name: m.name}
+	return fwkplugin.TypedName{Type: m.typeName, Name: m.name}
 }
 
 // Extract records the event and returns any configured error.

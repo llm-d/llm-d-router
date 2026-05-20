@@ -245,8 +245,6 @@ func TestStalePodCleanup(t *testing.T) {
 
 func TestProducerEndpointExtractorInterfaceContract(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
-
-	assert.Equal(t, fwkdl.EndpointEventReflectType, producer.ExpectedInputType())
 	var _ fwkdl.EndpointExtractor = producer
 	assert.True(t, reflect.TypeOf(producer).Implements(reflect.TypeFor[fwkdl.EndpointExtractor]()))
 }
@@ -257,7 +255,7 @@ func TestExtractEndpointRemovesDeletedPod(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
 	producer.putCacheEntry("hash-a", podA, podB)
 
-	err := producer.ExtractEndpoint(context.Background(), fwkdl.EndpointEvent{
+	err := producer.Extract(context.Background(), fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
 		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: podB}, nil),
 	})
