@@ -10,6 +10,20 @@ common validations
 {{- end -}}
 
 {{/*
+EPP resource validations
+*/}}
+{{- define "llm-d-router.validations.epp.resources" -}}
+{{- if not .Values.inferenceExtension.resources }}
+{{- fail ".Values.inferenceExtension.resources is required. EPP is a critical component that must have resource requests set." }}
+{{- end }}
+{{- if not .Values.inferenceExtension.resources.requests }}
+{{- fail ".Values.inferenceExtension.resources.requests is required. EPP is a critical component that must have resource requests set." }}
+{{- end }}
+{{- $_ := required ".Values.inferenceExtension.resources.requests.cpu is required. EPP is a critical component that must have CPU requests set." .Values.inferenceExtension.resources.requests.cpu }}
+{{- $_ := required ".Values.inferenceExtension.resources.requests.memory is required. EPP is a critical component that must have memory requests set." .Values.inferenceExtension.resources.requests.memory }}
+{{- end -}}
+
+{{/*
 standalone validations
 */}}
 {{- define "llm-d-router.validations.standalone" -}}
