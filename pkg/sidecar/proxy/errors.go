@@ -18,8 +18,11 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 )
+
+var errInvalidJSON = errors.New("invalid JSON")
 
 // vLLM error response
 type errorResponse struct {

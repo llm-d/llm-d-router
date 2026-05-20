@@ -202,7 +202,7 @@ func (av *AllowlistValidator) IsAllowed(hostPort string) bool {
 	}
 
 	// Clean up the hostPort input
-	hostPort = normalizeHostPort(hostPort)
+	hostPort = extractHost(hostPort)
 
 	av.allowedTargetsMu.RLock()
 	defer av.allowedTargetsMu.RUnlock()

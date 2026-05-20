@@ -183,7 +183,7 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 	}
 
 	// Generate bootstrap host from prefill host
-	bootstrapHost := normalizeHostPort(prefillHostPort)
+	bootstrapHost := extractHost(prefillHostPort)
 
 	// Add bootstrap information
 	modifiedRequest[requestFieldBootstrapHost] = bootstrapHost

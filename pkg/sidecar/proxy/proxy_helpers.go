@@ -161,21 +161,27 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 	return decoderProxy
 }
 
-// readJSONBody reads the request body, closes it, and unmarshals it into a
-// map. On failure it writes the appropriate HTTP error response and returns
-// ok=false so the caller can simply return.
-func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
+func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 	defer func() { _ = r.Body.Close() }()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(err.Error()))
-		return nil, nil, false
+		return nil, nil, err
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+		return nil, nil, fmt.Errorf("%w: %w", errInvalidJSON, err)
+	}
+	return raw, parsed, nil
+}
+
+func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
+	raw, parsed, err := bodyAsJSON(r)
+	if err != nil {
+		if !errors.Is(err, errInvalidJSON) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(err.Error()))
+		} else if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+			s.logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false
 	}
@@ -189,13 +195,12 @@ func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *ht
 	return cloned
 }
 
-// normalizeHostPort returns the host part of a host:port string. If parsing
+// extractHost returns the host part of a host:port string. If parsing
 // fails (e.g. no port), the input is returned as-is.
-func normalizeHostPort(hostPort string) string {
-	host, _, err := net.SplitHostPort(hostPort)
+func extractHost(hostWithPort string) string {
+	host, _, err := net.SplitHostPort(hostWithPort)
 	if err != nil {
-		// If net.SplitHostPort fails, it's likely just a hostname without port
-		return hostPort
+		return hostWithPort
 	}
 	return host
 }
