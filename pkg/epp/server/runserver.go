@@ -65,7 +65,6 @@ type ExtProcServerRunner struct {
 	UseExperimentalDatalayerV2       bool // Pluggable data layer feature flag
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
-	GRPCEnableCompression            bool
 }
 
 // NewDefaultExtProcServerRunner creates a runner with default values.
@@ -87,7 +86,6 @@ func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 		GrpcPort:                         opts.GRPCPort,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
-		GRPCEnableCompression:            opts.GRPCEnableCompression,
 		GKNN:                             gknn,
 		ControllerCfg:                    ControllerConfig{true, true, true},
 		SecureServing:                    opts.SecureServing,

@@ -19,9 +19,12 @@ package server
 import (
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/spf13/pflag"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -53,11 +56,12 @@ type Options struct {
 	//
 	// ext_proc configuration.
 	//
-	GRPCPort              int  // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
-	EnableLeaderElection  bool // Enables leader election for high availability
-	GRPCMaxRecvMsgSize    int  // Maximum size of a gRPC message to receive.
-	GRPCMaxSendMsgSize    int  // Maximum size of a gRPC message to send.
-	GRPCEnableCompression bool // Enables gRPC compression.
+	GRPCPort              int    // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
+	EnableLeaderElection  bool   // Enables leader election for high availability
+	GRPCMaxRecvMsgSize    int    // Maximum size of a gRPC message to receive (parsed bytes).
+	GRPCMaxSendMsgSize    int    // Maximum size of a gRPC message to send (parsed bytes).
+	GRPCMaxRecvMsgSizeStr string // Raw string value from CLI flag for receive limit.
+	GRPCMaxSendMsgSizeStr string // Raw string value from CLI flag for send limit.
 	//
 	// InferencePool.
 	//
@@ -145,9 +149,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.GRPCPort, "grpc-port", opts.GRPCPort, "gRPC port used for communicating with Envoy proxy.")
 	fs.BoolVar(&opts.EnableLeaderElection, "ha-enable-leader-election", opts.EnableLeaderElection,
 		"Enables leader election for high availability. When enabled, readiness probes will only pass on the leader.")
-	fs.IntVar(&opts.GRPCMaxRecvMsgSize, "grpc-max-recv-msg-size", opts.GRPCMaxRecvMsgSize, "Maximum size of a gRPC message to receive.")
-	fs.IntVar(&opts.GRPCMaxSendMsgSize, "grpc-max-send-msg-size", opts.GRPCMaxSendMsgSize, "Maximum size of a gRPC message to send.")
-	fs.BoolVar(&opts.GRPCEnableCompression, "grpc-enable-compression", opts.GRPCEnableCompression, "Enables gRPC compression.")
+	fs.StringVar(&opts.GRPCMaxRecvMsgSizeStr, "grpc-max-recv-msg-size", opts.GRPCMaxRecvMsgSizeStr, "Maximum size of a gRPC message to receive (e.g., 10MiB, 25MB).")
+	fs.StringVar(&opts.GRPCMaxSendMsgSizeStr, "grpc-max-send-msg-size", opts.GRPCMaxSendMsgSizeStr, "Maximum size of a gRPC message to send (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.PoolGroup, "pool-group", opts.PoolGroup,
 		"Kubernetes resource group of the InferencePool this Endpoint Picker is associated with. Only `inference.networking.k8s.io/v1` is currently supported.")
 	fs.StringVar(&opts.PoolNamespace, "pool-namespace", opts.PoolNamespace,
@@ -220,6 +223,43 @@ func (opts *Options) Complete() error {
 
 	opts.EndpointTargetPorts = removeDuplicatePorts(opts.EndpointTargetPorts)
 
+	if opts.GRPCMaxRecvMsgSizeStr != "" {
+		s := sanitizeSizeString(opts.GRPCMaxRecvMsgSizeStr)
+		q, err := resource.ParseQuantity(s)
+		if err != nil {
+			return fmt.Errorf("invalid grpc-max-recv-msg-size: %w", err)
+		}
+		val, ok := q.AsInt64()
+		if !ok {
+			return fmt.Errorf("grpc-max-recv-msg-size overflows maximum supported size: %s", s)
+		}
+		if val < 0 {
+			return fmt.Errorf("grpc-max-recv-msg-size must be non-negative, got %d", val)
+		}
+		if val > int64(math.MaxInt) {
+			return fmt.Errorf("grpc-max-recv-msg-size overflows int: %d", val)
+		}
+		opts.GRPCMaxRecvMsgSize = int(val)
+	}
+	if opts.GRPCMaxSendMsgSizeStr != "" {
+		s := sanitizeSizeString(opts.GRPCMaxSendMsgSizeStr)
+		q, err := resource.ParseQuantity(s)
+		if err != nil {
+			return fmt.Errorf("invalid grpc-max-send-msg-size: %w", err)
+		}
+		val, ok := q.AsInt64()
+		if !ok {
+			return fmt.Errorf("grpc-max-send-msg-size overflows maximum supported size: %s", s)
+		}
+		if val < 0 {
+			return fmt.Errorf("grpc-max-send-msg-size must be non-negative, got %d", val)
+		}
+		if val > int64(math.MaxInt) {
+			return fmt.Errorf("grpc-max-send-msg-size overflows int: %d", val)
+		}
+		opts.GRPCMaxSendMsgSize = int(val)
+	}
+
 	// Complete logging options.
 	return opts.LoggingOptions.Complete()
 }
@@ -247,6 +287,13 @@ func (opts *Options) Validate() error {
 			opts.ModelServerMetricsScheme, "model-server-metrics-scheme")
 	}
 
+	if opts.GRPCMaxRecvMsgSize < 0 {
+		return fmt.Errorf("grpc-max-recv-msg-size must be non-negative, got %d", opts.GRPCMaxRecvMsgSize)
+	}
+	if opts.GRPCMaxSendMsgSize < 0 {
+		return fmt.Errorf("grpc-max-send-msg-size must be non-negative, got %d", opts.GRPCMaxSendMsgSize)
+	}
+
 	// Validate deprecated metric flags are not explicitly set
 	for flagName := range deprecatedMetricFlags {
 		if f := opts.fs.Lookup(flagName); f != nil && f.Changed {
@@ -256,6 +303,14 @@ func (opts *Options) Validate() error {
 
 	// Validate logging options.
 	return opts.LoggingOptions.Validate()
+}
+
+func sanitizeSizeString(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 1 && (s[len(s)-1] == 'B' || s[len(s)-1] == 'b') {
+		return s[:len(s)-1]
+	}
+	return s
 }
 
 func removeDuplicatePorts(ports []int) []int {
