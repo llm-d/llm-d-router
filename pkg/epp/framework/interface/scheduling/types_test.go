@@ -189,5 +189,5 @@ func TestScoredEndpointComparer(t *testing.T) {
 
 func TestModalityAliases(t *testing.T) {
 	// These aliases exist for ergonomic re-export. Confirm the values line up.
-	assert.Equal(t, Modality(fwkrh.ModalityImage), ModalityImage)
+	assert.Equal(t, fwkrh.ModalityImage, ModalityImage)
 }
