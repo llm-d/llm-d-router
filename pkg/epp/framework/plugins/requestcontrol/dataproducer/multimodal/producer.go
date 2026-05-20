@@ -25,7 +25,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sync"
 	"time"
 
@@ -300,14 +299,9 @@ func (p *Producer) removeStalePods() {
 	}
 }
 
-// ExpectedInputType declares the endpoint lifecycle event type this extractor consumes.
-func (p *Producer) ExpectedInputType() reflect.Type {
-	return fwkdl.EndpointEventReflectType
-}
-
-// ExtractEndpoint removes deleted endpoints from the best-effort multimodal
+// Extract removes deleted endpoints from the best-effort multimodal
 // cache-affinity state when endpoint lifecycle events are wired through the data layer.
-func (p *Producer) ExtractEndpoint(ctx context.Context, event fwkdl.EndpointEvent) error {
+func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 	if event.Type != fwkdl.EventDelete || event.Endpoint == nil {
 		return nil
 	}

@@ -17,7 +17,7 @@ limitations under the License.
 package datalayer
 
 import (
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // Config defines the configuration of EPP data layer, as the set of DataSources
@@ -28,8 +28,12 @@ type Config struct {
 	Sources []DataSourceConfig // the data sources configured in the data layer
 }
 
-// DataSourceConfig defines the configuration of a specific DataSource
+// DataSourceConfig defines the configuration of a specific DataSource.
+// Plugin may be a DataSource (notification, endpoint) or a PollingDispatcher;
+// the framework type-asserts to the right variant at Configure time.
+// Extractors are stored as plugin.Plugin and type-asserted to the source's
+// variant; PollingDispatchers consume them via AppendExtractor.
 type DataSourceConfig struct {
-	Plugin     fwkdl.DataSource      // the data source plugin instance
-	Extractors []fwkdl.ExtractorBase // extractors defined for the data source
+	Plugin     plugin.Plugin   // the source plugin instance (DataSource or PollingDispatcher)
+	Extractors []plugin.Plugin // extractors defined for the data source
 }

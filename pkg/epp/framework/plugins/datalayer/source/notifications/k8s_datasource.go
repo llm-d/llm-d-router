@@ -18,7 +18,6 @@ package notifications
 
 import (
 	"context"
-	"reflect"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -57,19 +56,8 @@ func (s *K8sNotificationSource) GVK() schema.GroupVersionKind {
 	return s.gvk
 }
 
-// OutputType returns the type of data this DataSource produces (NotificationEvent).
-func (s *K8sNotificationSource) OutputType() reflect.Type {
-	return fwkdl.NotificationEventType
-}
-
-// ExtractorType returns the type of Extractor this DataSource expects (NotificationExtractor).
-func (s *K8sNotificationSource) ExtractorType() reflect.Type {
-	return fwkdl.NotificationExtractorType
-}
-
-// Notify processes a notification event and returns it for Runtime to dispatch.
-// Returns the event (possibly modified) for Runtime to dispatch to extractors.
-// Returns nil event to signal Runtime to skip extractor dispatch.
-func (s *K8sNotificationSource) Notify(ctx context.Context, event fwkdl.NotificationEvent) (*fwkdl.NotificationEvent, error) {
+// Notify passes the event through for Runtime to dispatch to extractors.
+// Returns nil to skip extractor dispatch.
+func (s *K8sNotificationSource) Notify(_ context.Context, event fwkdl.NotificationEvent) (*fwkdl.NotificationEvent, error) {
 	return &event, nil
 }

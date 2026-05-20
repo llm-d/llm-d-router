@@ -19,7 +19,6 @@ package mocks
 import (
 	"context"
 	"errors"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,9 +30,15 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
-var _ fwkdl.DataSource = (*MetricsDataSource)(nil)
-var _ fwkdl.PollingDataSource = (*MetricsDataSource)(nil)
+var (
+	_ fwkdl.PollingDispatcher  = (*MetricsDataSource)(nil)
+	_ fwkdl.DataSource         = (*NotificationSource)(nil)
+	_ fwkdl.NotificationSource = (*NotificationSource)(nil)
+)
 
+// MetricsDataSource is a test PollingDispatcher: on Dispatch it writes the
+// preconfigured metrics into the endpoint and returns a sentinel error. The
+// sentinel signals "test dispatch ran" without producing real Poll data.
 type MetricsDataSource struct {
 	mu        sync.RWMutex
 	typedName plugin.TypedName
@@ -50,14 +55,6 @@ func (fds *MetricsDataSource) TypedName() plugin.TypedName {
 	return fds.typedName
 }
 
-func (fds *MetricsDataSource) OutputType() reflect.Type {
-	return reflect.TypeFor[fwkdl.Metrics]()
-}
-
-func (fds *MetricsDataSource) ExtractorType() reflect.Type {
-	return reflect.TypeFor[fwkdl.Extractor]()
-}
-
 // SetMetrics replaces the metrics map in a thread-safe manner.
 func (fds *MetricsDataSource) SetMetrics(metrics map[types.NamespacedName]*fwkdl.Metrics) {
 	fds.mu.Lock()
@@ -72,7 +69,10 @@ func (fds *MetricsDataSource) SetErrors(errors map[types.NamespacedName]error) {
 	fds.errors = errors
 }
 
-func (fds *MetricsDataSource) Poll(ctx context.Context, ep fwkdl.Endpoint) (any, error) {
+// Dispatch satisfies PollingDispatcher. Preserves the original mock side
+// effect (write metrics into the endpoint when keyed by NamespacedName) and
+// returns the sentinel error so tests can detect the dispatch ran.
+func (fds *MetricsDataSource) Dispatch(_ context.Context, ep fwkdl.Endpoint) error {
 	atomic.AddInt64(&fds.CallCount, 1)
 	fds.mu.RLock()
 	defer fds.mu.RUnlock()
@@ -84,10 +84,14 @@ func (fds *MetricsDataSource) Poll(ctx context.Context, ep fwkdl.Endpoint) (any,
 			ep.UpdateMetrics(clone)
 		}
 	}
-	return nil, errors.New("sentinel nothing polled")
+	return errors.New("sentinel nothing polled")
 }
 
-// NotificationSource implements both DataSource and NotificationSource for testing.
+// AppendExtractor is a no-op: this mock sets endpoint metrics directly in
+// Dispatch instead of running extractors.
+func (fds *MetricsDataSource) AppendExtractor(_ plugin.Plugin) error { return nil }
+
+// NotificationSource implements DataSource + NotificationSource for testing.
 type NotificationSource struct {
 	typedName plugin.TypedName
 	gvk       schema.GroupVersionKind
@@ -100,34 +104,13 @@ func NewNotificationSource(pluginType, name string, gvk schema.GroupVersionKind)
 	}
 }
 
-func (m *NotificationSource) TypedName() plugin.TypedName {
-	return m.typedName
-}
-
-func (m *NotificationSource) OutputType() reflect.Type {
-	return reflect.TypeFor[fwkdl.NotificationEvent]()
-}
-
-func (m *NotificationSource) ExtractorType() reflect.Type {
-	return reflect.TypeFor[fwkdl.NotificationExtractor]()
-}
-
-func (m *NotificationSource) GVK() schema.GroupVersionKind {
-	return m.gvk
+func (m *NotificationSource) TypedName() plugin.TypedName  { return m.typedName }
+func (m *NotificationSource) GVK() schema.GroupVersionKind { return m.gvk }
+func (m *NotificationSource) Extractors() []string         { return []string{} }
+func (m *NotificationSource) Collect(_ context.Context, _ fwkdl.Endpoint) error {
+	return nil
 }
 
 func (m *NotificationSource) Notify(_ context.Context, event fwkdl.NotificationEvent) (*fwkdl.NotificationEvent, error) {
 	return &event, nil
-}
-
-func (m *NotificationSource) Extractors() []string {
-	return []string{}
-}
-
-func (m *NotificationSource) AddExtractor(_ fwkdl.Extractor) error {
-	return nil
-}
-
-func (m *NotificationSource) Collect(_ context.Context, _ fwkdl.Endpoint) error {
-	return nil
 }
