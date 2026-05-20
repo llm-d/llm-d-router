@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the architecture and request lifecycle for enabling **disaggregated inference execution** in the llm-d router. llm-d supports multiple disaggregation topologies:
+This document describes the architecture and request lifecycle for enabling **disaggregated inference execution** in the llm-d Router. llm-d supports multiple disaggregation topologies:
 
 - **EPD** (no disaggregation) – a single node handles all three functions (encode, prefill, and decode). This is the default mode when no disaggregation is configured.
 - **P/D** (Prefill/Decode) – separates the prefill and decode stages onto different workers. This is functionally equivalent to EP/D, since prefill workers also handle encoding (multimodal processing) as part of the prefill stage.
@@ -215,7 +215,7 @@ sequenceDiagram
 
 ## Future Considerations
 
-- Cache coordinate (we can talk about 3 different types of cache: KV-cache, embeddings, and mumtimedia content)
+- Cache coordinate (we can talk about 3 different types of cache: KV-cache, embeddings, and multimedia content)
 - Pre-allocation of kv blocks in the decode node, push cache from the prefill to the decode worker during calculation
 - More sophisticated encode worker selection (e.g., load-aware scheduling, cache content, locality-aware placement)
 
@@ -223,7 +223,7 @@ sequenceDiagram
 
 ## Integrating External Prefill/Decode Workloads
 
-The llm-d inference scheduler supports integration with external disaggregated encode/prefill/decode (E/P/D) workloads or other inference frameworks that follow the same E/P/D separation pattern but use **different Kubernetes Pod labeling conventions**.
+The llm-d Router supports integration with external disaggregated encode/prefill/decode (E/P/D) workloads or other inference frameworks that follow the same E/P/D separation pattern but use **different Kubernetes Pod labeling conventions**.
 
 ### Labeling Convention Flexibility
 
@@ -519,6 +519,5 @@ Custom profile names (if your scheduling profiles are not named `decode`/`prefil
 - vLLM: [Disaggregated Prefill](https://docs.vllm.ai/en/latest/features/disagg_prefill/)
 - vLLM: [Encode Prefill Decode Disaggregation Design](https://docs.google.com/document/d/1aed8KtC6XkXtdoV87pWT0a8OJlZ-CpnuLLzmR8l9BAE/edit?tab=t.0#heading=h.9xkkijtnbbje)
 - vLLM: [Disaggregated Encoder](https://docs.vllm.ai/en/latest/features/disagg_encoder/)
-- vLLM: [[RFC]: Prototype Separating Vision Encoder to Its Own Worker](https://github.com/vllm-project/vllm/issues/20799)}
+- vLLM: [[RFC]: Prototype Separating Vision Encoder to Its Own Worker](https://github.com/vllm-project/vllm/issues/20799)
 - vLLM: [Encoder Disaggregation for Scalable Multimodal Model Serving](https://vllm.ai/blog/vllm-epd)
-

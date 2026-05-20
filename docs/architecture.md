@@ -1,4 +1,4 @@
-# llm-d Inference Scheduler Architecture
+# llm-d Router Architecture
 
 ## Table of Contents
 
@@ -75,7 +75,7 @@ The design enables:
 
 ## Configuration
 
-The inference scheduler relies on a YAML-based configuration—provided either as a file or an in-line parameter—to determine which lifecycle hooks (plugins) are active.
+The llm-d EPP relies on a YAML-based configuration—provided either as a file or an in-line parameter—to determine which lifecycle hooks (plugins) are active.
 
 Specifically, this configuration establishes the following components:
 
