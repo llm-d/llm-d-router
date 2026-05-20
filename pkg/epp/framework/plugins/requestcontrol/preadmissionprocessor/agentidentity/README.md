@@ -72,27 +72,37 @@ The plugin only reads headers — getting them onto the wire is the agent's job.
 Claude Code speaks Anthropic's Messages API. llm-d's gateway exposes the OpenAI chat-completions wire format, so a translator is required in the path. LiteLLM works:
 
 ```yaml
-# ~/.litellm/config.yaml
+# LiteLLM proxy config (pass to `litellm --config <path>`)
 model_list:
   - model_name: <client-facing-model-name>
     litellm_params:
       model: hosted_vllm/<upstream-model-name>
       api_base: http://<llmd-gateway>/v1
 
-litellm_settings:
+general_settings:
   forward_client_headers_to_llm_api: true
 ```
 
 `forward_client_headers_to_llm_api: true` is **required** — without it LiteLLM strips `x-claude-code-session-id` (and every other `x-*` header) on the way to the upstream, and the plugin sees nothing.
 
-Then point Claude Code at LiteLLM and launch it:
+Then point Claude Code at LiteLLM and launch it. Use a settings file (rather than env vars) so inherited user-level settings, OAuth credentials, or keychain entries cannot override the configuration:
+
+```json
+// Claude Code settings file (any path, e.g. /tmp/claude-llmd-settings.json)
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://<litellm-host>",
+    "ANTHROPIC_AUTH_TOKEN": "dummy",
+    "ANTHROPIC_MODEL": "<client-facing-model-name>"
+  }
+}
+```
 
 ```bash
-export ANTHROPIC_BASE_URL=http://<litellm-host>
-export ANTHROPIC_AUTH_TOKEN=dummy
-export ANTHROPIC_MODEL=<client-facing-model-name>
-claude
+claude --bare --settings <path-to-settings.json> --setting-sources ""
 ```
+
+`--bare` disables OAuth and keychain reads; `--setting-sources ""` disables loading any other settings file. Together they ensure only the file passed via `--settings` is used.
 
 `<client-facing-model-name>` must match the `model_name` declared in the LiteLLM `model_list` above. `ANTHROPIC_AUTH_TOKEN` is required by Claude Code but its value is unused when LiteLLM has no `master_key` set — any non-empty string works. Claude Code emits `x-claude-code-session-id` automatically on every outbound request — no further client config needed.
 
