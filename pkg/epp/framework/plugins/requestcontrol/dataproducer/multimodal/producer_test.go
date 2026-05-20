@@ -291,9 +291,11 @@ func (h *testHandle) PodList() []k8stypes.NamespacedName {
 	return h.podList()
 }
 
+const testName = "test-mm-embeddings-cache-producer"
+
 func newTestProducer(t *testing.T, params *Parameters, podList func() []k8stypes.NamespacedName) *Producer {
 	t.Helper()
-	producer, err := New(context.Background(), params, podList)
+	producer, err := New(context.Background(), testName, params, podList)
 	require.NoError(t, err)
 	return producer
 }

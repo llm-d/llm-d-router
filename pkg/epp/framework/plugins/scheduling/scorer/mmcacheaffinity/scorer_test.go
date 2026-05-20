@@ -29,6 +29,8 @@ import (
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 )
 
+const testName = "test-mm-embeddings-cache-scorer"
+
 func TestFactory(t *testing.T) {
 	created, err := Factory("mm-scorer", nil, nil)
 	require.NoError(t, err)
@@ -37,7 +39,7 @@ func TestFactory(t *testing.T) {
 }
 
 func TestScorerConsumesMatchInfo(t *testing.T) {
-	scorer := New()
+	scorer := New(testName)
 
 	consumes := scorer.Consumes()
 	assert.Contains(t, consumes, attrmm.EncoderCacheMatchInfoKey)
@@ -46,7 +48,7 @@ func TestScorerConsumesMatchInfo(t *testing.T) {
 }
 
 func TestScoreFromProducedMatchInfo(t *testing.T) {
-	scorer := New()
+	scorer := New(testName)
 	endpointA := newEndpoint("pod-a")
 	endpointB := newEndpoint("pod-b")
 	endpointC := newEndpoint("pod-c")
@@ -63,7 +65,7 @@ func TestScoreFromProducedMatchInfo(t *testing.T) {
 }
 
 func TestScoreMissingOrInvalidMatchInfoReturnsZero(t *testing.T) {
-	scorer := New()
+	scorer := New(testName)
 	endpointA := newEndpoint("pod-a")
 	endpointB := newEndpoint("pod-b")
 	endpointB.Put(attrmm.EncoderCacheMatchInfoKey, attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "image", Size: 1}}, nil))

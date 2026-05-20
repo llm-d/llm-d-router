@@ -42,7 +42,7 @@ var (
 
 // Factory creates a multimodal encoder-cache affinity scorer.
 func Factory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
-	return New().WithName(name), nil
+	return New(name), nil
 }
 
 // Scorer computes normalized endpoint affinity from produced multimodal match data.
@@ -51,19 +51,13 @@ type Scorer struct {
 }
 
 // New creates a Scorer.
-func New() *Scorer {
-	return &Scorer{typedName: plugin.TypedName{Type: Type}}
+func New(name string) *Scorer {
+	return &Scorer{typedName: plugin.TypedName{Type: Type, Name: name}}
 }
 
 // TypedName returns the plugin type/name.
 func (s *Scorer) TypedName() plugin.TypedName {
 	return s.typedName
-}
-
-// WithName sets the plugin instance name.
-func (s *Scorer) WithName(name string) *Scorer {
-	s.typedName.Name = name
-	return s
 }
 
 // Category returns the scorer category.

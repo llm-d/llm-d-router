@@ -75,11 +75,7 @@ func Factory(name string, rawParameters json.RawMessage, handle plugin.Handle) (
 		}
 	}
 
-	p, err := New(handle.Context(), &parameters, handle.PodList)
-	if err != nil {
-		return nil, err
-	}
-	return p.WithName(name), nil
+	return New(handle.Context(), name, &parameters, handle.PodList)
 }
 
 // Producer tracks multimodal content hashes and the pods that likely hold their
@@ -104,7 +100,7 @@ func (s *requestState) Clone() plugin.StateData {
 }
 
 // New creates a Producer.
-func New(ctx context.Context, params *Parameters, podList func() []k8stypes.NamespacedName) (*Producer, error) {
+func New(ctx context.Context, name string, params *Parameters, podList func() []k8stypes.NamespacedName) (*Producer, error) {
 	cacheSize := defaultCacheSize
 	if params != nil && params.CacheSize > 0 {
 		cacheSize = params.CacheSize
@@ -116,7 +112,7 @@ func New(ctx context.Context, params *Parameters, podList func() []k8stypes.Name
 	}
 
 	return &Producer{
-		typedName:   plugin.TypedName{Type: ProducerType},
+		typedName:   plugin.TypedName{Type: ProducerType, Name: name},
 		cache:       cache,
 		pluginState: plugin.NewPluginState(ctx),
 		podList:     podList,
@@ -126,12 +122,6 @@ func New(ctx context.Context, params *Parameters, podList func() []k8stypes.Name
 // TypedName returns the plugin type/name.
 func (p *Producer) TypedName() plugin.TypedName {
 	return p.typedName
-}
-
-// WithName sets the plugin instance name.
-func (p *Producer) WithName(name string) *Producer {
-	p.typedName.Name = name
-	return p
 }
 
 // Produces returns the data keys this plugin produces.
