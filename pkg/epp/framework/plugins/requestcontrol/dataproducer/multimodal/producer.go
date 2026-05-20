@@ -25,7 +25,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"reflect"
 	"sort"
 	"sync"
@@ -41,7 +40,6 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
@@ -147,11 +145,6 @@ func (p *Producer) TypedName() plugin.TypedName {
 // Produces returns the data keys this plugin produces.
 func (p *Producer) Produces() map[string]any {
 	return map[string]any{ProducedKey: attrmm.EncoderCacheMatchInfo{}}
-}
-
-// Consumes returns the data keys this plugin requires.
-func (p *Producer) Consumes() map[string]any {
-	return map[string]any{}
 }
 
 // PluginState returns request-scoped state shared between producer extension points.
@@ -349,27 +342,3 @@ func (p *Producer) removePod(pod string) {
 	}
 }
 
-func (p *Producer) cacheSnapshot() map[string]map[string]struct{} {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
-	snapshot := make(map[string]map[string]struct{}, p.cache.Len())
-	for _, hash := range p.cache.Keys() {
-		if pods, ok := p.cache.Get(hash); ok {
-			snapshot[hash] = maps.Clone(pods)
-		}
-	}
-	return snapshot
-}
-
-func (p *Producer) putCacheEntry(hash string, pods ...k8stypes.NamespacedName) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	podSet := map[string]struct{}{}
-	if existing, ok := p.cache.Get(hash); ok {
-		podSet = maps.Clone(existing)
-	}
-	for _, pod := range pods {
-		podSet[pod.String()] = struct{}{}
-	}
-	p.cache.Add(hash, podSet)
-}
