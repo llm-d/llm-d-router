@@ -896,7 +896,6 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 			"namespace", runserver.DefaultPoolNamespace)
 	}
 
-
 	// File mode runs without a controller manager, so several Kubernetes-only
 	// features are inactive: the InferenceModelRewrite and InferenceObjective
 	// reconcilers never start, and any "k8s-notification-source" plugin in the
