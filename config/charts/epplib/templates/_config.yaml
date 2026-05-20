@@ -20,6 +20,8 @@ data:
       {{- $parserType = "vllmgrpc-parser" }}
     {{- else if and .Values.inferencePool .Values.inferencePool.parser }}
       {{- $parserType = .Values.inferencePool.parser }}
+    {{- else if eq (lower $modelServerType) "triton" }}
+      {{- $parserType = "passthrough-parser" }}
     {{- end }}
     apiVersion: inference.networking.x-k8s.io/v1alpha1
     kind: EndpointPickerConfig

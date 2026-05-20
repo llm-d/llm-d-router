@@ -3,7 +3,7 @@
 ## Purpose
 
 This document defines the distinction between **plugins** and **builtins** in the
-llm-d inference scheduler framework. Following these guidelines ensures a
+llm-d Router framework. Following these guidelines ensures a
 consistent architecture where users have clear control over what they can
 configure, and core runtime machinery remains reliable and non-optional.
 

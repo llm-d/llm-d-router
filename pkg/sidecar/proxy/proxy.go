@@ -207,23 +207,23 @@ func (c Config) String() string {
 	return string(b)
 }
 
-// pdConnectorRunner runs the configured P/D KV connector. The APIType lets each
+// pdConnectorHandler handles a P/D KV connector request. The APIType lets each
 // connector decide internally which JSON fields (if any) need special handling.
-type pdConnectorRunner func(http.ResponseWriter, *http.Request, string, APIType)
+type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, APIType)
 
-type epdProtocolRunner func(http.ResponseWriter, *http.Request, string, []string)
+type epdConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)
 
 // Server is the reverse proxy server
 type Server struct {
-	logger                  logr.Logger
-	addr                    net.Addr      // the proxy TCP address
-	readyCh                 chan struct{} // closed once addr is set and server is listening
-	handler                 http.Handler  // the handler function. either a Mux or a proxy
-	allowlistValidator      *AllowlistValidator
-	runPDConnectorProtocol  pdConnectorRunner // the handler for running the Prefiller-Decoder protocol
-	runEPDConnectorProtocol epdProtocolRunner // the handler for running the Encoder-Prefiller-Decoder protocol
-	prefillerURLPrefix      string
-	encoderURLPrefix        string
+	logger             logr.Logger
+	addr               net.Addr      // the proxy TCP address
+	readyCh            chan struct{} // closed once addr is set and server is listening
+	handler            http.Handler  // the handler function. either a Mux or a proxy
+	allowlistValidator *AllowlistValidator
+	handlePDConnector  pdConnectorHandler  // handles the Prefiller-Decoder connector request
+	handleEPDConnector epdConnectorHandler // handles the Encoder-Prefiller-Decoder connector request
+	prefillerURLPrefix string
+	encoderURLPrefix   string
 
 	decoderProxy        http.Handler                     // decoder proxy handler
 	prefillerProxies    *lru.Cache[string, http.Handler] // cached prefiller proxy handlers
@@ -306,20 +306,20 @@ func (s *Server) Start(ctx context.Context) error {
 // always set them explicitly after cloning.
 func (s *Server) Clone() *Server {
 	return &Server{
-		addr:                    s.addr,
-		readyCh:                 make(chan struct{}),
-		handler:                 s.handler,
-		allowlistValidator:      s.allowlistValidator,
-		runPDConnectorProtocol:  s.runPDConnectorProtocol,
-		runEPDConnectorProtocol: s.runEPDConnectorProtocol,
-		prefillerURLPrefix:      s.prefillerURLPrefix,
-		encoderURLPrefix:        s.encoderURLPrefix,
-		prefillerProxies:        s.prefillerProxies,
-		encoderProxies:          s.encoderProxies,
-		dataParallelProxies:     s.dataParallelProxies,
-		forwardDataParallel:     s.forwardDataParallel,
-		prefillSamplerFn:        s.prefillSamplerFn,
-		config:                  s.config,
+		addr:                s.addr,
+		readyCh:             make(chan struct{}),
+		handler:             s.handler,
+		allowlistValidator:  s.allowlistValidator,
+		handlePDConnector:   s.handlePDConnector,
+		handleEPDConnector:  s.handleEPDConnector,
+		prefillerURLPrefix:  s.prefillerURLPrefix,
+		encoderURLPrefix:    s.encoderURLPrefix,
+		prefillerProxies:    s.prefillerProxies,
+		encoderProxies:      s.encoderProxies,
+		dataParallelProxies: s.dataParallelProxies,
+		forwardDataParallel: s.forwardDataParallel,
+		prefillSamplerFn:    s.prefillSamplerFn,
+		config:              s.config,
 	}
 }
 
@@ -357,17 +357,17 @@ func (s *Server) setKVConnector() {
 
 	switch s.config.KVConnector {
 	case KVConnectorSharedStorage:
-		s.runPDConnectorProtocol = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
-			s.runSharedStorageProtocol(w, r, host)
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+			s.handleSharedStorage(w, r, host)
 		}
 	case KVConnectorSGLang:
-		s.runPDConnectorProtocol = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
-			s.runSGLangProtocol(w, r, host)
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+			s.handleSGLang(w, r, host)
 		}
 	case KVConnectorNIXLV2:
 		fallthrough
 	default:
-		s.runPDConnectorProtocol = s.runNIXLProtocolV2
+		s.handlePDConnector = s.handleNIXLV2
 	}
 }
 
@@ -381,7 +381,7 @@ func (s *Server) setECConnector() {
 
 	switch ecConnector {
 	case ECExampleConnector:
-		s.runEPDConnectorProtocol = s.runEPDProtocol
+		s.handleEPDConnector = s.handleEPD
 	default:
 		// Unknown EC connector value, skip encoder stage
 		return

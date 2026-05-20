@@ -121,7 +121,7 @@ inferenceExtension:
 inferencePool:
   targetPorts:
     - number: 8000
-  modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve
+  modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton
   modelServerProtocol: http # http, grpc
   parser: "" # openai-parser, vllmgrpc-parser, passthrough-parser, or empty for auto-selection
   apiVersion: inference.networking.k8s.io/v1

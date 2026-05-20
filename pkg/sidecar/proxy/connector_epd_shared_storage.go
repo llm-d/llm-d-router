@@ -207,8 +207,8 @@ func (s *Server) fanoutEncoderPrimer(originalRequest map[string]any, encoderHost
 	return nil
 }
 
-// runEPDProtocol implements the Encoder-Prefiller-Decoder disaggregation protocol
-func (s *Server) runEPDProtocol(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
+// handleEPD handles an Encoder-Prefiller-Decoder disaggregation request
+func (s *Server) handleEPD(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
 	s.logger.V(4).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	// Read request body
@@ -273,7 +273,7 @@ func (s *Server) runEPDProtocol(w http.ResponseWriter, r *http.Request, prefillE
 		s.logger.V(4).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
 		// Run the configured P/D protocol (prefill + decode)
 		// This will use whichever protocol is configured: shared-storage, nixlv2, or sglang
-		s.runPDConnectorProtocol(w, pdRequest, prefillEndPoint, APITypeChatCompletions)
+		s.handlePDConnector(w, pdRequest, prefillEndPoint, APITypeChatCompletions)
 	} else {
 		s.logger.V(4).Info("no prefiller configured, going directly to decoder after encoder")
 		// No prefiller, go directly to decoder (Encoder-Decoder mode)

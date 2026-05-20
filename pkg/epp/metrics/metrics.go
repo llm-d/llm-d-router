@@ -38,23 +38,18 @@ const (
 	inferencePoolComponent      = "inference_pool"
 	inferenceExtension          = "inference_extension"
 
-	// Metric Type Values
-	typeTPOT                   = "tpot"
-	typePredictedTPOT          = "predicted_tpot"
-	typeTPOTPredictionDuration = "tpot_prediction_duration"
-	typeTPOTSLOViolation       = "tpot_slo_violation"
-
-	typeTTFT                   = "ttft"
-	typePredictedTTFT          = "predicted_ttft"
-	typeTTFTPredictionDuration = "ttft_prediction_duration"
-	typeTTFTSLOViolation       = "ttft_slo_violation"
+	// InferenceObjectiveSubsystem is the legacy subsystem for inference objective metrics.
+	InferenceObjectiveSubsystem = inferenceObjectiveComponent
+	// InferenceExtensionSubsystem is the legacy subsystem for inference extension metrics.
+	InferenceExtensionSubsystem = inferenceExtension
+	// LLMDRouterEndpointPickerSubsystem is the subsystem for llm-d router endpoint picker metrics.
+	LLMDRouterEndpointPickerSubsystem = "llm_d_router_endpoint_picker"
 )
 
 var (
 	// --- Common Label Sets ---
 	modelLabels             = []string{"model_name", "target_model_name"}
 	modelWithPriorityLabels = []string{"model_name", "target_model_name", "priority"}
-	modelTypeLabels         = []string{"model_name", "target_model_name", "type"}
 	poolLabels              = []string{"name"}
 	endpointLabels          = []string{"pod_name", "namespace", "port"}
 
@@ -65,18 +60,6 @@ var (
 		0.005, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2, 3, 4, 5, 6,
 		8, 10, 15, 20, 30, 45, 60, 120, 180, 240, 300, 360, 480, 600, 900, 1200,
 		1800, 2700, 3600,
-	}
-
-	// tpotBuckets for time-per-output-token (usually milliseconds to seconds)
-	tpotBuckets = []float64{
-		0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.125, 0.15, 0.2,
-		0.3, 0.4, 0.5, 0.6, 0.8, 1, 1.5, 2, 3, 4.5, 6, 12, 18, 24, 30, 36, 48, 60,
-		90, 120, 180, 270, 360,
-	}
-
-	// predictionLatencyBuckets for internal latency (predictions) from 100us to 5s
-	predictionLatencyBuckets = []float64{
-		0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0,
 	}
 )
 
@@ -98,84 +81,6 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Counter of inference objective requests errors broken out for each model and target model.", compbasemetrics.ALPHA),
 		},
 		append(modelLabels, "error_code"),
-	)
-
-	inferenceGauges = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: inferenceObjectiveComponent,
-			Name:      "inference_request_metric",
-			Help:      metricsutil.HelpMsgWithStability("Consolidated gauge for various inference request metrics including TTFT, TPOT, SLOs, and prediction durations.", compbasemetrics.ALPHA),
-		},
-		modelTypeLabels,
-	)
-
-	requestTTFT = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: inferenceObjectiveComponent,
-			Name:      "request_ttft_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inference model TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
-		},
-		modelLabels,
-	)
-
-	requestPredictedTTFT = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: inferenceObjectiveComponent,
-			Name:      "request_predicted_ttft_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inference model Predicted TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
-		},
-		modelLabels,
-	)
-
-	requestTTFTPredictionDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: inferenceObjectiveComponent,
-			Name:      "request_ttft_prediction_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Duration taken to generate TTFT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   predictionLatencyBuckets,
-		},
-		modelLabels,
-	)
-
-	requestTPOT = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: inferenceObjectiveComponent,
-			Name:      "request_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inference model TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   tpotBuckets,
-		},
-		modelLabels,
-	)
-
-	requestPredictedTPOT = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: inferenceObjectiveComponent,
-			Name:      "request_predicted_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inference model Predicted TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   tpotBuckets,
-		},
-		modelLabels,
-	)
-
-	requestTPOTPredictionDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: inferenceObjectiveComponent,
-			Name:      "request_tpot_prediction_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Duration taken to generate TPOT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   predictionLatencyBuckets,
-		},
-		modelLabels,
-	)
-
-	sloViolationCounter = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Subsystem: inferenceObjectiveComponent,
-			Name:      "request_slo_violation_total",
-			Help:      metricsutil.HelpMsgWithStability("Counter of SLO violations for each model, target model, and violation type.", compbasemetrics.ALPHA),
-		},
-		modelTypeLabels,
 	)
 
 	requestLatencies = prometheus.NewHistogramVec(
@@ -345,36 +250,6 @@ var (
 		},
 		[]string{"extension_point", "plugin_type", "plugin_name"},
 	)
-
-	prefixCacheSize = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: inferenceExtension,
-			Name:      "prefix_indexer_size",
-			Help:      metricsutil.HelpMsgWithStability("Size of the prefix indexer.", compbasemetrics.ALPHA),
-		},
-		[]string{},
-	)
-
-	prefixCacheHitRatio = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: inferenceExtension,
-			Name:      "prefix_indexer_hit_ratio",
-			Help:      metricsutil.HelpMsgWithStability("Ratio of prefix length matched to total prefix length in the cache lookup.", compbasemetrics.ALPHA),
-			// Buckets from 0.0 to 1.0 in increments
-			Buckets: []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
-		},
-		[]string{},
-	)
-
-	prefixCacheHitLength = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: inferenceExtension,
-			Name:      "prefix_indexer_hit_bytes",
-			Help:      metricsutil.HelpMsgWithStability("Length of the prefix match in number of bytes in the cache lookup.", compbasemetrics.ALPHA),
-			Buckets:   []float64{0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536},
-		},
-		[]string{},
-	)
 )
 
 // --- Info Metrics ---
@@ -468,20 +343,6 @@ var registerMetrics sync.Once
 // Register all metrics.
 func Register(customCollectors ...prometheus.Collector) {
 	registerMetrics.Do(func() {
-		// Register inference gauges
-		metrics.Registry.MustRegister(inferenceGauges)
-
-		// Register Histograms
-		metrics.Registry.MustRegister(requestTPOT)
-		metrics.Registry.MustRegister(requestTTFT)
-		metrics.Registry.MustRegister(requestPredictedTPOT)
-		metrics.Registry.MustRegister(requestPredictedTTFT)
-		metrics.Registry.MustRegister(requestTPOTPredictionDuration)
-		metrics.Registry.MustRegister(requestTTFTPredictionDuration)
-
-		// Register SLO violation counters
-		metrics.Registry.MustRegister(sloViolationCounter)
-
 		// Register other metrics
 		metrics.Registry.MustRegister(requestCounter)
 		metrics.Registry.MustRegister(requestErrCounter)
@@ -501,9 +362,6 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(schedulerAttemptsTotal)
 		metrics.Registry.MustRegister(pluginProcessingLatencies)
 		metrics.Registry.MustRegister(inferenceExtensionInfo)
-		metrics.Registry.MustRegister(prefixCacheSize)
-		metrics.Registry.MustRegister(prefixCacheHitRatio)
-		metrics.Registry.MustRegister(prefixCacheHitLength)
 		metrics.Registry.MustRegister(flowControlRequestQueueDuration)
 		metrics.Registry.MustRegister(flowControlDispatchCycleDuration)
 		metrics.Registry.MustRegister(flowControlQueueSize)
@@ -519,20 +377,6 @@ func Register(customCollectors ...prometheus.Collector) {
 
 // Just for integration test
 func Reset() {
-	// Reset inference gauges
-	inferenceGauges.Reset()
-
-	// Reset Histograms
-	requestTPOT.Reset()
-	requestTTFT.Reset()
-	requestPredictedTPOT.Reset()
-	requestPredictedTTFT.Reset()
-	requestTPOTPredictionDuration.Reset()
-	requestTTFTPredictionDuration.Reset()
-
-	// Reset SLO violation counter
-	sloViolationCounter.Reset()
-
 	// Reset other metrics
 	requestCounter.Reset()
 	requestErrCounter.Reset()
@@ -552,9 +396,6 @@ func Reset() {
 	schedulerAttemptsTotal.Reset()
 	pluginProcessingLatencies.Reset()
 	inferenceExtensionInfo.Reset()
-	prefixCacheSize.Reset()
-	prefixCacheHitRatio.Reset()
-	prefixCacheHitLength.Reset()
 	flowControlRequestQueueDuration.Reset()
 	flowControlQueueSize.Reset()
 	flowControlQueueBytes.Reset()
@@ -589,123 +430,6 @@ func RecordRequestLatencies(ctx context.Context, modelName, targetModelName stri
 	}
 	elapsedSeconds := complete.Sub(received).Seconds()
 	requestLatencies.WithLabelValues(modelName, targetModelName).Observe(elapsedSeconds)
-	return true
-}
-
-func RecordRequestTPOT(ctx context.Context, modelName, targetModelName string, tpot float64) bool {
-	if tpot < 0 {
-		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TPOT value must be non-negative",
-			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot)
-		return false
-	}
-	requestTPOT.WithLabelValues(modelName, targetModelName).Observe(tpot)
-	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOT).Set(tpot)
-	return true
-}
-
-// RecordRequestTPOTWithSLO records TPOT and checks for SLO violation.
-// If tpot exceeds the threshold, it records a violation (sets gauge to 1 and increments counter).
-// If tpot is within limits, it sets gauge to 0.
-func RecordRequestTPOTWithSLO(ctx context.Context, modelName, targetModelName string, tpot float64, sloThreshold float64) bool {
-	if tpot < 0 {
-		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TPOT value must be non-negative",
-			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot)
-		return false
-	}
-
-	// Check for SLO violation (tpot exceeds threshold)
-	if tpot > sloThreshold {
-		inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTSLOViolation).Set(1)
-		sloViolationCounter.WithLabelValues(modelName, targetModelName, typeTPOT).Inc()
-		log.FromContext(ctx).V(logutil.DEFAULT).Info("TPOT SLO violation detected",
-			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot, "threshold", sloThreshold)
-	} else {
-		inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTSLOViolation).Set(0)
-	}
-
-	return true
-}
-
-// TPOT records duration of request.
-func RecordRequestPredictedTPOT(ctx context.Context, modelName, targetModelName string, predictedTpot float64) bool {
-	if predictedTpot < 0 {
-		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "Predicted TPOT value must be non-negative",
-			"modelName", modelName, "targetModelName", targetModelName, "tpot", predictedTpot)
-		return false
-	}
-	requestPredictedTPOT.WithLabelValues(modelName, targetModelName).Observe(predictedTpot)
-	inferenceGauges.WithLabelValues(modelName, targetModelName, typePredictedTPOT).Set(predictedTpot)
-	return true
-}
-
-// RecordRequestTPOTPredictionDuration records the duration taken to generate TPOT predictions.
-func RecordRequestTPOTPredictionDuration(ctx context.Context, modelName, targetModelName string, duration float64) bool {
-	if duration < 0 {
-		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TPOT prediction duration must be non-negative",
-			"modelName", modelName, "targetModelName", targetModelName, "duration", duration)
-		return false
-	}
-	requestTPOTPredictionDuration.WithLabelValues(modelName, targetModelName).Observe(duration)
-	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTPredictionDuration).Set(duration)
-	return true
-}
-
-// TTFT records duration of request.
-func RecordRequestTTFT(ctx context.Context, modelName, targetModelName string, ttft float64) bool {
-	if ttft < 0 {
-		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TTFT value must be non-negative",
-			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft)
-		return false
-	}
-	requestTTFT.WithLabelValues(modelName, targetModelName).Observe(ttft)
-	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFT).Set(ttft)
-	return true
-}
-
-// RecordRequestTTFTWithSLO records TTFT and checks for SLO violation.
-// If ttft exceeds the threshold, it records a violation (sets gauge to 1 and increments counter).
-// If ttft is within limits, it sets gauge to 0.
-func RecordRequestTTFTWithSLO(ctx context.Context, modelName, targetModelName string, ttft float64, sloThreshold float64) bool {
-	if ttft < 0 {
-		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TTFT value must be non-negative",
-			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft)
-		return false
-	}
-
-	// Check for SLO violation (ttft exceeds threshold)
-	if ttft > sloThreshold {
-		inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTSLOViolation).Set(1)
-		sloViolationCounter.WithLabelValues(modelName, targetModelName, typeTTFT).Inc()
-		log.FromContext(ctx).V(logutil.DEFAULT).Info("TTFT SLO violation detected",
-			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft, "threshold", sloThreshold)
-	} else {
-		inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTSLOViolation).Set(0)
-	}
-
-	return true
-}
-
-// TPOT records duration of request.
-func RecordRequestPredictedTTFT(ctx context.Context, modelName, targetModelName string, predictedTtft float64) bool {
-	if predictedTtft < 0 {
-		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "Predicted TTFT value must be non-negative",
-			"modelName", modelName, "targetModelName", targetModelName, "ttft", predictedTtft)
-		return false
-	}
-	requestPredictedTTFT.WithLabelValues(modelName, targetModelName).Observe(predictedTtft)
-	inferenceGauges.WithLabelValues(modelName, targetModelName, typePredictedTTFT).Set(predictedTtft)
-	return true
-}
-
-// RecordRequestTTFTPredictionDuration records the duration taken to generate TTFT predictions.
-func RecordRequestTTFTPredictionDuration(ctx context.Context, modelName, targetModelName string, duration float64) bool {
-	if duration < 0 {
-		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TTFT prediction duration must be non-negative",
-			"modelName", modelName, "targetModelName", targetModelName, "duration", duration)
-		return false
-	}
-	requestTTFTPredictionDuration.WithLabelValues(modelName, targetModelName).Observe(duration)
-	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTPredictionDuration).Set(duration)
 	return true
 }
 
@@ -820,24 +544,6 @@ const (
 // RecordPluginProcessingLatency records the processing latency for a plugin.
 func RecordPluginProcessingLatency(extensionPoint, pluginType, pluginName string, duration time.Duration) {
 	pluginProcessingLatencies.WithLabelValues(extensionPoint, pluginType, pluginName).Observe(duration.Seconds())
-}
-
-// RecordPrefixCacheSize records the size of the prefix indexer in megabytes.
-func RecordPrefixCacheSize(size int64) {
-	prefixCacheSize.WithLabelValues().Set(float64(size))
-}
-
-// RecordPrefixCacheMatch records both the hit ratio and hit length for a prefix indexer match.
-// matchedLength is the number of characters that matched, and totalLength is the total prefix length.
-func RecordPrefixCacheMatch(matchedLength, totalLength int) {
-	// Record the hit length metric
-	prefixCacheHitLength.WithLabelValues().Observe(float64(matchedLength))
-
-	// Record the hit ratio metric if totalLength is positive
-	if totalLength > 0 {
-		ratio := float64(matchedLength) / float64(totalLength)
-		prefixCacheHitRatio.WithLabelValues().Observe(ratio)
-	}
 }
 
 func RecordInferenceExtensionInfo(commitSha, buildRef string) {

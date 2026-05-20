@@ -19,6 +19,7 @@ package approximateprefix
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -31,7 +32,6 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
-	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -77,6 +77,12 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	}
 	if config.MaxPrefixTokensToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxPrefixTokensToMatch must be >= 0 (current value: %d)", config.MaxPrefixTokensToMatch)
+	}
+	if handle == nil {
+		return nil, errors.New("plugin handle is required")
+	}
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
 	}
 	indexer := newIndexer(ctx, config.LRUCapacityPerServer)
 
@@ -199,7 +205,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	avgChars := averageCharactersPerToken
-	metrics.RecordPrefixCacheMatch(matchLen*blockSize*avgChars, total*blockSize*avgChars)
+	recordPrefixCacheMatch(matchLen*blockSize*avgChars, total*blockSize*avgChars)
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {

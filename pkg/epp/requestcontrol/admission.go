@@ -194,6 +194,7 @@ func (r *flowControlRequest) ID() string {
 }
 func (r *flowControlRequest) InitialEffectiveTTL() time.Duration { return 0 } // Use controller default.
 func (r *flowControlRequest) ByteSize() uint64                   { return r.requestByteSize }
+
 func (r *flowControlRequest) InferenceRequest() *scheduling.InferenceRequest {
 	return r.inferenceRequest
 }
@@ -207,6 +208,7 @@ func (r *flowControlRequest) TargetModelName() string {
 	}
 	return r.inferenceRequest.TargetModel
 }
+
 func (r *flowControlRequest) FlowKey() flowcontrol.FlowKey {
 	return flowcontrol.FlowKey{ID: r.fairnessID, Priority: r.priority}
 }

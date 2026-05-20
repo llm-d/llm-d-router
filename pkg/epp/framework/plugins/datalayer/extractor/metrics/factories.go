@@ -71,12 +71,12 @@ type (
 		// Can be any engine name from EngineConfigs. Defaults to "vllm".
 		DefaultEngine string `json:"defaultEngine"`
 		// EngineConfigs defines metric specifications for specific engine types.
-		// Built-in configs (vLLM, SGLang, trtllm-serve, triton-tensorrt-llm) are automatically appended if not explicitly defined.
+		// Built-in configs (vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, triton) are automatically appended if not explicitly defined.
 		EngineConfigs []engineConfigParams `json:"engineConfigs"`
 	}
 )
 
-// Default engine configurations for vLLM, SGLang, trtllm-serve, and triton-tensorrt-llm.
+// Default engine configurations for vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
 	{
 		Name:                "vllm",
@@ -115,6 +115,24 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheInfoSpec:       "",
 		CacheBlockSizeSpec:  "nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=tokens_per}",
 		CacheNumBlocksSpec:  "nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}",
+	},
+	// "triton" defines standard Triton Inference Server metrics configuration for non-LLM workloads
+	// (e.g. classic ML/DL models serving KServe v2 protocols).
+	//
+	// In contrast:
+	// - "triton-tensorrt-llm" is for Triton deployments specifically using the TensorRT-LLM backend for LLMs,
+	//   which exposes LLM-specific metrics like KV Cache and token metrics.
+	// - "trtllm-serve" is for TensorRT-LLM's standalone C++ server orchestrator, which exposes similar
+	//   LLM-specific metrics under different names.
+	{
+		Name:                "triton",
+		QueuedRequestsSpec:  "nv_inference_pending_request_count",
+		RunningRequestsSpec: "nv_inference_exec_count",
+		KVUsageSpec:         "",
+		LoRASpec:            "",
+		CacheInfoSpec:       "",
+		CacheBlockSizeSpec:  "",
+		CacheNumBlocksSpec:  "",
 	},
 }
 

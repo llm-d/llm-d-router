@@ -145,6 +145,13 @@ spec:
               - --lora-info-metric
               - "" # LoRA metrics are not supported by trtllm-serve.
           {{- end }}
+          {{- if eq $modelServerType "triton" }}
+              - --total-queued-requests-metric="nv_inference_pending_request_count"
+              - --total-running-requests-metric="nv_inference_exec_count"
+              - --kv-cache-usage-percentage-metric=""
+              - --cache-info-metric=""
+              - --lora-info-metric=""
+          {{- end }}
           {{- end }}
               - --zap-encoder
               - "json"

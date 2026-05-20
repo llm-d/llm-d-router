@@ -31,6 +31,9 @@ type EndpointMetadata struct {
 	Port           string
 	MetricsHost    string
 	Labels         map[string]string
+	// RankIndex is this endpoint's position in the pool's TargetPorts,
+	// identifying the pod-local rank in multi-port deployments.
+	RankIndex int
 }
 
 // String returns a string representation of the endpoint.
@@ -59,7 +62,17 @@ func (epm *EndpointMetadata) Clone() *EndpointMetadata {
 		Port:        epm.Port,
 		MetricsHost: epm.MetricsHost,
 		Labels:      clonedLabels,
+		RankIndex:   epm.RankIndex,
 	}
+}
+
+// GetRankIndex returns the rank index of this endpoint within the pool's
+// TargetPorts list.
+func (epm *EndpointMetadata) GetRankIndex() int {
+	if epm == nil {
+		return 0
+	}
+	return epm.RankIndex
 }
 
 // GetNamespacedName gets the namespace name of the Endpoint.
