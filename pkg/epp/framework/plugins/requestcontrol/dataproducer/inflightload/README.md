@@ -2,7 +2,19 @@
 
 **Type:** `inflight-load-producer`
 
-Tracks real-time in-flight request and token counts per endpoint by hooking into the request lifecycle. Writes an `InFlightLoad` attribute onto each endpoint in the `Produce` phase, consumed by the `token-load-scorer` and the `concurrency-detector`.
+Tracks real-time in-flight request and token counts per endpoint by hooking into the request lifecycle. Writes an `InFlightLoad` attribute onto each endpoint in the `Produce` phase, consumed by the following plugins:
+- `token-load-scorer`: Scores endpoints based on in-flight tokens.
+- `active-request-scorer`: Scores endpoints based on in-flight requests.
+- `concurrency-detector`: Provides admission control based on in-flight requests/tokens.
+- `prefix-cache-affinity-filter`: Uses in-flight tokens as a load gate to break stickiness.
+
+## Behavior
+
+- **Prefix Cache Discounting**: Automatically detects if an endpoint has a prefix cache hit (via `PrefixCacheMatchInfo`). Only the **uncached** portion of the prompt is added to the in-flight token counter, providing a more accurate estimate of the actual compute load.
+- **Token Release Timing**: 
+    - If `addEstimatedOutputTokens` is `false` (default): For streaming requests, all tokens are released as soon as the first chunk of the response is received (`StartOfStream`), as the prefill compute is complete. For non-streaming requests (or as a safety net), tokens are released when the response completes (`EndOfStream`).
+    - If `addEstimatedOutputTokens` is `true`: The prompt portion is released at `StartOfStream` (for streaming) or `EndOfStream`, and the estimated output portion is released only when the response completes (`EndOfStream`).
+- **Request Release**: In-flight request counters are always released when the response completes (`EndOfStream`).
 
 The producer hooks three lifecycle phases:
 - **Produce**: Writes current in-flight counts to each endpoint's attributes.
@@ -11,10 +23,26 @@ The producer hooks three lifecycle phases:
 
 Endpoint departure events (pod removed from the pool) are handled via the `EndpointExtractor` interface to clean up stale counters.
 
-**Parameters:** None.
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. |
 
 ---
 
 ## Related Documentation
 - [Token Load Scorer](../../../scheduling/scorer/tokenload/README.md)
+- [Active Request Scorer](../../../scheduling/scorer/activerequest/README.md)
+- [Concurrency Detector](../../../flowcontrol/saturationdetector/concurrency/README.md)
+- [Prefix Cache Affinity Filter](../../../scheduling/filter/prefixcacheaffinity/README.md)
 - [Concurrency Attributes](../../../datalayer/attribute/concurrency/README.md)
+
+**Configuration Example:**
+```yaml
+plugins:
+  - type: inflight-load-producer
+    name: inflight-load
+    parameters:
+      addEstimatedOutputTokens: true
+```
