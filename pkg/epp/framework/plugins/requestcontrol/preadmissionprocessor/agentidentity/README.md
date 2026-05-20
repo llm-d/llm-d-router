@@ -88,13 +88,13 @@ litellm_settings:
 Then point Claude Code at LiteLLM and launch it:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://<litellm-host>:4000
-export ANTHROPIC_AUTH_TOKEN=<litellm-master-key>
+export ANTHROPIC_BASE_URL=http://<litellm-host>
+export ANTHROPIC_AUTH_TOKEN=dummy
 export ANTHROPIC_MODEL=<client-facing-model-name>
 claude
 ```
 
-`<client-facing-model-name>` must match the `model_name` declared in the LiteLLM `model_list` above. Claude Code emits `x-claude-code-session-id` automatically on every outbound request — no further client config needed.
+`<client-facing-model-name>` must match the `model_name` declared in the LiteLLM `model_list` above. `ANTHROPIC_AUTH_TOKEN` is required by Claude Code but its value is unused when LiteLLM has no `master_key` set — any non-empty string works. Claude Code emits `x-claude-code-session-id` automatically on every outbound request — no further client config needed.
 
 #### OpenCode — **No LiteLLM required**
 
