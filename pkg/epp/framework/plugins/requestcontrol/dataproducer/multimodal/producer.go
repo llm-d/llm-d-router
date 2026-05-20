@@ -151,7 +151,7 @@ func (p *Producer) Produces() map[string]any {
 
 // Consumes returns the data keys this plugin requires.
 func (p *Producer) Consumes() map[string]any {
-	return map[string]any{tokenproducer.TokenizedPromptKey: scheduling.TokenizedPrompt{}}
+	return map[string]any{}
 }
 
 // PluginState returns request-scoped state shared between producer extension points.
