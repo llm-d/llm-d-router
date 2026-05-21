@@ -182,13 +182,13 @@ func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
 
 	require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpointA, endpointB, endpointC}))
 
-	assertMatchInfo(t, endpointA,
+	assertMatchInfo(t, producer, endpointA,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}},
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}, {Hash: "hash-c", Size: 1}})
-	assertMatchInfo(t, endpointB,
+	assertMatchInfo(t, producer, endpointB,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}},
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}, {Hash: "hash-c", Size: 1}})
-	assertMatchInfo(t, endpointC,
+	assertMatchInfo(t, producer, endpointC,
 		nil,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}, {Hash: "hash-c", Size: 1}})
 
@@ -235,10 +235,10 @@ func TestStalePodCleanup(t *testing.T) {
 	endpointB := newEndpoint(podB)
 	require.NoError(t, producer.Produce(context.Background(), requestWithHashes("req", map[string]int{"hash-a": 1}), []scheduling.Endpoint{endpointA, endpointB}))
 
-	assertMatchInfo(t, endpointA,
+	assertMatchInfo(t, producer, endpointA,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}},
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}})
-	assertMatchInfo(t, endpointB,
+	assertMatchInfo(t, producer, endpointB,
 		nil,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}})
 }
@@ -341,9 +341,9 @@ func schedulingResult(target scheduling.Endpoint) *scheduling.SchedulingResult {
 	}
 }
 
-func assertMatchInfo(t *testing.T, endpoint scheduling.Endpoint, matchedItems, requestItems []attrmm.MatchItem) {
+func assertMatchInfo(t *testing.T, p *Producer, endpoint scheduling.Endpoint, matchedItems, requestItems []attrmm.MatchItem) {
 	t.Helper()
-	raw, ok := endpoint.Get(attrmm.EncoderCacheMatchInfoKey.String())
+	raw, ok := endpoint.Get(p.dk.String())
 	require.True(t, ok)
 	info, ok := raw.(*attrmm.EncoderCacheMatchInfo)
 	require.True(t, ok)

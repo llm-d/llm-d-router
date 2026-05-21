@@ -21,6 +21,7 @@ package mmcacheaffinity
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -40,19 +41,37 @@ var (
 	_ plugin.ConsumerPlugin = &Scorer{}
 )
 
+// Config holds optional configuration for the scorer.
+type Config struct {
+	// ProducerName scopes the data key to a specific named producer instance.
+	// Leave empty to consume from the default (unnamed) producer.
+	ProducerName string `json:"producerName,omitempty"`
+}
+
 // Factory creates a multimodal encoder-cache affinity scorer.
-func Factory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
-	return New(name), nil
+func Factory(name string, rawParameters json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+	var cfg Config
+	if len(rawParameters) > 0 {
+		if err := json.Unmarshal(rawParameters, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse parameters for %q scorer: %w", Type, err)
+		}
+	}
+	return New(name, cfg.ProducerName), nil
 }
 
 // Scorer computes normalized endpoint affinity from produced multimodal match data.
 type Scorer struct {
-	typedName plugin.TypedName
+	typedName    plugin.TypedName
+	mmMatchDataKey plugin.DataKey
 }
 
-// New creates a Scorer.
-func New(name string) *Scorer {
-	return &Scorer{typedName: plugin.TypedName{Type: Type, Name: name}}
+// New creates a Scorer. producerName scopes the data key to a specific producer
+// instance; pass an empty string to use the default producer's key.
+func New(name, producerName string) *Scorer {
+	return &Scorer{
+		typedName:    plugin.TypedName{Type: Type, Name: name},
+		mmMatchDataKey: attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(producerName),
+	}
 }
 
 // TypedName returns the plugin type/name.
@@ -67,7 +86,7 @@ func (s *Scorer) Category() scheduling.ScorerCategory {
 
 // Consumes returns the endpoint data consumed by this scorer.
 func (s *Scorer) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{attrmm.EncoderCacheMatchInfoKey: attrmm.EncoderCacheMatchInfo{}}
+	return map[plugin.DataKey]any{s.mmMatchDataKey: attrmm.EncoderCacheMatchInfo{}}
 }
 
 // Score scores endpoints by matched multimodal encoder-cache item size divided
@@ -85,7 +104,7 @@ func (s *Scorer) Score(ctx context.Context, _ *scheduling.CycleState, req *sched
 		if meta := endpoint.GetMetadata(); meta != nil {
 			pod = meta.PodName
 		}
-		info, ok := endpoint.Get(attrmm.EncoderCacheMatchInfoKey.String())
+		info, ok := endpoint.Get(s.mmMatchDataKey.String())
 		if !ok {
 			traceLogger.Info("mm-embeddings-cache: no match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
 			continue

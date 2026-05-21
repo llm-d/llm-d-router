@@ -39,7 +39,7 @@ func TestFactory(t *testing.T) {
 }
 
 func TestScorerConsumesMatchInfo(t *testing.T) {
-	scorer := New(testName)
+	scorer := New(testName, "")
 
 	consumes := scorer.Consumes()
 	assert.Contains(t, consumes, attrmm.EncoderCacheMatchInfoKey)
@@ -48,7 +48,7 @@ func TestScorerConsumesMatchInfo(t *testing.T) {
 }
 
 func TestScoreFromProducedMatchInfo(t *testing.T) {
-	scorer := New(testName)
+	scorer := New(testName, "")
 	endpointA := newEndpoint("pod-a")
 	endpointB := newEndpoint("pod-b")
 	endpointC := newEndpoint("pod-c")
@@ -65,7 +65,7 @@ func TestScoreFromProducedMatchInfo(t *testing.T) {
 }
 
 func TestScoreMissingOrInvalidMatchInfoReturnsZero(t *testing.T) {
-	scorer := New(testName)
+	scorer := New(testName, "")
 	endpointA := newEndpoint("pod-a")
 	endpointB := newEndpoint("pod-b")
 	endpointB.Put(attrmm.EncoderCacheMatchInfoKey.String(), attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "image", Size: 1}}, nil))

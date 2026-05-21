@@ -81,6 +81,7 @@ func Factory(name string, rawParameters json.RawMessage, handle plugin.Handle) (
 // encoder-cache entries.
 type Producer struct {
 	typedName   plugin.TypedName
+	dk          plugin.DataKey
 	cache       *lru.Cache[string, map[string]struct{}]
 	pluginState *plugin.PluginState
 	podList     func() []k8stypes.NamespacedName
@@ -113,6 +114,7 @@ func New(ctx context.Context, name string, params *Parameters, podList func() []
 
 	p := &Producer{
 		typedName:   plugin.TypedName{Type: ProducerType, Name: name},
+		dk:          attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(name),
 		cache:       cache,
 		pluginState: plugin.NewPluginState(ctx),
 		podList:     podList,
@@ -143,7 +145,7 @@ func (p *Producer) TypedName() plugin.TypedName {
 
 // Produces returns the data keys this plugin produces.
 func (p *Producer) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{ProducedKey: attrmm.EncoderCacheMatchInfo{}}
+	return map[plugin.DataKey]any{p.dk: attrmm.EncoderCacheMatchInfo{}}
 }
 
 // PluginState returns request-scoped state shared between producer extension points.
@@ -169,7 +171,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 			continue
 		}
 		matchedItems := p.matchedItemsForPod(metadata.NamespacedName.String(), requestItems)
-		endpoint.Put(attrmm.EncoderCacheMatchInfoKey.String(), attrmm.NewEncoderCacheMatchInfo(
+		endpoint.Put(p.dk.String(), attrmm.NewEncoderCacheMatchInfo(
 			matchedItems,
 			requestItems,
 		))
