@@ -254,6 +254,12 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	result, err := d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if err != nil {
+		// Preserve the scheduler's status code when it returned a typed errcommon.Error
+		// (e.g. PreconditionFailed for conditional-decode cache misses). Otherwise
+		// fall back to ResourceExhausted, the "no endpoint" status.
+		if e, ok := err.(errcommon.Error); ok {
+			return reqCtx, e
+		}
 		return reqCtx, errcommon.Error{Code: errcommon.ResourceExhausted, Msg: fmt.Errorf("failed to find target endpoint: %w", err).Error()}
 	}
 

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -1341,4 +1342,210 @@ func TestBothProfileAndHeadersHandlerPreRequest(t *testing.T) {
 	expected := net.JoinHostPort(podAddr, podPort)
 	assert.Equal(t, expected, request.Headers[routing.PrefillEndpointHeader],
 		"both handlers set the same prefill header — redundant but no conflict")
+}
+
+// ── Conditional-decode tests ────────────────────────────────────────────────
+
+func TestIsConditionalDecode(t *testing.T) {
+	tests := []struct {
+		name string
+		req  *scheduling.InferenceRequest
+		want bool
+	}{
+		{"nil request", nil, false},
+		{"nil headers", &scheduling.InferenceRequest{}, false},
+		{"empty headers", &scheduling.InferenceRequest{Headers: map[string]string{}}, false},
+		{"unrelated header", &scheduling.InferenceRequest{Headers: map[string]string{"x-other": "v"}}, false},
+		{
+			"phase=decode (not conditional)",
+			&scheduling.InferenceRequest{Headers: map[string]string{routing.EPPPhaseHeader: "decode"}},
+			false,
+		},
+		{
+			"phase=conditional-decode",
+			&scheduling.InferenceRequest{Headers: map[string]string{routing.EPPPhaseHeader: routing.EPPPhaseConditionalDecode}},
+			true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isConditionalDecode(tt.req))
+		})
+	}
+}
+
+// withConditionalDecodeHeader returns a new request copy with the conditional-decode header set.
+func withConditionalDecodeHeader(req *scheduling.InferenceRequest) *scheduling.InferenceRequest {
+	if req.Headers == nil {
+		req.Headers = map[string]string{}
+	}
+	req.Headers[routing.EPPPhaseHeader] = routing.EPPPhaseConditionalDecode
+	return req
+}
+
+// TestHandler_Pick_ConditionalDecode_PD verifies that, in a P/D-configured handler,
+// a request flagged as conditional-decode short-circuits prefill after decode runs,
+// even when the prefill decider would otherwise allow disaggregation.
+func TestHandler_Pick_ConditionalDecode_PD(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+
+	// AlwaysDisagg PD decider would normally trigger prefill — conditional-decode must override.
+	h := NewDisaggProfileHandler(
+		defaultDecodeProfile, defaultPrefillProfile, "",
+		newAlwaysDisaggPDDecider(), nil,
+	)
+
+	req := withConditionalDecodeHeader(completionsRequest(testLongPrompt))
+
+	// Stage 1: decode not run → run decode (header doesn't change Stage 1).
+	got := h.Pick(ctx, nil, req, profiles, map[string]*scheduling.ProfileRunResult{})
+	assert.ElementsMatch(t, []string{defaultDecodeProfile}, profileNames(got))
+
+	// Stage 2: decode succeeded → conditional-decode short-circuits prefill.
+	results := map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile: makeProfileRunResult("pod1"),
+	}
+	got = h.Pick(ctx, nil, req, profiles, results)
+	assert.Empty(t, profileNames(got), "conditional-decode must skip prefill")
+}
+
+// TestHandler_Pick_ConditionalDecode_EPD verifies that conditional-decode short-circuits
+// both encode and prefill in an E/PD-configured handler with a multimodal request.
+func TestHandler_Pick_ConditionalDecode_EPD(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+		defaultEncodeProfile:  &mockProfile{},
+	}
+
+	h := NewDisaggProfileHandler(
+		defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
+		newAlwaysDisaggPDDecider(), newAlwaysDisaggEncodeDecider(),
+	)
+
+	// Multimodal request — both encode and prefill would normally fire.
+	req := withConditionalDecodeHeader(chatRequest(true, false, false))
+
+	results := map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile: makeProfileRunResult("pod1"),
+	}
+	got := h.Pick(ctx, nil, req, profiles, results)
+	assert.Empty(t, profileNames(got), "conditional-decode must skip encode and prefill")
+}
+
+// TestHandler_Pick_ConditionalDecode_AbsentHeader confirms the regular flow is unaffected
+// when the conditional-decode header is not set.
+func TestHandler_Pick_ConditionalDecode_AbsentHeader(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+
+	h := NewDisaggProfileHandler(
+		defaultDecodeProfile, defaultPrefillProfile, "",
+		newAlwaysDisaggPDDecider(), nil,
+	)
+
+	// No conditional-decode header — prefill should run as the always-disagg decider dictates.
+	req := completionsRequest(testLongPrompt)
+
+	results := map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile: makeProfileRunResult("pod1"),
+	}
+	got := h.Pick(ctx, nil, req, profiles, results)
+	assert.ElementsMatch(t, []string{defaultPrefillProfile}, profileNames(got))
+}
+
+// TestHasCachedPrefix covers the cache-availability helper used by ProcessResults.
+func TestHasCachedPrefix(t *testing.T) {
+	endpointWith := func(matched, total int) scheduling.Endpoint {
+		ep := makeEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "p"}, "10.0.0.1", testPodPort, nil)
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+			attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
+		return ep
+	}
+
+	tests := []struct {
+		name string
+		ep   scheduling.Endpoint
+		want bool
+	}{
+		{"nil endpoint", nil, false},
+		{"endpoint without match info", makeEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "p"}, "10.0.0.1", testPodPort, nil), false},
+		{"zero match blocks", endpointWith(0, 4), false},
+		{"some match blocks", endpointWith(2, 4), true},
+		{"full match", endpointWith(4, 4), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, hasCachedPrefix(tt.ep))
+		})
+	}
+}
+
+// TestHandler_ProcessResults_ConditionalDecode_CacheHit verifies that a request
+// flagged as conditional-decode is forwarded to the chosen decode pod when the
+// pod has a non-empty prefix-cache match.
+func TestHandler_ProcessResults_ConditionalDecode_CacheHit(t *testing.T) {
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil)
+
+	req := withConditionalDecodeHeader(completionsRequest(testLongPrompt))
+	results := map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile: makeProfileRunResult("pod1"),
+	}
+	injectPrefixCache(results, 2, 8) // 2 cached blocks → cache available
+
+	res, err := h.ProcessResults(context.Background(), nil, req, results)
+	assert.NoError(t, err)
+	assert.NotNil(t, res)
+	assert.Equal(t, defaultDecodeProfile, res.PrimaryProfileName)
+	assert.Contains(t, res.ProfileResults, defaultDecodeProfile)
+}
+
+// TestHandler_ProcessResults_ConditionalDecode_CacheMiss verifies that a
+// conditional-decode request whose chosen decode pod has no cached prefix
+// surfaces a 412 PreconditionFailed error so the coordinator can restart
+// the pipeline.
+func TestHandler_ProcessResults_ConditionalDecode_CacheMiss(t *testing.T) {
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil)
+
+	req := withConditionalDecodeHeader(completionsRequest(testLongPrompt))
+	results := map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile: makeProfileRunResult("pod1"),
+	}
+	// no injectPrefixCache — chosen pod has zero cached blocks.
+
+	res, err := h.ProcessResults(context.Background(), nil, req, results)
+	assert.Nil(t, res)
+	assert.Error(t, err)
+
+	e, ok := err.(errcommon.Error)
+	assert.True(t, ok, "expected typed errcommon.Error to surface 412")
+	assert.Equal(t, errcommon.PreconditionFailed, e.Code)
+}
+
+// TestHandler_ProcessResults_NotConditionalDecode_NoCacheRequired confirms that
+// non-conditional requests are not subjected to the cache check and proceed
+// normally even when no prefix-cache match info is present.
+func TestHandler_ProcessResults_NotConditionalDecode_NoCacheRequired(t *testing.T) {
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil)
+
+	req := completionsRequest(testLongPrompt)
+	req.Headers = map[string]string{}
+	results := map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile: makeProfileRunResult("pod1"),
+	}
+
+	res, err := h.ProcessResults(context.Background(), nil, req, results)
+	assert.NoError(t, err)
+	assert.NotNil(t, res)
 }

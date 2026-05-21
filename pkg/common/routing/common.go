@@ -18,6 +18,16 @@ const (
 
 	// InferencePoolAPIGroup is the default InferencePool API group
 	InferencePoolAPIGroup = "inference.networking.k8s.io"
+
+	// EPPPhaseHeader is the header used by the coordinator to indicate which
+	// pipeline stage a request belongs to. EPP receives headers lowercased.
+	EPPPhaseHeader = "epp-phase"
+
+	// EPPPhaseConditionalDecode marks a speculative early-decode attempt: route
+	// to a decode worker without running prefill or encode. The worker returns
+	// 412 Precondition Failed if its KV cache cannot serve the request, and
+	// the coordinator restarts the pipeline normally.
+	EPPPhaseConditionalDecode = "conditional-decode"
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.
