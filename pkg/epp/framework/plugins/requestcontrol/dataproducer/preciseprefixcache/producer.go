@@ -42,24 +42,37 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
+// PluginType is the registered type name of the precise-prefix-cache-producer.
 const PluginType = "precise-prefix-cache-producer"
 
-// Mirrors the legacy precise-prefix-cache-scorer config shape.
+// PluginConfig configures the precise-prefix-cache-producer. Nested fields
+// mirror the llm-d-kv-cache configuration shape (see that repo's
+// docs/configuration.md for details on TokenProcessorConfig, IndexerConfig,
+// and KVEventsConfig).
 type PluginConfig struct {
 	TokenProcessorConfig *kvblock.TokenProcessorConfig `json:"tokenProcessorConfig"`
 	IndexerConfig        *kvcache.Config               `json:"indexerConfig"`
 	KVEventsConfig       *kvevents.Config              `json:"kvEventsConfig"`
-	// Seed predicted cache entries post-routing so the next same-prefix
-	// request hits without waiting for engine confirmation.
+	// SpeculativeIndexing seeds predicted cache entries for the selected
+	// endpoint(s) immediately after a routing decision, so the next
+	// same-prefix request hits without waiting for engine confirmation.
 	SpeculativeIndexing bool `json:"speculativeIndexing"`
-	// Go duration string. Defaults to defaultSpeculativeTTL.
+	// SpeculativeTTL bounds how long speculative entries live before
+	// eviction. Go duration string; defaults to defaultSpeculativeTTL when
+	// empty.
 	SpeculativeTTL string `json:"speculativeTTL"`
 }
 
 var _ requestcontrol.DataProducer = &Producer{}
 
-// Owns the KV-block index and publishes per-endpoint PrefixCacheMatchInfo.
-// Speculative indexing in prerequest.go; subscriber lifecycle in extractor.go.
+// Producer is a DataProducer plugin that maintains a KV-block prefix-cache
+// index by subscribing to vLLM KV-events and writes per-endpoint
+// PrefixCacheMatchInfo for each request. Operators pair it with the
+// generic prefix-cache-scorer (set prefixMatchInfoProducerName to this
+// producer's instance name) to route requests by precise cache locality.
+//
+// Speculative-indexing logic lives in prerequest.go; per-pod ZMQ subscriber
+// lifecycle in extractor.go.
 type Producer struct {
 	typedName      plugin.TypedName
 	kvCacheIndexer kvCacheIndexer
@@ -84,6 +97,9 @@ type Producer struct {
 	subscriberCtx context.Context
 }
 
+// PluginFactory parses the raw plugin configuration and returns a configured
+// Producer. Rejects configs with indexerConfig.tokenizersPoolConfig set, since
+// this producer is tokens-only and requires an upstream token-producer.
 func PluginFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
 	indexerConfig, err := kvcache.NewDefaultConfig()
 	if err != nil {
@@ -110,16 +126,20 @@ func PluginFactory(name string, rawParameters json.RawMessage, handle plugin.Han
 		return nil, errors.New("tokenizersPoolConfig is not supported; configure a token-producer plugin instead")
 	}
 
-	p, err := New(handle.Context(), parameters)
+	p, err := New(handle.Context(), name, parameters)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create %s plugin: %w", PluginType, err)
 	}
 
-	return p.WithName(name), nil
+	return p, nil
 }
 
-// Indexer and KV-events pool run in background goroutines bound to ctx.
-func New(ctx context.Context, config PluginConfig) (*Producer, error) {
+// New constructs a precise-prefix-cache-producer. The instance name becomes
+// the producer name on PrefixCacheMatchInfoDataKey, which downstream
+// consumers must match (see prefix-cache-scorer's prefixMatchInfoProducerName).
+// The kvcache indexer, KV-events pool, and any local ZMQ subscriber start
+// in background goroutines bound to ctx.
+func New(ctx context.Context, name string, config PluginConfig) (*Producer, error) {
 	if config.TokenProcessorConfig == nil {
 		config.TokenProcessorConfig = kvblock.DefaultTokenProcessorConfig()
 	}
@@ -161,12 +181,12 @@ func New(ctx context.Context, config PluginConfig) (*Producer, error) {
 	}
 
 	return &Producer{
-		typedName:          plugin.TypedName{Type: PluginType},
+		typedName:          plugin.TypedName{Type: PluginType, Name: name},
 		kvCacheIndexer:     indexer,
 		kvBlockScorer:      kvBlockScorer,
 		subscribersManager: subscribersManager,
 		kvEventsConfig:     config.KVEventsConfig,
-		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(PluginType),
+		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 		pluginState:        plugin.NewPluginState(ctx),
 		speculativeCache:   speculativeCache,
 		speculativeTTL:     speculativeTTL,
@@ -176,25 +196,28 @@ func New(ctx context.Context, config PluginConfig) (*Producer, error) {
 	}, nil
 }
 
+// TypedName returns the plugin's registered type and name.
 func (p *Producer) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-func (p *Producer) WithName(name string) *Producer {
-	p.typedName.Name = name
-	p.dk = attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name)
-	return p
-}
-
+// Produces declares the PrefixCacheMatchInfoDataKey published per endpoint,
+// name-bound to this producer instance.
 func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
-// Declares the TokenizedPrompt dep so the DAG orders token-producer first.
+// Consumes declares the TokenizedPrompt dependency from token-producer so
+// the data-layer DAG orders tokenization before this producer runs.
 func (p *Producer) Consumes() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}}
 }
 
+// Produce hashes the request's TokenizedPrompt into KV-block keys, looks
+// them up in the per-endpoint KV-block index, and writes PrefixCacheMatchInfo
+// to each candidate endpoint. No-op when the request carries no tokens.
+// With speculativeIndexing enabled, the computed block keys are stashed
+// for PreRequest to seed the index after a routing decision is made.
 func (p *Producer) Produce(ctx context.Context,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 ) error {

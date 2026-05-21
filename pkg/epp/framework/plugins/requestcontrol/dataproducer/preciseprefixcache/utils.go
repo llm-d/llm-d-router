@@ -24,6 +24,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
+// extractEndpointSet builds the "address:port" identifier set used to filter
+// kvblock.Index lookups to candidate endpoints. Endpoints without metadata
+// are skipped.
 func extractEndpointSet(endpoints []scheduling.Endpoint) sets.Set[string] {
 	endpointSet := sets.New[string]()
 	for _, ep := range endpoints {

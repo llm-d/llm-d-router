@@ -39,21 +39,29 @@ const (
 
 var _ requestcontrol.PreRequest = &Producer{}
 
+// speculativeEntries records the speculative rows added on a routing decision
+// so the TTL-eviction callback can roll them back.
 type speculativeEntries struct {
 	blockKeys  []kvblock.BlockHash
 	podEntries []kvblock.PodEntry
 }
 
+// blockKeysState carries the block keys computed in Produce to PreRequest
+// via PluginState, avoiding a second hash on the same request.
 type blockKeysState struct {
 	blockKeys []kvblock.BlockHash
 }
 
+// Clone implements plugin.StateData.
 func (s *blockKeysState) Clone() plugin.StateData {
 	cp := make([]kvblock.BlockHash, len(s.blockKeys))
 	copy(cp, s.blockKeys)
 	return &blockKeysState{blockKeys: cp}
 }
 
+// buildSpeculativeCache constructs the TTL cache used to evict speculative
+// index entries. Returns (nil, 0, nil) when speculative indexing is disabled.
+// The cache and its background goroutine are bound to ctx.
 func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 	index kvblock.Index,
 ) (*ttlcache.Cache[string, *speculativeEntries], time.Duration, error) {
@@ -98,7 +106,11 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 	return cache, ttl, nil
 }
 
-// Seeds speculative entries for the selected endpoint(s). No-op when disabled.
+// PreRequest seeds speculative KV-block index entries for the endpoint(s)
+// selected by the scheduler, so the next same-prefix request hits without
+// waiting for confirmed KV-events from the engine. Entries are tracked in
+// a TTL cache and evicted automatically. No-op when speculativeIndexing
+// is disabled.
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) {

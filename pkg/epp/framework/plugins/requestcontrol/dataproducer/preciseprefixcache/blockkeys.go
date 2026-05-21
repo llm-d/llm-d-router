@@ -25,13 +25,19 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
-// Subset of kvcache.Indexer used by the producer. Tokens-only.
+// kvCacheIndexer is the subset of kvcache.Indexer that the producer relies on.
+// Intentionally narrow: only the tokens-based entry points, no prompt-string
+// fallback. Lets tests inject a fake without pulling the full indexer.
 type kvCacheIndexer interface {
 	ComputeBlockKeysFromTokens(ctx context.Context, tokens []uint32, modelName string, extraFeatures []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error)
 	KVBlockIndex() kvblock.Index
 }
 
-// Hashes TokenizedPrompt into KV-block keys. (nil, nil) when tokens absent.
+// computeBlockKeys hashes the request's TokenizedPrompt into KV-block keys,
+// passing any multimodal features into the block-extra-features computation
+// so MM tokens land in the right blocks. Returns (nil, nil) when the request
+// carries no tokens — callers needing a prompt-string fallback should run
+// a token-producer upstream.
 func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	request *scheduling.InferenceRequest, blockSizeTokens int,
 ) ([]kvblock.BlockHash, error) {

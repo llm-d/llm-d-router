@@ -29,12 +29,15 @@ import (
 
 var _ fwkdl.EndpointExtractor = &Producer{}
 
+// ExpectedInputType reports the data-layer event type this extractor consumes.
 func (p *Producer) ExpectedInputType() reflect.Type {
 	return fwkdl.EndpointEventReflectType
 }
 
-// ExtractEndpoint: add/update installs a per-pod ZMQ subscriber, delete tears
-// it down. Sole per-pod discovery path; global socket mode is the alternative.
+// ExtractEndpoint processes endpoint lifecycle events emitted by the
+// endpoint-notification-source: add/update installs a per-pod ZMQ KV-events
+// subscriber, delete tears one down. No-op unless per-pod discovery is
+// enabled; the alternative is global socket mode (KVEventsConfig.ZMQEndpoint).
 func (p *Producer) ExtractEndpoint(ctx context.Context, event fwkdl.EndpointEvent) error {
 	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
 		return nil
@@ -60,17 +63,20 @@ func (p *Producer) ExtractEndpoint(ctx context.Context, event fwkdl.EndpointEven
 	return nil
 }
 
+// ensureSubscriber idempotently installs a KV-events subscriber for the given
+// endpoint, dialing SocketPort + RankIndex to match vLLM's offset_endpoint_port
+// (one ZMQ PUB socket per DP rank on the same pod IP).
 func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetadata) error {
 	if meta == nil || meta.Address == "" {
 		return nil
 	}
 	endpointKey := meta.NamespacedName.String()
-	// vLLM offset_endpoint_port: rank N binds at SocketPort + N.
 	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
 	zmqEndpoint := fmt.Sprintf("tcp://%s:%d", meta.Address, port)
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
-	// Use subscriberCtx (plugin-lifetime), not the caller's ctx.
+	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers
+	// down on request completion.
 	if err := p.subscribersManager.EnsureSubscriber(p.subscriberCtx, endpointKey,
 		zmqEndpoint, p.kvEventsConfig.TopicFilter, true); err != nil {
 		logger.Error(err, "Failed to ensure KV-events subscriber for endpoint",
