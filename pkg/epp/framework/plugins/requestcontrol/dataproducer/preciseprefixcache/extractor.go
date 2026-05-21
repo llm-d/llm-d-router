@@ -37,7 +37,7 @@ func (p *Producer) ExpectedInputType() reflect.Type {
 // ExtractEndpoint processes endpoint lifecycle events emitted by the
 // endpoint-notification-source: add/update installs a per-pod ZMQ KV-events
 // subscriber, delete tears one down. No-op unless per-pod discovery is
-// enabled; the alternative is global socket mode (KVEventsConfig.ZMQEndpoint).
+// enabled.
 func (p *Producer) ExtractEndpoint(ctx context.Context, event fwkdl.EndpointEvent) error {
 	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
 		return nil
@@ -64,7 +64,7 @@ func (p *Producer) ExtractEndpoint(ctx context.Context, event fwkdl.EndpointEven
 }
 
 // ensureSubscriber idempotently installs a KV-events subscriber for the given
-// endpoint, dialing SocketPort + RankIndex to match vLLM's offset_endpoint_port
+// endpoint, dialing SocketPort + RankIndex to match standard inference-engine port offsetting
 // (one ZMQ PUB socket per DP rank on the same pod IP).
 func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetadata) error {
 	if meta == nil || meta.Address == "" {
