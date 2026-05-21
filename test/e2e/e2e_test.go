@@ -382,7 +382,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			decodeOnlyCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", labelFilter2)
 
 			ginkgo.By("Step metric validation: Cleaning up objects")
-			ginkgo.By(fmt.Sprintf("counterproductive: %d", prefillDecodeCount))
+			ginkgo.By(fmt.Sprintf("pd decisions count: %d", prefillDecodeCount))
 			ginkgo.By(fmt.Sprintf("decode only count: %d", decodeOnlyCount))
 			gomega.Expect(prefillDecodeCount).Should(gomega.Equal(4))
 			gomega.Expect(decodeOnlyCount).Should(gomega.Equal(2))
