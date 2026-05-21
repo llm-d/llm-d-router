@@ -34,7 +34,7 @@ fetch_crds() {
   curl -sL "${url}" -o "${TEMP_DIR}/$(basename "${url}")"
 }
 
-# Use local 'config/crd/base', run "make generate" to regenerate llm-d CRDs
+# Use local 'config/crd/bases', run "make generate" to regenerate llm-d CRDs
 cp "${SCRIPT_ROOT}/config/crd/bases/"*.yaml "${TEMP_DIR}/"
 # GIE (Gateway API Inference Extension) CRDs - owned by upstream GIE
 fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${GIE_VERSION}/config/crd/bases/inference.networking.k8s.io_inferencepools.yaml"
