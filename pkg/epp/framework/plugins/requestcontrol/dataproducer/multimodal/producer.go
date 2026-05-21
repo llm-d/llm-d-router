@@ -47,14 +47,14 @@ const (
 	// ProducerType is the type name used to register the multimodal data producer.
 	ProducerType = "mm-embeddings-cache-producer"
 
-	// ProducedKey is the data key emitted by this producer.
-	ProducedKey = attrmm.EncoderCacheMatchInfoKey
-
-	defaultCacheSize       = 10000
-	podCleanupInterval     = 2 * time.Minute
+	defaultCacheSize   = 10000
+	podCleanupInterval = 2 * time.Minute
 )
 
 var (
+	// ProducedKey is the data key emitted by this producer.
+	ProducedKey = attrmm.EncoderCacheMatchInfoKey
+
 	_ requestcontrol.DataProducer = &Producer{}
 	_ requestcontrol.PreRequest   = &Producer{}
 	_ fwkdl.EndpointExtractor     = &Producer{}
@@ -143,8 +143,8 @@ func (p *Producer) TypedName() plugin.TypedName {
 }
 
 // Produces returns the data keys this plugin produces.
-func (p *Producer) Produces() map[string]any {
-	return map[string]any{ProducedKey: attrmm.EncoderCacheMatchInfo{}}
+func (p *Producer) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{ProducedKey: attrmm.EncoderCacheMatchInfo{}}
 }
 
 // PluginState returns request-scoped state shared between producer extension points.
@@ -170,7 +170,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 			continue
 		}
 		matchedItems := p.matchedItemsForPod(metadata.NamespacedName.String(), requestItems)
-		endpoint.Put(attrmm.EncoderCacheMatchInfoKey, attrmm.NewEncoderCacheMatchInfo(
+		endpoint.Put(attrmm.EncoderCacheMatchInfoKey.String(), attrmm.NewEncoderCacheMatchInfo(
 			matchedItems,
 			requestItems,
 		))

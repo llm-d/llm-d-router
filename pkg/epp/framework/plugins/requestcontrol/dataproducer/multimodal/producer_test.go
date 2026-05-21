@@ -291,6 +291,10 @@ func (h *testHandle) GetAllPluginsWithNames() map[string]plugin.Plugin {
 	return nil
 }
 
+func (h *testHandle) Metrics() plugin.MetricsRecorder {
+	return nil
+}
+
 func (h *testHandle) PodList() []k8stypes.NamespacedName {
 	if h.podList == nil {
 		return nil
@@ -339,7 +343,7 @@ func schedulingResult(target scheduling.Endpoint) *scheduling.SchedulingResult {
 
 func assertMatchInfo(t *testing.T, endpoint scheduling.Endpoint, matchedItems, requestItems []attrmm.MatchItem) {
 	t.Helper()
-	raw, ok := endpoint.Get(attrmm.EncoderCacheMatchInfoKey)
+	raw, ok := endpoint.Get(attrmm.EncoderCacheMatchInfoKey.String())
 	require.True(t, ok)
 	info, ok := raw.(*attrmm.EncoderCacheMatchInfo)
 	require.True(t, ok)

@@ -53,9 +53,9 @@ func TestScoreFromProducedMatchInfo(t *testing.T) {
 	endpointB := newEndpoint("pod-b")
 	endpointC := newEndpoint("pod-c")
 	requestItems := []attrmm.MatchItem{{Hash: "image", Size: 80}, {Hash: "icon", Size: 20}}
-	endpointA.Put(attrmm.EncoderCacheMatchInfoKey, attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "image", Size: 80}}, requestItems))
-	endpointB.Put(attrmm.EncoderCacheMatchInfoKey, attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "icon", Size: 20}}, requestItems))
-	endpointC.Put(attrmm.EncoderCacheMatchInfoKey, attrmm.NewEncoderCacheMatchInfo(nil, requestItems))
+	endpointA.Put(attrmm.EncoderCacheMatchInfoKey.String(), attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "image", Size: 80}}, requestItems))
+	endpointB.Put(attrmm.EncoderCacheMatchInfoKey.String(), attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "icon", Size: 20}}, requestItems))
+	endpointC.Put(attrmm.EncoderCacheMatchInfoKey.String(), attrmm.NewEncoderCacheMatchInfo(nil, requestItems))
 
 	scores := scorer.Score(context.Background(), scheduling.NewCycleState(), nil, []scheduling.Endpoint{endpointA, endpointB, endpointC})
 
@@ -68,7 +68,7 @@ func TestScoreMissingOrInvalidMatchInfoReturnsZero(t *testing.T) {
 	scorer := New(testName)
 	endpointA := newEndpoint("pod-a")
 	endpointB := newEndpoint("pod-b")
-	endpointB.Put(attrmm.EncoderCacheMatchInfoKey, attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "image", Size: 1}}, nil))
+	endpointB.Put(attrmm.EncoderCacheMatchInfoKey.String(), attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "image", Size: 1}}, nil))
 
 	scores := scorer.Score(context.Background(), scheduling.NewCycleState(), nil, []scheduling.Endpoint{endpointA, endpointB})
 

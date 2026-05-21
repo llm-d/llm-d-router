@@ -66,8 +66,8 @@ func (s *Scorer) Category() scheduling.ScorerCategory {
 }
 
 // Consumes returns the endpoint data consumed by this scorer.
-func (s *Scorer) Consumes() map[string]any {
-	return map[string]any{attrmm.EncoderCacheMatchInfoKey: attrmm.EncoderCacheMatchInfo{}}
+func (s *Scorer) Consumes() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{attrmm.EncoderCacheMatchInfoKey: attrmm.EncoderCacheMatchInfo{}}
 }
 
 // Score scores endpoints by matched multimodal encoder-cache item size divided
@@ -85,7 +85,7 @@ func (s *Scorer) Score(ctx context.Context, _ *scheduling.CycleState, req *sched
 		if meta := endpoint.GetMetadata(); meta != nil {
 			pod = meta.PodName
 		}
-		info, ok := endpoint.Get(attrmm.EncoderCacheMatchInfoKey)
+		info, ok := endpoint.Get(attrmm.EncoderCacheMatchInfoKey.String())
 		if !ok {
 			traceLogger.Info("mm-embeddings-cache: no match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
 			continue
