@@ -161,13 +161,13 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("parse config build failed: %w", err)
 	}
 
-	plugin, ok := handle.GetAllPluginsWithNames()[rawConfig.SaturationDetector.PluginRef]
+	plugin, ok := handle.GetAllPluginsWithNames()[rawConfig.FlowControl.SaturationDetector.PluginRef]
 	if !ok {
-		return nil, fmt.Errorf("saturation detector plugin '%s' not found", rawConfig.SaturationDetector.PluginRef)
+		return nil, fmt.Errorf("saturation detector plugin '%s' not found", rawConfig.FlowControl.SaturationDetector.PluginRef)
 	}
 	saturationDetector, ok := plugin.(fwkfc.SaturationDetector)
 	if !ok {
-		return nil, fmt.Errorf("plugin '%s' is not a fwkfc.SaturationDetector", rawConfig.SaturationDetector.PluginRef)
+		return nil, fmt.Errorf("plugin '%s' is not a fwkfc.SaturationDetector", rawConfig.FlowControl.SaturationDetector.PluginRef)
 	}
 
 	return &config.Config{

@@ -41,10 +41,10 @@ func validateConfig(cfg *configapi.EndpointPickerConfig) error {
 }
 
 func validateSaturationDetector(cfg *configapi.EndpointPickerConfig) error {
-	if cfg.SaturationDetector == nil {
+	if cfg.FlowControl == nil || cfg.FlowControl.SaturationDetector == nil {
 		return nil
 	}
-	if cfg.SaturationDetector.PluginRef == "" {
+	if cfg.FlowControl.SaturationDetector.PluginRef == "" {
 		return errors.New("saturation detector plugin reference is empty")
 	}
 
@@ -53,8 +53,8 @@ func validateSaturationDetector(cfg *configapi.EndpointPickerConfig) error {
 		definedPlugins.Insert(p.Name)
 	}
 
-	if !definedPlugins.Has(cfg.SaturationDetector.PluginRef) {
-		return fmt.Errorf("saturation detector references undefined plugin '%s'", cfg.SaturationDetector.PluginRef)
+	if !definedPlugins.Has(cfg.FlowControl.SaturationDetector.PluginRef) {
+		return fmt.Errorf("saturation detector references undefined plugin '%s'", cfg.FlowControl.SaturationDetector.PluginRef)
 	}
 
 	return nil

@@ -46,8 +46,9 @@ schedulingProfiles:
 featureGates:
 - dataLayer
 - flowControl
-saturationDetector:
-  pluginRef: utilization-detector
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
 `
 
 // successConfigText represents a fully populated, valid configuration.
@@ -77,8 +78,9 @@ schedulingProfiles:
 featureGates:
 - dataLayer
 - flowControl
-saturationDetector:
-  pluginRef: utilization-detector
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
 `
 
 // successNoProfilesText represents a valid config with plugins but no profiles.

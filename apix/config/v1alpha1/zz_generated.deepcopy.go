@@ -115,11 +115,6 @@ func (in *EndpointPickerConfig) DeepCopyInto(out *EndpointPickerConfig) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.SaturationDetector != nil {
-		in, out := &in.SaturationDetector, &out.SaturationDetector
-		*out = new(SaturationDetectorConfig)
-		**out = **in
-	}
 	if in.DataLayer != nil {
 		in, out := &in.DataLayer, &out.DataLayer
 		*out = new(DataLayerConfig)
@@ -208,6 +203,11 @@ func (in *FlowControlConfig) DeepCopyInto(out *FlowControlConfig) {
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
+	}
+	if in.SaturationDetector != nil {
+		in, out := &in.SaturationDetector, &out.SaturationDetector
+		*out = new(SaturationDetectorConfig)
+		**out = **in
 	}
 }
 

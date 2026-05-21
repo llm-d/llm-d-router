@@ -65,8 +65,25 @@ func TestStringers(t *testing.T) {
 				PriorityBands: []PriorityBandConfig{
 					{Priority: 10, MaxBytes: resource.NewQuantity(512, resource.DecimalSI)},
 				},
+				SaturationDetector: &SaturationDetectorConfig{
+					PluginRef: "test-plugin",
+				},
 			},
-			want: "{MaxBytes: 1024, MaxRequests: unlimited, DefaultRequestTTL: 30s, PriorityBands: [{Priority: 10, MaxBytes: 512}]}",
+			want: "{MaxBytes: 1024, MaxRequests: unlimited, DefaultRequestTTL: 30s, PriorityBands: [{Priority: 10, MaxBytes: 512}], SaturationDetector: {PluginRef: test-plugin}}",
+		},
+		{
+			name: "EndpointPickerConfig",
+			obj: &EndpointPickerConfig{
+				Plugins: []PluginSpec{
+					{Name: "p1", Type: "t1"},
+				},
+				FlowControl: &FlowControlConfig{
+					SaturationDetector: &SaturationDetectorConfig{
+						PluginRef: "sd1",
+					},
+				},
+			},
+			want: "{Plugins: [{Name: p1, Type: t1}], FlowControl: {MaxBytes: unlimited, MaxRequests: unlimited, SaturationDetector: {PluginRef: sd1}}}",
 		},
 		{
 			name: "ParserConfig",

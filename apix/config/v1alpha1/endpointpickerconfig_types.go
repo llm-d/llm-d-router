@@ -50,11 +50,6 @@ type EndpointPickerConfig struct {
 	SchedulingProfiles []SchedulingProfile `json:"schedulingProfiles"`
 
 	// +optional
-	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
-	// Flow Control. If omitted, "utilization-detector" is used by default.
-	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
-
-	// +optional
 	// DataLayer configures the DataLayer. It is required if the new DataLayer is enabled.
 	DataLayer *DataLayerConfig `json:"dataLayer"`
 
@@ -82,9 +77,6 @@ func (cfg EndpointPickerConfig) String() string {
 	}
 	if cfg.DataLayer != nil {
 		parts = append(parts, fmt.Sprintf("DataLayer: %v", cfg.DataLayer))
-	}
-	if cfg.SaturationDetector != nil {
-		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", cfg.SaturationDetector))
 	}
 	if cfg.FlowControl != nil {
 		parts = append(parts, fmt.Sprintf("FlowControl: %v", cfg.FlowControl))
@@ -362,6 +354,11 @@ type FlowControlConfig struct {
 	// Must reference a named plugin instance defined in the top-level Plugins section.
 	// If omitted, a default static policy (threshold=1.0, no gating) is used.
 	UsageLimitPolicyPluginRef string `json:"usageLimitPolicyPluginRef,omitempty"`
+
+	// +optional
+	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
+	// Flow Control. If omitted, "utilization-detector" is used by default.
+	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
 }
 
 func (fcc *FlowControlConfig) String() string {
@@ -400,6 +397,10 @@ func (fcc *FlowControlConfig) String() string {
 
 	if fcc.UsageLimitPolicyPluginRef != "" {
 		parts = append(parts, "UsageLimitPolicyRef: "+fcc.UsageLimitPolicyPluginRef)
+	}
+
+	if fcc.SaturationDetector != nil {
+		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", fcc.SaturationDetector))
 	}
 
 	return "{" + strings.Join(parts, ", ") + "}"

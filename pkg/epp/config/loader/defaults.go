@@ -267,12 +267,15 @@ func ensureSaturationDetector(
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
 ) error {
-	sdConfig := cfg.SaturationDetector
+	if cfg.FlowControl == nil {
+		cfg.FlowControl = &configapi.FlowControlConfig{}
+	}
+	sdConfig := cfg.FlowControl.SaturationDetector
 	if sdConfig == nil {
 		sdConfig = &configapi.SaturationDetectorConfig{
 			PluginRef: utilization.UtilizationDetectorType,
 		}
-		cfg.SaturationDetector = sdConfig
+		cfg.FlowControl.SaturationDetector = sdConfig
 	}
 	if sdConfig.PluginRef == "" {
 		sdConfig.PluginRef = utilization.UtilizationDetectorType

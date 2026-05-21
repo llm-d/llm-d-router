@@ -13,8 +13,9 @@ plugins:
   parameters:
     queueDepthThreshold: 999999999
     kvCacheUtilThreshold: 1.0
-saturationDetector:
-  pluginRef: utilization-detector
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
 schedulingProfiles:
 - name: default
   plugins:

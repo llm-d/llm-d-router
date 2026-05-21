@@ -116,8 +116,10 @@ func TestLoadRawConfiguration(t *testing.T) {
 					datalayer.ExperimentalDatalayerFeatureGate,
 					flowcontrol.FeatureGate,
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "utilization-detector",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "utilization-detector",
+					},
 				},
 			},
 			wantErr:    false,
@@ -151,8 +153,10 @@ func TestLoadRawConfiguration(t *testing.T) {
 					datalayer.ExperimentalDatalayerFeatureGate,
 					flowcontrol.FeatureGate,
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "utilization-detector",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "utilization-detector",
+					},
 				},
 			},
 			wantErr:    false,
@@ -862,15 +866,19 @@ func TestValidateSaturationDetector(t *testing.T) {
 		{
 			name: "Nil SaturationDetector",
 			cfg: &configapi.EndpointPickerConfig{
-				SaturationDetector: nil,
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: nil,
+				},
 			},
 			wantErr: false,
 		},
 		{
 			name: "Empty PluginRef",
 			cfg: &configapi.EndpointPickerConfig{
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "",
+					},
 				},
 			},
 			wantErr: true,
@@ -881,8 +889,10 @@ func TestValidateSaturationDetector(t *testing.T) {
 				Plugins: []configapi.PluginSpec{
 					{Name: "valid-plugin", Type: "valid-type"},
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "valid-plugin",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "valid-plugin",
+					},
 				},
 			},
 			wantErr: false,
@@ -893,8 +903,10 @@ func TestValidateSaturationDetector(t *testing.T) {
 				Plugins: []configapi.PluginSpec{
 					{Name: "other-plugin", Type: "valid-type"},
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "valid-plugin",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "valid-plugin",
+					},
 				},
 			},
 			wantErr: true,
@@ -919,8 +931,10 @@ func TestEnsureSaturationDetector(t *testing.T) {
 
 	t.Run("Plugin in allPlugins", func(t *testing.T) {
 		cfg := &configapi.EndpointPickerConfig{
-			SaturationDetector: &configapi.SaturationDetectorConfig{
-				PluginRef: "existing-plugin",
+			FlowControl: &configapi.FlowControlConfig{
+				SaturationDetector: &configapi.SaturationDetectorConfig{
+					PluginRef: "existing-plugin",
+				},
 			},
 		}
 		handle := igwtestutils.NewTestHandle(context.Background())
@@ -930,13 +944,15 @@ func TestEnsureSaturationDetector(t *testing.T) {
 
 		err := ensureSaturationDetector(cfg, handle, allPlugins)
 		require.NoError(t, err)
-		require.Equal(t, "existing-plugin", cfg.SaturationDetector.PluginRef)
+		require.Equal(t, "existing-plugin", cfg.FlowControl.SaturationDetector.PluginRef)
 	})
 
 	t.Run("Empty PluginRef in allPlugins", func(t *testing.T) {
 		cfg := &configapi.EndpointPickerConfig{
-			SaturationDetector: &configapi.SaturationDetectorConfig{
-				PluginRef: "",
+			FlowControl: &configapi.FlowControlConfig{
+				SaturationDetector: &configapi.SaturationDetectorConfig{
+					PluginRef: "",
+				},
 			},
 		}
 		handle := igwtestutils.NewTestHandle(context.Background())
@@ -946,7 +962,7 @@ func TestEnsureSaturationDetector(t *testing.T) {
 
 		err := ensureSaturationDetector(cfg, handle, allPlugins)
 		require.NoError(t, err)
-		require.Equal(t, "utilization-detector", cfg.SaturationDetector.PluginRef)
+		require.Equal(t, "utilization-detector", cfg.FlowControl.SaturationDetector.PluginRef)
 	})
 }
 
