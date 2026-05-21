@@ -23,7 +23,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // NotificationSourceType is the plugin type identifier for k8s notification sources.

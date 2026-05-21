@@ -20,7 +20,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
+
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
 // DefaultTestPort is the standard port used for mock model servers in tests.
@@ -146,7 +147,7 @@ func (m *InferenceObjectiveWrapper) PoolGroup(poolGroup string) *InferenceObject
 	return m
 }
 
-func (m *InferenceObjectiveWrapper) Priority(priority int) *InferenceObjectiveWrapper {
+func (m *InferenceObjectiveWrapper) Priority(priority int32) *InferenceObjectiveWrapper {
 	m.Spec.Priority = &priority
 	return m
 }

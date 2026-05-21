@@ -1,15 +1,11 @@
 approvers:
 - elevran
-- kfswain
-- nilig
-- nirrozenbaum
-- shmuelk
 - vMaroon
 - ahg-g
+- liu-cong
 
 reviewers:
 - elevran
-- kfswain
 - nilig
 - nirrozenbaum
 - shmuelk
@@ -21,9 +17,12 @@ reviewers:
 # Implemented via a custom GitHub Action
 auto-assign:
   - elevran
-  - kfswain
   - nilig
   - nirrozenbaum
   - shmuelk
   - vMaroon
   - ahg-g
+
+
+emeritus:
+  - kfswain

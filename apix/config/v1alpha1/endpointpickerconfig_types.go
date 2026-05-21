@@ -220,13 +220,36 @@ type DataLayerConfig struct {
 	// +optional
 	// Sources is the list of sources to define to the DataLayer
 	Sources []DataLayerSource `json:"sources,omitempty"`
+	// +optional
+	// Discovery specifies which EndpointDiscovery plugin to use for populating the
+	// endpoint datastore. When set, the EPP bypasses Kubernetes CRD reconcilers and
+	// relies entirely on the referenced plugin to enumerate and track inference
+	// endpoints. This enables running the EPP without a Kubernetes cluster.
+	// If omitted, the EPP uses the default Kubernetes-based discovery.
+	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
 }
 
 func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v}", dlc.Sources)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v}", dlc.Sources, dlc.Discovery)
+}
+
+// DiscoveryConfig references the EndpointDiscovery plugin to use.
+type DiscoveryConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef is the name of the plugin instance (from the Plugins list) that
+	// implements EndpointDiscovery.
+	PluginRef string `json:"pluginRef"`
+}
+
+func (dc *DiscoveryConfig) String() string {
+	if dc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", dc.PluginRef)
 }
 
 // DataLayerSource contains the configuration of a DataSource of the DataLayer feature
@@ -322,6 +345,13 @@ type FlowControlConfig struct {
 	// priority levels. This template cascades to the standard `PriorityBandConfig` defaults.
 	DefaultPriorityBand *PriorityBandConfig `json:"defaultPriorityBand,omitempty"`
 
+	// +optional
+	// DefaultNegativePriorityBand allows you to define a separate template for priority levels
+	// strictly below zero. This enables designating negative-priority traffic as sheddable by
+	// setting lower capacity limits (e.g., maxBytes: "0" to drop immediately).
+	// If not specified, negative priorities fall back to DefaultPriorityBand.
+	DefaultNegativePriorityBand *PriorityBandConfig `json:"defaultNegativePriorityBand,omitempty"`
+
 	// PriorityBands allows you to explicitly define policies (like capacity limits) for specific
 	// priority levels. Traffic matching these priorities will be handled according to these rules.
 	// If a priority band is not specified, it uses specific defaults.
@@ -358,6 +388,10 @@ func (fcc *FlowControlConfig) String() string {
 
 	if fcc.DefaultPriorityBand != nil {
 		parts = append(parts, fmt.Sprintf("DefaultPriorityBand: %v", fcc.DefaultPriorityBand))
+	}
+
+	if fcc.DefaultNegativePriorityBand != nil {
+		parts = append(parts, fmt.Sprintf("DefaultNegativePriorityBand: %v", fcc.DefaultNegativePriorityBand))
 	}
 
 	if len(fcc.PriorityBands) > 0 {

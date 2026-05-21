@@ -24,24 +24,29 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
-func TestPrepareRequestData(t *testing.T) {
+func testHandle() plugin.Handle {
+	return plugin.NewEppHandle(context.Background(), nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
+}
+
+func TestProduce(t *testing.T) {
 	config := config{
 		BlockSizeTokens:        1,
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
 	// Test the "initialize if nil" pattern
-	p, err := newPrepareData(context.Background(), config, nil)
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 	assert.NoError(t, err)
 	assert.NotNil(t, p.PluginState())
 
@@ -60,9 +65,9 @@ func TestPrepareRequestData(t *testing.T) {
 		},
 	}
 
-	// We need to simulate the PreRequest logic since PrepareRequestData only reads from the indexer.
-	// But first let's see if PrepareRequestData correctly handles an empty indexer.
-	err = p.PrepareRequestData(context.Background(), req1, endpoints)
+	// We need to simulate the PreRequest logic since Produce only reads from the indexer.
+	// But first let's see if Produce correctly handles an empty indexer.
+	err = p.Produce(context.Background(), req1, endpoints)
 	assert.NoError(t, err)
 
 	// Verify state was written to PluginState
@@ -72,8 +77,9 @@ func TestPrepareRequestData(t *testing.T) {
 	assert.Equal(t, 2, len(state.PrefixHashes)) // "aaaabbbb" with blockSize 4 (1 token * 4 chars) -> 2 blocks
 
 	// Verify pod match info was set (should be 0 match since indexer is empty)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
 	for _, ep := range endpoints {
-		info, ok := ep.Get(attrprefix.PrefixCacheMatchInfoKey)
+		info, ok := ep.Get(key)
 		assert.True(t, ok)
 		prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
 		assert.Equal(t, 0, prefixInfo.MatchBlocks())
@@ -87,7 +93,7 @@ func TestPreRequest(t *testing.T) {
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, _ := newPrepareData(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
 	req1 := &fwksched.InferenceRequest{
@@ -100,8 +106,8 @@ func TestPreRequest(t *testing.T) {
 		},
 	}
 
-	// 1. Prepare data (this saves state)
-	_ = p.PrepareRequestData(context.Background(), req1, []fwksched.Endpoint{endpoint1})
+	// 1. Produce data (this saves state)
+	_ = p.Produce(context.Background(), req1, []fwksched.Endpoint{endpoint1})
 
 	// 2. Simulate scheduling result
 	res := &fwksched.SchedulingResult{
@@ -120,14 +126,14 @@ func TestPreRequest(t *testing.T) {
 	p.wg.Wait()
 
 	// 4. Verify indexer was updated
-	hashes := hashPrompt(context.Background(), req1, 4, defaultMaxPrefixBlocks)
+	hashes := getBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks, NewApproximatePrefixCacheTokenEstimator(context.Background(), &defaultMultimodalConfig))
 	for _, hash := range hashes {
 		pods := p.indexer().Get(hash)
 		assert.Contains(t, pods, ServerID(endpoint1.GetMetadata().NamespacedName))
 	}
 }
 
-func TestPrepareDataValidation(t *testing.T) {
+func TestDataProducerValidation(t *testing.T) {
 	validConfigs := []config{{
 		AutoTune:        false,
 		BlockSizeTokens: 1,
@@ -148,12 +154,12 @@ func TestPrepareDataValidation(t *testing.T) {
 	}}
 
 	for _, config := range validConfigs {
-		_, err := newPrepareData(context.Background(), config, nil)
+		_, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 		assert.NoError(t, err)
 	}
 
 	for _, config := range invalidConfigs {
-		_, err := newPrepareData(context.Background(), config, nil)
+		_, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 		assert.Error(t, err)
 	}
 }
@@ -164,7 +170,7 @@ func TestPrefixPluginCompletion(t *testing.T) {
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, _ := newPrepareData(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
 	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
@@ -181,7 +187,7 @@ func TestPrefixPluginCompletion(t *testing.T) {
 			},
 		},
 	}
-	_ = p.PrepareRequestData(context.Background(), req1, endpoints)
+	_ = p.Produce(context.Background(), req1, endpoints)
 	state, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req1.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	// Input size is 6, block size is 4, so 1 body block. Total hashes = 1 (model only is not a block)
 	assert.Equal(t, 2, len(state.PrefixHashes))
@@ -207,21 +213,22 @@ func TestPrefixPluginCompletion(t *testing.T) {
 			},
 		},
 	}
-	_ = p.PrepareRequestData(context.Background(), req3, endpoints)
+	_ = p.Produce(context.Background(), req3, endpoints)
 
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
 	// Verify pod1 has the correct prefix match info
-	info1, _ := endpoint1.Get(attrprefix.PrefixCacheMatchInfoKey)
+	info1, _ := endpoint1.Get(key)
 	prefixInfo1 := info1.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Equal(t, 1, prefixInfo1.MatchBlocks()) // one block ("aaaa") matches
 	assert.Equal(t, 2, prefixInfo1.TotalBlocks()) // "aaaabbbb" -> 2 blocks
 
 	// Verify pod3 (prefill node) also has the match
-	info3, _ := endpoint3.Get(attrprefix.PrefixCacheMatchInfoKey)
+	info3, _ := endpoint3.Get(key)
 	prefixInfo3 := info3.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Equal(t, 1, prefixInfo3.MatchBlocks())
 
 	// Verify pod2 has no match info
-	info2, _ := endpoint2.Get(attrprefix.PrefixCacheMatchInfoKey)
+	info2, _ := endpoint2.Get(key)
 	prefixInfo2 := info2.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Equal(t, 0, prefixInfo2.MatchBlocks())
 }
@@ -233,7 +240,7 @@ func TestPrefixPluginChatCompletionsGrowth(t *testing.T) {
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, _ := newPrepareData(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint1}
@@ -251,7 +258,7 @@ func TestPrefixPluginChatCompletionsGrowth(t *testing.T) {
 			},
 		},
 	}
-	_ = p.PrepareRequestData(context.Background(), req1, endpoints)
+	_ = p.Produce(context.Background(), req1, endpoints)
 	state1, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req1.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	initialHashCount := len(state1.PrefixHashes)
 	assert.Greater(t, initialHashCount, 0)
@@ -281,12 +288,13 @@ func TestPrefixPluginChatCompletionsGrowth(t *testing.T) {
 			},
 		},
 	}
-	_ = p.PrepareRequestData(context.Background(), req2, endpoints)
+	_ = p.Produce(context.Background(), req2, endpoints)
 	state2, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req2.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	extendedHashCount := len(state2.PrefixHashes)
 	assert.Greater(t, extendedHashCount, initialHashCount)
 
-	info, _ := endpoint1.Get(attrprefix.PrefixCacheMatchInfoKey)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
+	info, _ := endpoint1.Get(key)
 	prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Greater(t, prefixInfo.MatchBlocks(), 0, "should have prefix cache hit")
 	assert.Equal(t, extendedHashCount, prefixInfo.TotalBlocks())
@@ -294,12 +302,13 @@ func TestPrefixPluginChatCompletionsGrowth(t *testing.T) {
 
 func TestPrefixPluginChatCompletionsMultimodalSameUrlMatches(t *testing.T) {
 	config := config{
-		BlockSizeTokens:        32,
-		AutoTune:               false,
-		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
-		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+		BlockSizeTokens:          32,
+		AutoTune:                 false,
+		MaxPrefixBlocksToMatch:   defaultMaxPrefixBlocks,
+		LRUCapacityPerServer:     defaultLRUCapacityPerServer,
+		MultimodalTokenEstimator: &defaultMultimodalConfig,
 	}
-	p, _ := newPrepareData(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint1}
@@ -323,7 +332,7 @@ func TestPrefixPluginChatCompletionsMultimodalSameUrlMatches(t *testing.T) {
 			},
 		},
 	}
-	_ = p.PrepareRequestData(context.Background(), req1, endpoints)
+	_ = p.Produce(context.Background(), req1, endpoints)
 	state1, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req1.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	initialHashCount := len(state1.PrefixHashes)
 	assert.Greater(t, initialHashCount, 0)
@@ -356,8 +365,9 @@ func TestPrefixPluginChatCompletionsMultimodalSameUrlMatches(t *testing.T) {
 			},
 		},
 	}
-	_ = p.PrepareRequestData(context.Background(), req2, endpoints)
-	info, _ := endpoint1.Get(attrprefix.PrefixCacheMatchInfoKey)
+	_ = p.Produce(context.Background(), req2, endpoints)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
+	info, _ := endpoint1.Get(key)
 	prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
 
 	// Since same prefix hashes are expected to be generated
@@ -366,12 +376,13 @@ func TestPrefixPluginChatCompletionsMultimodalSameUrlMatches(t *testing.T) {
 
 func TestPrefixPluginChatCompletionsMultimodalDifferentUrlPartialMatch(t *testing.T) {
 	config := config{
-		BlockSizeTokens:        32,
-		AutoTune:               false,
-		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
-		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+		BlockSizeTokens:          32,
+		AutoTune:                 false,
+		MaxPrefixBlocksToMatch:   defaultMaxPrefixBlocks,
+		LRUCapacityPerServer:     defaultLRUCapacityPerServer,
+		MultimodalTokenEstimator: &defaultMultimodalConfig,
 	}
-	p, _ := newPrepareData(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint1}
@@ -395,7 +406,7 @@ func TestPrefixPluginChatCompletionsMultimodalDifferentUrlPartialMatch(t *testin
 			},
 		},
 	}
-	_ = p.PrepareRequestData(context.Background(), req1, endpoints)
+	_ = p.Produce(context.Background(), req1, endpoints)
 	state1, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req1.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	initialHashCount := len(state1.PrefixHashes)
 	assert.Greater(t, initialHashCount, 0)
@@ -430,11 +441,175 @@ func TestPrefixPluginChatCompletionsMultimodalDifferentUrlPartialMatch(t *testin
 			},
 		},
 	}
-	_ = p.PrepareRequestData(context.Background(), req2, endpoints)
-	info, _ := endpoint1.Get(attrprefix.PrefixCacheMatchInfoKey)
+	_ = p.Produce(context.Background(), req2, endpoints)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
+	info, _ := endpoint1.Get(key)
 	prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
 	// Not a full cache hit as the image url has changed
 	assert.Less(t, prefixInfo.MatchBlocks(), prefixInfo.TotalBlocks(), "should not have full prefix cache hit")
+}
+
+func TestPrefixPluginChatCompletionsMultimodalSameImageContentMatches(t *testing.T) {
+	config := config{
+		BlockSizeTokens:          32,
+		AutoTune:                 false,
+		MaxPrefixBlocksToMatch:   defaultMaxPrefixBlocks,
+		LRUCapacityPerServer:     defaultLRUCapacityPerServer,
+		MultimodalTokenEstimator: &defaultMultimodalConfig,
+	}
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
+
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
+	endpoints := []fwksched.Endpoint{endpoint1}
+
+	req1 := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model1",
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{
+					{
+						Role: "user",
+						Content: fwkrh.Content{
+							Structured: []fwkrh.ContentBlock{
+								{Type: "text", Text: "Describe"},
+								{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p1}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_ = p.Produce(context.Background(), req1, endpoints)
+	state1, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req1.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
+	initialHashCount := len(state1.PrefixHashes)
+	assert.Greater(t, initialHashCount, 0)
+
+	schedulingResult := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint1}},
+		},
+	}
+	p.PreRequest(context.Background(), req1, schedulingResult)
+	p.wg.Wait()
+
+	req2 := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model1",
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{
+					{
+						Role: "user",
+						Content: fwkrh.Content{
+							Structured: []fwkrh.ContentBlock{
+								{Type: "text", Text: "Describe"},
+								{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p1}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_ = p.Produce(context.Background(), req2, endpoints)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
+	info, _ := endpoint1.Get(key)
+	prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
+
+	// Since same prefix hashes are expected to be generated
+	assert.Equal(t, prefixInfo.MatchBlocks(), prefixInfo.TotalBlocks())
+}
+
+func TestPrefixPluginChatCompletionsMultimodalPrefixImageContentMatches(t *testing.T) {
+	mmCfg := multiModalTokenEstimatorConfig{
+		Image: &imageTokenEstimatorConfig{
+			Mode: ModeFixed,
+			DefaultResolution: resolution{
+				Width:  640,
+				Height: 360,
+			},
+			FixedCfg: &fixedTokenEstimatorConfig{
+				FixedToken: 512,
+			},
+		},
+	}
+	config := config{
+		BlockSizeTokens:          32,
+		AutoTune:                 false,
+		MaxPrefixBlocksToMatch:   defaultMaxPrefixBlocks,
+		LRUCapacityPerServer:     defaultLRUCapacityPerServer,
+		MultimodalTokenEstimator: &mmCfg,
+	}
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
+
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
+	endpoints := []fwksched.Endpoint{endpoint1}
+
+	req1 := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model1",
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{
+					{
+						Role: "user",
+						Content: fwkrh.Content{
+							Structured: []fwkrh.ContentBlock{
+								{Type: "text", Text: "Describe"},
+								{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p1}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_ = p.Produce(context.Background(), req1, endpoints)
+	state1, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req1.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
+	initialHashCount := len(state1.PrefixHashes)
+	assert.Greater(t, initialHashCount, 0)
+
+	schedulingResult := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint1}},
+		},
+	}
+	p.PreRequest(context.Background(), req1, schedulingResult)
+	p.wg.Wait()
+
+	req2 := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model1",
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{
+					{
+						Role: "user",
+						Content: fwkrh.Content{
+							Structured: []fwkrh.ContentBlock{
+								{Type: "text", Text: "Describe"},
+								{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p1}},
+								{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p2}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_ = p.Produce(context.Background(), req2, endpoints)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
+	info, _ := endpoint1.Get(key)
+	prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
+
+	// Since same prefix hashes are expected to be generated
+	assert.Equal(t, 16, prefixInfo.MatchBlocks())
+	assert.Equal(t, 33, prefixInfo.TotalBlocks())
+
 }
 
 func TestPrefixPluginAutoTune(t *testing.T) {
@@ -464,9 +639,9 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   1,
 	}
-	p, _ := newPrepareData(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
-	_ = p.PrepareRequestData(context.Background(), req, endpoints)
+	_ = p.Produce(context.Background(), req, endpoints)
 	state, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	// 128 chars / (16 tokens * 4 chars/token) = 2 blocks
 	assert.Equal(t, 2, len(state.PrefixHashes), "Should use pod block size (16 tokens) -> 2 body blocks")
@@ -493,7 +668,7 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 		MaxPrefixTokensToMatch: 2,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, err := newPrepareData(context.Background(), cfg, nil)
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
 	assert.NoError(t, err)
 
 	endpoint := fwksched.NewEndpoint(
@@ -512,7 +687,7 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 		},
 	}
 
-	err = p.PrepareRequestData(context.Background(), req, []fwksched.Endpoint{endpoint})
+	err = p.Produce(context.Background(), req, []fwksched.Endpoint{endpoint})
 	assert.NoError(t, err)
 
 	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
@@ -526,7 +701,7 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 		MaxPrefixBlocksToMatch: 3,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p2, err := newPrepareData(context.Background(), cfg2, nil)
+	p2, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg2, testHandle())
 	assert.NoError(t, err)
 
 	req2 := &fwksched.InferenceRequest{
@@ -539,7 +714,7 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 		},
 	}
 
-	err = p2.PrepareRequestData(context.Background(), req2, []fwksched.Endpoint{endpoint})
+	err = p2.Produce(context.Background(), req2, []fwksched.Endpoint{endpoint})
 	assert.NoError(t, err)
 
 	state2, err := plugin.ReadPluginStateKey[*SchedulingContextState](p2.PluginState(), req2.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
@@ -554,7 +729,7 @@ func BenchmarkPrefixPluginStress(b *testing.B) {
 		MaxPrefixBlocksToMatch: 50000,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
-	p, _ := newPrepareData(context.Background(), config, nil)
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
 	promptLen := []int{1024, 4096, 10000, 50000}
 
@@ -577,7 +752,7 @@ func BenchmarkPrefixPluginStress(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_ = p.PrepareRequestData(context.Background(), req, endpoints)
+				_ = p.Produce(context.Background(), req, endpoints)
 				p.PluginState().Delete(req.RequestID)
 			}
 		})

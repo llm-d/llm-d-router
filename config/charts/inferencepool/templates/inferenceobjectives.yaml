@@ -1,15 +1,15 @@
 {{- range .Values.inferenceObjectives }}
 ---
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
   name: {{ .name }}
   namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "llm-d-inference-scheduler.labels" $ | nindent 4 }}
+    {{- include "llm-d-router.labels" $ | nindent 4 }}
 spec:
   priority: {{ .priority }}
   poolRef:
-    group: {{ .Values.inferenceExtension.apiVersion }}
+    group: {{ index (split "/" $.Values.inferencePool.apiVersion) 0 }}
     name: {{ $.Release.Name }}
 {{- end }}

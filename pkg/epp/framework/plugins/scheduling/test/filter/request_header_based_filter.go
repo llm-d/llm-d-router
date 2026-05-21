@@ -22,9 +22,9 @@ import (
 	"net"
 	"strings"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/test"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/test"
 )
 
 const (
@@ -33,7 +33,7 @@ const (
 )
 
 // compile-time type assertion
-var _ framework.Filter = &HeaderBasedTestingFilter{}
+var _ fwksched.Filter = &HeaderBasedTestingFilter{}
 
 // HeaderBasedTestingFilterFactory defines the factory function for HeaderBasedTestingFilter.
 func HeaderBasedTestingFilterFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -67,10 +67,10 @@ func (f *HeaderBasedTestingFilter) WithName(name string) *HeaderBasedTestingFilt
 // Filter selects endpoints whose IP or IP:port matches any value in the
 // "test-epp-endpoint-selection" header. Values may be "IP" or "IP:port".
 // If a port is provided, only an exact IP:port match is accepted.
-func (f *HeaderBasedTestingFilter) Filter(_ context.Context, _ *framework.CycleState, request *framework.InferenceRequest, endpoints []framework.Endpoint) []framework.Endpoint {
+func (f *HeaderBasedTestingFilter) Filter(_ context.Context, _ *fwksched.CycleState, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	hv, ok := request.Headers[test.HeaderTestEppEndPointSelectionKey]
 	if !ok || strings.TrimSpace(hv) == "" {
-		return []framework.Endpoint{}
+		return []fwksched.Endpoint{}
 	}
 
 	normalizeIP := func(s string) string { return strings.Trim(s, "[]") }
@@ -78,8 +78,8 @@ func (f *HeaderBasedTestingFilter) Filter(_ context.Context, _ *framework.CycleS
 	// Build lookup maps:
 	//   ip -> endpoint
 	//   ip:port -> endpoint (only when endpoint GetPort() is non-empty)
-	ipToEndpoint := make(map[string]framework.Endpoint, len(endpoints))
-	hpToPod := make(map[string]framework.Endpoint, len(endpoints))
+	ipToEndpoint := make(map[string]fwksched.Endpoint, len(endpoints))
+	hpToPod := make(map[string]fwksched.Endpoint, len(endpoints))
 	for _, e := range endpoints {
 		if e == nil || e.GetMetadata() == nil {
 			continue
@@ -95,7 +95,7 @@ func (f *HeaderBasedTestingFilter) Filter(_ context.Context, _ *framework.CycleS
 	}
 
 	headerVals := strings.Split(hv, ",")
-	filteredEndpoints := make([]framework.Endpoint, 0, len(headerVals))
+	filteredEndpoints := make([]fwksched.Endpoint, 0, len(headerVals))
 	seen := make(map[string]struct{}, len(headerVals)) // de-dupe by endpoint IP
 
 	for _, raw := range headerVals {
@@ -113,7 +113,7 @@ func (f *HeaderBasedTestingFilter) Filter(_ context.Context, _ *framework.CycleS
 		}
 		host = normalizeIP(host)
 
-		var endpoint framework.Endpoint
+		var endpoint fwksched.Endpoint
 		if port != "" {
 			// Require an exact ip:port match
 			if p, ok := hpToPod[host+":"+port]; ok {

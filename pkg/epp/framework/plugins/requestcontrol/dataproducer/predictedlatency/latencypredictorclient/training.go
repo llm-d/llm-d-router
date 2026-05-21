@@ -25,7 +25,7 @@ import (
 	"net/http"
 	"time"
 
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // AddTrainingDataBulk buffers entries for periodic flush.

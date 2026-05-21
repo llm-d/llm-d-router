@@ -9,13 +9,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	approxprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/scorer/nohitlru"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/scorer/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/nohitlru"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
+	"github.com/llm-d/llm-d-router/test/utils"
 )
 
 var _ plugin.Handle = &fakeHandle{}
@@ -57,6 +57,10 @@ func (h *fakeHandle) PodList() []k8stypes.NamespacedName {
 	return make([]k8stypes.NamespacedName, 0)
 }
 
+func (h *fakeHandle) Metrics() plugin.MetricsRecorder {
+	return nil
+}
+
 type stubPlugin struct {
 	name plugin.TypedName
 }
@@ -86,7 +90,7 @@ func newColdNS(name string) scheduling.Endpoint {
 // newWarm returns an endpoint with prefix-cache match info indicating a cache hit.
 func newWarm(name string) scheduling.Endpoint {
 	ep := newCold(name)
-	ep.Put(approxprefix.PrefixCacheMatchInfoKey, approxprefix.NewPrefixCacheMatchInfo(5, 10, 1))
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
 	return ep
 }
 
@@ -157,7 +161,7 @@ func TestNoHitLRUScorer(t *testing.T) {
 	}{
 		{
 			name:   "cold request - all endpoints never used",
-			scorer: nohitlru.NewNoHitLRU(utils.NewTestContext(t), nil),
+			scorer: nohitlru.NewNoHitLRU(utils.NewTestContext(t), nohitlru.NoHitLRUType, nil),
 			req: &scheduling.InferenceRequest{
 				TargetModel: "test-model",
 			},
@@ -175,7 +179,7 @@ func TestNoHitLRUScorer(t *testing.T) {
 		},
 		{
 			name:   "cache hit - neutral scores",
-			scorer: nohitlru.NewNoHitLRU(utils.NewTestContext(t), nil),
+			scorer: nohitlru.NewNoHitLRU(utils.NewTestContext(t), nohitlru.NoHitLRUType, nil),
 			req: &scheduling.InferenceRequest{
 				TargetModel: "test-model",
 			},
@@ -194,7 +198,7 @@ func TestNoHitLRUScorer(t *testing.T) {
 		},
 		{
 			name:   "single endpoint - max score",
-			scorer: nohitlru.NewNoHitLRU(utils.NewTestContext(t), nil),
+			scorer: nohitlru.NewNoHitLRU(utils.NewTestContext(t), nohitlru.NoHitLRUType, nil),
 			req: &scheduling.InferenceRequest{
 				TargetModel: "test-model",
 			},
@@ -222,7 +226,7 @@ func TestNoHitLRUScorer(t *testing.T) {
 
 func TestNoHitLRUBasicFunctionality(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	scorer := nohitlru.NewNoHitLRU(ctx, nil)
+	scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
 
 	endpointA := newCold("pod-a")
 	endpointB := newCold("pod-b")
@@ -248,7 +252,7 @@ func TestNoHitLRUBasicFunctionality(t *testing.T) {
 
 func TestNoPrefixCacheStateFound(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	scorer := nohitlru.NewNoHitLRU(ctx, nil)
+	scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
 
 	// No attributes on the endpoint → treated as cold request.
 	endpointA := newCold("pod-a")
@@ -263,7 +267,7 @@ func TestNoPrefixCacheStateFound(t *testing.T) {
 
 func TestNoHitLRUPreferLeastRecentlyUsedAfterColdRequests(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	scorer := nohitlru.NewNoHitLRU(ctx, nil)
+	scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
 
 	// Shared cold endpoints — no PrefixCacheMatchInfo attributes.
 	endpointA := newColdNS("pod-a")
@@ -281,7 +285,7 @@ func TestNoHitLRUPreferLeastRecentlyUsedAfterColdRequests(t *testing.T) {
 			&fwkdl.Metrics{},
 			nil,
 		)
-		w.Put(approxprefix.PrefixCacheMatchInfoKey, approxprefix.NewPrefixCacheMatchInfo(5, 10, 1))
+		w.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
 		return []scheduling.Endpoint{w, endpointB, endpointC}
 	}
 
@@ -373,7 +377,7 @@ func TestNoHitLRUPreferLeastRecentlyUsedAfterColdRequests(t *testing.T) {
 
 func TestNoHitLRUEdgeCases(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	scorer := nohitlru.NewNoHitLRU(ctx, nil)
+	scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
 
 	t.Run("empty endpoints list", func(t *testing.T) {
 		emptyEndpoints := []scheduling.Endpoint{}
@@ -417,7 +421,7 @@ func TestNoHitLRUPrefillDecodeTracking(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("P/D scenario - both profiles tracked separately", func(t *testing.T) {
-		scorer := nohitlru.NewNoHitLRU(ctx, nil)
+		scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
 
 		// First cold request with P/D (no attributes = cold).
 		req1 := &scheduling.InferenceRequest{RequestID: "pd-request-1"}
@@ -451,7 +455,7 @@ func TestNoHitLRUPrefillDecodeTracking(t *testing.T) {
 
 	t.Run("non-P/D scenario - only primary profile exists", func(t *testing.T) {
 		req := &scheduling.InferenceRequest{RequestID: "non-pd-request"}
-		scorer := nohitlru.NewNoHitLRU(ctx, nil)
+		scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
 		scorer.Score(ctx, &scheduling.CycleState{}, req, decodeEndpoints)
 
 		result := &scheduling.SchedulingResult{
@@ -474,14 +478,14 @@ func TestNoHitLRUPrefillDecodeTracking(t *testing.T) {
 
 	t.Run("nil scheduling result - graceful handling", func(_ *testing.T) {
 		req := &scheduling.InferenceRequest{RequestID: "nil-result"}
-		scorer := nohitlru.NewNoHitLRU(ctx, nil)
+		scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
 		scorer.Score(ctx, &scheduling.CycleState{}, req, decodeEndpoints)
 		scorer.PreRequest(ctx, req, nil)
 	})
 
 	t.Run("empty profile results - graceful handling", func(_ *testing.T) {
 		req := &scheduling.InferenceRequest{RequestID: "empty-results"}
-		scorer := nohitlru.NewNoHitLRU(ctx, nil)
+		scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
 		scorer.Score(ctx, &scheduling.CycleState{}, req, decodeEndpoints)
 
 		result := &scheduling.SchedulingResult{

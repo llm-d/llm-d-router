@@ -22,13 +22,13 @@ import (
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 )
 
-func makeLatencyScorerEndpoint(name string, kvCache float64, queueSize, runningReqs int) framework.Endpoint {
-	return framework.NewEndpoint(
+func makeLatencyScorerEndpoint(name string, kvCache float64, queueSize, runningReqs int) fwksched.Endpoint {
+	return fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}},
 		&fwkdl.Metrics{
 			KVCacheUsagePercent: kvCache,
@@ -39,8 +39,8 @@ func makeLatencyScorerEndpoint(name string, kvCache float64, queueSize, runningR
 	)
 }
 
-func setLatencyPrediction(ep framework.Endpoint, ttftValid, tpotValid bool, ttftHeadroom, tpotHeadroom, ttft, tpot float64) {
-	ep.Put(attrlatency.LatencyPredictionInfoKey,
+func setLatencyPrediction(ep fwksched.Endpoint, ttftValid, tpotValid bool, ttftHeadroom, tpotHeadroom, ttft, tpot float64) {
+	ep.Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 		attrlatency.NewLatencyPredictionInfo(ttftValid, tpotValid, ttftHeadroom, tpotHeadroom, ttft, tpot, 0))
 }
 
@@ -59,8 +59,8 @@ func TestScorePositiveHeadroom(t *testing.T) {
 	setLatencyPrediction(ep1, true, true, 100, 20, 50, 10)
 	setLatencyPrediction(ep2, true, true, 30, 5, 120, 25)
 
-	endpoints := []framework.Endpoint{ep1, ep2}
-	scores := scorer.Score(context.Background(), framework.NewCycleState(), nil, endpoints)
+	endpoints := []fwksched.Endpoint{ep1, ep2}
+	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
 
 	s1, s2 := scores[ep1], scores[ep2]
 
@@ -82,8 +82,8 @@ func TestScoreNegativeOnly(t *testing.T) {
 	setLatencyPrediction(ep1, false, false, -10, -5, 110, 35)
 	setLatencyPrediction(ep2, false, false, -100, -30, 200, 60)
 
-	endpoints := []framework.Endpoint{ep1, ep2}
-	scores := scorer.Score(context.Background(), framework.NewCycleState(), nil, endpoints)
+	endpoints := []fwksched.Endpoint{ep1, ep2}
+	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
 
 	s1, s2 := scores[ep1], scores[ep2]
 
@@ -111,8 +111,8 @@ func TestScoreTierSplit(t *testing.T) {
 	setLatencyPrediction(ep1, true, true, 10, 2, 90, 28)
 	setLatencyPrediction(ep2, true, true, 50, 10, 50, 20)
 
-	endpoints := []framework.Endpoint{ep1, ep2}
-	scores := scorer.Score(context.Background(), framework.NewCycleState(), nil, endpoints)
+	endpoints := []fwksched.Endpoint{ep1, ep2}
+	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
 
 	s1, s2 := scores[ep1], scores[ep2]
 
@@ -140,13 +140,13 @@ func TestScoreIdlePodPreference(t *testing.T) {
 
 	// Same predictions — both negative, same deficit.
 	// Use dispatch count for idle detection (matches EPP internal queue).
-	epBusy.Put(attrlatency.LatencyPredictionInfoKey,
+	epBusy.Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 		attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 5))
-	epIdle.Put(attrlatency.LatencyPredictionInfoKey,
+	epIdle.Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 		attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 
-	endpoints := []framework.Endpoint{epBusy, epIdle}
-	scores := scorer.Score(context.Background(), framework.NewCycleState(), nil, endpoints)
+	endpoints := []fwksched.Endpoint{epBusy, epIdle}
+	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
 
 	sBusy, sIdle := scores[epBusy], scores[epIdle]
 
@@ -173,8 +173,8 @@ func TestScoreHierarchicalBuckets(t *testing.T) {
 	setLatencyPrediction(epTTFTNeg, false, true, -30, 5, 130, 25)    // only TTFT negative
 	setLatencyPrediction(epTPOTNeg, true, false, 10, -8, 90, 38)     // only TPOT negative
 
-	endpoints := []framework.Endpoint{epBothNeg, epTTFTNeg, epTPOTNeg}
-	scores := scorer.Score(context.Background(), framework.NewCycleState(), nil, endpoints)
+	endpoints := []fwksched.Endpoint{epBothNeg, epTTFTNeg, epTPOTNeg}
+	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
 
 	// All should have non-zero scores (they're all in the negative tier).
 	for _, ep := range endpoints {
@@ -194,8 +194,8 @@ func TestScoreCompositeFallback(t *testing.T) {
 	ep1 := makeLatencyScorerEndpoint("pod1", 0.2, 0, 3)
 	ep2 := makeLatencyScorerEndpoint("pod2", 0.8, 5, 10)
 
-	endpoints := []framework.Endpoint{ep1, ep2}
-	scores := scorer.Score(context.Background(), framework.NewCycleState(), nil, endpoints)
+	endpoints := []fwksched.Endpoint{ep1, ep2}
+	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
 
 	s1, s2 := scores[ep1], scores[ep2]
 

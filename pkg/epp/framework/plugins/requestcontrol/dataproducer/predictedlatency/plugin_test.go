@@ -23,15 +23,16 @@ import (
 	"testing"
 	"time"
 
-	latencypredictor "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
 
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	utils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 // mockPredictor implements PredictorInterface for testing
@@ -137,10 +138,10 @@ func createTestInferenceRequestWithBody(reqID string, ttftSLO, tpotSLO float64, 
 	headers := make(map[string]string)
 	headers[reqcommon.RequestIDHeaderKey] = reqID
 	if ttftSLO > 0 {
-		headers["x-ttft-slo"] = fmt.Sprintf("%f", ttftSLO)
+		headers[metadata.TTFTSLOHeaderKey] = fmt.Sprintf("%f", ttftSLO)
 	}
 	if tpotSLO > 0 {
-		headers["x-avg-tpot-slo"] = fmt.Sprintf("%f", tpotSLO)
+		headers[metadata.TPOTSLOHeaderKey] = fmt.Sprintf("%f", tpotSLO)
 	}
 
 	return &fwksched.InferenceRequest{
@@ -149,10 +150,65 @@ func createTestInferenceRequestWithBody(reqID string, ttftSLO, tpotSLO float64, 
 	}
 }
 
+func TestParseSLOHeaders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		headers  map[string]string
+		wantTTFT float64
+		wantTPOT float64
+	}{
+		{
+			name: "SLO headers",
+			headers: map[string]string{
+				metadata.TTFTSLOHeaderKey: "100",
+				metadata.TPOTSLOHeaderKey: "50",
+			},
+			wantTTFT: 100,
+			wantTPOT: 50,
+		},
+		{
+			name: "old aliases",
+			headers: map[string]string{
+				metadata.OldTTFTSLOHeaderKey: "101",
+				metadata.OldTPOTSLOHeaderKey: "51",
+			},
+			wantTTFT: 101,
+			wantTPOT: 51,
+		},
+		{
+			name: "new headers take precedence",
+			headers: map[string]string{
+				metadata.TTFTSLOHeaderKey:    "102",
+				metadata.OldTTFTSLOHeaderKey: "999",
+				metadata.TPOTSLOHeaderKey:    "52",
+				metadata.OldTPOTSLOHeaderKey: "999",
+			},
+			wantTTFT: 102,
+			wantTPOT: 52,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pl := &PredictedLatency{}
+			req := &fwksched.InferenceRequest{Headers: tt.headers}
+			plCtx := &predictedLatencyCtx{}
+
+			pl.parseSLOHeaders(context.Background(), req, plCtx)
+
+			assert.Equal(t, tt.wantTTFT, plCtx.ttftSLO)
+			assert.Equal(t, tt.wantTPOT, plCtx.avgTPOTSLO)
+		})
+	}
+}
+
 func TestPredictedLatency_TypedName(t *testing.T) {
 	predictor := &mockPredictor{}
 	cfg := DefaultConfig
-	router := NewPredictedLatency(cfg, predictor)
+	router := NewPredictedLatency(LatencyDataProviderPluginType, cfg, predictor)
 
 	tn := router.TypedName()
 	assert.Equal(t, "predicted-latency-producer", tn.Type, "Type should be latency-predictor")
@@ -162,10 +218,8 @@ func TestPredictedLatency_TypedName(t *testing.T) {
 func TestPredictedLatency_WithName(t *testing.T) {
 	predictor := &mockPredictor{}
 	cfg := DefaultConfig
-	router := NewPredictedLatency(cfg, predictor)
-
 	customName := "custom-router"
-	router = router.WithName(customName)
+	router := NewPredictedLatency(customName, cfg, predictor)
 
 	tn := router.TypedName()
 	assert.Equal(t, "predicted-latency-producer", tn.Type, "Type should remain latency-predictor")
@@ -217,7 +271,7 @@ func TestPredictedLatency_GetPodRunningRequestCount(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			predictor := &mockPredictor{}
 			cfg := DefaultConfig
-			router := NewPredictedLatency(cfg, predictor)
+			router := NewPredictedLatency(LatencyDataProviderPluginType, cfg, predictor)
 			pod := createTestEndpoint("test-pod", 0.5, 2, 1)
 
 			tt.setupRequests(router, pod)
@@ -273,7 +327,7 @@ func TestPredictedLatency_GetPodMinTPOTSLO(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			predictor := &mockPredictor{}
 			cfg := DefaultConfig
-			router := NewPredictedLatency(cfg, predictor)
+			router := NewPredictedLatency(LatencyDataProviderPluginType, cfg, predictor)
 			pod := createTestEndpoint("test-pod", 0.5, 2, 1)
 
 			tt.setupRequests(router, pod)
@@ -329,7 +383,7 @@ func TestPredictedLatencyFactory(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			handle := utils.NewTestHandle(context.Background())
+			handle := igwtestutils.NewTestHandle(context.Background())
 			rawParams := json.RawMessage(tt.jsonParams)
 			plugin, err := PredictedLatencyFactory(tt.pluginName, rawParams, handle)
 
@@ -365,7 +419,7 @@ func TestPredictedLatencyFactoryInvalidJSON(t *testing.T) {
 
 	for _, tt := range invalidTests {
 		t.Run(tt.name, func(t *testing.T) {
-			handle := utils.NewTestHandle(context.Background())
+			handle := igwtestutils.NewTestHandle(context.Background())
 			rawParams := json.RawMessage(tt.jsonParams)
 			plugin, err := PredictedLatencyFactory("test", rawParams, handle)
 
@@ -378,7 +432,7 @@ func TestPredictedLatencyFactoryInvalidJSON(t *testing.T) {
 func TestSloContextStoreEviction(t *testing.T) {
 	config := DefaultConfig
 	config.ContextTTL = 100 * time.Millisecond
-	pl := NewPredictedLatency(config, nil)
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, config, nil)
 
 	requestID := "test-req-id"
 	endpointName := types.NamespacedName{Name: "test-model", Namespace: "default"}

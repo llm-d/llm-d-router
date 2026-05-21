@@ -30,11 +30,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer/mocks"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	plugininterface "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	datasourcemocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/mocks"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer/mocks"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	datasourcemocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	"github.com/llm-d/llm-d-router/pkg/metrics"
 )
 
 func defaultEndpoint() fwkdl.Endpoint {
@@ -59,8 +59,8 @@ type errSource struct {
 	err  error
 }
 
-func (e *errSource) TypedName() plugininterface.TypedName {
-	return plugininterface.TypedName{Type: e.kind, Name: e.kind}
+func (e *errSource) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: e.kind, Name: e.kind}
 }
 
 func (e *errSource) Poll(_ context.Context, _ fwkdl.Endpoint) (any, error) {
@@ -73,8 +73,8 @@ type dataSource struct {
 	kind string
 }
 
-func (d *dataSource) TypedName() plugininterface.TypedName {
-	return plugininterface.TypedName{Type: d.kind, Name: d.kind}
+func (d *dataSource) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: d.kind, Name: d.kind}
 }
 
 func (d *dataSource) Poll(_ context.Context, _ fwkdl.Endpoint) (any, error) {
@@ -87,8 +87,8 @@ type stubExtractor struct {
 	err  error
 }
 
-func (s *stubExtractor) TypedName() plugininterface.TypedName {
-	return plugininterface.TypedName{Type: s.kind, Name: s.kind}
+func (s *stubExtractor) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: s.kind, Name: s.kind}
 }
 func (s *stubExtractor) ExpectedInputType() reflect.Type                          { return reflect.TypeFor[any]() }
 func (s *stubExtractor) Extract(_ context.Context, _ any, _ fwkdl.Endpoint) error { return s.err }
@@ -117,13 +117,13 @@ func TestCollectorStartInputs(t *testing.T) {
 
 			c := NewCollector()
 			ticker := mocks.NewTicker()
-			err := c.Start(ctx, ticker, endpoint, tt.sources, nil)
+			err := c.Start(ctx, ticker, endpoint, tt.sources, newExtractorMap())
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.wantErrIs != nil {
 					assert.ErrorIs(t, err, tt.wantErrIs)
 				}
-				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, nil),
+				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, newExtractorMap()),
 					"retry after failed Start should succeed")
 			} else {
 				require.NoError(t, err)
@@ -138,8 +138,8 @@ func TestCollectorCanStartOnlyOnce(t *testing.T) {
 	ticker := mocks.NewTicker()
 	ctx := context.Background()
 
-	require.NoError(t, c.Start(ctx, ticker, endpoint, sources, nil))
-	assert.Error(t, c.Start(ctx, ticker, endpoint, sources, nil),
+	require.NoError(t, c.Start(ctx, ticker, endpoint, sources, newExtractorMap()))
+	assert.Error(t, c.Start(ctx, ticker, endpoint, sources, newExtractorMap()),
 		"second Start after success should error")
 	c.Stop()
 }
@@ -158,7 +158,7 @@ func TestCollectorStop(t *testing.T) {
 			setup: func(t *testing.T) *Collector {
 				c := NewCollector()
 				ticker := mocks.NewTicker()
-				_ = c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{}, nil)
+				_ = c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{}, newExtractorMap())
 				return c
 			},
 		},
@@ -167,7 +167,7 @@ func TestCollectorStop(t *testing.T) {
 			setup: func(t *testing.T) *Collector {
 				c := NewCollector()
 				ticker := mocks.NewTicker()
-				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, nil))
+				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, newExtractorMap()))
 				return c
 			},
 		},
@@ -189,7 +189,7 @@ func TestCollectorCollectsOnTicks(t *testing.T) {
 	c := NewCollector()
 	ticker := mocks.NewTicker()
 
-	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{source}, nil))
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{source}, newExtractorMap()))
 	defer c.Stop()
 
 	ticker.Tick()
@@ -248,10 +248,10 @@ func TestCollectorErrorMetrics(t *testing.T) {
 				src = &dataSource{kind: tt.srcType}
 			}
 
-			var extractors map[string][]fwkdl.ExtractorBase
+			extractors := newExtractorMap()
 			if tt.extType != "" {
 				ext := &stubExtractor{kind: tt.extType, err: tt.extErr}
-				extractors = map[string][]fwkdl.ExtractorBase{src.TypedName().Name: {ext}}
+				extractors.Append(src.TypedName().Name, ext)
 			}
 
 			pollBefore := testutil.ToFloat64(metrics.DataLayerPollErrorsTotal.WithLabelValues(tt.srcType))
@@ -301,7 +301,7 @@ func TestCollectorRapidStartStopRaceFree(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		c := NewCollector()
 		ticker := mocks.NewTicker()
-		require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{src}, nil))
+		require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{src}, newExtractorMap()))
 		ticker.Tick()
 		c.Stop()
 	}
@@ -312,7 +312,7 @@ func TestCollectorRapidStartStopRaceFree(t *testing.T) {
 func TestCollectorConcurrentStopRaceFree(t *testing.T) {
 	c := NewCollector()
 	ticker := mocks.NewTicker()
-	require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, nil))
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, newExtractorMap()))
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {

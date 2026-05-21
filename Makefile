@@ -17,20 +17,21 @@ include Makefile.gen.mk
 # Defaults
 TARGETOS ?= $(shell command -v go >/dev/null 2>&1 && go env GOOS || uname -s | tr '[:upper:]' '[:lower:]')
 TARGETARCH ?= $(shell command -v go >/dev/null 2>&1 && go env GOARCH || uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/; s/armv7l/arm/')
-PROJECT_NAME ?= llm-d-inference-scheduler
-SIDECAR_IMAGE_NAME ?= llm-d-routing-sidecar
+PROJECT_NAME ?= llm-d-router
+EPP_IMAGE_NAME ?= llm-d-router-endpoint-picker
+SIDECAR_IMAGE_NAME ?= llm-d-router-disagg-sidecar
 VLLM_SIMULATOR_IMAGE_NAME ?= llm-d-inference-sim
 UDS_TOKENIZER_IMAGE_NAME ?= llm-d-uds-tokenizer
 SIDECAR_NAME ?= pd-sidecar
 BUILDER_IMAGE_NAME ?= llm-d-builder
 IMAGE_REGISTRY ?= ghcr.io/llm-d
 
-IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(PROJECT_NAME)
+EPP_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(EPP_IMAGE_NAME)
 EPP_TAG ?= dev
-export EPP_IMAGE ?= $(IMAGE_TAG_BASE):$(EPP_TAG)
+export EPP_IMAGE ?= $(EPP_IMAGE_TAG_BASE):$(EPP_TAG)
 
-SIDECAR_TAG ?= dev
 SIDECAR_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(SIDECAR_IMAGE_NAME)
+SIDECAR_TAG ?= dev
 export SIDECAR_IMAGE ?= $(SIDECAR_IMAGE_TAG_BASE):$(SIDECAR_TAG)
 
 VLLM_SIMULATOR_TAG ?= v0.8.2
@@ -40,6 +41,10 @@ export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 UDS_TOKENIZER_TAG ?= dev
 UDS_TOKENIZER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(UDS_TOKENIZER_IMAGE_NAME)
 export UDS_TOKENIZER_IMAGE ?= $(UDS_TOKENIZER_TAG_BASE):$(UDS_TOKENIZER_TAG)
+
+# CPU-only vLLM image that exposes `vllm launch render` for the token-producer
+# plugin's HTTP backend.
+export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.19.1
 
 BUILDER_TAG ?= dev
 BUILDER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(BUILDER_IMAGE_NAME)
@@ -114,7 +119,7 @@ endif
 # Env vars forwarded into the e2e test container.
 # Add new image vars here so they are automatically passed through.
 # Should we pass ALL env vars here?
-E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE UDS_TOKENIZER_IMAGE \
+E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE UDS_TOKENIZER_IMAGE VLLM_RENDER_IMAGE \
                E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e $(v)=$($(v))))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
@@ -196,7 +201,7 @@ upgrade-deps: ## Upgrade all Go dependencies to latest minor/patch versions and 
 .PHONY: vulncheck
 vulncheck: image-build-builder ## Run govulncheck for known vulnerabilities
 	@printf "\033[33;1m==== Running govulncheck ====\033[0m\n"
-	$(BUILDER_RUN) 'go install golang.org/x/vuln/cmd/govulncheck@v1.3.0 && govulncheck ./...'
+	$(BUILDER_RUN) 'govulncheck ./...'
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
@@ -280,7 +285,7 @@ test-integration: image-build-builder ## Run integration tests (requires KUBECON
 test-integration-hermetic: image-build-builder ## Run hermetic integration tests (envtest, no cluster required)
 	@mkdir -p $(COVERAGE_DIR)
 	@printf "\033[33;1m==== Running Hermetic Integration Tests ====\033[0m\n"
-	$(BUILDER_RUN) 'CGO_ENABLED=1 KUBEBUILDER_ASSETS="$$(setup-envtest use $$ENVTEST_K8S_VERSION --bin-dir $$ENVTEST_ASSETS_DIR -p path)" go test -v -race -coverprofile=$(COVERAGE_DIR)/integration-hermetic.out -covermode=atomic ./test/integration/...'
+	$(BUILDER_RUN) 'CGO_ENABLED=1 KUBEBUILDER_ASSETS="$$(setup-envtest use $$ENVTEST_K8S_VERSION --bin-dir $$ENVTEST_ASSETS_DIR -p path)" go test -v -race $(if $(PATTERN),-run "$(PATTERN)",) -coverprofile=$(COVERAGE_DIR)/integration-hermetic.out -covermode=atomic ./test/integration/...'
 	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/integration-hermetic.out | tail -1'
 
 .PHONY: test-e2e
@@ -452,7 +457,6 @@ env: ## Print environment variables
 	@echo "TARGETOS=$(TARGETOS)"
 	@echo "TARGETARCH=$(TARGETARCH)"
 	@echo "CONTAINER_RUNTIME=$(CONTAINER_RUNTIME)"
-	@echo "IMAGE_TAG_BASE=$(IMAGE_TAG_BASE)"
 	@echo "EPP_TAG=$(EPP_TAG)"
 	@echo "EPP_IMAGE=$(EPP_IMAGE)"
 	@echo "SIDECAR_TAG=$(SIDECAR_TAG)"
@@ -461,6 +465,7 @@ env: ## Print environment variables
 	@echo "VLLM_IMAGE=$(VLLM_IMAGE)"
 	@echo "UDS_TOKENIZER_TAG=$(UDS_TOKENIZER_TAG)"
 	@echo "UDS_TOKENIZER_IMAGE=$(UDS_TOKENIZER_IMAGE)"
+	@echo "VLLM_RENDER_IMAGE=$(VLLM_RENDER_IMAGE)"
 	@echo "BUILDER_IMAGE=$(BUILDER_IMAGE)"
 
 .PHONY: print-namespace

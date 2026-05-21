@@ -1,513 +1,250 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  labels:
-    app: istio-reader
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istio-reader
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
-    release: istio
-  name: istio-reader-clusterrole-llm-d-gateway-llm-d-istio-system
-rules:
-- apiGroups:
-  - config.istio.io
-  - security.istio.io
-  - networking.istio.io
-  - authentication.istio.io
-  - rbac.istio.io
-  - telemetry.istio.io
-  - extensions.istio.io
-  resources:
-  - '*'
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - endpoints
-  - pods
-  - services
-  - nodes
-  - replicationcontrollers
-  - namespaces
-  - secrets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - networking.istio.io
-  resources:
-  - workloadentries
-  verbs:
-  - get
-  - watch
-  - list
-- apiGroups:
-  - networking.x-k8s.io
-  - gateway.networking.k8s.io
-  resources:
-  - gateways
-  verbs:
-  - get
-  - watch
-  - list
-- apiGroups:
-  - apiextensions.k8s.io
-  resources:
-  - customresourcedefinitions
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - discovery.k8s.io
-  resources:
-  - endpointslices
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - multicluster.x-k8s.io
-  resources:
-  - serviceexports
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - delete
-- apiGroups:
-  - multicluster.x-k8s.io
-  resources:
-  - serviceimports
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - apps
-  resources:
-  - replicasets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - authentication.k8s.io
-  resources:
-  - tokenreviews
-  verbs:
-  - create
-- apiGroups:
-  - authorization.k8s.io
-  resources:
-  - subjectaccessreviews
-  verbs:
-  - create
-
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app: istiod
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
-    release: istio
   name: istiod-clusterrole-llm-d-gateway-llm-d-istio-system
+  labels:
+    app: istiod
+    release: istiod
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
 rules:
-- apiGroups:
-  - admissionregistration.k8s.io
-  resources:
-  - mutatingwebhookconfigurations
-  verbs:
-  - get
-  - list
-  - watch
-  - update
-  - patch
-- apiGroups:
-  - admissionregistration.k8s.io
-  resources:
-  - validatingwebhookconfigurations
-  verbs:
-  - get
-  - list
-  - watch
-  - update
-- apiGroups:
-  - config.istio.io
-  - security.istio.io
-  - networking.istio.io
-  - authentication.istio.io
-  - rbac.istio.io
-  - telemetry.istio.io
-  - extensions.istio.io
-  resources:
-  - '*'
-  verbs:
-  - get
-  - watch
-  - list
-- apiGroups:
-  - networking.istio.io
-  resources:
-  - workloadentries
-  verbs:
-  - get
-  - watch
-  - list
-  - update
-  - patch
-  - create
-  - delete
-- apiGroups:
-  - networking.istio.io
-  resources:
-  - workloadentries/status
-  - serviceentries/status
-  verbs:
-  - get
-  - watch
-  - list
-  - update
-  - patch
-  - create
-  - delete
-- apiGroups:
-  - security.istio.io
-  resources:
-  - authorizationpolicies/status
-  verbs:
-  - get
-  - watch
-  - list
-  - update
-  - patch
-  - create
-  - delete
-- apiGroups:
-  - ""
-  resources:
-  - services/status
-  verbs:
-  - get
-  - watch
-  - list
-  - update
-  - patch
-  - create
-  - delete
-- apiGroups:
-  - apiextensions.k8s.io
-  resources:
-  - customresourcedefinitions
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  - nodes
-  - services
-  - namespaces
-  - endpoints
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - discovery.k8s.io
-  resources:
-  - endpointslices
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - ingresses
-  - ingressclasses
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - ingresses/status
-  verbs:
-  - '*'
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  verbs:
-  - create
-  - get
-  - list
-  - watch
-  - update
-- apiGroups:
-  - authentication.k8s.io
-  resources:
-  - tokenreviews
-  verbs:
-  - create
-- apiGroups:
-  - authorization.k8s.io
-  resources:
-  - subjectaccessreviews
-  verbs:
-  - create
-- apiGroups:
-  - gateway.networking.k8s.io
-  - gateway.networking.x-k8s.io
-  resources:
-  - '*'
-  verbs:
-  - get
-  - watch
-  - list
-- apiGroups:
-  - gateway.networking.x-k8s.io
-  resources:
-  - xbackendtrafficpolicies/status
-  - xlistenersets/status
-  verbs:
-  - update
-  - patch
-- apiGroups:
-  - gateway.networking.k8s.io
-  resources:
-  - backendtlspolicies/status
-  - gatewayclasses/status
-  - gateways/status
-  - grpcroutes/status
-  - httproutes/status
-  - referencegrants/status
-  - tcproutes/status
-  - tlsroutes/status
-  - udproutes/status
-  verbs:
-  - update
-  - patch
-- apiGroups:
-  - gateway.networking.k8s.io
-  resources:
-  - gatewayclasses
-  verbs:
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - inference.networking.x-k8s.io
-  resources:
-  - inferencepools
-  verbs:
-  - get
-  - watch
-  - list
-- apiGroups:
-  - inference.networking.x-k8s.io
-  resources:
-  - inferencepools/status
-  verbs:
-  - update
-  - patch
-- apiGroups:
-  - "inference.networking.k8s.io"
-  resources:
-  - "inferencepools"
-  verbs:
-  - "get"
-  - "watch"
-  - "list"
-- apiGroups:
-  - "inference.networking.k8s.io"
-  resources:
-  - inferencepools/status
-  verbs:
-  - update
-  - patch
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - get
-  - watch
-  - list
-- apiGroups:
-  - multicluster.x-k8s.io
-  resources:
-  - serviceexports
-  verbs:
-  - get
-  - watch
-  - list
-  - create
-  - delete
-- apiGroups:
-  - multicluster.x-k8s.io
-  resources:
-  - serviceimports
-  verbs:
-  - get
-  - watch
-  - list
+  # sidecar injection controller
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch", "update", "patch"]
 
+  # configuration validation webhook controller
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch", "update"]
+
+  # istio configuration
+  # removing CRD permissions can break older versions of Istio running alongside this control plane (https://github.com/istio/istio/issues/29382)
+  # please proceed with caution
+  - apiGroups: ["config.istio.io", "security.istio.io", "networking.istio.io", "authentication.istio.io", "rbac.istio.io", "telemetry.istio.io", "extensions.istio.io"]
+    verbs: ["get", "watch", "list"]
+    resources: ["*"]
+  - apiGroups: ["networking.istio.io"]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "workloadentries" ]
+  - apiGroups: ["networking.istio.io"]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "workloadentries/status",  "serviceentries/status" ]
+  - apiGroups: ["security.istio.io"]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "authorizationpolicies/status" ]
+  - apiGroups: [""]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "services/status" ]
+
+  # auto-detect installed CRD definitions
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+
+  # discovery and routing
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "services", "namespaces", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+
+  # ingress controller
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["*"]
+
+  # required for CA's namespace controller
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "list", "watch", "update"]
+
+  # Istiod and bootstrap.
+
+  # Used by Istiod to verify the JWT tokens
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+
+  # Used by Istiod to verify gateway SDS
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+
+  # Use for Kubernetes Service APIs
+  - apiGroups: ["gateway.networking.k8s.io", "gateway.networking.x-k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["gateway.networking.x-k8s.io"]
+    resources:
+    - xbackendtrafficpolicies/status
+    - xlistenersets/status
+    verbs: ["update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources:
+    - backendtlspolicies/status
+    - gatewayclasses/status
+    - gateways/status
+    - grpcroutes/status
+    - httproutes/status
+    - referencegrants/status
+    - tcproutes/status
+    - tlsroutes/status
+    - udproutes/status
+    verbs: ["update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["inference.networking.k8s.io"]
+    resources: ["inferencepools"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["inference.networking.k8s.io"]
+    resources: ["inferencepools/status"]
+    verbs: ["update", "patch"]
+
+  # Needed for multicluster secret reading, possibly ingress certs in the future
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "watch", "list"]
+
+  # Used for MCS serviceexport management
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceexports"]
+    verbs: [ "get", "watch", "list", "create", "delete"]
+
+  # Used for MCS serviceimport management
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceimports"]
+    verbs: ["get", "watch", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  labels:
-    app: istiod
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
-    release: istio
   name: istiod-gateway-controller-llm-d-gateway-llm-d-istio-system
-rules:
-- apiGroups:
-  - apps
-  resources:
-  - deployments
-  verbs:
-  - get
-  - watch
-  - list
-  - update
-  - patch
-  - create
-  - delete
-- apiGroups:
-  - autoscaling
-  resources:
-  - horizontalpodautoscalers
-  verbs:
-  - get
-  - watch
-  - list
-  - update
-  - patch
-  - create
-  - delete
-- apiGroups:
-  - policy
-  resources:
-  - poddisruptionbudgets
-  verbs:
-  - get
-  - watch
-  - list
-  - update
-  - patch
-  - create
-  - delete
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - get
-  - watch
-  - list
-  - update
-  - patch
-  - create
-  - delete
-- apiGroups:
-  - ""
-  resources:
-  - serviceaccounts
-  verbs:
-  - get
-  - watch
-  - list
-  - update
-  - patch
-  - create
-  - delete
-
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  labels:
-    app: istio-reader
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istio-reader
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
-    release: istio
-  name: istio-reader-clusterrole-llm-d-gateway-llm-d-istio-system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: istio-reader-clusterrole-llm-d-gateway-llm-d-istio-system
-subjects:
-- kind: ServiceAccount
-  name: istio-reader-service-account
-  namespace: llm-d-istio-system
-
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
   labels:
     app: istiod
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
-    release: istio
+    release: istiod
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
+rules:
+  - apiGroups: ["apps"]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "deployments" ]
+  - apiGroups: ["autoscaling"]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "horizontalpodautoscalers" ]
+  - apiGroups: ["policy"]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "poddisruptionbudgets" ]
+  - apiGroups: [""]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "services" ]
+  - apiGroups: [""]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "serviceaccounts"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: istio-reader-clusterrole-llm-d-gateway-llm-d-istio-system
+  labels:
+    app: istio-reader
+    release: istiod
+    app.kubernetes.io/name: "istio-reader"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
+rules:
+  - apiGroups:
+      - "config.istio.io"
+      - "security.istio.io"
+      - "networking.istio.io"
+      - "authentication.istio.io"
+      - "rbac.istio.io"
+      - "telemetry.istio.io"
+      - "extensions.istio.io"
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["endpoints", "pods", "services", "nodes", "replicationcontrollers", "namespaces", "secrets", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.istio.io"]
+    verbs: [ "get", "watch", "list" ]
+    resources: [ "workloadentries" ]
+  - apiGroups: ["networking.x-k8s.io", "gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceexports"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["serviceimports"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
   name: istiod-clusterrole-llm-d-gateway-llm-d-istio-system
+  labels:
+    app: istiod
+    release: istiod
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: istiod-clusterrole-llm-d-gateway-llm-d-istio-system
 subjects:
-- kind: ServiceAccount
-  name: istiod-llm-d-gateway
-  namespace: llm-d-istio-system
-
+  - kind: ServiceAccount
+    name: istiod-llm-d-gateway
+    namespace: llm-d-istio-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
+  name: istiod-gateway-controller-llm-d-gateway-llm-d-istio-system
   labels:
     app: istiod
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
-    release: istio
-  name: istiod-gateway-controller-llm-d-gateway-llm-d-istio-system
+    release: istiod
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -516,77 +253,85 @@ subjects:
 - kind: ServiceAccount
   name: istiod-llm-d-gateway
   namespace: llm-d-istio-system
-
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: istio-reader-clusterrole-llm-d-gateway-llm-d-istio-system
+  labels:
+    app: istio-reader
+    release: istiod
+    app.kubernetes.io/name: "istio-reader"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: istio-reader-clusterrole-llm-d-gateway-llm-d-istio-system
+subjects:
+  - kind: ServiceAccount
+    name: istio-reader-service-account
+    namespace: llm-d-istio-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  labels:
-    app: istiod
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
-    release: istio
   name: istiod-llm-d-gateway
   namespace: llm-d-istio-system
+  labels:
+    app: istiod
+    release: istiod
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
 rules:
-- apiGroups:
-  - networking.istio.io
-  resources:
-  - gateways
-  verbs:
-  - create
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - get
-  - watch
-  - list
-  - update
-  - delete
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  verbs:
-  - delete
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - get
-  - update
-  - patch
-  - create
+# permissions to verify the webhook is ready and rejecting
+# invalid config. We use --server-dry-run so no config is persisted.
+- apiGroups: ["networking.istio.io"]
+  verbs: ["create"]
+  resources: ["gateways"]
 
+# For storing CA secret
+- apiGroups: [""]
+  resources: ["secrets"]
+  # TODO lock this down to istio-ca-cert if not using the DNS cert mesh config
+  verbs: ["create", "get", "watch", "list", "update", "delete"]
+
+# For status controller, so it can delete the distribution report configmap
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["delete"]
+
+# For gateway deployment controller
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "update", "patch", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  labels:
-    app: istiod
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
-    release: istio
   name: istiod-llm-d-gateway
   namespace: llm-d-istio-system
+  labels:
+    app: istiod
+    release: istiod
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: istiod-llm-d-gateway
 subjects:
-- kind: ServiceAccount
-  name: istiod-llm-d-gateway
-  namespace: llm-d-istio-system
-
+  - kind: ServiceAccount
+    name: istiod-llm-d-gateway
+    namespace: llm-d-istio-system

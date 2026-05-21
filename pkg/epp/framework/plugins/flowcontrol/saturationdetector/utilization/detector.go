@@ -29,11 +29,11 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -61,7 +61,7 @@ func UtilizationDetectorFactory(
 }
 
 var (
-	_ framework.Filter               = &Detector{}
+	_ fwksched.Filter                = &Detector{}
 	_ flowcontrol.SaturationDetector = &Detector{}
 )
 
@@ -141,15 +141,15 @@ func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint
 // It applies a relaxed limit (Threshold * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
 func (d *Detector) Filter(
 	_ context.Context,
-	_ *framework.CycleState,
-	_ *framework.InferenceRequest,
-	endpoints []framework.Endpoint,
-) []framework.Endpoint {
+	_ *fwksched.CycleState,
+	_ *fwksched.InferenceRequest,
+	endpoints []fwksched.Endpoint,
+) []fwksched.Endpoint {
 	qLimit := float64(d.config.QueueDepthThreshold) * (1.0 + d.config.Headroom)
 	kvLimit := d.config.KVCacheUtilThreshold * (1.0 + d.config.Headroom)
 
 	// Pre-allocate assuming most endpoints will pass the filter to minimize allocations.
-	filtered := make([]framework.Endpoint, 0, len(endpoints))
+	filtered := make([]fwksched.Endpoint, 0, len(endpoints))
 
 	for _, endpoint := range endpoints {
 		metrics := endpoint.GetMetrics()

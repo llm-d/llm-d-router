@@ -33,7 +33,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 var (
@@ -52,7 +52,7 @@ func init() {
 	}
 }
 
-func (s *Server) runSGLangProtocol(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
+func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
 	s.logger.V(4).Info("running SGLang protocol", "url", prefillPodHostPort)
 
 	// Make Request
@@ -79,10 +79,10 @@ func (s *Server) runSGLangProtocol(w http.ResponseWriter, r *http.Request, prefi
 	}
 
 	// Send concurrent prefill and decode requests
-	s.sendSGLangConcurrentRequests(w, r, body, prefillPodHostPort)
+	s.handleSGLangConcurrentRequests(w, r, body, prefillPodHostPort)
 }
 
-func (s *Server) sendSGLangConcurrentRequests(w http.ResponseWriter, r *http.Request, body []byte, prefillHost string) {
+func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.Request, body []byte, prefillHost string) {
 	tracer := telemetry.Tracer()
 	ctx := r.Context()
 

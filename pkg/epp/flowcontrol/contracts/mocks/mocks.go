@@ -35,10 +35,10 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 )
 
 // --- RegistryShard Mocks ---
@@ -53,7 +53,7 @@ type MockRegistryShard struct {
 	FairnessPolicyFunc           func(priority int) (flowcontrol.FairnessPolicy, error)
 	PriorityBandAccessorFunc     func(priority int) (flowcontrol.PriorityBandAccessor, error)
 	AllOrderedPriorityLevelsFunc func() []int
-	StatsFunc                    func() contracts.ShardStats
+	StatsFunc                    func() *contracts.ShardStats
 }
 
 func (m *MockRegistryShard) ID() string {
@@ -98,11 +98,11 @@ func (m *MockRegistryShard) AllOrderedPriorityLevels() []int {
 	return nil
 }
 
-func (m *MockRegistryShard) Stats() contracts.ShardStats {
+func (m *MockRegistryShard) Stats() *contracts.ShardStats {
 	if m.StatsFunc != nil {
 		return m.StatsFunc()
 	}
-	return contracts.ShardStats{}
+	return &contracts.ShardStats{}
 }
 
 var _ contracts.RegistryShard = &MockRegistryShard{}

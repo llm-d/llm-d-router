@@ -41,8 +41,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	metricsource "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
 // pipeline wraps a PollingDataSource and an Extractor, calling both in sequence.
@@ -72,7 +72,7 @@ func buildSource(t *testing.T, serverURL string) fwkdl.PollingDataSource {
 	parsedURL, err := url.Parse(serverURL)
 	require.NoError(t, err, "failed to parse server URL")
 
-	source, err := metricsource.NewHTTPMetricsDataSource(parsedURL.Scheme, parsedURL.Path, "metrics-data-source")
+	source, err := sourcemetrics.NewHTTPMetricsDataSource(parsedURL.Scheme, parsedURL.Path, "metrics-data-source")
 	require.NoError(t, err, "failed to create metrics data source")
 	return source
 }

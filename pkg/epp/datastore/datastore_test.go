@@ -37,15 +37,30 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
 
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/mocks"
-	pooltuil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/testing"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
+
+// mockEndpointFactory is a minimal EndpointFactory for EndpointUpsert/Delete tests.
+// When returnNil is true, NewEndpoint returns nil (simulating a duplicate-start race).
+type mockEndpointFactory struct {
+	returnNil bool
+}
+
+func (f *mockEndpointFactory) NewEndpoint(_ context.Context, meta *fwkdl.EndpointMetadata, _ datalayer.PoolInfo) fwkdl.Endpoint {
+	if f.returnNil {
+		return nil
+	}
+	return fwkdl.NewEndpoint(meta, fwkdl.NewMetrics())
+}
+
+func (f *mockEndpointFactory) ReleaseEndpoint(_ fwkdl.Endpoint) {}
 
 func TestPoolGet_NoDeadlockWithConcurrentWrite(t *testing.T) {
 	pool := &datalayer.EndpointPool{
@@ -129,12 +144,12 @@ func TestPool(t *testing.T) {
 					Build()
 
 				ds := NewDatastore(context.Background(), epf, 0)
-				_ = ds.PoolSet(context.Background(), fakeClient, pooltuil.InferencePoolToEndpointPool(tt.inferencePool))
+				_ = ds.PoolSet(context.Background(), fakeClient, poolutil.InferencePoolToEndpointPool(tt.inferencePool))
 				gotPool, gotErr := ds.PoolGet()
 				if diff := cmp.Diff(tt.wantErr, gotErr, cmpopts.EquateErrors()); diff != "" {
 					t.Errorf("Unexpected error diff (+got/-want): %s", diff)
 				}
-				if diff := cmp.Diff(pooltuil.InferencePoolToEndpointPool(tt.wantPool), gotPool); diff != "" {
+				if diff := cmp.Diff(poolutil.InferencePoolToEndpointPool(tt.wantPool), gotPool); diff != "" {
 					t.Errorf("Unexpected pool diff (+got/-want): %s", diff)
 				}
 				gotSynced := ds.PoolHasSynced()
@@ -386,7 +401,7 @@ func TestMetrics(t *testing.T) {
 					WithScheme(scheme).
 					Build()
 				ds := NewDatastore(ctx, epf, 0)
-				_ = ds.PoolSet(ctx, fakeClient, pooltuil.InferencePoolToEndpointPool(inferencePool))
+				_ = ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(inferencePool))
 				for _, pod := range test.storePods {
 					ds.PodUpdateOrAddIfNotExist(ctx, pod)
 				}
@@ -396,9 +411,9 @@ func TestMetrics(t *testing.T) {
 				}
 				assert.EventuallyWithT(t, func(t *assert.CollectT) {
 					got := ds.PodList(test.predict)
-					metrics := []*fwkdl.Metrics{}
-					for _, one := range got {
-						metrics = append(metrics, one.GetMetrics())
+					metrics := make([]*fwkdl.Metrics, len(got))
+					for idx, one := range got {
+						metrics[idx] = one.GetMetrics()
 					}
 					diff := cmp.Diff(test.want, metrics, cmpopts.IgnoreFields(fwkdl.Metrics{}, "UpdateTime"), cmpopts.SortSlices(func(a, b *fwkdl.Metrics) bool {
 						return a.String() < b.String()
@@ -461,7 +476,7 @@ func TestPods(t *testing.T) {
 				ctx := context.Background()
 				ds := NewDatastore(t.Context(), epf, 0)
 				fakeClient := fake.NewFakeClient()
-				if err := ds.PoolSet(ctx, fakeClient, pooltuil.InferencePoolToEndpointPool(inferencePool)); err != nil {
+				if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(inferencePool)); err != nil {
 					t.Error(err)
 				}
 				for _, pod := range test.existingPods {
@@ -469,10 +484,13 @@ func TestPods(t *testing.T) {
 				}
 
 				test.op(ctx, ds)
-				var gotPods []*corev1.Pod
-				for _, pm := range ds.PodList(AllPodsPredicate) {
-					pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().PodName, Namespace: pm.GetMetadata().NamespacedName.Namespace}, Status: corev1.PodStatus{PodIP: pm.GetMetadata().GetIPAddress()}}
-					gotPods = append(gotPods, pod)
+				podList := ds.PodList(AllPodsPredicate)
+				gotPods := make([]*corev1.Pod, len(podList))
+				for idx, pm := range podList {
+					gotPods[idx] = &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().PodName, Namespace: pm.GetMetadata().NamespacedName.Namespace},
+						Status:     corev1.PodStatus{PodIP: pm.GetMetadata().GetIPAddress()},
+					}
 				}
 				if !cmp.Equal(gotPods, test.wantPods, cmpopts.SortSlices(func(a, b *corev1.Pod) bool { return a.Name < b.Name })) {
 					t.Errorf("got (%v) != want (%v);", gotPods, test.wantPods)
@@ -556,7 +574,7 @@ func TestTargetPortsChange(t *testing.T) {
 					Selector(map[string]string{"app": "vllm"}).ObjRef()
 				initialPool.Spec.TargetPorts = test.initialTargetPorts
 
-				if err := ds.PoolSet(ctx, fakeClient, pooltuil.InferencePoolToEndpointPool(initialPool)); err != nil {
+				if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(initialPool)); err != nil {
 					t.Fatalf("Failed to set initial pool: %v", err)
 				}
 
@@ -572,7 +590,7 @@ func TestTargetPortsChange(t *testing.T) {
 					Selector(map[string]string{"app": "vllm"}).ObjRef()
 				updatedPool.Spec.TargetPorts = test.updatedTargetPorts
 
-				if err := ds.PoolSet(ctx, fakeClient, pooltuil.InferencePoolToEndpointPool(updatedPool)); err != nil {
+				if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(updatedPool)); err != nil {
 					t.Fatalf("Failed to set updated pool: %v", err)
 				}
 
@@ -652,6 +670,7 @@ func TestEndpointMetadata(t *testing.T) {
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
+					RankIndex:   1,
 				},
 			},
 			op: func(ctx context.Context, ds Datastore) {
@@ -686,6 +705,7 @@ func TestEndpointMetadata(t *testing.T) {
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
+					RankIndex:   1,
 				},
 				{
 					NamespacedName: types.NamespacedName{
@@ -710,6 +730,7 @@ func TestEndpointMetadata(t *testing.T) {
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
+					RankIndex:   1,
 				},
 			},
 			op: func(ctx context.Context, ds Datastore) {
@@ -744,6 +765,7 @@ func TestEndpointMetadata(t *testing.T) {
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
+					RankIndex:   1,
 				},
 			},
 			op: func(ctx context.Context, ds Datastore) {
@@ -764,7 +786,7 @@ func TestEndpointMetadata(t *testing.T) {
 				ctx := context.Background()
 				ds := NewDatastore(t.Context(), epf, 0)
 				fakeClient := fake.NewFakeClient()
-				if err := ds.PoolSet(ctx, fakeClient, pooltuil.InferencePoolToEndpointPool(test.pool)); err != nil {
+				if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(test.pool)); err != nil {
 					t.Error(err)
 				}
 				for _, pod := range test.existingPods {
@@ -772,9 +794,10 @@ func TestEndpointMetadata(t *testing.T) {
 				}
 
 				test.op(ctx, ds)
-				var gotMetadata []*fwkdl.EndpointMetadata
-				for _, pm := range ds.PodList(AllPodsPredicate) {
-					gotMetadata = append(gotMetadata, pm.GetMetadata())
+				podList := ds.PodList(AllPodsPredicate)
+				gotMetadata := make([]*fwkdl.EndpointMetadata, len(podList))
+				for idx, pm := range podList {
+					gotMetadata[idx] = pm.GetMetadata()
 				}
 				if diff := cmp.Diff(test.wantEndpointMetas, gotMetadata, cmpopts.SortSlices(func(a, b *fwkdl.EndpointMetadata) bool { return a.NamespacedName.Name < b.NamespacedName.Name })); diff != "" {
 					t.Errorf("ConvertTo() mismatch (-want +got):\n%s", diff)
@@ -920,7 +943,7 @@ func TestActivePortFiltering(t *testing.T) {
 				// Use the first pool in the test
 				if len(test.pools) > 0 {
 					pool := test.pools[0]
-					if err := ds.PoolSet(ctx, fakeClient, pooltuil.InferencePoolToEndpointPool(&pool)); err != nil {
+					if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(&pool)); err != nil {
 						t.Fatalf("Failed to set pool: %v", err)
 					}
 				}
@@ -1071,7 +1094,7 @@ func TestActivePortEndpointRemoval(t *testing.T) {
 				ds := NewDatastore(ctx, epf, 0)
 
 				// Set up the pool
-				if err := ds.PoolSet(ctx, fakeClient, pooltuil.InferencePoolToEndpointPool(test.pool)); err != nil {
+				if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(test.pool)); err != nil {
 					t.Fatalf("Failed to set pool: %v", err)
 				}
 
@@ -1125,7 +1148,7 @@ func TestPodUpdateOrAddIfNotExist_ConcurrentPoolSet(t *testing.T) {
 			ctx := context.Background()
 			ds := NewDatastore(ctx, epf, 0)
 
-			pool := pooltuil.InferencePoolToEndpointPool(
+			pool := poolutil.InferencePoolToEndpointPool(
 				testutil.MakeInferencePool("pool1").
 					Namespace("default").
 					Selector(map[string]string{"app": "vllm"}).
@@ -1325,4 +1348,86 @@ func TestExtractActivePorts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---- EndpointUpsert / EndpointDelete tests -----------------------------------
+
+func TestEndpointUpsert_NewEndpoint(t *testing.T) {
+	const addr, port = "10.0.0.1", "8000"
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Port: port})
+
+	eps := ds.PodList(AllPodsPredicate)
+	assert.Len(t, eps, 1)
+	assert.Equal(t, addr, eps[0].GetMetadata().Address)
+}
+
+func TestEndpointUpsert_UpdateExisting(t *testing.T) {
+	const addr1, addr2 = "10.0.0.1", "10.0.0.2"
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr1})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr2})
+
+	eps := ds.PodList(AllPodsPredicate)
+	assert.Len(t, eps, 1)
+	assert.Equal(t, addr2, eps[0].GetMetadata().Address)
+}
+
+func TestEndpointUpsert_NewEndpointFactoryReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{returnNil: true}, 0)
+	meta := &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Name: "ep1", Namespace: "default"}}
+
+	assert.NotPanics(t, func() { ds.EndpointUpsert(ctx, meta) })
+	assert.Empty(t, ds.PodList(AllPodsPredicate))
+}
+
+func TestEndpointDelete_Existing(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id})
+	assert.Len(t, ds.PodList(AllPodsPredicate), 1)
+
+	ds.EndpointDelete(id)
+	assert.Empty(t, ds.PodList(AllPodsPredicate))
+}
+
+func TestEndpointDelete_Missing(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+
+	assert.NotPanics(t, func() {
+		ds.EndpointDelete(types.NamespacedName{Name: "nonexistent", Namespace: "default"})
+	})
+}
+
+func TestDiscoveryNotifier_WorksAlongsideDirectUpsert(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+
+	// Populate one endpoint directly (simulates the K8s reconciler path).
+	directID := types.NamespacedName{Name: "direct-ep", Namespace: "default"}
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: directID, Address: "10.0.0.1"})
+
+	// Add a second endpoint via DiscoveryNotifier (the file-discovery path).
+	notifier := fwkdl.NewDiscoveryNotifier(ds)
+	notifID := types.NamespacedName{Name: "notif-ep", Namespace: "default"}
+	notifier.Upsert(&fwkdl.EndpointMetadata{NamespacedName: notifID, Address: "10.0.0.2"})
+
+	// Both endpoints must coexist.
+	assert.Len(t, ds.PodList(AllPodsPredicate), 2)
+
+	// Deleting via the notifier must only remove the notifier-added endpoint.
+	notifier.Delete(notifID)
+	eps := ds.PodList(AllPodsPredicate)
+	assert.Len(t, eps, 1)
+	assert.Equal(t, "10.0.0.1", eps[0].GetMetadata().Address)
 }

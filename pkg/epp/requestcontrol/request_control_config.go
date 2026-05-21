@@ -17,59 +17,59 @@ limitations under the License.
 package requestcontrol
 
 import (
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwk "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 )
 
 // NewConfig creates a new Config object and returns its pointer.
 func NewConfig() *Config {
 	return &Config{
-		admissionPlugins:         []fwk.Admitter{},
-		prepareDataPlugins:       []fwk.DataProducer{},
-		preRequestPlugins:        []fwk.PreRequest{},
-		responseReceivedPlugins:  []fwk.ResponseHeaderProcessor{},
-		responseStreamingPlugins: []fwk.ResponseBodyProcessor{},
+		admissionPlugins:         []fwkrc.Admitter{},
+		dataProducerPlugins:      []fwkrc.DataProducer{},
+		preRequestPlugins:        []fwkrc.PreRequest{},
+		responseReceivedPlugins:  []fwkrc.ResponseHeaderProcessor{},
+		responseStreamingPlugins: []fwkrc.ResponseBodyProcessor{},
 	}
 }
 
 // Config provides a configuration for the requestcontrol plugins.
 type Config struct {
-	admissionPlugins         []fwk.Admitter
-	prepareDataPlugins       []fwk.DataProducer
-	preRequestPlugins        []fwk.PreRequest
-	responseReceivedPlugins  []fwk.ResponseHeaderProcessor
-	responseStreamingPlugins []fwk.ResponseBodyProcessor
+	admissionPlugins         []fwkrc.Admitter
+	dataProducerPlugins      []fwkrc.DataProducer
+	preRequestPlugins        []fwkrc.PreRequest
+	responseReceivedPlugins  []fwkrc.ResponseHeaderProcessor
+	responseStreamingPlugins []fwkrc.ResponseBodyProcessor
 }
 
 // WithPreRequestPlugins sets the given plugins as the PreRequest plugins.
 // If the Config has PreRequest plugins already, this call replaces the existing plugins with the given ones.
-func (c *Config) WithPreRequestPlugins(plugins ...fwk.PreRequest) *Config {
+func (c *Config) WithPreRequestPlugins(plugins ...fwkrc.PreRequest) *Config {
 	c.preRequestPlugins = plugins
 	return c
 }
 
 // WithResponseReceivedPlugins sets the given plugins as the ResponseReceived plugins.
 // If the Config has ResponseReceived plugins already, this call replaces the existing plugins with the given ones.
-func (c *Config) WithResponseReceivedPlugins(plugins ...fwk.ResponseHeaderProcessor) *Config {
+func (c *Config) WithResponseReceivedPlugins(plugins ...fwkrc.ResponseHeaderProcessor) *Config {
 	c.responseReceivedPlugins = plugins
 	return c
 }
 
 // WithResponseStreamingPlugins sets the given plugins as the ResponseStreaming plugins.
 // If the Config has ResponseStreaming plugins already, this call replaces the existing plugins with the given ones.
-func (c *Config) WithResponseStreamingPlugins(plugins ...fwk.ResponseBodyProcessor) *Config {
+func (c *Config) WithResponseStreamingPlugins(plugins ...fwkrc.ResponseBodyProcessor) *Config {
 	c.responseStreamingPlugins = plugins
 	return c
 }
 
-// WithPrepareDataPlugins sets the given plugins as the PrepareData plugins.
-func (c *Config) WithPrepareDataPlugins(plugins ...fwk.DataProducer) *Config {
-	c.prepareDataPlugins = plugins
+// WithDataProducerPlugins sets the given plugins as the DataProducer plugins.
+func (c *Config) WithDataProducerPlugins(plugins ...fwkrc.DataProducer) *Config {
+	c.dataProducerPlugins = plugins
 	return c
 }
 
 // WithAdmissionPlugins sets the given plugins as the AdmitRequest plugins.
-func (c *Config) WithAdmissionPlugins(plugins ...fwk.Admitter) *Config {
+func (c *Config) WithAdmissionPlugins(plugins ...fwkrc.Admitter) *Config {
 	c.admissionPlugins = plugins
 	return c
 }
@@ -79,29 +79,29 @@ func (c *Config) WithAdmissionPlugins(plugins ...fwk.Admitter) *Config {
 // If a plugin implements multiple plugin interfaces, it will be added to each corresponding list.
 func (c *Config) AddPlugins(pluginObjects ...plugin.Plugin) {
 	for _, plugin := range pluginObjects {
-		if preRequestPlugin, ok := plugin.(fwk.PreRequest); ok {
+		if preRequestPlugin, ok := plugin.(fwkrc.PreRequest); ok {
 			c.preRequestPlugins = append(c.preRequestPlugins, preRequestPlugin)
 		}
-		if responseReceivedPlugin, ok := plugin.(fwk.ResponseHeaderProcessor); ok {
+		if responseReceivedPlugin, ok := plugin.(fwkrc.ResponseHeaderProcessor); ok {
 			c.responseReceivedPlugins = append(c.responseReceivedPlugins, responseReceivedPlugin)
 		}
-		if responseStreamingPlugin, ok := plugin.(fwk.ResponseBodyProcessor); ok {
+		if responseStreamingPlugin, ok := plugin.(fwkrc.ResponseBodyProcessor); ok {
 			c.responseStreamingPlugins = append(c.responseStreamingPlugins, responseStreamingPlugin)
 		}
-		if prepareDataPlugin, ok := plugin.(fwk.DataProducer); ok {
-			c.prepareDataPlugins = append(c.prepareDataPlugins, prepareDataPlugin)
+		if dataProducerPlugin, ok := plugin.(fwkrc.DataProducer); ok {
+			c.dataProducerPlugins = append(c.dataProducerPlugins, dataProducerPlugin)
 		}
-		if admissionPlugin, ok := plugin.(fwk.Admitter); ok {
+		if admissionPlugin, ok := plugin.(fwkrc.Admitter); ok {
 			c.admissionPlugins = append(c.admissionPlugins, admissionPlugin)
 		}
 	}
 }
 
-// OrderPrepareDataPlugins reorders the prepareDataPlugins in the Config based on the given sorted plugin names.
-func (c *Config) OrderPrepareDataPlugins(sortedPluginNames []string) {
-	sortedPlugins := make([]fwk.DataProducer, 0, len(sortedPluginNames))
-	nameToPlugin := make(map[string]fwk.DataProducer)
-	for _, plugin := range c.prepareDataPlugins {
+// OrderDataProducerPlugins reorders the DataProducer plugins in the Config based on the given sorted plugin names.
+func (c *Config) OrderDataProducerPlugins(sortedPluginNames []string) {
+	sortedPlugins := make([]fwkrc.DataProducer, 0, len(sortedPluginNames))
+	nameToPlugin := make(map[string]fwkrc.DataProducer)
+	for _, plugin := range c.dataProducerPlugins {
 		nameToPlugin[plugin.TypedName().String()] = plugin
 	}
 	for _, name := range sortedPluginNames {
@@ -109,5 +109,5 @@ func (c *Config) OrderPrepareDataPlugins(sortedPluginNames []string) {
 			sortedPlugins = append(sortedPlugins, plugin)
 		}
 	}
-	c.prepareDataPlugins = sortedPlugins
+	c.dataProducerPlugins = sortedPlugins
 }

@@ -22,16 +22,15 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	latencypredictor "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	schedulingtypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 var _ requestcontrol.PreRequest = &PredictedLatency{}
@@ -40,7 +39,7 @@ var _ requestcontrol.ResponseBodyProcessor = &PredictedLatency{}
 
 // --- RequestControl Hooks ---
 
-func (pl *PredictedLatency) PreRequest(ctx context.Context, request *schedulingtypes.InferenceRequest, schedulingResult *schedulingtypes.SchedulingResult) {
+func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) {
 	logger := log.FromContext(ctx)
 	if request == nil {
 		logger.V(logutil.DEBUG).Info("PredictedLatency.PreRequest: request is nil, skipping")
@@ -110,7 +109,7 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *schedulingt
 	processPreRequestForLatencyPrediction(ctx, predictedLatencyCtx)
 }
 
-func (pl *PredictedLatency) ResponseHeader(ctx context.Context, request *schedulingtypes.InferenceRequest, response *requestcontrol.Response, targetMetadata *fwkdl.EndpointMetadata) {
+func (pl *PredictedLatency) ResponseHeader(ctx context.Context, request *fwksched.InferenceRequest, response *requestcontrol.Response, targetMetadata *fwkdl.EndpointMetadata) {
 	logger := log.FromContext(ctx)
 	if request == nil {
 		logger.V(logutil.DEBUG).Info("PredictedLatency.ResponseReceived: request is nil, skipping")
@@ -119,7 +118,7 @@ func (pl *PredictedLatency) ResponseHeader(ctx context.Context, request *schedul
 }
 
 // ResponseBody handles both per-chunk processing and request completion logic.
-func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *schedulingtypes.InferenceRequest, response *requestcontrol.Response, targetMetadata *fwkdl.EndpointMetadata) {
+func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *requestcontrol.Response, targetMetadata *fwkdl.EndpointMetadata) {
 	logger := log.FromContext(ctx)
 	if request == nil {
 		logger.V(logutil.DEBUG).Info("PredictedLatency.ResponseBody: request is nil, skipping")
@@ -142,7 +141,7 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *schedulin
 			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now, pl.config.SamplingMean, pl.config.MaxDecodeTokenSamplesForPrediction)
 
 			// Only decrement if PreRequest actually incremented the prefill pod counter.
-			// If PrepareData timed out, PreRequest may have skipped incrementing, and
+			// If Produce timed out, PreRequest may have skipped incrementing, and
 			// decrementing here would drift the counter negative.
 			if predictedLatencyCtx.prefillTargetMetadata != nil && predictedLatencyCtx.prefillTokensAtDispatchOnPrefill > 0 {
 				prefillPodKey := predictedLatencyCtx.prefillTargetMetadata.NamespacedName.String()
@@ -162,10 +161,10 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *schedulin
 		if predictedLatencyCtx.ttft > 0 {
 			// In non-streaming mode, TTFT represents full e2e latency.
 			logger.V(logutil.TRACE).Info("Averages calculated", "avgActualTTFT", predictedLatencyCtx.ttft, "avgPredictedTTFT", predictedLatencyCtx.predictedTTFT)
-			metrics.RecordRequestTTFT(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft/1000)
-			metrics.RecordRequestPredictedTTFT(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.predictedTTFT/1000)
+			recordRequestTTFT(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft/1000)
+			recordRequestPredictedTTFT(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.predictedTTFT/1000)
 			if predictedLatencyCtx.ttftSLO > 0 {
-				metrics.RecordRequestTTFTWithSLO(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft, predictedLatencyCtx.ttftSLO)
+				recordRequestTTFTWithSLO(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft, predictedLatencyCtx.ttftSLO)
 			}
 		}
 
@@ -176,10 +175,10 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *schedulin
 
 		if predictedLatencyCtx.avgTPOT > 0 {
 			logger.V(logutil.TRACE).Info("Averages calculated", "avgActualTPOT", predictedLatencyCtx.avgTPOT, "avgPredictedTPOT", predictedLatencyCtx.avgPredictedTPOT)
-			metrics.RecordRequestTPOT(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.avgTPOT/1000)
-			metrics.RecordRequestPredictedTPOT(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.avgPredictedTPOT/1000)
+			recordRequestTPOT(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.avgTPOT/1000)
+			recordRequestPredictedTPOT(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.avgPredictedTPOT/1000)
 			if predictedLatencyCtx.avgTPOTSLO > 0 {
-				metrics.RecordRequestTPOTWithSLO(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.avgTPOT, predictedLatencyCtx.avgTPOTSLO)
+				recordRequestTPOTWithSLO(ctx, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.avgTPOT, predictedLatencyCtx.avgTPOTSLO)
 			}
 
 			if m, err := getLatestMetricsForProfile(predictedLatencyCtx, ""); err == nil {
@@ -204,7 +203,7 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *schedulin
 
 		decodePodKey := targetMetadata.NamespacedName.String()
 		// Only decrement counters that PreRequest actually incremented. See the TTFT
-		// branch above for the rationale: PrepareData timeouts can leave PreRequest
+		// branch above for the rationale: Produce timeouts can leave PreRequest
 		// without an SLO context, so the counter was never bumped up, and decrementing
 		// here would orphan the pod's counter into negative territory.
 		if ttftNotYetRecorded && predictedLatencyCtx.prefillTargetMetadata != nil && predictedLatencyCtx.prefillTokensAtDispatchOnPrefill > 0 {
@@ -378,7 +377,7 @@ func processTokenForLatencyPrediction(
 			predictedLatencyCtx.predictedTPOTObservations = append(predictedLatencyCtx.predictedTPOTObservations, p.TPOT)
 			predictedLatencyCtx.avgPredictedTPOT = calculateRunningAverage(predictedLatencyCtx.avgPredictedTPOT, p.TPOT, len(predictedLatencyCtx.predictedTPOTObservations))
 		}
-		metrics.RecordRequestTPOTPredictionDuration(ctx, predictedLatencyCtx.schedulingRequest.TargetModel, predictedLatencyCtx.incomingModelName, dur.Seconds())
+		recordRequestTPOTPredictionDuration(ctx, predictedLatencyCtx.schedulingRequest.TargetModel, predictedLatencyCtx.incomingModelName, dur.Seconds())
 		predictedLatencyCtx.decodeTokenSampler.recordPrediction(predictedLatencyCtx.generatedTokenCount)
 	}
 

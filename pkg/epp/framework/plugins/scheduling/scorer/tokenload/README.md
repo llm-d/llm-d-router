@@ -26,7 +26,7 @@ The scorer returns category `Distribution`, helping spread requests away from en
 ## Inputs consumed
 
 The plugin consumes:
-- `attrconcurrency.InFlightLoadKey` (`*attrconcurrency.InFlightLoad`)
+- `attrconcurrency.InFlightLoadDataKey` (`*attrconcurrency.InFlightLoad`)
 
 ## Configuration
 

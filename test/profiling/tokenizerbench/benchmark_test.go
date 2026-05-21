@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package external_tokenizer_scorer benchmarks the end-to-end request flow
-// through the EPP when using the external tokenizer PrepareData plugin
+// through the EPP when using the external tokenizer DataProducer plugin
 // combined with the precise-prefix-cache-scorer.
 //
 // Prerequisites:

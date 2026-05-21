@@ -17,7 +17,7 @@ limitations under the License.
 package datalayer
 
 import (
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 // Config defines the configuration of EPP data layer, as the set of DataSources

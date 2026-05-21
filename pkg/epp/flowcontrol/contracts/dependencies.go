@@ -19,7 +19,7 @@ package contracts
 import (
 	"context"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 // EndpointCandidates defines the contract for a component that resolves the set of candidate endpoints for a request

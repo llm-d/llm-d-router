@@ -4,36 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
-	"sync"
-	"time"
 
-	"github.com/jellydator/ttlcache/v3"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 )
 
 const (
 	// ActiveRequestType is the type of the ActiveRequest scorer.
 	ActiveRequestType = "active-request-scorer"
-
-	// defaultRequestTimeout defines the default timeout for open requests to be
-	// considered stale and removed from the cache.
-	defaultRequestTimeout = 2 * time.Minute
 )
 
-// Parameters defines the parameters for the
-// ActiveRequest.
+// Parameters defines the parameters for ActiveRequest.
 type Parameters struct {
-	// RequestTimeout defines the timeout for requests in seconds.
-	// Once the request is "in-flight" for this duration, it is considered to
-	// be timed out and dropped.
-	// This field accepts duration strings like "30s", "1m", "2h".
+	// Deprecated: RequestTimeout is ignored. In-flight request lifecycle is
+	// tracked by the inflight-load-producer data producer.
 	RequestTimeout string `json:"requestTimeout"`
 
 	// IdleThreshold defines the maximum number of active requests for a pod
@@ -49,17 +37,8 @@ type Parameters struct {
 	// Default: 1.0 (no gap, current behavior)
 	// Example: 0.5 means idle pods get 1.0, busiest pod gets 0.0, least busy gets 0.5
 	MaxBusyScore float64 `json:"maxBusyScore"`
-}
 
-// requestEntry represents a single request in the cache
-type requestEntry struct {
-	PodNames  []string
-	RequestID string
-}
-
-// String returns a string representation of the request entry.
-func (r requestEntry) String() string {
-	return fmt.Sprintf("%s:%s", r.RequestID, strings.Join(r.PodNames, "."))
+	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
 }
 
 // endpointScores implements logr.Marshaler to lazily convert endpoint keys
@@ -76,8 +55,7 @@ func (s endpointScores) MarshalLog() interface{} {
 
 // compile-time type assertion
 var _ scheduling.Scorer = &ActiveRequest{}
-var _ requestcontrol.PreRequest = &ActiveRequest{}
-var _ requestcontrol.ResponseBodyProcessor = &ActiveRequest{}
+var _ plugin.ConsumerPlugin = &ActiveRequest{}
 
 // Factory defines the factory function for the ActiveRequest scorer.
 func Factory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
@@ -93,24 +71,12 @@ func Factory(name string, rawParameters json.RawMessage, handle plugin.Handle) (
 
 // NewActiveRequest creates a new ActiveRequest scorer.
 func NewActiveRequest(ctx context.Context, params *Parameters) *ActiveRequest {
-	requestTimeout := defaultRequestTimeout
 	logger := log.FromContext(ctx)
 
 	if params != nil && params.RequestTimeout != "" {
-		paramsRequestTimeout, err := time.ParseDuration(params.RequestTimeout)
-		if err != nil || paramsRequestTimeout <= 0 {
-			logger.Error(err, "Invalid request timeout duration, using default request timeout")
-		} else {
-			requestTimeout = paramsRequestTimeout
-			logger.Info("Using request timeout", "requestTimeout", requestTimeout)
-		}
+		logger.Info("DEPRECATED: requestTimeout is deprecated and ignored; inflight tracking is handled by inflight-load-producer",
+			"requestTimeout", params.RequestTimeout)
 	}
-
-	// cache for individual requests with their own TTL
-	requestCache := ttlcache.New[string, *requestEntry](
-		ttlcache.WithTTL[string, *requestEntry](requestTimeout),
-		ttlcache.WithDisableTouchOnHit[string, *requestEntry](),
-	)
 
 	// Set idle threshold (default: 0)
 	idleThreshold := 0
@@ -130,42 +96,24 @@ func NewActiveRequest(ctx context.Context, params *Parameters) *ActiveRequest {
 			"maxBusyScore", maxBusyScore)
 	}
 
-	scorer := &ActiveRequest{
-		typedName:      plugin.TypedName{Type: ActiveRequestType},
-		requestCache:   requestCache,
-		endpointCounts: make(map[string]int),
-		mutex:          &sync.RWMutex{},
-		idleThreshold:  idleThreshold,
-		maxBusyScore:   maxBusyScore,
+	var inFlightLoadProducerName string
+	if params != nil {
+		inFlightLoadProducerName = params.InFlightLoadProducerName
 	}
-	// callback to decrement count when requests expire
-	// most requests will be removed in ResponseComplete, but this ensures
-	// that we don't leak endpoint counts if ResponseComplete is not called
-	requestCache.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason,
-		item *ttlcache.Item[string, *requestEntry]) {
-		if reason == ttlcache.EvictionReasonExpired {
-			for _, endpointName := range item.Value().PodNames {
-				scorer.decrementPodCount(endpointName)
-			}
-		}
-	})
 
-	go cleanCachePeriodically(ctx, requestCache, requestTimeout)
-
-	return scorer
+	return &ActiveRequest{
+		typedName:           plugin.TypedName{Type: ActiveRequestType},
+		idleThreshold:       idleThreshold,
+		maxBusyScore:        maxBusyScore,
+		inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(inFlightLoadProducerName),
+	}
 }
 
-// ActiveRequest keeps track of individual requests being served
-// per endpoint.
+// ActiveRequest scores endpoints based on in-flight request counts produced by
+// the inflight-load-producer data producer.
 type ActiveRequest struct {
-	typedName plugin.TypedName
-
-	// requestCache stores individual request entries with unique composite keys (endpointName.requestID)
-	requestCache *ttlcache.Cache[string, *requestEntry]
-
-	// endpointCounts maintains fast lookup for request counts per endpoint
-	endpointCounts map[string]int
-	mutex          *sync.RWMutex
+	typedName           plugin.TypedName
+	inFlightLoadDataKey plugin.DataKey
 
 	// idleThreshold defines the max request count to be considered idle
 	idleThreshold int
@@ -189,35 +137,38 @@ func (s *ActiveRequest) Category() scheduling.ScorerCategory {
 	return scheduling.Distribution
 }
 
+// Consumes returns the in-flight load attribute required for scoring.
+func (s *ActiveRequest) Consumes() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		s.inFlightLoadDataKey: attrconcurrency.InFlightLoad{},
+	}
+}
+
 // Score scores the given endpoints based on the number of active requests
 // being served by each endpoint. The score is normalized to a range of 0-1.
 func (s *ActiveRequest) Score(ctx context.Context, _ *scheduling.CycleState, _ *scheduling.InferenceRequest,
 	endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
-	scoredEndpoints := make(map[string]int)
-	maxCount := 0
-	s.mutex.RLock()
-	for endpointName, count := range s.endpointCounts {
-		scoredEndpoints[endpointName] = count
-		if count >= maxCount {
+	requestCounts := make(map[scheduling.Endpoint]int64, len(endpoints))
+	logCounts := make(map[string]int64, len(endpoints))
+	maxCount := int64(0)
+
+	for _, endpoint := range endpoints {
+		endpointName := endpoint.GetMetadata().NamespacedName.String()
+		count := s.requestCount(ctx, endpoint)
+		requestCounts[endpoint] = count
+		logCounts[endpointName] = count
+		if count > maxCount {
 			maxCount = count
 		}
 	}
-	s.mutex.RUnlock()
 
-	log.FromContext(ctx).V(logutil.TRACE).Info("Active request counts", "endpointCounts", scoredEndpoints, "maxCount", maxCount)
+	log.FromContext(ctx).V(logutil.TRACE).Info("Active request counts", "endpointCounts", logCounts, "maxCount", maxCount)
 
 	scoredEndpointsMap := make(map[scheduling.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
-		endpointName := endpoint.GetMetadata().NamespacedName.String()
-		count, exists := scoredEndpoints[endpointName]
-		if !exists {
-			// Pod not tracked = no requests = idle
-			scoredEndpointsMap[endpoint] = 1.0
-			continue
-		}
-
+		count := requestCounts[endpoint]
 		// Check if pod is idle (count <= idleThreshold)
-		if count <= s.idleThreshold {
+		if count <= int64(s.idleThreshold) {
 			scoredEndpointsMap[endpoint] = 1.0 // Idle pods always get max score
 			continue
 		}
@@ -230,104 +181,24 @@ func (s *ActiveRequest) Score(ctx context.Context, _ *scheduling.CycleState, _ *
 	return scoredEndpointsMap
 }
 
-// PreRequest is called before a request is sent to the target endpoint.
-// It creates a new request entry in the cache with its own TTL and
-// increments the endpoint count for fast lookup.
-func (s *ActiveRequest) PreRequest(
-	ctx context.Context,
-	request *scheduling.InferenceRequest,
-	schedulingResult *scheduling.SchedulingResult,
-) {
-	traceLogger := log.FromContext(ctx).V(logutil.TRACE)
+func (s *ActiveRequest) requestCount(ctx context.Context, endpoint scheduling.Endpoint) int64 {
+	val, ok := endpoint.Get(s.inFlightLoadDataKey.String())
+	if !ok {
+		return 0
+	}
 
-	endpointNames := make([]string, 0, len(schedulingResult.ProfileResults))
-	for profileName, profileResult := range schedulingResult.ProfileResults {
-		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
-			continue
+	switch load := val.(type) {
+	case *attrconcurrency.InFlightLoad:
+		if load == nil {
+			log.FromContext(ctx).V(logutil.TRACE).Info("Ignoring nil in-flight load attribute",
+				"endpoint", endpoint.GetMetadata().NamespacedName.String())
+			return 0
 		}
-
-		endpointName := profileResult.TargetEndpoints[0].GetMetadata().NamespacedName.String()
-		endpointNames = append(endpointNames, endpointName)
-		s.incrementPodCount(endpointName)
-		traceLogger.Info(
-			"Added request to cache",
-			"requestId", request.RequestID,
-			"endpointName", endpointName,
-			"profileName", profileName,
-		)
-	}
-
-	// add to request cache
-	s.requestCache.Set(request.RequestID, &requestEntry{PodNames: endpointNames, RequestID: request.RequestID}, 0) // Use default TTL
-}
-
-// ResponseBody is called after a response is sent to the client.
-// It removes the specific request entry from the cache and decrements
-// the endpoint count.
-func (s *ActiveRequest) ResponseBody(
-	ctx context.Context,
-	request *scheduling.InferenceRequest,
-	resp *requestcontrol.Response,
-	targetPod *datalayer.EndpointMetadata,
-) {
-	traceLogger := log.FromContext(ctx).V(logutil.TRACE).WithName("ActiveRequest.ResponseBody")
-	if !resp.EndOfStream {
-		traceLogger.Info("Skipping ResponseBody because EndOfStream is false")
-		return
-	}
-	if targetPod == nil {
-		traceLogger.Info("Skipping ResponseBody because targetPod is nil")
-		return
-	}
-
-	if item, found := s.requestCache.GetAndDelete(request.RequestID); found {
-		entry := item.Value()
-		if entry != nil {
-			for _, endpointName := range entry.PodNames {
-				s.decrementPodCount(endpointName)
-			}
-			traceLogger.Info("Removed request from cache", "requestEntry", entry.String())
-		} else {
-			traceLogger.Info("Request entry value is nil", "requestId", request.RequestID)
-		}
-	} else {
-		traceLogger.Info("Request not found in cache", "requestId", request.RequestID)
-	}
-}
-
-// incrementPodCount increments the request count for a endpoint.
-func (s *ActiveRequest) incrementPodCount(endpointName string) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	s.endpointCounts[endpointName]++
-}
-
-// decrementPodCount decrements the request count for a endpoint and removes
-// the entry if count reaches zero.
-func (s *ActiveRequest) decrementPodCount(endpointName string) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if count, exists := s.endpointCounts[endpointName]; exists {
-		if count <= 1 {
-			delete(s.endpointCounts, endpointName)
-		} else {
-			s.endpointCounts[endpointName] = count - 1
-		}
-	}
-}
-
-func cleanCachePeriodically[K comparable, V any](ctx context.Context, cache *ttlcache.Cache[K, V], requestTimeout time.Duration) {
-	ticker := time.NewTicker(requestTimeout)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			cache.DeleteExpired()
-		}
+		return load.Requests
+	default:
+		log.FromContext(ctx).V(logutil.TRACE).Info("Ignoring in-flight load attribute with unexpected type",
+			"endpoint", endpoint.GetMetadata().NamespacedName.String(),
+			"attributeType", fmt.Sprintf("%T", val))
+		return 0
 	}
 }

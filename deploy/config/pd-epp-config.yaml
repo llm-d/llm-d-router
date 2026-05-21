@@ -1,8 +1,6 @@
 # Sample EPP configuration for tunning with P/D
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
-featureGates:
-- prepareDataPlugins
 plugins:
 - type: prefix-cache-scorer
   parameters:

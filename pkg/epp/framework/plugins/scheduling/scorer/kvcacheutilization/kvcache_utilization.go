@@ -20,9 +20,9 @@ import (
 	"context"
 	"encoding/json"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 )
 
 const (
@@ -30,7 +30,7 @@ const (
 )
 
 // compile-time type assertion
-var _ framework.Scorer = &KVCacheUtilizationScorer{}
+var _ fwksched.Scorer = &KVCacheUtilizationScorer{}
 
 // KvCacheUtilizationScorerFactory defines the factory function for KVCacheUtilizationScorer.
 func KvCacheUtilizationScorerFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -55,8 +55,8 @@ func (s *KVCacheUtilizationScorer) TypedName() fwkplugin.TypedName {
 }
 
 // Category returns the preference the scorer applies when scoring candidate endpoints.
-func (s *KVCacheUtilizationScorer) Category() framework.ScorerCategory {
-	return framework.Distribution
+func (s *KVCacheUtilizationScorer) Category() fwksched.ScorerCategory {
+	return fwksched.Distribution
 }
 
 // Consumes returns the list of data that is consumed by the plugin.
@@ -73,8 +73,8 @@ func (s *KVCacheUtilizationScorer) WithName(name string) *KVCacheUtilizationScor
 }
 
 // Score returns the scoring result for the given list of endpoints based on context.
-func (s *KVCacheUtilizationScorer) Score(_ context.Context, _ *framework.CycleState, _ *framework.InferenceRequest, endpoints []framework.Endpoint) map[framework.Endpoint]float64 {
-	scores := make(map[framework.Endpoint]float64, len(endpoints))
+func (s *KVCacheUtilizationScorer) Score(_ context.Context, _ *fwksched.CycleState, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
 		scores[endpoint] = 1 - endpoint.GetMetrics().KVCacheUsagePercent
 	}

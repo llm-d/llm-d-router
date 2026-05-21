@@ -33,11 +33,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pool"
-	utiltest "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/testing"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
 
 var (
@@ -69,7 +69,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: utiltest.FromBase(basePod3).
+			incomingPod: testutil.FromBase(basePod3).
 				Labels(map[string]string{"some-key": "some-val"}).
 				ReadyCondition().ObjRef(),
 			wantPods: []*corev1.Pod{basePod1, basePod2, basePod3},
@@ -87,7 +87,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: utiltest.FromBase(basePod11).
+			incomingPod: testutil.FromBase(basePod11).
 				Labels(map[string]string{"some-key": "some-val"}).
 				ReadyCondition().ObjRef(),
 			wantPods: []*corev1.Pod{basePod11, basePod2},
@@ -105,7 +105,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: utiltest.FromBase(basePod1).
+			incomingPod: testutil.FromBase(basePod1).
 				Labels(map[string]string{"some-key": "some-val"}).
 				DeletionTimestamp().
 				ReadyCondition().ObjRef(),
@@ -140,7 +140,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: utiltest.FromBase(basePod3).
+			incomingPod: testutil.FromBase(basePod3).
 				Labels(map[string]string{"some-key": "some-val"}).ObjRef(),
 			wantPods: []*corev1.Pod{basePod1, basePod2},
 		},
@@ -157,7 +157,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: utiltest.FromBase(basePod1).
+			incomingPod: testutil.FromBase(basePod1).
 				Labels(map[string]string{"some-wrong-key": "some-val"}).
 				ReadyCondition().ObjRef(),
 			wantPods: []*corev1.Pod{basePod2},
@@ -175,7 +175,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: utiltest.FromBase(basePod1).
+			incomingPod: testutil.FromBase(basePod1).
 				Labels(map[string]string{"some-wrong-key": "some-val"}).
 				ReadyCondition().ObjRef(),
 			wantPods: []*corev1.Pod{basePod2},
@@ -217,10 +217,13 @@ func TestPodReconciler(t *testing.T) {
 					t.Errorf("Unexpected InferencePool reconcile error: %v", err)
 				}
 
-				var gotPods []*corev1.Pod
-				for _, pm := range store.PodList(datastore.AllPodsPredicate) {
-					pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().PodName, Namespace: pm.GetMetadata().NamespacedName.Namespace}, Status: corev1.PodStatus{PodIP: pm.GetMetadata().GetIPAddress()}}
-					gotPods = append(gotPods, pod)
+				podList := store.PodList(datastore.AllPodsPredicate)
+				gotPods := make([]*corev1.Pod, len(podList))
+				for idx, pm := range podList {
+					gotPods[idx] = &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().PodName, Namespace: pm.GetMetadata().NamespacedName.Namespace},
+						Status:     corev1.PodStatus{PodIP: pm.GetMetadata().GetIPAddress()},
+					}
 				}
 				if !cmp.Equal(gotPods, test.wantPods, cmpopts.SortSlices(func(a, b *corev1.Pod) bool { return a.Name < b.Name })) {
 					t.Errorf("got (%v) != want (%v);", gotPods, test.wantPods)

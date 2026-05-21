@@ -59,46 +59,33 @@ spec:
           mountPath: /etc/epp
         - name: cache
           mountPath: /cache
-        - name: uds-socket
-          mountPath: /tmp/tokenizer
-      # UDS Tokenizer sidecar - handles tokenization via gRPC over Unix Domain Socket
-      - name: uds-tokenizer
-        image: ${UDS_TOKENIZER_IMAGE}
+      # vLLM render sidecar — exposes /v1/completions/render and
+      # /v1/chat/completions/render over loopback for the token-producer plugin.
+      - name: vllm-render
+        image: ${VLLM_RENDER_IMAGE}
         imagePullPolicy: IfNotPresent
-        env:
-        - name: LOG_LEVEL
-          value: "INFO"
-        - name: PROBE_PORT
-          value: "8082"
+        command: ["vllm", "launch", "render"]
+        args: ["${MODEL_NAME}", "--port=8000"]
         ports:
-        - name: health
-          containerPort: 8082
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: 8082
-          initialDelaySeconds: 10
-          periodSeconds: 10
+        - name: render-http
+          containerPort: 8000
         readinessProbe:
           httpGet:
-            path: /healthz
-            port: 8082
-          initialDelaySeconds: 5
-          periodSeconds: 5
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 60
         volumeMounts:
-        - name: uds-socket
-          mountPath: /tmp/tokenizer
         - name: model-cache
-          mountPath: /models
+          mountPath: /root/.cache/huggingface
       volumes:
       - name: epp-config
         configMap:
           name: epp-config
       - name: cache
         emptyDir: {}
-      # Shared volume for Unix Domain Socket communication between EPP and UDS tokenizer
-      - name: uds-socket
-        emptyDir: {}
-      # Model cache for tokenizer configurations
+      # HuggingFace cache for the render sidecar's model weights.
       - name: model-cache
         emptyDir: {}

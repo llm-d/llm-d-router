@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	_ "google.golang.org/grpc/encoding/gzip" // Register gzip compressor for gRPC.
 	"google.golang.org/grpc/health"
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -33,17 +34,17 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	"github.com/llm-d/llm-d-inference-scheduler/internal/runnable"
-	tlsutil "github.com/llm-d/llm-d-inference-scheduler/internal/tls"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common"
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/controller"
-	datalayerlogger "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer/logger"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
-	fwkflowcontrol "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/handlers"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/requestcontrol"
+	"github.com/llm-d/llm-d-router/internal/runnable"
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
+	"github.com/llm-d/llm-d-router/pkg/common"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/controller"
+	datalayerlogger "github.com/llm-d/llm-d-router/pkg/epp/datalayer/logger"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 )
 
 // ExtProcServerRunner provides methods to manage an external process server.
@@ -60,8 +61,10 @@ type ExtProcServerRunner struct {
 	MetricsStalenessThreshold        time.Duration
 	Director                         *requestcontrol.Director
 	Parser                           fwkrh.Parser
-	SaturationDetector               fwkflowcontrol.SaturationDetector
+	SaturationDetector               fwkfc.SaturationDetector
 	UseExperimentalDatalayerV2       bool // Pluggable data layer feature flag
+	GRPCMaxRecvMsgSize               int
+	GRPCMaxSendMsgSize               int
 }
 
 // NewDefaultExtProcServerRunner creates a runner with default values.
@@ -81,6 +84,8 @@ func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 	}
 	return &ExtProcServerRunner{
 		GrpcPort:                         opts.GRPCPort,
+		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
+		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		GKNN:                             gknn,
 		ControllerCfg:                    ControllerConfig{true, true, true},
 		SecureServing:                    opts.SecureServing,
@@ -142,6 +147,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 
 		var srv *grpc.Server
+		var creds credentials.TransportCredentials
 		if r.SecureServing {
 			var cert tls.Certificate
 			var err error
@@ -155,7 +161,6 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 				return fmt.Errorf("failed to create self signed certificate - %w", err)
 			}
 
-			var creds credentials.TransportCredentials
 			if r.CertPath != "" && r.EnableCertReload {
 				reloader, err := common.NewCertReloader(ctx, r.CertPath, &cert)
 				if err != nil {
@@ -173,13 +178,27 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 					NextProtos:   []string{"h2"},
 				})
 			}
-			// Init the server.
-			srv = grpc.NewServer(grpc.Creds(creds))
-		} else {
-			srv = grpc.NewServer()
 		}
 
-		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.Parser)
+		var grpcOpts []grpc.ServerOption
+		if creds != nil {
+			grpcOpts = append(grpcOpts, grpc.Creds(creds))
+		}
+		if r.GRPCMaxRecvMsgSize > 0 {
+			grpcOpts = append(grpcOpts, grpc.MaxRecvMsgSize(r.GRPCMaxRecvMsgSize))
+		}
+		if r.GRPCMaxSendMsgSize > 0 {
+			grpcOpts = append(grpcOpts, grpc.MaxSendMsgSize(r.GRPCMaxSendMsgSize))
+		}
+		// Note: gzip compressor is registered via blank import above.
+
+		srv = grpc.NewServer(grpcOpts...)
+
+		poolCap := r.GRPCMaxRecvMsgSize
+		if poolCap == 0 {
+			poolCap = 4 * 1024 * 1024 // gRPC default 4MB
+		}
+		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.Parser, poolCap)
 		extProcPb.RegisterExternalProcessorServer(srv, extProcServer)
 
 		if r.HealthChecking {

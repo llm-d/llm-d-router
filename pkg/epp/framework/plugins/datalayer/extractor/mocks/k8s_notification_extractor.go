@@ -23,8 +23,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // NotificationExtractor implements both Extractor and NotificationExtractor for testing.
@@ -58,7 +58,7 @@ func (m *NotificationExtractor) WithExtractError(err error) *NotificationExtract
 }
 
 func (m *NotificationExtractor) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Type: "mock-extractor", Name: m.name}
+	return fwkplugin.TypedName{Type: m.name, Name: m.name}
 }
 
 func (m *NotificationExtractor) ExpectedInputType() reflect.Type {
@@ -132,7 +132,7 @@ func (m *Extractor) WithMetricsUpdate(metrics *fwkdl.Metrics) *Extractor {
 }
 
 func (m *Extractor) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Type: "mock-extractor", Name: m.name}
+	return fwkplugin.TypedName{Type: m.name, Name: m.name}
 }
 
 func (m *Extractor) ExpectedInputType() reflect.Type {

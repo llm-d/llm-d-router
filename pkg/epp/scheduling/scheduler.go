@@ -24,9 +24,9 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -46,12 +46,12 @@ func NewSchedulerWithConfig(config *SchedulerConfig) *Scheduler {
 }
 
 type Scheduler struct {
-	profileHandler framework.ProfileHandler
-	profiles       map[string]framework.SchedulerProfile
+	profileHandler fwksched.ProfileHandler
+	profiles       map[string]fwksched.SchedulerProfile
 }
 
 // Schedule finds the target pod based on metrics and the requested lora adapter.
-func (s *Scheduler) Schedule(ctx context.Context, request *framework.InferenceRequest, candidateEndpoints []framework.Endpoint) (result *framework.SchedulingResult, err error) {
+func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (result *fwksched.SchedulingResult, err error) {
 	loggerVerbose := log.FromContext(ctx).V(logutil.VERBOSE)
 
 	scheduleStart := time.Now()
@@ -60,8 +60,8 @@ func (s *Scheduler) Schedule(ctx context.Context, request *framework.InferenceRe
 		metrics.RecordSchedulerAttempt(err, request.TargetModel, result)
 	}()
 
-	profileRunResults := map[string]*framework.ProfileRunResult{}
-	cycleState := framework.NewCycleState()
+	profileRunResults := map[string]*fwksched.ProfileRunResult{}
+	cycleState := fwksched.NewCycleState()
 
 	for { // get the next set of profiles to run iteratively based on the request and the previous execution results
 		loggerVerbose.Info("Running profile handler, Pick profiles", "plugin", s.profileHandler.TypedName())

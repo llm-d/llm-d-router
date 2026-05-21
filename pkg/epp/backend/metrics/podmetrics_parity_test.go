@@ -33,9 +33,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stretchr/testify/assert"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	metricextractor "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/metrics"
-	sourcemetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
 // vLLM metric names based on Model Server Protocol
@@ -325,7 +325,7 @@ func parseWithDatalayerMetrics(ctx context.Context, t *testing.T, urlStr string)
 		return nil, fmt.Errorf("failed to marshal datasource parameters: %w", err)
 	}
 
-	mapping, err := metricextractor.NewMapping(
+	mapping, err := extractormetrics.NewMapping(
 		WaitingMetric,
 		RunningMetric,
 		KVCacheMetric,
@@ -336,12 +336,12 @@ func parseWithDatalayerMetrics(ctx context.Context, t *testing.T, urlStr string)
 		return nil, fmt.Errorf("failed to create mapping: %w", err)
 	}
 
-	registry := metricextractor.NewMappingRegistry()
-	if err := registry.Register(metricextractor.DefaultEngineType, mapping); err != nil {
+	registry := extractormetrics.NewMappingRegistry()
+	if err := registry.Register(extractormetrics.DefaultEngineType, mapping); err != nil {
 		return nil, fmt.Errorf("failed to register mapping: %w", err)
 	}
 
-	extractor, err := metricextractor.NewCoreMetricsExtractor(registry, metricextractor.DefaultEngineTypeLabelKey)
+	extractor, err := extractormetrics.NewCoreMetricsExtractor(registry, extractormetrics.DefaultEngineTypeLabelKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create extractor: %w", err)
 	}
@@ -363,7 +363,7 @@ func parseWithDatalayerMetrics(ctx context.Context, t *testing.T, urlStr string)
 	metadata := &fwkdl.EndpointMetadata{
 		MetricsHost: parsedURL.Host,
 		Labels: map[string]string{
-			metricextractor.DefaultEngineTypeLabelKey: metricextractor.DefaultEngineType,
+			extractormetrics.DefaultEngineTypeLabelKey: extractormetrics.DefaultEngineType,
 		},
 	}
 	endpoint := fwkdl.NewEndpoint(metadata, fwkdl.NewMetrics())

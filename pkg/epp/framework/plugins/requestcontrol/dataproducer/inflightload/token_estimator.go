@@ -19,12 +19,17 @@ package inflightload
 import (
 	"math"
 
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // TokenEstimator estimates the number of tokens for an LLM request.
 type TokenEstimator interface {
-	Estimate(request *framework.InferenceRequest) int64
+	// Estimate returns the total estimated token count (input + output) for the request.
+	Estimate(request *fwksched.InferenceRequest) int64
+	// EstimateInput returns only the estimated input token count for the request.
+	EstimateInput(request *fwksched.InferenceRequest) int64
+	// EstimateOutput returns the estimated output token count given the input token count.
+	EstimateOutput(inputTokens int64) int64
 }
 
 // SimpleTokenEstimator estimates tokens from character count. tokens = characters / CharactersPerToken.
@@ -45,28 +50,41 @@ func NewSimpleTokenEstimator() TokenEstimator {
 // When RequestSizeBytes is set, input tokens are derived from request size (~4 bytes per token)
 // to avoid allocations. Otherwise, input tokens are estimated from prompt/message character count
 // using CharactersPerToken; output tokens are estimated as inputTokens * OutputRatio.
-func (e *SimpleTokenEstimator) Estimate(request *framework.InferenceRequest) int64 {
+func (e *SimpleTokenEstimator) Estimate(request *fwksched.InferenceRequest) int64 {
+	inputTokens := e.EstimateInput(request)
+	if inputTokens == 0 {
+		return 0
+	}
+	return inputTokens + e.EstimateOutput(inputTokens)
+}
+
+// EstimateInput returns only the estimated input token count for the request.
+func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest) int64 {
 	if request == nil {
 		return 0
 	}
 	// Prefer request body size when available: avoids PlainText() and reduces GC pressure.
-	var inputTokens int64
 	switch {
 	case request.RequestSizeBytes > 0:
-		inputTokens = max(int64(request.RequestSizeBytes)/4, 1)
+		return max(int64(request.RequestSizeBytes)/4, 1)
 	case request.Body != nil:
 		hint := request.Body.InputTokenCountHint()
 		if hint >= 0 {
-			inputTokens = int64(hint)
-		} else {
-			// Fallback: character count from prompt text across all API types
-			// (completions, chat/completions, responses, conversations).
-			chars := len(request.Body.PromptText())
-			inputTokens = int64(math.Max(1, math.Round(float64(chars)/e.CharactersPerToken)))
+			return int64(hint)
 		}
+		// Fallback: character count from prompt text across all API types
+		// (completions, chat/completions, responses, conversations).
+		chars := len(request.Body.PromptText())
+		return int64(math.Max(1, math.Round(float64(chars)/e.CharactersPerToken)))
 	default:
 		return 0
 	}
-	outputTokens := int64(math.Round(float64(inputTokens) * e.OutputRatio))
-	return inputTokens + outputTokens
+}
+
+// EstimateOutput returns the estimated output token count given the input token count.
+func (e *SimpleTokenEstimator) EstimateOutput(inputTokens int64) int64 {
+	if inputTokens <= 0 {
+		return 0
+	}
+	return int64(math.Round(float64(inputTokens) * e.OutputRatio))
 }

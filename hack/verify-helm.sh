@@ -15,9 +15,9 @@
 # limitations under the License.
 
 SCRIPT_ROOT=$(dirname "${BASH_SOURCE}")/..
-GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.3.0}"
+GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
 GKE_GATEWAY_API_VERSION="${GKE_GATEWAY_API_VERSION:-v1.4.0}"
-GIE_VERSION="${GIE_VERSION:-v1.4.0}"
+GIE_VERSION="${GIE_VERSION:-v1.5.0}"
 HELM="${HELM:-${SCRIPT_ROOT}/bin/helm}"
 KUBECTL_VALIDATE="${KUBECTL_VALIDATE:-${SCRIPT_ROOT}/bin/kubectl-validate}"
 TEMP_DIR=$(mktemp -d)
@@ -34,16 +34,13 @@ fetch_crds() {
   curl -sL "${url}" -o "${TEMP_DIR}/$(basename "${url}")"
 }
 
-fetch_gie_crd() {
-  local name="$1"
-  fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${GIE_VERSION}/config/crd/bases/${name}"
-}
-
-fetch_gie_crd "inference.networking.k8s.io_inferencepools.yaml"
-fetch_gie_crd "inference.networking.x-k8s.io_inferencemodelrewrites.yaml"
-fetch_gie_crd "inference.networking.x-k8s.io_inferenceobjectives.yaml"
-fetch_gie_crd "inference.networking.x-k8s.io_inferencepoolimports.yaml"
+# Use local 'config/crd', run "make generate" or "hack/update-codegen.sh" to regenerate llm-d CRDs
+cp "${SCRIPT_ROOT}/config/crd/bases/"*.yaml "${TEMP_DIR}/"
+# GIE (Gateway API Inference Extension) CRDs - InferencePool is owned by upstream GIE
+fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${GIE_VERSION}/config/crd/bases/inference.networking.k8s.io_inferencepools.yaml"
+# GW API CRD
 fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/refs/tags/${GATEWAY_API_VERSION}/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml"
+# GKE CRD
 fetch_crds "https://raw.githubusercontent.com/GoogleCloudPlatform/gke-gateway-api/refs/tags/${GKE_GATEWAY_API_VERSION}/config/crd/networking.gke.io_gcpbackendpolicies.yaml"
 fetch_crds "https://raw.githubusercontent.com/GoogleCloudPlatform/gke-gateway-api/refs/tags/${GKE_GATEWAY_API_VERSION}/config/crd/networking.gke.io_healthcheckpolicies.yaml"
 
@@ -98,6 +95,14 @@ for key in "${!test_cases_inference_pool[@]}"; do
     echo "Kubectl validation failed for test: ${key}"
     exit 1
   fi
+
+  if [ "${key}" == "triton" ]; then
+    if ! grep -q "passthrough-parser" "${output_dir}/inferencepool/templates/inferenceextension.yaml"; then
+      echo "Validation failed: passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
   echo "Test case ${key} passed validation."
 done
 
@@ -109,6 +114,7 @@ test_cases_standalone["gke-provider"]="--set provider.name=gke --set inferenceEx
 test_cases_standalone["latency-predictor"]="--set inferenceExtension.latencyPredictor.enabled=true --set inferenceExtension.endpointsServer.endpointSelector='app=llm-instance-gateway' --set inferenceExtension.endpointsServer.createInferencePool=false"
 test_cases_standalone["inferencepool"]="--set inferenceExtension.endpointsServer.createInferencePool=true --set inferencePool.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_standalone["agentgateway"]="--set inferenceExtension.sidecar.proxyType=agentgateway --set inferenceExtension.sidecar.agentgateway.service.name=llm-instance-gateway --set 'inferenceExtension.sidecar.agentgateway.service.ports[0]=8000' --set inferenceExtension.endpointsServer.endpointSelector='app=llm-instance-gateway' --set inferenceExtension.endpointsServer.createInferencePool=false --set 'inferenceExtension.endpointsServer.targetPorts[0]=8000'"
+test_cases_standalone["triton"]="--set inferenceExtension.endpointsServer.modelServerType=triton --set inferenceExtension.endpointsServer.endpointSelector=app=llm-instance-gateway --set inferenceExtension.endpointsServer.createInferencePool=false"
 
 
 echo "Processing dependencies for standalone chart..."

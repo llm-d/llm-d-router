@@ -1,0 +1,47 @@
+# Sample EPP config: split precise-prefix-cache pipeline
+#   token-producer -> precise-prefix-cache-producer -> prefix-cache-scorer
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: hf-repo/model-name           # set to the model used in the vLLM deployment
+      vllm:
+        http: http://localhost:8000
+  - type: endpoint-notification-source
+  - type: metrics-data-source
+  - type: core-metrics-extractor
+  - type: single-profile-handler
+  - type: decode-filter
+  - type: precise-prefix-cache-producer
+    parameters:
+      tokenProcessorConfig:
+        blockSize: 64
+      indexerConfig:
+        kvBlockIndexConfig:
+          enableMetrics: true       # enable kv-block index metrics (prometheus)
+  - type: prefix-cache-scorer
+    parameters:
+      prefixMatchInfoProducerName: precise-prefix-cache-producer
+  - type: kv-cache-utilization-scorer
+  - type: queue-scorer
+  - type: max-score-picker
+dataLayer:
+  sources:
+    - pluginRef: metrics-data-source
+      extractors:
+        - pluginRef: core-metrics-extractor
+    - pluginRef: endpoint-notification-source
+      extractors:
+        - pluginRef: precise-prefix-cache-producer
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: decode-filter
+      - pluginRef: prefix-cache-scorer
+        weight: 2.0
+      - pluginRef: kv-cache-utilization-scorer
+        weight: 1.0
+      - pluginRef: queue-scorer
+        weight: 1.0
+      - pluginRef: max-score-picker

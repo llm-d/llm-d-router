@@ -33,10 +33,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	infextv1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	infextv1a2 "sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/env"
 
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 const (
@@ -75,13 +75,13 @@ const (
 	// modelServerManifestFilepathEnvVar is the env var that holds absolute path to the manifest for the model server test resource.
 	modelServerManifestFilepathEnvVar = "MANIFEST_PATH"
 	// crdKustomizePath is the kustomize folder path for the required CRDs.
-	crdKustomizePath = "../../../deploy/components/crds-gie"
+	crdKustomizePath = "../../../config/crd"
 )
 
 const e2eLeaderElectionEnabledEnvVar = "E2E_LEADER_ELECTION_ENABLED"
 
 var (
-	testConfig *testutils.TestConfig
+	testConfig *igwtestutils.TestConfig
 	// Required for exec'ing in curl pod
 	e2eImage              string
 	leaderElectionEnabled bool
@@ -91,7 +91,8 @@ var (
 		"inferencepools.inference.networking.k8s.io",
 		"inferenceobjectives.inference.networking.x-k8s.io",
 		"inferencemodelrewrites.inference.networking.x-k8s.io",
-		"inferencepoolimports.inference.networking.x-k8s.io",
+		"inferenceobjectives.llm-d.ai",
+		"inferencemodelrewrites.llm-d.ai",
 	}
 )
 
@@ -107,7 +108,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	if nsName == "" {
 		nsName = defaultNsName
 	}
-	testConfig = testutils.NewTestConfig(nsName, "")
+	testConfig = igwtestutils.NewTestConfig(nsName, "")
 
 	e2eImage = os.Getenv("E2E_IMAGE")
 	gomega.Expect(e2eImage).NotTo(gomega.BeEmpty(), "E2E_IMAGE environment variable is not set")
@@ -135,8 +136,8 @@ func setupInfra() {
 	if strings.Contains(modelServerManifestArray[0], "hf-token") {
 		createHfSecret(testConfig, modelServerSecretManifest)
 	}
-	testutils.ProcessKustomize(testConfig, crdKustomizePath, testutils.CreateAndVerifyObjs)
-	testutils.ValidateCRDsEstablished(testConfig, expectedCRDs)
+	igwtestutils.ProcessKustomize(testConfig, crdKustomizePath, igwtestutils.CreateAndVerifyObjs)
+	igwtestutils.ValidateCRDsEstablished(testConfig, expectedCRDs)
 
 	inferExtManifestPath := inferExtManifestDefault
 	if leaderElectionEnabled {
@@ -179,7 +180,7 @@ func setupSuite() {
 	err = apiextv1.AddToScheme(testConfig.Scheme)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 
-	err = infextv1a2.Install(testConfig.Scheme)
+	err = v1alpha2.Install(testConfig.Scheme)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 
 	err = infextv1.Install(testConfig.Scheme)
@@ -193,12 +194,12 @@ func cleanupResources() {
 		return // could happen if BeforeSuite had an error
 	}
 
-	gomega.Expect(testutils.DeleteClusterResources(testConfig)).To(gomega.Succeed())
-	gomega.Expect(testutils.DeleteNamespacedResources(testConfig)).To(gomega.Succeed())
+	gomega.Expect(igwtestutils.DeleteClusterResources(testConfig)).To(gomega.Succeed())
+	gomega.Expect(igwtestutils.DeleteNamespacedResources(testConfig)).To(gomega.Succeed())
 }
 
 func cleanupInferObjectiveResources() {
-	gomega.Expect(testutils.DeleteInferenceObjectiveResources(testConfig)).To(gomega.Succeed())
+	gomega.Expect(igwtestutils.DeleteInferenceObjectiveResources(testConfig)).To(gomega.Succeed())
 }
 
 var (
@@ -206,7 +207,7 @@ var (
 	curlInterval = defaultCurlInterval
 )
 
-func createNamespace(testConfig *testutils.TestConfig) {
+func createNamespace(testConfig *igwtestutils.TestConfig) {
 	ginkgo.By("Creating e2e namespace: " + testConfig.NsName)
 	obj := &corev1.Namespace{
 		ObjectMeta: v1.ObjectMeta{
@@ -218,9 +219,9 @@ func createNamespace(testConfig *testutils.TestConfig) {
 }
 
 // namespaceExists ensures that a specified namespace exists and is ready for use.
-func namespaceExists(testConfig *testutils.TestConfig) {
+func namespaceExists(testConfig *igwtestutils.TestConfig) {
 	ginkgo.By("Ensuring namespace exists: " + testConfig.NsName)
-	testutils.EventuallyExists(testConfig, func() error {
+	igwtestutils.EventuallyExists(testConfig, func() error {
 		return testConfig.K8sClient.Get(testConfig.Context,
 			types.NamespacedName{Name: testConfig.NsName}, &corev1.Namespace{})
 	})
@@ -236,20 +237,20 @@ func readModelServerManifestPath() string {
 
 func getYamlsFromModelServerManifest(modelServerManifestPath string) []string {
 	ginkgo.By("Ensuring the model server manifest points to an existing file")
-	modelServerManifestArray := testutils.ReadYaml(modelServerManifestPath)
+	modelServerManifestArray := igwtestutils.ReadYaml(modelServerManifestPath)
 	gomega.Expect(modelServerManifestArray).NotTo(gomega.BeEmpty())
 	return modelServerManifestArray
 }
 
 // createClient creates the client pod used for testing from the given filePath.
-func createClient(testConfig *testutils.TestConfig, filePath string) {
+func createClient(testConfig *igwtestutils.TestConfig, filePath string) {
 	ginkgo.By("Creating client resources from manifest: " + filePath)
-	testutils.ApplyYAMLFile(testConfig, filePath)
+	igwtestutils.ApplyYAMLFile(testConfig, filePath)
 }
 
 // createMetricsRbac creates the metrics RBAC resources from the manifest file.
-func createMetricsRbac(testConfig *testutils.TestConfig, filePath string) {
-	inManifests := testutils.ReadYaml(filePath)
+func createMetricsRbac(testConfig *igwtestutils.TestConfig, filePath string) {
+	inManifests := igwtestutils.ReadYaml(filePath)
 	ginkgo.By("Replacing placeholder namespace with E2E_NS environment variable")
 	outManifests := make([]string, 0, len(inManifests))
 	for _, m := range inManifests {
@@ -257,10 +258,10 @@ func createMetricsRbac(testConfig *testutils.TestConfig, filePath string) {
 	}
 
 	ginkgo.By("Creating RBAC resources for scraping metrics from manifest: " + filePath)
-	testutils.CreateObjsFromYaml(testConfig, outManifests)
+	igwtestutils.CreateObjsFromYaml(testConfig, outManifests)
 
 	// wait for sa token to exist
-	testutils.EventuallyExists(testConfig, func() error {
+	igwtestutils.EventuallyExists(testConfig, func() error {
 		token, err := getMetricsReaderToken(testConfig.K8sClient)
 		if err != nil {
 			return err
@@ -273,17 +274,17 @@ func createMetricsRbac(testConfig *testutils.TestConfig, filePath string) {
 }
 
 // createModelServer creates the model server resources used for testing from the given filePaths.
-func createModelServer(testConfig *testutils.TestConfig, modelServerManifestArray []string) {
-	testutils.CreateObjsFromYaml(testConfig, modelServerManifestArray)
+func createModelServer(testConfig *igwtestutils.TestConfig, modelServerManifestArray []string) {
+	igwtestutils.CreateObjsFromYaml(testConfig, modelServerManifestArray)
 }
 
 // createHfSecret read HF_TOKEN from env var and creates a secret that contains the access token.
-func createHfSecret(testConfig *testutils.TestConfig, secretPath string) {
+func createHfSecret(testConfig *igwtestutils.TestConfig, secretPath string) {
 	ginkgo.By("Ensuring the HF_TOKEN environment variable is set")
 	token := os.Getenv("HF_TOKEN")
 	gomega.Expect(token).NotTo(gomega.BeEmpty(), "HF_TOKEN is not set")
 
-	inManifests := testutils.ReadYaml(secretPath)
+	inManifests := igwtestutils.ReadYaml(secretPath)
 	ginkgo.By("Replacing placeholder secret data with HF_TOKEN environment variable")
 	outManifests := make([]string, 0, len(inManifests))
 	for _, m := range inManifests {
@@ -291,12 +292,12 @@ func createHfSecret(testConfig *testutils.TestConfig, secretPath string) {
 	}
 
 	ginkgo.By("Creating model server secret resource")
-	testutils.CreateObjsFromYaml(testConfig, outManifests)
+	igwtestutils.CreateObjsFromYaml(testConfig, outManifests)
 }
 
 // createEnvoy creates the envoy proxy resources used for testing from the given filePath.
-func createEnvoy(testConfig *testutils.TestConfig, filePath string) {
-	inManifests := testutils.ReadYaml(filePath)
+func createEnvoy(testConfig *igwtestutils.TestConfig, filePath string) {
+	inManifests := igwtestutils.ReadYaml(filePath)
 	ginkgo.By("Replacing placeholder namespace with E2E_NS environment variable")
 	outManifests := make([]string, 0, len(inManifests))
 	for _, m := range inManifests {
@@ -304,14 +305,14 @@ func createEnvoy(testConfig *testutils.TestConfig, filePath string) {
 	}
 
 	ginkgo.By("Creating envoy proxy resources from manifest: " + filePath)
-	testutils.CreateObjsFromYaml(testConfig, outManifests)
+	igwtestutils.CreateObjsFromYaml(testConfig, outManifests)
 }
 
 // createInferExt creates the inference extension resources used for testing from the given filePath.
-func createInferExt(testConfig *testutils.TestConfig, filePath string) {
+func createInferExt(testConfig *igwtestutils.TestConfig, filePath string) {
 
 	// This image needs to be updated to open multiple ports and respond.
-	inManifests := testutils.ReadYaml(filePath) // Modify inference-pool.yaml
+	inManifests := igwtestutils.ReadYaml(filePath) // Modify inference-pool.yaml
 	ginkgo.By("Replacing placeholders with environment variables")
 	outManifests := make([]string, 0, len(inManifests))
 	replacer := strings.NewReplacer(
@@ -323,7 +324,7 @@ func createInferExt(testConfig *testutils.TestConfig, filePath string) {
 	}
 
 	ginkgo.By("Creating inference extension resources from manifest: " + filePath)
-	testutils.CreateObjsFromYaml(testConfig, outManifests)
+	igwtestutils.CreateObjsFromYaml(testConfig, outManifests)
 
 	// Wait for the deployment to exist.
 	deploy := &appsv1.Deployment{
@@ -334,8 +335,8 @@ func createInferExt(testConfig *testutils.TestConfig, filePath string) {
 	}
 	if leaderElectionEnabled {
 		// With leader election enabled, only 1 replica will be "Ready" at any given time (the leader).
-		testutils.DeploymentReadyReplicas(testConfig, deploy, 1)
+		igwtestutils.DeploymentReadyReplicas(testConfig, deploy, 1)
 	} else {
-		testutils.DeploymentAvailable(testConfig, deploy)
+		igwtestutils.DeploymentAvailable(testConfig, deploy)
 	}
 }

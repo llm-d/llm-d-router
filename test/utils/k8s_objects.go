@@ -32,16 +32,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	gaieutils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
-type TestConfig = gaieutils.TestConfig
+type TestConfig = igwtestutils.TestConfig
 
 var (
-	NewTestConfig      = gaieutils.NewTestConfig
-	ApplyYAMLFile      = gaieutils.ApplyYAMLFile
-	CreateObjsFromYaml = gaieutils.CreateObjsFromYaml
-	ReadYaml           = gaieutils.ReadYaml
+	NewTestConfig      = igwtestutils.NewTestConfig
+	ApplyYAMLFile      = igwtestutils.ApplyYAMLFile
+	CreateObjsFromYaml = igwtestutils.CreateObjsFromYaml
+	ReadYaml           = igwtestutils.ReadYaml
 )
 
 // DeleteObjects deletes a set of Kubernetes objects in the form of kind/name.

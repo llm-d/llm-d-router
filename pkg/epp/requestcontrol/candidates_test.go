@@ -26,9 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // --- DatastoreEndpointCandidates Tests ---
@@ -141,9 +141,9 @@ func TestDatastoreEndpointCandidates_Locate(t *testing.T) {
 			endpointCandidates := NewDatastoreEndpointCandidates(mockDS, tc.opts...)
 			result := endpointCandidates.Locate(context.Background(), tc.metadata)
 
-			var gotIPs []string
-			for _, ep := range result {
-				gotIPs = append(gotIPs, ep.GetMetadata().GetIPAddress())
+			gotIPs := make([]string, len(result))
+			for idx, ep := range result {
+				gotIPs[idx] = ep.GetMetadata().GetIPAddress()
 			}
 			assert.ElementsMatch(t, tc.expectedEndpointIPs, gotIPs, "Locate returned unexpected set of endpoint candidates")
 		})

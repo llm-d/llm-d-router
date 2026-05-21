@@ -20,9 +20,9 @@ import (
 	"context"
 	"encoding/json"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 )
 
 const (
@@ -30,7 +30,7 @@ const (
 )
 
 // compile-time type assertion
-var _ framework.Scorer = &LoraAffinityScorer{}
+var _ fwksched.Scorer = &LoraAffinityScorer{}
 
 // LoraAffinityScorerFactory defines the factory function for LoraAffinityScorer.
 func LoraAffinityScorerFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -55,8 +55,8 @@ func (s *LoraAffinityScorer) TypedName() fwkplugin.TypedName {
 }
 
 // Category returns the preference the scorer applies when scoring candidate endpoints.
-func (s *LoraAffinityScorer) Category() framework.ScorerCategory {
-	return framework.Affinity
+func (s *LoraAffinityScorer) Category() fwksched.ScorerCategory {
+	return fwksched.Affinity
 }
 
 // Consumes returns the list of data that is consumed by the plugin.
@@ -73,8 +73,8 @@ func (s *LoraAffinityScorer) WithName(name string) *LoraAffinityScorer {
 	return s
 }
 
-func (s *LoraAffinityScorer) Score(_ context.Context, _ *framework.CycleState, request *framework.InferenceRequest, endpoints []framework.Endpoint) map[framework.Endpoint]float64 {
-	scores := make(map[framework.Endpoint]float64, len(endpoints))
+func (s *LoraAffinityScorer) Score(_ context.Context, _ *fwksched.CycleState, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 
 	// Assign a score to each endpoint for loading the target adapter.
 	for _, endpoint := range endpoints {

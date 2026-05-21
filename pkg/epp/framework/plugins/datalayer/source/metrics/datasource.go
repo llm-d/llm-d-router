@@ -26,8 +26,8 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/spf13/pflag"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/http"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
 const MetricsDataSourceType = "metrics-data-source"

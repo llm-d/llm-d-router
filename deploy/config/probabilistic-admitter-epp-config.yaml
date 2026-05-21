@@ -1,0 +1,21 @@
+# EPP configuration for the probabilistic-admitter plugin.
+#
+# The probabilistic-admitter handles all saturation-based admission decisions,
+# so the system-level utilization-detector is configured with effectively
+# infinite thresholds to prevent it from gating requests before the admitter
+# can evaluate them.
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: probabilistic-admitter
+- type: random-picker  # feel free to plug in other scorers/pickers here
+- type: utilization-detector
+  parameters:
+    queueDepthThreshold: 999999999
+    kvCacheUtilThreshold: 1.0
+saturationDetector:
+  pluginRef: utilization-detector
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: random-picker

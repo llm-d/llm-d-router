@@ -12,7 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 func createModelServersFromKustomize(kustomizeDir string, extra map[string]string) []string {
@@ -21,6 +21,7 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${POOL_NAME}":               poolName,
 		"${VLLM_IMAGE}":              vllmSimImage,
 		"${UDS_TOKENIZER_IMAGE}":     udsTokenizerImage,
+		"${VLLM_RENDER_IMAGE}":       vllmRenderImage,
 		"${SIDECAR_IMAGE}":           sideCarImage,
 		"${VLLM_DATA_PARALLEL_SIZE}": "1",
 		"${VLLM_SIM_MODE}":           "echo",
@@ -136,9 +137,12 @@ func createEndPointPicker(eppConfig string) []string {
 	eppYamls := testutils.ReadYaml(eppManifest)
 	eppYamls = substituteMany(eppYamls,
 		map[string]string{
-			"${EPP_NAME}":              "e2e-epp",
-			"${EPP_IMAGE}":             eppImage,
-			"${UDS_TOKENIZER_IMAGE}":   udsTokenizerImage,
+			"${EPP_NAME}":          "e2e-epp",
+			"${EPP_IMAGE}":         eppImage,
+			"${VLLM_RENDER_IMAGE}": vllmRenderImage,
+			// The render sidecar needs a real, fetchable model. Sim tests
+			// don't query it; the cost is paying weights-load on every EPP.
+			"${MODEL_NAME}":            kvModelName,
 			"${NAMESPACE}":             nsName,
 			"${POOL_NAME}":             simModelName + "-inference-pool",
 			"${METRICS_ENDPOINT_AUTH}": "false",

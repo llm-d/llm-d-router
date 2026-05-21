@@ -31,7 +31,7 @@ because the predictor already neutralizes TPOT for non-streaming mode and prefil
 
 ## Dependencies
 
-- Requires `predicted-latency-producer` to run first (in PrepareRequestData) to populate
+- Requires `predicted-latency-producer` to run first (in Produce) to populate
   `LatencyPredictionInfo` attributes on endpoints.
 - Reads `DispatchedRequestCount` from the same attributes for idle detection.
 - Reads `KVCacheUsagePercent` from endpoint metrics for cold detection.

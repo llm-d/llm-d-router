@@ -34,12 +34,16 @@ const (
 
 	// RolePrefill indicates the handler is a prefiller
 	RolePrefill Role = "prefill"
+
+	contentTypeEventStream = "text/event-stream"
 )
 
 // ChatCompletionHandler is a simple chat completion mock handler
 type ChatCompletionHandler struct {
 	Connector           string
 	Role                Role
+	RawResponse         string
+	RawResponseType     string
 	RequestCount        atomic.Int32
 	CompletionRequests  []map[string]any
 	CompletionResponses []map[string]any
@@ -84,7 +88,7 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	case "nixlv2":
 		switch cc.Role {
 		case RoleDecode:
-			rawResponse = `{}`
+			rawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
 		case RolePrefill:
 
 			// 1. Verify Prefill Request
@@ -135,7 +139,7 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 
 			// 2. Produce Response
 
-			rawResponse = `{"kv_transfer_params":{"remote_block_ids":[1, 2, 3], "remote_engine_id": "5b5fb28f-3f30-4bdd-9a36-958d52459200", "remote_host":"ahost", "remote_port":4032}}`
+			rawResponse = `{"kv_transfer_params":{"remote_block_ids":[1, 2, 3], "remote_engine_id": "5b5fb28f-3f30-4bdd-9a36-958d52459200", "remote_host":"ahost", "remote_port":4032},"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}}}`
 
 		}
 
@@ -148,16 +152,24 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		rawResponse = `{}`
 	}
 
-	var completionResponse map[string]any
-	if err := json.Unmarshal([]byte(rawResponse), &completionResponse); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error())) //nolint:all
-		return
+	if cc.RawResponse != "" {
+		rawResponse = cc.RawResponse
+	}
+	if cc.RawResponseType != "" {
+		w.Header().Set("Content-Type", cc.RawResponseType)
 	}
 
-	cc.mu.Lock()
-	cc.CompletionResponses = append(cc.CompletionResponses, completionResponse)
-	cc.mu.Unlock()
+	var completionResponse map[string]any
+	if cc.RawResponseType != contentTypeEventStream {
+		if err := json.Unmarshal([]byte(rawResponse), &completionResponse); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(err.Error())) //nolint:all
+			return
+		}
+		cc.mu.Lock()
+		cc.CompletionResponses = append(cc.CompletionResponses, completionResponse)
+		cc.mu.Unlock()
+	}
 
 	w.Write([]byte(rawResponse)) //nolint:all
 }

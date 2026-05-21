@@ -29,10 +29,10 @@ import (
 	"github.com/stretchr/testify/require"
 	testclock "k8s.io/utils/clock/testing"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/framework/plugins/queue"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 )
 
 // --- Test Harness ---
@@ -47,9 +47,8 @@ type registryTestHarness struct {
 
 // harnessOptions configures the test harness.
 type harnessOptions struct {
-	config            *Config
-	initialShardCount int
-	manualGC          bool
+	config   *Config
+	manualGC bool
 }
 
 // newRegistryTestHarness creates and starts a new `FlowRegistry` for testing.
@@ -61,18 +60,9 @@ func newRegistryTestHarness(t *testing.T, opts harnessOptions) *registryTestHarn
 
 	if opts.config != nil {
 		cfg = opts.config.Clone()
-		if opts.initialShardCount > 0 {
-			cfg.InitialShardCount = opts.initialShardCount
-		}
 	} else {
-		shardCount := 1
-		if opts.initialShardCount > 0 {
-			shardCount = opts.initialShardCount
-		}
-
 		cfg, err = NewConfig(
 			newTestPluginsHandle(t),
-			WithInitialShardCount(shardCount),
 			WithFlowGCTimeout(5*time.Minute),
 			WithPriorityBand(&PriorityBandConfig{Priority: highPriority}),
 			WithPriorityBand(&PriorityBandConfig{Priority: lowPriority}),
@@ -206,20 +196,16 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 
 	t.Run("Handle_Shards_ShouldReturnAllActiveShardsAndBeACopy", func(t *testing.T) {
 		t.Parallel()
-		// Create a registry with one shard.
-		h := newRegistryTestHarness(t, harnessOptions{initialShardCount: 1})
+		// Create a registry
+		h := newRegistryTestHarness(t, harnessOptions{})
 		require.NotNil(t, h.fr.shard, "Test setup: should have one shard")
 
 		key := flowcontrol.FlowKey{ID: "test-flow", Priority: highPriority}
 
 		err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
-			shards := conn.ActiveShards()
+			shard := conn.GetShard()
 
-			assert.Len(t, shards, 1, "ActiveShards() must only return the Active shards")
-
-			// Assert it's a copy by maliciously modifying it.
-			require.NotEmpty(t, shards, "Test setup assumes shards are present")
-			shards[0] = nil // Modify the local copy.
+			assert.NotNil(t, shard, "GetShard() must never return nil")
 
 			return nil
 		})
@@ -236,7 +222,7 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 func TestFlowRegistry_Stats(t *testing.T) {
 	t.Parallel()
 
-	h := newRegistryTestHarness(t, harnessOptions{initialShardCount: 1})
+	h := newRegistryTestHarness(t, harnessOptions{})
 	keyHigh := flowcontrol.FlowKey{ID: "high-pri-flow", Priority: highPriority}
 	keyLow := flowcontrol.FlowKey{ID: "low-pri-flow", Priority: lowPriority}
 	h.openConnectionOnFlow(keyHigh)
@@ -257,17 +243,16 @@ func TestFlowRegistry_Stats(t *testing.T) {
 	assert.Equal(t, uint64(40), globalStats.TotalByteSize, "Global TotalByteSize should be the sum of all item sizes")
 
 	shardStats := h.fr.ShardStats()
-	require.Len(t, shardStats, 1, "Should return stats for one shard")
 	var totalShardLen, totalShardBytes uint64
-	for _, ss := range shardStats {
-		assert.True(t, ss.IsActive, "All shards should be active in this test")
-		assert.NotEmpty(t, ss.PerPriorityBandStats, "Each shard should have stats for its priority bands")
-		assert.NotEmpty(t, ss.ID, "Each shard should have a non-empty ID")
-		totalShardLen += ss.TotalLen
-		totalShardBytes += ss.TotalByteSize
-	}
-	assert.Equal(t, globalStats.TotalLen, totalShardLen, "Sum of shard lengths must equal global length")
-	assert.Equal(t, globalStats.TotalByteSize, totalShardBytes, "Sum of shard byte sizes must equal global byte size")
+
+	assert.True(t, shardStats.IsActive, "The shard should be active in this test")
+	assert.NotEmpty(t, shardStats.PerPriorityBandStats, "The shard should have stats for its priority bands")
+	assert.NotEmpty(t, shardStats.ID, "The shard should have a non-empty ID")
+	totalShardLen += shardStats.TotalLen
+	totalShardBytes += shardStats.TotalByteSize
+
+	assert.Equal(t, globalStats.TotalLen, totalShardLen, "The shard length must equal global length")
+	assert.Equal(t, globalStats.TotalByteSize, totalShardBytes, "The shard byte size must equal global byte size")
 }
 
 // --- Garbage Collection Tests ---
@@ -368,8 +353,7 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 
 	t.Run("ShouldCreateBand_WhenPriorityIsUnknown", func(t *testing.T) {
 		t.Parallel()
-		// Start with 2 shards to ensure propagation works across the cluster.
-		h := newRegistryTestHarness(t, harnessOptions{initialShardCount: 2})
+		h := newRegistryTestHarness(t, harnessOptions{})
 		dynamicPrio := 55
 		key := flowcontrol.FlowKey{ID: "dynamic-flow", Priority: dynamicPrio}
 
@@ -394,7 +378,7 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 
 	t.Run("ShouldHandleConcurrentDynamicCreation", func(t *testing.T) {
 		t.Parallel()
-		h := newRegistryTestHarness(t, harnessOptions{initialShardCount: 2})
+		h := newRegistryTestHarness(t, harnessOptions{})
 		dynamicPrio := 77
 		key := flowcontrol.FlowKey{ID: "race-flow", Priority: dynamicPrio}
 
@@ -419,7 +403,7 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 
 	t.Run("ShouldPersistDynamicBands", func(t *testing.T) {
 		t.Parallel()
-		h := newRegistryTestHarness(t, harnessOptions{initialShardCount: 1})
+		h := newRegistryTestHarness(t, harnessOptions{})
 		dynamicPrio := 88
 		key := flowcontrol.FlowKey{ID: "scaling-flow", Priority: dynamicPrio}
 
@@ -432,6 +416,91 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 		mq, err := h.fr.shard.ManagedQueue(key)
 		require.NoError(t, err, "Existing flows should be auto-synced")
 		require.NotNil(t, mq)
+	})
+
+	t.Run("ShouldUseNegativeBandTemplate_WhenPriorityBelowZero", func(t *testing.T) {
+		t.Parallel()
+		handle := newTestPluginsHandle(t)
+
+		negativeMaxBytes := uint64(256)
+		cfg, err := NewConfig(handle,
+			WithDefaultNegativePriorityBand(&PriorityBandConfig{
+				MaxBytes: negativeMaxBytes,
+			}),
+		)
+		require.NoError(t, err)
+
+		h := newRegistryTestHarness(t, harnessOptions{config: cfg})
+
+		negativePrio := -5
+		key := flowcontrol.FlowKey{ID: "negative-flow", Priority: negativePrio}
+
+		err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+			return nil
+		})
+		require.NoError(t, err, "WithConnection should succeed for negative priority")
+
+		h.fr.mu.RLock()
+		band, exists := h.fr.config.PriorityBands[negativePrio]
+		h.fr.mu.RUnlock()
+		require.True(t, exists, "Negative priority band should be dynamically provisioned")
+		assert.Equal(t, negativeMaxBytes, band.MaxBytes,
+			"Negative priority band should use DefaultNegativePriorityBand template")
+	})
+
+	t.Run("ShouldFallBackToDefaultBand_WhenNegativeTemplateIsNil", func(t *testing.T) {
+		t.Parallel()
+		handle := newTestPluginsHandle(t)
+
+		cfg, err := NewConfig(handle)
+		require.NoError(t, err)
+
+		h := newRegistryTestHarness(t, harnessOptions{config: cfg})
+
+		negativePrio := -3
+		key := flowcontrol.FlowKey{ID: "fallback-flow", Priority: negativePrio}
+
+		err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+			return nil
+		})
+		require.NoError(t, err)
+
+		h.fr.mu.RLock()
+		band, exists := h.fr.config.PriorityBands[negativePrio]
+		h.fr.mu.RUnlock()
+		require.True(t, exists, "Negative priority band should still be provisioned")
+		assert.Equal(t, defaultPriorityBandMaxBytes, band.MaxBytes,
+			"Without negative template, should fall back to default band's MaxBytes")
+	})
+
+	t.Run("ShouldUseDefaultBand_WhenPositivePriorityWithNegativeTemplate", func(t *testing.T) {
+		t.Parallel()
+		handle := newTestPluginsHandle(t)
+
+		negativeMaxBytes := uint64(100)
+		cfg, err := NewConfig(handle,
+			WithDefaultNegativePriorityBand(&PriorityBandConfig{
+				MaxBytes: negativeMaxBytes,
+			}),
+		)
+		require.NoError(t, err)
+
+		h := newRegistryTestHarness(t, harnessOptions{config: cfg})
+
+		positivePrio := 42
+		key := flowcontrol.FlowKey{ID: "positive-flow", Priority: positivePrio}
+
+		err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+			return nil
+		})
+		require.NoError(t, err)
+
+		h.fr.mu.RLock()
+		band, exists := h.fr.config.PriorityBands[positivePrio]
+		h.fr.mu.RUnlock()
+		require.True(t, exists, "Positive priority band should be provisioned")
+		assert.Equal(t, defaultPriorityBandMaxBytes, band.MaxBytes,
+			"Positive priorities should use DefaultPriorityBand, not the negative template")
 	})
 }
 
@@ -636,7 +705,7 @@ func TestFlowRegistry_deletePriorityBand(t *testing.T) {
 
 	t.Run("ShouldDeleteDynamicBandFromAllShards", func(t *testing.T) {
 		t.Parallel()
-		h := newRegistryTestHarness(t, harnessOptions{initialShardCount: 1})
+		h := newRegistryTestHarness(t, harnessOptions{})
 
 		// Create a dynamic priority band via JIT provisioning
 		err := h.fr.ensurePriorityBand(dynamicPrio)
@@ -831,7 +900,7 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 
 	t.Run("ShouldCollectBand_AcrossMultipleShards", func(t *testing.T) {
 		t.Parallel()
-		h := newRegistryTestHarness(t, harnessOptions{initialShardCount: 1})
+		h := newRegistryTestHarness(t, harnessOptions{})
 		key := flowcontrol.FlowKey{ID: "test-flow", Priority: dynamicPrio}
 
 		// Create flow on all shards

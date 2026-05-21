@@ -14,7 +14,7 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Set a default CLUSTER_NAME if not provided
-: "${CLUSTER_NAME:=llm-d-inference-scheduler-dev}"
+: "${CLUSTER_NAME:=llm-d-router-dev}"
 
 # Set the host port to map to the Gateway's inbound port (30080)
 : "${GATEWAY_HOST_PORT:=30080}"
@@ -33,7 +33,7 @@ export VLLM_IMAGE="${VLLM_IMAGE:-${IMAGE_REGISTRY}/llm-d-inference-sim:${VLLM_SI
 export EPP_TAG="${EPP_TAG:-dev}"
 
 # Set a default EPP_IMAGE if not provided
-EPP_IMAGE="${EPP_IMAGE:-${IMAGE_REGISTRY}/llm-d-inference-scheduler:${EPP_TAG}}"
+EPP_IMAGE="${EPP_IMAGE:-${IMAGE_REGISTRY}/llm-d-router-endpoint-picker:${EPP_TAG}}"
 export EPP_IMAGE
 
 # Set the model name to deploy.
@@ -59,7 +59,7 @@ export EPP_NAME="${EPP_NAME:-${MODEL_NAME_SAFE}-endpoint-picker}"
 export SIDECAR_TAG="${SIDECAR_TAG:-dev}"
 
 # Set a default SIDECAR_IMAGE if not provided
-SIDECAR_IMAGE="${SIDECAR_IMAGE:-${IMAGE_REGISTRY}/llm-d-routing-sidecar:${SIDECAR_TAG}}"
+SIDECAR_IMAGE="${SIDECAR_IMAGE:-${IMAGE_REGISTRY}/llm-d-router-disagg-sidecar:${SIDECAR_TAG}}"
 export SIDECAR_IMAGE
 
 # Set the default UDS tokenizer image tag
@@ -68,6 +68,10 @@ export UDS_TOKENIZER_TAG="${UDS_TOKENIZER_TAG:-dev}"
 # Set a default UDS_TOKENIZER_IMAGE if not provided
 UDS_TOKENIZER_IMAGE="${UDS_TOKENIZER_IMAGE:-${IMAGE_REGISTRY}/llm-d-uds-tokenizer:${UDS_TOKENIZER_TAG}}"
 export UDS_TOKENIZER_IMAGE
+
+# Set a default VLLM_RENDER_IMAGE if not provided (CPU-only vLLM image that
+# runs `vllm launch render` for the token-producer plugin's HTTP backend).
+export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.19.1}"
 
 # Set the inference pool name for the deployment
 export POOL_NAME="${POOL_NAME:-${MODEL_NAME_SAFE}-inference-pool}"
@@ -249,7 +253,7 @@ nodes:
 - role: control-plane
   # Pin to Kubernetes 1.31+ for Gateway API v1.5.1 compatibility
   # (requires isIP() CEL function and ValidatingAdmissionPolicy)
-  image: kindest/node:v1.31.2
+  image: kindest/node:v1.31.12
   extraPortMappings:
   - containerPort: 30080
     hostPort: ${GATEWAY_HOST_PORT}
@@ -304,20 +308,7 @@ fi
 
 pull_image() {
     local image="$1"
-    if [ "${CONTAINER_RUNTIME}" == "docker" ]; then
-        # Pull with --platform to ensure platform-specific layers are cached.
-        # If the pull fails, check for a local image (e.g. a locally-built :dev tag)
-        # before giving up — only treat the failure as non-fatal when the image
-        # already exists locally. Real failures (network, auth) are surfaced as errors.
-        if ! "${CONTAINER_RUNTIME}" pull ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} "${image}" 2>/dev/null; then
-            if "${CONTAINER_RUNTIME}" image inspect "${image}" > /dev/null 2>&1; then
-                echo "Note: ${image} not found in registry, using local build."
-            else
-                echo "Error: failed to pull ${image} and no local image found." >&2
-                return 1
-            fi
-        fi
-    elif ! "${CONTAINER_RUNTIME}" image inspect "${image}" > /dev/null 2>&1; then
+    if ! "${CONTAINER_RUNTIME}" image inspect "${image}" > /dev/null 2>&1; then
         echo "Image ${image} not found locally, pulling..."
         "${CONTAINER_RUNTIME}" pull ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} "${image}"
     fi
@@ -400,7 +391,7 @@ kubectl --context ${KUBE_CONTEXT} create configmap epp-config --from-file=epp-co
 # Deploy Istio base (shared infrastructure)
 kubectl kustomize --enable-helm deploy/environments/dev/base-kind-istio \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
-  ${SIDECAR_IMAGE} ${UDS_TOKENIZER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
+  ${SIDECAR_IMAGE} ${UDS_TOKENIZER_IMAGE} ${VLLM_RENDER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
 ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE}' \
   | kubectl --context ${KUBE_CONTEXT} apply -f -
 

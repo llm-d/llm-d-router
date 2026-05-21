@@ -5,7 +5,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	compbasemetrics "k8s.io/component-base/metrics"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
 const (
@@ -68,7 +68,7 @@ var (
 	)
 )
 
-// GetCollectors returns all custom collectors for the llm-d-inference-scheduler.
+// GetCollectors returns all custom collectors for the llm-d-router.
 func GetCollectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		SchedulerPDDecisionCount,

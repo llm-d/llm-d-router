@@ -2,9 +2,11 @@
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-  - type: tokenizer
+  - type: token-producer
     parameters:
       modelName: hf-repo/model-name           # set to the model used in the vLLM deployment
+      vllm:
+        http: http://localhost:8000
   - type: endpoint-notification-source
   - type: metrics-data-source
   - type: core-metrics-extractor
@@ -13,13 +15,10 @@ plugins:
   - type: precise-prefix-cache-scorer
     parameters:
       tokenProcessorConfig:
-        blockSize: 64                 # must match vLLM block size
-        hashSeed: "42"                # must match vLLM PYTHONHASHSEED env var
+        blockSize: 64
       indexerConfig:
-        tokenizersPoolConfig:
-          modelName: hf-repo/model-name
         kvBlockIndexConfig:
-          enableMetrics: true           # enable kv-block index metrics (prometheus)
+          enableMetrics: true         # enable kv-block index metrics (prometheus)
   - type: kv-cache-utilization-scorer
   - type: queue-scorer
   - type: max-score-picker
@@ -35,7 +34,6 @@ schedulingProfiles:
   - name: default
     plugins:
       - pluginRef: decode-filter
-      - pluginRef: tokenizer
       - pluginRef: precise-prefix-cache-scorer
         weight: 2.0
       - pluginRef: kv-cache-utilization-scorer

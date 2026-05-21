@@ -22,12 +22,14 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/openai"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
@@ -341,10 +343,11 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	reqCtx := &RequestContext{
 		Response: &Response{
 			Headers: map[string]string{
-				"x-backend-server":              "vllm-v0.6.3",            // should passthrough
-				metadata.ObjectiveKey:           "sensitive-objective-id", // should be stripped
-				metadata.DestinationEndpointKey: "10.2.0.5:8080",          // should be stripped
-				"content-length":                "500",                    // should be stripped
+				"x-backend-server":              "vllm-v0.6.3",                // should passthrough
+				metadata.ObjectiveKey:           "sensitive-objective-id",     // should be stripped
+				metadata.OldObjectiveKey:        "old-sensitive-objective-id", // should be stripped
+				metadata.DestinationEndpointKey: "10.2.0.5:8080",              // should be stripped
+				"content-length":                "500",                        // should be stripped
 			},
 		},
 	}
@@ -359,6 +362,7 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	assert.Contains(t, gotHeaders, "x-backend-server")
 	assert.Contains(t, gotHeaders, "x-went-into-resp-headers")
 	assert.NotContains(t, gotHeaders, metadata.ObjectiveKey)
+	assert.NotContains(t, gotHeaders, metadata.OldObjectiveKey)
 	assert.NotContains(t, gotHeaders, metadata.DestinationEndpointKey)
 	assert.NotContains(t, gotHeaders, "content-length")
 }
@@ -483,6 +487,65 @@ func TestResponseSizeAccumulation(t *testing.T) {
 				server.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 			}
 			assert.Equal(t, tt.wantResponseSize, reqCtx.ResponseSize)
+		})
+	}
+}
+
+// TestGenerateResponseBodyResponses_DynamicMetadata verifies that DynamicMetadata is attached
+// to the last ProcessingResponse chunk and not to earlier chunks. This is a regression test for
+// the bug where the metadata was computed by plugins but silently dropped before reaching Envoy.
+func TestGenerateResponseBodyResponses_DynamicMetadata(t *testing.T) {
+	meta := &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			"envoy.lb": structpb.NewStructValue(&structpb.Struct{
+				Fields: map[string]*structpb.Value{
+					"x-gateway-inference-request-cost": structpb.NewNumberValue(42),
+				},
+			}),
+		},
+	}
+
+	tests := []struct {
+		name            string
+		body            []byte
+		dynamicMetadata *structpb.Struct
+		wantMetaOnLast  bool
+	}{
+		{
+			name:            "metadata attached to last chunk when provided",
+			body:            []byte(`{"result":"ok"}`),
+			dynamicMetadata: meta,
+			wantMetaOnLast:  true,
+		},
+		{
+			name:            "no metadata when nil",
+			body:            []byte(`{"result":"ok"}`),
+			dynamicMetadata: nil,
+			wantMetaOnLast:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			responses := generateResponseBodyResponses(tc.body, true, tc.dynamicMetadata)
+			require.NotEmpty(t, responses, "expected at least one response")
+
+			last := responses[len(responses)-1]
+			if tc.wantMetaOnLast {
+				require.NotNil(t, last.DynamicMetadata, "expected DynamicMetadata on last chunk")
+				envoyLb, ok := last.DynamicMetadata.Fields["envoy.lb"]
+				require.True(t, ok, "expected envoy.lb namespace in DynamicMetadata")
+				cost, ok := envoyLb.GetStructValue().Fields["x-gateway-inference-request-cost"]
+				require.True(t, ok)
+				assert.Equal(t, float64(42), cost.GetNumberValue())
+			} else {
+				assert.Nil(t, last.DynamicMetadata, "expected no DynamicMetadata when none provided")
+			}
+
+			// Earlier chunks must never carry metadata.
+			for i, r := range responses[:len(responses)-1] {
+				assert.Nil(t, r.DynamicMetadata, "chunk %d should not have DynamicMetadata", i)
+			}
 		})
 	}
 }

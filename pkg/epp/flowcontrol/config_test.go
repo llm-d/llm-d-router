@@ -25,20 +25,20 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 
-	configapi "github.com/llm-d/llm-d-inference-scheduler/apix/config/v1alpha1"
-	flowcontrolif "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	utils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
+	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 func TestNewConfigFromAPI(t *testing.T) {
 	t.Parallel()
 
-	handle := utils.NewTestHandle(context.Background())
+	handle := igwtestutils.NewTestHandle(context.Background())
 	handle.AddPlugin(globalstrict.GlobalStrictFairnessPolicyType, &mocks.MockFairnessPolicy{
 		TypedNameV: fwkplugin.TypedName{
 			Name: globalstrict.GlobalStrictFairnessPolicyType,
@@ -82,8 +82,6 @@ func TestNewConfigFromAPI(t *testing.T) {
 				assert.NotNil(t, cfg.Registry, "Registry config sub-struct should be initialized even when API config is nil")
 				assert.NotNil(t, cfg.Controller,
 					"Controller config sub-struct should be initialized even when API config is nil")
-				assert.NotZero(t, cfg.Registry.InitialShardCount,
-					"Registry should contain default values (InitialShardCount) when API config is nil")
 				assert.NotZero(t, cfg.Controller.EnqueueChannelBufferSize,
 					"Controller should contain default values (EnqueueChannelBufferSize) when API config is nil")
 			},
@@ -201,4 +199,4 @@ func (p *constantPointEightPolicy) ComputeLimit(_ context.Context, _ float64, pr
 }
 
 // compile-time check that constantPointEightPolicy satisfies the interface.
-var _ flowcontrolif.UsageLimitPolicy = (*constantPointEightPolicy)(nil)
+var _ fwkfc.UsageLimitPolicy = (*constantPointEightPolicy)(nil)

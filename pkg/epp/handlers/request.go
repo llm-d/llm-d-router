@@ -20,6 +20,7 @@ import (
 	"context"
 	"maps"
 	"strconv"
+	"strings"
 	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -28,10 +29,10 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	envoy "github.com/llm-d/llm-d-inference-scheduler/pkg/common/envoy"
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/request"
+	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *RequestContext, req *extProcPb.ProcessingRequest_RequestHeaders) error {
@@ -47,16 +48,12 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 	}
 
 	for _, header := range req.RequestHeaders.Headers.Headers {
-		reqCtx.Request.Headers[header.Key] = envoy.GetHeaderValue(header)
-		switch header.Key {
-		case metadata.FlowFairnessIDKey:
-			reqCtx.FairnessID = reqCtx.Request.Headers[header.Key]
-		case metadata.ObjectiveKey:
-			reqCtx.ObjectiveKey = reqCtx.Request.Headers[header.Key]
-		case metadata.ModelNameRewriteKey:
-			reqCtx.TargetModelName = reqCtx.Request.Headers[header.Key]
-		}
+		reqCtx.Request.Headers[strings.ToLower(header.Key)] = envoy.GetHeaderValue(header)
 	}
+
+	reqCtx.FairnessID, _ = metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
+	reqCtx.ObjectiveKey, _ = metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.ObjectiveKey)
+	reqCtx.TargetModelName, _ = metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.ModelNameRewriteKey)
 
 	if reqCtx.FairnessID == "" {
 		reqCtx.FairnessID = metadata.DefaultFairnessID

@@ -48,18 +48,16 @@ schedulingProfiles:
 
 #### Token Counting
 
-Reads tokenized prompt data from `CycleState` as written by the `tokenizer` plugin. When a tokenizer is configured in the same scheduling profile, the exact token count is used. Otherwise falls back to character-based estimation (characters × 0.25).
+Reads tokenized prompt data from `request.Body.TokenizedPrompt` as written by the `token-producer` DataProducer plugin. When a token-producer is configured, the exact token count is used. Otherwise falls back to character-based estimation (characters × 0.25).
 
-> **Note:** The `tokenizer` plugin must appear **before** `context-length-aware` in the scheduling profile so that `CycleState` is populated before scoring runs.
-
-**Example — Scorer with tokenizer:**
+**Example — Scorer with token-producer:**
 ```yaml
 plugins:
-  - type: tokenizer
+  - type: token-producer
     parameters:
       modelName: meta-llama/Llama-3.1-8B-Instruct
-      udsTokenizerConfig:
-        socketFile: /tmp/tokenizer/tokenizer-uds.socket
+      vllm:
+        http: http://localhost:8000
   - type: context-length-aware
     parameters:
       label: llm-d.ai/context-length-range
@@ -68,8 +66,6 @@ plugins:
 schedulingProfiles:
   - name: default
     plugins:
-      - pluginRef: tokenizer
-        weight: 1
       - pluginRef: context-length-aware
         weight: 3
       - pluginRef: load-aware-scorer

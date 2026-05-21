@@ -1,18 +1,9 @@
 inferenceExtension:
-  replicas: 1
-  image:
-    registry: ghcr.io/llm-d
-    repository: llm-d-inference-scheduler-dev
-    tag: main
-    pullPolicy: Always
-  extProcPort: 9002
   extraServicePorts:
     - name: http
       port: 8081
       protocol: TCP
       targetPort: 8081
-  env: []
-  pluginsConfigFile: "default-plugins.yaml"
 
   endpointsServer:
     # set it to false when you want to deploy EPP with inferencepool
@@ -23,12 +14,19 @@ inferenceExtension:
     targetPorts:
       - 8000
     # unused when createInferencePool is true
-    modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve
-
+    modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton
+    # unused when createInferencePool is true
+    modelServerProtocol: http # http, grpc
 
   sidecar:
     enabled: true
     proxyType: envoy
+    resources:
+      requests:
+        cpu: "4"
+        memory: 8Gi
+      limits:
+        memory: 16Gi
 
     # Agentgateway-specific settings used by the built-in preset when
     # proxyType=agentgateway. service.name is required.
@@ -253,7 +251,7 @@ inferenceExtension:
           - "--service-node"
           - "envoy-sidecar"
           - "--log-level"
-          - "trace"
+          - "warn"
           - "--cpuset-threads"
           - "--drain-strategy"
           - "immediate"
@@ -275,10 +273,6 @@ inferenceExtension:
             name: http-8081
           - containerPort: 19001
             name: metrics-19001
-        resources:
-          requests:
-            cpu: 100m
-            memory: 512Mi
         readinessProbe:
           failureThreshold: 1
           httpGet:
@@ -315,10 +309,6 @@ inferenceExtension:
             name: metrics-15020
           - containerPort: 15021
             name: readiness-15021
-        resources:
-          requests:
-            cpu: 100m
-            memory: 256Mi
         readinessProbe:
           failureThreshold: 1
           httpGet:
@@ -340,47 +330,13 @@ inferenceExtension:
 
     # Optional explicit sidecar overrides applied on top of the selected
     # preset. For example, set sidecar.image to replace the preset image.
-  monitoring:
-    interval: "10s"
-    # Prometheus ServiceMonitor will be created when enabled for EPP metrics collection
-    prometheus:
-      enabled: false
-      auth:
-        # To allow unauthenticated /metrics access (e.g., for debugging with curl), set to false
-        enabled: true
-
-  tracing:
-    enabled: false
-
-  latencyPredictor:
-    # common latencyPredictor setting exists in config/charts/inference-extension/values.yaml
-    enabled: false
-
-  # Metrics DataSource Configuration
-  # These values configure how the EPP scrapes metrics from model server pods.
-  metricsDataSource:
-    # scheme is the HTTP scheme used to scrape metrics (http or https).
-    scheme: "http"
-    # path is the URL path on the model server pod that exposes Prometheus metrics.
-    path: "/metrics"
-    # insecureSkipVerify disables TLS certificate verification when scheme is https.
-    insecureSkipVerify: true
-
-# Options: ["gke"]
-provider:
-  name: none
-
-  # GKE-specific configuration.
-  # This block is only used if name is "gke".
-  gke:
-    # Set to true if the cluster is an Autopilot cluster.
-    autopilot: false
 
 # This is not used when you deploy standalone with inferenceExtension.endpointsServer.createInferencePool=false
 inferencePool:
   targetPorts:
     - number: 8000
-  modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve
+  modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton
+  modelServerProtocol: http # http, grpc
   apiVersion: inference.networking.k8s.io/v1
   # modelServers: # REQUIRED
   #   matchLabels:

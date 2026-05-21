@@ -1,0 +1,34 @@
+# Sample EPP configuration with the token-producer plugin (vLLM HTTP backend)
+# and the precise-prefix-cache-scorer. Sidecar:
+#   command: ["vllm", "launch", "render"]
+#   args:    ["${MODEL_NAME}", "--port=8000"]
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: token-producer
+  parameters:
+    modelName: "${MODEL_NAME}"
+    vllm:
+      http: "http://localhost:8000"
+      # timeout: "5s"
+      # mmTimeout: "30s"
+- type: precise-prefix-cache-scorer
+  parameters:
+    tokenProcessorConfig:
+      blockSize: 16
+      hashSeed: "42"
+    kvEventsConfig:
+      zmqEndpoint: tcp://0.0.0.0:5557
+    indexerConfig:
+      kvBlockIndexConfig:
+        enableMetrics: false
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: precise-prefix-cache-scorer
+    weight: 10

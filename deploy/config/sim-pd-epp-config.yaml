@@ -2,8 +2,6 @@
 # Use with small hash block size for simulation purposes
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
-featureGates:
-- prepareDataPlugins
 plugins:
 - type: prefix-cache-scorer
   parameters:

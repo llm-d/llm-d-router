@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	extmodels "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/models"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/http"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
 const ModelsDataSourceType = "models-data-source"

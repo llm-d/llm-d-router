@@ -23,10 +23,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrconcurrency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 )
 
 func TestTokenLoadScorer(t *testing.T) {
@@ -35,6 +35,7 @@ func TestTokenLoadScorer(t *testing.T) {
 	scorer := &TokenLoadScorer{
 		typedName:            fwkplugin.TypedName{Type: TokenLoadScorerType, Name: TokenLoadScorerType},
 		queueThresholdTokens: threshold,
+		inFlightLoadDataKey:  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(""),
 	}
 
 	pod1NN := types.NamespacedName{Namespace: "default", Name: "pod1"}
@@ -49,9 +50,9 @@ func TestTokenLoadScorer(t *testing.T) {
 
 	// pod1: 0 tokens (default)
 	// pod2: 500 tokens
-	endpoints[1].Put(attrconcurrency.InFlightLoadKey, &attrconcurrency.InFlightLoad{Tokens: 500})
+	endpoints[1].Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 500})
 	// pod3: 1000 tokens
-	endpoints[2].Put(attrconcurrency.InFlightLoadKey, &attrconcurrency.InFlightLoad{Tokens: 1000})
+	endpoints[2].Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 1000})
 
 	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), &fwksched.InferenceRequest{}, endpoints)
 

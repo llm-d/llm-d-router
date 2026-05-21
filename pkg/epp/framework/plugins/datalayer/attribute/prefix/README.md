@@ -6,7 +6,7 @@ This package defines the data structures for tracking prefix cache hits and stat
 
 Contains information about how much of a request's prefix matched the cache on a specific endpoint.
 
-- **Key**: `PrefixCacheMatchInfoKey`
+- **Key**: `PrefixCacheMatchInfoDataKey`
 - **Fields**:
   - `MatchBlocks`: Number of blocks that matched the cache.
   - `TotalBlocks`: Total number of blocks in the request prefix.

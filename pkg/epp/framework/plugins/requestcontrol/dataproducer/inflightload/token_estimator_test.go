@@ -21,8 +21,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 func TestSimpleTokenEstimator_Estimate(t *testing.T) {
@@ -30,7 +30,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 
 	testCases := []struct {
 		name     string
-		request  *framework.InferenceRequest
+		request  *fwksched.InferenceRequest
 		expected int64
 	}{
 		{
@@ -40,19 +40,19 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name:     "Empty request",
-			request:  &framework.InferenceRequest{},
+			request:  &fwksched.InferenceRequest{},
 			expected: 0,
 		},
 		{
 			name: "Body nil",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: nil,
 			},
 			expected: 0,
 		},
 		{
 			name: "Less than 4 characters",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "123"},
@@ -63,7 +63,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name: "Completions Request",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "Hello, world!"},
@@ -74,7 +74,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name: "Completions with empty prompt",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{},
@@ -85,7 +85,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name: "Completions with exactly 4 characters",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "1234"},
@@ -96,7 +96,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name: "Chat Completions Request with Structured content",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					ChatCompletions: &fwkrh.ChatCompletionsRequest{
 						Messages: []fwkrh.Message{
@@ -119,7 +119,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name: "Chat Completions with Raw content",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					ChatCompletions: &fwkrh.ChatCompletionsRequest{
 						Messages: []fwkrh.Message{
@@ -137,7 +137,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name: "Chat Completions with multiple messages",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					ChatCompletions: &fwkrh.ChatCompletionsRequest{
 						Messages: []fwkrh.Message{
@@ -167,7 +167,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name: "Chat Completions with empty messages",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					ChatCompletions: &fwkrh.ChatCompletionsRequest{
 						Messages: []fwkrh.Message{},
@@ -178,7 +178,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name: "Responses API with string input",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Responses: &fwkrh.ResponsesRequest{
 						Input: "Tell me a story about a brave knight.",
@@ -189,7 +189,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name: "Responses API with structured input",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Responses: &fwkrh.ResponsesRequest{
 						Input: []any{
@@ -202,7 +202,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 		},
 		{
 			name: "Conversations API",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Conversations: &fwkrh.ConversationsRequest{
 						Items: []fwkrh.ConversationItem{
@@ -231,12 +231,12 @@ func TestSimpleTokenEstimator_Estimate_CustomConfig(t *testing.T) {
 
 	testCases := []struct {
 		name     string
-		request  *framework.InferenceRequest
+		request  *fwksched.InferenceRequest
 		expected int64
 	}{
 		{
 			name: "Empty prompt with custom config",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{},
@@ -247,7 +247,7 @@ func TestSimpleTokenEstimator_Estimate_CustomConfig(t *testing.T) {
 		},
 		{
 			name: "4 chars with custom config",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "1234"},
@@ -258,7 +258,7 @@ func TestSimpleTokenEstimator_Estimate_CustomConfig(t *testing.T) {
 		},
 		{
 			name: "More than 4 chars with custom config",
-			request: &framework.InferenceRequest{
+			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "This is a longer message."},

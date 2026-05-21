@@ -75,7 +75,7 @@ export EPP_NAME="${EPP_NAME:-${MODEL_NAME_SAFE}-endpoint-picker}"
 export EPP_TAG="${EPP_TAG:-v0.1.0}"
 
 # EPP container image (full reference including tag)
-export EPP_IMAGE="${EPP_IMAGE:-${IMAGE_REGISTRY}/llm-d-inference-scheduler:${EPP_TAG}}"
+export EPP_IMAGE="${EPP_IMAGE:-${IMAGE_REGISTRY}/llm-d-router-endpoint-picker:${EPP_TAG}}"
 
 # Whether P/D mode is enabled for this deployment
 export PD_ENABLED="\"${PD_ENABLED:-false}\""

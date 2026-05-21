@@ -30,10 +30,10 @@ import (
 	"k8s.io/component-base/metrics/testutil"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	schedulingframework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -839,12 +839,12 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 
 	t.Run("success with endpoint metadata", func(t *testing.T) {
 		Reset()
-		result := &schedulingframework.SchedulingResult{
+		result := &fwksched.SchedulingResult{
 			PrimaryProfileName: "primary",
-			ProfileResults: map[string]*schedulingframework.ProfileRunResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
 				"primary": {
-					TargetEndpoints: []schedulingframework.Endpoint{
-						schedulingframework.NewEndpoint(
+					TargetEndpoints: []fwksched.Endpoint{
+						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
 								NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
 								PodName:        "pod-1",
@@ -863,12 +863,12 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 
 	t.Run("success with multiple endpoints uses first", func(t *testing.T) {
 		Reset()
-		result := &schedulingframework.SchedulingResult{
+		result := &fwksched.SchedulingResult{
 			PrimaryProfileName: "primary",
-			ProfileResults: map[string]*schedulingframework.ProfileRunResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
 				"primary": {
-					TargetEndpoints: []schedulingframework.Endpoint{
-						schedulingframework.NewEndpoint(
+					TargetEndpoints: []fwksched.Endpoint{
+						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
 								NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
 								PodName:        "pod-1",
@@ -876,7 +876,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 							},
 							nil, nil,
 						),
-						schedulingframework.NewEndpoint(
+						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
 								NamespacedName: k8stypes.NamespacedName{Name: "pod-2", Namespace: "ns-2"},
 								PodName:        "pod-2",
@@ -895,12 +895,12 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 
 	t.Run("success with different models and endpoints", func(t *testing.T) {
 		Reset()
-		resultA := &schedulingframework.SchedulingResult{
+		resultA := &fwksched.SchedulingResult{
 			PrimaryProfileName: "primary",
-			ProfileResults: map[string]*schedulingframework.ProfileRunResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
 				"primary": {
-					TargetEndpoints: []schedulingframework.Endpoint{
-						schedulingframework.NewEndpoint(
+					TargetEndpoints: []fwksched.Endpoint{
+						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
 								NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
 								PodName:        "pod-1",
@@ -912,12 +912,12 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 				},
 			},
 		}
-		resultB := &schedulingframework.SchedulingResult{
+		resultB := &fwksched.SchedulingResult{
 			PrimaryProfileName: "primary",
-			ProfileResults: map[string]*schedulingframework.ProfileRunResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
 				"primary": {
-					TargetEndpoints: []schedulingframework.Endpoint{
-						schedulingframework.NewEndpoint(
+					TargetEndpoints: []fwksched.Endpoint{
+						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
 								NamespacedName: k8stypes.NamespacedName{Name: "pod-2", Namespace: "ns-2"},
 								PodName:        "pod-2",
@@ -944,109 +944,6 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 			RecordSchedulerAttempt(errors.New("simulated scheduling failure"), "modelA", nil)
 		}
 		compareMetrics(t, "testdata/scheduler_attempts_total_metrics")
-	})
-}
-
-func TestPrefixCacheMetrics(t *testing.T) {
-	Reset()
-	const (
-		PrefixCacheSizeMetric      = inferenceExtension + "_prefix_indexer_size"
-		PrefixCacheHitRatioMetric  = inferenceExtension + "_prefix_indexer_hit_ratio"
-		PrefixCacheHitLengthMetric = inferenceExtension + "_prefix_indexer_hit_bytes"
-	)
-
-	type cacheMatchRecord struct {
-		matchedLength int
-		totalLength   int
-	}
-
-	scenario := struct {
-		name         string
-		cacheSizes   []int64
-		cacheMatches []cacheMatchRecord
-	}{
-		name:       "multiple cache metrics",
-		cacheSizes: []int64{1024, 2048, 4096},
-		cacheMatches: []cacheMatchRecord{
-			{
-				matchedLength: 5,
-				totalLength:   10,
-			},
-			{
-				matchedLength: 0,
-				totalLength:   10,
-			},
-			{
-				matchedLength: 10,
-				totalLength:   10,
-			},
-			{
-				matchedLength: 7,
-				totalLength:   10,
-			},
-			{
-				matchedLength: 64,
-				totalLength:   128,
-			},
-			{
-				matchedLength: 0,
-				totalLength:   128,
-			},
-		},
-	}
-
-	t.Run(scenario.name, func(t *testing.T) {
-		// Record cache size metrics
-		for _, size := range scenario.cacheSizes {
-			RecordPrefixCacheSize(size)
-		}
-
-		// Record cache match metrics (both hit ratio and hit length)
-		for _, match := range scenario.cacheMatches {
-			RecordPrefixCacheMatch(match.matchedLength, match.totalLength)
-		}
-
-		// Verify cache size metrics
-		wantCacheSizeMetrics, err := os.Open("testdata/prefix_indexer_size_metric")
-		defer func() {
-			if err := wantCacheSizeMetrics.Close(); err != nil {
-				t.Error(err)
-			}
-		}()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := testutil.GatherAndCompare(metrics.Registry, wantCacheSizeMetrics, PrefixCacheSizeMetric); err != nil {
-			t.Error(err)
-		}
-
-		// Verify hit ratio metrics
-		wantHitRatioMetrics, err := os.Open("testdata/prefix_indexer_hit_ratio_metric")
-		defer func() {
-			if err := wantHitRatioMetrics.Close(); err != nil {
-				t.Error(err)
-			}
-		}()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := testutil.GatherAndCompare(metrics.Registry, wantHitRatioMetrics, PrefixCacheHitRatioMetric); err != nil {
-			t.Error(err)
-		}
-
-		// Verify hit length metrics
-		wantHitLengthMetrics, err := os.Open("testdata/prefix_indexer_hit_bytes_metric")
-		defer func() {
-			if err := wantHitLengthMetrics.Close(); err != nil {
-				t.Error(err)
-			}
-		}()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := testutil.GatherAndCompare(metrics.Registry, wantHitLengthMetrics, PrefixCacheHitLengthMetric); err != nil {
-			t.Error(err)
-		}
 	})
 }
 

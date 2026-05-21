@@ -26,8 +26,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -77,6 +77,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		)
 
 		prefillHostPorts := r.Header.Values(routing.PrefillEndpointHeader)
+		r.Header.Del(routing.PrefillEndpointHeader)
 
 		if len(prefillHostPorts) == 1 {
 			prefillHostPorts = strings.Split(prefillHostPorts[0], ",")
@@ -125,6 +126,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		}
 
 		encoderHostPorts := r.Header.Values(routing.EncoderEndpointsHeader)
+		r.Header.Del(routing.EncoderEndpointsHeader)
 		if len(encoderHostPorts) == 1 {
 			encoderHostPorts = strings.Split(encoderHostPorts[0], ",")
 		}
@@ -147,7 +149,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 			}
 		}
 
-		if len(allowedEncoders) > 0 && s.runEPDConnectorProtocol != nil {
+		if len(allowedEncoders) > 0 && s.handleEPDConnector != nil {
 			s.logger.V(4).Info("encoder headers detected, using EPD protocol",
 				"encoderCount", len(allowedEncoders),
 				"encoderCandidates", len(encoderHostPorts),
@@ -157,7 +159,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 				attribute.Int("llm_d.epd_proxy.encoder_count", len(allowedEncoders)),
 				attribute.Int("llm_d.epd_proxy.encoder_candidates", len(encoderHostPorts)),
 			)
-			s.runEPDConnectorProtocol(w, r, prefillHostPort, allowedEncoders)
+			s.handleEPDConnector(w, r, prefillHostPort, allowedEncoders)
 			return
 		}
 
@@ -172,12 +174,16 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 
 		if len(prefillHostPort) > 0 {
 			s.logger.V(4).Info("using P/D protocol")
-			s.runPDConnectorProtocol(w, r, prefillHostPort, apiType)
+			s.handlePDConnector(w, r, prefillHostPort, apiType)
 			return
 		}
 
 		s.logger.V(4).Info("no prefiller or encoder, using decoder only")
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
+			if s.config.DecodeChunkSize > 0 && r.URL.Path == ChatCompletionsPath {
+				s.runChunkedDecode(w, r)
+				return
+			}
 			s.decoderProxy.ServeHTTP(w, r)
 		}
 	}

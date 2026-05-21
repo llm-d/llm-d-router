@@ -28,9 +28,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
-	podutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pod"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	podutil "github.com/llm-d/llm-d-router/pkg/epp/util/pod"
 )
 
 type PodReconciler struct {

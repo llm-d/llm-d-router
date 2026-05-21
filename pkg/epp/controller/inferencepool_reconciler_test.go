@@ -32,13 +32,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
 
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pool"
-	utiltest "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/testing"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
 
 var (
@@ -46,24 +46,24 @@ var (
 	selectorV2 = map[string]string{"app": "vllm_v2"}
 	pods       = []*corev1.Pod{
 		// Two ready pods matching pool1
-		utiltest.MakePod("pod1").
+		testutil.MakePod("pod1").
 			Namespace("pool1-ns").
 			Labels(selectorV1).ReadyCondition().ObjRef(),
-		utiltest.MakePod("pod2").
+		testutil.MakePod("pod2").
 			Namespace("pool1-ns").
 			Labels(selectorV1).
 			ReadyCondition().ObjRef(),
 		// A not ready pod matching pool1
-		utiltest.MakePod("pod3").
+		testutil.MakePod("pod3").
 			Namespace("pool1-ns").
 			Labels(selectorV1).ObjRef(),
 		// A pod not matching pool1 namespace
-		utiltest.MakePod("pod4").
+		testutil.MakePod("pod4").
 			Namespace("pool2-ns").
 			Labels(selectorV1).
 			ReadyCondition().ObjRef(),
 		// A ready pod matching pool1 with a new selector
-		utiltest.MakePod("pod5").
+		testutil.MakePod("pod5").
 			Namespace("pool1-ns").
 			Labels(selectorV2).
 			ReadyCondition().ObjRef(),
@@ -78,13 +78,13 @@ func TestInferencePoolReconciler(t *testing.T) {
 		Version: v1.GroupVersion.Version,
 		Kind:    "InferencePool",
 	}
-	pool1 := utiltest.MakeInferencePool("pool1").
+	pool1 := testutil.MakeInferencePool("pool1").
 		Namespace("pool1-ns").
 		Selector(selectorV1).
 		TargetPorts(8080).
 		EndpointPickerRef("epp-service").ObjRef()
 	pool1.SetGroupVersionKind(gvk)
-	pool2 := utiltest.MakeInferencePool("pool2").Namespace("pool2-ns").EndpointPickerRef("epp-service").ObjRef()
+	pool2 := testutil.MakeInferencePool("pool2").Namespace("pool2-ns").EndpointPickerRef("epp-service").ObjRef()
 	pool2.SetGroupVersionKind(gvk)
 
 	period := time.Second

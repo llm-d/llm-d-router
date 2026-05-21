@@ -23,12 +23,12 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // RequestEvictor tracks in-flight requests via RequestControl hooks and provides eviction capability.
@@ -45,10 +45,14 @@ func NewRequestEvictor(
 	filter flowcontrol.EvictionFilterPolicy,
 	evictor Evictor,
 ) *RequestEvictor {
+	registry := NewEvictionRegistry()
+	if re, ok := evictor.(EvictorWithRegistry); ok {
+		re.SetRegistry(registry)
+	}
 	return &RequestEvictor{
 		queue:            NewEvictionQueue(ordering, filter),
 		evictor:          evictor,
-		evictionRegistry: NewEvictionRegistry(),
+		evictionRegistry: registry,
 	}
 }
 

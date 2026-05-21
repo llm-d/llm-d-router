@@ -21,28 +21,24 @@ When enabled, the scorer will use the [`llm-d-kv-cache`](https://github.com/llm-
 
 See the full parameter reference at [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md).
 
-> [!NOTE]
-> In most cases you only need to set:
-> - Model name in `tokenizersPoolConfig` to match the vLLM deployment.
-> - HuggingFace token via `tokenizersPoolConfig` or `tokenizersCacheDir` (or the `HF_TOKEN` environment variable).
-> - Token processor `blockSize` and `hashSeed` to match the vLLM deployment.
-> - `enableMetrics: true` in `kvBlockIndexConfig` to enable KV-block index metrics.
+Tokens are sourced from the `token-producer` DataProducer plugin
+(`request.Body.TokenizedPrompt`).
 
 **Example configuration with the above parameters set**
 ```yaml
 plugins:
+  - type: token-producer
+    parameters:
+      modelName: hf-repo/model-name
+      vllm:
+        http: http://localhost:8000
   - type: precise-prefix-cache-scorer
     parameters:
       tokenProcessorConfig:
-        blockSize: 64                    # must match vLLM block size
-        hashSeed: "12345"                # must match vLLM PYTHONHASHSEED env var
+        blockSize: 64
       indexerConfig:
         kvBlockIndexConfig:
           enableMetrics: true
-        tokenizersPoolConfig:
-          modelName: hf-repo/model-name
-          hf:
-            huggingFaceToken: your_hf_token_here    # or set HF_TOKEN env var
 ```
 
 **Example configuration for automatic pod discovery in active-active multi-replica scheduler deployments**
@@ -52,12 +48,9 @@ plugins:
     parameters:
       tokenProcessorConfig:
         blockSize: 64
-        hashSeed: "42"
       indexerConfig:
-        tokenizersPoolConfig:
-          modelName: "Qwen/Qwen3-32B"
-          hf:
-            tokenizersCacheDir: "/tmp/tokenizers"
+        kvBlockIndexConfig:
+          enableMetrics: true
       kvEventsConfig:
         topicFilter: "kv@"
         concurrency: 4
@@ -74,6 +67,11 @@ vLLM engines configured to emit KV-events on port `5556`:
 **Configuration Example — all parameters:**
 ```yaml
 plugins:
+  - type: token-producer
+    parameters:
+      modelName: hf-repo/model-name
+      vllm:
+        http: http://localhost:8000
   - type: precise-prefix-cache-scorer
     parameters:
       tokenProcessorConfig:
@@ -86,20 +84,11 @@ plugins:
         podDiscoveryConfig:
           socketPort: 5556
       indexerConfig:
-        prefixStoreConfig:
-          cacheSize: 500000
-          blockSize: 256
         kvBlockIndexConfig:
           inMemoryConfig:
             size: 100000000
             podCacheSize: 10
           enableMetrics: true
-        tokenizersPoolConfig:
-          modelName: hf-repo/model-name
-          workersCount: 8
-          hf:
-            huggingFaceToken: your_hf_token_here   # automatically set by `HF_TOKEN` environment
-            tokenizersCacheDir: /tmp/tokenizers
 ```
 
 ##### Pod discovery via the data layer (recommended)
@@ -145,13 +134,6 @@ dataLayer:
 The same scorer instance serves both roles (Scorer and EndpointExtractor),
 no second factory is needed.
 
-> [!NOTE]
-> The `tokenizer` PrepareData plugin is the preferred source of tokenized
-> prompts; the scorer's internal tokenization (via
-> `indexerConfig.tokenizersPoolConfig`) is a fallback and is being phased
-> out. New configs should declare a `tokenizer` plugin and reference it in
-> the scheduling profile alongside the precise-prefix-cache-scorer.
-
 ##### Speculative Indexing
 
 Speculative indexing closes the gap between a routing decision and KV event arrival by immediately writing a predicted cache entry to the prefix-cache index. This lets the next request with the same prefix hit the cache without waiting for engine confirmation.
@@ -167,7 +149,4 @@ plugins:
     parameters:
       speculativeIndexing: true
       speculativeTTL: "2s"
-      tokenProcessorConfig:
-        blockSize: 64
-        hashSeed: "42"
 ```

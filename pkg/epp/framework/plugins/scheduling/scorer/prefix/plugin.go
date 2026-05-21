@@ -19,23 +19,31 @@ package prefix
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
+
+// Config defines the configuration for the prefix cache scorer plugin.
+type Config struct {
+	// The name of the data producer that produces PrefixCacheMatchInfo.
+	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
+}
 
 // Plugin implements the prefix cache aware scoring logic.
 type Plugin struct {
-	typedName plugin.TypedName
+	typedName          plugin.TypedName
+	prefixMatchDataKey plugin.DataKey
 }
 
 // compile-time type assertions
 var (
-	_ framework.Scorer = &Plugin{}
+	_ fwksched.Scorer = &Plugin{}
 )
 
 const (
@@ -44,24 +52,29 @@ const (
 )
 
 // PrefixCachePluginFactory defines the factory function for the Prefix plugin.
-func PrefixCachePluginFactory(name string, _ json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
-	p, err := New(handle.Context())
+func PrefixCachePluginFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+	var cfg Config
+	if rawParameters != nil {
+		if err := json.Unmarshal(rawParameters, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal prefix cache scorer parameters: %w", err)
+		}
+	}
+
+	p, err := New(handle.Context(), name, cfg.PrefixMatchInfoProducerName)
 	if err != nil {
 		return nil, err
-	}
-	if name != "" {
-		p = p.WithName(name)
 	}
 	return p, nil
 }
 
 // New initializes a new prefix Plugin.
-func New(_ context.Context) (*Plugin, error) {
+func New(_ context.Context, name string, producerName string) (*Plugin, error) {
 	return &Plugin{
 		typedName: plugin.TypedName{
 			Type: PrefixCacheScorerPluginType,
-			Name: PrefixCacheScorerPluginType,
+			Name: name,
 		},
+		prefixMatchDataKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName),
 	}, nil
 }
 
@@ -71,37 +84,31 @@ func (p *Plugin) TypedName() plugin.TypedName {
 }
 
 // Category returns the preference the scorer applies (Affinity).
-func (p *Plugin) Category() framework.ScorerCategory {
-	return framework.Affinity
-}
-
-// WithName sets the name of the plugin instance.
-func (p *Plugin) WithName(name string) *Plugin {
-	p.typedName.Name = name
-	return p
+func (p *Plugin) Category() fwksched.ScorerCategory {
+	return fwksched.Affinity
 }
 
 // Produces returns the data produced by the plugin.
-func (p *Plugin) Produces() map[string]any {
-	return map[string]any{}
+func (p *Plugin) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{}
 }
 
 // Consumes returns the data consumed by the plugin.
-func (p *Plugin) Consumes() map[string]any {
-	return map[string]any{attrprefix.PrefixCacheMatchInfoKey: attrprefix.PrefixCacheMatchInfo{}}
+func (p *Plugin) Consumes() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}}
 }
 
 // Score returns the scoring result for the given list of pods based on prefix cache match info.
-func (p *Plugin) Score(ctx context.Context, _ *framework.CycleState, _ *framework.InferenceRequest, endpoints []framework.Endpoint) map[framework.Endpoint]float64 {
-	scores := make(map[framework.Endpoint]float64, len(endpoints))
+func (p *Plugin) Score(ctx context.Context, _ *fwksched.CycleState, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	logger := log.FromContext(ctx)
 
 	for _, endpoint := range endpoints {
 		// Default to score 0 if PrefixCacheMatchInfo is missing or invalid.
 		scores[endpoint] = 0.0
-		info, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoKey)
+		info, ok := endpoint.Get(p.prefixMatchDataKey.String())
 		if !ok {
-			logger.V(logutil.DEFAULT).Error(nil, "PrefixCacheMatchInfo not found for endpoint, assigning score 0", "endpoint", endpoint)
+			logger.V(logutil.DEFAULT).Error(nil, "PrefixCacheMatchInfo not found for endpoint, assigning score 0", "endpoint", endpoint, "key", p.prefixMatchDataKey.String())
 			continue
 		}
 

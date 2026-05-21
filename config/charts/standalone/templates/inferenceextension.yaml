@@ -1,4 +1,5 @@
-{{ include "llm-d-inference-scheduler.validations.standalone" . }}
+{{ include "llm-d-router.validations.epp.resources" $ }}
+{{ include "llm-d-router.validations.standalone" . }}
 {{ include "inference-extension.config" . }}
 {{ include "inference-extension.deployment" . }}
 {{ include "inference-extension.gke" . }}

@@ -23,12 +23,11 @@ import (
 	"strings"
 	"time"
 
-	latencypredictor "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 // buildPredictionRequest constructs a prediction request from endpoint metrics and request data.
@@ -220,8 +219,8 @@ func bulkPredictWithMetrics(
 	}
 
 	if predictedLatencyContext != nil {
-		metrics.RecordRequestTTFTPredictionDuration(ctx, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
-		metrics.RecordRequestTPOTPredictionDuration(ctx, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
+		recordRequestTTFTPredictionDuration(ctx, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
+		recordRequestTPOTPredictionDuration(ctx, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
 	}
 
 	results := make([]*latencypredictor.PredictionResponse, len(bulkResponse.Predictions))

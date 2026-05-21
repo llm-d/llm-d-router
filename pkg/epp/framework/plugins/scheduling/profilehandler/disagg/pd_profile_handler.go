@@ -13,31 +13,32 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	dl_prefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/scorer/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/metrics"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 const (
 	// PdProfileHandlerType is a legacy alias for DisaggProfileHandlerType.
 	PdProfileHandlerType     = "pd-profile-handler"
-	defaultPrefixPluginType  = prefix.PrefixCacheScorerPluginType
 	defaultDeciderPluginName = PrefixBasedPDDeciderPluginType
 )
 
 // pdDeciderPlugin interface for pd decider plugins
 
 type pdProfileHandlerParameters struct {
-	DecodeProfile     string `json:"decodeProfile"`
-	PrefillProfile    string `json:"prefillProfile"`
-	PrefixPluginType  string `json:"prefixPluginType"`
-	PrefixPluginName  string `json:"prefixPluginName"`
-	PrimaryPort       int    `json:"primaryPort"`
-	DeciderPluginName string `json:"deciderPluginName"`
+	DecodeProfile  string `json:"decodeProfile"`
+	PrefillProfile string `json:"prefillProfile"`
+	// Deprecated: This field was never used.
+	PrefixPluginType string `json:"prefixPluginType"`
+	// Deprecated: This field was never used.
+	PrefixPluginName            string `json:"prefixPluginName"`
+	PrimaryPort                 int    `json:"primaryPort"`
+	DeciderPluginName           string `json:"deciderPluginName"`
+	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName"`
 }
 
 // compile-time type assertion
@@ -51,7 +52,6 @@ func PdProfileHandlerFactory(name string, rawParameters json.RawMessage, handle 
 	parameters := pdProfileHandlerParameters{
 		DecodeProfile:     defaultDecodeProfile,
 		PrefillProfile:    defaultPrefillProfile,
-		PrefixPluginType:  defaultPrefixPluginType,
 		PrimaryPort:       0,
 		DeciderPluginName: defaultDeciderPluginName,
 	}
@@ -86,8 +86,7 @@ func PdProfileHandlerFactory(name string, rawParameters json.RawMessage, handle 
 		return nil, fmt.Errorf("decider plugin of type: %s does not implement pdDeciderPlugin", parameters.DeciderPluginName)
 	}
 
-	handler, err := NewPdProfileHandler(parameters.PrefillProfile, parameters.DecodeProfile, parameters.PrefixPluginType, parameters.PrefixPluginName,
-		parameters.PrimaryPort, deciderPlugin)
+	handler, err := NewPdProfileHandler(name, parameters, deciderPlugin)
 
 	if err != nil {
 		return nil, err
@@ -100,17 +99,16 @@ func PdProfileHandlerFactory(name string, rawParameters json.RawMessage, handle 
 // NewPdProfileHandler initializes a new PdProfileHandler and returns its pointer.
 //
 // Deprecated: Use NewDisaggProfileHandler instead.
-func NewPdProfileHandler(prefillProfile, decodeProfile, prefixPluginType, prefixPluginName string,
-	primaryPort int, deciderPlugin deciderPlugin) (*PdProfileHandler, error) {
+func NewPdProfileHandler(name string, parameters pdProfileHandlerParameters, deciderPlugin deciderPlugin) (*PdProfileHandler, error) {
 	result := &PdProfileHandler{
-		typedName:             plugin.TypedName{Type: PdProfileHandlerType},
-		prefixPluginTypedName: plugin.TypedName{Type: prefixPluginType, Name: prefixPluginName},
-		decodeProfile:         decodeProfile,
-		prefillProfile:        prefillProfile,
-		decider:               deciderPlugin,
+		typedName:      plugin.TypedName{Name: name, Type: PdProfileHandlerType},
+		decodeProfile:  parameters.DecodeProfile,
+		prefillProfile: parameters.PrefillProfile,
+		decider:        deciderPlugin,
+		dk:             attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(parameters.PrefixMatchInfoProducerName),
 	}
-	if primaryPort != 0 {
-		result.primaryPort = strconv.Itoa(primaryPort)
+	if parameters.PrimaryPort != 0 {
+		result.primaryPort = strconv.Itoa(parameters.PrimaryPort)
 	}
 
 	return result, nil
@@ -120,17 +118,17 @@ func NewPdProfileHandler(prefillProfile, decodeProfile, prefixPluginType, prefix
 //
 // Deprecated: Use Handler instead.
 type PdProfileHandler struct {
-	typedName             plugin.TypedName
-	prefixPluginTypedName plugin.TypedName
-	decodeProfile         string
-	prefillProfile        string
-	primaryPort           string
-	decider               deciderPlugin
+	typedName      plugin.TypedName
+	decodeProfile  string
+	prefillProfile string
+	primaryPort    string
+	decider        deciderPlugin
+	dk             plugin.DataKey
 }
 
 // Consumes defines data types consumed by this plugin (through the PD decider).
-func (*PdProfileHandler) Consumes() map[string]any {
-	return map[string]any{dl_prefix.PrefixCacheMatchInfoKey: dl_prefix.PrefixCacheMatchInfo{}}
+func (h *PdProfileHandler) Consumes() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{h.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
 // TypedName returns the typed name of the plugin.

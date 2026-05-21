@@ -22,13 +22,14 @@ import (
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	schedulingtypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
-func makeLatencyAdmissionEndpoint(name string, kvCache float64, runningRequests int) schedulingtypes.Endpoint {
-	return schedulingtypes.NewEndpoint(
+func makeLatencyAdmissionEndpoint(name string, kvCache float64, runningRequests int) fwksched.Endpoint {
+	return fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}},
 		&fwkdl.Metrics{
 			KVCacheUsagePercent: kvCache,
@@ -38,23 +39,23 @@ func makeLatencyAdmissionEndpoint(name string, kvCache float64, runningRequests 
 	)
 }
 
-func makeSheddableRequest(ttftSLO, tpotSLO string) *schedulingtypes.InferenceRequest {
-	return &schedulingtypes.InferenceRequest{
+func makeSheddableRequest(ttftSLO, tpotSLO string) *fwksched.InferenceRequest {
+	return &fwksched.InferenceRequest{
 		Headers: map[string]string{
 			ttftSLOHeaderKey: ttftSLO,
 			tpotSLOHeaderKey: tpotSLO,
 		},
-		Objectives: schedulingtypes.RequestObjectives{Priority: -1},
+		Objectives: fwksched.RequestObjectives{Priority: -1},
 	}
 }
 
-func makeNonSheddableRequest(ttftSLO, tpotSLO string) *schedulingtypes.InferenceRequest {
-	return &schedulingtypes.InferenceRequest{
+func makeNonSheddableRequest(ttftSLO, tpotSLO string) *fwksched.InferenceRequest {
+	return &fwksched.InferenceRequest{
 		Headers: map[string]string{
 			ttftSLOHeaderKey: ttftSLO,
 			tpotSLOHeaderKey: tpotSLO,
 		},
-		Objectives: schedulingtypes.RequestObjectives{Priority: 1},
+		Objectives: fwksched.RequestObjectives{Priority: 1},
 	}
 }
 
@@ -63,9 +64,9 @@ func TestAdmitRequest(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		request   *schedulingtypes.InferenceRequest
-		endpoints []schedulingtypes.Endpoint
-		setupFn   func(endpoints []schedulingtypes.Endpoint) // set endpoint attributes
+		request   *fwksched.InferenceRequest
+		endpoints []fwksched.Endpoint
+		setupFn   func(endpoints []fwksched.Endpoint) // set endpoint attributes
 		wantErr   bool
 	}{
 		{
@@ -76,12 +77,12 @@ func TestAdmitRequest(t *testing.T) {
 		{
 			name:    "non-sheddable request — always admit",
 			request: makeNonSheddableRequest("100", "30"),
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
 			},
-			setupFn: func(endpoints []schedulingtypes.Endpoint) {
+			setupFn: func(endpoints []fwksched.Endpoint) {
 				// All invalid predictions
-				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 			},
 			wantErr: false,
@@ -89,7 +90,7 @@ func TestAdmitRequest(t *testing.T) {
 		{
 			name:    "no SLO headers — admit",
 			request: makeSheddableRequest("", ""),
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
 			},
 			wantErr: false,
@@ -97,29 +98,67 @@ func TestAdmitRequest(t *testing.T) {
 		{
 			name:    "sheddable, all invalid, all busy, no cold — reject",
 			request: makeSheddableRequest("100", "30"),
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
 				makeLatencyAdmissionEndpoint("pod2", 0.4, 3),
 			},
-			setupFn: func(endpoints []schedulingtypes.Endpoint) {
-				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+			setupFn: func(endpoints []fwksched.Endpoint) {
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
-				endpoints[1].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
 			wantErr: true,
 		},
 		{
+			name: "sheddable, old SLO aliases — reject",
+			request: &fwksched.InferenceRequest{
+				Headers: map[string]string{
+					metadata.OldTTFTSLOHeaderKey: "100",
+					metadata.OldTPOTSLOHeaderKey: "30",
+				},
+				Objectives: fwksched.RequestObjectives{Priority: -1},
+			},
+			endpoints: []fwksched.Endpoint{
+				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
+			},
+			setupFn: func(endpoints []fwksched.Endpoint) {
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
+			},
+			wantErr: true,
+		},
+		{
+			name: "new SLO headers take precedence over old aliases",
+			request: &fwksched.InferenceRequest{
+				Headers: map[string]string{
+					metadata.TTFTSLOHeaderKey:    "0",
+					metadata.OldTTFTSLOHeaderKey: "100",
+					metadata.TPOTSLOHeaderKey:    "0",
+					metadata.OldTPOTSLOHeaderKey: "30",
+				},
+				Objectives: fwksched.RequestObjectives{Priority: -1},
+			},
+			endpoints: []fwksched.Endpoint{
+				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
+			},
+			setupFn: func(endpoints []fwksched.Endpoint) {
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
+					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
+			},
+			wantErr: false,
+		},
+		{
 			name:    "sheddable, all invalid, but one pod idle — admit",
 			request: makeSheddableRequest("100", "30"),
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
 				makeLatencyAdmissionEndpoint("pod2", 0.4, 0), // idle
 			},
-			setupFn: func(endpoints []schedulingtypes.Endpoint) {
-				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+			setupFn: func(endpoints []fwksched.Endpoint) {
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
-				endpoints[1].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
 			wantErr: false,
@@ -127,14 +166,14 @@ func TestAdmitRequest(t *testing.T) {
 		{
 			name:    "sheddable, all invalid, but cold pod exists — admit",
 			request: makeSheddableRequest("100", "30"),
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
 				makeLatencyAdmissionEndpoint("pod2", 0.01, 3), // cold
 			},
-			setupFn: func(endpoints []schedulingtypes.Endpoint) {
-				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+			setupFn: func(endpoints []fwksched.Endpoint) {
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
-				endpoints[1].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -30, -5, 130, 35, 0))
 			},
 			wantErr: false,
@@ -142,14 +181,14 @@ func TestAdmitRequest(t *testing.T) {
 		{
 			name:    "sheddable, one valid endpoint — admit",
 			request: makeSheddableRequest("100", "30"),
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
 				makeLatencyAdmissionEndpoint("pod2", 0.4, 3),
 			},
-			setupFn: func(endpoints []schedulingtypes.Endpoint) {
-				endpoints[0].Put(attrlatency.LatencyPredictionInfoKey,
+			setupFn: func(endpoints []fwksched.Endpoint) {
+				endpoints[0].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
-				endpoints[1].Put(attrlatency.LatencyPredictionInfoKey,
+				endpoints[1].Put(attrlatency.LatencyPredictionInfoDataKey.String(),
 					attrlatency.NewLatencyPredictionInfo(true, true, 20, 5, 80, 25, 0)) // valid
 			},
 			wantErr: false,
@@ -157,7 +196,7 @@ func TestAdmitRequest(t *testing.T) {
 		{
 			name:    "sheddable, no prediction data on endpoints — admit (fail-open)",
 			request: makeSheddableRequest("100", "30"),
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeLatencyAdmissionEndpoint("pod1", 0.5, 5),
 			},
 			// no setupFn — no latency attributes set

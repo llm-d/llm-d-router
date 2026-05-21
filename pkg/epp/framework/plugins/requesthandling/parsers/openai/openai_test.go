@@ -24,8 +24,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 func TestNewOpenAIParser(t *testing.T) {
