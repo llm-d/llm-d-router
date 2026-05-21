@@ -41,7 +41,24 @@ The producer supports the following runtime parameters:
 - `cacheSize` (integer, default: `10000`): maximum number of multimodal hash entries
   retained in the best-effort pod-affinity cache.
 
-**Configuration Example:**
+**Configuration Examples:**
+
+```yaml
+plugins:
+  - type: mm-embeddings-cache-producer
+    parameters:
+      cacheSize: 10000
+  - type: mm-embeddings-cache-scorer
+schedulingProfiles:
+  - name: encoder-cache-aware
+    plugins:
+      - pluginRef: mm-embeddings-cache-scorer
+        weight: 4
+      - pluginRef: kv-cache-utilization-scorer
+        weight: 2
+      - pluginRef: queue-scorer
+        weight: 2
+```
 
 ```yaml
 plugins:
@@ -64,8 +81,6 @@ schedulingProfiles:
 ## Operational Notes
 
 - The cache is a best-effort routing signal, not a correctness dependency.
-- Endpoint delete events can remove stale pod entries when `endpoint-notification-source`
-  is wired through `dataLayer`.
 - The producer remains tokenizer-free for request shapes where typed media blocks are
   sufficient; `token-producer` is only required when relying on upstream multimodal
   metadata.
