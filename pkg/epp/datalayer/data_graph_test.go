@@ -429,6 +429,115 @@ func TestCreateMissingDataProducers(t *testing.T) {
 	}
 }
 
+// mockMayConsumerPlugin is a plugin that optionally consumes certain data keys.
+type mockMayConsumerPlugin struct {
+	name       string
+	mayConsume map[fwkplugin.DataKey]any
+}
+
+func (m *mockMayConsumerPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
+}
+
+func (m *mockMayConsumerPlugin) MayConsume() map[fwkplugin.DataKey]any {
+	return m.mayConsume
+}
+
+// mockMixedConsumerPlugin is a plugin that has both required Consumes and optional MayConsume.
+// This models a real plugin like prefix cache scorer — requires prefix-match data,
+// but optionally uses tokenized input and falls back to raw text if unavailable.
+type mockMixedConsumerPlugin struct {
+	name       string
+	consumes   map[fwkplugin.DataKey]any
+	mayConsume map[fwkplugin.DataKey]any
+}
+
+func (m *mockMixedConsumerPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
+}
+
+func (m *mockMixedConsumerPlugin) Consumes() map[fwkplugin.DataKey]any {
+	return m.consumes
+}
+
+func (m *mockMixedConsumerPlugin) MayConsume() map[fwkplugin.DataKey]any {
+	return m.mayConsume
+}
+
+func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
+	producerTypeA := "producer-a"
+	keyA := fwkplugin.NewDataKey("keyA", producerTypeA)
+
+	producerAFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{name: name, produces: map[fwkplugin.DataKey]any{keyA: nil}}, nil
+	})
+
+	testCases := []struct {
+		name            string
+		existingPlugins []fwkplugin.Plugin
+		factoryRegistry map[string]fwkplugin.FactoryFunc
+		wantErr         bool
+	}{
+		{
+			name: "MayConsume key with no producer — warning only, no error",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockMayConsumerPlugin{
+					name:       "optional-consumer",
+					mayConsume: map[fwkplugin.DataKey]any{keyA: nil},
+				},
+			},
+			factoryRegistry: map[string]fwkplugin.FactoryFunc{},
+			wantErr:         false, // must NOT error
+		},
+		{
+			name: "MayConsume key with a producer present — no warning, no error",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{name: "producer", produces: map[fwkplugin.DataKey]any{keyA: nil}},
+				&mockMayConsumerPlugin{
+					name:       "optional-consumer",
+					mayConsume: map[fwkplugin.DataKey]any{keyA: nil},
+				},
+			},
+			factoryRegistry: map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
+			wantErr:         false,
+		},
+		{
+			// Models the real prefix cache scorer — it requires prefix-match data (Consumes)
+			// but optionally uses tokenized input (MayConsume), falling back to raw text.
+			// The required key has a producer. The optional key does not.
+			// Result: no error. Warning logged for the missing optional key.
+			name: "plugin with both Consumes and MayConsume — required key has producer, optional does not",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{name: "required-producer", produces: map[fwkplugin.DataKey]any{keyA: nil}},
+				&mockMixedConsumerPlugin{
+					name:       "prefix-cache-scorer",
+					consumes:   map[fwkplugin.DataKey]any{keyA: nil},
+					mayConsume: map[fwkplugin.DataKey]any{fwkplugin.NewDataKey("tokenized-input", "tokenizer"): nil},
+				},
+			},
+			factoryRegistry: map[string]fwkplugin.FactoryFunc{},
+			wantErr:         false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+			for _, p := range tc.existingPlugins {
+				handle.AddPlugin(p.TypedName().Name, p)
+			}
+
+			err := CreateMissingDataProducers(context.Background(), map[string]string{}, tc.factoryRegistry, handle)
+
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
 func assertTopologicalOrder(t *testing.T, dag map[string][]string, ordered []string) {
 	t.Helper()
 	positions := make(map[string]int)
