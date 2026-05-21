@@ -374,14 +374,21 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			gomega.Expect(podHdr).Should(gomega.Equal(podHdrChat))
 
 			// Metrics Validation
+			ginkgo.By("Step 11: Validating metrics from EPP")
 			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypePrefillDecode, simModelName)
 			prefillDecodeCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", labelFilter)
 
 			labelFilter2 := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeDecodeOnly, simModelName)
 			decodeOnlyCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", labelFilter2)
 
+			ginkgo.By("Step metric validation: Cleaning up objects")
+			ginkgo.By(fmt.Sprintf("pd decisions count: %d", prefillDecodeCount))
+			ginkgo.By(fmt.Sprintf("decode only count: %d", decodeOnlyCount))
 			gomega.Expect(prefillDecodeCount).Should(gomega.Equal(4))
 			gomega.Expect(decodeOnlyCount).Should(gomega.Equal(2))
+			ginkgo.By("Step metric validation debug: Cleaning up objects")
+
+			ginkgo.By("Step 12: Cleaning up objects")
 
 			testutils.DeleteObjects(testConfig, epp)
 			testutils.DeleteObjects(testConfig, modelServers)
