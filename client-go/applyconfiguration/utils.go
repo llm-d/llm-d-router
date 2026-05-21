@@ -15,7 +15,7 @@ import (
 // apply configuration type exists for the given GroupVersionKind.
 func ForKind(kind schema.GroupVersionKind) interface{} {
 	switch kind {
-	// Group=inference.networking.x-k8s.io, Version=v1alpha2
+	// Group=llm-d.ai, Version=v1alpha2
 	case v1alpha2.SchemeGroupVersion.WithKind("InferenceModelRewrite"):
 		return &apixv1alpha2.InferenceModelRewriteApplyConfiguration{}
 	case v1alpha2.SchemeGroupVersion.WithKind("InferenceModelRewriteRule"):

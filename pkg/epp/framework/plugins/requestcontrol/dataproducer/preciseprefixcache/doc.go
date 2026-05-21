@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,11 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package v1alpha2 contains API Schema definitions for the
-// llm-d.ai API group.
-//
-// +k8s:openapi-gen=true
-// +kubebuilder:object:generate=true
-// +groupName=llm-d.ai
-// +groupGoName=XInference
-package v1alpha2
+// Package preciseprefixcache hashes TokenizedPrompt into KV-block keys,
+// looks them up in the index, and writes per-endpoint PrefixCacheMatchInfo.
+package preciseprefixcache

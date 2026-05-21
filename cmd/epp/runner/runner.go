@@ -81,6 +81,7 @@ import (
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	mmproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/multimodal"
+	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
 	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
@@ -523,6 +524,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(activerequest.ActiveRequestType, activerequest.Factory)
 	fwkplugin.Register(preciseprefixcache.PrecisePrefixCachePluginType, preciseprefixcache.PluginFactory)
 	fwkplugin.Register(mmcacheaffinity.Type, mmcacheaffinity.Factory)
+	fwkplugin.Register(preciseproducer.PluginType, preciseproducer.PluginFactory)
 
 	// Flow Control plugins
 	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, globalstrict.GlobalStrictFairnessPolicyFactory)
