@@ -19,7 +19,7 @@ package latency
 import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	latencyproducerconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/constants"
+	latencyproducerconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/dataproducer/predictedlatency/constants"
 )
 
 var LatencyPredictionInfoDataKey = plugin.NewDataKey("LatencyPredictionInfoDataKey", latencyproducerconstants.LatencyDataProviderPluginType)

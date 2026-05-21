@@ -1,6 +1,7 @@
 package sessionaffinity
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,7 +11,6 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -23,7 +23,7 @@ const (
 
 // compile-time type assertion
 var _ scheduling.Scorer = &SessionAffinity{}
-var _ requestcontrol.ResponseBodyProcessor = &SessionAffinity{}
+var _ fwkrhapi.ResponseBodyProcessor = &SessionAffinity{}
 
 // Factory defines the factory function for SessionAffinity scorer.
 func Factory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
@@ -89,7 +89,7 @@ func (s *SessionAffinity) Score(ctx context.Context, _ *scheduling.CycleState, r
 // TODO: this should be using a cookie and ensure not overriding any other
 // cookie values if present.
 // Tracked in https://github.com/llm-d/llm-d-router/issues/28
-func (s *SessionAffinity) ResponseBody(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
+func (s *SessionAffinity) ResponseBody(ctx context.Context, _ *scheduling.InferenceRequest, response *fwkrhapi.Response, targetPod *datalayer.EndpointMetadata) {
 	if !response.EndOfStream {
 		return
 	}

@@ -28,7 +28,7 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
+	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/parsers/vllmgrpc/api/gen"
 	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 

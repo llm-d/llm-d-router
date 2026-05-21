@@ -17,14 +17,14 @@ limitations under the License.
 package handlers
 
 import (
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 )
 
 // Config holds the configuration for the SaturationDetector.
 type Config struct {
-	Parser fwkrh.Parser
+	Parser fwkrhapi.Parser
 }
 
-func NewParser(config *Config) fwkrh.Parser {
+func NewParser(config *Config) fwkrhapi.Parser {
 	return config.Parser
 }

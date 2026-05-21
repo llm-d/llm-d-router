@@ -17,6 +17,7 @@ limitations under the License.
 package eviction
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"net"
 	"time"
@@ -27,7 +28,6 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -120,7 +120,7 @@ func (p *RequestEvictor) PreRequest(
 func (p *RequestEvictor) ResponseBody(
 	ctx context.Context,
 	request *scheduling.InferenceRequest,
-	response *requestcontrol.Response,
+	response *fwkrhapi.Response,
 	targetEndpoint *datalayer.EndpointMetadata,
 ) {
 	if !response.EndOfStream {

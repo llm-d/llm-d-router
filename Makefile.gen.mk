@@ -40,11 +40,11 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 .PHONY: generate-proto
 generate-proto: protoc-gen-go protoc-gen-go-grpc ## Generate Golang code from protobuf files.
 	PATH="$(LOCALBIN):$$PATH" $(PROTOC) \
-		-I pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto \
+		-I pkg/epp/framework/requesthandler/parsers/vllmgrpc/api/proto \
 		-I . \
 		--go_out=module=github.com/llm-d/llm-d-router:. \
 		--go-grpc_out=module=github.com/llm-d/llm-d-router:. \
-		pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto/*.proto
+		pkg/epp/framework/requesthandler/parsers/vllmgrpc/api/proto/*.proto
 
 .PHONY: protoc-gen-go
 protoc-gen-go: $(PROTOC_GEN_GO) ## Download protoc-gen-go locally if necessary.

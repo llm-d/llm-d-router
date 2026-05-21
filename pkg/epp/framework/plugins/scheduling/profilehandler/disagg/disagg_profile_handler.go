@@ -2,6 +2,7 @@
 package disagg
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,7 +17,6 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/metrics"
@@ -194,7 +194,7 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 // compile-time assertions
 var (
 	_ scheduling.ProfileHandler = &Handler{}
-	_ requestcontrol.PreRequest = &Handler{}
+	_ fwkrhapi.PreRequest = &Handler{}
 )
 
 // Handler is the unified disaggregation profile handler.

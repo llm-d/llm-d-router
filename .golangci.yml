@@ -51,7 +51,7 @@ linters:
       alias:
         - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling
           alias: fwksched
-        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler
           alias: fwkrc
         - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol
           alias: fwkfc

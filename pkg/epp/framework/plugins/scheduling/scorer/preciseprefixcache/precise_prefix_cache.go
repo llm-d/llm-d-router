@@ -1,6 +1,7 @@
 package preciseprefixcache
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,10 +25,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
@@ -86,8 +86,8 @@ type PluginConfig struct {
 // compile-time type assertions
 var (
 	_ scheduling.Scorer           = &Scorer{}
-	_ requestcontrol.DataProducer = &Scorer{}
-	_ requestcontrol.PreRequest   = &Scorer{}
+	_ fwkrhapi.DataProducer = &Scorer{}
+	_ fwkrhapi.PreRequest   = &Scorer{}
 	_ fwkdl.EndpointExtractor     = &Scorer{}
 )
 

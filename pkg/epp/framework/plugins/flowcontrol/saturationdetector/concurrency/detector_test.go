@@ -17,6 +17,7 @@ limitations under the License.
 package concurrency
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"fmt"
 	"sync"
@@ -28,11 +29,9 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/dataproducer/inflightload"
 )
 
 // localRegistry is a thread-safe storage for simulated endpoint load.
@@ -313,7 +312,7 @@ func TestDetector_Lifecycle(t *testing.T) {
 
 	// 3. Decrement (Available)
 	targetEndpoint := newStubSchedulingEndpoint(reg, endpointName)
-	simulateResponseBody(ctx, reg, nil, &requestcontrol.Response{EndOfStream: true}, targetEndpoint.metadata)
+	simulateResponseBody(ctx, reg, nil, &fwkrhapi.Response{EndOfStream: true}, targetEndpoint.metadata)
 	require.InDelta(t, 0.0, detector.Saturation(ctx, candidates), 1e-6, "expected 0.0 after completion")
 
 	// 4. Increment again -> Delete -> Verify Reset
@@ -470,7 +469,7 @@ func TestDetector_TokenLifecycle(t *testing.T) {
 	simulatePreRequest(ctx, reg, req1, makeSchedulingResult(reg, endpointName))
 	require.InDelta(t, 0.1, detector.Saturation(ctx, candidates), 1e-6)
 
-	eos := &requestcontrol.Response{EndOfStream: true}
+	eos := &fwkrhapi.Response{EndOfStream: true}
 	simulateResponseBody(ctx, reg, req1, eos, targetEndpoint.metadata)
 	require.InDelta(t, 0.0, detector.Saturation(ctx, candidates), 1e-6)
 }
@@ -506,7 +505,7 @@ func TestDetector_ConcurrencyStress(t *testing.T) {
 	warmUpRes := makeSchedulingResult(reg, endpointName)
 	warmUpEndpoint := newStubSchedulingEndpoint(reg, endpointName)
 	simulatePreRequest(ctx, reg, nil, warmUpRes)
-	simulateResponseBody(ctx, reg, nil, &requestcontrol.Response{EndOfStream: true}, warmUpEndpoint.metadata)
+	simulateResponseBody(ctx, reg, nil, &fwkrhapi.Response{EndOfStream: true}, warmUpEndpoint.metadata)
 
 	const numGoroutines = 50
 	const opsPerRoutine = 1000
@@ -529,7 +528,7 @@ func TestDetector_ConcurrencyStress(t *testing.T) {
 			defer wg.Done()
 			targetEndpoint := newStubSchedulingEndpoint(reg, endpointName)
 			for range opsPerRoutine {
-				simulateResponseBody(ctx, reg, nil, &requestcontrol.Response{EndOfStream: true}, targetEndpoint.metadata)
+				simulateResponseBody(ctx, reg, nil, &fwkrhapi.Response{EndOfStream: true}, targetEndpoint.metadata)
 			}
 		}()
 	}
@@ -551,7 +550,7 @@ func simulatePreRequest(_ context.Context, reg *localRegistry, req *fwksched.Inf
 	})
 }
 
-func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.InferenceRequest, resp *requestcontrol.Response, metadata *datalayer.EndpointMetadata) {
+func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.InferenceRequest, resp *fwkrhapi.Response, metadata *datalayer.EndpointMetadata) {
 	if metadata == nil || resp == nil || !resp.EndOfStream {
 		return
 	}
@@ -670,8 +669,8 @@ func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
 func makeTokenRequest(requestID, prompt string) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+		Body: &fwkrhapi.InferenceRequestBody{
+			Completions: &fwkrhapi.CompletionsRequest{Prompt: fwkrhapi.Prompt{Raw: prompt}},
 		},
 	}
 }

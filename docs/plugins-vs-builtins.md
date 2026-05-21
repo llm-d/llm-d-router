@@ -45,14 +45,14 @@ A **builtin** is a component that:
 - **Does not implement `plugin.Plugin`** and does not have a `TypedName()`.
 - **Is not registered** in the plugin registry.
 - **Lives outside** `pkg/epp/framework/plugins/`, typically in the subsystem it
-  belongs to (e.g. `pkg/epp/flowcontrol/`, `pkg/epp/requestcontrol/`).
+  belongs to (e.g. `pkg/epp/flowcontrol/`, `pkg/epp/framework/requesthandler/`).
 
 ### Examples of builtins
 
 - **RequestEvictor** (`pkg/epp/flowcontrol/eviction/`): tracks in-flight
   requests and executes eviction decisions. It accepts pluggable **policies**
   (ordering, filtering) but the evictor runtime itself is always present.
-- **Admission control** wiring in `pkg/epp/requestcontrol/`.
+- **Admission control** wiring in `pkg/epp/framework/requesthandler/`.
 - **Flow control** infrastructure in `pkg/epp/flowcontrol/`.
 
 ### Key characteristics

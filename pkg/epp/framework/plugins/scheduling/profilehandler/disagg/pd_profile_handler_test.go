@@ -1,6 +1,7 @@
 package disagg
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,7 +13,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
@@ -216,9 +216,9 @@ func (p *mockSchedulerProfile) Run(_ context.Context, _ *scheduling.InferenceReq
 // creates and returns llm completion request forthe given prompt
 func createRequest(prompt string) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: prompt},
+		Body: &fwkrhapi.InferenceRequestBody{
+			Completions: &fwkrhapi.CompletionsRequest{
+				Prompt: fwkrhapi.Prompt{Raw: prompt},
 			},
 		},
 	}

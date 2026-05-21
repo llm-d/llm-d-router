@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,9 +34,8 @@ import (
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
@@ -349,7 +349,7 @@ type testDirector struct {
 	handleResponseBodyEndStreamCount int
 }
 
-func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*handlers.RequestContext, error) {
+func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrhapi.InferenceRequestBody) (*handlers.RequestContext, error) {
 	ts.requestHeaders = reqCtx.Request.Headers
 
 	bodyMap := make(map[string]any)
@@ -368,7 +368,7 @@ func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.Requ
 
 	// Populate SchedulingRequest for testing request-based streaming detection.
 	reqCtx.SchedulingRequest = &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{},
+		Body: &fwkrhapi.InferenceRequestBody{},
 	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		reqCtx.SchedulingRequest.Body.Stream = true
@@ -398,11 +398,11 @@ type mockParser struct {
 	skip bool
 }
 
-func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	return &fwkrh.ParseResult{Skip: m.skip, Body: &fwkrh.InferenceRequestBody{}}, nil
+func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrhapi.ParseResult, error) {
+	return &fwkrhapi.ParseResult{Skip: m.skip, Body: &fwkrhapi.InferenceRequestBody{}}, nil
 }
 
-func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
+func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrhapi.ParsedResponse, error) {
 	return nil, errors.New("sentinel error for mock parser")
 }
 

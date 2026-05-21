@@ -17,13 +17,13 @@ limitations under the License.
 package scheduling
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 type cloneableString string
@@ -58,7 +58,7 @@ func TestInferenceRequest_String_HasFields(t *testing.T) {
 	r := &InferenceRequest{
 		RequestID:   "req-1",
 		TargetModel: "llama-7b",
-		Body:        &fwkrh.InferenceRequestBody{},
+		Body:        &fwkrhapi.InferenceRequestBody{},
 		Headers:     map[string]string{"x-trace": "abc"},
 	}
 	s := r.String()
@@ -189,5 +189,5 @@ func TestScoredEndpointComparer(t *testing.T) {
 
 func TestModalityAliases(t *testing.T) {
 	// These aliases exist for ergonomic re-export. Confirm the values line up.
-	assert.Equal(t, fwkrh.ModalityImage, ModalityImage)
+	assert.Equal(t, fwkrhapi.ModalityImage, ModalityImage)
 }

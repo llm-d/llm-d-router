@@ -17,6 +17,7 @@ limitations under the License.
 package datalayer
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"errors"
 	"fmt"
@@ -27,7 +28,6 @@ import (
 
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -140,16 +140,16 @@ func pluginToLayerExecutionOrder(plugin plugin.Plugin) int {
 	}
 
 	// Request control plugins
-	if _, ok := plugin.(fwkrc.DataProducer); ok {
+	if _, ok := plugin.(fwkrhapi.DataProducer); ok {
 		return RequestControlLayer
 	}
-	if _, ok := plugin.(fwkrc.Admitter); ok {
+	if _, ok := plugin.(fwkrhapi.Admitter); ok {
 		return RequestControlLayer
 	}
-	if _, ok := plugin.(fwkrc.PreRequest); ok {
+	if _, ok := plugin.(fwkrhapi.PreRequest); ok {
 		return RequestControlLayer
 	}
-	if _, ok := plugin.(fwkrc.ResponseHeaderProcessor); ok {
+	if _, ok := plugin.(fwkrhapi.ResponseHeaderProcessor); ok {
 		return RequestControlLayer
 	}
 

@@ -17,6 +17,8 @@ limitations under the License.
 package server
 
 import (
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler"
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -42,9 +44,7 @@ import (
 	datalayerlogger "github.com/llm-d/llm-d-router/pkg/epp/datalayer/logger"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
-	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 )
 
 // ExtProcServerRunner provides methods to manage an external process server.
@@ -59,8 +59,8 @@ type ExtProcServerRunner struct {
 	EnableCertReload                 bool
 	RefreshPrometheusMetricsInterval time.Duration
 	MetricsStalenessThreshold        time.Duration
-	Director                         *requestcontrol.Director
-	Parser                           fwkrh.Parser
+	Director                         *fwkrh.Director
+	Parser                           fwkrhapi.Parser
 	SaturationDetector               fwkfc.SaturationDetector
 	UseExperimentalDatalayerV2       bool // Pluggable data layer feature flag
 	GRPCMaxRecvMsgSize               int

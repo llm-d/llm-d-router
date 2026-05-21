@@ -1,6 +1,7 @@
 package disagg_test
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"testing"
 
@@ -13,7 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
@@ -106,9 +106,9 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "any-model",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345678901"},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: "12345678901"},
 					},
 				},
 			},
@@ -120,9 +120,9 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345678901"},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: "12345678901"},
 					},
 				},
 			},
@@ -135,9 +135,9 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345678901"},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: "12345678901"},
 					},
 				},
 			},
@@ -150,9 +150,9 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345678906"},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: "12345678906"},
 					},
 				},
 			},
@@ -166,9 +166,9 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345"},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: "12345"},
 					},
 				},
 			},
@@ -183,9 +183,9 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345678901"},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: "12345678901"},
 					},
 				},
 			},
@@ -215,9 +215,9 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "1234567890123456789012345678901234567890"},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: "1234567890123456789012345678901234567890"},
 					},
 				},
 			},

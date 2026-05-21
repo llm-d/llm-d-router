@@ -2,6 +2,7 @@
 package disagg
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
@@ -31,7 +31,7 @@ const (
 )
 
 // compile-time type assertion
-var _ requestcontrol.PreRequest = &HeadersHandler{}
+var _ fwkrhapi.PreRequest = &HeadersHandler{}
 
 type disaggHeadersHandlerParameters struct {
 	PrefillProfile string `json:"prefillProfile"`

@@ -1,6 +1,7 @@
 package nohitlru
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
@@ -31,7 +31,7 @@ const (
 
 // compile-time type assertions
 var _ scheduling.Scorer = &NoHitLRU{}
-var _ requestcontrol.PreRequest = &NoHitLRU{}
+var _ fwkrhapi.PreRequest = &NoHitLRU{}
 var _ plugin.ConsumerPlugin = &NoHitLRU{}
 
 // Parameters defines the parameters for the NoHitLRU scorer.

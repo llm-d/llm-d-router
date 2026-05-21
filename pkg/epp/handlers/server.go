@@ -17,6 +17,7 @@ limitations under the License.
 package handlers
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"bytes"
 	"context"
 	"io"
@@ -43,7 +44,6 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/version"
@@ -58,7 +58,7 @@ type EvictChannelLookup interface {
 	Deregister(requestID string)
 }
 
-func NewStreamingServer(datastore Datastore, director Director, parser fwkrh.Parser, maxPoolBufferSize int) *StreamingServer {
+func NewStreamingServer(datastore Datastore, director Director, parser fwkrhapi.Parser, maxPoolBufferSize int) *StreamingServer {
 	return &StreamingServer{
 		director:          director,
 		datastore:         datastore,
@@ -78,10 +78,32 @@ func (s *StreamingServer) SetEvictChannelLookup(lookup EvictChannelLookup) {
 }
 
 type Director interface {
-	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
+	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrhapi.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
 	HandleResponseBody(ctx context.Context, reqCtx *RequestContext, endOfStream bool) *RequestContext
 	GetRandomEndpoint() *fwkdl.EndpointMetadata
+}
+
+// AdmissionController defines the interface for making admission control decisions.
+// Implementations of this interface determine whether an incoming inference request should be accepted or rejected
+// based on various criteria such as system load, fairness, priority, and available capacity.
+type AdmissionController interface {
+	// Admit determines if a request should be admitted.
+	// It is called by the Director for each incoming request.
+	//
+	// Args:
+	//   ctx: The request context, carrying deadlines, cancellation signals, and logger.
+	//   reqCtx: *RequestContext containing details about the incoming request.
+	//   priority: The priority level of the request, as determined by the InferenceObjective.
+	//
+	// Returns:
+	//   - nil: If the request is admitted and should proceed to scheduling.
+	//   - errcommon.Error: If the request is rejected.
+	Admit(
+		ctx context.Context,
+		reqCtx *RequestContext,
+		priority int,
+	) error
 }
 
 type Datastore interface {
@@ -93,7 +115,7 @@ type Datastore interface {
 type StreamingServer struct {
 	datastore         Datastore
 	director          Director
-	parser            fwkrh.Parser
+	parser            fwkrhapi.Parser
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
@@ -115,7 +137,7 @@ type RequestContext struct {
 	RequestReceivedTimestamp  time.Time
 	ResponseCompleteTimestamp time.Time
 	RequestSize               int
-	Usage                     fwkrh.Usage
+	Usage                     fwkrhapi.Usage
 	ResponseSize              int
 	ResponseBodyStarted       bool
 	ResponseComplete          bool

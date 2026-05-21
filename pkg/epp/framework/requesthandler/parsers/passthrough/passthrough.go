@@ -1,0 +1,82 @@
+/*
+Copyright 2025 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package passthrough
+
+import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
+	"context"
+	"encoding/json"
+
+	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+)
+
+const (
+	PassthroughParserType = "passthrough-parser"
+)
+
+// compile-time type validation
+var _ fwkrhapi.Parser = &PassthroughParser{}
+
+// PassthroughParser implements the fwkrhapi.Parser interface and does nothing.
+type PassthroughParser struct {
+	typedName fwkplugin.TypedName
+}
+
+// NewPassthroughParser creates a new PassthroughParser.
+func NewPassthroughParser() *PassthroughParser {
+	return &PassthroughParser{
+		typedName: fwkplugin.TypedName{
+			Type: PassthroughParserType,
+			Name: PassthroughParserType,
+		},
+	}
+}
+
+// TypedName returns the type and name tuple of this plugin instance.
+func (p *PassthroughParser) TypedName() fwkplugin.TypedName {
+	return p.typedName
+}
+
+func (p *PassthroughParser) SupportedAppProtocols() []v1.AppProtocol {
+	return []v1.AppProtocol{}
+}
+
+func PassthroughParserPluginFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	return NewPassthroughParser().WithName(name), nil
+}
+
+func (p *PassthroughParser) WithName(name string) *PassthroughParser {
+	p.typedName.Name = name
+	return p
+}
+
+// ParseRequest converts the request to RawPayload.
+func (p *PassthroughParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrhapi.ParseResult, error) {
+	return &fwkrhapi.ParseResult{
+		Body: &fwkrhapi.InferenceRequestBody{
+			Payload: fwkrhapi.RawPayload(body),
+		},
+		Skip: false,
+	}, nil
+}
+
+// ParseResponse does nothing and returns nil.
+func (p *PassthroughParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, isEnd bool) (*fwkrhapi.ParsedResponse, error) {
+	return nil, nil //nolint:nilnil
+}

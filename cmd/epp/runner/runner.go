@@ -17,6 +17,8 @@ limitations under the License.
 package runner
 
 import (
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler"
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"errors"
 	"fmt"
@@ -59,7 +61,6 @@ import (
 	fcregistry "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -76,18 +77,18 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/probabilisticadmitter"
-	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
-	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
-	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/admitter/latencyslo"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/admitter/probabilisticadmitter"
+	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/dataproducer/approximateprefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/dataproducer/inflightload"
+	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/dataproducer/predictedlatency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/requestattributereporter"
+	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/test/responsereceived"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/parsers/passthrough"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/parsers/vertexai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/parsers/vllmgrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
@@ -114,7 +115,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics/collectors"
-	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
@@ -136,7 +136,7 @@ var (
 func NewRunner() *Runner {
 	return &Runner{
 		eppExecutableName:    "GIE",
-		requestControlConfig: requestcontrol.NewConfig(), // default requestcontrol config has empty plugin list
+		requestControlConfig: fwkrh.NewConfig(), // default requesthandler config has empty plugin list
 		customCollectors:     []prometheus.Collector{},
 	}
 }
@@ -145,10 +145,10 @@ func NewRunner() *Runner {
 type Runner struct {
 	eppExecutableName    string // the EPP executable name
 	featureGates         map[string]bool
-	requestControlConfig *requestcontrol.Config
+	requestControlConfig *fwkrh.Config
 	schedulerConfig      *scheduling.SchedulerConfig
 	customCollectors     []prometheus.Collector
-	parser               fwkrh.Parser
+	parser               fwkrhapi.Parser
 	dlRuntime            *datalayer.Runtime
 	PluginHandle         fwkplugin.Handle
 }
@@ -160,7 +160,7 @@ func (r *Runner) WithExecutableName(exeName string) *Runner {
 	return r
 }
 
-func (r *Runner) WithRequestControlConfig(requestControlConfig *requestcontrol.Config) *Runner {
+func (r *Runner) WithRequestControlConfig(requestControlConfig *fwkrh.Config) *Runner {
 	r.requestControlConfig = requestControlConfig
 	return r
 }
@@ -359,11 +359,11 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	}
 
 	// --- Admission Control Initialization ---
-	var admissionController requestcontrol.AdmissionController
+	var admissionController handlers.AdmissionController
 	var endpointCandidates contracts.EndpointCandidates
-	endpointCandidates = requestcontrol.NewDatastoreEndpointCandidates(ds, requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter))
+	endpointCandidates = fwkrh.NewDatastoreEndpointCandidates(ds, fwkrh.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter))
 	if r.featureGates[flowcontrol.FeatureGate] {
-		endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, time.Millisecond*50)
+		endpointCandidates = fwkrh.NewCachedEndpointCandidates(ctx, endpointCandidates, time.Millisecond*50)
 		setupLog.Info("Initializing experimental Flow Control layer")
 		registry, err := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
 		if err != nil {
@@ -384,13 +384,13 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 			return nil, nil, fmt.Errorf("failed to initialize Flow Controller: %w", err)
 		}
 		go registry.Run(ctx)
-		admissionController = requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
+		admissionController = fwkrh.NewFlowControlAdmissionController(fc, opts.PoolName)
 	} else {
 		setupLog.Info("Experimental Flow Control layer is disabled, using legacy admission control")
-		admissionController = requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
+		admissionController = fwkrh.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
 	}
 
-	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	director := fwkrh.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
 	serverRunner := &runserver.ExtProcServerRunner{
 		GrpcPort:                         opts.GRPCPort,

@@ -17,6 +17,7 @@ limitations under the License.
 package preciseprefixcache
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"testing"
 
@@ -29,7 +30,6 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
@@ -106,8 +106,8 @@ func TestScorer_UsesTokenizedPrompt(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-tokenized",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs},
+		Body: &fwkrhapi.InferenceRequestBody{
+			TokenizedPrompt: &fwkrhapi.TokenizedPrompt{TokenIDs: tokenIDs},
 		},
 	}
 
@@ -138,11 +138,11 @@ func TestScorer_PassesExtraFeaturesToScoreTokens(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-mm",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+		Body: &fwkrhapi.InferenceRequestBody{
+			TokenizedPrompt: &fwkrhapi.TokenizedPrompt{
 				TokenIDs: tokenIDs,
-				MultiModalFeatures: []fwkrh.MultiModalFeature{
-					{Modality: fwkrh.ModalityImage, Hash: "abc123", Offset: 2, Length: 4},
+				MultiModalFeatures: []fwkrhapi.MultiModalFeature{
+					{Modality: fwkrhapi.ModalityImage, Hash: "abc123", Offset: 2, Length: 4},
 				},
 			},
 		},
@@ -176,8 +176,8 @@ func TestScorer_NilExtraFeaturesForTextOnly(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-text-only",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs},
+		Body: &fwkrhapi.InferenceRequestBody{
+			TokenizedPrompt: &fwkrhapi.TokenizedPrompt{TokenIDs: tokenIDs},
 		},
 	}
 
@@ -209,9 +209,9 @@ func TestScorer_SkipsTokenizedPromptWhenEmpty(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-skip-empty",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "hello"}},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: []uint32{}},
+		Body: &fwkrhapi.InferenceRequestBody{
+			Completions:     &fwkrhapi.CompletionsRequest{Prompt: fwkrhapi.Prompt{Raw: "hello"}},
+			TokenizedPrompt: &fwkrhapi.TokenizedPrompt{TokenIDs: []uint32{}},
 		},
 	}
 

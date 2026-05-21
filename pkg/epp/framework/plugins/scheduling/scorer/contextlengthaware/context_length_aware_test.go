@@ -1,6 +1,7 @@
 package contextlengthaware
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -10,7 +11,6 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
@@ -271,11 +271,11 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-request",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: "some prompt text"},
+		Body: &fwkrhapi.InferenceRequestBody{
+			Completions: &fwkrhapi.CompletionsRequest{
+				Prompt: fwkrhapi.Prompt{Raw: "some prompt text"},
 			},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs},
+			TokenizedPrompt: &fwkrhapi.TokenizedPrompt{TokenIDs: tokenIDs},
 		},
 	}
 
@@ -308,9 +308,9 @@ func TestContextLengthAwareFallbackWithoutTokenizedPrompt(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-request",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: prompt},
+		Body: &fwkrhapi.InferenceRequestBody{
+			Completions: &fwkrhapi.CompletionsRequest{
+				Prompt: fwkrhapi.Prompt{Raw: prompt},
 			},
 		},
 	}

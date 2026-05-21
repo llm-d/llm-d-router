@@ -1,6 +1,7 @@
 package preciseprefixcache
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"fmt"
 	"math"
@@ -17,7 +18,6 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
@@ -57,7 +57,7 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 
 	// kvBlockData populates the index for the request and reports the total
 	// chunk count, which is the absolute-normalization denominator.
-	type populateFn func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+	type populateFn func(t *testing.T, req *fwkrhapi.InferenceRequestBody, model string) (
 		blockData map[kvblock.BlockHash][]kvblock.PodEntry, totalChunks int)
 
 	testcases := []struct {
@@ -127,13 +127,13 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 			request: &scheduling.InferenceRequest{
 				RequestID:   "test-request",
 				TargetModel: "test-model",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: prompt},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: prompt},
 					},
 				},
 			},
-			populate: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+			populate: func(t *testing.T, req *fwkrhapi.InferenceRequestBody, model string) (
 				map[kvblock.BlockHash][]kvblock.PodEntry, int) {
 				require.NotNil(t, req.Completions, "req expected to use Completions API")
 
@@ -195,19 +195,19 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 			request: &scheduling.InferenceRequest{
 				RequestID:   "test-request",
 				TargetModel: "test-model",
-				Body: &fwkrh.InferenceRequestBody{
-					ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Body: &fwkrhapi.InferenceRequestBody{
+					ChatCompletions: &fwkrhapi.ChatCompletionsRequest{
 						ChatTemplate: `{% for message in messages %}{{ message.role }}: {{ message.content }}
 		{% endfor %}`,
-						Messages: []fwkrh.Message{
-							{Role: "user", Content: fwkrh.Content{Raw: "Hello, how are you?"}},
-							{Role: "assistant", Content: fwkrh.Content{Raw: "I'm doing well, thank you for asking!"}},
-							{Role: "user", Content: fwkrh.Content{Raw: "Can you help me with a question about prefix caching in LLM inference?"}},
+						Messages: []fwkrhapi.Message{
+							{Role: "user", Content: fwkrhapi.Content{Raw: "Hello, how are you?"}},
+							{Role: "assistant", Content: fwkrhapi.Content{Raw: "I'm doing well, thank you for asking!"}},
+							{Role: "user", Content: fwkrhapi.Content{Raw: "Can you help me with a question about prefix caching in LLM inference?"}},
 						},
 					},
 				},
 			},
-			populate: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+			populate: func(t *testing.T, req *fwkrhapi.InferenceRequestBody, model string) (
 				map[kvblock.BlockHash][]kvblock.PodEntry, int) {
 				require.NotNil(t, req.ChatCompletions, "req expected to use ChatCompletions API")
 
@@ -280,13 +280,13 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 			request: &scheduling.InferenceRequest{
 				RequestID:   "test-request",
 				TargetModel: "test-model",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: prompt},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: prompt},
 					},
 				},
 			},
-			populate: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+			populate: func(t *testing.T, req *fwkrhapi.InferenceRequestBody, model string) (
 				map[kvblock.BlockHash][]kvblock.PodEntry, int) {
 				require.NotNil(t, req.Completions, "req expected to use Completions API")
 
@@ -345,13 +345,13 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 			request: &scheduling.InferenceRequest{
 				RequestID:   "test-request",
 				TargetModel: "test-model",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: prompt},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: prompt},
 					},
 				},
 			},
-			populate: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+			populate: func(t *testing.T, req *fwkrhapi.InferenceRequestBody, model string) (
 				map[kvblock.BlockHash][]kvblock.PodEntry, int) {
 				require.NotNil(t, req.Completions, "req expected to use Completions API")
 
@@ -410,9 +410,9 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 			request: &scheduling.InferenceRequest{
 				RequestID:   "test-request",
 				TargetModel: "test-model",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "This prompt has never been cached before on any endpoint."},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: "This prompt has never been cached before on any endpoint."},
 					},
 				},
 			},
@@ -452,13 +452,13 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 			request: &scheduling.InferenceRequest{
 				RequestID:   "test-request",
 				TargetModel: "test-model",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: prompt},
+				Body: &fwkrhapi.InferenceRequestBody{
+					Completions: &fwkrhapi.CompletionsRequest{
+						Prompt: fwkrhapi.Prompt{Raw: prompt},
 					},
 				},
 			},
-			populate: func(t *testing.T, req *fwkrh.InferenceRequestBody, model string) (
+			populate: func(t *testing.T, req *fwkrhapi.InferenceRequestBody, model string) (
 				map[kvblock.BlockHash][]kvblock.PodEntry, int) {
 				require.NotNil(t, req.Completions, "req expected to use Completions API")
 
@@ -799,15 +799,15 @@ func TestMMPipeline_ScoreTokensWithExtraFeatures_UDS(t *testing.T) {
 
 	// Attach tokenized state with MM features to the request (simulating the
 	// tokenizer DataProducer plugin).
-	upstreamMM := make([]fwkrh.MultiModalFeature, 0)
+	upstreamMM := make([]fwkrhapi.MultiModalFeature, 0)
 	for modality, hashes := range mmFeatures.MMHashes {
 		ranges := mmFeatures.MMPlaceholders[modality]
 		for i, h := range hashes {
 			if i >= len(ranges) {
 				break
 			}
-			upstreamMM = append(upstreamMM, fwkrh.MultiModalFeature{
-				Modality: fwkrh.Modality(modality),
+			upstreamMM = append(upstreamMM, fwkrhapi.MultiModalFeature{
+				Modality: fwkrhapi.Modality(modality),
 				Hash:     h,
 				Offset:   ranges[i].Offset,
 				Length:   ranges[i].Length,
@@ -823,8 +823,8 @@ func TestMMPipeline_ScoreTokensWithExtraFeatures_UDS(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-mm-e2e",
 		TargetModel: mmModelName,
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+		Body: &fwkrhapi.InferenceRequestBody{
+			TokenizedPrompt: &fwkrhapi.TokenizedPrompt{
 				TokenIDs:           tokens,
 				MultiModalFeatures: upstreamMM,
 			},

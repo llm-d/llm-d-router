@@ -17,6 +17,7 @@ limitations under the License.
 package scheduling
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"fmt"
 	"strings"
@@ -26,7 +27,6 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
@@ -87,9 +87,9 @@ func BenchmarkSchedule(b *testing.B) {
 	req := &fwksched.InferenceRequest{
 		RequestID:   uuid.NewString(),
 		TargetModel: "critical",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: prompt},
+		Body: &fwkrhapi.InferenceRequestBody{
+			Completions: &fwkrhapi.CompletionsRequest{
+				Prompt: fwkrhapi.Prompt{Raw: prompt},
 			},
 		},
 	}

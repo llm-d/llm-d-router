@@ -17,6 +17,7 @@ limitations under the License.
 package loader
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"errors"
 	"fmt"
 	"sync"
@@ -36,7 +37,6 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
@@ -291,7 +291,7 @@ func buildParserConfig(rawParserConfig *configapi.ParserConfig, handle fwkplugin
 	if !ok {
 		return nil, errors.New("the configured parser is not loaded")
 	}
-	v, ok := plugin.(fwkrh.Parser)
+	v, ok := plugin.(fwkrhapi.Parser)
 	if !ok {
 		return nil, errors.New("the specified plugin is not a parser plugin in the config")
 	}

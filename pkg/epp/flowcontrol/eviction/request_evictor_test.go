@@ -17,6 +17,7 @@ limitations under the License.
 package eviction
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"sync"
 	"testing"
@@ -29,7 +30,6 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -85,7 +85,7 @@ func TestRequestEvictor_ResponseBody_DeregistersEvictChannel(t *testing.T) {
 	re.PreRequest(ctx, request, makeSchedulingResult())
 	require.NotNil(t, re.EvictionRegistry().Get("req-1"))
 
-	re.ResponseBody(ctx, request, &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, request, &fwkrhapi.Response{EndOfStream: true}, nil)
 
 	assert.Nil(t, re.EvictionRegistry().Get("req-1"), "EvictCh should be deregistered after completion")
 	assert.Equal(t, 0, re.queue.InFlightLen())
@@ -157,7 +157,7 @@ func TestRequestEvictor_RaceBetweenEvictAndCompletion(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for _, req := range requests {
-			re.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+			re.ResponseBody(ctx, req, &fwkrhapi.Response{EndOfStream: true}, nil)
 			time.Sleep(time.Millisecond)
 		}
 	}()
@@ -215,7 +215,7 @@ func TestRequestEvictor_CleanupCallsEvictorCleanup(t *testing.T) {
 
 	// The ResponseBody from the first eviction fires via defer in real code.
 	// Simulate it here.
-	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &fwkrhapi.Response{EndOfStream: true}, nil)
 
 	// Re-track and evict again.
 	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
@@ -241,7 +241,7 @@ func TestRequestEvictor_CleanupWorksWithNoOpEvictor(t *testing.T) {
 
 	ctx := context.Background()
 	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
-	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &fwkrhapi.Response{EndOfStream: true}, nil)
 
 	assert.Equal(t, 0, re.queue.InFlightLen())
 }

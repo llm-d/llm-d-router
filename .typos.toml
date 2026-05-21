@@ -18,6 +18,6 @@ extend-exclude = [
     "build/",
     "testdata/",
     # Generated protobuf files
-    "pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen/"
+    "pkg/epp/framework/requesthandler/parsers/vllmgrpc/api/gen/"
 ]
 

@@ -1,6 +1,7 @@
 package disagg
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -69,28 +69,28 @@ func profileNames(m map[string]scheduling.SchedulerProfile) []string {
 // completionsRequest builds a text-only InferenceRequest.
 func completionsRequest(prompt string) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+		Body: &fwkrhapi.InferenceRequestBody{
+			Completions: &fwkrhapi.CompletionsRequest{Prompt: fwkrhapi.Prompt{Raw: prompt}},
 		},
 	}
 }
 
 // chatRequest builds a chat-completions InferenceRequest with optional multimodal blocks.
 func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest {
-	blocks := []fwkrh.ContentBlock{{Type: "text", Text: "describe this"}}
+	blocks := []fwkrhapi.ContentBlock{{Type: "text", Text: "describe this"}}
 	if hasImage {
-		blocks = append(blocks, fwkrh.ContentBlock{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/img.jpg"}})
+		blocks = append(blocks, fwkrhapi.ContentBlock{Type: "image_url", ImageURL: fwkrhapi.ImageBlock{URL: "https://example.com/img.jpg"}})
 	}
 	if hasVideo {
-		blocks = append(blocks, fwkrh.ContentBlock{Type: "video_url"})
+		blocks = append(blocks, fwkrhapi.ContentBlock{Type: "video_url"})
 	}
 	if hasAudio {
-		blocks = append(blocks, fwkrh.ContentBlock{Type: "input_audio"})
+		blocks = append(blocks, fwkrhapi.ContentBlock{Type: "input_audio"})
 	}
 	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: blocks}}},
+		Body: &fwkrhapi.InferenceRequestBody{
+			ChatCompletions: &fwkrhapi.ChatCompletionsRequest{
+				Messages: []fwkrhapi.Message{{Role: "user", Content: fwkrhapi.Content{Structured: blocks}}},
 			},
 		},
 	}
@@ -98,7 +98,7 @@ func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest
 
 // withPrompt adds a completions body to a chat request so the PD decider can estimate tokens.
 func withPrompt(req *scheduling.InferenceRequest, prompt string) *scheduling.InferenceRequest {
-	req.Body.Completions = &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}}
+	req.Body.Completions = &fwkrhapi.CompletionsRequest{Prompt: fwkrhapi.Prompt{Raw: prompt}}
 	return req
 }
 
@@ -144,7 +144,7 @@ func TestHasMultimodalContent(t *testing.T) {
 	}{
 		{"nil request", nil, false},
 		{"nil body", &scheduling.InferenceRequest{Body: nil}, false},
-		{"nil chat completions", &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}, false},
+		{"nil chat completions", &scheduling.InferenceRequest{Body: &fwkrhapi.InferenceRequestBody{}}, false},
 		{"text only", chatRequest(false, false, false), false},
 		{"image", chatRequest(true, false, false), true},
 		{"video", chatRequest(false, true, false), true},
@@ -420,7 +420,7 @@ func TestHandler_Pick_PD_InputTokenError(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	// Request with neither Completions nor ChatCompletions → getUserInputLenInTokens fails.
 	req := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{},
+		Body: &fwkrhapi.InferenceRequestBody{},
 	}
 	profiles := map[string]scheduling.SchedulerProfile{
 		defaultDecodeProfile:  &mockProfile{},

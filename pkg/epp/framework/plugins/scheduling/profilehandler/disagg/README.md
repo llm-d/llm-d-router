@@ -103,11 +103,11 @@ plugins:
 ### DisaggHeadersHandler (Deprecated)
 
 **Type:** `disagg-headers-handler`
-**Interfaces**: `requestcontrol.PreRequest`
+**Interfaces**: `fwkrhapi.PreRequest`
 
 > **Deprecated:** Use `disagg-profile-handler` instead.
 >
-> `disagg-profile-handler` now implements `requestcontrol.PreRequest` natively.
+> `disagg-profile-handler` now implements `fwkrhapi.PreRequest` natively.
 >
 > Planned removal: `v0.11`.
 
@@ -156,7 +156,7 @@ plugins:
 ### PrefillHeaderHandler (Deprecated)
 
 **Type:** `prefill-header-handler`
-**Interfaces**: `requestcontrol.PreRequest`
+**Interfaces**: `fwkrhapi.PreRequest`
 
 > **Deprecated:** Use `disagg-profile-handler` instead.
 >

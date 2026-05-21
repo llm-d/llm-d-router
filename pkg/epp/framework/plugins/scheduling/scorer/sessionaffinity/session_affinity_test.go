@@ -1,6 +1,7 @@
 package sessionaffinity_test
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"context"
 	"encoding/base64"
 	"testing"
@@ -9,7 +10,6 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sessionaffinity "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -107,31 +107,31 @@ func TestSessionAffinity_ResponseBody(t *testing.T) {
 
 	tests := []struct {
 		name            string
-		initialResponse *requestcontrol.Response
+		initialResponse *fwkrhapi.Response
 		targetPod       *fwkdl.EndpointMetadata
 		wantHeaders     map[string]string
 	}{
 		{
 			name:            "standard case with existing headers map",
-			initialResponse: &requestcontrol.Response{RequestID: "req-1", Headers: make(map[string]string), EndOfStream: true},
+			initialResponse: &fwkrhapi.Response{RequestID: "req-1", Headers: make(map[string]string), EndOfStream: true},
 			targetPod:       targetEndpoint,
 			wantHeaders:     map[string]string{"x-session-token": wantToken},
 		},
 		{
 			name:            "response with nil headers map",
-			initialResponse: &requestcontrol.Response{RequestID: "req-2", Headers: nil, EndOfStream: true},
+			initialResponse: &fwkrhapi.Response{RequestID: "req-2", Headers: nil, EndOfStream: true},
 			targetPod:       targetEndpoint,
 			wantHeaders:     map[string]string{"x-session-token": wantToken},
 		},
 		{
 			name:            "nil targetPod should do nothing",
-			initialResponse: &requestcontrol.Response{RequestID: "req-3", Headers: make(map[string]string), EndOfStream: true},
+			initialResponse: &fwkrhapi.Response{RequestID: "req-3", Headers: make(map[string]string), EndOfStream: true},
 			targetPod:       nil,
 			wantHeaders:     map[string]string{},
 		},
 		{
 			name:            "incomplete response should do nothing (EndOfStream=false)",
-			initialResponse: &requestcontrol.Response{RequestID: "req-4", Headers: make(map[string]string), EndOfStream: false},
+			initialResponse: &fwkrhapi.Response{RequestID: "req-4", Headers: make(map[string]string), EndOfStream: false},
 			targetPod:       targetEndpoint,
 			wantHeaders:     map[string]string{},
 		},

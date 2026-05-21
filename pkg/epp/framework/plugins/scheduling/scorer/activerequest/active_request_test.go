@@ -1,6 +1,7 @@
 package activerequest
 
 import (
+	fwkrhapi "github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/types"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,10 +9,9 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/requesthandler/dataproducer/inflightload"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -121,7 +121,7 @@ func TestActiveRequestScorer_UsesInFlightLoadProducerLifecycle(t *testing.T) {
 	assert.Equal(t, 1.0, scores[podB])
 
 	req.SchedulingResult = result
-	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	producer.ResponseBody(ctx, req, &fwkrhapi.Response{EndOfStream: true}, nil)
 	require.NoError(t, producer.Produce(ctx, req, endpoints))
 
 	require.Equal(t, int64(0), inFlightRequests(t, podA))
