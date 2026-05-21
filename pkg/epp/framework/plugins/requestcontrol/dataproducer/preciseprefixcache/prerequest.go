@@ -1,0 +1,172 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package preciseprefixcache
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/jellydator/ttlcache/v3"
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+)
+
+const (
+	defaultSpeculativeTTL      = 2 * time.Second
+	experimentalPrefillProfile = "prefill"
+	blockKeysStateKey          = plugin.StateKey("precise-prefix-cache-producer.block-keys")
+)
+
+var _ requestcontrol.PreRequest = &Producer{}
+
+type speculativeEntries struct {
+	blockKeys  []kvblock.BlockHash
+	podEntries []kvblock.PodEntry
+}
+
+type blockKeysState struct {
+	blockKeys []kvblock.BlockHash
+}
+
+func (s *blockKeysState) Clone() plugin.StateData {
+	cp := make([]kvblock.BlockHash, len(s.blockKeys))
+	copy(cp, s.blockKeys)
+	return &blockKeysState{blockKeys: cp}
+}
+
+func buildSpeculativeCache(ctx context.Context, config PluginConfig,
+	index kvblock.Index,
+) (*ttlcache.Cache[string, *speculativeEntries], time.Duration, error) {
+	if !config.SpeculativeIndexing {
+		return nil, 0, nil
+	}
+
+	ttl := defaultSpeculativeTTL
+	if config.SpeculativeTTL != "" {
+		parsed, err := time.ParseDuration(config.SpeculativeTTL)
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid speculativeTTL %q: %w", config.SpeculativeTTL, err)
+		}
+		if parsed > 0 {
+			ttl = parsed
+		}
+	}
+
+	cache := ttlcache.New[string, *speculativeEntries](
+		ttlcache.WithTTL[string, *speculativeEntries](ttl),
+	)
+	cache.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason,
+		item *ttlcache.Item[string, *speculativeEntries],
+	) {
+		if reason != ttlcache.EvictionReasonExpired {
+			return
+		}
+		entries := item.Value()
+		for _, reqKey := range entries.blockKeys {
+			// Speculative entries were added without engineKey mapping, so
+			// evict by RequestKey directly.
+			//nolint:errcheck // best-effort cleanup on TTL expiry
+			index.Evict(ctx, reqKey, kvblock.RequestKey, entries.podEntries)
+		}
+	})
+	go cache.Start()
+	go func() {
+		<-ctx.Done()
+		cache.Stop()
+	}()
+
+	return cache, ttl, nil
+}
+
+// Seeds speculative entries for the selected endpoint(s). No-op when disabled.
+func (p *Producer) PreRequest(ctx context.Context,
+	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
+) {
+	if !p.speculativeEnabled {
+		return
+	}
+
+	logger := log.FromContext(ctx).WithName(p.typedName.String())
+
+	state, err := plugin.ReadPluginStateKey[*blockKeysState](
+		p.pluginState, request.RequestID, blockKeysStateKey)
+	if err != nil {
+		logger.V(logging.TRACE).Info("No plugin state for PreRequest, skipping speculative indexing",
+			"requestID", request.RequestID)
+		return
+	}
+	p.pluginState.Delete(request.RequestID)
+
+	if len(state.blockKeys) == 0 {
+		return
+	}
+
+	primary := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
+	if primary == nil || len(primary.TargetEndpoints) == 0 {
+		return
+	}
+	targetEndpoint := primary.TargetEndpoints[0]
+	targetMeta := targetEndpoint.GetMetadata()
+	if targetMeta == nil {
+		return
+	}
+	speculativePod := kvblock.PodEntry{
+		PodIdentifier: fmt.Sprintf("%s:%s", targetMeta.Address, targetMeta.Port),
+		Speculative:   true,
+	}
+
+	index := p.kvCacheIndexer.KVBlockIndex()
+	// nil engineKeys: confirmed KV events will fill them in.
+	if err := index.Add(ctx, nil, state.blockKeys, []kvblock.PodEntry{speculativePod}); err != nil {
+		logger.Error(err, "Failed to add speculative entries to index",
+			"pod", speculativePod.PodIdentifier)
+	}
+
+	allPodEntries := []kvblock.PodEntry{speculativePod}
+
+	// P/D disagg: seed the prefill endpoint too.
+	if pr, exists := schedulingResult.ProfileResults[experimentalPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {
+		if prefillMeta := pr.TargetEndpoints[0].GetMetadata(); prefillMeta != nil {
+			prefillPod := kvblock.PodEntry{
+				PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
+				Speculative:   true,
+			}
+			if err := index.Add(ctx, nil, state.blockKeys, []kvblock.PodEntry{prefillPod}); err != nil {
+				logger.Error(err, "Failed to add speculative entries for prefill endpoint",
+					"pod", prefillPod.PodIdentifier)
+			}
+			allPodEntries = append(allPodEntries, prefillPod)
+		}
+	}
+
+	p.speculativeCache.Set(request.RequestID, &speculativeEntries{
+		blockKeys:  state.blockKeys,
+		podEntries: allPodEntries,
+	}, p.speculativeTTL)
+
+	logger.V(logging.TRACE).Info("Added speculative entries",
+		"requestID", request.RequestID,
+		"pod", speculativePod.PodIdentifier,
+		"blockKeys", len(state.blockKeys),
+		"ttl", p.speculativeTTL)
+}

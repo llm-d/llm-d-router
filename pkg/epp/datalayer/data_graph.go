@@ -117,6 +117,10 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 			return fmt.Errorf("auto-created default entry %q is not a ProducerPlugin, this is required by datakey: %v, which is consumed by: %v", defaultProducerNameOrType, key, consumerName)
 		}
 		handle.AddPlugin(plg.TypedName().Name, plg)
+		logger.Info("auto-created default producer",
+			"producer", plg.TypedName().String(),
+			"dataKey", key,
+			"consumer", consumerName)
 	}
 
 	return nil
