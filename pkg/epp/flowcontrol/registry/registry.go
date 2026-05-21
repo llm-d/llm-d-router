@@ -474,10 +474,11 @@ func (fr *FlowRegistry) propagateStatsDelta(priority int, lenDelta, byteSizeDelt
 		band.len.Add(lenDelta)
 		band.byteSize.Add(byteSizeDelta)
 
-		val, _ := fr.perPriorityBandStats.Load(priority)
-		stats := val.(*bandStats)
-		stats.len.Add(lenDelta)
-		stats.byteSize.Add(byteSizeDelta)
+		if val, ok := fr.perPriorityBandStats.Load(priority); ok && val != nil {
+			stats := val.(*bandStats)
+			stats.len.Add(lenDelta)
+			stats.byteSize.Add(byteSizeDelta)
+		}
 		fr.totalLen.Add(lenDelta)
 		fr.totalByteSize.Add(byteSizeDelta)
 	}

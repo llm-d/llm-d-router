@@ -176,9 +176,22 @@ func (fr *FlowRegistry) synchronizeFlow(
 // deleteFlow removes a queue instance.
 // Must be called with the registry write lock held
 func (fr *FlowRegistry) deleteFlow(key flowcontrol.FlowKey) {
-	fr.logger.V(logging.DEFAULT).Info("Deleting queue instance.", "flowKey", key)
+	fr.logger.V(logging.DEBUG).Info("Deleting queue instance.", "flowKey", key)
 	if val, ok := fr.priorityBands.Load(key.Priority); ok {
 		band := val.(*priorityBand)
+		// Requests in a queue that are asynchronously finalized (e.g., due to client
+		// stream cancellation or context timeout), they are left in the queue for the
+		// GC process to clean them up, including updating the capacity. Here we remove
+		// a flow queue, potentially with such requests waiting for GC, therefor the
+		// capacity stats are updated here before removing the queue.
+		if mq, ok := band.queues[key.ID]; ok && mq != nil {
+			// Safe-guard: Deduct any unswept capacity before destroying the queue
+			if mqLen := int64(mq.Len()); mqLen > 0 {
+				fr.logger.V(logging.DEBUG).Info("Deregistering non-empty queue during GC, flushing stats",
+					"flowKey", key, "unsweptCount", mqLen)
+				fr.propagateStatsDelta(key.Priority, -mqLen, -int64(mq.ByteSize()))
+			}
+		}
 		delete(band.queues, key.ID)
 	}
 }
@@ -219,9 +232,10 @@ func (a *priorityBandAccessor) FlowKeys() []flowcontrol.FlowKey {
 	}
 	a.registry.mu.RUnlock()
 
+	priority := a.band.config.Priority
 	flowKeys := make([]flowcontrol.FlowKey, len(ids))
 	for i, id := range ids {
-		flowKeys[i] = flowcontrol.FlowKey{ID: id, Priority: a.Priority()}
+		flowKeys[i] = flowcontrol.FlowKey{ID: id, Priority: priority}
 	}
 	return flowKeys
 }
