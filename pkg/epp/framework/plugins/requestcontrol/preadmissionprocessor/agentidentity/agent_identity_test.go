@@ -189,6 +189,11 @@ func TestPluginFactory_PriorityHeaders(t *testing.T) {
 			want: append([]string{"x-custom-1", "x-custom-2"}, defaultPriorityHeaders...),
 		},
 		{
+			name: "mixed-case extras lowercased to match request header map",
+			raw:  `{"additionalSessionHeaders":["X-Tenant-ID","X-User-Session"]}`,
+			want: append([]string{"x-tenant-id", "x-user-session"}, defaultPriorityHeaders...),
+		},
+		{
 			name:    "malformed json → factory error",
 			raw:     `{"additionalSessionHeaders": not-json}`,
 			wantErr: true,

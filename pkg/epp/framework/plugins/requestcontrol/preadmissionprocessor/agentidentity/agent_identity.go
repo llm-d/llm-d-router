@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -51,15 +52,9 @@ var defaultPriorityHeaders = []string{
 	CodexSessionHeaderLegacy,
 }
 
-// Parameters is the user-facing plugin configuration block.
-//
-// Example configmap entry that adds a new header upstream just renamed to,
-// without losing the built-in defaults:
-//
-//	- type: agent-identity
-//	  parameters:
-//	    additionalSessionHeaders:
-//	      - x-new-codex-session-header
+// Parameters is the user-facing plugin configuration block. See the package
+// README for a configmap example showing how additionalSessionHeaders extends
+// the built-in default list.
 type Parameters struct {
 	// AdditionalSessionHeaders is prepended to the built-in default list.
 	// Order is preserved; the request-time loop short-circuits on first match.
@@ -81,11 +76,19 @@ func PluginFactory(name string, raw json.RawMessage, _ plugin.Handle) (plugin.Pl
 	}, nil
 }
 
-// mergeHeaders returns extras followed by defaults. Duplicates and empty
-// strings are left in — the request-time loop short-circuits on first match,
-// so the cost is one extra map lookup per duplicate.
+// mergeHeaders returns extras followed by defaults, lowercased. Request headers
+// are stored with lowercased keys (see handlers.HandleRequestHeaders), so the
+// priority list must match. Duplicates and empty strings are left in — the
+// request-time loop short-circuits on first match.
 func mergeHeaders(extras, defaults []string) []string {
-	return append(append([]string{}, extras...), defaults...)
+	merged := make([]string, 0, len(extras)+len(defaults))
+	for _, h := range extras {
+		merged = append(merged, strings.ToLower(h))
+	}
+	for _, h := range defaults {
+		merged = append(merged, strings.ToLower(h))
+	}
+	return merged
 }
 
 // Plugin resolves agent identity from provider-specific headers into FairnessID.
