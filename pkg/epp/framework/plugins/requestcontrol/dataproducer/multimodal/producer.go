@@ -26,7 +26,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"sort"
 	"sync"
 	"time"
 
@@ -206,7 +205,7 @@ func itemsFromTokenizedPrompt(features []fwkrh.MultiModalFeature) []attrmm.Match
 		}
 		addItem(itemsByHash, feature.Hash)
 	}
-	return sortedItems(itemsByHash)
+	return itemSlice(itemsByHash)
 }
 
 func itemsFromChat(request *fwkrh.ChatCompletionsRequest) []attrmm.MatchItem {
@@ -216,7 +215,7 @@ func itemsFromChat(request *fwkrh.ChatCompletionsRequest) []attrmm.MatchItem {
 			addBlockItem(itemsByHash, block)
 		}
 	}
-	return sortedItems(itemsByHash)
+	return itemSlice(itemsByHash)
 }
 
 func addBlockItem(itemsByHash map[string]attrmm.MatchItem, block fwkrh.ContentBlock) {
@@ -239,18 +238,13 @@ func addItem(itemsByHash map[string]attrmm.MatchItem, hash string) {
 	itemsByHash[hash] = attrmm.MatchItem{Hash: hash, Size: 1}
 }
 
-func sortedItems(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
+func itemSlice(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
 	if len(itemsByHash) == 0 {
 		return nil
 	}
-	hashes := make([]string, 0, len(itemsByHash))
-	for hash := range itemsByHash {
-		hashes = append(hashes, hash)
-	}
-	sort.Strings(hashes)
-	items := make([]attrmm.MatchItem, 0, len(hashes))
-	for _, hash := range hashes {
-		items = append(items, itemsByHash[hash])
+	items := make([]attrmm.MatchItem, 0, len(itemsByHash))
+	for _, item := range itemsByHash {
+		items = append(items, item)
 	}
 	return items
 }
@@ -268,7 +262,7 @@ func (p *Producer) matchedItemsForPod(pod string, requestItems []attrmm.MatchIte
 			matchedItemsByHash[item.Hash] = item
 		}
 	}
-	return sortedItems(matchedItemsByHash)
+	return itemSlice(matchedItemsByHash)
 }
 
 func (p *Producer) removeStalePods() {

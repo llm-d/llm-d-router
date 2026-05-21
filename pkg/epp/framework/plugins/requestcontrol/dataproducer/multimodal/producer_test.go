@@ -60,7 +60,7 @@ func TestExtractMMItemsFromTokenizedPrompt(t *testing.T) {
 		},
 	})
 
-	assert.Equal(t, []attrmm.MatchItem{{Hash: "image-a", Size: 1}, {Hash: "image-b", Size: 1}}, items)
+	assert.ElementsMatch(t, []attrmm.MatchItem{{Hash: "image-a", Size: 1}, {Hash: "image-b", Size: 1}}, items)
 }
 
 func TestExtractMMItemsFromStructuredChat(t *testing.T) {
@@ -81,7 +81,7 @@ func TestExtractMMItemsFromStructuredChat(t *testing.T) {
 	}
 
 	items := ExtractMMItems(request)
-	assert.Equal(t, []attrmm.MatchItem{
+	assert.ElementsMatch(t, []attrmm.MatchItem{
 		{Hash: contentHash("video_url", "https://example.com/cat.mp4"), Size: 1},
 		{Hash: contentHash("image_url", "https://example.com/cat.png"), Size: 1},
 	}, items)
@@ -347,6 +347,6 @@ func assertMatchInfo(t *testing.T, endpoint scheduling.Endpoint, matchedItems, r
 	require.True(t, ok)
 	info, ok := raw.(*attrmm.EncoderCacheMatchInfo)
 	require.True(t, ok)
-	assert.Equal(t, matchedItems, info.MatchedItems())
-	assert.Equal(t, requestItems, info.RequestItems())
+	assert.ElementsMatch(t, matchedItems, info.MatchedItems())
+	assert.ElementsMatch(t, requestItems, info.RequestItems())
 }
