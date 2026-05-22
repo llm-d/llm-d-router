@@ -2,8 +2,10 @@ package approximateprefix
 
 import (
 	"context"
+	"encoding/binary"
 	"testing"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/stretchr/testify/assert"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -105,24 +107,24 @@ func TestGetContentBlocks(t *testing.T) {
 				},
 			},
 			expectedContentBlocks: []KVCacheBlock{
-				{PseudoBytes: append([]byte("user"), repeatBytes("ec9fcee4f9e3bf14", 15)...)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 16)},
-				{PseudoBytes: repeatBytes("ec9fcee4f9e3bf14", 9)},
+				{PseudoBytes: append([]byte("user"), repeatBytes(imageHashBytes("https://example.com/image.jpg"), 15)...)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes("https://example.com/image.jpg"), 9)},
 			},
 			expectErr: false,
 		},
@@ -158,7 +160,7 @@ func TestGetContentBlocks(t *testing.T) {
 				},
 			},
 			expectedContentBlocks: []KVCacheBlock{
-				{PseudoBytes: append([]byte("user"), repeatBytes("78e243a88df523d4", 10)...)},
+				{PseudoBytes: append([]byte("user"), repeatBytes(imageHashBytes("data:image/jpeg;base64,bm90IGFuIGltYWdl"), 10)...)},
 			},
 			expectErr: false,
 		},
@@ -190,7 +192,7 @@ func TestGetContentBlocks(t *testing.T) {
 				},
 			},
 			expectedContentBlocks: []KVCacheBlock{
-				{PseudoBytes: append([]byte("user"), repeatBytes("4a94ad0c81606c56", 10)...)},
+				{PseudoBytes: append([]byte("user"), repeatBytes(imageHashBytes(base64Image180p1), 10)...)},
 			},
 			expectErr: false,
 		},
@@ -226,10 +228,10 @@ func TestGetContentBlocks(t *testing.T) {
 				},
 			},
 			expectedContentBlocks: []KVCacheBlock{
-				{PseudoBytes: append([]byte("user"), repeatBytes("4a94ad0c81606c56", 15)...)},
-				{PseudoBytes: repeatBytes("4a94ad0c81606c56", 16)},
-				{PseudoBytes: repeatBytes("4a94ad0c81606c56", 16)},
-				{PseudoBytes: repeatBytes("4a94ad0c81606c56", 9)},
+				{PseudoBytes: append([]byte("user"), repeatBytes(imageHashBytes(base64Image180p1), 15)...)},
+				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p1), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p1), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p1), 9)},
 			},
 			expectErr: false,
 		},
@@ -244,7 +246,7 @@ func TestGetContentBlocks(t *testing.T) {
 								Content: fwkrh.Content{
 									Structured: []fwkrh.ContentBlock{
 										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p1}},
-										{Type: "text", Text: "aaaaaaa"},
+										{Type: "text", Text: "aaaaaaaa"},
 										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p2}},
 									},
 								},
@@ -267,14 +269,14 @@ func TestGetContentBlocks(t *testing.T) {
 				},
 			},
 			expectedContentBlocks: []KVCacheBlock{
-				{PseudoBytes: append([]byte("user"), repeatBytes("4a94ad0c81606c56", 15)...)},
-				{PseudoBytes: repeatBytes("4a94ad0c81606c56", 16)},
-				{PseudoBytes: repeatBytes("4a94ad0c81606c56", 16)},
-				{PseudoBytes: append(append(repeatBytes("4a94ad0c81606c56", 9), []byte("aaaaaaa")...), repeatBytes("12989a57d904c624", 5)...)},
-				{PseudoBytes: repeatBytes("12989a57d904c624", 16)},
-				{PseudoBytes: repeatBytes("12989a57d904c624", 16)},
-				{PseudoBytes: repeatBytes("12989a57d904c624", 16)},
-				{PseudoBytes: repeatBytes("12989a57d904c624", 3)},
+				{PseudoBytes: append([]byte("user"), repeatBytes(imageHashBytes(base64Image180p1), 15)...)},
+				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p1), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p1), 16)},
+				{PseudoBytes: append(append(repeatBytes(imageHashBytes(base64Image180p1), 9), []byte("aaaaaaaa")...), repeatBytes(imageHashBytes(base64Image180p2), 5)...)},
+				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p2), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p2), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p2), 16)},
+				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p2), 3)},
 			},
 			expectErr: false,
 		},
@@ -292,11 +294,15 @@ func TestGetContentBlocks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			blocks, err := getKVCacheBlocksFromRawPrompt(context.Background(), tt.request, tt.blockSizeTokens, NewApproximatePrefixCacheTokenEstimator(context.Background(), tt.multimodalCfg))
+			seq, err := getKVCacheBlocksFromRawPrompt(context.Background(), tt.request, tt.blockSizeTokens, NewApproximatePrefixCacheTokenEstimator(context.Background(), tt.multimodalCfg))
 			if tt.expectErr {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
+				var blocks []KVCacheBlock
+				for block := range seq {
+					blocks = append(blocks, block)
+				}
 				assert.Equal(t, tt.expectedContentBlocks, blocks)
 			}
 		})
@@ -363,11 +369,17 @@ func TestKVCacheBlock_Hash(t *testing.T) {
 	}
 }
 
-func repeatBytes(s string, count int) []byte {
-	res := make([]byte, 0, len(s)*count)
-	b := []byte(s)
+func repeatBytes(b []byte, count int) []byte {
+	res := make([]byte, 0, len(b)*count)
 	for i := 0; i < count; i++ {
 		res = append(res, b...)
 	}
 	return res
+}
+
+func imageHashBytes(url string) []byte {
+	h := xxhash.Sum64([]byte(url))
+	buf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(buf, uint32(h))
+	return buf
 }

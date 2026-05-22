@@ -725,7 +725,7 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 // BenchmarkPrefixPluginStress is a stress test using prompts of increasing length.
 func BenchmarkPrefixPluginStress(b *testing.B) {
 	config := config{
-		BlockSizeTokens:        1,
+		BlockSizeTokens:        16,
 		MaxPrefixBlocksToMatch: 50000,
 		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 	}
@@ -735,6 +735,7 @@ func BenchmarkPrefixPluginStress(b *testing.B) {
 
 	for _, v := range promptLen {
 		b.Run(fmt.Sprintf("length_%d", v), func(b *testing.B) {
+			b.ReportAllocs()
 			prompt := randomPrompt(v)
 			endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
 				NamespacedName: k8stypes.NamespacedName{Name: "pod1"},

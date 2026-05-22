@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"iter"
 
 	"github.com/cespare/xxhash/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -85,28 +86,24 @@ func getBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, b
 		return nil
 	}
 
-	kvCacheBlocks, err := getKVCacheBlocksFromRawPrompt(ctx, request, blockSizeTokens, tokenEstimator)
+	seq, err := getKVCacheBlocksFromRawPrompt(ctx, request, blockSizeTokens, tokenEstimator)
 	if err != nil {
 		loggerDebug.Error(err, "Failed to get kv cache blocks")
 		return nil
 	}
 
-	if len(kvCacheBlocks) == 0 {
+	blockHashes := computeBlockHashes(seq, request, maxPrefixBlocks)
+	if len(blockHashes) == 0 {
 		loggerDebug.Info("No kv cache block found")
 		return nil
 	}
 
-	if len(kvCacheBlocks) > maxPrefixBlocks {
-		loggerDebug.Info("Truncating input kv cache blocks", "blocks", len(kvCacheBlocks), "max prefix blocks", maxPrefixBlocks)
-		kvCacheBlocks = kvCacheBlocks[:maxPrefixBlocks]
-	}
-
-	return computeBlockHashes(kvCacheBlocks, request)
+	return blockHashes
 }
 
 // computeBlockHashes calculates the hash for content blocks.
-func computeBlockHashes(kvCacheBlocks []KVCacheBlock, request *scheduling.InferenceRequest) []blockHash {
-	blockHashes := make([]blockHash, 0, len(kvCacheBlocks))
+func computeBlockHashes(seq iter.Seq[KVCacheBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []blockHash {
+	var blockHashes []blockHash
 
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.
@@ -117,7 +114,11 @@ func computeBlockHashes(kvCacheBlocks []KVCacheBlock, request *scheduling.Infere
 
 	prevBlockHash := blockHash(h.Sum64())
 
-	for _, block := range kvCacheBlocks {
+	count := 0
+	for block := range seq {
+		if count >= maxPrefixBlocks {
+			break
+		}
 		h.Reset()
 		blockID := block.Hash()
 		_, _ = h.Write(toBytes(blockHash(blockID)))
@@ -125,6 +126,7 @@ func computeBlockHashes(kvCacheBlocks []KVCacheBlock, request *scheduling.Infere
 		blockHashes = append(blockHashes, blockHash(h.Sum64()))
 
 		prevBlockHash = blockHashes[len(blockHashes)-1]
+		count++
 	}
 
 	return blockHashes
@@ -136,7 +138,7 @@ func toBytes(i blockHash) []byte {
 	return bytes
 }
 
-func getKVCacheBlocksFromRawPrompt(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, tokenEstimator TokenEstimator) ([]KVCacheBlock, error) {
+func getKVCacheBlocksFromRawPrompt(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, tokenEstimator TokenEstimator) (iter.Seq[KVCacheBlock], error) {
 	switch {
 	case request.Body.Conversations != nil:
 		rawBytes, err := json.Marshal(request.Body.Conversations.Items)
@@ -178,31 +180,31 @@ func getKVCacheBlocksFromRawPrompt(ctx context.Context, request *scheduling.Infe
 	}
 }
 
-func getKVCacheBlocksFromRawBytes(rawBytes []byte, blockSizeTokens int) []KVCacheBlock {
-	if len(rawBytes) == 0 {
-		return nil
-	}
-
-	blockSizeBytes := blockSizeTokens * averageCharactersPerToken
-
-	numBlocks := (len(rawBytes) + blockSizeBytes - 1) / blockSizeBytes
-	blocks := make([]KVCacheBlock, 0, numBlocks)
-
-	for i := 0; i < len(rawBytes); i += blockSizeBytes {
-		blockEnd := i + blockSizeBytes
-		if blockEnd > len(rawBytes) {
-			blockEnd = len(rawBytes)
+func getKVCacheBlocksFromRawBytes(rawBytes []byte, blockSizeTokens int) iter.Seq[KVCacheBlock] {
+	return func(yield func(KVCacheBlock) bool) {
+		if len(rawBytes) == 0 {
+			return
 		}
 
-		blocks = append(blocks, KVCacheBlock{
-			PseudoBytes: rawBytes[i:blockEnd],
-		})
-	}
+		blockSizeBytes := blockSizeTokens * averageCharactersPerToken
 
-	return blocks
+		for i := 0; i < len(rawBytes); i += blockSizeBytes {
+			blockEnd := i + blockSizeBytes
+			if blockEnd > len(rawBytes) {
+				blockEnd = len(rawBytes)
+			}
+
+			block := KVCacheBlock{
+				PseudoBytes: rawBytes[i:blockEnd],
+			}
+			if !yield(block) {
+				return
+			}
+		}
+	}
 }
 
-func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, tokenEstimator TokenEstimator) []KVCacheBlock {
+func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, tokenEstimator TokenEstimator) iter.Seq[KVCacheBlock] {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	messages := request.Body.ChatCompletions.Messages
 	var allPseudoBytes []byte
@@ -246,20 +248,5 @@ func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *schedulin
 		}
 	}
 
-	blockSizeBytes := blockSizeTokens * averageCharactersPerToken
-	numBlocks := (len(allPseudoBytes) + blockSizeBytes - 1) / blockSizeBytes
-	kvCacheBlocks := make([]KVCacheBlock, 0, numBlocks)
-
-	for i := 0; i < len(allPseudoBytes); i += blockSizeBytes {
-		end := i + blockSizeBytes
-		if end > len(allPseudoBytes) {
-			end = len(allPseudoBytes)
-		}
-
-		kvCacheBlocks = append(kvCacheBlocks, KVCacheBlock{
-			PseudoBytes: allPseudoBytes[i:end],
-		})
-	}
-
-	return kvCacheBlocks
+	return getKVCacheBlocksFromRawBytes(allPseudoBytes, blockSizeTokens)
 }
