@@ -11,8 +11,8 @@ data:
     {{- $parserType := "" }}
     {{- if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
       {{- $parserType = "vllmgrpc-parser" }}
-    {{- else if .Values.router.parser }}
-      {{- $parserType = .Values.router.parser }}
+    {{- else if .Values.router.epp.parser }}
+      {{- $parserType = .Values.router.epp.parser }}
     {{- else if eq (lower $modelServerType) "triton" }}
       {{- $parserType = "passthrough-parser" }}
     {{- end }}
@@ -24,9 +24,9 @@ data:
     - type: prefix-cache-scorer
     - type: metrics-data-source
       parameters:
-        scheme: {{ .Values.router.metricsDataSource.scheme | default "http" | quote }}
-        path: {{ .Values.router.metricsDataSource.path | default "/metrics" | quote }}
-        insecureSkipVerify: {{ .Values.router.metricsDataSource.insecureSkipVerify | default true }}
+        scheme: {{ .Values.router.epp.metricsDataSource.scheme | default "http" | quote }}
+        path: {{ .Values.router.epp.metricsDataSource.path | default "/metrics" | quote }}
+        insecureSkipVerify: {{ .Values.router.epp.metricsDataSource.insecureSkipVerify | default true }}
     - type: core-metrics-extractor
       {{- $modelServerType := .Values.router.modelServers.type | default "vllm" }}
       {{- if ne $modelServerType "vllm" }}
@@ -84,15 +84,15 @@ data:
   {{- end }}
   
 ---
-{{- $sidecar := include "llm-d-router.sidecar" . | fromYaml | default dict }}
-{{- if and $sidecar.enabled $sidecar.configMap }}
+{{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict }}
+{{- if and $proxy.enabled $proxy.configMap }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ $sidecar.configMap.name }}
+  name: {{ $proxy.configMap.name }}
   namespace: {{ .Release.Namespace }}
 data:
-  {{- include "llm-d-router.sidecarConfigMapData" . | nindent 2 }}
+  {{- include "llm-d-router.proxyConfigMapData" . | nindent 2 }}
 {{- end }}
 ---
 {{- if .Values.router.latencyPredictor.enabled }}

@@ -1,0 +1,3 @@
+# HELP inference_extension_prefix_indexer_size [ALPHA] [Deprecated: Use llm_d_router_epp_prefix_indexer_size] Size of the prefix indexer.
+# TYPE inference_extension_prefix_indexer_size gauge
+inference_extension_prefix_indexer_size{} 4096

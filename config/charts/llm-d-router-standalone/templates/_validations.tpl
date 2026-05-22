@@ -13,35 +13,35 @@ common validations
 standalone validations
 */}}
 {{- define "llm-d-router.validations.standalone" -}}
-{{- $sidecar := .Values.router.sidecar | default dict -}}
-{{- if $sidecar.enabled -}}
-  {{- $proxyType := default "envoy" ($sidecar.proxyType | default "envoy") | lower -}}
+{{- $proxy := .Values.router.proxy | default dict -}}
+{{- if $proxy.enabled -}}
+  {{- $proxyType := default "envoy" ($proxy.proxyType | default "envoy") | lower -}}
   {{- if not (or (eq $proxyType "envoy") (eq $proxyType "agentgateway")) -}}
-    {{- fail (printf ".Values.router.sidecar.proxyType must be one of [envoy, agentgateway], got %q" $proxyType) -}}
+    {{- fail (printf ".Values.router.proxy.proxyType must be one of [envoy, agentgateway], got %q" $proxyType) -}}
   {{- end -}}
   {{- if eq $proxyType "agentgateway" -}}
     {{- if ne .Values.router.inferencePool.create false -}}
       {{- fail ".Values.router.inferencePool.create=false is required when proxyType=agentgateway; standalone agentgateway currently supports only service-backed routing" -}}
     {{- end -}}
-    {{- $agentgateway := index $sidecar "agentgateway" | default dict -}}
+    {{- $agentgateway := index $proxy "agentgateway" | default dict -}}
     {{- $service := index $agentgateway "service" | default dict -}}
     {{- $serviceName := index $service "name" | default "" -}}
     {{- $serviceCreate := index $service "create" | default true -}}
     {{- if hasKey $service "port" -}}
-      {{- fail ".Values.router.sidecar.agentgateway.service.port has been replaced by .Values.router.sidecar.agentgateway.service.ports" -}}
+      {{- fail ".Values.router.proxy.agentgateway.service.port has been replaced by .Values.router.proxy.agentgateway.service.ports" -}}
     {{- end -}}
     {{- if empty $serviceName -}}
-      {{- fail ".Values.router.sidecar.agentgateway.service.name is required when proxyType=agentgateway" -}}
+      {{- fail ".Values.router.proxy.agentgateway.service.name is required when proxyType=agentgateway" -}}
     {{- end -}}
     {{- $targetPorts := include "llm-d-router.standaloneEndpointTargetPorts" . -}}
     {{- $servicePorts := include "llm-d-router.agentgateway.modelServicePorts" . -}}
     {{- if ne $targetPorts $servicePorts -}}
-      {{- fail (printf ".Values.router.sidecar.agentgateway.service.ports must match .Values.router.modelServers.targetPorts when proxyType=agentgateway, got service ports %q and target ports %q" $servicePorts $targetPorts) -}}
+      {{- fail (printf ".Values.router.proxy.agentgateway.service.ports must match .Values.router.modelServers.targetPorts when proxyType=agentgateway, got service ports %q and target ports %q" $servicePorts $targetPorts) -}}
     {{- end -}}
     {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . -}}
-    {{- $flags := .Values.router.flags | default dict -}}
+    {{- $flags := .Values.router.epp.flags | default dict -}}
     {{- if and (hasKey $flags "secure-serving") (ne (toString (index $flags "secure-serving")) "false") -}}
-      {{- fail ".Values.router.flags.secure-serving must be false when proxyType=agentgateway; standalone agentgateway uses plaintext gRPC to EPP over localhost" -}}
+      {{- fail ".Values.router.epp.flags.secure-serving must be false when proxyType=agentgateway; standalone agentgateway uses plaintext gRPC to EPP over localhost" -}}
     {{- end -}}
     {{- if $serviceCreate -}}
       {{- $selectorLabels := include "llm-d-router.agentgateway.modelServiceSelectorLabels" . -}}

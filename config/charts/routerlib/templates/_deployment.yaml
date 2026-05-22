@@ -26,11 +26,11 @@ spec:
         {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
         {{- include "llm-d-router.modeLabels" . | nindent 8 }}
     spec:
-      {{- $sidecar := include "llm-d-router.sidecar" . | fromYaml | default dict }}
-      {{- $proxyType := include "llm-d-router.sidecarProxyType" . | trim }}
-      {{- $sidecarConfigMap := index $sidecar "configMap" | default dict }}
-      {{- $sidecarConfigMapName := index $sidecarConfigMap "name" | default "" }}
-      {{- $inferenceExtensionFlags := deepCopy (.Values.router.flags | default dict) }}
+      {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict }}
+      {{- $proxyType := include "llm-d-router.proxyType" . | trim }}
+      {{- $proxyConfigMap := index $proxy "configMap" | default dict }}
+      {{- $proxyConfigMapName := index $proxyConfigMap "name" | default "" }}
+      {{- $inferenceExtensionFlags := deepCopy (.Values.router.epp.flags | default dict) }}
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $inferenceExtensionFlags "secure-serving")) }}
         {{- $_ := set $inferenceExtensionFlags "secure-serving" false }}
       {{- end }}
@@ -38,63 +38,63 @@ spec:
       # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
       terminationGracePeriodSeconds: 130
       containers:
-      {{- if $sidecar.enabled }}
-        - name: {{ $sidecar.name }}
-          image: {{ $sidecar.image }}
-          imagePullPolicy: {{ $sidecar.imagePullPolicy | default "IfNotPresent" }}
-        {{- with $sidecar.command }}
+      {{- if $proxy.enabled }}
+        - name: {{ $proxy.name }}
+          image: {{ $proxy.image }}
+          imagePullPolicy: {{ $proxy.imagePullPolicy | default "IfNotPresent" }}
+        {{- with $proxy.command }}
           command:
             - {{ . | quote }}
         {{- end }}
-        {{- with $sidecar.args }}
+        {{- with $proxy.args }}
           args:
           {{- range . }}
             - {{ . | quote }}
           {{- end }}
         {{- end }}
-        {{- with $sidecar.env }}
+        {{- with $proxy.env }}
           env:
           {{- toYaml . | nindent 10 }}
           {{- end }}
-        {{- with $sidecar.ports }}
+        {{- with $proxy.ports }}
           ports:
           {{- toYaml . | nindent 10 }}
         {{- end }}
-        {{- with $sidecar.livenessProbe }}
+        {{- with $proxy.livenessProbe }}
           livenessProbe:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- with $sidecar.readinessProbe }}
+        {{- with $proxy.readinessProbe }}
           readinessProbe:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- with $sidecar.startupProbe }}
+        {{- with $proxy.startupProbe }}
           startupProbe:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- with $sidecar.securityContext }}
+        {{- with $proxy.securityContext }}
           securityContext:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- with $sidecar.resources }}
+        {{- with $proxy.resources }}
           resources:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- if or (and (eq $proxyType "agentgateway") $sidecarConfigMapName) $sidecar.volumeMounts }}
+        {{- if or (and (eq $proxyType "agentgateway") $proxyConfigMapName) $proxy.volumeMounts }}
           volumeMounts:
-          {{- if and (eq $proxyType "agentgateway") $sidecarConfigMapName }}
+          {{- if and (eq $proxyType "agentgateway") $proxyConfigMapName }}
             - name: agentgateway-config-template
               mountPath: /config
               readOnly: true
           {{- end }}
-          {{- with $sidecar.volumeMounts }}
+          {{- with $proxy.volumeMounts }}
           {{- toYaml . | nindent 12 }}
           {{- end }}
         {{- end }}
         {{- end }}
         - name: epp
-          image: {{ .Values.router.image.registry }}/{{ .Values.router.image.repository }}:{{ .Values.router.image.tag }}
-          imagePullPolicy: {{ .Values.router.image.pullPolicy | default "IfNotPresent" }}
+          image: {{ .Values.router.epp.image.registry }}/{{ .Values.router.epp.image.repository }}:{{ .Values.router.epp.image.tag }}
+          imagePullPolicy: {{ .Values.router.epp.image.pullPolicy | default "IfNotPresent" }}
           args:
           {{- /* 1. Determine Mode Logic */ -}}
           {{- $useInferencePool := ne .Values.router.inferencePool.create false }}
@@ -161,7 +161,7 @@ spec:
               - --zap-encoder
               - "json"
               - --config-file
-              - "/config/{{ .Values.router.pluginsConfigFile }}"
+              - "/config/{{ .Values.router.epp.pluginsConfigFile }}"
           {{- if gt (.Values.router.replicas | int) 1 }}
               - --ha-enable-leader-election
           {{- end }}
@@ -178,7 +178,7 @@ spec:
           {{- if not .Values.router.monitoring.prometheus.auth.enabled }}
               - --metrics-endpoint-auth=false
           {{- end }}
-          {{- with .Values.router.resources }}
+          {{- with .Values.router.epp.resources }}
           resources:
             {{ toYaml . | nindent 12 }}
           {{- end }}
@@ -189,8 +189,8 @@ spec:
               containerPort: 9003
             - name: metrics
               containerPort: 9090
-        {{- if .Values.router.extraContainerPorts }}
-            {{- toYaml .Values.router.extraContainerPorts | nindent 12 }}
+        {{- if .Values.router.epp.extraContainerPorts }}
+            {{- toYaml .Values.router.epp.extraContainerPorts | nindent 12 }}
         {{- end }}
           livenessProbe:
           {{- if gt (.Values.router.replicas | int) 1 }}
@@ -249,29 +249,29 @@ spec:
             - name: OTEL_TRACES_SAMPLER_ARG
               value: {{ .Values.router.tracing.sampling.samplerArg | quote }}
         {{- end }}
-        {{- if .Values.router.env }}
-        {{- toYaml .Values.router.env | nindent 12 }}
+        {{- if .Values.router.epp.env }}
+        {{- toYaml .Values.router.epp.env | nindent 12 }}
         {{- end }}
           volumeMounts:
             - name: plugins-config-volume
               mountPath: "/config"
-        {{- if .Values.router.volumeMounts }}
-        {{- toYaml .Values.router.volumeMounts | nindent 12 }}
+        {{- if .Values.router.epp.volumeMounts }}
+        {{- toYaml .Values.router.epp.volumeMounts | nindent 12 }}
         {{- end }}
       {{- include "llm-d-router.latencyPredictor.containers" . | nindent 8 }}
       volumes:
       {{- if .Values.router.volumes }}
       {{- toYaml .Values.router.volumes | nindent 8 }}
       {{- end }}
-      {{- if and $sidecar.enabled (eq $proxyType "agentgateway") $sidecarConfigMapName }}
+      {{- if and $proxy.enabled (eq $proxyType "agentgateway") $proxyConfigMapName }}
         - name: agentgateway-config-template
           configMap:
-            name: {{ $sidecarConfigMapName }}
+            name: {{ $proxyConfigMapName }}
             items:
               - key: config.yaml
                 path: config.yaml
       {{- end }}
-      {{- with $sidecar.volumes }}
+      {{- with $proxy.volumes }}
       {{- tpl (toYaml .) $ | nindent 8 }}
       {{- end }}
         - name: plugins-config-volume

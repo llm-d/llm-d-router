@@ -9,7 +9,7 @@ router:
       protocol: TCP
       targetPort: 8081
 
-  sidecar:
+  proxy:
     enabled: true
     proxyType: envoy
     resources:
@@ -31,7 +31,7 @@ router:
           - 8000
 
     # Built-in standalone proxy presets. The selected preset is merged with the
-    # top-level sidecar.* fields below, so explicit user overrides still win.
+    # top-level proxy.* fields below, so explicit user overrides still win.
     presets:
       envoy:
         configMap:
@@ -235,12 +235,12 @@ router:
                                     address: 127.0.0.1
                                     port_value: 9002
                               load_balancing_weight: 1
-        name: envoy-sidecar
+        name: envoy-proxy
         image: docker.io/envoyproxy/envoy:distroless-v1.33.2
         command: "envoy"
         args:
           - "--service-node"
-          - "envoy-sidecar"
+          - "envoy-proxy"
           - "--log-level"
           - "warn"
           - "--cpuset-threads"
@@ -287,7 +287,7 @@ router:
       agentgateway:
         configMap:
           name: agentgateway
-        name: agentgateway-sidecar
+        name: agentgateway-proxy
         # Keep main on latest-dev; release tooling rewrites this to a stable tag.
         image: cr.agentgateway.dev/agentgateway:latest-dev
         args:
@@ -319,7 +319,7 @@ router:
           successThreshold: 1
           timeoutSeconds: 2
 
-    # Optional explicit sidecar overrides applied on top of the selected
-    # preset. For example, set sidecar.image to replace the preset image.
+    # Optional explicit proxy overrides applied on top of the selected
+    # preset. For example, set proxy.image to replace the preset image.
 
 

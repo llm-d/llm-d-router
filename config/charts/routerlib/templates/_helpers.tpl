@@ -99,11 +99,11 @@ provider.name=gke and no monitoring provider is explicitly set.
 {{- end -}}
 
 {{/*
-Return the standalone sidecar proxy type.
+Return the standalone proxy type.
 */}}
-{{- define "llm-d-router.sidecarProxyType" -}}
-{{- $sidecar := .Values.router.sidecar | default dict -}}
-{{- default "envoy" ($sidecar.proxyType | default "envoy") | lower -}}
+{{- define "llm-d-router.proxyType" -}}
+{{- $proxy := .Values.router.proxy | default dict -}}
+{{- default "envoy" ($proxy.proxyType | default "envoy") | lower -}}
 {{- end -}}
 
 {{/*
@@ -205,24 +205,24 @@ Return the standalone EPP model-server target ports.
 Return the agentgateway model Service ports.
 */}}
 {{- define "llm-d-router.agentgateway.modelServicePorts" -}}
-{{- $sidecarValues := .Values.router.sidecar | default dict -}}
-{{- $agentgateway := index $sidecarValues "agentgateway" | default dict -}}
+{{- $proxyValues := .Values.router.proxy | default dict -}}
+{{- $agentgateway := index $proxyValues "agentgateway" | default dict -}}
 {{- $service := index $agentgateway "service" | default dict -}}
-{{- include "llm-d-router.normalizedPortList" (dict "path" ".Values.router.sidecar.agentgateway.service.ports" "value" (index $service "ports")) -}}
+{{- include "llm-d-router.normalizedPortList" (dict "path" ".Values.router.proxy.agentgateway.service.ports" "value" (index $service "ports")) -}}
 {{- end -}}
 
 {{/*
-Return the resolved sidecar configuration for the current chart.
-Standalone uses proxy presets merged with explicit sidecar overrides.
+Return the resolved proxy configuration for the current chart.
+Standalone uses proxy presets merged with explicit proxy overrides.
 */}}
-{{- define "llm-d-router.sidecar" -}}
-{{- $sidecar := deepCopy (.Values.router.sidecar | default dict) -}}
-{{- $resolved := $sidecar -}}
+{{- define "llm-d-router.proxy" -}}
+{{- $proxy := deepCopy (.Values.router.proxy | default dict) -}}
+{{- $resolved := $proxy -}}
 {{- if eq .Chart.Name "llm-d-router-standalone" -}}
-  {{- $proxyType := include "llm-d-router.sidecarProxyType" . -}}
-  {{- $presets := index $sidecar "presets" | default dict -}}
+  {{- $proxyType := include "llm-d-router.proxyType" . -}}
+  {{- $presets := index $proxy "presets" | default dict -}}
   {{- $preset := deepCopy ((index $presets $proxyType) | default dict) -}}
-  {{- $resolved = mergeOverwrite $preset $sidecar -}}
+  {{- $resolved = mergeOverwrite $preset $proxy -}}
   {{- if eq $proxyType "agentgateway" -}}
     {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . | int -}}
     {{- $ports := index $resolved "ports" | default list -}}
@@ -240,14 +240,14 @@ Standalone uses proxy presets merged with explicit sidecar overrides.
 {{- end -}}
 
 {{/*
-Return the rendered sidecar ConfigMap data.
+Return the rendered proxy ConfigMap data.
 */}}
-{{- define "llm-d-router.sidecarConfigMapData" -}}
-{{- $sidecar := include "llm-d-router.sidecar" . | fromYaml | default dict -}}
-{{- $configMap := index $sidecar "configMap" | default dict -}}
+{{- define "llm-d-router.proxyConfigMapData" -}}
+{{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
+{{- $configMap := index $proxy "configMap" | default dict -}}
 {{- $data := deepCopy ((index $configMap "data") | default dict) -}}
-{{- if and (eq .Chart.Name "llm-d-router-standalone") (eq (include "llm-d-router.sidecarProxyType" .) "agentgateway") -}}
-  {{- $generated := dict "config.yaml" (include "llm-d-router.sidecar.agentgatewayConfig" .) -}}
+{{- if and (eq .Chart.Name "llm-d-router-standalone") (eq (include "llm-d-router.proxyType" .) "agentgateway") -}}
+  {{- $generated := dict "config.yaml" (include "llm-d-router.proxy.agentgatewayConfig" .) -}}
   {{- $data = mergeOverwrite $data $generated -}}
 {{- end -}}
 {{- toYaml $data -}}
@@ -268,11 +268,11 @@ Only equality-based selectors are supported because Service selectors are a map.
 {{- end -}}
 
 {{/*
-Render the default standalone agentgateway sidecar config template.
+Render the default standalone agentgateway proxy config template.
 */}}
-{{- define "llm-d-router.sidecar.agentgatewayConfig" -}}
-{{- $sidecarValues := .Values.router.sidecar | default dict -}}
-{{- $agentgateway := index $sidecarValues "agentgateway" | default dict -}}
+{{- define "llm-d-router.proxy.agentgatewayConfig" -}}
+{{- $proxyValues := .Values.router.proxy | default dict -}}
+{{- $agentgateway := index $proxyValues "agentgateway" | default dict -}}
 {{- $service := index $agentgateway "service" | default dict -}}
 {{- $serviceName := index $service "name" | default "" -}}
 {{- $serviceNamespace := index $service "namespace" | default .Release.Namespace -}}
@@ -299,7 +299,7 @@ binds:
         policies:
           inferenceRouting:
             endpointPicker:
-              host: {{ printf "127.0.0.1:%v" (.Values.router.extProcPort | default 9002) | quote }}
+              host: {{ printf "127.0.0.1:%v" (.Values.router.epp.extProcPort | default 9002) | quote }}
             destinationMode: passthrough
 services:
 - name: {{ $serviceName | quote }}
@@ -316,12 +316,12 @@ services:
 EPP resource validations
 */}}
 {{- define "llm-d-router.validations.epp.resources" -}}
-{{- if not .Values.router.resources }}
-{{- fail ".Values.router.resources is required. EPP is a critical component that must have resource requests set." }}
+{{- if not .Values.router.epp.resources }}
+{{- fail ".Values.router.epp.resources is required. EPP is a critical component that must have resource requests set." }}
 {{- end }}
-{{- if not .Values.router.resources.requests }}
-{{- fail ".Values.router.resources.requests is required. EPP is a critical component that must have resource requests set." }}
+{{- if not .Values.router.epp.resources.requests }}
+{{- fail ".Values.router.epp.resources.requests is required. EPP is a critical component that must have resource requests set." }}
 {{- end }}
-{{- $_ := required ".Values.router.resources.requests.cpu is required. EPP is a critical component that must have CPU requests set." .Values.router.resources.requests.cpu }}
-{{- $_ := required ".Values.router.resources.requests.memory is required. EPP is a critical component that must have memory requests set." .Values.router.resources.requests.memory }}
+{{- $_ := required ".Values.router.epp.resources.requests.cpu is required. EPP is a critical component that must have CPU requests set." .Values.router.epp.resources.requests.cpu }}
+{{- $_ := required ".Values.router.epp.resources.requests.memory is required. EPP is a critical component that must have memory requests set." .Values.router.epp.resources.requests.memory }}
 {{- end -}}

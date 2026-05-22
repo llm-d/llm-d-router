@@ -1,10 +1,10 @@
-{{- $sidecar := .Values.router.sidecar | default dict -}}
-{{- $proxyType := default "envoy" ($sidecar.proxyType | default "envoy") | lower -}}
-{{- $agentgateway := index $sidecar "agentgateway" | default dict -}}
+{{- $proxy := .Values.router.proxy | default dict -}}
+{{- $proxyType := default "envoy" ($proxy.proxyType | default "envoy") | lower -}}
+{{- $agentgateway := index $proxy "agentgateway" | default dict -}}
 {{- $service := index $agentgateway "service" | default dict -}}
 {{- $serviceCreate := index $service "create" | default true -}}
 {{- $serviceName := index $service "name" | default "" -}}
-{{- if and $sidecar.enabled (eq $proxyType "agentgateway") $serviceCreate (not (empty $serviceName)) -}}
+{{- if and $proxy.enabled (eq $proxyType "agentgateway") $serviceCreate (not (empty $serviceName)) -}}
 {{- $serviceNamespace := index $service "namespace" | default .Release.Namespace -}}
 {{- $servicePorts := splitList "," (include "llm-d-router.agentgateway.modelServicePorts" .) -}}
 apiVersion: v1
