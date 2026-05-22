@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"iter"
+	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -50,13 +51,8 @@ func (b HashBlock) Hash() uint64 {
 	}
 
 	if len(b.Tokens) > 0 {
-		var h xxhash.Digest
-		var buf [4]byte // uint32 fits perfectly in 4 bytes
-		for _, t := range b.Tokens {
-			binary.LittleEndian.PutUint32(buf[:], t)
-			_, _ = h.Write(buf[:])
-		}
-		return h.Sum64()
+		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4)
+		return xxhash.Sum64(byteSlice)
 	}
 
 	return 0
