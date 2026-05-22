@@ -323,12 +323,12 @@ verify-manifests: kubectl-validate ## Validate deployment manifests.
 	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
 
 .PHONY: inferencepool-helm-chart-push
-inferencepool-helm-chart-push: yq helm-install ## Package and push the InferencePool Helm chart.
-	CHART=inferencepool EXTRA_TAG="$(EXTRA_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
+inferencepool-helm-chart-push: yq helm-install ## Package and push the llm-d-router-gateway Helm chart.
+	CHART=llm-d-router-gateway EXTRA_TAG="$(EXTRA_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 
 .PHONY: standalone-helm-chart-push
-standalone-helm-chart-push: yq helm-install ## Package and push the standalone EPP Helm chart.
-	CHART=standalone EXTRA_TAG="$(EXTRA_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
+standalone-helm-chart-push: yq helm-install ## Package and push the llm-d-router-standalone Helm chart.
+	CHART=llm-d-router-standalone EXTRA_TAG="$(EXTRA_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 
 
 ##@ Coverage

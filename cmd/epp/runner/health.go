@@ -56,7 +56,7 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 	// If leader election is disabled, use current logic: all checks are based on whether the pool has synced.
 	if !s.leaderElectionEnabled {
 		if !isLive || !protocolMatches {
-			s.logger.V(logutil.DEFAULT).Info("gRPC health check not serving (leader election disabled)", "service", in.Service, "isLive", isLive, "protocolMatches", protocolMatches)
+			s.logger.Error(nil, "gRPC health check not serving (leader election disabled)", "service", in.Service, "isLive", isLive, "protocolMatches", protocolMatches)
 			return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_NOT_SERVING}, nil
 		}
 		s.logger.V(logutil.TRACE).Info("gRPC health check serving (leader election disabled)", "service", in.Service)
@@ -88,12 +88,12 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 		checkName = "ext_proc"
 		isPassing = isLive && s.isLeader.Load() && protocolMatches
 	default:
-		s.logger.V(logutil.DEFAULT).Info("gRPC health check requested unknown service", "available-services", []string{LivenessCheckService, ReadinessCheckService, extProcPb.ExternalProcessor_ServiceDesc.ServiceName}, "requested-service", in.Service)
+		s.logger.Error(nil, "gRPC health check requested unknown service", "available-services", []string{LivenessCheckService, ReadinessCheckService, extProcPb.ExternalProcessor_ServiceDesc.ServiceName}, "requested-service", in.Service)
 		return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_SERVICE_UNKNOWN}, nil
 	}
 
 	if !isPassing {
-		s.logger.V(logutil.DEFAULT).Info(fmt.Sprintf("gRPC %s check not serving", checkName), "service", in.Service, "isLive", isLive, "isLeader", s.isLeader.Load())
+		s.logger.Error(nil, fmt.Sprintf("gRPC %s check not serving", checkName), "service", in.Service, "isLive", isLive, "isLeader", s.isLeader.Load())
 		return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_NOT_SERVING}, nil
 	}
 
