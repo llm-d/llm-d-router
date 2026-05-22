@@ -1,2 +1,0 @@
-{{ include "llm-d-router.validations.gateway.common" $ }}
-{{ include "inference-extension.inferencepool" . }}

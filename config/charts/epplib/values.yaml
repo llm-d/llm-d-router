@@ -6,8 +6,6 @@ image:
   pullPolicy: Always
 extProcPort: 9002
 
-failureMode: "FailOpen"
-
 # Example flags:
 # flags:
 #  # Log verbosity
@@ -194,3 +192,18 @@ latencyPredictor:
     LATENCY_MAX_SAMPLE_SIZE: "10000"
     LATENCY_MAX_CONCURRENT_DISPATCHES: "36"
     LATENCY_COALESCE_WINDOW_MS: "1"
+
+inferencePool:
+  create: true
+  apiVersion: inference.networking.k8s.io/v1
+  failureMode: "FailOpen"
+
+parser: "" # openai-parser, vllmgrpc-parser, passthrough-parser, or empty for auto-selection
+
+modelServers:
+  type: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton
+  protocol: http # http, grpc
+  targetPorts:
+    - number: 8000
+  # matchLabels: # REQUIRED in parent charts if creating inference pool
+  #   app: vllm-qwen3-32b

@@ -6,13 +6,13 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   default-plugins.yaml: |
-    {{- $modelServerProtocol = .Values.inferencePool.modelServerProtocol | default "http" }}
-    {{- $modelServerType = .Values.inferencePool.modelServerType | default "vllm" }}
+    {{- $modelServerProtocol := .Values.inferenceExtension.modelServers.protocol | default "http" }}
+    {{- $modelServerType := .Values.inferenceExtension.modelServers.type | default "vllm" }}
     {{- $parserType := "" }}
     {{- if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
       {{- $parserType = "vllmgrpc-parser" }}
-    {{- else if and .Values.inferencePool .Values.inferencePool.parser }}
-      {{- $parserType = .Values.inferencePool.parser }}
+    {{- else if .Values.inferenceExtension.parser }}
+      {{- $parserType = .Values.inferenceExtension.parser }}
     {{- else if eq (lower $modelServerType) "triton" }}
       {{- $parserType = "passthrough-parser" }}
     {{- end }}
@@ -28,7 +28,7 @@ data:
         path: {{ .Values.inferenceExtension.metricsDataSource.path | default "/metrics" | quote }}
         insecureSkipVerify: {{ .Values.inferenceExtension.metricsDataSource.insecureSkipVerify | default true }}
     - type: core-metrics-extractor
-      {{- $modelServerType := .Values.inferencePool.modelServerType | default "vllm" }}
+      {{- $modelServerType := .Values.inferenceExtension.modelServers.type | default "vllm" }}
       {{- if ne $modelServerType "vllm" }}
       parameters:
         defaultEngine: {{ $modelServerType | quote }}

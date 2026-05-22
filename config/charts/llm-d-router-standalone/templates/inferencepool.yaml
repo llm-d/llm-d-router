@@ -1,4 +1,0 @@
-{{- if .Values.inferencePool.enabled | default true }}
-{{ include "llm-d-router.validations.gateway.common" $ }}
-{{ include "inference-extension.inferencepool" . }}
-{{- end }}

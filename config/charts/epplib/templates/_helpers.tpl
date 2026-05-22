@@ -29,7 +29,7 @@ Cluster RBAC unique name
 Selector labels
 */}}
 {{- define "llm-d-router.selectorLabels" -}}
-{{- if not (default true .Values.inferencePool.enabled) -}}
+{{- if eq .Values.inferenceExtension.inferencePool.create false -}}
 {{- /* LOGIC FOR STANDALONE EPP MODE */ -}}
 llm-d-router-standalone: {{ include "llm-d-router.name" . }}
 {{- else -}}
@@ -42,7 +42,7 @@ llm-d-router-gateway: {{ include "llm-d-router.name" . }}
 Mode labels
 */}}
 {{- define "llm-d-router.modeLabels" -}}
-{{- if not (default true .Values.inferencePool.enabled) -}}
+{{- if eq .Values.inferenceExtension.inferencePool.create false -}}
 llm-d.ai/igw-mode: llm-d-router-standalone
 {{- else -}}
 llm-d.ai/igw-mode: llm-d-router-gateway
@@ -195,7 +195,7 @@ Return the standalone EPP model-server target ports.
 */}}
 {{- define "llm-d-router.standaloneEndpointTargetPorts" -}}
 {{- $ports := list -}}
-{{- range .Values.inferencePool.targetPorts -}}
+{{- range .Values.inferenceExtension.modelServers.targetPorts -}}
 {{- $ports = append $ports (toString .number) -}}
 {{- end -}}
 {{- join "," $ports -}}
@@ -258,12 +258,12 @@ Render labels from the standalone endpoint selector for the generated model Serv
 Only equality-based selectors are supported because Service selectors are a map.
 */}}
 {{- define "llm-d-router.agentgateway.modelServiceSelectorLabels" -}}
-{{- if and .Values.inferencePool.modelServers .Values.inferencePool.modelServers.matchLabels -}}
-{{- range $key, $value := .Values.inferencePool.modelServers.matchLabels -}}
+{{- if and .Values.inferenceExtension.modelServers .Values.inferenceExtension.modelServers.matchLabels -}}
+{{- range $key, $value := .Values.inferenceExtension.modelServers.matchLabels -}}
 {{- printf "%s: %s\n" ($key | quote) ($value | quote) -}}
 {{- end -}}
 {{- else -}}
-  {{- fail ".Values.inferencePool.modelServers.matchLabels is required when creating an agentgateway model Service" -}}
+  {{- fail ".Values.modelServers.matchLabels is required when creating an agentgateway model Service" -}}
 {{- end -}}
 {{- end -}}
 

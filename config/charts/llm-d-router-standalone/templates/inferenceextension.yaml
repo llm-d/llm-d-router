@@ -8,3 +8,4 @@
 {{ include "inference-extension.service" . }}
 {{ include "inference-extension.service-monitor" . }}
 {{ include "inference-extension.rbac" . }}
+{{ include "inference-extension.inferencepool-resource" . }}

@@ -8,14 +8,14 @@ To install an InferencePool named `vllm-qwen3-32b`  that selects from endpoints 
 
 ```txt
 $ helm install vllm-qwen3-32b ./config/charts/llm-d-router-gateway \
-  --set inferencePool.modelServers.matchLabels.app=vllm-qwen3-32b \
+  --set inferenceExtension.modelServers.matchLabels.app=vllm-qwen3-32b \
 ```
 
 To install via the latest published chart in staging  (--version v0 indicates latest dev version), you can run the following command:
 
 ```txt
 $ helm install vllm-qwen3-32b \
-  --set inferencePool.modelServers.matchLabels.app=vllm-qwen3-32b \
+  --set inferenceExtension.modelServers.matchLabels.app=vllm-qwen3-32b \
   --set provider.name=[none|gke|istio] \
   oci://ghcr.io/llm-d/charts/llm-d-router-gateway --version v0
 ```
@@ -28,8 +28,8 @@ To set cmd-line flags, you can use the `--set` option to set each flag, e.g.,:
 
 ```txt
 $ helm install vllm-qwen3-32b \
-  --set inferencePool.modelServers.matchLabels.app=vllm-qwen3-32b \
-  --set inferenceExtension.flags.<FLAG_NAME>=<FLAG_VALUE>
+  --set inferenceExtension.modelServers.matchLabels.app=vllm-qwen3-32b \
+  --set inferenceExtension.flags.<FLAG_NAME>=<FLAG_VALUE> \
   --set provider.name=[none|gke|istio] \
   oci://ghcr.io/llm-d/charts/llm-d-router-gateway --version v0
 ```
@@ -111,24 +111,24 @@ $ helm install vllm-qwen3-32b ./config/charts/llm-d-router-gateway -f values.yam
 
 ### Install for Triton TensorRT-LLM
 
-Use `--set inferencePool.modelServerType=triton-tensorrt-llm` to install for Triton TensorRT-LLM, e.g.,
+Use `--set inferenceExtension.modelServers.type=triton-tensorrt-llm` to install for Triton TensorRT-LLM, e.g.,
 
 ```txt
 $ helm install triton-qwen3-32b \
-  --set inferencePool.modelServers.matchLabels.app=triton-qwen3-32b \
-  --set inferencePool.modelServerType=triton-tensorrt-llm \
+  --set inferenceExtension.modelServers.matchLabels.app=triton-qwen3-32b \
+  --set inferenceExtension.modelServers.type=triton-tensorrt-llm \
   --set provider.name=[none|gke|istio] \
   oci://ghcr.io/llm-d/charts/llm-d-router-gateway --version v0
 ```
 
 ### Install for trtllm-serve (TensorRT-LLM)
 
-Use `--set inferencePool.modelServerType=trtllm-serve` to install for TensorRT-LLM's built-in OpenAI-compatible server ([`trtllm-serve`](https://nvidia.github.io/TensorRT-LLM/commands/trtllm-serve.html)). Prometheus metrics are supported in TensorRT-LLM >= 1.3.0 ([metrics reference](https://nvidia.github.io/TensorRT-LLM/latest/examples/prometheus_metrics.html)), but the version used must expose the metrics defined in the [Model Server Protocol](https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/docs/proposals/003-model-server-protocol). Example:
+Use `--set inferenceExtension.modelServers.type=trtllm-serve` to install for TensorRT-LLM's built-in OpenAI-compatible server ([`trtllm-serve`](https://nvidia.github.io/TensorRT-LLM/commands/trtllm-serve.html)). Prometheus metrics are supported in TensorRT-LLM >= 1.3.0 ([metrics reference](https://nvidia.github.io/TensorRT-LLM/latest/examples/prometheus_metrics.html)), but the version used must expose the metrics defined in the [Model Server Protocol](https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/docs/proposals/003-model-server-protocol). Example:
 
 ```txt
 $ helm install trtllm-serve-qwen3-32b \
-  --set inferencePool.modelServers.matchLabels.app=trtllm-serve-qwen3-32b \
-  --set inferencePool.modelServerType=trtllm-serve \
+  --set inferenceExtension.modelServers.matchLabels.app=trtllm-serve-qwen3-32b \
+  --set inferenceExtension.modelServers.type=trtllm-serve \
   --set provider.name=[none|gke|istio] \
   oci://ghcr.io/llm-d/charts/llm-d-router-gateway --version v0
 ```
@@ -148,7 +148,7 @@ To enable HA, set `inferenceExtension.replicas` to a number greater than 1.
 
   ```txt
   helm install vllm-qwen3-32b \
-  --set inferencePool.modelServers.matchLabels.app=vllm-qwen3-32b \
+  --set inferenceExtension.modelServers.matchLabels.app=vllm-qwen3-32b \
   --set inferenceExtension.replicas=3 \
   --set provider=[none|gke] \
   oci://ghcr.io/llm-d/charts/llm-d-router-gateway --version v0
@@ -209,11 +209,13 @@ The following table list the configurable parameters of the chart.
 
 | **Parameter Name**                                         | **Description**                                                                                                                                                                                                                                                                                                                                                                               |
 |------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `inferencePool.apiVersion`                                 | The API version of the InferencePool resource. Only `inference.networking.k8s.io/v1` is currently supported.                                                                                                                                                                                                                                                                                  |
-| `inferencePool.targetPortNumber`                           | Target port number for the vllm backends, will be used to scrape metrics by the inference extension. Defaults to 8000.                                                                                                                                                                                                                                                                        |
-| `inferencePool.modelServerType`                            | Type of the model servers in the pool, valid options are [vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton], default is vllm.                                                                                                                                                                                                                                                                  |
-| `inferencePool.modelServerProtocol`                        | Protocol of the model servers in the pool, valid options are [http, grpc], default is http.                                                                                                                                                                                                                                                                                                   |
-| `inferencePool.modelServers.matchLabels`                   | Label selector to match vllm backends managed by the inference pool.                                                                                                                                                                                                                                                                                                                          |
+| `inferenceExtension.inferencePool.apiVersion`               | The API version of the InferencePool resource. Only `inference.networking.k8s.io/v1` is currently supported.                                                                                                                                                                                                                                                                                  |
+| `inferenceExtension.inferencePool.create`                 | Whether to create the InferencePool resource. Defaults to true.                                                                                                                                                                                                                                                                                                                               |
+| `inferenceExtension.parser`                               | Parser type for EPP, valid options are [openai-parser, vllmgrpc-parser, passthrough-parser], or empty for auto-selection.                                                                                                                                                                                                                                                                     |
+| `inferenceExtension.modelServers.targetPortNumber`         | Target port number for the vllm backends, will be used to scrape metrics by the inference extension. Defaults to 8000.                                                                                                                                                                                                                                                                        |
+| `inferenceExtension.modelServers.type`                     | Type of the model servers in the pool, valid options are [vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton], default is vllm.                                                                                                                                                                                                                                                                  |
+| `inferenceExtension.modelServers.protocol`                 | Protocol of the model servers in the pool, valid options are [http, grpc], default is http.                                                                                                                                                                                                                                                                                                   |
+| `inferenceExtension.modelServers.matchLabels`               | Label selector to match vllm backends managed by the inference pool.                                                                                                                                                                                                                                                                                                                          |
 | `inferenceExtension.replicas`                              | Number of replicas for the endpoint picker extension service. If More than one replica is used, EPP will run in HA active-passive mode. Defaults to `1` from the shared [`inference-extension`](../epplib/values.yaml) library chart.                                                                                                                                           |
 | `inferenceExtension.image.repository`                      | Repository of the container image used for the endpoint picker. Defaults from the shared [`inference-extension`](../epplib/values.yaml) library chart.                                                                                                                                                                                                                             |
 | `inferenceExtension.image.registry`                        | Registry URL where the endpoint picker image is hosted. Defaults from the shared [`inference-extension`](../epplib/values.yaml) library chart.                                                                                                                                                                                                                                     |

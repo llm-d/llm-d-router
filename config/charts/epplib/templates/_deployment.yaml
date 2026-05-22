@@ -97,16 +97,16 @@ spec:
           imagePullPolicy: {{ .Values.inferenceExtension.image.pullPolicy | default "IfNotPresent" }}
           args:
           {{- /* 1. Determine Mode Logic */ -}}
-          {{- $useInferencePool := .Values.inferencePool.enabled | default true }}
+          {{- $useInferencePool := ne .Values.inferenceExtension.inferencePool.create false }}
           {{- /* 2. Determine Model Server Type */ -}}
-          {{- $modelServerType := .Values.inferencePool.modelServerType | default "vllm" }}
+          {{- $modelServerType := .Values.inferenceExtension.modelServers.type | default "vllm" }}
           {{- /* 3. Mode Specific Flags */ -}}
           {{- if not $useInferencePool }}
               - --endpoint-selector
               {{- $selector := "" }}
-              {{- if and .Values.inferencePool.modelServers .Values.inferencePool.modelServers.matchLabels }}
+              {{- if and .Values.inferenceExtension.modelServers .Values.inferenceExtension.modelServers.matchLabels }}
                 {{- $labels := list }}
-                {{- range $k, $v := .Values.inferencePool.modelServers.matchLabels }}
+                {{- range $k, $v := .Values.inferenceExtension.modelServers.matchLabels }}
                   {{- $labels = append $labels (printf "%s=%s" $k $v) }}
                 {{- end }}
                 {{- $selector = join "," $labels }}
@@ -121,7 +121,7 @@ spec:
               - --pool-namespace
               - {{ .Release.Namespace }}
               - --pool-group
-              - {{ .Values.inferencePool.group | default "inference.networking.k8s.io" | quote }}
+              - {{ .Values.inferenceExtension.inferencePool.group | default "inference.networking.k8s.io" | quote }}
           {{- end }}
           {{- if not .Values.inferenceExtension.latencyPredictor.enabled }}
           # Legacy metric CLI flags (skipped when dataLayer is enabled via latency predictor).

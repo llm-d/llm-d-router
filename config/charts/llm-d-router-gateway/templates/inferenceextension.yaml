@@ -5,3 +5,4 @@
 {{ include "inference-extension.sa-token-secret" . }}
 {{ include "inference-extension.service" . }}
 {{ include "inference-extension.service-monitor" . }}
+{{ include "inference-extension.inferencepool-resource" . }}

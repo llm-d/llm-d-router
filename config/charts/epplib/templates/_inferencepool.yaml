@@ -8,20 +8,20 @@ metadata:
     {{- include "llm-d-router.labels" . | nindent 4 }}
 spec:
   targetPorts:
-  {{- range .Values.inferencePool.targetPorts }}
+  {{- range .Values.inferenceExtension.modelServers.targetPorts }}
   - number: {{ .number }}
   {{- end }}
-  {{- if .Values.inferencePool.modelServerProtocol }}
-  {{- if eq .Values.inferencePool.modelServerProtocol "grpc" }}
+  {{- if .Values.inferenceExtension.modelServers.protocol }}
+  {{- if eq .Values.inferenceExtension.modelServers.protocol "grpc" }}
   appProtocol: "kubernetes.io/h2c"
-  {{- else if eq .Values.inferencePool.modelServerProtocol "http" }}
+  {{- else if eq .Values.inferenceExtension.modelServers.protocol "http" }}
   appProtocol: "http"
   {{- end }}
   {{- end }}
   selector:
     matchLabels:
-      {{- if .Values.inferencePool.modelServers.matchLabels }}
-      {{- range $key, $value := .Values.inferencePool.modelServers.matchLabels }}
+      {{- if .Values.inferenceExtension.modelServers.matchLabels }}
+      {{- range $key, $value := .Values.inferenceExtension.modelServers.matchLabels }}
       {{ $key }}: {{ quote $value }}
       {{- end }}
       {{- end }}
@@ -29,5 +29,12 @@ spec:
     name: {{ include "llm-d-router.name" . }}
     port:
       number: {{ .Values.inferenceExtension.extProcPort | default 9002 }}
-    failureMode: {{ .Values.inferenceExtension.failureMode | default "FailOpen" }}
+    failureMode: {{ .Values.inferenceExtension.inferencePool.failureMode | default "FailOpen" }}
+{{- end }}
+
+{{- define "inference-extension.inferencepool-resource" -}}
+{{- if ne .Values.inferenceExtension.inferencePool.create false }}
+{{- include "llm-d-router.validations.gateway.common" . }}
+{{- include "inference-extension.inferencepool" . }}
+{{- end }}
 {{- end }}

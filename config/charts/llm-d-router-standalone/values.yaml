@@ -1,4 +1,8 @@
 inferenceExtension:
+  modelServers:
+    # matchLabels: # REQUIRED
+    #   app: vllm-qwen3-32b
+
   extraServicePorts:
     - name: http
       port: 8081
@@ -318,14 +322,4 @@ inferenceExtension:
     # Optional explicit sidecar overrides applied on top of the selected
     # preset. For example, set sidecar.image to replace the preset image.
 
-# This is not used when you deploy standalone with inferencePool.enabled=false
-inferencePool:
-  enabled: true
-  targetPorts:
-    - number: 8000
-  modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton
-  modelServerProtocol: http # http, grpc
-  apiVersion: inference.networking.k8s.io/v1
-  # modelServers: # REQUIRED
-  #   matchLabels:
-  #     app: vllm-qwen3-32b
+

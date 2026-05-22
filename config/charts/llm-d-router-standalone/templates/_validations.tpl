@@ -2,12 +2,12 @@
 common validations
 */}}
 {{- define "llm-d-router.validations.gateway.common" -}}
-{{- if .Values.inferencePool.enabled | default true }}
-{{- if or (empty $.Values.inferencePool.modelServers) (not $.Values.inferencePool.modelServers.matchLabels) }}
-{{- fail ".Values.inferencePool.modelServers.matchLabels is required" }}
+{{- if ne .Values.inferenceExtension.inferencePool.create false }}
+{{- if or (empty $.Values.inferenceExtension.modelServers) (not $.Values.inferenceExtension.modelServers.matchLabels) }}
+{{- fail ".Values.inferenceExtension.modelServers.matchLabels is required" }}
 {{- end }}
 {{- end }}
-{{- end - -}}
+{{- end -}}
 
 {{/*
 standalone validations
@@ -20,9 +20,9 @@ standalone validations
     {{- fail (printf ".Values.inferenceExtension.sidecar.proxyType must be one of [envoy, agentgateway], got %q" $proxyType) -}}
   {{- end -}}
   {{- if eq $proxyType "agentgateway" -}}
-    {{- if .Values.inferencePool.enabled | default true -}}
-      {{- fail ".Values.inferencePool.enabled=false is required when proxyType=agentgateway; standalone agentgateway currently supports only service-backed routing" -}}
-    {{- end - -}}
+    {{- if ne .Values.inferenceExtension.inferencePool.create false -}}
+      {{- fail ".Values.inferenceExtension.inferencePool.create=false is required when proxyType=agentgateway; standalone agentgateway currently supports only service-backed routing" -}}
+    {{- end -}}
     {{- $agentgateway := index $sidecar "agentgateway" | default dict -}}
     {{- $service := index $agentgateway "service" | default dict -}}
     {{- $serviceName := index $service "name" | default "" -}}
@@ -36,7 +36,7 @@ standalone validations
     {{- $targetPorts := include "llm-d-router.standaloneEndpointTargetPorts" . -}}
     {{- $servicePorts := include "llm-d-router.agentgateway.modelServicePorts" . -}}
     {{- if ne $targetPorts $servicePorts -}}
-      {{- fail (printf ".Values.inferenceExtension.sidecar.agentgateway.service.ports must match .Values.inferencePool.targetPorts when proxyType=agentgateway, got service ports %q and target ports %q" $servicePorts $targetPorts) -}}
+      {{- fail (printf ".Values.inferenceExtension.sidecar.agentgateway.service.ports must match .Values.inferenceExtension.modelServers.targetPorts when proxyType=agentgateway, got service ports %q and target ports %q" $servicePorts $targetPorts) -}}
     {{- end -}}
     {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . -}}
     {{- $flags := .Values.inferenceExtension.flags | default dict -}}
