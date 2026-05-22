@@ -6,12 +6,31 @@ image:
   pullPolicy: Always
 extProcPort: 9002
 
+failureMode: "FailOpen"
+
+# Example flags:
+# flags:
+#  # Log verbosity
+#  v: 2
+
 # Example environment variables:
 # env:
 #   ENABLE_EXPERIMENTAL_FEATURE: "true"
 env: []
 
 pluginsConfigFile: "default-plugins.yaml"
+
+# Define additional container ports
+extraContainerPorts: []
+
+# Define additional service ports
+# Example environment variables:  
+#  extraServicePorts:
+#    - name: http
+#      port: 80
+#      protocol: TCP
+#      targetPort: 8081
+extraServicePorts: []
 
 # Example defining a custom EPP config file
 # pluginsCustomConfig:
@@ -39,6 +58,10 @@ resources:
   limits:
     memory: 16Gi
 
+# By default no sidecars are configured
+sidecar:
+  enabled: false    
+    
 # Monitoring configuration for EPP
 monitoring:
   interval: "10s"

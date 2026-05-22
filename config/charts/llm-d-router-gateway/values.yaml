@@ -1,27 +1,3 @@
-inferenceExtension:
-  failureMode: "FailOpen"
-
-  # Define additional container ports
-  extraContainerPorts: []
-
-  # Define additional service ports
-  # Example environment variables:  
-  #  extraServicePorts:
-  #    - name: http
-  #      port: 80
-  #      protocol: TCP
-  #      targetPort: 8081
-  extraServicePorts: []
-
-  # Example flags:
-  # flags:
-  #  # Log verbosity
-  #  v: 2
-
-  # Sidecar configuration for EPP
-  sidecar:
-    enabled: false
-
 inferencePool:
   targetPorts:
     - number: 8000
