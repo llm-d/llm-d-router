@@ -735,7 +735,6 @@ func BenchmarkPrefixPluginStress(b *testing.B) {
 
 	for _, v := range promptLen {
 		b.Run(fmt.Sprintf("length_%d", v), func(b *testing.B) {
-			b.ReportAllocs()
 			prompt := randomPrompt(v)
 			endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
 				NamespacedName: k8stypes.NamespacedName{Name: "pod1"},
