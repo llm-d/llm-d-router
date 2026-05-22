@@ -299,7 +299,7 @@ binds:
         policies:
           inferenceRouting:
             endpointPicker:
-              host: {{ printf "127.0.0.1:%v" (.Values.router.extProcPort | default 9002) | quote }}
+              host: {{ printf "127.0.0.1:%v" (.Values.router.epp.extProcPort | default 9002) | quote }}
             destinationMode: passthrough
 services:
 - name: {{ $serviceName | quote }}
@@ -316,12 +316,12 @@ services:
 EPP resource validations
 */}}
 {{- define "llm-d-router.validations.epp.resources" -}}
-{{- if not .Values.router.resources }}
-{{- fail ".Values.router.resources is required. EPP is a critical component that must have resource requests set." }}
+{{- if not .Values.router.epp.resources }}
+{{- fail ".Values.router.epp.resources is required. EPP is a critical component that must have resource requests set." }}
 {{- end }}
-{{- if not .Values.router.resources.requests }}
-{{- fail ".Values.router.resources.requests is required. EPP is a critical component that must have resource requests set." }}
+{{- if not .Values.router.epp.resources.requests }}
+{{- fail ".Values.router.epp.resources.requests is required. EPP is a critical component that must have resource requests set." }}
 {{- end }}
-{{- $_ := required ".Values.router.resources.requests.cpu is required. EPP is a critical component that must have CPU requests set." .Values.router.resources.requests.cpu }}
-{{- $_ := required ".Values.router.resources.requests.memory is required. EPP is a critical component that must have memory requests set." .Values.router.resources.requests.memory }}
+{{- $_ := required ".Values.router.epp.resources.requests.cpu is required. EPP is a critical component that must have CPU requests set." .Values.router.epp.resources.requests.cpu }}
+{{- $_ := required ".Values.router.epp.resources.requests.memory is required. EPP is a critical component that must have memory requests set." .Values.router.epp.resources.requests.memory }}
 {{- end -}}

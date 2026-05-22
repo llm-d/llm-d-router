@@ -28,7 +28,7 @@ spec:
   endpointPickerRef:
     name: {{ include "llm-d-router.name" . }}
     port:
-      number: {{ .Values.router.extProcPort | default 9002 }}
+      number: {{ .Values.router.epp.extProcPort | default 9002 }}
     failureMode: {{ .Values.router.inferencePool.failureMode | default "FailOpen" }}
 {{- end }}
 

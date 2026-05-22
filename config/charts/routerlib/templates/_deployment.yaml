@@ -30,7 +30,7 @@ spec:
       {{- $proxyType := include "llm-d-router.sidecarProxyType" . | trim }}
       {{- $sidecarConfigMap := index $sidecar "configMap" | default dict }}
       {{- $sidecarConfigMapName := index $sidecarConfigMap "name" | default "" }}
-      {{- $inferenceExtensionFlags := deepCopy (.Values.router.flags | default dict) }}
+      {{- $inferenceExtensionFlags := deepCopy (.Values.router.epp.flags | default dict) }}
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $inferenceExtensionFlags "secure-serving")) }}
         {{- $_ := set $inferenceExtensionFlags "secure-serving" false }}
       {{- end }}
@@ -93,8 +93,8 @@ spec:
         {{- end }}
         {{- end }}
         - name: epp
-          image: {{ .Values.router.image.registry }}/{{ .Values.router.image.repository }}:{{ .Values.router.image.tag }}
-          imagePullPolicy: {{ .Values.router.image.pullPolicy | default "IfNotPresent" }}
+          image: {{ .Values.router.epp.image.registry }}/{{ .Values.router.epp.image.repository }}:{{ .Values.router.epp.image.tag }}
+          imagePullPolicy: {{ .Values.router.epp.image.pullPolicy | default "IfNotPresent" }}
           args:
           {{- /* 1. Determine Mode Logic */ -}}
           {{- $useInferencePool := ne .Values.router.inferencePool.create false }}
@@ -161,7 +161,7 @@ spec:
               - --zap-encoder
               - "json"
               - --config-file
-              - "/config/{{ .Values.router.pluginsConfigFile }}"
+              - "/config/{{ .Values.router.epp.pluginsConfigFile }}"
           {{- if gt (.Values.router.replicas | int) 1 }}
               - --ha-enable-leader-election
           {{- end }}
@@ -178,7 +178,7 @@ spec:
           {{- if not .Values.router.monitoring.prometheus.auth.enabled }}
               - --metrics-endpoint-auth=false
           {{- end }}
-          {{- with .Values.router.resources }}
+          {{- with .Values.router.epp.resources }}
           resources:
             {{ toYaml . | nindent 12 }}
           {{- end }}
@@ -189,8 +189,8 @@ spec:
               containerPort: 9003
             - name: metrics
               containerPort: 9090
-        {{- if .Values.router.extraContainerPorts }}
-            {{- toYaml .Values.router.extraContainerPorts | nindent 12 }}
+        {{- if .Values.router.epp.extraContainerPorts }}
+            {{- toYaml .Values.router.epp.extraContainerPorts | nindent 12 }}
         {{- end }}
           livenessProbe:
           {{- if gt (.Values.router.replicas | int) 1 }}
@@ -249,14 +249,14 @@ spec:
             - name: OTEL_TRACES_SAMPLER_ARG
               value: {{ .Values.router.tracing.sampling.samplerArg | quote }}
         {{- end }}
-        {{- if .Values.router.env }}
-        {{- toYaml .Values.router.env | nindent 12 }}
+        {{- if .Values.router.epp.env }}
+        {{- toYaml .Values.router.epp.env | nindent 12 }}
         {{- end }}
           volumeMounts:
             - name: plugins-config-volume
               mountPath: "/config"
-        {{- if .Values.router.volumeMounts }}
-        {{- toYaml .Values.router.volumeMounts | nindent 12 }}
+        {{- if .Values.router.epp.volumeMounts }}
+        {{- toYaml .Values.router.epp.volumeMounts | nindent 12 }}
         {{- end }}
       {{- include "llm-d-router.latencyPredictor.containers" . | nindent 8 }}
       volumes:
