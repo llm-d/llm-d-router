@@ -153,6 +153,27 @@ func TestShard_Stats(t *testing.T) {
 		"Priority band byte size must reflect the items queued at that level")
 }
 
+// TestShard_PropagateStatsDelta_UnknownPriority_NoPanic is a regression
+// test for #980. propagateStatsDelta is invoked lock-free on the stats hot
+// path; the GC's deletePriorityBand holds s.mu.Lock() and can delete a
+// band's sync.Map entry between the lock-free Load and the type assertion.
+// Before the fix, the unchecked val.(*priorityBand) panics with
+// "interface conversion: interface {} is nil, not *registry.priorityBand"
+// when val is nil. The shape of the bug is the same whether nil comes
+// from a never-populated priority or from a concurrent Delete, so this
+// test exercises the never-populated case directly without needing to
+// orchestrate the race.
+func TestShard_PropagateStatsDelta_UnknownPriority_NoPanic(t *testing.T) {
+	t.Parallel()
+	h := newShardTestHarness(t)
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("propagateStatsDelta panicked on unknown priority: %v", r)
+		}
+	}()
+	h.shard.propagateStatsDelta(nonExistentPriority, 1, 100)
+}
+
 func TestShard_Accessors(t *testing.T) {
 	t.Parallel()
 

@@ -372,7 +372,13 @@ func (s *registryShard) updateConfig(newConfig *ShardConfig) {
 // It atomically updates the relevant band's stats, the shard's total stats, and propagates the delta to the parent
 // registry.
 func (s *registryShard) propagateStatsDelta(priority int, lenDelta, byteSizeDelta int64) {
-	val, _ := s.priorityBands.Load(priority)
+	val, ok := s.priorityBands.Load(priority)
+	if !ok {
+		// The band was concurrently removed by the GC path holding s.mu.Lock(). The
+		// stats delta is lost, which is acceptable for an eventually-consistent counter
+		// of a queue that no longer exists.
+		return
+	}
 	band := val.(*priorityBand)
 	band.len.Add(lenDelta)
 	band.byteSize.Add(byteSizeDelta)

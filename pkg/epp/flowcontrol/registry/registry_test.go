@@ -255,6 +255,27 @@ func TestFlowRegistry_Stats(t *testing.T) {
 	assert.Equal(t, globalStats.TotalByteSize, totalShardBytes, "The shard byte size must equal global byte size")
 }
 
+// TestFlowRegistry_PropagateStatsDelta_UnknownPriority_NoPanic is a
+// regression test for #980. The top-level propagateStatsDelta aggregator
+// is documented as lock-free; the GC's removePriorityBand holds the
+// registry's write lock and can Delete the perPriorityBandStats entry
+// between the lock-free Load and the type assertion. Before the fix, the
+// unchecked val.(*bandStats) panics with "interface conversion:
+// interface {} is nil, not *registry.bandStats" when val is nil. Same
+// reasoning as the shard-level test: drive nil through the type
+// assertion directly via an unknown priority rather than orchestrating
+// the race.
+func TestFlowRegistry_PropagateStatsDelta_UnknownPriority_NoPanic(t *testing.T) {
+	t.Parallel()
+	h := newRegistryTestHarness(t, harnessOptions{})
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("propagateStatsDelta panicked on unknown priority: %v", r)
+		}
+	}()
+	h.fr.propagateStatsDelta(nonExistentPriority, 1, 100)
+}
+
 // --- Garbage Collection Tests ---
 
 func TestFlowRegistry_GarbageCollection(t *testing.T) {
