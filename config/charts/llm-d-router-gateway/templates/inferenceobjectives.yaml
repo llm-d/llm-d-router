@@ -10,6 +10,6 @@ metadata:
 spec:
   priority: {{ .priority }}
   poolRef:
-    group: {{ index (split "/" $.Values.inferencePool.apiVersion) 0 }}
+    group: {{ index (splitList "/" $.Values.inferenceExtension.inferencePool.apiVersion) 0 }}
     name: {{ $.Release.Name }}
 {{- end }}
