@@ -61,7 +61,7 @@ func Factory(name string, rawParameters json.RawMessage, _ plugin.Handle) (plugi
 
 // Scorer computes normalized endpoint affinity from produced multimodal match data.
 type Scorer struct {
-	typedName    plugin.TypedName
+	typedName      plugin.TypedName
 	mmMatchDataKey plugin.DataKey
 }
 
@@ -69,7 +69,7 @@ type Scorer struct {
 // instance; pass an empty string to use the default producer's key.
 func New(name, producerName string) *Scorer {
 	return &Scorer{
-		typedName:    plugin.TypedName{Type: Type, Name: name},
+		typedName:      plugin.TypedName{Type: Type, Name: name},
 		mmMatchDataKey: attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(producerName),
 	}
 }

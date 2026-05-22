@@ -337,4 +337,3 @@ func (p *Producer) removePod(pod string) {
 		p.cache.Add(hash, pods)
 	}
 }
-
