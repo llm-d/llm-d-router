@@ -1,4 +1,4 @@
-{{- if and .Values.inferenceExtension.endpointsServer .Values.inferenceExtension.endpointsServer.createInferencePool }}
+{{- if .Values.inferencePool.enabled | default true }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

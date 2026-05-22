@@ -6,15 +6,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   default-plugins.yaml: |
-    {{- $modelServerProtocol := "http" }}
-    {{- $modelServerType := "vllm" }}
-    {{- if and .Values.inferenceExtension.endpointsServer (not .Values.inferenceExtension.endpointsServer.createInferencePool) -}}
-      {{- $modelServerProtocol = .Values.inferenceExtension.endpointsServer.modelServerProtocol | default "http" }}
-      {{- $modelServerType = .Values.inferenceExtension.endpointsServer.modelServerType | default "vllm" }}
-    {{- else if .Values.inferencePool -}}
-      {{- $modelServerProtocol = .Values.inferencePool.modelServerProtocol | default "http" }}
-      {{- $modelServerType = .Values.inferencePool.modelServerType | default "vllm" }}
-    {{- end }}
+    {{- $modelServerProtocol = .Values.inferencePool.modelServerProtocol | default "http" }}
+    {{- $modelServerType = .Values.inferencePool.modelServerType | default "vllm" }}
     {{- $parserType := "" }}
     {{- if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
       {{- $parserType = "vllmgrpc-parser" }}
@@ -36,9 +29,6 @@ data:
         insecureSkipVerify: {{ .Values.inferenceExtension.metricsDataSource.insecureSkipVerify | default true }}
     - type: core-metrics-extractor
       {{- $modelServerType := .Values.inferencePool.modelServerType | default "vllm" }}
-      {{- if and .Values.inferenceExtension.endpointsServer (not .Values.inferenceExtension.endpointsServer.createInferencePool) }}
-        {{- $modelServerType = .Values.inferenceExtension.endpointsServer.modelServerType | default "vllm" }}
-      {{- end }}
       {{- if ne $modelServerType "vllm" }}
       parameters:
         defaultEngine: {{ $modelServerType | quote }}

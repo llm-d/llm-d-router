@@ -1,26 +1,4 @@
-{{- if and .Values.inferenceExtension.endpointsServer .Values.inferenceExtension.endpointsServer.createInferencePool }}
+{{- if .Values.inferencePool.enabled | default true }}
 {{ include "llm-d-router.validations.gateway.common" $ }}
-apiVersion: "inference.networking.k8s.io/v1"
-kind: InferencePool
-metadata:
-  name: {{ .Release.Name }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "llm-d-router.labels" . | nindent 4 }}
-spec:
-  targetPorts:
-    {{- range .Values.inferencePool.targetPorts }}
-    - number: {{ .number }}
-    {{- end }}
-  selector:
-    matchLabels:
-      {{- if .Values.inferencePool.modelServers.matchLabels }}
-      {{- range $key, $value := .Values.inferencePool.modelServers.matchLabels }}
-      {{ $key }}: {{ quote $value }}
-      {{- end }}
-      {{- end }}
-  endpointPickerRef:
-    name: {{ include "llm-d-router.name" . }}
-    port:
-      number: {{ .Values.inferenceExtension.extProcPort | default 9002 }}
+{{ include "inference-extension.inferencepool" . }}
 {{- end }}

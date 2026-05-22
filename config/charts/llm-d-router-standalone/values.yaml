@@ -5,19 +5,6 @@ inferenceExtension:
       protocol: TCP
       targetPort: 8081
 
-  endpointsServer:
-    # set it to false when you want to deploy EPP with inferencepool
-    createInferencePool: true
-    # Required when createInferencePool is false
-#    endpointSelector: app=vllm-qwen3-32b
-    # unused when createInferencePool is true
-    targetPorts:
-      - 8000
-    # unused when createInferencePool is true
-    modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton
-    # unused when createInferencePool is true
-    modelServerProtocol: http # http, grpc
-
   sidecar:
     enabled: true
     proxyType: envoy
@@ -35,7 +22,7 @@ inferenceExtension:
         create: true
         name: ""
         namespace: ""
-        # Must match inferenceExtension.endpointsServer.targetPorts.
+        # Must match inferencePool.targetPorts.
         ports:
           - 8000
 
@@ -331,8 +318,9 @@ inferenceExtension:
     # Optional explicit sidecar overrides applied on top of the selected
     # preset. For example, set sidecar.image to replace the preset image.
 
-# This is not used when you deploy standalone with inferenceExtension.endpointsServer.createInferencePool=false
+# This is not used when you deploy standalone with inferencePool.enabled=false
 inferencePool:
+  enabled: true
   targetPorts:
     - number: 8000
   modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton

@@ -1,4 +1,5 @@
 inferencePool:
+  enabled: true
   targetPorts:
     - number: 8000
   modelServerType: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton

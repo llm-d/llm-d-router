@@ -96,17 +96,22 @@ spec:
           image: {{ .Values.inferenceExtension.image.registry }}/{{ .Values.inferenceExtension.image.repository }}:{{ .Values.inferenceExtension.image.tag }}
           imagePullPolicy: {{ .Values.inferenceExtension.image.pullPolicy | default "IfNotPresent" }}
           args:
-          {{- /* 1. Determine Model Server Type Logic */ -}}
-          {{- $modelServerType := "vllm" }}
-          {{- if and .Values.inferenceExtension.endpointsServer (not .Values.inferenceExtension.endpointsServer.createInferencePool) -}}
-            {{- $modelServerType = .Values.inferenceExtension.endpointsServer.modelServerType | default "vllm" }}
-          {{- else }}
-            {{- $modelServerType = .Values.inferencePool.modelServerType | default "vllm" }}
-          {{- end }}
-          {{- /* 2. Mode Specific Flags */ -}}
-          {{- if and .Values.inferenceExtension.endpointsServer (not .Values.inferenceExtension.endpointsServer.createInferencePool) }}
+          {{- /* 1. Determine Mode Logic */ -}}
+          {{- $useInferencePool := .Values.inferencePool.enabled | default true }}
+          {{- /* 2. Determine Model Server Type */ -}}
+          {{- $modelServerType := .Values.inferencePool.modelServerType | default "vllm" }}
+          {{- /* 3. Mode Specific Flags */ -}}
+          {{- if not $useInferencePool }}
               - --endpoint-selector
-              - {{ .Values.inferenceExtension.endpointsServer.endpointSelector | quote }}
+              {{- $selector := "" }}
+              {{- if and .Values.inferencePool.modelServers .Values.inferencePool.modelServers.matchLabels }}
+                {{- $labels := list }}
+                {{- range $k, $v := .Values.inferencePool.modelServers.matchLabels }}
+                  {{- $labels = append $labels (printf "%s=%s" $k $v) }}
+                {{- end }}
+                {{- $selector = join "," $labels }}
+              {{- end }}
+              - {{ $selector | quote }}
               - --endpoint-target-ports
               - {{ include "llm-d-router.standaloneEndpointTargetPorts" . | quote }}
           {{- else }}
@@ -116,7 +121,7 @@ spec:
               - --pool-namespace
               - {{ .Release.Namespace }}
               - --pool-group
-              - "inference.networking.k8s.io"
+              - {{ .Values.inferencePool.group | default "inference.networking.k8s.io" | quote }}
           {{- end }}
           {{- if not .Values.inferenceExtension.latencyPredictor.enabled }}
           # Legacy metric CLI flags (skipped when dataLayer is enabled via latency predictor).

@@ -29,8 +29,7 @@ Cluster RBAC unique name
 Selector labels
 */}}
 {{- define "llm-d-router.selectorLabels" -}}
-{{- /* Check if endpointsServer exists AND if createInferencePool is false */ -}}
-{{- if and .Values.inferenceExtension.endpointsServer (not .Values.inferenceExtension.endpointsServer.createInferencePool) -}}
+{{- if not (default true .Values.inferencePool.enabled) -}}
 {{- /* LOGIC FOR STANDALONE EPP MODE */ -}}
 llm-d-router-standalone: {{ include "llm-d-router.name" . }}
 {{- else -}}
@@ -43,7 +42,7 @@ llm-d-router-gateway: {{ include "llm-d-router.name" . }}
 Mode labels
 */}}
 {{- define "llm-d-router.modeLabels" -}}
-{{- if and .Values.inferenceExtension.endpointsServer (not .Values.inferenceExtension.endpointsServer.createInferencePool) -}}
+{{- if not (default true .Values.inferencePool.enabled) -}}
 llm-d.ai/igw-mode: llm-d-router-standalone
 {{- else -}}
 llm-d.ai/igw-mode: llm-d-router-gateway
@@ -195,7 +194,11 @@ deterministic even when additional Service ports are configured.
 Return the standalone EPP model-server target ports.
 */}}
 {{- define "llm-d-router.standaloneEndpointTargetPorts" -}}
-{{- include "llm-d-router.normalizedPortList" (dict "path" ".Values.inferenceExtension.endpointsServer.targetPorts" "value" .Values.inferenceExtension.endpointsServer.targetPorts) -}}
+{{- $ports := list -}}
+{{- range .Values.inferencePool.targetPorts -}}
+{{- $ports = append $ports (toString .number) -}}
+{{- end -}}
+{{- join "," $ports -}}
 {{- end -}}
 
 {{/*
@@ -255,22 +258,12 @@ Render labels from the standalone endpoint selector for the generated model Serv
 Only equality-based selectors are supported because Service selectors are a map.
 */}}
 {{- define "llm-d-router.agentgateway.modelServiceSelectorLabels" -}}
-{{- $selector := .Values.inferenceExtension.endpointsServer.endpointSelector | default "" -}}
-{{- if empty $selector -}}
-  {{- fail ".Values.inferenceExtension.endpointsServer.endpointSelector is required when creating an agentgateway model Service" -}}
-{{- end -}}
-{{- range $raw := splitList "," $selector }}
-  {{- $part := trim $raw -}}
-  {{- $kv := splitList "=" $part -}}
-  {{- if ne (len $kv) 2 -}}
-    {{- fail (printf ".Values.inferenceExtension.endpointsServer.endpointSelector must use comma-separated key=value labels when creating an agentgateway model Service, got %q" $selector) -}}
-  {{- end -}}
-  {{- $key := trim (index $kv 0) -}}
-  {{- $value := trim (index $kv 1) -}}
-  {{- if or (empty $key) (empty $value) -}}
-    {{- fail (printf ".Values.inferenceExtension.endpointsServer.endpointSelector must use non-empty key=value labels when creating an agentgateway model Service, got %q" $selector) -}}
-  {{- end -}}
+{{- if and .Values.inferencePool.modelServers .Values.inferencePool.modelServers.matchLabels -}}
+{{- range $key, $value := .Values.inferencePool.modelServers.matchLabels -}}
 {{- printf "%s: %s\n" ($key | quote) ($value | quote) -}}
+{{- end -}}
+{{- else -}}
+  {{- fail ".Values.inferencePool.modelServers.matchLabels is required when creating an agentgateway model Service" -}}
 {{- end -}}
 {{- end -}}
 
