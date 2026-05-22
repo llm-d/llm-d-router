@@ -349,15 +349,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					break
 				}
 
-				if parseResult.Skip {
-					if err = s.fallbackToRandomEndpoint(ctx, reqCtx, reqCtx.RequestSize); err != nil {
-						logger.Error(err, "Error falling back to random endpoint")
-						break
-					}
-					reqCtx.RequestState = RequestSkipped
-					break
-				}
-
 				reqCtx, err = s.director.HandleRequest(ctx, reqCtx, parseResult.Body)
 				if err != nil {
 					logger.Error(err, "Error handling request")
@@ -380,6 +371,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
 				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.Priority)
 				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestSize)
+
+				if parseResult.Skip {
+					reqCtx.RequestState = RequestSkipped
+				}
 			}
 		case *extProcPb.ProcessingRequest_RequestTrailers:
 			// This is currently unused.
