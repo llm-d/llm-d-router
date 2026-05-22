@@ -135,7 +135,7 @@ func TestGetContentBlocks(t *testing.T) {
 					ChatCompletions: &fwkrh.ChatCompletionsRequest{
 						Messages: []fwkrh.Message{
 							{
-								Role: "user",
+								Role: "system",
 								Content: fwkrh.Content{
 									Structured: []fwkrh.ContentBlock{
 										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "data:image/jpeg;base64,bm90IGFuIGltYWdl"}},
@@ -160,7 +160,7 @@ func TestGetContentBlocks(t *testing.T) {
 				},
 			},
 			expectedContentBlocks: []KVCacheBlock{
-				{PseudoBytes: append([]byte("user"), repeatBytes(imageHashBytes("data:image/jpeg;base64,bm90IGFuIGltYWdl"), 10)...)},
+				{PseudoBytes: append([]byte("system\x00\x00"), repeatBytes(imageHashBytes("data:image/jpeg;base64,bm90IGFuIGltYWdl"), 10)...)},
 			},
 			expectErr: false,
 		},
@@ -246,7 +246,7 @@ func TestGetContentBlocks(t *testing.T) {
 								Content: fwkrh.Content{
 									Structured: []fwkrh.ContentBlock{
 										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p1}},
-										{Type: "text", Text: "aaaaaaaa"},
+										{Type: "text", Text: "aaaaaa"},
 										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p2}},
 									},
 								},
@@ -272,7 +272,7 @@ func TestGetContentBlocks(t *testing.T) {
 				{PseudoBytes: append([]byte("user"), repeatBytes(imageHashBytes(base64Image180p1), 15)...)},
 				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p1), 16)},
 				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p1), 16)},
-				{PseudoBytes: append(append(repeatBytes(imageHashBytes(base64Image180p1), 9), []byte("aaaaaaaa")...), repeatBytes(imageHashBytes(base64Image180p2), 5)...)},
+				{PseudoBytes: append(append(repeatBytes(imageHashBytes(base64Image180p1), 9), []byte("aaaaaa\x00\x00")...), repeatBytes(imageHashBytes(base64Image180p2), 5)...)},
 				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p2), 16)},
 				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p2), 16)},
 				{PseudoBytes: repeatBytes(imageHashBytes(base64Image180p2), 16)},

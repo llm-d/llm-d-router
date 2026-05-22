@@ -221,6 +221,8 @@ func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *schedulin
 				case "text":
 					allPseudoBytes = append(allPseudoBytes, []byte(block.Text)...)
 				case "image_url":
+					// multimodal content can't be in the same pseudo token of text.
+					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
 					url := block.ImageURL.URL
 					numPlaceHolders := tokenEstimator.Estimate(fwkrh.ContentBlock{
 						Type:     "image_url",
@@ -235,9 +237,13 @@ func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *schedulin
 					}
 				case "video_url":
 					// Add video support later
+					// multimodal content can't be in the same pseudo token of text.
+					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
 					allPseudoBytes = append(allPseudoBytes, []byte(block.VideoURL.URL)...)
 				case "input_audio", "audio_url":
 					// Add audio support later
+					// multimodal content can't be in the same pseudo token of text.
+					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
 					allPseudoBytes = append(allPseudoBytes, []byte(block.InputAudio.Data)...)
 					allPseudoBytes = append(allPseudoBytes, []byte(block.InputAudio.Format)...)
 				default:
@@ -249,4 +255,16 @@ func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *schedulin
 	}
 
 	return getKVCacheBlocksFromRawBytes(allPseudoBytes, blockSizeTokens)
+}
+
+func padToAlignment(b []byte, alignment int) []byte {
+	remainder := len(b) % alignment
+	if remainder == 0 {
+		return b
+	}
+	padding := alignment - remainder
+	for i := 0; i < padding; i++ {
+		b = append(b, 0)
+	}
+	return b
 }
