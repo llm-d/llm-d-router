@@ -299,7 +299,7 @@ func TestGetContentBlocks(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
-				var blocks []KVCacheBlock
+				blocks := make([]KVCacheBlock, 0, len(tt.expectedContentBlocks))
 				for block := range seq {
 					blocks = append(blocks, block)
 				}
