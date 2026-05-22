@@ -25,7 +25,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const PluginStateDebugPath = "/debug/plugins/state"

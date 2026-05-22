@@ -26,7 +26,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 type stateDebugTestPlugin struct {
