@@ -1,4 +1,4 @@
-{{- if ne .Values.inferenceExtension.inferencePool.create false }}
+{{- if ne .Values.router.inferencePool.create false }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

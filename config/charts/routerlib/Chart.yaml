@@ -1,5 +1,5 @@
 apiVersion: v2
-name: inference-extension
+name: router
 description: A library Helm chart for Endpoint Picker
 
 type: library

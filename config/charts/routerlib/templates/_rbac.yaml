@@ -1,5 +1,5 @@
 {{- define "inference-extension.rbac" -}}
-{{- if .Values.inferenceExtension.monitoring.prometheus.enabled }}
+{{- if .Values.router.monitoring.prometheus.enabled }}
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:

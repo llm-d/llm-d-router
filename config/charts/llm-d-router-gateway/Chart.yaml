@@ -8,8 +8,8 @@ version: 0.0.0
 
 appVersion: "0.0.0"
 dependencies:
-  - name: inference-extension
+  - name: router
     version: 0.0.0
-    repository: "file://../epplib"
-    # This is needed to make use of the common values.yaml in ./config/charts/epplib/values.yaml
-    alias: inferenceExtension
+    repository: "file://../routerlib"
+    # This is needed to make use of the common values.yaml in ./config/charts/routerlib/values.yaml
+    alias: router

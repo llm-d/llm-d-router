@@ -1,4 +1,4 @@
-inferenceExtension:
+router:
   modelServers:
     # matchLabels: # REQUIRED
     #   app: vllm-qwen3-32b

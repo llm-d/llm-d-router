@@ -1,5 +1,5 @@
 {{- define "inference-extension.lead-election-rbac" -}}
-{{- if gt (.Values.inferenceExtension.replicas | int) 1 }}
+{{- if gt (.Values.router.replicas | int) 1 }}
 ---
 kind: Role
 apiVersion: rbac.authorization.k8s.io/v1

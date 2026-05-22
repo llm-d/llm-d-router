@@ -1,4 +1,4 @@
-{{- $sidecar := .Values.inferenceExtension.sidecar | default dict -}}
+{{- $sidecar := .Values.router.sidecar | default dict -}}
 {{- $proxyType := default "envoy" ($sidecar.proxyType | default "envoy") | lower -}}
 {{- $agentgateway := index $sidecar "agentgateway" | default dict -}}
 {{- $service := index $agentgateway "service" | default dict -}}

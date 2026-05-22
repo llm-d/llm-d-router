@@ -29,7 +29,7 @@ Cluster RBAC unique name
 Selector labels
 */}}
 {{- define "llm-d-router.selectorLabels" -}}
-{{- if eq .Values.inferenceExtension.inferencePool.create false -}}
+{{- if eq .Values.router.inferencePool.create false -}}
 {{- /* LOGIC FOR STANDALONE EPP MODE */ -}}
 llm-d-router-standalone: {{ include "llm-d-router.name" . }}
 {{- else -}}
@@ -42,7 +42,7 @@ llm-d-router-gateway: {{ include "llm-d-router.name" . }}
 Mode labels
 */}}
 {{- define "llm-d-router.modeLabels" -}}
-{{- if eq .Values.inferenceExtension.inferencePool.create false -}}
+{{- if eq .Values.router.inferencePool.create false -}}
 llm-d.ai/igw-mode: llm-d-router-standalone
 {{- else -}}
 llm-d.ai/igw-mode: llm-d-router-gateway
@@ -57,7 +57,7 @@ prometheusoperator. For backwards compatibility, provider.name=gke still maps
 to gmp when no monitoring provider is explicitly set.
 */}}
 {{- define "llm-d-router.monitoring.provider.name" -}}
-{{- $monitoring := .Values.inferenceExtension.monitoring | default dict -}}
+{{- $monitoring := .Values.router.monitoring | default dict -}}
 {{- $mp := index $monitoring "provider" | default dict -}}
 {{- $mpName := index $mp "name" | default "" -}}
 {{- $gatewayProvider := .Values.provider | default dict -}}
@@ -79,7 +79,7 @@ For backwards compatibility, provider.gke.autopilot is still honored when
 provider.name=gke and no monitoring provider is explicitly set.
 */}}
 {{- define "llm-d-router.monitoring.provider" -}}
-{{- $monitoring := .Values.inferenceExtension.monitoring | default dict -}}
+{{- $monitoring := .Values.router.monitoring | default dict -}}
 {{- $mp := index $monitoring "provider" | default dict -}}
 {{- $mpName := include "llm-d-router.monitoring.provider.name" . -}}
 {{- $gatewayProvider := .Values.provider | default dict -}}
@@ -102,7 +102,7 @@ provider.name=gke and no monitoring provider is explicitly set.
 Return the standalone sidecar proxy type.
 */}}
 {{- define "llm-d-router.sidecarProxyType" -}}
-{{- $sidecar := .Values.inferenceExtension.sidecar | default dict -}}
+{{- $sidecar := .Values.router.sidecar | default dict -}}
 {{- default "envoy" ($sidecar.proxyType | default "envoy") | lower -}}
 {{- end -}}
 
@@ -146,7 +146,7 @@ The port is selected by the Service port named "http" so selection is
 deterministic even when additional Service ports are configured.
 */}}
 {{- define "llm-d-router.standaloneProxyListenerPort" -}}
-{{- $servicePorts := .Values.inferenceExtension.extraServicePorts | default list -}}
+{{- $servicePorts := .Values.router.extraServicePorts | default list -}}
 {{- $found := false -}}
 {{- $listenerPort := "" -}}
 {{- $targetPort := "" -}}
@@ -154,11 +154,11 @@ deterministic even when additional Service ports are configured.
 {{- range $index, $servicePort := $servicePorts -}}
   {{- if eq (toString (index $servicePort "name")) "http" -}}
     {{- if $found -}}
-      {{- fail ".Values.inferenceExtension.extraServicePorts must contain exactly one port named \"http\" when proxyType=agentgateway" -}}
+      {{- fail ".Values.router.extraServicePorts must contain exactly one port named \"http\" when proxyType=agentgateway" -}}
     {{- end -}}
     {{- $found = true -}}
     {{- if not (hasKey $servicePort "port") -}}
-      {{- fail (printf ".Values.inferenceExtension.extraServicePorts[%d].port is required for the port named \"http\"" $index) -}}
+      {{- fail (printf ".Values.router.extraServicePorts[%d].port is required for the port named \"http\"" $index) -}}
     {{- end -}}
     {{- $listenerPort = index $servicePort "port" -}}
     {{- if hasKey $servicePort "targetPort" -}}
@@ -168,23 +168,23 @@ deterministic even when additional Service ports are configured.
   {{- end -}}
 {{- end -}}
 {{- if not $found -}}
-  {{- fail ".Values.inferenceExtension.extraServicePorts must contain exactly one port named \"http\" when proxyType=agentgateway" -}}
+  {{- fail ".Values.router.extraServicePorts must contain exactly one port named \"http\" when proxyType=agentgateway" -}}
 {{- end -}}
 {{- if kindIs "slice" $listenerPort -}}
-  {{- fail ".Values.inferenceExtension.extraServicePorts[name=http].port must be a single numeric port" -}}
+  {{- fail ".Values.router.extraServicePorts[name=http].port must be a single numeric port" -}}
 {{- end -}}
 {{- $listenerPortString := trim (toString $listenerPort) -}}
 {{- if not (regexMatch "^[0-9]+$" $listenerPortString) -}}
-  {{- fail (printf ".Values.inferenceExtension.extraServicePorts[name=http].port must be numeric, got %q" $listenerPortString) -}}
+  {{- fail (printf ".Values.router.extraServicePorts[name=http].port must be numeric, got %q" $listenerPortString) -}}
 {{- end -}}
 {{- $listenerPortNumber := int $listenerPortString -}}
 {{- if or (lt $listenerPortNumber 1) (gt $listenerPortNumber 65535) -}}
-  {{- fail (printf ".Values.inferenceExtension.extraServicePorts[name=http].port must be between 1 and 65535, got %d" $listenerPortNumber) -}}
+  {{- fail (printf ".Values.router.extraServicePorts[name=http].port must be between 1 and 65535, got %d" $listenerPortNumber) -}}
 {{- end -}}
 {{- if $hasTargetPort -}}
   {{- $targetPortString := trim (toString $targetPort) -}}
   {{- if and (ne $targetPortString $listenerPortString) (ne $targetPortString "http") -}}
-    {{- fail (printf ".Values.inferenceExtension.extraServicePorts[name=http].targetPort must be omitted, %q, or \"http\" when proxyType=agentgateway, got %q" $listenerPortString $targetPortString) -}}
+    {{- fail (printf ".Values.router.extraServicePorts[name=http].targetPort must be omitted, %q, or \"http\" when proxyType=agentgateway, got %q" $listenerPortString $targetPortString) -}}
   {{- end -}}
 {{- end -}}
 {{- $listenerPortString -}}
@@ -195,7 +195,7 @@ Return the standalone EPP model-server target ports.
 */}}
 {{- define "llm-d-router.standaloneEndpointTargetPorts" -}}
 {{- $ports := list -}}
-{{- range .Values.inferenceExtension.modelServers.targetPorts -}}
+{{- range .Values.router.modelServers.targetPorts -}}
 {{- $ports = append $ports (toString .number) -}}
 {{- end -}}
 {{- join "," $ports -}}
@@ -205,10 +205,10 @@ Return the standalone EPP model-server target ports.
 Return the agentgateway model Service ports.
 */}}
 {{- define "llm-d-router.agentgateway.modelServicePorts" -}}
-{{- $sidecarValues := .Values.inferenceExtension.sidecar | default dict -}}
+{{- $sidecarValues := .Values.router.sidecar | default dict -}}
 {{- $agentgateway := index $sidecarValues "agentgateway" | default dict -}}
 {{- $service := index $agentgateway "service" | default dict -}}
-{{- include "llm-d-router.normalizedPortList" (dict "path" ".Values.inferenceExtension.sidecar.agentgateway.service.ports" "value" (index $service "ports")) -}}
+{{- include "llm-d-router.normalizedPortList" (dict "path" ".Values.router.sidecar.agentgateway.service.ports" "value" (index $service "ports")) -}}
 {{- end -}}
 
 {{/*
@@ -216,7 +216,7 @@ Return the resolved sidecar configuration for the current chart.
 Standalone uses proxy presets merged with explicit sidecar overrides.
 */}}
 {{- define "llm-d-router.sidecar" -}}
-{{- $sidecar := deepCopy (.Values.inferenceExtension.sidecar | default dict) -}}
+{{- $sidecar := deepCopy (.Values.router.sidecar | default dict) -}}
 {{- $resolved := $sidecar -}}
 {{- if eq .Chart.Name "llm-d-router-standalone" -}}
   {{- $proxyType := include "llm-d-router.sidecarProxyType" . -}}
@@ -258,8 +258,8 @@ Render labels from the standalone endpoint selector for the generated model Serv
 Only equality-based selectors are supported because Service selectors are a map.
 */}}
 {{- define "llm-d-router.agentgateway.modelServiceSelectorLabels" -}}
-{{- if and .Values.inferenceExtension.modelServers .Values.inferenceExtension.modelServers.matchLabels -}}
-{{- range $key, $value := .Values.inferenceExtension.modelServers.matchLabels -}}
+{{- if and .Values.router.modelServers .Values.router.modelServers.matchLabels -}}
+{{- range $key, $value := .Values.router.modelServers.matchLabels -}}
 {{- printf "%s: %s\n" ($key | quote) ($value | quote) -}}
 {{- end -}}
 {{- else -}}
@@ -271,7 +271,7 @@ Only equality-based selectors are supported because Service selectors are a map.
 Render the default standalone agentgateway sidecar config template.
 */}}
 {{- define "llm-d-router.sidecar.agentgatewayConfig" -}}
-{{- $sidecarValues := .Values.inferenceExtension.sidecar | default dict -}}
+{{- $sidecarValues := .Values.router.sidecar | default dict -}}
 {{- $agentgateway := index $sidecarValues "agentgateway" | default dict -}}
 {{- $service := index $agentgateway "service" | default dict -}}
 {{- $serviceName := index $service "name" | default "" -}}
@@ -299,7 +299,7 @@ binds:
         policies:
           inferenceRouting:
             endpointPicker:
-              host: {{ printf "127.0.0.1:%v" (.Values.inferenceExtension.extProcPort | default 9002) | quote }}
+              host: {{ printf "127.0.0.1:%v" (.Values.router.extProcPort | default 9002) | quote }}
             destinationMode: passthrough
 services:
 - name: {{ $serviceName | quote }}
@@ -316,12 +316,12 @@ services:
 EPP resource validations
 */}}
 {{- define "llm-d-router.validations.epp.resources" -}}
-{{- if not .Values.inferenceExtension.resources }}
-{{- fail ".Values.inferenceExtension.resources is required. EPP is a critical component that must have resource requests set." }}
+{{- if not .Values.router.resources }}
+{{- fail ".Values.router.resources is required. EPP is a critical component that must have resource requests set." }}
 {{- end }}
-{{- if not .Values.inferenceExtension.resources.requests }}
-{{- fail ".Values.inferenceExtension.resources.requests is required. EPP is a critical component that must have resource requests set." }}
+{{- if not .Values.router.resources.requests }}
+{{- fail ".Values.router.resources.requests is required. EPP is a critical component that must have resource requests set." }}
 {{- end }}
-{{- $_ := required ".Values.inferenceExtension.resources.requests.cpu is required. EPP is a critical component that must have CPU requests set." .Values.inferenceExtension.resources.requests.cpu }}
-{{- $_ := required ".Values.inferenceExtension.resources.requests.memory is required. EPP is a critical component that must have memory requests set." .Values.inferenceExtension.resources.requests.memory }}
+{{- $_ := required ".Values.router.resources.requests.cpu is required. EPP is a critical component that must have CPU requests set." .Values.router.resources.requests.cpu }}
+{{- $_ := required ".Values.router.resources.requests.memory is required. EPP is a critical component that must have memory requests set." .Values.router.resources.requests.memory }}
 {{- end -}}

@@ -17,17 +17,17 @@ spec:
     # over during EPP rollout.
     timeoutSec: 2
     checkIntervalSec: 2
-    {{- $port := .Values.inferenceExtension.modelServers.targetPortNumber }}
-    {{- if .Values.inferenceExtension.modelServers.targetPorts }}
-      {{- $port = (index .Values.inferenceExtension.modelServers.targetPorts 0).number }}
+    {{- $port := .Values.router.modelServers.targetPortNumber }}
+    {{- if .Values.router.modelServers.targetPorts }}
+      {{- $port = (index .Values.router.modelServers.targetPorts 0).number }}
     {{- end }}
-    {{- if eq .Values.inferenceExtension.modelServers.protocol "http" }}
+    {{- if eq .Values.router.modelServers.protocol "http" }}
     config:
       type: HTTP
       httpHealthCheck:
         requestPath: /health
         port: {{ $port }}
-    {{- else if and (eq (lower .Values.inferenceExtension.modelServers.type) "vllm") (eq .Values.inferenceExtension.modelServers.protocol "grpc") }}
+    {{- else if and (eq (lower .Values.router.modelServers.type) "vllm") (eq .Values.router.modelServers.protocol "grpc") }}
     config:
       type: GRPC
       grpcHealthCheck:

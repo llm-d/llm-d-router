@@ -12,11 +12,11 @@ spec:
   ports:
     - name: grpc-ext-proc
       protocol: TCP
-      port: {{ .Values.inferenceExtension.extProcPort | default 9002 }}
+      port: {{ .Values.router.extProcPort | default 9002 }}
     - name: http-metrics
       protocol: TCP
-      port: {{ .Values.inferenceExtension.metricsPort | default 9090 }}
-    {{- with .Values.inferenceExtension.extraServicePorts }}
+      port: {{ .Values.router.metricsPort | default 9090 }}
+    {{- with .Values.router.extraServicePorts }}
     {{- . | toYaml | nindent 4 }}
     {{- end }}
   type: ClusterIP

@@ -8,7 +8,7 @@ metadata:
     {{- include "llm-d-router.labels" . | nindent 4 }}
     {{- include "llm-d-router.modeLabels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.inferenceExtension.replicas | default 1 }}
+  replicas: {{ .Values.router.replicas | default 1 }}
   strategy:
     # The current recommended EPP deployment pattern is to have a single active replica. This ensures
     # optimal performance of the stateful operations such prefix cache aware scorer.
@@ -30,7 +30,7 @@ spec:
       {{- $proxyType := include "llm-d-router.sidecarProxyType" . | trim }}
       {{- $sidecarConfigMap := index $sidecar "configMap" | default dict }}
       {{- $sidecarConfigMapName := index $sidecarConfigMap "name" | default "" }}
-      {{- $inferenceExtensionFlags := deepCopy (.Values.inferenceExtension.flags | default dict) }}
+      {{- $inferenceExtensionFlags := deepCopy (.Values.router.flags | default dict) }}
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $inferenceExtensionFlags "secure-serving")) }}
         {{- $_ := set $inferenceExtensionFlags "secure-serving" false }}
       {{- end }}
@@ -93,20 +93,20 @@ spec:
         {{- end }}
         {{- end }}
         - name: epp
-          image: {{ .Values.inferenceExtension.image.registry }}/{{ .Values.inferenceExtension.image.repository }}:{{ .Values.inferenceExtension.image.tag }}
-          imagePullPolicy: {{ .Values.inferenceExtension.image.pullPolicy | default "IfNotPresent" }}
+          image: {{ .Values.router.image.registry }}/{{ .Values.router.image.repository }}:{{ .Values.router.image.tag }}
+          imagePullPolicy: {{ .Values.router.image.pullPolicy | default "IfNotPresent" }}
           args:
           {{- /* 1. Determine Mode Logic */ -}}
-          {{- $useInferencePool := ne .Values.inferenceExtension.inferencePool.create false }}
+          {{- $useInferencePool := ne .Values.router.inferencePool.create false }}
           {{- /* 2. Determine Model Server Type */ -}}
-          {{- $modelServerType := .Values.inferenceExtension.modelServers.type | default "vllm" }}
+          {{- $modelServerType := .Values.router.modelServers.type | default "vllm" }}
           {{- /* 3. Mode Specific Flags */ -}}
           {{- if not $useInferencePool }}
               - --endpoint-selector
               {{- $selector := "" }}
-              {{- if and .Values.inferenceExtension.modelServers .Values.inferenceExtension.modelServers.matchLabels }}
+              {{- if and .Values.router.modelServers .Values.router.modelServers.matchLabels }}
                 {{- $labels := list }}
-                {{- range $k, $v := .Values.inferenceExtension.modelServers.matchLabels }}
+                {{- range $k, $v := .Values.router.modelServers.matchLabels }}
                   {{- $labels = append $labels (printf "%s=%s" $k $v) }}
                 {{- end }}
                 {{- $selector = join "," $labels }}
@@ -121,9 +121,9 @@ spec:
               - --pool-namespace
               - {{ .Release.Namespace }}
               - --pool-group
-              - {{ .Values.inferenceExtension.inferencePool.group | default "inference.networking.k8s.io" | quote }}
+              - {{ .Values.router.inferencePool.group | default "inference.networking.k8s.io" | quote }}
           {{- end }}
-          {{- if not .Values.inferenceExtension.latencyPredictor.enabled }}
+          {{- if not .Values.router.latencyPredictor.enabled }}
           # Legacy metric CLI flags (skipped when dataLayer is enabled via latency predictor).
           {{- if eq $modelServerType "sglang" }}
               - --total-queued-requests-metric="sglang:num_queue_reqs"
@@ -161,8 +161,8 @@ spec:
               - --zap-encoder
               - "json"
               - --config-file
-              - "/config/{{ .Values.inferenceExtension.pluginsConfigFile }}"
-          {{- if gt (.Values.inferenceExtension.replicas | int) 1 }}
+              - "/config/{{ .Values.router.pluginsConfigFile }}"
+          {{- if gt (.Values.router.replicas | int) 1 }}
               - --ha-enable-leader-election
           {{- end }}
               # Pass additional flags via the inferenceExtension.flags field in values.yaml.
@@ -170,15 +170,15 @@ spec:
           {{- range $key, $value := $inferenceExtensionFlags }}
               - {{ printf "--%s=%v" $key $value | quote }}
           {{- end }}
-          {{- if .Values.inferenceExtension.tracing.enabled }}
+          {{- if .Values.router.tracing.enabled }}
               - --tracing=true
           {{- else }}
               - --tracing=false
           {{- end }}
-          {{- if not .Values.inferenceExtension.monitoring.prometheus.auth.enabled }}
+          {{- if not .Values.router.monitoring.prometheus.auth.enabled }}
               - --metrics-endpoint-auth=false
           {{- end }}
-          {{- with .Values.inferenceExtension.resources }}
+          {{- with .Values.router.resources }}
           resources:
             {{ toYaml . | nindent 12 }}
           {{- end }}
@@ -189,11 +189,11 @@ spec:
               containerPort: 9003
             - name: metrics
               containerPort: 9090
-        {{- if .Values.inferenceExtension.extraContainerPorts }}
-            {{- toYaml .Values.inferenceExtension.extraContainerPorts | nindent 12 }}
+        {{- if .Values.router.extraContainerPorts }}
+            {{- toYaml .Values.router.extraContainerPorts | nindent 12 }}
         {{- end }}
           livenessProbe:
-          {{- if gt (.Values.inferenceExtension.replicas | int) 1 }}
+          {{- if gt (.Values.router.replicas | int) 1 }}
             grpc:
               port: 9003
               service: liveness
@@ -205,7 +205,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
-          {{- if gt (.Values.inferenceExtension.replicas | int) 1 }}
+          {{- if gt (.Values.router.replicas | int) 1 }}
             grpc:
               port: 9003
               service: readiness
@@ -225,11 +225,11 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
         {{- include "llm-d-router.latencyPredictor.env" . | nindent 12 }}
-        {{- if .Values.inferenceExtension.tracing.enabled }}
+        {{- if .Values.router.tracing.enabled }}
             - name: OTEL_SERVICE_NAME
               value: "llm-d-router/epp"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.inferenceExtension.tracing.otelExporterEndpoint | quote }}
+              value: {{ .Values.router.tracing.otelExporterEndpoint | quote }}
             - name: OTEL_TRACES_EXPORTER
               value: "otlp"
             - name: OTEL_RESOURCE_ATTRIBUTES_NODE_NAME
@@ -245,23 +245,23 @@ spec:
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: 'k8s.namespace.name=$(NAMESPACE),k8s.node.name=$(OTEL_RESOURCE_ATTRIBUTES_NODE_NAME),k8s.pod.name=$(OTEL_RESOURCE_ATTRIBUTES_POD_NAME)'
             - name: OTEL_TRACES_SAMPLER
-              value: {{ .Values.inferenceExtension.tracing.sampling.sampler | quote }}
+              value: {{ .Values.router.tracing.sampling.sampler | quote }}
             - name: OTEL_TRACES_SAMPLER_ARG
-              value: {{ .Values.inferenceExtension.tracing.sampling.samplerArg | quote }}
+              value: {{ .Values.router.tracing.sampling.samplerArg | quote }}
         {{- end }}
-        {{- if .Values.inferenceExtension.env }}
-        {{- toYaml .Values.inferenceExtension.env | nindent 12 }}
+        {{- if .Values.router.env }}
+        {{- toYaml .Values.router.env | nindent 12 }}
         {{- end }}
           volumeMounts:
             - name: plugins-config-volume
               mountPath: "/config"
-        {{- if .Values.inferenceExtension.volumeMounts }}
-        {{- toYaml .Values.inferenceExtension.volumeMounts | nindent 12 }}
+        {{- if .Values.router.volumeMounts }}
+        {{- toYaml .Values.router.volumeMounts | nindent 12 }}
         {{- end }}
       {{- include "llm-d-router.latencyPredictor.containers" . | nindent 8 }}
       volumes:
-      {{- if .Values.inferenceExtension.volumes }}
-      {{- toYaml .Values.inferenceExtension.volumes | nindent 8 }}
+      {{- if .Values.router.volumes }}
+      {{- toYaml .Values.router.volumes | nindent 8 }}
       {{- end }}
       {{- if and $sidecar.enabled (eq $proxyType "agentgateway") $sidecarConfigMapName }}
         - name: agentgateway-config-template
@@ -278,13 +278,13 @@ spec:
           configMap:
             name: {{ include "llm-d-router.name" . }}
       {{- include "llm-d-router.latencyPredictor.volumes" . | nindent 8 }}
-      {{- if .Values.inferenceExtension.affinity }}
+      {{- if .Values.router.affinity }}
       affinity:
-        {{- toYaml .Values.inferenceExtension.affinity | nindent 8 }}
+        {{- toYaml .Values.router.affinity | nindent 8 }}
       {{- end }}
-      {{- if .Values.inferenceExtension.tolerations }}
+      {{- if .Values.router.tolerations }}
       tolerations:
-        {{- toYaml .Values.inferenceExtension.tolerations | nindent 8 }}
+        {{- toYaml .Values.router.tolerations | nindent 8 }}
       {{- end }}
 ---
 {{- end }}
