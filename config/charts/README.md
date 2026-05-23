@@ -204,6 +204,15 @@ The following table lists all configurable parameters for the LLM-D Router chart
 | `router.proxy.volumeMounts` | Sidecar container volume mounts. | `[]` |
 | `router.proxy.volumes` | Sidecar container volumes. | `[]` |
 | `router.proxy.configMapData` | Key-value pairs to include in a ConfigMap created for the sidecar. | `{}` |
+| **EPP Tokenizer Config (`router.tokenizer.*`)** | | |
+| `router.tokenizer.enabled` | Enable a tokenizer UDS sidecar container in the EPP deployment. | `false` |
+| `router.tokenizer.image.registry` | Tokenizer container image registry. | `ghcr.io/llm-d` |
+| `router.tokenizer.image.repository` | Tokenizer container image repository. | `llm-d-uds-tokenizer` |
+| `router.tokenizer.image.tag` | Tokenizer container image tag. | `vllm-v0.19.1` |
+| `router.tokenizer.image.pullPolicy` | Tokenizer container image pull policy. | `IfNotPresent` |
+| `router.tokenizer.env` | Extra environment variables for the tokenizer container (e.g., HuggingFace token). `TOKENIZERS_DIR` and `HF_HOME` are templated automatically. | `[HF_TOKEN]` |
+| `router.tokenizer.resources` | Tokenizer container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi` |
+| `router.tokenizer.volumeMounts` | Extra volume mounts for the tokenizer container (e.g., for model files). | `[]` |
 | **Standalone Proxy Overrides (`router.proxy.agentgateway.*`)** | | |
 | `router.proxy.agentgateway.service.create` | Create a dedicated model Service for the Agentgateway sidecar. | `true` |
 | `router.proxy.agentgateway.service.name` | Name of the model Service to route to. | `""` |

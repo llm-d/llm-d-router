@@ -258,10 +258,45 @@ spec:
         {{- if .Values.router.epp.volumeMounts }}
         {{- toYaml .Values.router.epp.volumeMounts | nindent 12 }}
         {{- end }}
+        {{- if .Values.router.tokenizer.enabled }}
+            - name: tokenizer-uds
+              mountPath: /tmp/tokenizer
+        {{- end }}
+        {{- if .Values.router.tokenizer.enabled }}
+        - name: tokenizer-uds
+          image: {{ .Values.router.tokenizer.image.registry }}/{{ .Values.router.tokenizer.image.repository }}:{{ .Values.router.tokenizer.image.tag }}
+          imagePullPolicy: {{ .Values.router.tokenizer.image.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: TOKENIZERS_DIR
+              value: /tokenizers
+            - name: HF_HOME
+              value: /tokenizers
+            {{- if .Values.router.tokenizer.env }}
+            {{- toYaml .Values.router.tokenizer.env | nindent 12 }}
+            {{- end }}
+          {{- if .Values.router.tokenizer.resources }}
+          resources:
+            {{- toYaml .Values.router.tokenizer.resources | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - mountPath: /tokenizers
+              name: tokenizers
+            - mountPath: /tmp/tokenizer
+              name: tokenizer-uds
+            {{- if .Values.router.tokenizer.volumeMounts }}
+            {{- toYaml .Values.router.tokenizer.volumeMounts | nindent 12 }}
+            {{- end }}
+        {{- end }}
       {{- include "llm-d-router.latencyPredictor.containers" . | nindent 8 }}
       volumes:
       {{- if .Values.router.volumes }}
       {{- toYaml .Values.router.volumes | nindent 8 }}
+      {{- end }}
+      {{- if .Values.router.tokenizer.enabled }}
+        - name: tokenizers
+          emptyDir: {}
+        - name: tokenizer-uds
+          emptyDir: {}
       {{- end }}
       {{- if and $proxy.enabled (eq $proxyType "agentgateway") $proxyConfigMapName }}
         - name: agentgateway-config-template

@@ -64,6 +64,25 @@ tolerations: []
 # By default no proxy is configured
 proxy:
   enabled: false    
+
+# Tokenizer sidecar configuration
+tokenizer:
+  enabled: false
+  image:
+    registry: ghcr.io/llm-d
+    repository: llm-d-uds-tokenizer
+    tag: vllm-v0.19.1
+    pullPolicy: IfNotPresent
+  env:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: llm-d-hf-token
+          key: HF_TOKEN
+  resources:
+    requests:
+      cpu: "8"
+      memory: 8Gi
     
 # Monitoring configuration for EPP
 monitoring:
