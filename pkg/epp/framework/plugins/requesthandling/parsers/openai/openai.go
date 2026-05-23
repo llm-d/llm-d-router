@@ -54,6 +54,10 @@ const (
 	// The base media type for Server-Sent Events. We check for this substring
 	// to account for optional parameters like "; charset=utf-8" often appended by proxies.
 	eventStreamType = "text/event-stream"
+
+	promptTokensDetailsField = "prompt_tokens_details"
+	inputTokensDetailsField  = "input_tokens_details"
+	cachedTokensField        = "cached_tokens"
 )
 
 // compile-time type validation
@@ -280,14 +284,8 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 		}
 		objectType, _ := responseBody["object"].(string)
 		usage := extractUsageByAPIType(usg, objectType)
-		if usg["prompt_token_details"] != nil {
-			if detailsMap, ok := usg["prompt_token_details"].(map[string]any); ok {
-				if cachedTokens, ok := detailsMap["cached_tokens"]; ok {
-					usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
-						CachedTokens: toInt(cachedTokens),
-					}
-				}
-			}
+		if details := extractPromptTokenDetails(usg); details != nil {
+			usage.PromptTokenDetails = details
 		}
 		return &usage, nil
 	}
@@ -340,6 +338,21 @@ func extractUsageByAPIType(usg map[string]any, objectType string) fwkrh.Usage {
 	return usage
 }
 
+func extractPromptTokenDetails(usg map[string]any) *fwkrh.PromptTokenDetails {
+	for _, field := range []string{promptTokensDetailsField, inputTokensDetailsField} {
+		detailsMap, ok := usg[field].(map[string]any)
+		if !ok {
+			continue
+		}
+		if cachedTokens, ok := detailsMap[cachedTokensField]; ok {
+			return &fwkrh.PromptTokenDetails{
+				CachedTokens: toInt(cachedTokens),
+			}
+		}
+	}
+	return nil
+}
+
 // Example message if "stream_options": {"include_usage": "true"} is included in the request:
 // data: {"id":"...","object":"text_completion","created":1739400043,"model":"small-segment-lora-0","choices":[],
 // "usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}
@@ -359,16 +372,6 @@ func extractUsageByAPIType(usg map[string]any, objectType string) fwkrh.Usage {
 //
 // It extracts usage from events with type="response.completed".
 func extractUsageStreaming(responseText string) *fwkrh.Usage {
-
-	var streamResponse struct {
-		Usage    *fwkrh.Usage `json:"usage"`
-		Response struct {
-			Usage  map[string]any `json:"usage"`
-			Object string         `json:"object"`
-		} `json:"response"`
-		Type string `json:"type"`
-	}
-
 	lines := strings.SplitSeq(responseText, "\n")
 	for line := range lines {
 		if !strings.HasPrefix(line, streamingRespPrefix) {
@@ -380,19 +383,27 @@ func extractUsageStreaming(responseText string) *fwkrh.Usage {
 		}
 
 		byteSlice := []byte(content)
+		var streamResponse map[string]any
 		if err := json.Unmarshal(byteSlice, &streamResponse); err != nil {
 			continue
 		}
+
 		// Standard ChatCompletion / vLLM usage format
-		if streamResponse.Usage != nil {
-			return streamResponse.Usage
+		if streamResponse["usage"] != nil {
+			if usage, err := extractUsage(byteSlice); err == nil && usage != nil {
+				return usage
+			}
 		}
+
 		// Responses API streaming format
-		if streamResponse.Response.Usage != nil && streamResponse.Type == "response.completed" {
+		response, _ := streamResponse["response"].(map[string]any)
+		usageMap, _ := response["usage"].(map[string]any)
+		if usageMap != nil && streamResponse["type"] == "response.completed" {
+			objectType, _ := response["object"].(string)
 			// Convert map[string]any to JSON and parse
 			jsonBytes, _ := json.Marshal(map[string]any{
-				"usage":  streamResponse.Response.Usage,
-				"object": streamResponse.Response.Object,
+				"usage":  usageMap,
+				"object": objectType,
 			})
 			if usage, err := extractUsage(jsonBytes); err == nil && usage != nil {
 				return usage

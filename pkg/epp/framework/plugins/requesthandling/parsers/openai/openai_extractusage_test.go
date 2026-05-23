@@ -28,8 +28,8 @@ func TestExtractUsage_MalformedFields_NoPanic(t *testing.T) {
 			body: `{"object":"chat.completion","usage":"oops"}`,
 		},
 		{
-			name: "prompt_token_details_is_number",
-			body: `{"object":"chat.completion","usage":{"prompt_token_details":0,"prompt_tokens":7}}`,
+			name: "prompt_tokens_details_is_number",
+			body: `{"object":"chat.completion","usage":{"prompt_tokens_details":0,"prompt_tokens":7}}`,
 		},
 		{
 			name: "prompt_tokens_is_string",
