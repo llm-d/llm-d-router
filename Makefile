@@ -312,22 +312,22 @@ post-deploy-test: ## Run post deployment tests
 	@echo "Success!"
 	@echo "Post-deployment tests passed."
 
+.PHONY: verify-manifests
+verify-manifests: kubectl-validate ## Validate deployment manifests.
+	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
+
 ##@ Helm
 
 .PHONY: verify-helm-charts
 verify-helm-charts: helm-install kubectl-validate ## Render and validate Helm charts.
 	HELM="$(HELM)" KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-helm.sh $(MODE)
 
-.PHONY: verify-manifests
-verify-manifests: kubectl-validate ## Validate deployment manifests.
-	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
-
-.PHONY: inferencepool-helm-chart-push
-inferencepool-helm-chart-push: yq helm-install ## Package and push the llm-d-router-gateway Helm chart.
+.PHONY: helm-push-gateway
+helm-push-gateway: yq helm-install ## Package and push the llm-d-router-gateway Helm chart.
 	CHART=llm-d-router-gateway EXTRA_TAG="$(EXTRA_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 
-.PHONY: standalone-helm-chart-push
-standalone-helm-chart-push: yq helm-install ## Package and push the llm-d-router-standalone Helm chart.
+.PHONY: helm-push-standalone
+helm-push-standalone: yq helm-install ## Package and push the llm-d-router-standalone Helm chart.
 	CHART=llm-d-router-standalone EXTRA_TAG="$(EXTRA_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 
 

@@ -38,14 +38,14 @@ chart_version=${CHART_VERSION}
 if [[ ${EXTRA_TAG} =~ ${semver_regex} ]]
 then
   ${YQ} -i \
-    '.inferenceExtension.image.registry=strenv(IMAGE_REGISTRY) |
-     .inferenceExtension.image.repository=strenv(EPP_RELEASE_IMAGE_REPOSITORY) |
-     .inferenceExtension.image.tag=strenv(EXTRA_TAG) |
-     .inferenceExtension.image.pullPolicy="IfNotPresent"' \
+    '.router.epp.image.registry=strenv(IMAGE_REGISTRY) |
+     .router.epp.image.repository=strenv(EPP_RELEASE_IMAGE_REPOSITORY) |
+     .router.epp.image.tag=strenv(EXTRA_TAG) |
+     .router.epp.image.pullPolicy="IfNotPresent"' \
     config/charts/${CHART}/values.yaml
   if [[ ${CHART} == "llm-d-router-standalone" ]]; then
     ${YQ} -i \
-      '.inferenceExtension.sidecar.presets.agentgateway.image="cr.agentgateway.dev/agentgateway:" + strenv(AGENTGATEWAY_TAG)' \
+      '.router.proxy.presets.agentgateway.image="cr.agentgateway.dev/agentgateway:" + strenv(AGENTGATEWAY_TAG)' \
       config/charts/${CHART}/values.yaml
   fi
   chart_version=${EXTRA_TAG}
@@ -59,4 +59,4 @@ ${HELM} package --version "${chart_version}" --app-version "${chart_version}" "c
 
 # Push the package
 echo "pushing chart to ${HELM_CHART_REPO}"
-${HELM} push "bin/${CHART}-${chart_version}.tgz" "oci://${HELM_CHART_REPO}"
+#${HELM} push "bin/${CHART}-${chart_version}.tgz" "oci://${HELM_CHART_REPO}"
