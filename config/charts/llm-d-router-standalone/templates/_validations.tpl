@@ -13,6 +13,9 @@ common validations
 standalone validations
 */}}
 {{- define "llm-d-router.validations.standalone" -}}
+{{- if hasKey .Values.router "sidecar" -}}
+  {{- fail ".Values.router.sidecar has been refactored to .Values.router.proxy. Please update your values.yaml" -}}
+{{- end -}}
 {{- $proxy := .Values.router.proxy | default dict -}}
 {{- if $proxy.enabled -}}
   {{- $proxyType := default "envoy" ($proxy.proxyType | default "envoy") | lower -}}
