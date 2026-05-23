@@ -1,20 +1,32 @@
-name: 'Unstale Issue'
+name: 'Unstale Issue or PR'
 
 on:
   issues:
     types: [ reopened ]
   issue_comment:
     types: [ created ]
+  pull_request:
+    types: [ reopened ]
 
 jobs:
   remove-stale:
     runs-on: ubuntu-latest
     permissions:
       issues: write
+      pull-requests: write
     if: >-
-      github.event.issue.state == 'open' &&
-      (contains(github.event.issue.labels.*.name, 'lifecycle/stale') || 
-       contains(github.event.issue.labels.*.name, 'lifecycle/rotten'))
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.state == 'open' &&
+        (contains(github.event.pull_request.labels.*.name, 'lifecycle/stale') ||
+         contains(github.event.pull_request.labels.*.name, 'lifecycle/rotten'))
+      ) ||
+      (
+        github.event_name != 'pull_request' &&
+        github.event.issue.state == 'open' &&
+        (contains(github.event.issue.labels.*.name, 'lifecycle/stale') ||
+         contains(github.event.issue.labels.*.name, 'lifecycle/rotten'))
+      )
     steps:
       - name: 'Checkout repository'
         uses: actions/checkout@v6
@@ -22,6 +34,8 @@ jobs:
       - name: 'Remove stale labels'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: |
-          echo "Removing 'stale' label from issue #${{ github.event.issue.number }}"
-          gh issue edit ${{ github.event.issue.number }} --remove-label "lifecycle/stale,lifecycle/rotten"
+          echo "Removing stale labels from item #$TARGET_NUMBER"
+          gh issue edit "$TARGET_NUMBER" --remove-label "lifecycle/stale" || true
+          gh issue edit "$TARGET_NUMBER" --remove-label "lifecycle/rotten" || true
