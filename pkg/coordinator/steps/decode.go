@@ -11,8 +11,8 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"

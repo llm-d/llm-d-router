@@ -2,7 +2,7 @@ package kv
 
 import (
 	"github.com/llm-d/coordinator/pkg/pipeline"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // nixlV2 implements the NIXL v2 P2P KV transfer protocol. The prefill request

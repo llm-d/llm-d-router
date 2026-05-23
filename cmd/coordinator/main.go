@@ -6,7 +6,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
 	"github.com/llm-d/coordinator/pkg/config"
 	"github.com/llm-d/coordinator/pkg/gateway"

@@ -2,7 +2,7 @@ package ec
 
 import (
 	"github.com/llm-d/coordinator/pkg/pipeline"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // nixlV2 is the NIXL EC connector: each encoder response carries an
