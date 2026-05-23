@@ -7,6 +7,10 @@ inputs:
   extra_tag:
     description: 'Tag for the EPP image and chart version (e.g., v0.1.0 or branch name)'
     required: true
+  chart_suffix:
+    description: 'Optional suffix to append to the chart name (e.g. -dev)'
+    required: false
+    default: ''
 runs:
   using: 'composite'
   steps:
@@ -14,5 +18,6 @@ runs:
       shell: bash
       env:
         EXTRA_TAG: "${{ inputs.extra_tag }}"
+        CHART_SUFFIX: "${{ inputs.chart_suffix }}"
       run: |
         make helm-push CHART="${{ inputs.chart_name }}"

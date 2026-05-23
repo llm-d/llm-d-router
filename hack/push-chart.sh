@@ -25,7 +25,8 @@ CHART_VERSION=${CHART_VERSION:-"v0"}
 IMAGE_REGISTRY=${IMAGE_REGISTRY:-ghcr.io/llm-d}
 EPP_RELEASE_IMAGE_REPOSITORY=${EPP_RELEASE_IMAGE_REPOSITORY:-llm-d-router-endpoint-picker}
 AGENTGATEWAY_TAG=${AGENTGATEWAY_TAG:-${EXTRA_TAG}}
-export EXTRA_TAG AGENTGATEWAY_TAG IMAGE_REGISTRY EPP_RELEASE_IMAGE_REPOSITORY
+CHART_SUFFIX=${CHART_SUFFIX:-""}
+export EXTRA_TAG AGENTGATEWAY_TAG IMAGE_REGISTRY EPP_RELEASE_IMAGE_REPOSITORY CHART_SUFFIX
 
 HELM_CHART_REPO=${HELM_CHART_REPO:-${IMAGE_REGISTRY}/charts}
 CHART=${CHART:-llm-d-router-gateway}
@@ -51,6 +52,17 @@ then
   chart_version=${EXTRA_TAG}
 fi
 
+# If suffix is defined, dynamically rename the chart in Chart.yaml before packaging and ensure it gets reverted on exit
+if [[ -n "${CHART_SUFFIX}" ]]; then
+  cleanup() {
+    echo "reverting Chart.yaml name back to ${CHART}..."
+    ${YQ} -i ".name = \"${CHART}\"" "config/charts/${CHART}/Chart.yaml"
+  }
+  trap cleanup EXIT
+
+  ${YQ} -i ".name = .name + \"${CHART_SUFFIX}\"" "config/charts/${CHART}/Chart.yaml"
+fi
+
 # Update dependencies
 ${HELM} dependency update "config/charts/${CHART}"
 
@@ -59,4 +71,4 @@ ${HELM} package --version "${chart_version}" --app-version "${chart_version}" "c
 
 # Push the package
 echo "pushing chart to ${HELM_CHART_REPO}"
-${HELM} push "bin/${CHART}-${chart_version}.tgz" "oci://${HELM_CHART_REPO}"
+${HELM} push "${DEST_CHART_DIR}${CHART}${CHART_SUFFIX}-${chart_version}.tgz" "oci://${HELM_CHART_REPO}"

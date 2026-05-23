@@ -52,3 +52,4 @@ jobs:
       sidecar-image-name: ${{ needs.set-params.outputs.sidecar_name }}
       tag: ${{ needs.set-params.outputs.tag }}
       prerelease: ${{ fromJSON(needs.set-params.outputs.prerelease) }}
+      chart-suffix: ""

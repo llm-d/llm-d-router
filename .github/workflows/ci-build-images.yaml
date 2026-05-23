@@ -15,6 +15,10 @@ on:
       prerelease:
         required: true
         type: boolean
+      chart-suffix:
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -83,11 +87,13 @@ jobs:
         with:
           chart_name: llm-d-router-standalone
           extra_tag: ${{ inputs.tag }}
+          chart_suffix: ${{ inputs.chart-suffix }}
 
       - name: Build and Push Gateway Chart
         uses: ./.github/actions/helm-build-and-push
         with:
           chart_name: llm-d-router-gateway
           extra_tag: ${{ inputs.tag }}
+          chart_suffix: ${{ inputs.chart-suffix }}
 
 
