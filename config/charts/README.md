@@ -63,100 +63,17 @@ helm install vllm-qwen3-32b ./config/charts/llm-d-router-gateway \
 ```
 ---
 
-## Common Customizations
+## Configuration & Customization
 
-Since both charts use `routerlib` under the hood, most EPP customizations are shared and configured under the `router` values block.
-
-### Custom Command-Line Flags for EPP
-Pass additional flags to the EPP container using `router.epp.flags`:
-
-```bash
-helm install vllm-pool ./config/charts/llm-d-router-gateway \
-  --set router.modelServers.matchLabels.app=vllm-pool \
-  --set router.epp.flags.v=3 # Enable debug logging (verbosity 3)
-```
-
-### Custom Environment Variables
-Define custom environment variables for EPP in your `values.yaml`:
-
-```yaml
-router:
-  epp:
-    env:
-      - name: FEATURE_FLAG_ENABLED
-        value: "true"
-      - name: POD_IP
-        valueFrom:
-          fieldRef:
-            fieldPath: status.podIP
-```
-
-### Custom EPP Plugins Configuration
-EPP routing behavior is controlled by plugins. You can pass custom inline plugin configurations:
-
-```yaml
-router:
-  epp:
-    pluginsCustomConfig:
-      custom-plugins.yaml: |
-        apiVersion: inference.networking.x-k8s.io/v1alpha1
-        kind: EndpointPickerConfig
-        plugins:
-        - type: queue-scorer
-        - type: custom-scorer
-          parameters:
-            threshold: 64
-        schedulingProfiles:
-        - name: default
-          plugins:
-          - pluginRef: queue-scorer
-          - pluginRef: custom-scorer
-```
-
-### High Availability (HA)
-To deploy EPP in an active-passive HA configuration, set `epp.replicas` to a value greater than 1. Only one "leader" replica will process traffic, with others acting as warm standbys:
-
-```bash
-helm install vllm-pool ./config/charts/llm-d-router-gateway \
-  --set router.modelServers.matchLabels.app=vllm-pool \
-  --set router.epp.replicas=3
-```
-
-### Monitoring
-EPP exposes Prometheus metrics on port `9090`. You can configure metrics collection:
-
-```yaml
-router:
-  monitoring:
-    interval: "10s"
-    provider:
-      name: "gmp" # Options: [gmp (Google Managed Prometheus), prometheusoperator]
-    prometheus:
-      enabled: true
-      auth:
-        enabled: true # Set to false for unauthenticated /metrics access
-```
-
-### Tracing
-EPP supports OpenTelemetry tracing:
-
-```yaml
-router:
-  tracing:
-    enabled: true
-    otelExporterEndpoint: "http://otel-collector.monitoring.svc:4317"
-    sampling:
-      sampler: "parentbased_traceidratio"
-      samplerArg: "0.1" # Sample 10% of traces
-```
+Since both charts use `routerlib` under the hood, all configurations and customizations are shared under the `router` values block. EPP and the LLM-D Router can be customized by grouping configuration blocks in your `values.yaml` file. Below is the complete documentation and reference for each component.
 
 ---
 
-## Configuration Reference
+### 1. EPP Core Configuration
 
-The following table lists all configurable parameters for the LLM-D Router charts.
+Core settings for the Endpoint Picker Proxy (EPP) container and pod, including scaling, images, command-line flags, custom environment variables, resources, and plugins config.
 
-### EPP Core Configuration
+#### EPP Core Configuration Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
@@ -179,7 +96,82 @@ The following table lists all configurable parameters for the LLM-D Router chart
 | `router.epp.volumes` | Extra volumes for EPP pod. | `[]` |
 | `router.epp.volumeMounts` | Extra volume mounts for EPP container. | `[]` |
 
-### Model Server Configuration
+#### Complete Custom EPP Core Example
+
+To fully customize the EPP core container and pod (e.g., HA scaling, custom image, debugging flags, custom environment variables, custom plugin scheduling, and resource allocations), define the `router` block in your `values.yaml` as follows:
+
+```yaml
+router:
+  epp:
+    # Run EPP in active-passive HA mode
+    replicas: 3
+    image:
+      registry: my-registry.io
+      repository: my-epp-dev
+      tag: v1.2.3
+      pullPolicy: IfNotPresent
+    extProcPort: 9002
+    parser: vllmgrpc-parser
+    flags:
+      # Enable debug logging (verbosity 3)
+      v: 3
+      tracing: true
+    env:
+      - name: FEATURE_FLAG_ENABLED
+        value: "true"
+      - name: POD_IP
+        valueFrom:
+          fieldRef:
+            fieldPath: status.podIP
+    resources:
+      requests:
+        cpu: "8"
+        memory: 16Gi
+      limits:
+        memory: 32Gi
+    pluginsConfigFile: "custom-plugins.yaml"
+    pluginsCustomConfig:
+      custom-plugins.yaml: |
+        apiVersion: inference.networking.x-k8s.io/v1alpha1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: queue-scorer
+        - type: custom-scorer
+          parameters:
+            threshold: 64
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: queue-scorer
+          - pluginRef: custom-scorer
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+          - matchExpressions:
+            - key: topology.kubernetes.io/zone
+              operator: In
+              values:
+              - us-central1-a
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+    volumeMounts:
+      - mountPath: /models
+        name: model-volume
+  volumes:
+    - name: model-volume
+      emptyDir: {}
+```
+
+---
+
+### 2. Model Server Configuration
+
+Configuration for the backend model servers that EPP routes traffic to. These settings are used by EPP to parse requests and route traffic correctly.
+
+#### Model Server Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
@@ -189,7 +181,27 @@ The following table lists all configurable parameters for the LLM-D Router chart
 | `router.modelServers.targetPorts` | Port(s) EPP routes traffic to on the model servers. | `[{number: 8000}]` |
 | `router.modelServers.targetPortNumber` | Legacy fallback port number for GKE health check policies. | `8000` |
 
-### InferencePool Configuration
+#### Complete Model Server Example
+
+```yaml
+router:
+  modelServers:
+    # Label selector to match your model server pods
+    matchLabels:
+      app: my-sglang-deployment
+    type: sglang
+    protocol: grpc
+    targetPorts:
+      - number: 50051
+```
+
+---
+
+### 3. InferencePool Configuration
+
+Settings for managing the `InferencePool` Kubernetes resource which logically groups the backend model servers.
+
+#### InferencePool Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
@@ -198,7 +210,26 @@ The following table lists all configurable parameters for the LLM-D Router chart
 | `router.inferencePool.group` | The API group of the `InferencePool` resource. | `inference.networking.k8s.io` |
 | `router.inferencePool.failureMode` | EPP failure mode when external processing fails (configured on the pool). Options: `[FailOpen, FailClosed]`. | `FailOpen` |
 
-### Monitoring & Tracing Configuration
+#### Complete InferencePool Example
+
+```yaml
+router:
+  inferencePool:
+    # Enable or disable InferencePool resource creation (false in standalone service-backed mode)
+    create: true
+    apiVersion: inference.networking.k8s.io/v1
+    group: inference.networking.k8s.io
+    # If EPP fails to process the request, route anyway (FailOpen) or fail the request (FailClosed)
+    failureMode: FailClosed
+```
+
+---
+
+### 4. Monitoring & Tracing Configuration
+
+Configures metrics scraping via Prometheus (compatible with Google Managed Prometheus or standard Prometheus Operator) and OpenTelemetry distributed tracing endpoints.
+
+#### Monitoring & Tracing Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
@@ -209,7 +240,35 @@ The following table lists all configurable parameters for the LLM-D Router chart
 | `router.tracing.sampling.sampler` | Trace sampler type. | `parentbased_traceidratio` |
 | `router.tracing.sampling.samplerArg` | Sampler argument (e.g., sampling ratio `"0.1"`). | `"0.1"` |
 
-### Gateway-Specific Configuration (`llm-d-router-gateway` only)
+#### Complete Monitoring & Tracing Example
+
+```yaml
+router:
+  monitoring:
+    interval: "10s"
+    provider:
+      name: "gmp" # Use Google Managed Prometheus (GMP)
+      gmp:
+        autopilot: true # Enable if running on GKE Autopilot
+    prometheus:
+      enabled: true
+      auth:
+        enabled: true # Requires token authorization to scrape metrics on port 9090
+  tracing:
+    enabled: true
+    otelExporterEndpoint: "http://otel-collector.monitoring.svc.cluster.local:4317"
+    sampling:
+      sampler: "parentbased_traceidratio"
+      samplerArg: "0.1" # Sample 10% of requests
+```
+
+---
+
+### 5. Gateway-Specific Configuration (`llm-d-router-gateway` only)
+
+Configures routing policies and optional Gateway API integration features exclusive to the Gateway implementation chart.
+
+#### Gateway-Specific Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
@@ -222,7 +281,32 @@ The following table lists all configurable parameters for the LLM-D Router chart
 | `experimentalHttpRoute.inferenceGatewayNamespace` | Target Gateway namespace for the `HTTPRoute`. | `""` |
 | `experimentalHttpRoute.requestTimeout` | Request timeout for the `HTTPRoute` (Istio/non-GKE only). | `300s` |
 
-### Sidecar Proxy Configuration (`router.proxy.*`)
+#### Complete Gateway Example
+
+```yaml
+inferenceObjectives:
+  - name: high-priority
+    priority: 100
+  - name: background-batch
+    priority: 10
+
+provider:
+  name: gke # Use GKE gateway implementation
+  
+experimentalHttpRoute:
+  enabled: true
+  inferenceGatewayName: "my-company-gateway"
+  inferenceGatewayNamespace: "gateway-infra"
+  requestTimeout: "120s"
+```
+
+---
+
+### 6. Sidecar Proxy Configuration (`router.proxy.*`)
+
+Used primarily in **Standalone Mode** to spin up a proxy container (Envoy sidecar or Agentgateway sidecar) alongside EPP to intercept and route incoming traffic.
+
+#### Proxy Sidecar Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
@@ -246,7 +330,39 @@ The following table lists all configurable parameters for the LLM-D Router chart
 | `router.proxy.agentgateway.service.namespace` | **Agentgateway only**. Namespace of the model Service. Defaults to release namespace. | `""` |
 | `router.proxy.agentgateway.service.ports` | **Agentgateway only**. Port list for the model Service (must match `modelServers.targetPorts`). | `[]` |
 
-### Sidecar Tokenizer Configuration (`router.tokenizer.*`)
+#### Complete Proxy Sidecar Example (Agentgateway Service-Backed)
+
+To deploy EPP in standalone mode with an Agentgateway sidecar routing traffic directly to an existing model Service `my-model-service` (bypassing `InferencePool` creation):
+
+```yaml
+router:
+  inferencePool:
+    create: false # Disable InferencePool creation
+
+  proxy:
+    enabled: true
+    proxyType: agentgateway
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        memory: 8Gi
+    agentgateway:
+      service:
+        create: true # Create a Service to route client traffic to EPP
+        name: "my-model-service"
+        ports:
+          - 8000 # Intercept traffic on port 8000
+```
+
+---
+
+### 7. Sidecar Tokenizer Configuration (`router.tokenizer.*`)
+
+Runs a tokenizer sidecar container to expose a Unix Domain Socket (UDS) to EPP, allowing EPP to tokenize incoming requests and enable precise, token-count-aware routing policies (e.g., precise prefix-cache matching).
+
+#### Tokenizer Sidecar Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
@@ -259,7 +375,45 @@ The following table lists all configurable parameters for the LLM-D Router chart
 | `router.tokenizer.resources` | Tokenizer container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi` |
 | `router.tokenizer.volumeMounts` | Extra volume mounts for the tokenizer container (e.g., for model files). | `[]` |
 
-### Sidecar Latency Predictor Configuration (`router.latencyPredictor.*`)
+#### Complete Tokenizer Sidecar Example
+
+```yaml
+router:
+  tokenizer:
+    enabled: true
+    image:
+      registry: ghcr.io/llm-d
+      repository: llm-d-uds-tokenizer
+      tag: vllm-v0.19.1
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: my-hf-token-secret
+            key: token
+    resources:
+      requests:
+        cpu: "8"
+        memory: 8Gi
+      limits:
+        memory: 16Gi
+    volumeMounts:
+      # If pre-loading models from an external volume:
+      - mountPath: /models
+        name: model-cache-volume
+  volumes:
+    - name: model-cache-volume
+      persistentVolumeClaim:
+        claimName: pvc-model-cache
+```
+
+---
+
+### 8. Sidecar Latency Predictor Configuration (`router.latencyPredictor.*`)
+
+Enables latency predictor containers inside the EPP deployment to feed metrics to a latency scorer plugin, allowing EPP to route traffic based on real-time predicted latencies.
+
+#### Latency Predictor Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
@@ -267,3 +421,25 @@ The following table lists all configurable parameters for the LLM-D Router chart
 | `router.latencyPredictor.trainingServer.image` | Latency training server image configuration. | |
 | `router.latencyPredictor.predictionServers.image` | Latency prediction server image configuration. | |
 | `router.latencyPredictor.eppEnv` | EPP tuning variables for Latency Predictor. | |
+
+#### Complete Latency Predictor Example
+
+```yaml
+router:
+  latencyPredictor:
+    enabled: true
+    trainingServer:
+      image:
+        registry: my-company-docker.pkg.dev/k8s-staging-images
+        repository: latency-training-server
+        tag: latest
+    predictionServers:
+      image:
+        registry: my-company-docker.pkg.dev/k8s-staging-images
+        repository: latency-prediction-server
+        tag: latest
+    eppEnv:
+      LATENCY_MAX_SAMPLE_SIZE: "20000"
+      LATENCY_MAX_CONCURRENT_DISPATCHES: "48"
+      LATENCY_COALESCE_WINDOW_MS: "2"
+```

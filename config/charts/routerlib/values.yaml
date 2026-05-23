@@ -32,6 +32,7 @@ epp:
   env: []
   
   pluginsConfigFile: "default-plugins.yaml"
+  pluginsCustomConfig: {}
   
   # Define additional container ports
   extraContainerPorts: []
