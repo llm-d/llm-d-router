@@ -59,4 +59,4 @@ ${HELM} package --version "${chart_version}" --app-version "${chart_version}" "c
 
 # Push the package
 echo "pushing chart to ${HELM_CHART_REPO}"
-#${HELM} push "bin/${CHART}-${chart_version}.tgz" "oci://${HELM_CHART_REPO}"
+${HELM} push "bin/${CHART}-${chart_version}.tgz" "oci://${HELM_CHART_REPO}"
