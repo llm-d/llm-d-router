@@ -325,7 +325,7 @@ verify-helm-charts: helm-install kubectl-validate ## Render and validate Helm ch
 .PHONY: helm-push
 helm-push: yq helm-install ## Package and push a specified Helm chart. Usage: make helm-push CHART=<chart_name>
 	@if [ -z "$(CHART)" ]; then echo "Error: CHART variable is required (e.g. CHART=llm-d-router-standalone)"; exit 1; fi
-	CHART=$(CHART) EXTRA_TAG="$(EXTRA_TAG)" CHART_SUFFIX="$(CHART_SUFFIX)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
+	CHART=$(CHART) EXTRA_TAG="$(EXTRA_TAG)" CHART_SUFFIX="$(CHART_SUFFIX)" EPP_RELEASE_IMAGE_REPOSITORY="$(EPP_RELEASE_IMAGE_REPOSITORY)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 
 .PHONY: helm-push-gateway
 helm-push-gateway: ## Package and push the llm-d-router-gateway Helm chart.

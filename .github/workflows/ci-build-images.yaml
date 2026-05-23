@@ -88,6 +88,7 @@ jobs:
           chart_name: llm-d-router-standalone
           extra_tag: ${{ inputs.tag }}
           chart_suffix: ${{ inputs.chart-suffix }}
+          epp_image_repository: ${{ inputs.epp-image-name }}
 
       - name: Build and Push Gateway Chart
         uses: ./.github/actions/helm-build-and-push
@@ -95,5 +96,6 @@ jobs:
           chart_name: llm-d-router-gateway
           extra_tag: ${{ inputs.tag }}
           chart_suffix: ${{ inputs.chart-suffix }}
+          epp_image_repository: ${{ inputs.epp-image-name }}
 
 
