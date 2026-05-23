@@ -286,7 +286,7 @@ func TestPluginFactory_RejectsTokenizersPoolConfig(t *testing.T) {
 	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
 	raw := json.RawMessage(`{"indexerConfig":{"tokenizersPoolConfig":{"modelName":"x"}}}`)
 
-	_, err := PluginFactory("test", raw, handle)
+	_, err := PluginFactory("test", plugin.StrictDecoder(raw), handle)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "tokenizersPoolConfig is not supported")
 }

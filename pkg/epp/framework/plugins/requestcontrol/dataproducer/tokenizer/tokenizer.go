@@ -73,11 +73,11 @@ type tokenizerPluginConfig struct {
 }
 
 // PluginFactory is the factory function for the tokenizer plugin.
-func PluginFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	config := tokenizerPluginConfig{}
 
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &config); err != nil {
+		if err := rawParameters.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' plugin - %w", PluginType, err)
 		}
 	}
@@ -102,7 +102,7 @@ func PluginFactory(name string, rawParameters json.RawMessage, handle plugin.Han
 // to PluginFactory. Will be removed when LegacyPluginType is removed.
 //
 // Deprecated: register PluginType ("token-producer") instead.
-func LegacyPluginFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func LegacyPluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	log.FromContext(handle.Context()).Info(
 		"DEPRECATION: plugin type '"+LegacyPluginType+"' is deprecated; use '"+PluginType+"' instead",
 		"pluginName", name,

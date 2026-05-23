@@ -80,7 +80,7 @@ Plugin config — dedicated render Service:
 
 A complete sample config that pairs this with `precise-prefix-cache-scorer`
 is at
-[`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](/deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
+[`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
 
 ---
 

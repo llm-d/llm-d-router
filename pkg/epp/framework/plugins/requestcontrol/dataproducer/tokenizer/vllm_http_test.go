@@ -145,7 +145,7 @@ func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 		"vllm": {"http": "http://localhost:8000"}
 	}`
 	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
-	p, err := PluginFactory("test", json.RawMessage(params), handle)
+	p, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(params)), handle)
 	require.Error(t, err)
 	assert.Nil(t, p)
 	assert.Contains(t, err.Error(), "only one of")
@@ -157,7 +157,7 @@ func TestPluginFactory_HTTPBackend_BadTimeout(t *testing.T) {
 		"vllm": {"timeout": "nope"}
 	}`
 	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
-	p, err := PluginFactory("test", json.RawMessage(params), handle)
+	p, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(params)), handle)
 	require.Error(t, err)
 	assert.Nil(t, p)
 	assert.Contains(t, err.Error(), "invalid 'timeout'")

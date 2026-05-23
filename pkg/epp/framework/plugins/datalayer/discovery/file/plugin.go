@@ -80,10 +80,10 @@ type FileDiscovery struct {
 var _ fwkdl.EndpointDiscovery = (*FileDiscovery)(nil)
 
 // Factory is the plugin factory for file-discovery.
-func Factory(name string, parameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	p := &params{WatchFile: false}
-	if len(parameters) > 0 {
-		if err := json.Unmarshal(parameters, p); err != nil {
+	if parameters != nil {
+		if err := parameters.Decode(p); err != nil {
 			return nil, fmt.Errorf("file-discovery: failed to parse parameters: %w", err)
 		}
 	}

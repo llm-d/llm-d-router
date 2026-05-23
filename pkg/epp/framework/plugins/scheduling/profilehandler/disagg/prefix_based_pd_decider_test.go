@@ -10,6 +10,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -172,7 +173,7 @@ func TestPrefixBasedPDDeciderFactory(t *testing.T) {
 				raw = json.RawMessage(tt.rawParams)
 			}
 
-			p, err := PrefixBasedPDDeciderPluginFactory(tt.pluginName, raw, nil)
+			p, err := PrefixBasedPDDeciderPluginFactory(tt.pluginName, fwkplugin.StrictDecoder(raw), nil)
 			if tt.expectErr {
 				assert.Error(t, err)
 				assert.Nil(t, p)

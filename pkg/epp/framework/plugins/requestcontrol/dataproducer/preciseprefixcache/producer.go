@@ -100,7 +100,7 @@ type Producer struct {
 // PluginFactory parses the raw plugin configuration and returns a configured
 // Producer. Rejects configs with indexerConfig.tokenizersPoolConfig set, since
 // this producer is tokens-only and requires an upstream token-producer.
-func PluginFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	indexerConfig, err := kvcache.NewDefaultConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize indexer config: %w", err)
@@ -112,7 +112,7 @@ func PluginFactory(name string, rawParameters json.RawMessage, handle plugin.Han
 	}
 
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PluginType, err)
 		}
 	}

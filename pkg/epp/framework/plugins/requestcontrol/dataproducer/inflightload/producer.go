@@ -53,11 +53,11 @@ func defaultConfig() Config {
 	return Config{AddEstimatedOutputTokens: false}
 }
 
-func InFlightLoadProducerFactory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func InFlightLoadProducerFactory(name string, decoder *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	cfg := defaultConfig()
-	if len(rawParameters) > 0 {
-		if err := json.Unmarshal(rawParameters, &cfg); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal inflight-load-producer parameters: %w", err)
+	if decoder != nil {
+		if err := decoder.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("failed to decode inflight-load-producer parameters: %w", err)
 		}
 	}
 	return &InFlightLoadProducer{

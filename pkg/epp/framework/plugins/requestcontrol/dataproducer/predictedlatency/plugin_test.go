@@ -29,6 +29,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -385,7 +386,7 @@ func TestPredictedLatencyFactory(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			handle := igwtestutils.NewTestHandle(context.Background())
 			rawParams := json.RawMessage(tt.jsonParams)
-			plugin, err := PredictedLatencyFactory(tt.pluginName, rawParams, handle)
+			plugin, err := PredictedLatencyFactory(tt.pluginName, fwkplugin.StrictDecoder(rawParams), handle)
 
 			if tt.expectErr {
 				assert.Error(t, err)
@@ -421,7 +422,7 @@ func TestPredictedLatencyFactoryInvalidJSON(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			handle := igwtestutils.NewTestHandle(context.Background())
 			rawParams := json.RawMessage(tt.jsonParams)
-			plugin, err := PredictedLatencyFactory("test", rawParams, handle)
+			plugin, err := PredictedLatencyFactory("test", fwkplugin.StrictDecoder(rawParams), handle)
 
 			assert.Error(t, err)
 			assert.Nil(t, plugin)

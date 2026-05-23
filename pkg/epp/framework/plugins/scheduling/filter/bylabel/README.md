@@ -173,5 +173,5 @@ None.
 ---
 
 ## Related Documentation
-- [Creating a Custom Filter](/docs/create_new_filter.md)
-- [Disaggregated Inference Serving in llm-d](/docs/disaggregation.md)
+- [Creating a Custom Filter](../../../../../../../docs/create_new_filter.md)
+- [Disaggregated Inference Serving in llm-d](../../../../../../../docs/disaggregation.md)

@@ -59,7 +59,7 @@ saturation ≈ 0.34. This creates a dead zone at low load with a steep ramp at m
 
 ### Example Configuration
 
-See [`deploy/config/probabilistic-admitter-epp-config.yaml`](/deploy/config/probabilistic-admitter-epp-config.yaml) for the full EPP config. The
+See [`deploy/config/probabilistic-admitter-epp-config.yaml`](../../../../../../../deploy/config/probabilistic-admitter-epp-config.yaml) for the full EPP config. The
 key snippet:
 
 ```yaml

@@ -37,13 +37,13 @@ func TestFactory(t *testing.T) {
 	raw, err := json.Marshal(map[string]any{"cacheSize": 4})
 	require.NoError(t, err)
 
-	created, err := Factory("mm-producer", raw, &testHandle{ctx: context.Background()})
+	created, err := Factory("mm-producer", plugin.StrictDecoder(raw), &testHandle{ctx: context.Background()})
 	require.NoError(t, err)
 	require.NotNil(t, created)
 	assert.Equal(t, "mm-producer", created.TypedName().Name)
 	assert.Equal(t, ProducerType, created.TypedName().Type)
 
-	_, err = Factory("bad", json.RawMessage(`{"cacheSize":"bad"}`), &testHandle{ctx: context.Background()})
+	_, err = Factory("bad", plugin.StrictDecoder(json.RawMessage(`{"cacheSize":"bad"}`)), &testHandle{ctx: context.Background()})
 	require.Error(t, err)
 }
 

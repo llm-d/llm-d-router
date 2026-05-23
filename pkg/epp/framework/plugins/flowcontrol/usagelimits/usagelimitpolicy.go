@@ -36,11 +36,11 @@ type staticPolicyConfig struct {
 
 // StaticPolicyFactory creates a StaticUsageLimitPolicy from JSON config.
 // If no threshold is specified, it defaults to 1.0 (no gating).
-func StaticPolicyFactory(name string, rawConfig json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func StaticPolicyFactory(name string, rawConfig *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	threshold := 1.0
-	if len(rawConfig) > 0 {
+	if rawConfig != nil {
 		var cfg staticPolicyConfig
-		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
+		if err := rawConfig.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse static usage limit policy config: %w", err)
 		}
 		if cfg.Threshold != nil {

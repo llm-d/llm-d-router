@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // recordingNotifier captures Upsert and Delete calls for assertions.
@@ -87,18 +88,18 @@ endpoints:
 `
 
 func TestFactory_MissingPath(t *testing.T) {
-	_, err := Factory("", json.RawMessage(`{}`), nil)
+	_, err := Factory("", fwkplugin.StrictDecoder(json.RawMessage(`{}`)), nil)
 	assert.ErrorContains(t, err, "'path' parameter is required")
 }
 
 func TestFactory_InvalidJSON(t *testing.T) {
-	_, err := Factory("", json.RawMessage(`{bad json`), nil)
+	_, err := Factory("", fwkplugin.StrictDecoder(json.RawMessage(`{bad json`)), nil)
 	assert.ErrorContains(t, err, "failed to parse parameters")
 }
 
 func TestFactory_ValidParams(t *testing.T) {
 	path := writeTemp(t, validYAML)
-	plugin, err := Factory("my-discovery", json.RawMessage(`{"path":"`+path+`"}`), nil)
+	plugin, err := Factory("my-discovery", fwkplugin.StrictDecoder(json.RawMessage(`{"path":"`+path+`"}`)), nil)
 	require.NoError(t, err)
 	assert.Equal(t, PluginType, plugin.TypedName().Type)
 	assert.Equal(t, "my-discovery", plugin.TypedName().Name)
@@ -106,7 +107,7 @@ func TestFactory_ValidParams(t *testing.T) {
 
 func TestFactory_DefaultName(t *testing.T) {
 	path := writeTemp(t, validYAML)
-	plugin, err := Factory("", json.RawMessage(`{"path":"`+path+`"}`), nil)
+	plugin, err := Factory("", fwkplugin.StrictDecoder(json.RawMessage(`{"path":"`+path+`"}`)), nil)
 	require.NoError(t, err)
 	assert.Equal(t, PluginType, plugin.TypedName().Name)
 }

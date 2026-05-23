@@ -4,5 +4,5 @@ This directory contains the available plugins. For detailed information on indiv
 
 ## Related Documentation
 
-- [Architecture Overview](/docs/architecture.md)
-- [Creating a new Filter guide](/docs/create_new_filter.md)
+- [Architecture Overview](../../../../docs/architecture.md)
+- [Creating a new Filter guide](../../../../docs/create_new_filter.md)

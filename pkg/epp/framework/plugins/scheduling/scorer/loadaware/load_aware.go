@@ -28,10 +28,10 @@ type loadAwareParameters struct {
 var _ scheduling.Scorer = &LoadAware{}
 
 // Factory defines the factory function for the LoadAware
-func Factory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	parameters := loadAwareParameters{Threshold: QueueThresholdDefault}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", LoadAwareType, err)
 		}
 	}

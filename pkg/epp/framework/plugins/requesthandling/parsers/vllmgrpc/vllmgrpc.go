@@ -59,7 +59,7 @@ func NewVllmGRPCParser() *VllmGRPCParser {
 	}
 }
 
-func VllmGRPCParserPluginFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func VllmGRPCParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewVllmGRPCParser().WithName(name), nil
 }
 

@@ -34,7 +34,7 @@ import (
 // For detailed documentation, see README.md.
 const EDFOrderingPolicyType = "edf-ordering-policy"
 
-func EDFOrderingPolicyFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func EDFOrderingPolicyFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return newEDFPolicy().withName(name), nil
 }
 
