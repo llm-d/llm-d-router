@@ -16,7 +16,6 @@ jobs:
   set-params:
     runs-on: ubuntu-latest
     outputs:
-      project_name: ${{ steps.version.outputs.project_name }}
       epp_name: ${{ steps.version.outputs.epp_name }}
       sidecar_name: ${{ steps.version.outputs.sidecar_name }}
       tag: ${{ steps.tag.outputs.tag }}
@@ -26,7 +25,6 @@ jobs:
         id: version
         run: |
           repo="${GITHUB_REPOSITORY##*/}"
-          echo "project_name=${repo}" >> "$GITHUB_OUTPUT"
           echo "epp_name=${repo}-endpoint-picker" >> "$GITHUB_OUTPUT"
           echo "sidecar_name=${repo}-disagg-sidecar" >> "$GITHUB_OUTPUT"
 
