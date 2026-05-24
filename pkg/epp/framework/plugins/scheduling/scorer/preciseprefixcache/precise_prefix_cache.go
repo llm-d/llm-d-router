@@ -60,6 +60,16 @@ type kvCacheIndexer interface {
 // PluginConfig holds the configuration for the
 // Scorer plugin.
 type PluginConfig struct {
+	// BlockSizeTokens is the number of tokens per KV-block. When set, it
+	// overrides TokenProcessorConfig.BlockSize. The field is a top-level
+	// alias so operators can use a single field name across both the
+	// precise- and the approximate-prefix-cache plugins (the latter has
+	// always exposed blockSizeTokens directly). The legacy
+	// tokenProcessorConfig.blockSize remains accepted for backwards
+	// compatibility with configs that wrap the underlying kvblock
+	// config directly.
+	BlockSizeTokens int `json:"blockSizeTokens,omitempty"`
+
 	// TokenProcessorConfig holds the configuration for the `kvblock.TokenProcessor` which is
 	// used to process tokens into KV-block keys.
 	TokenProcessorConfig *kvblock.TokenProcessorConfig `json:"tokenProcessorConfig"`
@@ -81,6 +91,19 @@ type PluginConfig struct {
 	// If empty, defaultSpeculativeTTL is used. Only used when SpeculativeIndexing is true.
 	// Accepts Go duration strings (e.g. "2s", "500ms").
 	SpeculativeTTL string `json:"speculativeTTL"`
+}
+
+// applyAliases resolves top-level field aliases on the parsed config. The
+// top-level BlockSizeTokens, when set, overrides
+// TokenProcessorConfig.BlockSize so a single user-facing field name works
+// across both the precise- and the approximate-prefix-cache plugins.
+func (c *PluginConfig) applyAliases() {
+	if c.BlockSizeTokens > 0 {
+		if c.TokenProcessorConfig == nil {
+			c.TokenProcessorConfig = kvblock.DefaultTokenProcessorConfig()
+		}
+		c.TokenProcessorConfig.BlockSize = c.BlockSizeTokens
+	}
 }
 
 // compile-time type assertions
@@ -139,6 +162,7 @@ func PluginFactory(name string, rawParameters json.RawMessage,
 			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PrecisePrefixCachePluginType, err)
 		}
 	}
+	parameters.applyAliases()
 
 	if parameters.IndexerConfig == nil {
 		return nil, errors.New("indexerConfig is required")
