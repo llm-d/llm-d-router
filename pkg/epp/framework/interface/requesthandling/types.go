@@ -73,7 +73,7 @@ type InferenceRequestBody struct {
 	Conversations *ConversationsRequest `json:"conversations,omitempty"`
 	// EmbeddingsRequest is the representation of the OpenAI /v1/embeddings request body.
 	Embeddings *EmbeddingsRequest `json:"embeddings,omitempty"`
-	// GenerateRequest is the representation of the vLLM native /generate request body.
+	// GenerateRequest is the representation of the vLLM /inference/v1/generate request body.
 	Generate *GenerateRequest `json:"generate,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
@@ -435,7 +435,7 @@ func (e *EmbeddingsRequest) String() string {
 }
 
 // GenerateRequest is a structured representation of the fields we parse out of the vLLM
-// disaggregated Prefill/Decode API at /inference/v1/generate.
+// request at /inference/v1/generate.
 // Unlike the OpenAI-compatible endpoints, this API accepts pre-tokenized input (token IDs).
 // This struct includes fields usable for plugins and scheduling decisions.
 type GenerateRequest struct {
