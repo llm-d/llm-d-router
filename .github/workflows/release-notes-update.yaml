@@ -48,8 +48,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Extract the release-note block, collapse to a single line.
+          # Avoid `xargs` here: with no command it runs `echo` which interprets
+          # quotes, so notes containing apostrophes (e.g. "Don't ...") would
+          # error and the fragment would be silently dropped.
           NOTE=$(printf '%s' "$PR_BODY" | tr -d '\r' | \
-            sed -n '/^```release-note/,/^```/p' | sed '1d;$d' | xargs)
+            sed -n '/^```release-note/,/^```/p' | sed '1d;$d' | \
+            tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
 
           if [[ -z "$NOTE" || "${NOTE,,}" == "none" ]]; then
             echo "No valid release note found. Exiting."
@@ -74,10 +79,17 @@ jobs:
           git checkout -b "$BRANCH"
           git add "$FRAGMENT"
           git commit -s -m "docs: add release-note fragment for PR #${PR_NUMBER}"
-          git push origin "$BRANCH"
+          # Force-push so re-runs on the same PR (e.g. after a transient
+          # token failure) overwrite the existing branch instead of failing
+          # non-fast-forward.
+          git push -f origin "$BRANCH"
 
-          gh pr create \
-            --title "docs: add release-note fragment for PR #${PR_NUMBER}" \
-            --body "Stages release-note fragment for ${PR_URL}. Will be assembled into RELEASE-NOTES.md at the next release tag." \
-            --base main \
-            --head "$BRANCH"
+          if gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -q .; then
+            echo "PR already open for $BRANCH; pushed update."
+          else
+            gh pr create \
+              --title "docs: add release-note fragment for PR #${PR_NUMBER}" \
+              --body "Stages release-note fragment for ${PR_URL}. Will be assembled into RELEASE-NOTES.md at the next release tag." \
+              --base main \
+              --head "$BRANCH"
+          fi

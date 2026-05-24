@@ -35,5 +35,7 @@ jobs:
       - name: Run lychee link checker
         uses: lycheeverse/lychee-action@v2.8.0
         with:
-          args: '--config .lychee.toml --verbose --no-progress **/*.md'
+          # Exclude release-notes.d/ — fragments are sourced verbatim from
+          # PR bodies; let the original PR's link check be authoritative.
+          args: '--config .lychee.toml --verbose --no-progress --exclude-path release-notes.d **/*.md'
           fail: true

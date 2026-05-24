@@ -18,6 +18,10 @@ extend-exclude = [
     "build/",
     "testdata/",
     # Generated protobuf files
-    "pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen/"
+    "pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen/",
+    # Release-note fragments are sourced verbatim from PR bodies; let the
+    # original PR's typo check be authoritative.
+    "release-notes.d/",
+    "RELEASE-NOTES.md"
 ]
 

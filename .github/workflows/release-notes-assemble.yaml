@@ -27,10 +27,13 @@ jobs:
         run: |
           echo "user-id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout main
+      - name: Checkout tagged commit
+        # Check out the tagged commit (not main HEAD) so a fragment merged
+        # into main between the tag push and this workflow's run is not
+        # accidentally rolled into the wrong release.
         uses: actions/checkout@v6
         with:
-          ref: main
+          ref: ${{ github.sha }}
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Assemble fragments and open PR
@@ -56,7 +59,11 @@ jobs:
             pr=$(sed -n 's/^pr: *//p' "$f" | head -1)
             url=$(sed -n 's/^url: *//p' "$f" | head -1)
             date=$(sed -n 's/^date: *//p' "$f" | head -1)
-            note=$(awk '/^---$/{c++; next} c==2' "$f" | sed '/^[[:space:]]*$/d' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+            # Print everything after the second `---` line verbatim — once
+            # we're past the closing frontmatter marker, a body line that
+            # happens to be `---` (Markdown horizontal rule) must be kept,
+            # not counted as a third delimiter.
+            note=$(awk 'p {print; next} /^---$/ {if (++c == 2) p = 1}' "$f" | sed '/^[[:space:]]*$/d' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
             if [[ -z "$pr" || -z "$url" || -z "$date" || -z "$note" ]]; then
               echo "Malformed fragment: $f" >&2
               exit 1
@@ -86,10 +93,16 @@ jobs:
           git checkout -b "$BRANCH"
           git add RELEASE-NOTES.md
           git commit -s -m "docs: assemble release notes for ${TAG}"
-          git push origin "$BRANCH"
+          # Force-push so a re-run (re-tag, manual workflow re-run) overwrites
+          # the prior branch rather than failing non-fast-forward.
+          git push -f origin "$BRANCH"
 
-          gh pr create \
-            --title "docs: assemble release notes for ${TAG}" \
-            --body "Assembles staged release-note fragments into RELEASE-NOTES.md for ${TAG} and removes the fragments." \
-            --base main \
-            --head "$BRANCH"
+          if gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -q .; then
+            echo "Assembly PR already open for $BRANCH; pushed update."
+          else
+            gh pr create \
+              --title "docs: assemble release notes for ${TAG}" \
+              --body "Assembles staged release-note fragments into RELEASE-NOTES.md for ${TAG} and removes the fragments." \
+              --base main \
+              --head "$BRANCH"
+          fi
