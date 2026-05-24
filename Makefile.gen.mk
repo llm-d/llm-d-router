@@ -22,7 +22,7 @@ PROTOC_GEN_GO_GRPC_VERSION ?= v1.5.1
 .PHONY: sync-upstream-versions
 sync-upstream-versions: ## Update upstream CRD version references to match go.mod once version bumped run this target
 	@echo "Syncing GIE version to $(GIE_VERSION)"
-	@sed -i 's|gateway-api-inference-extension/config/crd?ref=.*|gateway-api-inference-extension/config/crd?ref=$(GIE_VERSION)|' deploy/components/crds-gie/kustomization.yaml
+	@sed -i 's|gateway-api-inference-extension/releases/download/.*/v1-manifests.yaml|gateway-api-inference-extension/releases/download/$(GIE_VERSION)/v1-manifests.yaml|' deploy/components/crds-gie/kustomization.yaml
 	@sed -i 's|GIE_VERSION="$${GIE_VERSION:-.*}"|GIE_VERSION="$${GIE_VERSION:-$(GIE_VERSION)}"|' hack/verify-helm.sh hack/verify-manifests.sh
 	@echo "Syncing Gateway API version to $(GATEWAY_API_VERSION)"
 	@sed -i 's|gateway-api/config/crd?ref=.*|gateway-api/config/crd?ref=$(GATEWAY_API_VERSION)|' deploy/components/crds-gateway-api/kustomization.yaml
