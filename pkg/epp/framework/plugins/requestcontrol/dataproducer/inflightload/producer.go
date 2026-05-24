@@ -77,7 +77,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		tokenEstimator:           NewSimpleTokenEstimator(),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
-		currentRequestLoadDK:     attrconcurrency.CurrentRequestLoadDataKey.WithNonEmptyProducerName(name),
+		currentRequestEndpointImpactDK: attrconcurrency.CurrentRequestEndpointImpactDataKey.WithNonEmptyProducerName(name),
 		PluginState:              fwkplugin.NewPluginState(ctx),
 	}, nil
 }
@@ -98,7 +98,7 @@ type InFlightLoadProducer struct {
 	addEstimatedOutputTokens bool
 	PluginState              *fwkplugin.PluginState
 	dk                       fwkplugin.DataKey
-	currentRequestLoadDK     fwkplugin.DataKey
+	currentRequestEndpointImpactDK fwkplugin.DataKey
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -215,7 +215,7 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 		if p.addEstimatedOutputTokens {
 			tokens += p.tokenEstimator.EstimateOutput(inputTokens)
 		}
-		e.Put(p.currentRequestLoadDK.String(), &attrconcurrency.InFlightLoad{
+		e.Put(p.currentRequestEndpointImpactDK.String(), &attrconcurrency.InFlightLoad{
 			Tokens:   tokens,
 			Requests: 1,
 		})
@@ -439,7 +439,7 @@ func nonNeg(v int64) int64 {
 func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
 		p.dk:                 attrconcurrency.InFlightLoad{},
-		p.currentRequestLoadDK: attrconcurrency.InFlightLoad{},
+		p.currentRequestEndpointImpactDK: attrconcurrency.InFlightLoad{},
 	}
 }
 

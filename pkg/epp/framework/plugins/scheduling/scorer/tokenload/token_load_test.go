@@ -36,7 +36,7 @@ func TestTokenLoadScorer(t *testing.T) {
 		typedName:            fwkplugin.TypedName{Type: TokenLoadScorerType, Name: TokenLoadScorerType},
 		queueThresholdTokens: threshold,
 		inFlightLoadDataKey:  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(""),
-		currentRequestLoadDK: attrconcurrency.CurrentRequestLoadDataKey.WithNonEmptyProducerName(""),
+		currentRequestEndpointImpactDK: attrconcurrency.CurrentRequestEndpointImpactDataKey.WithNonEmptyProducerName(""),
 	}
 
 	pod1NN := types.NamespacedName{Namespace: "default", Name: "pod1"}
@@ -50,13 +50,13 @@ func TestTokenLoadScorer(t *testing.T) {
 	}
 
 	// pod1: 0 in-flight + 250 current = 250. Score = 1 - 250/1000 = 0.75
-	endpoints[0].Put(attrconcurrency.CurrentRequestLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
+	endpoints[0].Put(attrconcurrency.CurrentRequestEndpointImpactDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
 	// pod2: 250 in-flight + 250 current = 500. Score = 1 - 500/1000 = 0.5
 	endpoints[1].Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
-	endpoints[1].Put(attrconcurrency.CurrentRequestLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
+	endpoints[1].Put(attrconcurrency.CurrentRequestEndpointImpactDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
 	// pod3: 750 in-flight + 250 current = 1000. Score = 1 - 1000/1000 = 0.0
 	endpoints[2].Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 750})
-	endpoints[2].Put(attrconcurrency.CurrentRequestLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
+	endpoints[2].Put(attrconcurrency.CurrentRequestEndpointImpactDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
 
 	scores := scorer.Score(context.Background(), &fwksched.InferenceRequest{}, endpoints)
 
