@@ -41,7 +41,7 @@ func NewModelExtractor() *ModelExtractor {
 			Type: attrmodels.ModelsExtractorType,
 			Name: attrmodels.ModelsExtractorType,
 		},
-		dk: attrmodels.ModelsAttributeKey.WithNonEmptyProducerName(attrmodels.ModelsExtractorType),
+		dk: attrmodels.ModelsAttributeKey,
 	}
 }
 
