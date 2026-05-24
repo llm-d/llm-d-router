@@ -6,7 +6,7 @@ import (
 	context "context"
 	time "time"
 
-	llmdinferenceschedulerapixv1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
+	llmdrouterapixv1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 	versioned "github.com/llm-d/llm-d-router/client-go/clientset/versioned"
 	internalinterfaces "github.com/llm-d/llm-d-router/client-go/informers/externalversions/internalinterfaces"
 	apixv1alpha2 "github.com/llm-d/llm-d-router/client-go/listers/apix/v1alpha2"
@@ -67,7 +67,7 @@ func NewFilteredInferenceObjectiveInformer(client versioned.Interface, namespace
 				return client.XInferenceV1alpha2().InferenceObjectives(namespace).Watch(ctx, options)
 			},
 		}, client),
-		&llmdinferenceschedulerapixv1alpha2.InferenceObjective{},
+		&llmdrouterapixv1alpha2.InferenceObjective{},
 		resyncPeriod,
 		indexers,
 	)
@@ -78,7 +78,7 @@ func (f *inferenceObjectiveInformer) defaultInformer(client versioned.Interface,
 }
 
 func (f *inferenceObjectiveInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&llmdinferenceschedulerapixv1alpha2.InferenceObjective{}, f.defaultInformer)
+	return f.factory.InformerFor(&llmdrouterapixv1alpha2.InferenceObjective{}, f.defaultInformer)
 }
 
 func (f *inferenceObjectiveInformer) Lister() apixv1alpha2.InferenceObjectiveLister {

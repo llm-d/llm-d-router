@@ -55,7 +55,7 @@ To correctly establish the mapping, model server Pods should be labeled using th
 ```yaml
 metadata:
   labels:
-    llm-d.ai/engine-type: vllm # other options: sglang, trtllm-serve, triton-tensorrt-llm 
+    llm-d.ai/engine-type: vllm # other options: sglang, trtllm-serve, triton-tensorrt-llm, triton 
 
 ```
 
@@ -78,6 +78,8 @@ and the model server deployment Pods should have the label:
 metadata:
   labels:
     llm-d.ai/engine-type: my-custom-engine
+
+```
 
 ```
 

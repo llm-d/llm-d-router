@@ -1,6 +1,6 @@
 # Development
 
-Documentation for developing the inference scheduler.
+Documentation for developing the llm-d Router.
 
 ## Table of Contents
 

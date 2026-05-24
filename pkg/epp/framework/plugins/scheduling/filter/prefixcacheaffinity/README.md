@@ -35,10 +35,10 @@ This filter resolves the trade-off by operating as a **pre-filter** rather than 
 It narrows the candidate set to only the sticky endpoints (those above `affinityThreshold`),
 then passes them to downstream plugins. When paired with `weighted-random-picker`, requests
 are spread across the sticky set — maintaining cache affinity while distributing load. The
-TTFT load gate (`maxTTFTPenaltyMs`) adds automatic back-off: if sticky endpoints become
-overloaded and their predicted TTFT exceeds non-sticky endpoints by more than the configured
-penalty, the filter breaks stickiness and opens up all endpoints, preventing the hot-spotting
-problem. The exploration mechanism (`explorationProbability`) seeds cache state on other
+load gates (`maxTTFTPenaltyMs` and `maxTokensInFlightPenalty`) add automatic back-off: if
+sticky endpoints become overloaded and their predicted TTFT or in-flight tokens exceed
+non-sticky endpoints by more than the configured penalty, the filter breaks stickiness and
+opens up all endpoints, preventing the hot-spotting problem. The exploration mechanism (`explorationProbability`) seeds cache state on other
 endpoints over time, preventing permanent stickiness to a fixed subset.
 
 ## Overview
@@ -59,6 +59,8 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 - With probability `explorationProbability` (default 1%), skip the gate entirely for exploration
 - TTFT load gate: if best sticky endpoint's predicted TTFT exceeds best non-sticky by
   more than `maxTTFTPenaltyMs`, break stickiness and keep all endpoints
+- In-flight tokens load gate: if best sticky endpoint's in-flight tokens exceed best non-sticky
+  by more than `maxTokensInFlightPenalty`, break stickiness and keep all endpoints (if > 0)
 - If no endpoints have `LatencyPredictionInfo` (predictions absent), the TTFT load gate
   is skipped. If no endpoints have `PrefixCacheMatchInfo`, all prefix scores default to 0
   and no endpoints pass the affinity threshold, so all are kept (no-op)
@@ -70,11 +72,13 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 | `affinityThreshold` | `float64` | No | `0.80` | Prefix cache score threshold for stickiness |
 | `explorationProbability` | `float64` | No | `0.01` | Probability of skipping the gate |
 | `maxTTFTPenaltyMs` | `float64` | No | `5000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
+| `maxTokensInFlightPenalty` | `int64` | No | `0` | Max in-flight tokens penalty before breaking stickiness. 0 = disabled |
 
 ## Dependencies
 
 - Reads `PrefixCacheMatchInfo` from endpoint attributes (from `prefix-cache-scorer`)
 - Reads `LatencyPredictionInfo` for TTFT load gate (from `predicted-latency-producer`)
+- Reads `InFlightLoad` for in-flight tokens load gate (from `in-flight-load-producer`)
 
 **Configuration Example:**
 ```yaml
@@ -85,6 +89,7 @@ plugins:
       affinityThreshold: 0.80
       explorationProbability: 0.01
       maxTTFTPenaltyMs: 5000
+      maxTokensInFlightPenalty: 1000
 schedulingProfiles:
   - name: default
     plugins:

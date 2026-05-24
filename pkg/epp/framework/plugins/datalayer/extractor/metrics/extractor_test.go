@@ -505,7 +505,7 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 			checkDefault: "custom",
 		},
 		{
-			name: "custom engineConfigs auto-appends vllm sglang trtllm-serve and triton-tensorrt-llm",
+			name: "custom engineConfigs auto-appends vllm sglang trtllm-serve triton-tensorrt-llm and triton",
 			params: map[string]any{
 				"engineConfigs": []map[string]any{
 					{
@@ -524,6 +524,14 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 			},
 			wantErr:      false,
 			checkDefault: "triton-tensorrt-llm",
+		},
+		{
+			name: "defaultEngine triton",
+			params: map[string]any{
+				"defaultEngine": "triton",
+			},
+			wantErr:      false,
+			checkDefault: "triton",
 		},
 		{
 			name: "custom engineConfigs with custom vllm preserves user config",
@@ -716,5 +724,39 @@ func TestGetEngineTypeFromEndpoint(t *testing.T) {
 				t.Errorf("getEngineTypeFromEndpoint() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDefaultEngineConfigsTritonValues(t *testing.T) {
+	var tritonConfig *engineConfigParams
+	for _, config := range defaultEngineConfigs {
+		if config.Name == "triton" {
+			// Create a local copy to point to
+			c := config
+			tritonConfig = &c
+			break
+		}
+	}
+
+	if tritonConfig == nil {
+		t.Fatalf("Expected to find 'triton' in defaultEngineConfigs, but it was not found")
+	}
+
+	expectedQueued := "nv_inference_pending_request_count"
+	if tritonConfig.QueuedRequestsSpec != expectedQueued {
+		t.Errorf("triton QueuedRequestsSpec = %q, want %q", tritonConfig.QueuedRequestsSpec, expectedQueued)
+	}
+
+	expectedRunning := "nv_inference_exec_count"
+	if tritonConfig.RunningRequestsSpec != expectedRunning {
+		t.Errorf("triton RunningRequestsSpec = %q, want %q", tritonConfig.RunningRequestsSpec, expectedRunning)
+	}
+
+	// Verify LLM-specific metrics are intentionally empty
+	if tritonConfig.KVUsageSpec != "" {
+		t.Errorf("triton KVUsageSpec = %q, want empty string", tritonConfig.KVUsageSpec)
+	}
+	if tritonConfig.LoRASpec != "" {
+		t.Errorf("triton LoRASpec = %q, want empty string", tritonConfig.LoRASpec)
 	}
 }
