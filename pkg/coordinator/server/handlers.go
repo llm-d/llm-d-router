@@ -46,12 +46,6 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	stream, _ := parsed["stream"].(bool)
 	model, _ := parsed["model"].(string)
 
-	flusher, ok := w.(http.Flusher)
-	if !ok && stream {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        uuid.New().String(),
 		OriginalPath:     r.URL.Path,
@@ -61,7 +55,6 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		Stream:           stream,
 		KVTransferParams: make(map[string]any),
 		ResponseWriter:   w,
-		Flusher:          flusher,
 		StartTime:        time.Now(),
 	}
 

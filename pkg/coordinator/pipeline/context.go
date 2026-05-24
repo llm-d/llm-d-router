@@ -24,8 +24,8 @@ type RequestContext struct {
 	ECTransferParams []map[string]any
 	KVTransferParams map[string]any
 
+	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
-	Flusher        http.Flusher
 
 	StartTime time.Time
 }

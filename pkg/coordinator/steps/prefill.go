@@ -24,16 +24,16 @@ func init() {
 }
 
 type PrefillStep struct {
-	gatewayPath string
-	gwClient    *gateway.Client
-	kv          kv.Connector
-	ec          ec.Connector
+	useOpenAIFormat bool
+	gwClient        *gateway.Client
+	kv              kv.Connector
+	ec              ec.Connector
 }
 
 func NewPrefillStep(params map[string]any) (pipeline.Step, error) {
-	path := gateway.DefaultGeneratePath
-	if v, ok := params[ParamGatewayPath].(string); ok {
-		path = v
+	useOpenAI := true
+	if v, ok := params["use_openai_format"].(bool); ok {
+		useOpenAI = v
 	}
 	kvName, _ := params[ParamKVConnector].(string)
 	kvConn, err := kv.Build(kvName)
@@ -45,7 +45,7 @@ func NewPrefillStep(params map[string]any) (pipeline.Step, error) {
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	return &PrefillStep{gatewayPath: path, kv: kvConn, ec: ecConn}, nil
+	return &PrefillStep{useOpenAIFormat: useOpenAI, kv: kvConn, ec: ecConn}, nil
 }
 
 func (s *PrefillStep) SetGatewayClient(c *gateway.Client) {
@@ -55,7 +55,7 @@ func (s *PrefillStep) SetGatewayClient(c *gateway.Client) {
 func (s *PrefillStep) Name() string { return PrefillStepName }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := log.FromContext(ctx).WithName("prefill")
+	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
 	allHashes := make([]string, len(reqCtx.MultimodalEntries))
 	allPlaceholders := make([]any, len(reqCtx.MultimodalEntries))
@@ -69,40 +69,29 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		allKwargsData[i] = entry.KwargsData
 	}
 
-	var features any
+	var features map[string]any
 	if len(reqCtx.MultimodalEntries) > 0 {
 		features = map[string]any{
-			"mm_hashes":       map[string][]string{"image": allHashes},
-			"mm_placeholders": map[string][]any{"image": allPlaceholders},
-			"kwargs_data":     map[string][]string{"image": allKwargsData},
+			"mm_hashes":       map[string][]string{ModalityImage: allHashes},
+			"mm_placeholders": map[string][]any{ModalityImage: allPlaceholders},
+			"kwargs_data":     map[string][]string{ModalityImage: allKwargsData},
 		}
 	}
 
-	body := map[string]any{
-		"request_id":         reqCtx.RequestID,
-		"token_ids":          reqCtx.TokenIDs,
-		"model":              reqCtx.Model,
-		"sampling_params":    map[string]any{"max_tokens": 1},
-		"kv_transfer_params": s.kv.PreparePrefillKVParams(reqCtx),
-	}
-
-	if features != nil {
-		body["features"] = features
-	}
-	if ecParams := s.ec.PreparePrefillECParams(reqCtx); len(ecParams) > 0 {
-		body["ec_transfer_params"] = ecParams
-	}
+	format := s.resolveFormat(reqCtx)
+	body := s.buildPrefillBody(reqCtx, features, format)
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("prefill: marshal: %w", err)
 	}
 
-	path := fmt.Sprintf("%s%s", gateway.PrefillPrefix, s.gatewayPath)
+	path := gateway.PathForFormat(format)
 	logger.V(logutil.DEFAULT).Info("sending request", "path", path)
 
 	resp, err := s.gwClient.Post(ctx, path, bodyBytes, map[string]string{
 		reqcommon.RequestIDHeaderKey: reqCtx.RequestID,
+		gateway.EPPPhaseHeader:       gateway.PhasePrefill,
 	})
 	if err != nil {
 		return fmt.Errorf("prefill: request: %w", err)
@@ -123,6 +112,80 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil
+}
+
+func (s *PrefillStep) resolveFormat(reqCtx *pipeline.RequestContext) gateway.RequestFormat {
+	detected := gateway.DetectFormat(reqCtx.OriginalPath)
+	if detected == gateway.FormatCompletions {
+		return gateway.FormatCompletions
+	}
+	if !s.useOpenAIFormat {
+		return gateway.FormatGenerate
+	}
+	return detected
+}
+
+func (s *PrefillStep) buildPrefillBody(reqCtx *pipeline.RequestContext, features map[string]any, format gateway.RequestFormat) map[string]any {
+	ecParams := s.ec.PreparePrefillECParams(reqCtx)
+	kvParams := s.kv.PreparePrefillKVParams(reqCtx)
+
+	switch format {
+	case gateway.FormatChatCompletions:
+		body := copyBody(reqCtx.Body)
+		tokens := map[string]any{
+			"token_ids": reqCtx.TokenIDs,
+		}
+		if features != nil {
+			tokensFeatures := map[string]any{
+				"mm_hashes":       features["mm_hashes"],
+				"mm_placeholders": features["mm_placeholders"],
+			}
+			tokens["features"] = tokensFeatures
+		}
+		body["tokens"] = tokens
+		body["sampling_params"] = map[string]any{"max_tokens": 1}
+		body["kv_transfer_params"] = kvParams
+		if len(ecParams) > 0 {
+			body["ec_transfer_params"] = ecParams
+		}
+		return body
+
+	case gateway.FormatCompletions:
+		body := map[string]any{
+			"request_id":         reqCtx.RequestID,
+			"model":              reqCtx.Model,
+			"prompt":             reqCtx.TokenIDs,
+			"sampling_params":    map[string]any{"max_tokens": 1},
+			"kv_transfer_params": kvParams,
+		}
+		if features != nil {
+			body["features"] = features
+		}
+		if len(ecParams) > 0 {
+			body["ec_transfer_params"] = ecParams
+		}
+		return body
+
+	default:
+		body := map[string]any{
+			"request_id": reqCtx.RequestID,
+			"token_ids":  reqCtx.TokenIDs,
+			"model":      reqCtx.Model,
+			"sampling_params": map[string]any{
+				"max_tokens": 1,
+				"extra_args": map[string]any{
+					"kv_transfer_params": kvParams,
+				},
+			},
+		}
+		if features != nil {
+			body["features"] = features
+		}
+		if len(ecParams) > 0 {
+			body["ec_transfer_params"] = ecParams
+		}
+		return body
+	}
 }
 
 type prefillResponse struct {

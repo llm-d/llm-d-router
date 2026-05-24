@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
@@ -19,14 +18,15 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	var prefillBody map[string]any
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasPrefix(r.URL.Path, "/encode"):
+		phase := r.Header.Get(gateway.EPPPhaseHeader)
+		switch phase {
+		case gateway.PhaseEncode:
 			body, _ := io.ReadAll(r.Body)
 			var parsed map[string]any
 			_ = json.Unmarshal(body, &parsed)
 			features, _ := parsed["features"].(map[string]any)
 			mmHashes, _ := features["mm_hashes"].(map[string]any)
-			imageHashes, _ := mmHashes["image"].([]any)
+			imageHashes, _ := mmHashes[ModalityImage].([]any)
 			hash, _ := imageHashes[0].(string)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ec_transfer_params": map[string]any{
@@ -34,7 +34,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 				},
 			})
 
-		case strings.HasPrefix(r.URL.Path, "/prefill"):
+		case gateway.PhasePrefill:
 			body, _ := io.ReadAll(r.Body)
 			_ = json.Unmarshal(body, &prefillBody)
 
@@ -43,7 +43,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 			})
 
 		default:
-			http.Error(w, "unexpected path: "+r.URL.Path, 404)
+			http.Error(w, "unexpected phase: "+phase, 404)
 		}
 	}))
 	defer gwServer.Close()
@@ -63,8 +63,8 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 
 	// Run encode step
 	encodeStep, _ := NewEncodeStep(map[string]any{
-		"gateway_path":   gateway.DefaultGeneratePath,
-		ParamECConnector: ec.NIXLv2,
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXLv2,
 	})
 	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
@@ -80,8 +80,8 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 
 	// Run prefill step
 	prefillStep, _ := NewPrefillStep(map[string]any{
-		"gateway_path":   gateway.DefaultGeneratePath,
-		ParamECConnector: ec.NIXLv2,
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXLv2,
 	})
 	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 
@@ -100,7 +100,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ec_transfer_params map, got %T", prefillBody["ec_transfer_params"])
 	}
-	imageList, ok := ecParams["image"].([]any)
+	imageList, ok := ecParams[ModalityImage].([]any)
 	if !ok {
 		t.Fatalf("ec_transfer_params.image not a list: %v", ecParams)
 	}
@@ -125,22 +125,33 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected kwargs_data map in prefill, got %T", features["kwargs_data"])
 	}
-	imageKwargs, _ := kwargsData["image"].([]any)
+	imageKwargs, _ := kwargsData[ModalityImage].([]any)
 	if len(imageKwargs) != 2 || imageKwargs[0] != "dDE=" || imageKwargs[1] != "dDI=" {
 		t.Fatalf("expected kwargs_data.image=[dDE=,dDI=], got %v", imageKwargs)
 	}
 
 	// Verify mm_hashes in features
 	mmHashes, _ := features["mm_hashes"].(map[string]any)
-	imageHashes, _ := mmHashes["image"].([]any)
+	imageHashes, _ := mmHashes[ModalityImage].([]any)
 	if len(imageHashes) != 2 {
 		t.Fatalf("expected 2 mm_hashes in prefill features, got %d", len(imageHashes))
 	}
 
-	// Verify sampling_params
+	// Verify sampling_params with extra_args workaround
 	samplingParams, _ := prefillBody["sampling_params"].(map[string]any)
 	if samplingParams["max_tokens"] != float64(1) {
 		t.Fatalf("expected sampling_params.max_tokens=1, got %v", samplingParams["max_tokens"])
+	}
+	extraArgs, ok := samplingParams["extra_args"].(map[string]any)
+	if !ok {
+		t.Fatal("expected extra_args in sampling_params for generate format")
+	}
+	kvParams, ok := extraArgs["kv_transfer_params"].(map[string]any)
+	if !ok {
+		t.Fatal("expected kv_transfer_params in extra_args")
+	}
+	if kvParams["do_remote_decode"] != true {
+		t.Fatalf("expected do_remote_decode=true, got %v", kvParams["do_remote_decode"])
 	}
 
 	// Verify response populated KVTransferParams

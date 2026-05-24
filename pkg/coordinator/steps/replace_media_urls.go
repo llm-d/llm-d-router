@@ -18,6 +18,8 @@ import (
 
 const ReplaceMediaURLsStepName = "replace-media-urls"
 
+const imageURLPartType = "image_url"
+
 func init() {
 	pipeline.Register(ReplaceMediaURLsStepName, NewReplaceMediaURLsStep)
 }
@@ -55,7 +57,7 @@ func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
 func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := log.FromContext(ctx).WithName("replace-media-urls")
+	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
 	messages, ok := reqCtx.Body["messages"].([]any)
 	if !ok {
@@ -77,10 +79,10 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 			if !ok {
 				continue
 			}
-			if partMap["type"] != "image_url" {
+			if partMap["type"] != imageURLPartType {
 				continue
 			}
-			imageURL, ok := partMap["image_url"].(map[string]any)
+			imageURL, ok := partMap[imageURLPartType].(map[string]any)
 			if !ok {
 				continue
 			}
@@ -131,7 +133,7 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		msg := messages[r.ref.msgIdx].(map[string]any)
 		content := msg["content"].([]any)
 		part := content[r.ref.partIdx].(map[string]any)
-		imageURL := part["image_url"].(map[string]any)
+		imageURL := part[imageURLPartType].(map[string]any)
 		imageURL["url"] = dataURI
 
 		reqCtx.MultimodalEntries = append(reqCtx.MultimodalEntries, pipeline.MultimodalEntry{

@@ -12,7 +12,7 @@ import (
 	"github.com/llm-d/coordinator/pkg/config"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
-	_ "github.com/llm-d/coordinator/pkg/steps"
+	"github.com/llm-d/coordinator/pkg/steps"
 )
 
 func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
@@ -25,25 +25,26 @@ func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 2345, 6789},
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{"image": {}},
-				"mm_placeholders": map[string][]any{"image": {}},
-				"kwargs_data":     map[string][]string{"image": {}},
+				"mm_hashes":       map[string][]string{steps.ModalityImage: {}},
+				"mm_placeholders": map[string][]any{steps.ModalityImage: {}},
+				"kwargs_data":     map[string][]string{steps.ModalityImage: {}},
 			},
 		})
 	}))
 	defer renderServer.Close()
 
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasPrefix(r.URL.Path, "/encode"):
+		phase := r.Header.Get(gateway.EPPPhaseHeader)
+		switch phase {
+		case gateway.PhaseEncode:
 			encodeCalled.Store(true)
 			t.Error("encode should not be called for text-only request")
-		case strings.HasPrefix(r.URL.Path, "/prefill"):
+		case gateway.PhasePrefill:
 			prefillCalled.Store(true)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"kv_transfer_params": map[string]any{"block_id": "b1", "peer_host": "10.0.0.2", "peer_port": 5502},
 			})
-		case strings.HasPrefix(r.URL.Path, "/decode"):
+		case gateway.PhaseDecode:
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{
 					{"message": map[string]any{"role": "assistant", "content": "Hi there!"}},
@@ -97,14 +98,13 @@ func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "text-only-test",
-		OriginalPath:     "/v1/chat/completions",
+		OriginalPath:     gateway.PathChatCompletions,
 		OriginalBody:     mustJSON(body),
 		Body:             body,
 		Model:            "llama-3",
 		Stream:           false,
 		KVTransferParams: make(map[string]any),
 		ResponseWriter:   recorder,
-		Flusher:          recorder,
 	}
 
 	err := p.Execute(t.Context(), reqCtx)

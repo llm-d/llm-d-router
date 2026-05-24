@@ -18,8 +18,11 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/prefill/inference/v1/generate" {
+		if r.URL.Path != "/inference/v1/generate" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -38,8 +41,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
 	step, err := NewPrefillStep(map[string]any{
-		"gateway_path":   gateway.DefaultGeneratePath,
-		ParamECConnector: ec.NIXLv2,
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXLv2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +91,7 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		t.Fatal("expected features in prefill request")
 	}
 	mmHashes, _ := features["mm_hashes"].(map[string]any)
-	imageHashes, _ := mmHashes["image"].([]any)
+	imageHashes, _ := mmHashes[ModalityImage].([]any)
 	if len(imageHashes) != 2 {
 		t.Fatalf("expected 2 mm_hashes, got %d", len(imageHashes))
 	}
@@ -101,7 +104,7 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected kwargs_data map in prefill, got %T", features["kwargs_data"])
 	}
-	imageKwargs, _ := kwargsData["image"].([]any)
+	imageKwargs, _ := kwargsData[ModalityImage].([]any)
 	if len(imageKwargs) != 2 || imageKwargs[0] != "dGVuc29yLWE=" || imageKwargs[1] != "dGVuc29yLWI=" {
 		t.Fatalf("expected kwargs_data.image=[dGVuc29yLWE=,dGVuc29yLWI=], got %v", imageKwargs)
 	}
@@ -111,7 +114,7 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	if !ok {
 		t.Fatal("expected ec_transfer_params in prefill request")
 	}
-	imageList, ok := ecParams["image"].([]any)
+	imageList, ok := ecParams[ModalityImage].([]any)
 	if !ok {
 		t.Fatalf("ec_transfer_params.image not a list: %v", ecParams)
 	}
@@ -138,7 +141,7 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		}
 	}
 
-	// Verify sampling_params
+	// Verify sampling_params with extra_args workaround
 	samplingParams, ok := prefillBody["sampling_params"].(map[string]any)
 	if !ok {
 		t.Fatal("expected sampling_params in body")
@@ -146,19 +149,179 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	if samplingParams["max_tokens"] != float64(1) {
 		t.Fatalf("expected sampling_params.max_tokens=1, got %v", samplingParams["max_tokens"])
 	}
-
-	// Verify kv_transfer_params in request
-	kvParams, ok := prefillBody["kv_transfer_params"].(map[string]any)
+	extraArgs, ok := samplingParams["extra_args"].(map[string]any)
 	if !ok {
-		t.Fatal("expected kv_transfer_params in body")
+		t.Fatal("expected sampling_params.extra_args in generate format")
+	}
+	kvParams, ok := extraArgs["kv_transfer_params"].(map[string]any)
+	if !ok {
+		t.Fatal("expected kv_transfer_params in extra_args")
 	}
 	if kvParams["do_remote_decode"] != true {
 		t.Fatalf("expected kv_transfer_params.do_remote_decode=true, got %v", kvParams["do_remote_decode"])
 	}
 
+	// Verify no top-level kv_transfer_params in generate format
+	if _, ok := prefillBody["kv_transfer_params"]; ok {
+		t.Fatal("generate format should not have top-level kv_transfer_params")
+	}
+
 	// Verify response populated KVTransferParams
 	if reqCtx.KVTransferParams["block_id"] != "block-xyz" {
 		t.Fatalf("expected block_id=block-xyz, got %v", reqCtx.KVTransferParams["block_id"])
+	}
+}
+
+func TestPrefillStep_CompletionsFormat(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != gateway.PathCompletions {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-1", "peer_host": "10.0.0.5", "peer_port": 6001},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.(*PrefillStep).SetGatewayClient(gwClient)
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:         "req-compl",
+		OriginalPath:      gateway.PathCompletions,
+		Model:             "test-model",
+		TokenIDs:          []int{1, 2345, 6789},
+		MultimodalEntries: nil,
+		KVTransferParams:  make(map[string]any),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, ok := prefillBody["token_ids"]; ok {
+		t.Fatal("completions format should not have token_ids field")
+	}
+	prompt, ok := prefillBody["prompt"].([]any)
+	if !ok || len(prompt) != 3 {
+		t.Fatalf("expected prompt with 3 token_ids, got %v", prefillBody["prompt"])
+	}
+	if prefillBody["request_id"] != "req-compl" {
+		t.Fatalf("expected request_id, got %v", prefillBody["request_id"])
+	}
+	// Completions format has top-level kv_transfer_params
+	kvParams, ok := prefillBody["kv_transfer_params"].(map[string]any)
+	if !ok {
+		t.Fatal("expected kv_transfer_params in completions format")
+	}
+	if kvParams["do_remote_decode"] != true {
+		t.Fatalf("expected do_remote_decode=true, got %v", kvParams["do_remote_decode"])
+	}
+}
+
+func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != gateway.PathChatCompletions {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-2", "peer_host": "10.0.0.5", "peer_port": 6001},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(map[string]any{
+		ParamECConnector: ec.NIXLv2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.(*PrefillStep).SetGatewayClient(gwClient)
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-chat",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        "test-model",
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model":  "test-model",
+			"stream": false,
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hello"},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-a", KwargsData: "dGVuc29y", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+		ECTransferParams: []map[string]any{
+			{"hash-a": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["model"] != "test-model" {
+		t.Fatalf("expected model from original body, got %v", prefillBody["model"])
+	}
+	if _, ok := prefillBody["messages"]; !ok {
+		t.Fatal("expected messages from original body in chat format")
+	}
+
+	// Verify tokens nested field
+	tokens, ok := prefillBody["tokens"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tokens field in chat format")
+	}
+	tokenIDs, _ := tokens["token_ids"].([]any)
+	if len(tokenIDs) != 5 {
+		t.Fatalf("expected 5 token_ids in tokens, got %d", len(tokenIDs))
+	}
+	tokensFeatures, ok := tokens["features"].(map[string]any)
+	if !ok {
+		t.Fatal("expected features in tokens field")
+	}
+	// tokens.features should NOT have kwargs_data
+	if _, ok := tokensFeatures["kwargs_data"]; ok {
+		t.Fatal("tokens.features should not have kwargs_data")
+	}
+	if _, ok := tokensFeatures["mm_hashes"]; !ok {
+		t.Fatal("tokens.features should have mm_hashes")
+	}
+
+	// Verify top-level kv_transfer_params
+	if _, ok := prefillBody["kv_transfer_params"]; !ok {
+		t.Fatal("expected kv_transfer_params in chat format")
+	}
+	// Verify no top-level token_ids (should be in tokens field)
+	if _, ok := prefillBody["token_ids"]; ok {
+		t.Fatal("chat format should not have top-level token_ids")
+	}
+	if _, ok := prefillBody["request_id"]; ok {
+		t.Fatal("chat format should not have request_id (uses original body)")
 	}
 }
 

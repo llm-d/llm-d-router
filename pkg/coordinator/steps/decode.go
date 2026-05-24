@@ -26,25 +26,24 @@ func init() {
 }
 
 type DecodeStep struct {
-	gatewayPath string
-	gwClient    *gateway.Client
-	kv          kv.Connector
+	useOpenAIFormat bool
+	gwClient        *gateway.Client
+	kv              kv.Connector
 }
 
 func NewDecodeStep(params map[string]any) (pipeline.Step, error) {
-	path := gateway.DefaultGeneratePath
-	if v, ok := params[ParamGatewayPath].(string); ok {
-		path = v
+	useOpenAI := true
+	if v, ok := params["use_openai_format"].(bool); ok {
+		useOpenAI = v
 	}
 	kvName, _ := params[ParamKVConnector].(string)
 	kvConn, err := kv.Build(kvName)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{gatewayPath: path, kv: kvConn}, nil
+	return &DecodeStep{useOpenAIFormat: useOpenAI, kv: kvConn}, nil
 }
 
-// SetGatewayClient injects the shared gateway client.
 func (s *DecodeStep) SetGatewayClient(c *gateway.Client) {
 	s.gwClient = c
 }
@@ -52,16 +51,16 @@ func (s *DecodeStep) SetGatewayClient(c *gateway.Client) {
 func (s *DecodeStep) Name() string { return DecodeStepName }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := log.FromContext(ctx).WithName("decode")
-	reqCtx.Body["kv_transfer_params"] = s.kv.PrepareDecodeKVParams(reqCtx)
-	s.injectUUIDs(reqCtx)
+	logger := log.FromContext(ctx).WithName(DecodeStepName)
+
+	s.prepareDecodeBody(reqCtx)
 
 	bodyBytes, err := json.Marshal(reqCtx.Body)
 	if err != nil {
 		return fmt.Errorf("decode: marshal: %w", err)
 	}
 
-	path := fmt.Sprintf("%s%s", gateway.DecodePrefix, reqCtx.OriginalPath)
+	path := reqCtx.OriginalPath
 	logger.V(logutil.DEFAULT).Info("sending request", "path", path, "stream", reqCtx.Stream)
 
 	upstreamURL, err := url.Parse(s.gwClient.BaseURL() + path)
@@ -76,6 +75,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	proxyReq.ContentLength = int64(len(bodyBytes))
 	proxyReq.Header.Set("Content-Type", "application/json")
 	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
+	proxyReq.Header.Set(gateway.EPPPhaseHeader, gateway.PhaseDecode)
 
 	proxy := &httputil.ReverseProxy{
 		Director:      func(_ *http.Request) {},
@@ -88,6 +88,52 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	}
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
 	return nil
+}
+
+func (s *DecodeStep) prepareDecodeBody(reqCtx *pipeline.RequestContext) {
+	reqCtx.Body["kv_transfer_params"] = s.kv.PrepareDecodeKVParams(reqCtx)
+	s.injectUUIDs(reqCtx)
+
+	format := s.resolveFormat(reqCtx)
+	switch format {
+	case gateway.FormatChatCompletions:
+		s.injectTokensField(reqCtx)
+	case gateway.FormatCompletions:
+		reqCtx.Body["prompt"] = reqCtx.TokenIDs
+	}
+}
+
+func (s *DecodeStep) resolveFormat(reqCtx *pipeline.RequestContext) gateway.RequestFormat {
+	detected := gateway.DetectFormat(reqCtx.OriginalPath)
+	if detected == gateway.FormatCompletions {
+		return gateway.FormatCompletions
+	}
+	if !s.useOpenAIFormat {
+		return gateway.FormatGenerate
+	}
+	return detected
+}
+
+func (s *DecodeStep) injectTokensField(reqCtx *pipeline.RequestContext) {
+	tokens := map[string]any{
+		"token_ids": reqCtx.TokenIDs,
+	}
+	if len(reqCtx.MultimodalEntries) > 0 {
+		allHashes := make([]string, len(reqCtx.MultimodalEntries))
+		allPlaceholders := make([]any, len(reqCtx.MultimodalEntries))
+		for i, entry := range reqCtx.MultimodalEntries {
+			allHashes[i] = entry.Hash
+			allPlaceholders[i] = map[string]any{
+				"offset": entry.Placeholder.Offset,
+				"length": entry.Placeholder.Length,
+			}
+		}
+		tokens["features"] = map[string]any{
+			"mm_hashes":       map[string][]string{ModalityImage: allHashes},
+			"mm_placeholders": map[string][]any{ModalityImage: allPlaceholders},
+		}
+	}
+	reqCtx.Body["tokens"] = tokens
 }
 
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {

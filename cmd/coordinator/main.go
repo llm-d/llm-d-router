@@ -64,6 +64,9 @@ func buildPipeline(cfg *config.Config, gwClient *gateway.Client) ([]pipeline.Ste
 	var steps []pipeline.Step
 	for _, stepCfg := range cfg.Pipeline.Steps {
 		params := mergeConnectorDefaults(stepCfg.Params, cfg.Pipeline.KVConnector, cfg.Pipeline.ECConnector)
+		if _, ok := params["use_openai_format"]; !ok {
+			params["use_openai_format"] = cfg.Gateway.UseOpenAIFormat
+		}
 		step, err := pipeline.Build(stepCfg.Type, params)
 		if err != nil {
 			return nil, err
