@@ -210,11 +210,7 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 		})
 
 		// Estimate the load this request would add if scheduled to this endpoint.
-		adjustedInput := uncachedInputTokens(e, inputTokens)
-		tokens := adjustedInput
-		if p.addEstimatedOutputTokens {
-			tokens += p.tokenEstimator.EstimateOutput(inputTokens)
-		}
+		tokens := p.estimateRequestTokens(e, inputTokens)
 		e.Put(p.currentRequestEndpointImpactDK.String(), &attrconcurrency.InFlightLoad{
 			Tokens:   tokens,
 			Requests: 1,
@@ -261,12 +257,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		// Prefer the prefix producer's view (real tokens) when available so the
 		// match-length and the input length are in the same units; fall back to
 		// the (estimated) input tokens otherwise.
-		adjustedInput := uncachedInputTokens(endpoint, inputTokens)
-		tokens := adjustedInput
-		if p.addEstimatedOutputTokens {
-			// Output tokens are based on the full input, not the cached portion.
-			tokens += p.tokenEstimator.EstimateOutput(inputTokens)
-		}
+		tokens := p.estimateRequestTokens(endpoint, inputTokens)
 
 		p.tokenTracker.add(eid, tokens)
 
@@ -283,6 +274,16 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			entry,
 		)
 	}
+}
+
+func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, inputTokens int64) int64 {
+	adjustedInput := uncachedInputTokens(endpoint, inputTokens)
+	tokens := adjustedInput
+	if p.addEstimatedOutputTokens {
+		// Output tokens are based on the full input, not the cached portion.
+		tokens += p.tokenEstimator.EstimateOutput(inputTokens)
+	}
+	return tokens
 }
 
 func (p *InFlightLoadProducer) ResponseBody(
