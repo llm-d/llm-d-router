@@ -19,9 +19,11 @@ extend-exclude = [
     "testdata/",
     # Generated protobuf files
     "pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen/",
-    # Release-note fragments are sourced verbatim from PR bodies; let the
-    # original PR's typo check be authoritative.
-    "release-notes.d/",
-    "RELEASE-NOTES.md"
+    # Fragment files are sourced verbatim from human PR bodies; the bot
+    # can't fix typos itself, so don't fail fragment PRs on them. Typos in
+    # the assembled RELEASE-NOTES.md (also a bot PR, but reviewed by a
+    # maintainer before merge) are still checked so they get caught before
+    # landing on main.
+    "release-notes.d/"
 ]
 
