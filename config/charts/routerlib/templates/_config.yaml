@@ -79,7 +79,7 @@ data:
     parser:
       pluginRef: {{ $parserType }}
     {{- end }}
-  {{- if (hasKey .Values.router.epp "pluginsCustomConfig") }}
+  {{- if .Values.router.epp.pluginsCustomConfig }}
   {{- .Values.router.epp.pluginsCustomConfig | toYaml | nindent 2 }}
   {{- end }}
   

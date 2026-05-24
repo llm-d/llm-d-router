@@ -1,7 +1,7 @@
-replicas: 1
 extraServicePorts: []
 
 epp:
+  replicas: 1
   image:
     registry: ghcr.io/llm-d
     repository: llm-d-router-endpoint-picker-dev
@@ -32,6 +32,7 @@ epp:
   env: []
   
   pluginsConfigFile: "default-plugins.yaml"
+  pluginsCustomConfig: {}
   
   # Define additional container ports
   extraContainerPorts: []
@@ -58,12 +59,31 @@ epp:
     limits:
       memory: 16Gi
 
-affinity: {}
-tolerations: []
+  affinity: {}
+  tolerations: []
 
 # By default no proxy is configured
 proxy:
   enabled: false    
+
+# Tokenizer sidecar configuration
+tokenizer:
+  enabled: false
+  image:
+    registry: ghcr.io/llm-d
+    repository: llm-d-uds-tokenizer
+    tag: vllm-v0.19.1
+    pullPolicy: IfNotPresent
+  env:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: llm-d-hf-token
+          key: HF_TOKEN
+  resources:
+    requests:
+      cpu: "8"
+      memory: 8Gi
     
 # Monitoring configuration for EPP
 monitoring:
