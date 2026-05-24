@@ -29,13 +29,11 @@ go.work.sum
 # Environment Files
 .DS_Store
 .env
+CLAUDE.md
 
 # IDE files
 .idea
 .vscode
-
-# Local agent workspace (research, plans, memory files)
-.agents/
 
 vendor
 
