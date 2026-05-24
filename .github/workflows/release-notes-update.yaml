@@ -11,22 +11,43 @@ jobs:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+      pull-requests: read
     steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_NOTES_APP_ID }}
+          private-key: ${{ secrets.RELEASE_NOTES_APP_PRIVATE_KEY }}
+
+      - name: Get App user id
+        id: app-user
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          echo "user-id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout main
         uses: actions/checkout@v6
         with:
           ref: main
+          token: ${{ steps.app-token.outputs.token }}
 
-      - name: Update RELEASE-NOTES.md and open PR
+      - name: Stage release-note fragment and open PR
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          APP_USER_ID: ${{ steps.app-user.outputs.user-id }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_MERGED_AT: ${{ github.event.pull_request.merged_at }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
+          set -euo pipefail
+
           NOTE=$(printf '%s' "$PR_BODY" | tr -d '\r' | \
             sed -n '/^```release-note/,/^```/p' | sed '1d;$d' | xargs)
 
@@ -35,19 +56,28 @@ jobs:
             exit 0
           fi
 
-          touch RELEASE-NOTES.md
-          printf '%s\n%s\n' "${PR_MERGED_AT:0:10} $PR_URL $NOTE" "$(cat RELEASE-NOTES.md)" > RELEASE-NOTES.md
+          mkdir -p release-notes.d/unreleased
+          FRAGMENT="release-notes.d/unreleased/${PR_NUMBER}.md"
+          {
+            echo "---"
+            echo "pr: ${PR_NUMBER}"
+            echo "url: ${PR_URL}"
+            echo "author: ${PR_AUTHOR}"
+            echo "date: ${PR_MERGED_AT:0:10}"
+            echo "---"
+            echo "${NOTE}"
+          } > "$FRAGMENT"
 
           BRANCH="release-notes/pr-${PR_NUMBER}"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add RELEASE-NOTES.md
-          git commit -s -m "docs: update release notes for PR #${PR_NUMBER}"
+          git add "$FRAGMENT"
+          git commit -s -m "docs: add release-note fragment for PR #${PR_NUMBER}"
           git push origin "$BRANCH"
 
           gh pr create \
-            --title "update release notes for PR #${PR_NUMBER}" \
-            --body "Updates RELEASE-NOTES.md with the release note from ${PR_URL}." \
+            --title "docs: add release-note fragment for PR #${PR_NUMBER}" \
+            --body "Stages release-note fragment for ${PR_URL}. Will be assembled into RELEASE-NOTES.md at the next release tag." \
             --base main \
             --head "$BRANCH"

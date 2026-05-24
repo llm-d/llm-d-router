@@ -6,9 +6,13 @@ on:
 jobs:
   check-signed-commits:
     name: Check signed commits in PR
+    # Skip signed-commits enforcement for bot-authored release-notes branches
+    # (per-PR fragments under release-notes/pr-*, assembly under release-notes/assemble-*).
+    # The release-notes App can't sign commits; fragment content is sourced from
+    # already-reviewed PR bodies and assembly is a deterministic transform.
     if: |
-      !startsWith(github.head_ref, 'release-notes/pr-') ||
-      github.event.pull_request.user.login != 'github-actions[bot]'
+      !startsWith(github.head_ref, 'release-notes/') ||
+      !endsWith(github.event.pull_request.user.login, '[bot]')
     runs-on: ubuntu-latest
     permissions:
       contents: read
