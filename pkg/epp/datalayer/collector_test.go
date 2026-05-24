@@ -254,9 +254,11 @@ func TestCollectorErrorMetrics(t *testing.T) {
 				extractors.Append(src.TypedName().Name, ext)
 			}
 
+			//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
 			pollBefore := testutil.ToFloat64(metrics.DataLayerPollErrorsTotal.WithLabelValues(tt.srcType))
 			var extBefore float64
 			if tt.extType != "" {
+				//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
 				extBefore = testutil.ToFloat64(metrics.DataLayerExtractErrorsTotal.WithLabelValues(tt.srcType, tt.extType))
 			}
 
@@ -270,11 +272,13 @@ func TestCollectorErrorMetrics(t *testing.T) {
 			}
 
 			require.Eventually(t, func() bool {
+				//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
 				gotPoll := testutil.ToFloat64(metrics.DataLayerPollErrorsTotal.WithLabelValues(tt.srcType)) - pollBefore
 				if gotPoll != tt.wantPollDelta {
 					return false
 				}
 				if tt.extType != "" {
+					//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
 					gotExt := testutil.ToFloat64(metrics.DataLayerExtractErrorsTotal.WithLabelValues(tt.srcType, tt.extType)) - extBefore
 					if gotExt != tt.wantExtDelta {
 						return false

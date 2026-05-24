@@ -1,0 +1,16 @@
+# HELP llm_d_router_epp_prefix_indexer_hit_ratio [ALPHA] Ratio of prefix length matched to total prefix length in the cache lookup.
+# TYPE llm_d_router_epp_prefix_indexer_hit_ratio histogram
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="0"} 2
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="0.1"} 2
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="0.2"} 2
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="0.3"} 2
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="0.4"} 2
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="0.5"} 4
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="0.6"} 4
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="0.7"} 5
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="0.8"} 5
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="0.9"} 5
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="1"} 6
+llm_d_router_epp_prefix_indexer_hit_ratio_bucket{le="+Inf"} 6
+llm_d_router_epp_prefix_indexer_hit_ratio_sum 2.7
+llm_d_router_epp_prefix_indexer_hit_ratio_count 6

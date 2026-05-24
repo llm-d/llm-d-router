@@ -32,6 +32,15 @@ var (
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.InferenceExtensionSubsystem,
 			Name:      "prefix_indexer_size",
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_prefix_indexer_size] Size of the prefix indexer.", compbasemetrics.ALPHA),
+		},
+		[]string{},
+	)
+
+	llmdPrefixCacheSize = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "prefix_indexer_size",
 			Help:      metricsutil.HelpMsgWithStability("Size of the prefix indexer.", compbasemetrics.ALPHA),
 		},
 		[]string{},
@@ -40,6 +49,16 @@ var (
 	prefixCacheHitRatio = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceExtensionSubsystem,
+			Name:      "prefix_indexer_hit_ratio",
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_prefix_indexer_hit_ratio] Ratio of prefix length matched to total prefix length in the cache lookup.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
+		},
+		[]string{},
+	)
+
+	llmdPrefixCacheHitRatio = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "prefix_indexer_hit_ratio",
 			Help:      metricsutil.HelpMsgWithStability("Ratio of prefix length matched to total prefix length in the cache lookup.", compbasemetrics.ALPHA),
 			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
@@ -50,6 +69,16 @@ var (
 	prefixCacheHitLength = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceExtensionSubsystem,
+			Name:      "prefix_indexer_hit_bytes",
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_prefix_indexer_hit_bytes] Length of the prefix match in number of bytes in the cache lookup.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536},
+		},
+		[]string{},
+	)
+
+	llmdPrefixCacheHitLength = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "prefix_indexer_hit_bytes",
 			Help:      metricsutil.HelpMsgWithStability("Length of the prefix match in number of bytes in the cache lookup.", compbasemetrics.ALPHA),
 			Buckets:   []float64{0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536},
@@ -64,8 +93,11 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	}
 	for _, collector := range []prometheus.Collector{
 		prefixCacheSize,
+		llmdPrefixCacheSize,
 		prefixCacheHitRatio,
+		llmdPrefixCacheHitRatio,
 		prefixCacheHitLength,
+		llmdPrefixCacheHitLength,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -81,15 +113,18 @@ func registerMetrics(registerer prometheus.Registerer) error {
 // recordPrefixCacheSize records the size of the prefix indexer in megabytes.
 func recordPrefixCacheSize(size int64) {
 	prefixCacheSize.WithLabelValues().Set(float64(size))
+	llmdPrefixCacheSize.WithLabelValues().Set(float64(size))
 }
 
 // recordPrefixCacheMatch records both the hit ratio and hit length for a prefix indexer match.
 // matchedLength is the number of characters that matched, and totalLength is the total prefix length.
 func recordPrefixCacheMatch(matchedLength, totalLength int) {
 	prefixCacheHitLength.WithLabelValues().Observe(float64(matchedLength))
+	llmdPrefixCacheHitLength.WithLabelValues().Observe(float64(matchedLength))
 
 	if totalLength > 0 {
 		ratio := float64(matchedLength) / float64(totalLength)
 		prefixCacheHitRatio.WithLabelValues().Observe(ratio)
+		llmdPrefixCacheHitRatio.WithLabelValues().Observe(ratio)
 	}
 }

@@ -1,9 +1,6 @@
 module github.com/llm-d/llm-d-router
 
-go 1.25.7
-
-// Pinned to go1.25.10 to pick up stdlib fixes reported by govulncheck.
-toolchain go1.25.10
+go 1.25.10
 
 require (
 	cloud.google.com/go/aiplatform v1.124.0
