@@ -23,6 +23,7 @@ import (
 )
 
 var InFlightLoadDataKey = plugin.NewDataKey("InFlightLoadDataKey", inflightloadconstants.InFlightLoadProducerType)
+var CurrentRequestLoadDataKey = plugin.NewDataKey("CurrentRequestLoadDataKey", inflightloadconstants.InFlightLoadProducerType)
 
 // InFlightLoad captures the current real-time load of an endpoint as tracked by the EPP.
 type InFlightLoad struct {

@@ -36,6 +36,7 @@ func TestTokenLoadScorer(t *testing.T) {
 		typedName:            fwkplugin.TypedName{Type: TokenLoadScorerType, Name: TokenLoadScorerType},
 		queueThresholdTokens: threshold,
 		inFlightLoadDataKey:  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(""),
+		currentRequestLoadDK: attrconcurrency.CurrentRequestLoadDataKey.WithNonEmptyProducerName(""),
 	}
 
 	pod1NN := types.NamespacedName{Namespace: "default", Name: "pod1"}
@@ -48,15 +49,18 @@ func TestTokenLoadScorer(t *testing.T) {
 		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: pod3NN}, &fwkdl.Metrics{}, nil),
 	}
 
-	// pod1: 0 tokens (default)
-	// pod2: 500 tokens
-	endpoints[1].Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 500})
-	// pod3: 1000 tokens
-	endpoints[2].Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 1000})
+	// pod1: 0 in-flight + 250 current = 250. Score = 1 - 250/1000 = 0.75
+	endpoints[0].Put(attrconcurrency.CurrentRequestLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
+	// pod2: 250 in-flight + 250 current = 500. Score = 1 - 500/1000 = 0.5
+	endpoints[1].Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
+	endpoints[1].Put(attrconcurrency.CurrentRequestLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
+	// pod3: 750 in-flight + 250 current = 1000. Score = 1 - 1000/1000 = 0.0
+	endpoints[2].Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 750})
+	endpoints[2].Put(attrconcurrency.CurrentRequestLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
 
 	scores := scorer.Score(context.Background(), &fwksched.InferenceRequest{}, endpoints)
 
-	assert.InDelta(t, 1.0, scores[endpoints[0]], 0.0001, "Pod1 (0 tokens) should have score 1.0")
-	assert.InDelta(t, 0.5, scores[endpoints[1]], 0.0001, "Pod2 (500 tokens) should have score 0.5")
-	assert.InDelta(t, 0.0, scores[endpoints[2]], 0.0001, "Pod3 (1000 tokens) should have score 0.0")
+	assert.InDelta(t, 0.75, scores[endpoints[0]], 0.0001, "Pod1 (0 + 250 tokens) should have score 0.75")
+	assert.InDelta(t, 0.5, scores[endpoints[1]], 0.0001, "Pod2 (250 + 250 tokens) should have score 0.5")
+	assert.InDelta(t, 0.0, scores[endpoints[2]], 0.0001, "Pod3 (750 + 250 tokens) should have score 0.0")
 }

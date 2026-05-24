@@ -77,6 +77,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		tokenEstimator:           NewSimpleTokenEstimator(),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
+		currentRequestLoadDK:     attrconcurrency.CurrentRequestLoadDataKey.WithNonEmptyProducerName(name),
 		PluginState:              fwkplugin.NewPluginState(ctx),
 	}, nil
 }
@@ -97,6 +98,7 @@ type InFlightLoadProducer struct {
 	addEstimatedOutputTokens bool
 	PluginState              *fwkplugin.PluginState
 	dk                       fwkplugin.DataKey
+	currentRequestLoadDK     fwkplugin.DataKey
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -194,7 +196,9 @@ func (p *InFlightLoadProducer) ExtractEndpoint(ctx context.Context, event datala
 	return nil
 }
 
-func (p *InFlightLoadProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	inputTokens := p.tokenEstimator.EstimateInput(request)
+
 	for _, e := range endpoints {
 		if e == nil || e.GetMetadata() == nil {
 			continue
@@ -203,6 +207,17 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, _ *fwksched.InferenceR
 		e.Put(p.dk.String(), &attrconcurrency.InFlightLoad{
 			Tokens:   p.tokenTracker.get(endpointID),
 			Requests: p.requestTracker.get(endpointID),
+		})
+
+		// Estimate the load this request would add if scheduled to this endpoint.
+		adjustedInput := uncachedInputTokens(e, inputTokens)
+		tokens := adjustedInput
+		if p.addEstimatedOutputTokens {
+			tokens += p.tokenEstimator.EstimateOutput(inputTokens)
+		}
+		e.Put(p.currentRequestLoadDK.String(), &attrconcurrency.InFlightLoad{
+			Tokens:   tokens,
+			Requests: 1,
 		})
 	}
 	return nil
@@ -423,7 +438,8 @@ func nonNeg(v int64) int64 {
 
 func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
-		p.dk: attrconcurrency.InFlightLoad{},
+		p.dk:                 attrconcurrency.InFlightLoad{},
+		p.currentRequestLoadDK: attrconcurrency.InFlightLoad{},
 	}
 }
 
