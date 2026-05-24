@@ -23,14 +23,12 @@ const (
 	InferencePoolAPIGroup = "inference.networking.k8s.io"
 
 	// PreferHeader is the standard HTTP "Prefer" header (RFC 7240). EPP
-	// receives header keys lowercased. The value is a comma-separated list of
-	// preference tokens; callers must match individual tokens, not the whole
-	// value.
+	// receives header keys lowercased.
 	PreferHeader = "prefer"
 
 	// PreferIfAvailable is the preference token the coordinator sets to mark a
 	// request as a speculative early-decode attempt: route to a decode worker
-	// only if its KV cache already covers the prompt; otherwise EPP surfaces
+	// only if its KV cache already covers the prompt (at leat partially); otherwise EPP surfaces
 	// 412 Precondition Failed so the coordinator restarts the pipeline.
 	PreferIfAvailable = "if-available"
 )
@@ -48,8 +46,9 @@ func StripScheme(endpoint string) string {
 // IsConditionalDecode reports whether the request headers carry the standard
 // HTTP "Prefer: if-available" preference (RFC 7240). It is the marker the
 // coordinator uses to flag a speculative early-decode attempt: route to a
-// decode worker only if its KV cache already covers the prompt; otherwise EPP
-// surfaces 412 Precondition Failed so the coordinator restarts the pipeline.
+// decode worker only if its KV cache already covers the prompt(at least partially);
+// otherwise EPP surfaces 412 Precondition Failed so the coordinator restarts the
+// pipeline.
 //
 // Per RFC 7240 the Prefer header value is a comma-separated list of preference
 // tokens, each with optional ";"-delimited parameters. This function matches

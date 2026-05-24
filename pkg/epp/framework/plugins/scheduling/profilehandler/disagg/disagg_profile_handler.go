@@ -291,9 +291,7 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	// Conditional-decode short-circuit: when the coordinator marks the request
 	// with "Prefer: if-available", the cache-availability gate in the director
 	// will already have rejected it with 412 if no decode worker has the prompt
-	// cached. By the time we reach this point the request is going through, but
-	// running encode or prefill would defeat the whole point of conditional
-	// decode — the prompt is already cached on the chosen decode pod.
+	// cached. By the time we reach this point the request is going through.
 	if request != nil && routing.IsConditionalDecode(request.Headers) {
 		span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "skip_encode_prefill_conditional_decode"))
 		metrics.RecordDisaggDecision(request.TargetModel, metrics.DisaggDecisionType(false, false))
