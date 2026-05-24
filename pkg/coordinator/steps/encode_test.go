@@ -21,6 +21,10 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount.Add(1)
 
+		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhaseEncode {
+			t.Errorf("expected EPP-Phase: encode, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		}
+
 		body, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
 		_ = json.Unmarshal(body, &parsed)
@@ -37,18 +41,17 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 			t.Errorf("expected features in encode request")
 		}
 		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes["image"].([]any)
+		imageHashes, _ := mmHashes[ModalityImage].([]any)
 		if len(imageHashes) != 1 {
 			t.Errorf("expected 1 hash per encode request, got %d", len(imageHashes))
 		}
 		kwargsData, _ := features["kwargs_data"].(map[string]any)
-		imageKwargs, _ := kwargsData["image"].([]any)
+		imageKwargs, _ := kwargsData[ModalityImage].([]any)
 		if len(imageKwargs) != 1 {
 			t.Errorf("expected 1 kwargs_data per encode request, got %d", len(imageKwargs))
 		}
 
-		// Echo the per-image hash back as the ec_transfer_params key, matching
-		// the real encoder shape: {mm_hash: {peer_host, peer_port, ...}}.
+		// Echo the per-image hash back as the ec_transfer_params key
 		hash, _ := imageHashes[0].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
@@ -66,9 +69,9 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
 	step, err := NewEncodeStep(map[string]any{
-		"gateway_path":   gateway.DefaultGeneratePath,
-		"max_parallel":   4,
-		ParamECConnector: ec.NIXLv2,
+		"use_openai_format": false,
+		"max_parallel":      4,
+		ParamECConnector:    ec.NIXLv2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +138,7 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 		_ = json.Unmarshal(body, &parsed)
 		features, _ := parsed["features"].(map[string]any)
 		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes["image"].([]any)
+		imageHashes, _ := mmHashes[ModalityImage].([]any)
 		hash, _ := imageHashes[0].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
@@ -147,7 +150,7 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, _ := NewEncodeStep(map[string]any{"max_parallel": 1})
+	step, _ := NewEncodeStep(map[string]any{"max_parallel": 1, "use_openai_format": false})
 	step.(*EncodeStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
@@ -167,17 +170,22 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 	}
 }
 
-func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
-	var receivedTokenIDs []any
+func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
+	var receivedBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhaseEncode {
+			t.Fatalf("expected EPP-Phase: encode, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		}
+
 		body, _ := io.ReadAll(r.Body)
-		var parsed map[string]any
-		_ = json.Unmarshal(body, &parsed)
-		receivedTokenIDs, _ = parsed["token_ids"].([]any)
-		features, _ := parsed["features"].(map[string]any)
+		_ = json.Unmarshal(body, &receivedBody)
+
+		// Extract hash from tokens.features
+		tokens, _ := receivedBody["tokens"].(map[string]any)
+		features, _ := tokens["features"].(map[string]any)
 		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes["image"].([]any)
+		imageHashes, _ := mmHashes[ModalityImage].([]any)
 		hash, _ := imageHashes[0].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
@@ -188,7 +196,114 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, _ := NewEncodeStep(map[string]any{})
+	step, err := NewEncodeStep(map[string]any{
+		ParamECConnector: ec.NIXLv2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.(*EncodeStep).SetGatewayClient(gwClient)
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-chat",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        "test-model",
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model":  "test-model",
+			"stream": false,
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "describe"},
+						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-x", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify model present
+	if receivedBody["model"] != "test-model" {
+		t.Fatalf("expected model from body, got %v", receivedBody["model"])
+	}
+
+	// Verify messages contains only image (no text) in per-image body
+	messages, ok := receivedBody["messages"].([]any)
+	if !ok {
+		t.Fatal("expected messages in chat/completions format")
+	}
+	msg := messages[0].(map[string]any)
+	content := msg["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("expected 1 content part (image only), got %d", len(content))
+	}
+	part := content[0].(map[string]any)
+	if part["type"] != imageURLPartType {
+		t.Fatalf("expected %s content part, got %v", imageURLPartType, part["type"])
+	}
+
+	// Verify tokens nested field
+	tokens, ok := receivedBody["tokens"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tokens field in chat/completions format")
+	}
+	tokenIDs, _ := tokens["token_ids"].([]any)
+	if len(tokenIDs) != 4 { // BOS + 3 placeholders
+		t.Fatalf("expected 4 token_ids in tokens, got %d", len(tokenIDs))
+	}
+	tokensFeatures, ok := tokens["features"].(map[string]any)
+	if !ok {
+		t.Fatal("expected features in tokens field")
+	}
+	// tokens.features should NOT have kwargs_data
+	if _, ok := tokensFeatures["kwargs_data"]; ok {
+		t.Fatal("tokens.features should not have kwargs_data in chat format")
+	}
+	if _, ok := tokensFeatures["mm_hashes"]; !ok {
+		t.Fatal("tokens.features should have mm_hashes")
+	}
+
+	// Verify no top-level token_ids or features
+	if _, ok := receivedBody["token_ids"]; ok {
+		t.Fatal("chat format should not have top-level token_ids")
+	}
+	if _, ok := receivedBody["features"]; ok {
+		t.Fatal("chat format should not have top-level features")
+	}
+}
+
+func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
+	var receivedTokenIDs []any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		receivedTokenIDs, _ = parsed["token_ids"].([]any)
+		features, _ := parsed["features"].(map[string]any)
+		mmHashes, _ := features["mm_hashes"].(map[string]any)
+		imageHashes, _ := mmHashes[ModalityImage].([]any)
+		hash, _ := imageHashes[0].(string)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{
+				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, _ := NewEncodeStep(map[string]any{"use_openai_format": false})
 	step.(*EncodeStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{

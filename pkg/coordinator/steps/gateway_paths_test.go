@@ -16,38 +16,46 @@ import (
 
 func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	var mu sync.Mutex
-	receivedPaths := []string{}
+	receivedPhases := []string{}
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		phase := r.Header.Get(gateway.EPPPhaseHeader)
 		mu.Lock()
-		receivedPaths = append(receivedPaths, r.URL.Path)
+		receivedPhases = append(receivedPhases, phase)
 		mu.Unlock()
 
-		switch r.URL.Path {
-		case "/encode/inference/v1/generate":
+		if r.URL.Path != gateway.PathChatCompletions {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.Error(w, "unexpected path", 404)
+			return
+		}
+
+		switch phase {
+		case gateway.PhaseEncode:
 			body, _ := io.ReadAll(r.Body)
 			var parsed map[string]any
 			_ = json.Unmarshal(body, &parsed)
-			features, _ := parsed["features"].(map[string]any)
+			tokens, _ := parsed["tokens"].(map[string]any)
+			features, _ := tokens["features"].(map[string]any)
 			mmHashes, _ := features["mm_hashes"].(map[string]any)
-			imageHashes, _ := mmHashes["image"].([]any)
+			imageHashes, _ := mmHashes[ModalityImage].([]any)
 			hash, _ := imageHashes[0].(string)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ec_transfer_params": map[string]any{
 					hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 				},
 			})
-		case "/prefill/inference/v1/generate":
+		case gateway.PhasePrefill:
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"kv_transfer_params": map[string]any{"block_id": "b1", "peer_host": "10.0.0.2", "peer_port": 5502},
 			})
-		case "/decode/v1/chat/completions":
+		case gateway.PhaseDecode:
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
 			})
 		default:
-			t.Errorf("unexpected path: %s", r.URL.Path)
-			http.Error(w, "unexpected path", 404)
+			t.Errorf("unexpected EPP-Phase: %s", phase)
+			http.Error(w, "unexpected phase", 404)
 		}
 	}))
 	defer gwServer.Close()
@@ -55,12 +63,12 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
 
 	// --- Encode step ---
-	encodeStep, _ := NewEncodeStep(map[string]any{"gateway_path": gateway.DefaultGeneratePath})
+	encodeStep, _ := NewEncodeStep(map[string]any{})
 	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-path-test",
-		OriginalPath: "/v1/chat/completions",
+		OriginalPath: gateway.PathChatCompletions,
 		Model:        "test-model",
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
@@ -91,7 +99,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	}
 
 	// --- Prefill step ---
-	prefillStep, _ := NewPrefillStep(map[string]any{"gateway_path": gateway.DefaultGeneratePath})
+	prefillStep, _ := NewPrefillStep(map[string]any{})
 	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 
 	err = prefillStep.Execute(context.Background(), reqCtx)
@@ -105,39 +113,113 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	reqCtx.ResponseWriter = recorder
-	reqCtx.Flusher = recorder
 
 	err = decodeStep.Execute(context.Background(), reqCtx)
 	if err != nil {
 		t.Fatalf("decode failed: %v", err)
 	}
 
-	// --- Validate paths ---
+	// --- Validate EPP-Phase headers ---
 	mu.Lock()
 	defer mu.Unlock()
 
-	expectedPaths := []string{
-		"/encode/inference/v1/generate",
-		"/prefill/inference/v1/generate",
-		"/decode/v1/chat/completions",
+	expectedPhases := []string{
+		gateway.PhaseEncode,
+		gateway.PhasePrefill,
+		gateway.PhaseDecode,
 	}
 
-	if len(receivedPaths) != len(expectedPaths) {
-		t.Fatalf("expected %d requests, got %d: %v", len(expectedPaths), len(receivedPaths), receivedPaths)
+	if len(receivedPhases) != len(expectedPhases) {
+		t.Fatalf("expected %d requests, got %d: %v", len(expectedPhases), len(receivedPhases), receivedPhases)
 	}
 
-	for i, expected := range expectedPaths {
-		if receivedPaths[i] != expected {
-			t.Errorf("request %d: expected path %q, got %q", i, expected, receivedPaths[i])
+	for i, expected := range expectedPhases {
+		if receivedPhases[i] != expected {
+			t.Errorf("request %d: expected EPP-Phase %q, got %q", i, expected, receivedPhases[i])
+		}
+	}
+}
+
+func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T) {
+	var mu sync.Mutex
+	receivedPaths := []string{}
+
+	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedPaths = append(receivedPaths, r.URL.Path)
+		mu.Unlock()
+
+		phase := r.Header.Get(gateway.EPPPhaseHeader)
+		switch phase {
+		case gateway.PhaseEncode:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ec_transfer_params": map[string]any{
+					"h1": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+				},
+			})
+		case gateway.PhasePrefill:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"kv_transfer_params": map[string]any{"block_id": "b1"},
+			})
+		case gateway.PhaseDecode:
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{}}})
+		}
+	}))
+	defer gwServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-openai-false",
+		OriginalPath: gateway.PathCompletions,
+		Model:        "test-model",
+		Stream:       false,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+		KVTransferParams: make(map[string]any),
+		Body:             map[string]any{"model": "test-model", "stream": false, "prompt": "hello"},
+	}
+
+	encodeStep, _ := NewEncodeStep(map[string]any{"use_openai_format": false})
+	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
+	if err := encodeStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+
+	prefillStep, _ := NewPrefillStep(map[string]any{"use_openai_format": false})
+	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
+	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("prefill failed: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx.ResponseWriter = recorder
+
+	decodeStep, _ := NewDecodeStep(map[string]any{"use_openai_format": false})
+	decodeStep.(*DecodeStep).SetGatewayClient(gwClient)
+	if err := decodeStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	for i, path := range receivedPaths {
+		if path != gateway.PathCompletions {
+			t.Errorf("request %d: expected /v1/completions, got %s", i, path)
 		}
 	}
 }
 
 func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 	var receivedPath string
+	var receivedPhase string
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
+		receivedPhase = r.Header.Get(gateway.EPPPhaseHeader)
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{}}})
 	}))
 	defer gwServer.Close()
@@ -150,16 +232,16 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-2",
-		OriginalPath:     "/v1/completions",
+		OriginalPath:     gateway.PathCompletions,
 		Model:            "test",
 		Stream:           false,
+		TokenIDs:         []int{1, 2345, 6789},
 		KVTransferParams: map[string]any{"k": "v"},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "h1"},
 		},
 		Body:           map[string]any{"model": "test", "stream": false},
 		ResponseWriter: recorder,
-		Flusher:        recorder,
 	}
 
 	err := decodeStep.Execute(context.Background(), reqCtx)
@@ -167,7 +249,10 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 		t.Fatalf("decode failed: %v", err)
 	}
 
-	if receivedPath != "/decode/v1/completions" {
-		t.Fatalf("expected /decode/v1/completions, got %s", receivedPath)
+	if receivedPath != gateway.PathCompletions {
+		t.Fatalf("expected /v1/completions, got %s", receivedPath)
+	}
+	if receivedPhase != gateway.PhaseDecode {
+		t.Fatalf("expected EPP-Phase: decode, got %q", receivedPhase)
 	}
 }

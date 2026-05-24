@@ -20,9 +20,9 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{"image": {"hash-img0", "hash-img1"}},
-				"mm_placeholders": map[string][]any{"image": {map[string]any{"offset": 1, "length": 3}, map[string]any{"offset": 4, "length": 3}}},
-				"kwargs_data":     map[string][]string{"image": {"dGVuc29yQQ==", "dGVuc29yQg=="}},
+				"mm_hashes":       map[string][]string{ModalityImage: {"hash-img0", "hash-img1"}},
+				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": 3}, map[string]any{"offset": 4, "length": 3}}},
+				"kwargs_data":     map[string][]string{ModalityImage: {"dGVuc29yQQ==", "dGVuc29yQg=="}},
 			},
 		})
 	}))
@@ -43,7 +43,7 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 		// Echo per-image hash back as the ec_transfer_params key (nixl shape).
 		features, _ := parsed["features"].(map[string]any)
 		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes["image"].([]any)
+		imageHashes, _ := mmHashes[ModalityImage].([]any)
 		hash, _ := imageHashes[0].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
@@ -87,8 +87,8 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 
 	// Run encode step (nixl EC connector merges per-hash ec_transfer_params)
 	encodeStep, _ := NewEncodeStep(map[string]any{
-		"gateway_path":   gateway.DefaultGeneratePath,
-		ParamECConnector: ec.NIXLv2,
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXLv2,
 	})
 	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
@@ -113,13 +113,13 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 
 		features, _ := body["features"].(map[string]any)
 		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		hashes, _ := mmHashes["image"].([]any)
+		hashes, _ := mmHashes[ModalityImage].([]any)
 		if len(hashes) != 1 {
 			t.Fatalf("request %d: expected 1 hash, got %d", i, len(hashes))
 		}
 
 		kwargs, _ := features["kwargs_data"].(map[string]any)
-		imageKwargs, _ := kwargs["image"].([]any)
+		imageKwargs, _ := kwargs[ModalityImage].([]any)
 		if len(imageKwargs) != 1 {
 			t.Fatalf("request %d: expected 1 kwargs_data entry, got %d", i, len(imageKwargs))
 		}

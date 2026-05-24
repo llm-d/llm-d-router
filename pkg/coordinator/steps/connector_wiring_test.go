@@ -16,13 +16,13 @@ import (
 
 // TestPrefillStep_ConnectorShapesPrefillBody verifies that the connector
 // selected via params controls the kv_transfer_params shape on the prefill
-// request. nixlv2 emits the full 6-field map (remote_* keys set to nil);
-// shared_storage emits only do_remote_decode.
+// request. In generate format, kv_transfer_params lives inside
+// sampling_params.extra_args due to the vLLM workaround.
 func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 	cases := []struct {
 		connector  string
-		wantFields map[string]any // key → expected value (nil means key must exist with nil value)
-		denyFields []string       // must NOT be present
+		wantFields map[string]any
+		denyFields []string
 	}{
 		{
 			connector: kv.NIXLv2,
@@ -49,15 +49,18 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 				body, _ := io.ReadAll(r.Body)
 				var parsed map[string]any
 				_ = json.Unmarshal(body, &parsed)
-				captured, _ = parsed["kv_transfer_params"].(map[string]any)
+				// In generate format, kv_transfer_params is in sampling_params.extra_args
+				samplingParams, _ := parsed["sampling_params"].(map[string]any)
+				extraArgs, _ := samplingParams["extra_args"].(map[string]any)
+				captured, _ = extraArgs["kv_transfer_params"].(map[string]any)
 				_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{}})
 			}))
 			defer srv.Close()
 
 			gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
 			step, err := NewPrefillStep(map[string]any{
-				"gateway_path":   gateway.DefaultGeneratePath,
-				ParamKVConnector: tc.connector,
+				"use_openai_format": false,
+				ParamKVConnector:    tc.connector,
 			})
 			if err != nil {
 				t.Fatalf("NewPrefillStep: %v", err)
@@ -75,7 +78,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 			}
 
 			if captured == nil {
-				t.Fatal("kv_transfer_params not sent to gateway")
+				t.Fatal("kv_transfer_params not found in sampling_params.extra_args")
 			}
 			for f, want := range tc.wantFields {
 				got, ok := captured[f]
@@ -144,12 +147,11 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req",
-				OriginalPath:     "/v1/chat/completions",
+				OriginalPath:     gateway.PathChatCompletions,
 				Model:            "m",
 				KVTransferParams: map[string]any{"block_id": "from-prefill"},
 				Body:             map[string]any{"model": "m"},
 				ResponseWriter:   recorder,
-				Flusher:          recorder,
 			}
 			if err := step.Execute(context.Background(), reqCtx); err != nil {
 				t.Fatalf("Execute: %v", err)
