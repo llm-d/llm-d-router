@@ -23,6 +23,12 @@ import (
 )
 
 var InFlightLoadDataKey = plugin.NewDataKey("InFlightLoadDataKey", inflightloadconstants.InFlightLoadProducerType)
+
+// CurrentRequestEndpointImpactDataKey carries the estimated per-endpoint cost of the
+// request currently being scheduled. Set by InFlightLoadProducer.Produce
+// for each candidate endpoint based on that endpoint's prefix-cache match;
+// consumed by load-aware scorers to include the request's own impact when
+// scoring. Lifecycle: overwritten each scheduling cycle; never cleared.
 var CurrentRequestEndpointImpactDataKey = plugin.NewDataKey("CurrentRequestEndpointImpactDataKey", inflightloadconstants.InFlightLoadProducerType)
 
 // InFlightLoad captures the current real-time load of an endpoint as tracked by the EPP.
