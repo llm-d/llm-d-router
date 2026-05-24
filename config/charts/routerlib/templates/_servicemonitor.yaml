@@ -1,0 +1,34 @@
+{{- define "inference-extension.service-monitor" -}}
+{{- $monitoringProviderName := include "llm-d-router.monitoring.provider.name" . | lower -}}
+{{- if and .Values.router.monitoring.prometheus.enabled (eq $monitoringProviderName "prometheusoperator") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "llm-d-router.name" . }}-monitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- with .Values.router.monitoring.prometheus.extraLabels }}
+    {{- . | toYaml | nindent 4 }}
+    {{- end }}
+spec:
+  endpoints:
+  - interval: {{ .Values.router.monitoring.interval }}
+    port: "http-metrics"
+    path: "/metrics"
+    {{- if .Values.router.monitoring.prometheus.auth.enabled }}
+    authorization:
+      credentials:
+        key: token
+        name: {{ .Values.router.monitoring.prometheus.auth.secretName }}
+    {{- end }}
+  jobLabel: {{ include "llm-d-router.name" . }}
+  namespaceSelector:
+    matchNames:
+    - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "llm-d-router.labels" . | nindent 6 }}
+---
+{{- end }}
+{{- end }}

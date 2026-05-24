@@ -25,23 +25,27 @@ const (
 var (
 	// SchedulerPDDecisionCount records request P/D decision.
 	//
-	// Deprecated: Use SchedulerDisaggDecisionCount instead.
+	// Deprecated: Use LlmdPDDecisionCount instead.
+	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	SchedulerPDDecisionCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: SchedulerSubsystem,
 			Name:      "pd_decision_total",
-			Help:      metrics.HelpMsgWithStability("Total number of P/D disaggregation decisions made", compbasemetrics.ALPHA),
+			Help:      metrics.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_pd_decision_total] Total number of P/D disaggregation decisions made", compbasemetrics.ALPHA),
 		},
 		[]string{"model_name", "decision_type"}, // "decode-only" or "prefill-decode"
 	)
 
 	// SchedulerDisaggDecisionCount records disaggregation routing decisions,
 	// covering all stages: decode-only, prefill-decode, encode-decode, encode-prefill-decode.
+	//
+	// Deprecated: Use llm_d_router_epp_disagg_decision_total instead.
+	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	SchedulerDisaggDecisionCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: SchedulerSubsystem,
 			Name:      "disagg_decision_total",
-			Help:      metrics.HelpMsgWithStability("Total number of disaggregation routing decisions made", compbasemetrics.ALPHA),
+			Help:      metrics.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_disagg_decision_total] Total number of disaggregation routing decisions made", compbasemetrics.ALPHA),
 		},
 		[]string{"model_name", "decision_type"},
 	)
@@ -49,20 +53,24 @@ var (
 	// Data-layer counters: label values must be plugin TypedName.Type only —
 	// never per-instance or runtime-variable strings (cardinality).
 
+	// Deprecated: Use llm_d_router_epp_datalayer_poll_errors_total instead.
+	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	DataLayerPollErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: SchedulerSubsystem,
 			Name:      "datalayer_poll_errors_total",
-			Help:      metrics.HelpMsgWithStability("Data-source poll errors per source type.", compbasemetrics.ALPHA),
+			Help:      metrics.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_datalayer_poll_errors_total] Data-source poll errors per source type.", compbasemetrics.ALPHA),
 		},
 		[]string{"source_type"},
 	)
 
+	// Deprecated: Use llm_d_router_epp_datalayer_extract_errors_total instead.
+	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	DataLayerExtractErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: SchedulerSubsystem,
 			Name:      "datalayer_extract_errors_total",
-			Help:      metrics.HelpMsgWithStability("Extract errors per source/extractor type.", compbasemetrics.ALPHA),
+			Help:      metrics.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_datalayer_extract_errors_total] Extract errors per source/extractor type.", compbasemetrics.ALPHA),
 		},
 		[]string{"source_type", "extractor_type"},
 	)
@@ -72,9 +80,13 @@ var (
 func GetCollectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		SchedulerPDDecisionCount,
+		LlmdPDDecisionCount,
 		SchedulerDisaggDecisionCount,
+		LlmdDisaggDecisionCount,
 		DataLayerPollErrorsTotal,
+		LlmdDataLayerPollErrorsTotal,
 		DataLayerExtractErrorsTotal,
+		LlmdDataLayerExtractErrorsTotal,
 	}
 }
 
@@ -86,6 +98,7 @@ func RecordPDDecision(modelName, decisionType string) {
 		modelName = "unknown"
 	}
 	SchedulerPDDecisionCount.WithLabelValues(modelName, decisionType).Inc()
+	LlmdPDDecisionCount.WithLabelValues(modelName, decisionType).Inc()
 }
 
 // RecordDisaggDecision increments the counter for a disaggregation routing decision.
@@ -97,6 +110,7 @@ func RecordDisaggDecision(modelName, decisionType string) {
 		modelName = "unknown"
 	}
 	SchedulerDisaggDecisionCount.WithLabelValues(modelName, decisionType).Inc()
+	LlmdDisaggDecisionCount.WithLabelValues(modelName, decisionType).Inc()
 }
 
 // DisaggDecisionType returns the DecisionType* constant corresponding to which

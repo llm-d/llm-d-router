@@ -21,6 +21,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -57,11 +58,17 @@ type EvictChannelLookup interface {
 	Deregister(requestID string)
 }
 
-func NewStreamingServer(datastore Datastore, director Director, parser fwkrh.Parser) *StreamingServer {
+func NewStreamingServer(datastore Datastore, director Director, parser fwkrh.Parser, maxPoolBufferSize int) *StreamingServer {
 	return &StreamingServer{
-		director:  director,
-		datastore: datastore,
-		parser:    parser,
+		director:          director,
+		datastore:         datastore,
+		parser:            parser,
+		maxPoolBufferSize: maxPoolBufferSize,
+		bufferPool: sync.Pool{
+			New: func() any {
+				return new(bytes.Buffer)
+			},
+		},
 	}
 }
 
@@ -84,10 +91,12 @@ type Datastore interface {
 // Server implements the Envoy external processing server.
 // https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ext_proc/v3/external_processor.proto
 type StreamingServer struct {
-	datastore      Datastore
-	director       Director
-	parser         fwkrh.Parser
-	evictionLookup EvictChannelLookup // optional, set for eviction support
+	datastore         Datastore
+	director          Director
+	parser            fwkrh.Parser
+	evictionLookup    EvictChannelLookup // optional, set for eviction support
+	bufferPool        sync.Pool
+	maxPoolBufferSize int
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -196,7 +205,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		},
 	}
 
-	var body []byte
+	buf := s.bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer func() {
+		// Return to pool if capacity is within limits.
+		if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
+			s.bufferPool.Put(buf)
+		}
+	}()
+	var respBody []byte
 	var evictionRequestID string
 
 	// Start a single reader goroutine for the lifetime of the stream.
@@ -314,16 +331,17 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		case *extProcPb.ProcessingRequest_RequestBody:
 			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
 			// In the stream case, we can receive multiple request bodies.
-			body = append(body, v.RequestBody.Body...)
+			buf.Write(v.RequestBody.Body)
 
 			// Message is buffered, we can read and decode.
 			if v.RequestBody.EndOfStream {
 				loggerTrace.Info("decoding")
-				reqCtx.Request.RawBody = body
+				reqCtx.Request.RawBody = make([]byte, buf.Len())
+				copy(reqCtx.Request.RawBody, buf.Bytes())
 
 				// Body stream complete. Capture raw size for flow control.
-				reqCtx.RequestSize = len(body)
-				body = []byte{}
+				reqCtx.RequestSize = buf.Len()
+				buf.Reset()
 
 				parseResult, parseErr := s.parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				if parseErr != nil {
@@ -396,16 +414,16 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 			} else {
-				body = append(body, chunk...)
+				respBody = append(respBody, chunk...)
 				if endOfStream {
-					s.finishResponse(ctx, reqCtx, body, reqCtx.modelServerStreaming, true)
+					s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, true)
 				}
 			}
 		case *extProcPb.ProcessingRequest_ResponseTrailers:
 			// For HTTP, the response trailer is not sent. Thus, this case will not be triggered.
 			// For gRPC(over HTTP2), the protocol relies on responseTrailers to determine whether a response is complete.
 			// More info: https://chromium.googlesource.com/external/github.com/grpc/grpc/+/HEAD/doc/PROTOCOL-HTTP2.md#responses
-			s.finishResponse(ctx, reqCtx, body, reqCtx.modelServerStreaming, false)
+			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false)
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
 					ResponseTrailers: &extProcPb.TrailersResponse{},

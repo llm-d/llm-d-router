@@ -84,7 +84,7 @@ func NewCollector() *Collector {
 }
 
 // Start launches the collection goroutine.
-func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, pollers []fwkdl.PollingDataSource, extractors map[string][]fwkdl.ExtractorBase) error {
+func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, pollers []fwkdl.PollingDataSource, extractors *extractorMap) error {
 	if len(pollers) == 0 {
 		return errors.New("cannot start collector with empty sources")
 	}
@@ -93,19 +93,23 @@ func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint,
 			return errors.New("cannot add nil data source")
 		}
 	}
+	if extractors == nil {
+		extractors = newExtractorMap()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	// Filter to poll-capable extractors up front so the hot loop avoids per-tick type assertions.
-	pollingExtractors := make(map[string][]fwkdl.Extractor, len(extractors))
-	for name, exts := range extractors {
+	pollingExtractors := make(map[string][]fwkdl.Extractor, extractors.Count())
+	extractors.Range(func(name string, exts []fwkdl.ExtractorBase) bool {
 		for _, ext := range exts {
 			if e, ok := ext.(fwkdl.Extractor); ok {
 				pollingExtractors[name] = append(pollingExtractors[name], e)
 			}
 		}
-	}
+		return true
+	})
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -158,7 +162,9 @@ func (c *Collector) pollOne(ctx context.Context, src fwkdl.PollingDataSource, ep
 	defer cancel()
 	data, err := src.Poll(pollCtx, ep)
 	if err != nil {
+		//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
 		metrics.DataLayerPollErrorsTotal.WithLabelValues(tn.Type).Inc()
+		metrics.LlmdDataLayerPollErrorsTotal.WithLabelValues(tn.Type).Inc()
 		logger.V(logging.DEBUG).Info("poll failed", "source", tn, "err", err)
 		return
 	}
@@ -175,7 +181,9 @@ func (c *Collector) pollOne(ctx context.Context, src fwkdl.PollingDataSource, ep
 		cancel()
 		if err != nil {
 			extName := ext.TypedName()
+			//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
 			metrics.DataLayerExtractErrorsTotal.WithLabelValues(tn.Type, extName.Type).Inc()
+			metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(tn.Type, extName.Type).Inc()
 			logger.V(logging.DEBUG).Info("extract failed", "source", tn, "extractor", extName, "err", err)
 		}
 	}

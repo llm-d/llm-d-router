@@ -135,7 +135,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	director := &testDirector{}
 	ctx, cancel, ds, _ := igwtestutils.PrepareForTestStreamingServer([]*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser())
+	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser(), 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
@@ -425,7 +425,7 @@ func TestServer_Skip(t *testing.T) {
 
 	ctx, cancel, ds, _ := igwtestutils.PrepareForTestStreamingServer([]*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, mockPar)
+	streamingServer := handlers.NewStreamingServer(ds, director, mockPar, 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
@@ -474,6 +474,76 @@ func TestServer_Skip(t *testing.T) {
 	// Verify that the stream is closed by checking if Recv returns EOF or error
 	_, err = process.Recv()
 	require.Error(t, err, "Expected error or EOF when receiving after skip")
+
+	cancel()
+	<-errChan
+	testListener.Close()
+}
+
+func TestServer_GRPCReceiveLimit(t *testing.T) {
+	// We will send a request body that is larger than 4MB (e.g., 5MB).
+	// Since the test gRPC server defaults to 4MB receive limit, EPP should reject it.
+
+	model := testutil.MakeInferenceObjective("v1").
+		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
+
+	director := &testDirector{}
+	ctx, cancel, ds, _ := igwtestutils.PrepareForTestStreamingServer([]*v1alpha2.InferenceObjective{model},
+		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
+
+	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser(), 0)
+
+	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
+	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
+	defer conn.Close()
+
+	// 1. Send request headers - no response expected yet
+	headers := igwtestutils.BuildEnvoyGRPCHeaders(map[string]string{
+		"x-test":                   "body",
+		":method":                  "POST",
+		metadata.FlowFairnessIDKey: "test-fairness",
+		"x-request-id":             "test-request-id",
+	}, true)
+	request := &pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_RequestHeaders{
+			RequestHeaders: headers,
+		},
+	}
+	err := process.Send(request)
+	require.NoError(t, err)
+
+	// 2. Send a large request body (5MB of dummy text to exceed the 4MB default limit)
+	// 5MB = 5 * 1024 * 1024 bytes
+	largeBodySize := 5 * 1024 * 1024
+	largeBodyBytes := make([]byte, largeBodySize)
+	for i := range largeBodyBytes {
+		largeBodyBytes[i] = 'a'
+	}
+
+	// Wrap in valid JSON
+	largeBodyJSON, err := json.Marshal(map[string]any{
+		"model":  "food-review",
+		"prompt": string(largeBodyBytes),
+	})
+	require.NoError(t, err)
+
+	request = &pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_RequestBody{
+			RequestBody: &pb.HttpBody{
+				Body:        largeBodyJSON,
+				EndOfStream: true,
+			},
+		},
+	}
+
+	// Send should trigger EPP's gRPC server error.
+	// Note: Send is asynchronous and might succeed locally, but EPP's server will abort.
+	_ = process.Send(request)
+
+	// 3. Receive must fail with a ResourceExhausted or stream closed error.
+	_, err = process.Recv()
+	require.Error(t, err, "Expected gRPC stream to abort due to 5MB message exceeding 4MB limit")
+	t.Logf("Successfully reproduced gRPC stream limit error: %v", err)
 
 	cancel()
 	<-errChan

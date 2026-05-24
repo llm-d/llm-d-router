@@ -61,9 +61,9 @@ var _ = Describe("Sidecar", Ordered, func() {
 		cmd = exec.Command("kubectl", "describe", "pod", qwenPodName, "-n", namespace)
 		podDescription, err := utils.Run(cmd)
 		if err == nil {
-			fmt.Println("Pod description:\n", podDescription)
+			_, _ = fmt.Fprintf(GinkgoWriter, "Pod description:\n%s", podDescription)
 		} else {
-			fmt.Println("Failed to describe controller pod")
+			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to describe controller pod: %s", err)
 		}
 	})
 

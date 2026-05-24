@@ -120,3 +120,129 @@ func TestEndpointTargetPorts(t *testing.T) {
 		})
 	}
 }
+
+func TestGRPCFlags(t *testing.T) {
+	tests := []struct {
+		name                string
+		args                []string
+		expectedMaxRecvSize int
+		expectedMaxSendSize int
+		expectError         bool
+	}{
+		{
+			name: "Valid flags (raw integers)",
+			args: []string{
+				"--grpc-max-recv-msg-size", "10485760",
+				"--grpc-max-send-msg-size", "20971520",
+			},
+			expectedMaxRecvSize: 10485760,
+			expectedMaxSendSize: 20971520,
+		},
+		{
+			name: "Valid flags with units",
+			args: []string{
+				"--grpc-max-recv-msg-size", "10Mi",
+				"--grpc-max-send-msg-size", "20M",
+			},
+			expectedMaxRecvSize: 10485760, // 10 * 1024 * 1024
+			expectedMaxSendSize: 20000000, // 20 * 1000 * 1000
+		},
+		{
+			name: "Valid flags with B suffix",
+			args: []string{
+				"--grpc-max-recv-msg-size", "10MiB",
+				"--grpc-max-send-msg-size", "20MB",
+			},
+			expectedMaxRecvSize: 10485760,
+			expectedMaxSendSize: 20000000,
+		},
+		{
+			name:                "Defaults",
+			args:                []string{},
+			expectedMaxRecvSize: 0,
+			expectedMaxSendSize: 0,
+		},
+		{
+			name: "Invalid recv size unit",
+			args: []string{
+				"--grpc-max-recv-msg-size", "10invalid",
+			},
+			expectError: true,
+		},
+		{
+			name: "Invalid send size unit",
+			args: []string{
+				"--grpc-max-send-msg-size", "abc",
+			},
+			expectError: true,
+		},
+		{
+			name: "Negative recv size",
+			args: []string{
+				"--grpc-max-recv-msg-size", "-10Mi",
+			},
+			expectError: true,
+		},
+		{
+			name: "Overflow recv size",
+			args: []string{
+				"--grpc-max-recv-msg-size", "10Ei",
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := pflag.NewFlagSet(tt.name, pflag.ContinueOnError)
+			opts := NewOptions()
+			opts.AddFlags(fs)
+
+			argv := make([]string, 0, 4+len(tt.args))
+			argv = append(argv, "--pool-name", "test-pool", "--config-file", "fake-config.yaml")
+			argv = append(argv, tt.args...)
+
+			if err := fs.Parse(argv); err != nil {
+				t.Fatalf("Failed to parse flags: %v", err)
+			}
+
+			err := opts.Complete()
+			if err == nil {
+				err = opts.Validate()
+			}
+
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("Expected Complete() or Validate() to fail, but it succeeded")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Complete/Validate failed unexpectedly with error: %v", err)
+			}
+
+			if opts.GRPCMaxRecvMsgSize != tt.expectedMaxRecvSize {
+				t.Errorf("GRPCMaxRecvMsgSize mismatch: got %v, want %v", opts.GRPCMaxRecvMsgSize, tt.expectedMaxRecvSize)
+			}
+			if opts.GRPCMaxSendMsgSize != tt.expectedMaxSendSize {
+				t.Errorf("GRPCMaxSendMsgSize mismatch: got %v, want %v", opts.GRPCMaxSendMsgSize, tt.expectedMaxSendSize)
+			}
+		})
+	}
+}
+
+func TestValidateDirectValues(t *testing.T) {
+	opts := NewOptions()
+	opts.PoolName = "test-pool" // bypass other validations
+	opts.GRPCMaxRecvMsgSize = -5
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for negative GRPCMaxRecvMsgSize, but it succeeded")
+	}
+
+	opts = NewOptions()
+	opts.PoolName = "test-pool"
+	opts.GRPCMaxSendMsgSize = -5
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for negative GRPCMaxSendMsgSize, but it succeeded")
+	}
+}

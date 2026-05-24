@@ -654,7 +654,16 @@ func (s *Scorer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetad
 		return nil
 	}
 	endpointKey := meta.NamespacedName.String()
-	zmqEndpoint := fmt.Sprintf("tcp://%s:%d", meta.Address, s.kvEventsConfig.PodDiscoveryConfig.SocketPort)
+	// Mirror vLLM's `offset_endpoint_port` rule: rank N binds at
+	// SocketPort + N. For single-rank pods (RankIndex=0) this collapses to
+	// the legacy single-port-per-pod behaviour; multi-rank wide-EP / DP
+	// pods get one subscriber per rank automatically.
+	port := s.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid KV-events ZMQ port %d for endpoint %s (socketPort=%d, rankIndex=%d)",
+			port, endpointKey, s.kvEventsConfig.PodDiscoveryConfig.SocketPort, meta.GetRankIndex())
+	}
+	zmqEndpoint := fmt.Sprintf("tcp://%s:%d", meta.Address, port)
 
 	logger := log.FromContext(ctx).WithName(s.typedName.String())
 	if err := s.subscribersManager.EnsureSubscriber(s.subscriberCtx, endpointKey,

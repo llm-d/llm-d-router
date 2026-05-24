@@ -1,7 +1,7 @@
 name: Apply kind labels from PR body
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, edited, reopened]
     branches:
       - main

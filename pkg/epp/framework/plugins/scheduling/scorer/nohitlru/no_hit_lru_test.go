@@ -57,6 +57,10 @@ func (h *fakeHandle) PodList() []k8stypes.NamespacedName {
 	return make([]k8stypes.NamespacedName, 0)
 }
 
+func (h *fakeHandle) Metrics() plugin.MetricsRecorder {
+	return nil
+}
+
 type stubPlugin struct {
 	name plugin.TypedName
 }
