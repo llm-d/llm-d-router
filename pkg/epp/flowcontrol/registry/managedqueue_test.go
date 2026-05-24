@@ -47,7 +47,7 @@ type mqTestHarness struct {
 // This is ideal for isolating and unit testing the decorator logic of `managedQueue`.
 func newMockedMqHarness(t *testing.T, queue *mocks.MockSafeQueue, key flowcontrol.FlowKey) *mqTestHarness {
 	t.Helper()
-	return newMqHarness(t, queue, key, false)
+	return newMqHarness(t, queue, key)
 }
 
 // newRealMqHarness creates a harness that uses a real "ListQueue" implementation.
@@ -56,18 +56,17 @@ func newRealMqHarness(t *testing.T, key flowcontrol.FlowKey) *mqTestHarness {
 	t.Helper()
 	q, err := queue.NewQueueFromName(queue.ListQueueName, nil)
 	require.NoError(t, err, "Test setup: creating a real ListQueue implementation should not fail")
-	return newMqHarness(t, q, key, false)
+	return newMqHarness(t, q, key)
 }
 
 // newMqHarness is the base constructor for the test harness.
-func newMqHarness(t *testing.T, queue contracts.SafeQueue, key flowcontrol.FlowKey, isDraining bool) *mqTestHarness {
+func newMqHarness(t *testing.T, queue contracts.SafeQueue, key flowcontrol.FlowKey) *mqTestHarness {
 	t.Helper()
 
 	propagator := &mockStatsPropagator{}
 	mockPolicy := &fwkfcmocks.MockOrderingPolicy{}
 
-	isDrainingFunc := func() bool { return isDraining }
-	mq := newManagedQueue(queue, mockPolicy, key, logr.Discard(), propagator.propagate, isDrainingFunc)
+	mq := newManagedQueue(queue, mockPolicy, key, logr.Discard(), propagator.propagate)
 	require.NotNil(t, mq, "Test setup: newManagedQueue must return a valid instance")
 
 	return &mqTestHarness{
@@ -120,7 +119,6 @@ func TestManagedQueue_Add(t *testing.T) {
 	testCases := []struct {
 		name                  string
 		setupMock             func(q *mocks.MockSafeQueue)
-		isDraining            bool
 		expectErr             bool
 		expectErrIs           error // Optional
 		expectedLenDelta      int64
@@ -131,19 +129,9 @@ func TestManagedQueue_Add(t *testing.T) {
 			setupMock: func(q *mocks.MockSafeQueue) {
 				q.AddFunc = func(flowcontrol.QueueItemAccessor) {}
 			},
-			isDraining:            false,
 			expectErr:             false,
 			expectedLenDelta:      1,
 			expectedByteSizeDelta: 100,
-		},
-		{
-			name:                  "ShouldFail_AndNotChangeStats_WhenQueueIsDraining",
-			setupMock:             func(q *mocks.MockSafeQueue) {},
-			isDraining:            true,
-			expectErr:             true,
-			expectErrIs:           contracts.ErrShardDraining,
-			expectedLenDelta:      0,
-			expectedByteSizeDelta: 0,
 		},
 	}
 
@@ -151,7 +139,7 @@ func TestManagedQueue_Add(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			q := &mocks.MockSafeQueue{}
-			h := newMqHarness(t, q, flowKey, tc.isDraining)
+			h := newMqHarness(t, q, flowKey)
 			item := fwkfcmocks.NewMockQueueItemAccessor(100, "req", flowKey)
 			if tc.setupMock != nil {
 				tc.setupMock(q)

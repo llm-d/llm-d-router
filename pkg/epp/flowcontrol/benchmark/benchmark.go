@@ -215,10 +215,7 @@ func setupRegistry(
 		b.Fatalf("Failed to create registry config: %v", err)
 	}
 
-	reg, err := registry.NewFlowRegistry(regCfg, logr.Discard())
-	if err != nil {
-		b.Fatalf("Failed to initialize concrete registry: %v", err)
-	}
+	reg := registry.NewFlowRegistry(regCfg, logr.Discard())
 
 	go reg.Run(ctx)
 	return reg
