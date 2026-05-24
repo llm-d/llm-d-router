@@ -406,10 +406,10 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 
 			req := newTestRequest(defaultFlowKey)
 			outcome, err := h.fc.EnqueueAndWait(context.Background(), req)
-			require.Error(t, err, "EnqueueAndWait must reject requests if no shards are available")
+			require.Error(t, err, "EnqueueAndWait must reject requests if queue doesn't exist fo flow")
 			assert.ErrorIs(t, err, types.ErrRejected, "error should wrap ErrRejected")
 			assert.Equal(t, types.QueueOutcomeRejectedCapacity, outcome,
-				"outcome should be QueueOutcomeRejectedCapacity when no shards exist for the flow")
+				"outcome should be QueueOutcomeRejectedCapacity when queue doesn't exist for the flow")
 		})
 	})
 

@@ -364,10 +364,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	if r.featureGates[flowcontrol.FeatureGate] {
 		endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, time.Millisecond*50)
 		setupLog.Info("Initializing experimental Flow Control layer")
-		registry, err := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to initialize Flow Registry: %w", err)
-		}
+		registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
 		fc, err := fccontroller.NewFlowController(
 			ctx,
 			opts.PoolName,

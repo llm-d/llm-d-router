@@ -68,7 +68,7 @@ func newTestHarness(t *testing.T) *testHarness {
 	statsPropagator := &mockStatsPropagator{}
 	fakeClock := testclock.NewFakeClock(time.Now())
 	registryOpts := []RegistryOption{withClock(fakeClock)}
-	registry, _ := NewFlowRegistry(globalConfig, logr.Discard(), registryOpts...)
+	registry := NewFlowRegistry(globalConfig, logr.Discard(), registryOpts...)
 
 	h := &testHarness{
 		t:                t,

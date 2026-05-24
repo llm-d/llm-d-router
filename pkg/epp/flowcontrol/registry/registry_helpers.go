@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"sync/atomic"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
@@ -51,12 +50,6 @@ type priorityBand struct {
 
 	// priorityBandAccessor is a preallocated flowcontrol.PriorityBandAccessor for this priorityBand
 	priorityBandAccessor *priorityBandAccessor
-
-	// --- Concurrent-Safe State (Atomics) ---
-
-	// Band-level statistics, updated via lock-free propagation from child queues.
-	byteSize atomic.Int64
-	len      atomic.Int64
 }
 
 // initPriorityBand constructs the runtime state for a single priority level and registers it within the shard.

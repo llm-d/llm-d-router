@@ -132,7 +132,7 @@ func withClock(clk clock.WithTickerAndDelayedExecution) RegistryOption {
 }
 
 // NewFlowRegistry creates and initializes a new `FlowRegistry` instance.
-func NewFlowRegistry(config *Config, logger logr.Logger, opts ...RegistryOption) (*FlowRegistry, error) {
+func NewFlowRegistry(config *Config, logger logr.Logger, opts ...RegistryOption) *FlowRegistry {
 	cfg := config.Clone()
 	fr := &FlowRegistry{
 		config: cfg,
@@ -147,13 +147,13 @@ func NewFlowRegistry(config *Config, logger logr.Logger, opts ...RegistryOption)
 	}
 
 	for prio, bandConfig := range cfg.PriorityBands {
-		fr.perPriorityBandStats.Store(prio, &bandStats{})
+		fr.perPriorityBandStats.LoadOrStore(prio, &bandStats{})
 		fr.initPriorityBand(bandConfig)
 	}
 
 	fr.logger.V(logging.DEFAULT).Info("FlowRegistry initialized successfully",
 		"orderedPriorities", fr.orderedPriorityLevels)
-	return fr, nil
+	return fr
 }
 
 // Run starts the registry's background garbage collection loop.
@@ -315,6 +315,9 @@ func (fr *FlowRegistry) deletePriorityBand(priority int) {
 // Statistics are aggregated using high-performance, lock-free atomic updates.
 // The returned stats represent a near-consistent snapshot of the system's state.
 func (fr *FlowRegistry) Stats() contracts.AggregateStats {
+	fr.mu.RLock()
+	defer fr.mu.RUnlock()
+
 	// Casts from `int64` to `uint64` are safe because the non-negativity invariant is strictly enforced at the
 	// `managedQueue` level.
 	stats := contracts.AggregateStats{
@@ -469,12 +472,9 @@ func (fr *FlowRegistry) buildFlowComponents(key flowcontrol.FlowKey) (*flowCompo
 
 // propagateStatsDelta is the top-level, lock-free aggregator for all statistics.
 func (fr *FlowRegistry) propagateStatsDelta(priority int, lenDelta, byteSizeDelta int64) {
-	if rawBand, ok := fr.priorityBands.Load(priority); rawBand != nil && ok {
-		band := rawBand.(*priorityBand)
-		band.len.Add(lenDelta)
-		band.byteSize.Add(byteSizeDelta)
+	if _, ok := fr.priorityBands.Load(priority); ok {
 
-		if val, ok := fr.perPriorityBandStats.Load(priority); ok && val != nil {
+		if val, ok := fr.perPriorityBandStats.Load(priority); ok {
 			stats := val.(*bandStats)
 			stats.len.Add(lenDelta)
 			stats.byteSize.Add(byteSizeDelta)

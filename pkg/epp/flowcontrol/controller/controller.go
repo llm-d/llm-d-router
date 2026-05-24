@@ -283,18 +283,18 @@ func (fc *FlowController) tryDistribution(
 	// We must create a fresh FlowItem on each attempt as finalization is per-lifecycle.
 	item := internal.NewItem(req, effectiveTTL, enqueueTime)
 
-	candidate, err := fc.selectDistributionCandidate(conn)
+	worker := fc.getOrStartWorker()
+	dp := conn.GetDataPlane()
+	_, err := dp.ManagedQueue(conn.FlowKey())
 	if err != nil {
-		outcome := types.QueueOutcomeRejectedOther
-		if errors.Is(err, errNoShards) {
-			outcome = types.QueueOutcomeRejectedCapacity
-		}
-		finalErr := fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
-		item.FinalizeWithOutcome(outcome, finalErr)
-		return item, finalErr
+		fc.logger.Error(err,
+			"Invariant violation. Failed to get ManagedQueue for a leased flow.",
+			"flowKey", conn.FlowKey())
+		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, types.ErrRejected)
+		return item, err
 	}
 
-	outcome, err := fc.distributeRequest(reqCtx, item, candidate)
+	outcome, err := fc.distributeRequest(reqCtx, item, worker)
 	if err == nil {
 		// Success: Ownership of the item has been transferred to the processor.
 		return item, nil
@@ -356,28 +356,6 @@ func (fc *FlowController) createRequestContext(
 	return reqCtx, cancel, enqueueTime
 }
 
-// candidate holds the information needed to evaluate a shard as a potential target for a request.
-type candidate struct {
-	processor processor
-	byteSize  uint64
-}
-
-// selectDistributionCandidate identifies all Active shards for the leased flow and ranks them by the current byte size
-// of that flow's queue, from least to most loaded.
-func (fc *FlowController) selectDistributionCandidate(conn contracts.ActiveFlowConnection) (*candidate, error) {
-	dp := conn.GetDataPlane()
-
-	worker := fc.getOrStartWorker()
-	mq, err := dp.ManagedQueue(conn.FlowKey())
-	if err != nil {
-		fc.logger.Error(err,
-			"Invariant violation. Failed to get ManagedQueue for a leased flow.",
-			"flowKey", conn.FlowKey())
-		return nil, fmt.Errorf("%w for flow %s", errNoShards, conn.FlowKey())
-	}
-	return &candidate{worker.processor, mq.FlowQueueAccessor().ByteSize()}, nil
-}
-
 // distributeRequest implements a flow-aware, two-phase "Join-Shortest-Queue-by-Bytes" (JSQ-Bytes) distribution strategy
 // with graceful backpressure. It attempts to submit an item to the best-ranked candidate from the provided list.
 //
@@ -396,16 +374,16 @@ func (fc *FlowController) selectDistributionCandidate(conn contracts.ActiveFlowC
 func (fc *FlowController) distributeRequest(
 	ctx context.Context,
 	item *internal.FlowItem,
-	candidate *candidate,
+	worker *managedWorker,
 ) (types.QueueOutcome, error) {
 	reqID := item.OriginalRequest().ID()
-	if err := candidate.processor.Submit(item); err == nil {
+	if err := worker.processor.Submit(item); err == nil {
 		return types.QueueOutcomeNotYetFinalized, nil
 	}
 
 	// processor is busy. Attempt a single blocking submission to the candidate.
 	fc.logger.V(logutil.TRACE).Info("Processor is busy, attempting blocking submit", "requestID", reqID)
-	err := candidate.processor.SubmitOrBlock(ctx, item)
+	err := worker.processor.SubmitOrBlock(ctx, item)
 	if err != nil {
 		return types.QueueOutcomeRejectedOther, fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
 	}

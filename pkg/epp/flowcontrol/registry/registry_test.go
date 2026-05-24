@@ -72,8 +72,7 @@ func newRegistryTestHarness(t *testing.T, opts harnessOptions) *registryTestHarn
 
 	fakeClock := testclock.NewFakeClock(time.Now())
 	registryOpts := []RegistryOption{withClock(fakeClock)}
-	fr, err := NewFlowRegistry(cfg, logr.Discard(), registryOpts...)
-	require.NoError(t, err, "Test setup: NewFlowRegistry should not fail")
+	fr := NewFlowRegistry(cfg, logr.Discard(), registryOpts...)
 
 	if !opts.manualGC {
 		// Start the GC loop in the background.
@@ -230,19 +229,6 @@ func TestFlowRegistry_Stats(t *testing.T) {
 	globalStats := h.fr.Stats()
 	assert.Equal(t, uint64(2), globalStats.TotalLen, "Global TotalLen should be the sum of all items")
 	assert.Equal(t, uint64(40), globalStats.TotalByteSize, "Global TotalByteSize should be the sum of all item sizes")
-
-	var totalPriorityBandLen, totalPriorityBandBytes uint64
-
-	h.fr.priorityBands.Range(func(_, value any) bool {
-		priorityBand := value.(*priorityBand)
-		totalPriorityBandLen += uint64(priorityBand.len.Load())
-		totalPriorityBandBytes += uint64(priorityBand.byteSize.Load())
-
-		return true
-	})
-
-	assert.Equal(t, globalStats.TotalLen, totalPriorityBandLen, "The priorityBand length must equal global length")
-	assert.Equal(t, globalStats.TotalByteSize, totalPriorityBandBytes, "The priorityBand byte size must equal global byte size")
 }
 
 // --- Garbage Collection Tests ---
@@ -1144,8 +1130,7 @@ func TestFlowRegistry_JITErrorScoping(t *testing.T) {
 	cfg, err := NewConfig(handle, withCapabilityChecker(mockChecker), WithDefaultPriorityBand(failingBand))
 	require.NoError(t, err)
 
-	registry, err := NewFlowRegistry(cfg, logr.Discard())
-	require.NoError(t, err)
+	registry := NewFlowRegistry(cfg, logr.Discard())
 
 	key := flowcontrol.FlowKey{
 		Priority: 100, // Dynamic, will trigger ensurePriorityBand
