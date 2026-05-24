@@ -6,19 +6,21 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 
 ## Working in the codebase
 
-- State your interpretation before coding. When the task has multiple valid reads, ask — don't pick one silently.
+- State your interpretation before coding. When the task has multiple valid reads, ask — don't pick one silently. For clear failure signals (logs, failing tests, reproducer), act — the ask rule is about unclear requirements, not unclear bugs.
 - Define success as a checkable outcome — "add validation" becomes "write failing tests for invalid inputs, then make them pass".
 - Before changing or extending a component, read an analogous one in the repository. The closest existing implementation is the canonical pattern — follow its structure, naming, and tests rather than introducing new conventions.
 - The plugin model is the main extension surface. Start at [docs/architecture.md](docs/architecture.md); existing filters, scorers, and profile handlers are the canonical references.
 - Tests in the same package describe the contract. Read them before changing behavior.
 - Verify behavior against the code, not from filenames or familiarity. Run the build or read the test when uncertain.
+- If execution goes sideways — unexpected state, cascading failures, a fix that breaks adjacent code — stop and re-plan. Restate what you know, identify where the plan broke, propose a revised path before continuing.
 
 ## Pull requests
 
 - Minimalism: smallest correct change inside the smallest scope.
 - Non-trivial work must be tracked in an issue. If there isn't one, ask the user to file or link it.
 - The PR addresses that issue and nothing else — no renames, reformatting, refactors, new abstractions, or pattern changes beyond what the issue requires.
-- Unrelated improvements belong in their own issue, not folded into this PR.
+- Unrelated improvements belong in their own issue, not folded into this PR. If you spot dead code or unrelated bugs in passing, mention them — don't fix them.
+- Self-check on the way out: if the change grew larger than expected or the fix feels hacky, rewrite the clean version before opening the PR.
 
 ## Code style
 
