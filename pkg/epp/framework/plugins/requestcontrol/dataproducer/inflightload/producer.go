@@ -19,6 +19,7 @@ package inflightload
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
@@ -53,13 +54,22 @@ func defaultConfig() Config {
 	return Config{AddEstimatedOutputTokens: false}
 }
 
-func InFlightLoadProducerFactory(name string, decoder *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	if handle == nil {
+		return nil, errors.New("handle is nil")
+	}
+	ctx := handle.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	cfg := defaultConfig()
 	if decoder != nil {
 		if err := decoder.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to decode inflight-load-producer parameters: %w", err)
 		}
 	}
+
 	return &InFlightLoadProducer{
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:           newConcurrencyTracker(),
@@ -67,6 +77,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, _ fwkplugin
 		tokenEstimator:           NewSimpleTokenEstimator(),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
+		PluginState:              fwkplugin.NewPluginState(ctx),
 	}, nil
 }
 
@@ -74,7 +85,7 @@ var (
 	_ requestcontrol.PreRequest            = &InFlightLoadProducer{}
 	_ requestcontrol.ResponseBodyProcessor = &InFlightLoadProducer{}
 	_ requestcontrol.DataProducer          = &InFlightLoadProducer{}
-	_ datalayer.EndpointExtractor          = &InFlightLoadProducer{}
+	_ datalayer.EndpointExtractor          = (*InFlightLoadProducer)(nil)
 	_ datalayer.Registrant                 = &InFlightLoadProducer{}
 )
 
@@ -84,15 +95,70 @@ type InFlightLoadProducer struct {
 	tokenTracker             *concurrencyTracker
 	tokenEstimator           TokenEstimator
 	addEstimatedOutputTokens bool
-	// addedTokens tracks the exact token amount added per (requestID, endpointID, profileName)
-	// so release subtracts the same value (accounting for prefix-cache discount).
-	// The profile name is part of the key so that multiple profiles targeting the
-	// same endpoint each track their own increment independently and a release
-	// for one profile cannot subtract another profile's value (which would leak
-	// or double-count tokens).
-	// Key format: "<requestID>|<endpointID>|<profileName>".
-	addedTokens sync.Map
-	dk          fwkplugin.DataKey
+	PluginState              *fwkplugin.PluginState
+	dk                       fwkplugin.DataKey
+}
+
+// addedTokensEntry tracks a request's contribution to the global token and
+// request counters. OnEvicted rolls back the contribution exactly once,
+// whether triggered by explicit release at end-of-stream or by the janitor's
+// TTL reaper. The fields are atomic so releaseTokensEarly and OnEvicted
+// can race safely: whichever swaps first does the decrement, the other
+// sees 0 and is a no-op.
+type addedTokensEntry struct {
+	endpointID     string
+	tokens         atomic.Int64
+	tokenTracker   *concurrencyTracker
+	requestTracker *concurrencyTracker
+	requests       atomic.Int32
+}
+
+var _ fwkplugin.EvictableStateData = (*addedTokensEntry)(nil)
+
+// Clone returns a distinct copy of the entry with the current atomic values.
+// The tracker references remain shared, but the cloned state object itself is
+// independent so later mutation or eviction of the clone does not alias the
+// original entry.
+func (e *addedTokensEntry) Clone() fwkplugin.StateData {
+	if e == nil {
+		return nil
+	}
+	clone := &addedTokensEntry{
+		endpointID:     e.endpointID,
+		tokenTracker:   e.tokenTracker,
+		requestTracker: e.requestTracker,
+	}
+	clone.tokens.Store(e.tokens.Load())
+	clone.requests.Store(e.requests.Load())
+	return clone
+}
+
+// addIfPresent applies delta only when the endpoint is still tracked.
+// This avoids recreating a deleted endpoint with a negative in-flight count
+// during delayed eviction cleanup.
+func (t *concurrencyTracker) addIfPresent(endpointID string, delta int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	counter, ok := t.counts[endpointID]
+	if !ok {
+		return
+	}
+	counter.Add(delta)
+}
+
+// decIfPresent decrements the endpoint only when it is still tracked.
+func (t *concurrencyTracker) decIfPresent(endpointID string) {
+	t.addIfPresent(endpointID, -1)
+}
+
+func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
+	if t := e.tokens.Swap(0); t != 0 {
+		e.tokenTracker.addIfPresent(e.endpointID, -t)
+	}
+	if e.requests.Swap(0) != 0 {
+		e.requestTracker.decIfPresent(e.endpointID)
+	}
 }
 
 func (p *InFlightLoadProducer) TypedName() fwkplugin.TypedName {
@@ -117,7 +183,7 @@ func (p *InFlightLoadProducer) ExpectedInputType() reflect.Type {
 
 // ExtractEndpoint handles endpoint deletion events to prune stateful trackers.
 func (p *InFlightLoadProducer) ExtractEndpoint(ctx context.Context, event datalayer.EndpointEvent) error {
-	if event.Type != datalayer.EventDelete || event.Endpoint == nil {
+	if event.Type != datalayer.EventDelete || event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
 		return nil
 	}
 
@@ -130,6 +196,9 @@ func (p *InFlightLoadProducer) ExtractEndpoint(ctx context.Context, event datala
 
 func (p *InFlightLoadProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	for _, e := range endpoints {
+		if e == nil || e.GetMetadata() == nil {
+			continue
+		}
 		endpointID := e.GetMetadata().NamespacedName.String()
 		e.Put(p.dk.String(), &attrconcurrency.InFlightLoad{
 			Tokens:   p.tokenTracker.get(endpointID),
@@ -139,8 +208,23 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, _ *fwksched.InferenceR
 	return nil
 }
 
-func (p *InFlightLoadProducer) PreRequest(_ context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
+func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
 	if result == nil || len(result.ProfileResults) == 0 {
+		return
+	}
+
+	if request == nil {
+		log.FromContext(ctx).V(logutil.VERBOSE).Info("Skipping in-flight load tracking: request is nil")
+		return
+	}
+
+	if request.RequestID == "" {
+		log.FromContext(ctx).V(logutil.VERBOSE).Info("Skipping in-flight load tracking: missing RequestID")
+		return
+	}
+
+	if p.PluginState == nil {
+		log.FromContext(ctx).V(logutil.VERBOSE).Info("Skipping in-flight load tracking: PluginState is nil", "requestID", request.RequestID)
 		return
 	}
 
@@ -170,19 +254,29 @@ func (p *InFlightLoadProducer) PreRequest(_ context.Context, request *fwksched.I
 		}
 
 		p.tokenTracker.add(eid, tokens)
-		if request != nil && request.RequestID != "" {
-			p.addedTokens.Store(addedTokensKey(request.RequestID, eid, profileName), tokens)
+
+		entry := &addedTokensEntry{
+			endpointID:     eid,
+			tokenTracker:   p.tokenTracker,
+			requestTracker: p.requestTracker,
 		}
+		entry.tokens.Store(tokens)
+		entry.requests.Store(1)
+		p.PluginState.Write(
+			request.RequestID,
+			fwkplugin.StateKey(addedTokensKey(eid, profileName)),
+			entry,
+		)
 	}
 }
 
 func (p *InFlightLoadProducer) ResponseBody(
-	ctx context.Context,
+	_ context.Context,
 	request *fwksched.InferenceRequest,
 	resp *requestcontrol.Response,
 	_ *datalayer.EndpointMetadata,
 ) {
-	if request == nil || resp == nil {
+	if request == nil || resp == nil || request.RequestID == "" || p.PluginState == nil {
 		return
 	}
 
@@ -195,106 +289,87 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// the prompt cost, which is consumed by prefill. As soon as the first chunk
 	// arrives (StartOfStream), prefill is done across all profiles, so free the
 	// token counters for every targeted endpoint regardless of profile name.
-	// Request counters are still released on EndOfStream below.
+	// Request counters are still released on EndOfStream below via PluginState.Delete.
 	if !p.addEstimatedOutputTokens && resp.StartOfStream {
 		for profileName, profileResult := range result.ProfileResults {
 			if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
 				continue
 			}
-			p.releaseTokens(profileResult.TargetEndpoints[0], request, profileName)
+			endpoint := profileResult.TargetEndpoints[0]
+			if endpoint == nil || endpoint.GetMetadata() == nil {
+				continue
+			}
+			p.releaseTokensEarly(endpoint, request, profileName)
 		}
 	}
 
-	// 1. Early Prefill Release (on first chunk) — original behavior.
-	// Uses the new StartOfStream signal provided by the framework.
+	// Early prefill release (on first chunk). Frees the primary profile's
+	// prefill contribution as soon as prefill completes, while other profiles'
+	// entries remain until EndOfStream.
 	if p.addEstimatedOutputTokens && resp.StartOfStream {
 		if prefillResult, ok := result.ProfileResults[profilePrefill]; ok && len(prefillResult.TargetEndpoints) > 0 {
-			p.release(prefillResult.TargetEndpoints[0], request, profilePrefill)
+			endpoint := prefillResult.TargetEndpoints[0]
+			if endpoint != nil && endpoint.GetMetadata() != nil {
+				p.release(endpoint, request, profilePrefill)
+			}
 		}
 	}
 
-	// 2. Full Cleanup (on completion)
+	// Full cleanup on completion vs. lifetime extension on an intermediate chunk.
+	// PluginState.Delete iterates remaining entries via per-key LoadAndDelete,
+	// firing OnEvicted at most once per entry; entries already released at
+	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
-		for name, profileResult := range result.ProfileResults {
-			if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
-				continue
-			}
-			endpoint := profileResult.TargetEndpoints[0]
-
-			if !p.addEstimatedOutputTokens {
-				// Tokens are normally freed at StartOfStream; also call
-				// releaseTokens here as a safety net for non-streaming or
-				// error paths where StartOfStream may not be observed. It is
-				// a no-op via LoadAndDelete if tokens were already released.
-				p.release(endpoint, request, name)
-				continue
-			}
-
-			// Skip "prefill" as it was already released in the StartOfStream block.
-			// This works perfectly even if StartOfStream and EndOfStream are both true (single chunk).
-			if name == profilePrefill {
-				continue
-			}
-			p.release(endpoint, request, name)
-		}
+		p.PluginState.Delete(request.RequestID)
+	} else {
+		p.PluginState.Touch(request.RequestID)
 	}
 }
 
+// release surgically deletes a single profile's entry from PluginState,
+// triggering OnEvicted to roll back that profile's counter contribution.
+// Used at StartOfStream when a single profile needs to be released ahead of
+// the EndOfStream bulk Delete.
 func (p *InFlightLoadProducer) release(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, profileName string) {
-	p.releaseRequest(endpoint)
-	p.releaseTokens(endpoint, request, profileName)
-}
-
-func (p *InFlightLoadProducer) releaseRequest(endpoint fwksched.Endpoint) {
-	if endpoint == nil || endpoint.GetMetadata() == nil {
+	if endpoint == nil || request == nil || request.RequestID == "" || p.PluginState == nil {
 		return
 	}
-	eid := endpoint.GetMetadata().NamespacedName.String()
-	p.requestTracker.dec(eid)
-}
-
-func (p *InFlightLoadProducer) releaseTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, profileName string) {
-	if endpoint == nil || endpoint.GetMetadata() == nil {
+	meta := endpoint.GetMetadata()
+	if meta == nil {
 		return
 	}
-	eid := endpoint.GetMetadata().NamespacedName.String()
+	eid := meta.NamespacedName.String()
+	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 
-	// Prefer the exact value stored in PreRequest to keep counters balanced.
-	// LoadAndDelete makes this idempotent per (requestID, endpointID, profileName):
-	// a second call for the same key finds nothing and is a no-op below (we do
-	// NOT fall back to Estimate when the request carries a real RequestID, since
-	// the absence of the key means "already released").
-	if request != nil && request.RequestID != "" {
-		key := addedTokensKey(request.RequestID, eid, profileName)
-		if v, ok := p.addedTokens.LoadAndDelete(key); ok {
-			if tokens, ok := v.(int64); ok && tokens != 0 {
-				p.tokenTracker.add(eid, -tokens)
-			}
+	// DeleteKey triggers OnEvicted, which decrements the counters exactly once.
+	// If the janitor already reaped the request, this is a no-op.
+	p.PluginState.DeleteKey(request.RequestID, key)
+}
+
+// releaseTokensEarly frees only the token portion of a profile's entry
+// (request counter stays held), used at StartOfStream for the
+// addEstimatedOutputTokens=false path where prefill completion frees tokens
+// but the request remains in-flight until EndOfStream.
+func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, profileName string) {
+	if endpoint == nil || request == nil || request.RequestID == "" || p.PluginState == nil {
+		return
+	}
+	meta := endpoint.GetMetadata()
+	if meta == nil {
+		return
+	}
+	eid := meta.NamespacedName.String()
+
+	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
+	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
+		if t := entry.tokens.Swap(0); t != 0 {
+			entry.tokenTracker.addIfPresent(entry.endpointID, -t)
 		}
-		// Either we just released the stored value, or the key was already
-		// released by a previous call — both cases are no-ops here.
-		return
-	}
-
-	// Fallback: re-estimate. Covers tests/legacy paths that bypass PreRequest
-	// (request is nil or has no RequestID, so nothing was stored to release).
-	// Mirror PreRequest's accounting so we subtract the same amount we would
-	// have added: uncached input tokens, plus output tokens only when
-	// addEstimatedOutputTokens is true. Using tokenEstimator.Estimate() here would
-	// ignore both the addEstimatedOutputTokens=false semantics and any prefix-cache
-	// discount applied at PreRequest time, leading over/under-decrement.
-	inputTokens := p.tokenEstimator.EstimateInput(request)
-	tokens := uncachedInputTokens(endpoint, inputTokens)
-	if p.addEstimatedOutputTokens {
-		tokens += p.tokenEstimator.EstimateOutput(inputTokens)
-	}
-	if tokens != 0 {
-		p.tokenTracker.add(eid, -tokens)
 	}
 }
 
-func addedTokensKey(requestID, endpointID, profileName string) string {
-	return requestID + "|" + endpointID + "|" + profileName
+func addedTokensKey(endpointID, profileName string) string {
+	return endpointID + "|" + profileName + "|added"
 }
 
 // uncachedInputTokens returns the prompt tokens this endpoint must actually compute,
@@ -378,10 +453,10 @@ func newConcurrencyTracker() *concurrencyTracker {
 	}
 }
 
-func (ct *concurrencyTracker) get(endpointID string) int64 {
-	ct.mu.RLock()
-	counter, exists := ct.counts[endpointID]
-	ct.mu.RUnlock()
+func (t *concurrencyTracker) get(endpointID string) int64 {
+	t.mu.RLock()
+	counter, exists := t.counts[endpointID]
+	t.mu.RUnlock()
 
 	if !exists {
 		return 0
@@ -389,39 +464,35 @@ func (ct *concurrencyTracker) get(endpointID string) int64 {
 	return counter.Load()
 }
 
-func (ct *concurrencyTracker) inc(endpointID string) {
-	ct.add(endpointID, 1)
+func (t *concurrencyTracker) inc(endpointID string) {
+	t.add(endpointID, 1)
 }
 
-func (ct *concurrencyTracker) add(endpointID string, delta int64) {
-	ct.mu.RLock()
-	counter, exists := ct.counts[endpointID]
-	ct.mu.RUnlock()
+func (t *concurrencyTracker) add(endpointID string, delta int64) {
+	t.mu.RLock()
+	counter, exists := t.counts[endpointID]
+	t.mu.RUnlock()
 
 	if exists {
 		counter.Add(delta)
 		return
 	}
 
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	if counter, exists = ct.counts[endpointID]; exists {
+	if counter, exists = t.counts[endpointID]; exists {
 		counter.Add(delta)
 		return
 	}
 
 	counter = &atomic.Int64{}
 	counter.Store(delta)
-	ct.counts[endpointID] = counter
+	t.counts[endpointID] = counter
 }
 
-func (ct *concurrencyTracker) dec(endpointID string) {
-	ct.add(endpointID, -1)
-}
-
-func (ct *concurrencyTracker) delete(endpointID string) {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	delete(ct.counts, endpointID)
+func (t *concurrencyTracker) delete(endpointID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.counts, endpointID)
 }

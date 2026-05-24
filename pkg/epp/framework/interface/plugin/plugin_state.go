@@ -60,11 +60,11 @@ type PluginState struct {
 // Read retrieves data with the given "key" in the context of "requestID" from PluginState.
 // If the key is not present, ErrNotFound is returned.
 func (s *PluginState) Read(requestID string, key StateKey) (StateData, error) {
-	s.requestToLastAccessTime.Store(requestID, time.Now())
 	stateMap, ok := s.storage.Load(requestID)
 	if !ok {
 		return nil, ErrNotFound
 	}
+	s.requestToLastAccessTime.Store(requestID, time.Now())
 
 	stateData := stateMap.(*sync.Map)
 	if value, ok := stateData.Load(key); ok {
@@ -75,6 +75,7 @@ func (s *PluginState) Read(requestID string, key StateKey) (StateData, error) {
 }
 
 // Write stores the given "val" in PluginState with the given "key" in the context of the given "requestID".
+// Note: overwriting an existing key does NOT trigger OnEvicted on the displaced value.
 func (s *PluginState) Write(requestID string, key StateKey, val StateData) {
 	s.requestToLastAccessTime.Store(requestID, time.Now())
 	var stateData *sync.Map
@@ -90,13 +91,59 @@ func (s *PluginState) Write(requestID string, key StateKey, val StateData) {
 	s.storage.Store(requestID, stateData)
 }
 
-// Delete deletes data associated with the given requestID.
-// It is possible to call Delete explicitly when the handling of a request is completed
-// or alternatively, if the request failed during its processing, a cleanup goroutine will
-// clean data of stale requests.
+// Delete deletes data associated with the given requestID from PluginState.
+//
+// Triggers OnEvicted for every EvictableStateData entry being removed.
+// OnEvicted is invoked at most once per entry: Delete uses LoadAndDelete
+// per key, so it does not fire OnEvicted on entries that were concurrently
+// removed by a racing DeleteKey (or another Delete) on the same requestID.
 func (s *PluginState) Delete(requestID string) {
-	s.storage.Delete(requestID)
 	s.requestToLastAccessTime.Delete(requestID)
+	val, ok := s.storage.LoadAndDelete(requestID)
+	if !ok {
+		return
+	}
+	stateData := val.(*sync.Map)
+	stateData.Range(func(k, _ any) bool {
+		if claimed, ok := stateData.LoadAndDelete(k); ok {
+			if evictable, ok := claimed.(EvictableStateData); ok {
+				evictable.OnEvicted(requestID, k.(StateKey))
+			}
+		}
+		return true
+	})
+}
+
+// DeleteKey deletes the data associated with the given "key" in the context of "requestID" from PluginState.
+//
+// Note: DeleteKey triggers the OnEvicted callback for the EvictableStateData entry being removed.
+func (s *PluginState) DeleteKey(requestID string, key StateKey) {
+	stateMap, ok := s.storage.Load(requestID)
+	if !ok {
+		return
+	}
+
+	stateData := stateMap.(*sync.Map)
+	if val, ok := stateData.LoadAndDelete(key); ok {
+		if evictable, ok := val.(EvictableStateData); ok {
+			evictable.OnEvicted(requestID, key)
+		}
+	}
+}
+
+// Touch updates the last access time for the given requestID, extending its
+// lifetime before being reaped by the janitor.
+func (s *PluginState) Touch(requestID string) {
+	s.requestToLastAccessTime.Store(requestID, time.Now())
+}
+
+// LastAccessTime returns the last access time for the given requestID and a
+// boolean indicating if the requestID was found.
+func (s *PluginState) LastAccessTime(requestID string) (time.Time, bool) {
+	if val, ok := s.requestToLastAccessTime.Load(requestID); ok {
+		return val.(time.Time), true
+	}
+	return time.Time{}, false
 }
 
 // cleanup periodically deletes data associated with the given requestID.
@@ -122,6 +169,7 @@ func (s *PluginState) cleanStaleRequests() {
 		requestID := k.(string)
 		lastAccessTime := v.(time.Time)
 		if time.Since(lastAccessTime) > stalenessThreshold {
+			log.Log.V(logutil.DEBUG).Info("Cleaning up stale request from PluginState", "requestID", requestID, "lastAccessTime", lastAccessTime)
 			s.Delete(requestID) // cleanup stale requests (this is safe in sync.Map)
 		}
 		return true
