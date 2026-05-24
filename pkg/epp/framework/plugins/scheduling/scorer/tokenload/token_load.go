@@ -45,10 +45,10 @@ type Config struct {
 var _ fwksched.Scorer = &TokenLoadScorer{}
 
 type TokenLoadScorer struct {
-	typedName            fwkplugin.TypedName
-	queueThresholdTokens float64
-	inFlightLoadDataKey  fwkplugin.DataKey
-	currentRequestEndpointImpactDK fwkplugin.DataKey
+	typedName                           fwkplugin.TypedName
+	queueThresholdTokens                float64
+	inFlightLoadDataKey                 fwkplugin.DataKey
+	currentRequestEndpointImpactDataKey fwkplugin.DataKey
 }
 
 func TokenLoadScorerFactory(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -65,10 +65,10 @@ func TokenLoadScorerFactory(name string, params *json.Decoder, _ fwkplugin.Handl
 	}
 
 	return &TokenLoadScorer{
-		typedName:            fwkplugin.TypedName{Type: TokenLoadScorerType, Name: name},
-		queueThresholdTokens: float64(cfg.QueueThresholdTokens),
-		inFlightLoadDataKey:  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
-		currentRequestEndpointImpactDK: attrconcurrency.CurrentRequestEndpointImpactDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
+		typedName:                           fwkplugin.TypedName{Type: TokenLoadScorerType, Name: name},
+		queueThresholdTokens:                float64(cfg.QueueThresholdTokens),
+		inFlightLoadDataKey:                 attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
+		currentRequestEndpointImpactDataKey: attrconcurrency.CurrentRequestEndpointImpactDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
 	}, nil
 }
 
@@ -82,8 +82,8 @@ func (s *TokenLoadScorer) Category() fwksched.ScorerCategory {
 
 func (s *TokenLoadScorer) Consumes() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
-		s.inFlightLoadDataKey:  attrconcurrency.InFlightLoad{},
-		s.currentRequestEndpointImpactDK: attrconcurrency.InFlightLoad{},
+		s.inFlightLoadDataKey:                 attrconcurrency.InFlightLoad{},
+		s.currentRequestEndpointImpactDataKey: attrconcurrency.InFlightLoad{},
 	}
 }
 
@@ -96,13 +96,13 @@ func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceReques
 		tokenLoad := 0.0
 
 		if val, ok := endpoint.Get(s.inFlightLoadDataKey.String()); ok {
-			if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
+			if load, ok := val.(*attrconcurrency.InFlightLoad); ok && load != nil {
 				tokenLoad = float64(load.Tokens)
 			}
 		}
 
-		if val, ok := endpoint.Get(s.currentRequestEndpointImpactDK.String()); ok {
-			if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
+		if val, ok := endpoint.Get(s.currentRequestEndpointImpactDataKey.String()); ok {
+			if load, ok := val.(*attrconcurrency.InFlightLoad); ok && load != nil {
 				tokenLoad += float64(load.Tokens)
 			}
 		}
