@@ -279,7 +279,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			// Labels are empty because we skipped the Request phase.
 			wantMetrics: map[string]string{
 				"inference_objective_input_tokens": cleanMetric(`
-					# HELP inference_objective_input_tokens [ALPHA] Inference objective input token count distribution for requests in each model.
+					# HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_router_epp_input_tokens] Inference objective input token count distribution for requests in each model.
 					# TYPE inference_objective_input_tokens histogram
 					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
 					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8"} 1
@@ -403,7 +403,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			}(),
 			wantMetrics: map[string]string{
 				"inference_objective_input_tokens": cleanMetric(`
-					# HELP inference_objective_input_tokens [ALPHA] Inference objective input token count distribution for requests in each model.
+					# HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_router_epp_input_tokens] Inference objective input token count distribution for requests in each model.
 					# TYPE inference_objective_input_tokens histogram
 					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
 					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8"} 1
@@ -429,7 +429,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 					inference_objective_input_tokens_count{model_name="",target_model_name=""} 1
 					`),
 				"inference_objective_output_tokens": cleanMetric(`
-					# HELP inference_objective_output_tokens [ALPHA] Inference objective output token count distribution for requests in each model.
+					# HELP inference_objective_output_tokens [ALPHA] [Deprecated: Use llm_d_router_epp_output_tokens] Inference objective output token count distribution for requests in each model.
 					# TYPE inference_objective_output_tokens histogram
 					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="1"} 0
 					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="8"} 0

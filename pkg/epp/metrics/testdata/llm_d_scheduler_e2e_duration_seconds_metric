@@ -1,0 +1,15 @@
+# HELP llm_d_router_epp_scheduler_e2e_duration_seconds [ALPHA] End-to-end scheduling latency distribution in seconds.
+# TYPE llm_d_router_epp_scheduler_e2e_duration_seconds histogram
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="0.0001"} 0
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="0.0002"} 1
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="0.0005"} 1
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="0.001"} 2
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="0.002"} 3
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="0.005"} 4
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="0.01"} 5
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="0.02"} 6
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="0.05"} 7
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="0.1"} 8
+llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="+Inf"} 9
+llm_d_router_epp_scheduler_e2e_duration_seconds_sum 0.2835
+llm_d_router_epp_scheduler_e2e_duration_seconds_count 9

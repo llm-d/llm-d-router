@@ -1,0 +1,18 @@
+name: 'Helm Build and Push'
+description: 'Builds, packages, and pushes a specific EPP Helm chart using Makefile rules'
+inputs:
+  chart_name:
+    description: 'Name of the chart to build and push (llm-d-router-standalone or llm-d-router-gateway)'
+    required: true
+  extra_tag:
+    description: 'Tag for the EPP image and chart version (e.g., v0.1.0 or branch name)'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Package and Push Chart
+      shell: bash
+      env:
+        EXTRA_TAG: "${{ inputs.extra_tag }}"
+      run: |
+        make helm-push CHART="${{ inputs.chart_name }}"

@@ -19,6 +19,7 @@ package utils
 import (
 	"context"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -28,6 +29,7 @@ import (
 type testHandle struct {
 	ctx context.Context
 	plugin.HandlePlugins
+	metricsRecorder plugin.MetricsRecorder
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -37,6 +39,10 @@ func (h *testHandle) Context() context.Context {
 
 func (h *testHandle) PodList() []types.NamespacedName {
 	return []types.NamespacedName{}
+}
+
+func (h *testHandle) Metrics() plugin.MetricsRecorder {
+	return h.metricsRecorder
 }
 
 type testHandlePlugins struct {
@@ -69,5 +75,6 @@ func NewTestHandle(ctx context.Context) plugin.Handle {
 		HandlePlugins: &testHandlePlugins{
 			plugins: map[string]plugin.Plugin{},
 		},
+		metricsRecorder: prometheus.NewRegistry(),
 	}
 }

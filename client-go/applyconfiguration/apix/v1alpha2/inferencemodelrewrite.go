@@ -26,7 +26,7 @@ func InferenceModelRewrite(name, namespace string) *InferenceModelRewriteApplyCo
 	b.WithName(name)
 	b.WithNamespace(namespace)
 	b.WithKind("InferenceModelRewrite")
-	b.WithAPIVersion("inference.networking.x-k8s.io/v1alpha2")
+	b.WithAPIVersion("llm-d.ai/v1alpha2")
 	return b
 }
 

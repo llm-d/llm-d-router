@@ -28,7 +28,7 @@ AGENTGATEWAY_TAG=${AGENTGATEWAY_TAG:-${EXTRA_TAG}}
 export EXTRA_TAG AGENTGATEWAY_TAG IMAGE_REGISTRY EPP_RELEASE_IMAGE_REPOSITORY
 
 HELM_CHART_REPO=${HELM_CHART_REPO:-${IMAGE_REGISTRY}/charts}
-CHART=${CHART:-inferencepool}
+CHART=${CHART:-llm-d-router-gateway}
 
 HELM=${HELM:-./bin/helm}
 
@@ -38,14 +38,14 @@ chart_version=${CHART_VERSION}
 if [[ ${EXTRA_TAG} =~ ${semver_regex} ]]
 then
   ${YQ} -i \
-    '.inferenceExtension.image.registry=strenv(IMAGE_REGISTRY) |
-     .inferenceExtension.image.repository=strenv(EPP_RELEASE_IMAGE_REPOSITORY) |
-     .inferenceExtension.image.tag=strenv(EXTRA_TAG) |
-     .inferenceExtension.image.pullPolicy="IfNotPresent"' \
+    '.router.epp.image.registry=strenv(IMAGE_REGISTRY) |
+     .router.epp.image.repository=strenv(EPP_RELEASE_IMAGE_REPOSITORY) |
+     .router.epp.image.tag=strenv(EXTRA_TAG) |
+     .router.epp.image.pullPolicy="IfNotPresent"' \
     config/charts/${CHART}/values.yaml
-  if [[ ${CHART} == "standalone" ]]; then
+  if [[ ${CHART} == "llm-d-router-standalone" ]]; then
     ${YQ} -i \
-      '.inferenceExtension.sidecar.presets.agentgateway.image="cr.agentgateway.dev/agentgateway:" + strenv(AGENTGATEWAY_TAG)' \
+      '.router.proxy.presets.agentgateway.image="cr.agentgateway.dev/agentgateway:" + strenv(AGENTGATEWAY_TAG)' \
       config/charts/${CHART}/values.yaml
   fi
   chart_version=${EXTRA_TAG}
