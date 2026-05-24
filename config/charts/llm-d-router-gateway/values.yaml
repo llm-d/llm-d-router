@@ -31,6 +31,3 @@ httpRoute:
   # Example header matches:
   # headerMatches:
   #  x-my-custom-route-header: route-name
-
-
-
