@@ -261,8 +261,6 @@ func (fc *FlowController) EnqueueAndWait(
 	return finalOutcome, err
 }
 
-var errNoShards = errors.New("no viable active shards available")
-
 // tryDistribution handles a single attempt to select a shard and submit a request.
 // It uses the provided `conn` to identify candidate shards.
 // If this function returns an error, it guarantees that the provided `item` has been finalized.
