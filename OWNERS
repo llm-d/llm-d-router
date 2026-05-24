@@ -11,6 +11,7 @@ reviewers:
 - shmuelk
 - vMaroon
 - ahg-g
+- liu-cong
 
 # Auto-assign configuration for global assignment
 # Works in addition to GitHub's built-in CODEOWNERS functionality
@@ -22,6 +23,7 @@ auto-assign:
   - shmuelk
   - vMaroon
   - ahg-g
+  - liu-cong
 
 
 emeritus:

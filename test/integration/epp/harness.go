@@ -444,24 +444,29 @@ func (h *TestHarness) WaitForReadyPodsMetric(expectedCount int) {
 // WaitForSync blocks until the EPP Datastore has synced the expected number of pods.
 func (h *TestHarness) WaitForSync(expectedPods int, checkModelObjective string) *TestHarness {
 	h.t.Helper()
-	require.Eventually(h.t, func() bool {
-		if h.hasCRDs() && !h.Datastore.PoolHasSynced() {
-			return false
-		}
 
-		if len(h.Datastore.PodList(datastore.AllPodsPredicate)) != expectedPods {
+	var lastPoolSynced bool
+	var lastPodsFound int
+	require.Eventually(h.t, func() bool {
+		hasCRDs := h.hasCRDs()
+		lastPoolSynced = h.Datastore.PoolHasSynced()
+		lastPodsFound = len(h.Datastore.PodList(datastore.AllPodsPredicate))
+		if hasCRDs && !lastPoolSynced {
 			return false
 		}
-		if h.hasCRDs() && checkModelObjective != "" && h.Datastore.ObjectiveGet(checkModelObjective) == nil {
+		if lastPodsFound != expectedPods {
+			return false
+		}
+		if hasCRDs && checkModelObjective != "" && h.Datastore.ObjectiveGet(checkModelObjective) == nil {
 			return false
 		}
 		return true
 	}, 10*time.Second, 50*time.Millisecond,
-		"Datastore sync timed out.\n- runMode: standaloneStrategy=%v\n- PoolSynced: %v\n- Pods Found: %d (Expected: %d)",
+		"Datastore sync timed out (runMode=%v standaloneStrategy=%v poolSynced=%v podsFound=%d expected=%d)",
 		h.runMode,
 		h.standaloneStrategy,
-		h.Datastore.PoolHasSynced(),
-		len(h.Datastore.PodList(datastore.AllPodsPredicate)),
+		lastPoolSynced,
+		lastPodsFound,
 		expectedPods,
 	)
 	return h

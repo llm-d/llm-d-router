@@ -659,6 +659,10 @@ func (s *Scorer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetad
 	// the legacy single-port-per-pod behaviour; multi-rank wide-EP / DP
 	// pods get one subscriber per rank automatically.
 	port := s.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid KV-events ZMQ port %d for endpoint %s (socketPort=%d, rankIndex=%d)",
+			port, endpointKey, s.kvEventsConfig.PodDiscoveryConfig.SocketPort, meta.GetRankIndex())
+	}
 	zmqEndpoint := fmt.Sprintf("tcp://%s:%d", meta.Address, port)
 
 	logger := log.FromContext(ctx).WithName(s.typedName.String())

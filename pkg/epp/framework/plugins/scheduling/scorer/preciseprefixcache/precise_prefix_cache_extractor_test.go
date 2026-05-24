@@ -159,6 +159,27 @@ func TestScorer_EnsureSubscriber_SurvivesRequestCtxCancel(t *testing.T) {
 		"subscriber must outlive the caller's request-scoped context")
 }
 
+func TestScorer_EnsureSubscriber_RejectsPortOutOfRange(t *testing.T) {
+	s := newExtractorScorer(true)
+	defer s.subscribersManager.Shutdown(context.Background())
+
+	s.kvEventsConfig.PodDiscoveryConfig.SocketPort = 65535
+
+	err := s.ensureSubscriber(discardCtx(t), &fwkdl.EndpointMetadata{
+		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-1"},
+		Address:        "10.0.0.1",
+		Port:           "8080",
+		RankIndex:      1,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid KV-events ZMQ port 65536")
+	assert.Contains(t, err.Error(), "socketPort=65535")
+	assert.Contains(t, err.Error(), "rankIndex=1")
+
+	ids, _ := s.subscribersManager.GetActiveSubscribers()
+	assert.Empty(t, ids, "invalid port must not register a subscriber")
+}
+
 // Backwards-compat: configs that don't wire the endpoint-notification-source
 // rely on Score()-time subscriber discovery. Verify the legacy path still
 // installs a subscriber for each endpoint Score() sees.
