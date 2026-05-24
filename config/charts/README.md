@@ -206,30 +206,37 @@ router:
 
 ---
 
-### 3. InferencePool Configuration
+### 3. InferencePool & InferenceObjectives Configuration
 
-Settings for managing the `InferencePool` Kubernetes resource which logically groups the backend model servers.
+Settings for managing the `InferencePool` Kubernetes resource and optional `InferenceObjective` priority routing rules.
 
-#### InferencePool Parameters
+> [!IMPORTANT]
+> `inferenceObjectives` can only be configured when `inferencePool.create` is `true`. Creating `InferenceObjectives` without creating an `InferencePool` is not supported and will trigger a chart validation error.
+
+#### InferencePool & InferenceObjectives Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
 | `router.inferencePool.create` | Whether to create the `InferencePool` resource. Set to `false` in standalone mode for Service-backed routing. | `true` |
-| `router.inferencePool.apiVersion` | The API version of the `InferencePool` resource. | `inference.networking.k8s.io/v1` |
-| `router.inferencePool.group` | The API group of the `InferencePool` resource. | `inference.networking.k8s.io` |
 | `router.inferencePool.failureMode` | EPP failure mode when external processing fails (configured on the pool). Options: `[FailOpen, FailClosed]`. | `FailOpen` |
+| `router.inferenceObjectives` | List of names and priorities to create optional `InferenceObjective` resources. | `[]` |
 
-#### Complete InferencePool Example
+#### Complete InferencePool & InferenceObjectives Example
 
 ```yaml
 router:
   inferencePool:
     # Enable or disable InferencePool resource creation (false in standalone service-backed mode)
     create: true
-    apiVersion: inference.networking.k8s.io/v1
-    group: inference.networking.k8s.io
     # If EPP fails to process the request, route anyway (FailOpen) or fail the request (FailClosed)
     failureMode: FailClosed
+  
+  # Optional: Define InferenceObjective(s) for this InferencePool
+  inferenceObjectives:
+    - name: high-priority
+      priority: 100
+    - name: background-batch
+      priority: 10
 ```
 
 ---
@@ -273,101 +280,7 @@ router:
 
 ---
 
-### 5. Gateway-Specific Configuration (`llm-d-router-gateway` only)
-
-Configures routing policies and optional Gateway API integration features exclusive to the Gateway implementation chart.
-
-#### Gateway-Specific Parameters
-
-| **Parameter Name** | **Description** | **Default** |
-| :--- | :--- | :--- |
-| `inferenceObjectives` | List of names and priorities to create optional `InferenceObjective` resources. | `[]` |
-| `provider.name` | Name of Gateway implementation. Options: `[none, gke, istio]`. | `none` |
-| `provider.istio.destinationRule.host` | Custom host value for Istio DestinationRule. | `""` |
-| `provider.istio.destinationRule.trafficPolicy.connectionPool` | Connection pool settings for Istio DestinationRule. | `{}` |
-| `experimentalHttpRoute.enabled` | Deploy an `HTTPRoute` resource as part of the gateway chart. | `false` |
-| `experimentalHttpRoute.inferenceGatewayName` | Target Gateway name for the `HTTPRoute`. | `inference-gateway` |
-| `experimentalHttpRoute.inferenceGatewayNamespace` | Target Gateway namespace for the `HTTPRoute`. | `""` |
-| `experimentalHttpRoute.requestTimeout` | Request timeout for the `HTTPRoute` (Istio/non-GKE only). | `300s` |
-
-#### Complete Gateway Example
-
-```yaml
-inferenceObjectives:
-  - name: high-priority
-    priority: 100
-  - name: background-batch
-    priority: 10
-
-provider:
-  name: gke # Use GKE gateway implementation
-  
-experimentalHttpRoute:
-  enabled: true
-  inferenceGatewayName: "my-company-gateway"
-  inferenceGatewayNamespace: "gateway-infra"
-  requestTimeout: "120s"
-```
-
----
-
-### 6. Sidecar Proxy Configuration (`router.proxy.*`)
-
-Used primarily in **Standalone Mode** to spin up a proxy container (Envoy sidecar or Agentgateway sidecar) alongside EPP to intercept and route incoming traffic.
-
-#### Proxy Sidecar Parameters
-
-| **Parameter Name** | **Description** | **Default** |
-| :--- | :--- | :--- |
-| `router.proxy.enabled` | Enable a sidecar proxy container in the EPP deployment. | `false` |
-| `router.proxy.proxyType` | **Standalone only**. Type of sidecar proxy. Options: `[envoy, agentgateway]`. | `envoy` |
-| `router.proxy.name` | Name of the sidecar container. | `""` |
-| `router.proxy.image` | Sidecar container image. | `""` |
-| `router.proxy.imagePullPolicy` | Sidecar container image pull policy. | `IfNotPresent` |
-| `router.proxy.command` | Sidecar container command. | `""` |
-| `router.proxy.args` | Sidecar container arguments. | `[]` |
-| `router.proxy.env` | Sidecar container environment variables. | `[]` |
-| `router.proxy.ports` | Sidecar container ports. | `[]` |
-| `router.proxy.livenessProbe` | Sidecar container liveness probe. | `{}` |
-| `router.proxy.readinessProbe` | Sidecar container readiness probe. | `{}` |
-| `router.proxy.resources` | Sidecar container resource requests and limits. | `{}` |
-| `router.proxy.volumeMounts` | Sidecar container volume mounts. | `[]` |
-| `router.proxy.volumes` | Sidecar container volumes. | `[]` |
-| `router.proxy.configMapData` | Key-value pairs to include in a ConfigMap created for the sidecar. | `{}` |
-| `router.proxy.agentgateway.service.create` | **Agentgateway only**. Create a dedicated model Service for the Agentgateway proxy. | `true` |
-| `router.proxy.agentgateway.service.name` | **Agentgateway only**. Name of the model Service to route to. | `""` |
-| `router.proxy.agentgateway.service.namespace` | **Agentgateway only**. Namespace of the model Service. Defaults to release namespace. | `""` |
-| `router.proxy.agentgateway.service.ports` | **Agentgateway only**. Port list for the model Service (must match `modelServers.targetPorts`). | `[]` |
-
-#### Complete Proxy Sidecar Example (Agentgateway Service-Backed)
-
-To deploy EPP in standalone mode with an Agentgateway sidecar routing traffic directly to an existing model Service `my-model-service` (bypassing `InferencePool` creation):
-
-```yaml
-router:
-  inferencePool:
-    create: false # Disable InferencePool creation
-
-  proxy:
-    enabled: true
-    proxyType: agentgateway
-    resources:
-      requests:
-        cpu: "2"
-        memory: 4Gi
-      limits:
-        memory: 8Gi
-    agentgateway:
-      service:
-        create: true # Create a Service to route client traffic to EPP
-        name: "my-model-service"
-        ports:
-          - 8000 # Intercept traffic on port 8000
-```
-
----
-
-### 7. Sidecar Tokenizer Configuration (`router.tokenizer.*`)
+### 5. Sidecar Tokenizer Configuration (`router.tokenizer.*`)
 
 Runs a tokenizer sidecar container to expose a Unix Domain Socket (UDS) to EPP, allowing EPP to tokenize incoming requests and enable precise, token-count-aware routing policies (e.g., precise prefix-cache matching).
 
@@ -418,7 +331,7 @@ router:
 
 ---
 
-### 8. Sidecar Latency Predictor Configuration (`router.latencyPredictor.*`)
+### 6. Sidecar Latency Predictor Configuration (`router.latencyPredictor.*`)
 
 Enables latency predictor containers inside the EPP deployment to feed metrics to a latency scorer plugin, allowing EPP to route traffic based on real-time predicted latencies.
 
@@ -451,4 +364,97 @@ router:
       LATENCY_MAX_SAMPLE_SIZE: "20000"
       LATENCY_MAX_CONCURRENT_DISPATCHES: "48"
       LATENCY_COALESCE_WINDOW_MS: "2"
+```
+
+---
+
+## Deployment Mode Specific Configurations
+
+Depending on your target deployment architecture (Gateway Mode vs Standalone Mode), utilize the following specific configurations.
+
+---
+
+### Gateway Mode Configuration
+
+Configures routing policies, target Gateway interfaces, and priority objectives exclusive to the Gateway implementation chart (`llm-d-router-gateway`).
+
+#### Gateway-Specific Parameters
+
+| **Parameter Name** | **Description** | **Default** |
+| :--- | :--- | :--- |
+| `provider.name` | Name of Gateway implementation. Options: `[none, gke, istio]`. | `none` |
+| `provider.istio.destinationRule.host` | Custom host value for Istio DestinationRule. | `""` |
+| `provider.istio.destinationRule.trafficPolicy.connectionPool` | Connection pool settings for Istio DestinationRule. | `{}` |
+| `httpRoute.create` | Deploy an `HTTPRoute` resource as part of the gateway chart. | `false` |
+| `httpRoute.inferenceGatewayName` | Target Gateway name for the `HTTPRoute`. | `inference-gateway` |
+| `httpRoute.inferenceGatewayNamespace` | Target Gateway namespace for the `HTTPRoute`. | `""` |
+| `httpRoute.requestTimeout` | Request timeout for the `HTTPRoute` (Istio/non-GKE only). | `300s` |
+
+#### Complete Gateway Example
+
+```yaml
+provider:
+  name: gke # Use GKE gateway implementation
+  
+httpRoute:
+  create: true
+  inferenceGatewayName: "my-company-gateway"
+  inferenceGatewayNamespace: "gateway-infra"
+  requestTimeout: "120s"
+```
+
+---
+
+### Standalone Mode Configuration
+
+Configures EPP to run with a sidecar proxy container (Envoy proxy or Agentgateway proxy) to intercept and route client traffic directly to model servers (exclusive to `llm-d-router-standalone`).
+
+#### Proxy Sidecar Parameters
+
+| **Parameter Name** | **Description** | **Default** |
+| :--- | :--- | :--- |
+| `router.proxy.enabled` | Enable a sidecar proxy container in the EPP deployment. | `false` |
+| `router.proxy.proxyType` | **Standalone only**. Type of sidecar proxy. Options: `[envoy, agentgateway]`. | `envoy` |
+| `router.proxy.name` | Name of the sidecar container. | `""` |
+| `router.proxy.image` | Sidecar container image. | `""` |
+| `router.proxy.imagePullPolicy` | Sidecar container image pull policy. | `IfNotPresent` |
+| `router.proxy.command` | Sidecar container command. | `""` |
+| `router.proxy.args` | Sidecar container arguments. | `[]` |
+| `router.proxy.env` | Sidecar container environment variables. | `[]` |
+| `router.proxy.ports` | Sidecar container ports. | `[]` |
+| `router.proxy.livenessProbe` | Sidecar container liveness probe. | `{}` |
+| `router.proxy.readinessProbe` | Sidecar container readiness probe. | `{}` |
+| `router.proxy.resources` | Sidecar container resource requests and limits. | `{}` |
+| `router.proxy.volumeMounts` | Sidecar container volume mounts. | `[]` |
+| `router.proxy.volumes` | Sidecar container volumes. | `[]` |
+| `router.proxy.configMapData` | Key-value pairs to include in a ConfigMap created for the sidecar. | `{}` |
+| `router.proxy.agentgateway.service.create` | **Agentgateway only**. Create a dedicated model Service for the Agentgateway proxy. | `true` |
+| `router.proxy.agentgateway.service.name` | **Agentgateway only**. Name of the model Service to route to. | `""` |
+| `router.proxy.agentgateway.service.namespace` | **Agentgateway only**. Namespace of the model Service. Defaults to release namespace. | `""` |
+| `router.proxy.agentgateway.service.ports` | **Agentgateway only**. Port list for the model Service (must match `modelServers.targetPorts`). | `[]` |
+
+#### Complete Proxy Sidecar Example (Agentgateway Service-Backed)
+
+To deploy EPP in standalone mode with an Agentgateway sidecar routing traffic directly to an existing model Service `my-model-service` (bypassing `InferencePool` creation):
+
+```yaml
+router:
+  inferencePool:
+    create: false # Disable InferencePool creation
+
+  proxy:
+    enabled: true
+    proxyType: agentgateway
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        memory: 8Gi
+    agentgateway:
+      service:
+        create: true # Create a Service to route client traffic to EPP
+        name: "my-model-service"
+        ports:
+          - 8000 # Intercept traffic on port 8000
 ```

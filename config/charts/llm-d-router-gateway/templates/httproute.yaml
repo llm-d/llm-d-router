@@ -1,4 +1,4 @@
-{{- if .Values.experimentalHttpRoute.enabled }}
+{{- if .Values.httpRoute.create }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -9,8 +9,8 @@ spec:
   - group: gateway.networking.k8s.io
     kind: Gateway
     name: {{ include "llm-d-router-gateway.fullname" . }}
-    {{- if .Values.experimentalHttpRoute.inferenceGatewayNamespace }}
-    namespace: {{ .Values.experimentalHttpRoute.inferenceGatewayNamespace }}
+    {{- if .Values.httpRoute.inferenceGatewayNamespace }}
+    namespace: {{ .Values.httpRoute.inferenceGatewayNamespace }}
     {{- end }}
   rules:
   - backendRefs:
@@ -21,13 +21,13 @@ spec:
     - path:
         type: PathPrefix
         value: /
-      {{- if or .Values.experimentalHttpRoute.baseModel .Values.experimentalHttpRoute.headerMatches }}
+      {{- if or .Values.httpRoute.baseModel .Values.httpRoute.headerMatches }}
       headers:
-      {{- $headerMatches := deepCopy (.Values.experimentalHttpRoute.headerMatches | default dict) }}
-      {{- if .Values.experimentalHttpRoute.baseModel }}
+      {{- $headerMatches := deepCopy (.Values.httpRoute.headerMatches | default dict) }}
+      {{- if .Values.httpRoute.baseModel }}
         - type: Exact
           name: X-Gateway-Base-Model-Name
-          value: {{ .Values.experimentalHttpRoute.baseModel }}
+          value: {{ .Values.httpRoute.baseModel }}
       {{- end }}
       {{- range $key, $value := $headerMatches }}
         - type: Exact
@@ -37,6 +37,6 @@ spec:
       {{- end }}
     {{- if ne (lower .Values.provider.name) "gke" }}
     timeouts:
-      request: {{ .Values.experimentalHttpRoute.requestTimeout }}
+      request: {{ .Values.httpRoute.requestTimeout }}
     {{- end }}
 {{- end }}

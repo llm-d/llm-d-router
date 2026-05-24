@@ -118,8 +118,13 @@ tracing:
 
 inferencePool:
   create: true
-  apiVersion: inference.networking.k8s.io/v1
   failureMode: "FailOpen"
+
+inferenceObjectives: []
+# - name: high-priority
+#   priority: 5
+# - name: low-priority
+#   priority: 1
 
 modelServers:
   type: vllm # vllm, sglang, triton-tensorrt-llm, trtllm-serve, triton

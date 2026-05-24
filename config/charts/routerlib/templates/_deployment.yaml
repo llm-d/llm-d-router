@@ -121,7 +121,7 @@ spec:
               - --pool-namespace
               - {{ .Release.Namespace }}
               - --pool-group
-              - {{ .Values.router.inferencePool.group | default "inference.networking.k8s.io" | quote }}
+              - "inference.networking.k8s.io"
           {{- end }}
           {{- if not .Values.router.latencyPredictor.enabled }}
           # Legacy metric CLI flags (skipped when dataLayer is enabled via latency predictor).

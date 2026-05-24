@@ -36,5 +36,6 @@ spec:
 {{- if ne .Values.router.inferencePool.create false }}
 {{- include "llm-d-router.validations.gateway.common" . }}
 {{- include "inference-extension.inferencepool" . }}
+{{- include "inference-extension.inferenceobjective-resource" . }}
 {{- end }}
 {{- end }}

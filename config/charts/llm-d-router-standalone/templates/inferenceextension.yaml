@@ -1,4 +1,4 @@
-{{ include "llm-d-router.validations.epp.resources" $ }}
+{{ include "llm-d-router.validations.epp" $ }}
 {{ include "llm-d-router.validations.standalone" . }}
 {{ include "inference-extension.config" . }}
 {{ include "inference-extension.deployment" . }}
