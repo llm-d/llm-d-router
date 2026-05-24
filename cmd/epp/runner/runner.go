@@ -822,33 +822,23 @@ func resolvePoolNamespace(poolNamespace string) string {
 	return runserver.DefaultPoolNamespace
 }
 
-// resolveDiscovery finds the plugin named by rawConfig.DataLayer.Discovery.PluginRef,
-// instantiates it via the registered factory, and returns it as an EndpointDiscovery.
+// resolveDiscovery returns the discovery plugin identified by
+// rawConfig.DataLayer.Discovery.PluginRef. The plugin is expected to have
+// already been instantiated and registered in r.PluginHandle by
+// parseConfigurationPhaseTwo; this function only looks it up and verifies its
+// type, so the loader-created instance (with its real Handle wired in) is the
+// one the runner drives.
 func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fwkdl.EndpointDiscovery, error) {
 	ref := rawConfig.DataLayer.Discovery.PluginRef
-	for _, spec := range rawConfig.Plugins {
-		name := spec.Name
-		if name == "" {
-			name = spec.Type
-		}
-		if name != ref {
-			continue
-		}
-		factory, ok := fwkplugin.Registry[spec.Type]
-		if !ok {
-			return nil, fmt.Errorf("discovery: unknown plugin type %q for plugin %q", spec.Type, ref)
-		}
-		p, err := factory(name, spec.Parameters, nil)
-		if err != nil {
-			return nil, fmt.Errorf("discovery: failed to create plugin %q: %w", ref, err)
-		}
-		disc, ok := p.(fwkdl.EndpointDiscovery)
-		if !ok {
-			return nil, fmt.Errorf("discovery: plugin %q (type %q) does not implement EndpointDiscovery", ref, spec.Type)
-		}
-		return disc, nil
+	p := r.PluginHandle.Plugin(ref)
+	if p == nil {
+		return nil, fmt.Errorf("discovery: no plugin found with name %q", ref)
 	}
-	return nil, fmt.Errorf("discovery: no plugin found with name %q", ref)
+	disc, ok := p.(fwkdl.EndpointDiscovery)
+	if !ok {
+		return nil, fmt.Errorf("discovery: plugin %q does not implement EndpointDiscovery", ref)
+	}
+	return disc, nil
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.

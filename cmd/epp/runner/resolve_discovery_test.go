@@ -17,6 +17,7 @@ limitations under the License.
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -29,17 +30,17 @@ import (
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 )
 
-func init() {
-	fwkplugin.Register(discoveryfile.PluginType, discoveryfile.Factory)
+func newHandleWithPlugin(t *testing.T, name string, p fwkplugin.Plugin) fwkplugin.Handle {
+	t.Helper()
+	h := fwkplugin.NewEppHandle(context.Background(), nil)
+	h.AddPlugin(name, p)
+	return h
 }
 
-func makeConfig(pluginName, pluginType string, params json.RawMessage, discoveryRef string) *configapi.EndpointPickerConfig {
+func discoveryConfigRef(ref string) *configapi.EndpointPickerConfig {
 	return &configapi.EndpointPickerConfig{
-		Plugins: []configapi.PluginSpec{
-			{Name: pluginName, Type: pluginType, Parameters: params},
-		},
 		DataLayer: &configapi.DataLayerConfig{
-			Discovery: &configapi.DiscoveryConfig{PluginRef: discoveryRef},
+			Discovery: &configapi.DiscoveryConfig{PluginRef: ref},
 		},
 	}
 }
@@ -51,10 +52,11 @@ func TestResolveDiscovery_FileDiscovery(t *testing.T) {
 	require.NoError(t, f.Close())
 
 	params, _ := json.Marshal(map[string]any{"path": f.Name()})
-	cfg := makeConfig("my-disc", discoveryfile.PluginType, params, "my-disc")
+	p, err := discoveryfile.Factory("my-disc", params, nil)
+	require.NoError(t, err)
 
-	r := &Runner{}
-	disc, err := r.resolveDiscovery(cfg)
+	r := &Runner{PluginHandle: newHandleWithPlugin(t, "my-disc", p)}
+	disc, err := r.resolveDiscovery(discoveryConfigRef("my-disc"))
 	require.NoError(t, err)
 	assert.IsType(t, &discoveryfile.FileDiscovery{}, disc)
 	assert.Equal(t, discoveryfile.PluginType, disc.TypedName().Type)
@@ -62,35 +64,16 @@ func TestResolveDiscovery_FileDiscovery(t *testing.T) {
 }
 
 func TestResolveDiscovery_PluginRefNotFound(t *testing.T) {
-	cfg := &configapi.EndpointPickerConfig{
-		Plugins: []configapi.PluginSpec{
-			{Name: "other", Type: discoveryfile.PluginType},
-		},
-		DataLayer: &configapi.DataLayerConfig{
-			Discovery: &configapi.DiscoveryConfig{PluginRef: "nonexistent"},
-		},
-	}
-	r := &Runner{}
-	_, err := r.resolveDiscovery(cfg)
-	assert.ErrorContains(t, err, "no plugin found with name")
-}
-
-func TestResolveDiscovery_UnknownType(t *testing.T) {
-	cfg := makeConfig("my-disc", "unknown-type", nil, "my-disc")
-	r := &Runner{}
-	_, err := r.resolveDiscovery(cfg)
-	assert.ErrorContains(t, err, "unknown plugin type")
+	r := &Runner{PluginHandle: fwkplugin.NewEppHandle(context.Background(), nil)}
+	_, err := r.resolveDiscovery(discoveryConfigRef("nonexistent"))
+	assert.ErrorContains(t, err, "nonexistent")
 }
 
 func TestResolveDiscovery_NotEndpointDiscovery(t *testing.T) {
-	const notDiscType = "not-a-discovery"
-	fwkplugin.Register(notDiscType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-		return &notDiscoveryPlugin{}, nil
-	})
-	cfg := makeConfig("not-disc", notDiscType, nil, "not-disc")
-	r := &Runner{}
-	_, err := r.resolveDiscovery(cfg)
-	assert.ErrorContains(t, err, "does not implement EndpointDiscovery")
+	r := &Runner{PluginHandle: newHandleWithPlugin(t, "not-disc", &notDiscoveryPlugin{})}
+	_, err := r.resolveDiscovery(discoveryConfigRef("not-disc"))
+	assert.ErrorContains(t, err, "not-disc")
+	assert.ErrorContains(t, err, "EndpointDiscovery")
 }
 
 type notDiscoveryPlugin struct{}
