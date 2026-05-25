@@ -1,0 +1,695 @@
+version: "3"
+
+vars:
+  PROJECT_NAME: llm-d-router
+  SIDECAR_IMAGE_NAME: llm-d-router-disagg-sidecar
+  VLLM_SIMULATOR_IMAGE_NAME: llm-d-inference-sim
+  UDS_TOKENIZER_IMAGE_NAME: llm-d-uds-tokenizer
+  SIDECAR_NAME: pd-sidecar
+  BUILDER_IMAGE_NAME: llm-d-builder
+  IMAGE_REGISTRY: '{{.IMAGE_REGISTRY | default "ghcr.io/llm-d"}}'
+  EPP_IMAGE_NAME: llm-d-router-endpoint-picker
+  EPP_TAG: '{{.EPP_TAG | default "dev"}}'
+  EPP_IMAGE: "{{.IMAGE_REGISTRY}}/{{.EPP_IMAGE_NAME}}:{{.EPP_TAG}}"
+  SIDECAR_TAG: '{{.SIDECAR_TAG | default "dev"}}'
+  SIDECAR_IMAGE: "{{.IMAGE_REGISTRY}}/{{.SIDECAR_IMAGE_NAME}}:{{.SIDECAR_TAG}}"
+  VLLM_SIMULATOR_TAG: '{{.VLLM_SIMULATOR_TAG | default "v0.8.2"}}'
+  VLLM_SIMULATOR_IMAGE: "{{.IMAGE_REGISTRY}}/{{.VLLM_SIMULATOR_IMAGE_NAME}}:{{.VLLM_SIMULATOR_TAG}}"
+  UDS_TOKENIZER_TAG: '{{.UDS_TOKENIZER_TAG | default "dev"}}'
+  UDS_TOKENIZER_IMAGE: "{{.IMAGE_REGISTRY}}/{{.UDS_TOKENIZER_IMAGE_NAME}}:{{.UDS_TOKENIZER_TAG}}"
+  BUILDER_TAG: '{{.BUILDER_TAG | default "dev"}}'
+  BUILDER_IMAGE: "{{.IMAGE_REGISTRY}}/{{.BUILDER_IMAGE_NAME}}:{{.BUILDER_TAG}}"
+  NAMESPACE: '{{.NAMESPACE | default "hc4ai-operator"}}'
+  KIND_CLUSTER_NAME: '{{.KIND_CLUSTER_NAME | default "llm-d-router-dev"}}'
+  KIND_GATEWAY_HOST_PORT: '{{.KIND_GATEWAY_HOST_PORT | default "30080"}}'
+  COVERAGE_DIR: '{{.COVERAGE_DIR | default "coverage"}}'
+  COVERAGE_THRESHOLD: '{{.COVERAGE_THRESHOLD | default "0"}}'
+  COVERAGE_LABEL: '{{.COVERAGE_LABEL | default "main"}}'
+  BASE_REF: '{{.BASE_REF | default "main"}}'
+  LDFLAGS: '{{.LDFLAGS | default "-s -w"}}'
+  LINT_NEW_ONLY: '{{.LINT_NEW_ONLY | default "false"}}'
+  TARGETOS:
+    sh: command -v go >/dev/null 2>&1 && go env GOOS || uname -s | tr '[:upper:]' '[:lower:]'
+  TARGETARCH:
+    sh: command -v go >/dev/null 2>&1 && go env GOARCH || uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/; s/armv7l/arm/'
+  CONTAINER_RUNTIME:
+    sh: "{ command -v docker >/dev/null 2>&1 && echo docker; } || { command -v podman >/dev/null 2>&1 && echo podman; } || echo ''"
+  GIT_COMMIT_SHA:
+    sh: git rev-parse HEAD 2>/dev/null || echo ""
+  BUILD_REF:
+    sh: git describe --abbrev=0 2>/dev/null || echo ""
+  HOST_KUBECONFIG:
+    sh: echo "${KUBECONFIG:-$HOME/.kube/config}"
+  GO_MOD_CACHE_VOL:
+    sh: echo "${GO_MOD_CACHE_VOL:-$HOME/.cache/llm-d-gomodcache}"
+  GO_BUILD_CACHE_VOL:
+    sh: echo "${GO_BUILD_CACHE_VOL:-$HOME/.cache/llm-d-gobuildcache}"
+  BUILDER_STAMP: build/.builder.stamp
+  EPP_TEST_PACKAGES:
+    sh: go list ./... | grep -v /test/ | grep -v ./pkg/sidecar/ | tr '\n' ' '
+  SIDECAR_TEST_PACKAGES: ./pkg/sidecar/...
+
+env:
+  EPP_IMAGE: "{{.EPP_IMAGE}}"
+  SIDECAR_IMAGE: "{{.SIDECAR_IMAGE}}"
+  VLLM_SIMULATOR_IMAGE: "{{.VLLM_SIMULATOR_IMAGE}}"
+  UDS_TOKENIZER_IMAGE: "{{.UDS_TOKENIZER_IMAGE}}"
+  BUILDER_IMAGE: "{{.BUILDER_IMAGE}}"
+  CONTAINER_RUNTIME: "{{.CONTAINER_RUNTIME}}"
+
+tasks:
+  # ---------------------------------------------------------------------------
+  # Default / help
+  # ---------------------------------------------------------------------------
+  default:
+    desc: List all available tasks
+    cmds:
+      - task --list
+
+  # ---------------------------------------------------------------------------
+  # Tool checks
+  # ---------------------------------------------------------------------------
+  check-container-tool:
+    internal: true
+    preconditions:
+      - sh: '[ -n "{{.CONTAINER_RUNTIME}}" ]'
+        msg: "No container tool detected. Please install docker or podman."
+
+  check-kubectl:
+    internal: true
+    preconditions:
+      - sh: command -v kubectl >/dev/null 2>&1
+        msg: "kubectl is not installed. Install it from https://kubernetes.io/docs/tasks/tools/"
+
+  check-envsubst:
+    internal: true
+    preconditions:
+      - sh: command -v envsubst >/dev/null 2>&1
+        msg: "envsubst is not installed. Try: sudo apt install gettext OR brew install gettext"
+
+  # ---------------------------------------------------------------------------
+  # Builder image
+  # ---------------------------------------------------------------------------
+  image-build-builder:
+    desc: Build builder image (skipped if up-to-date)
+    deps: [check-container-tool]
+    cmds:
+      - |
+        if ! {{.CONTAINER_RUNTIME}} image inspect {{.BUILDER_IMAGE}} >/dev/null 2>&1 || \
+            [ ! -f {{.BUILDER_STAMP}} ] || \
+            [ Dockerfile.builder -nt {{.BUILDER_STAMP}} ]; then
+          printf "\033[33;1m==== Building image {{.BUILDER_IMAGE}} ====\033[0m\n"
+          {{.CONTAINER_RUNTIME}} build -f Dockerfile.builder -t {{.BUILDER_IMAGE}} .
+          mkdir -p $(dirname {{.BUILDER_STAMP}})
+          touch {{.BUILDER_STAMP}}
+        fi
+
+  # ---------------------------------------------------------------------------
+  # Development
+  # ---------------------------------------------------------------------------
+  install-hooks:
+    desc: Install git hooks
+    cmds:
+      - git config core.hooksPath hooks
+
+  presubmit:
+    desc: Run all pre-submit checks (lint new code only, like CI)
+    vars:
+      LINT_NEW_ONLY: "true"
+    cmds:
+      - task: git-branch-check
+      - task: signed-commits-check
+      - task: go-mod-check
+      - task: format
+      - task: lint
+
+  git-branch-check:
+    desc: Ensure we are not on main
+    cmds:
+      - |
+        branch=$(git rev-parse --abbrev-ref HEAD)
+        if [ "$branch" = "main" ]; then
+          echo "ERROR: Direct push to 'main' is not allowed."
+          echo "Create a branch and open a PR instead."
+          exit 1
+        fi
+
+  signed-commits-check:
+    desc: Check that commits are signed
+    cmds:
+      - ./scripts/check-commits.sh upstream/main
+
+  go-mod-check:
+    desc: Verify go.mod/go.sum are tidy
+    deps: [image-build-builder]
+    cmds:
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c 'go mod tidy'
+      - |
+        git diff --exit-code go.mod go.sum || \
+        ( echo "ERROR: go.mod/go.sum are not tidy. Run 'go mod tidy' and commit."; exit 1 )
+
+  format:
+    desc: Format Go source files
+    deps: [image-build-builder]
+    cmds:
+      - printf "\033[33;1m==== Running go fmt ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c
+        'gofmt -l -w . && golangci-lint fmt --config=./.golangci.yml'
+
+  lint:
+    desc: Run linter (set LINT_NEW_ONLY=true to check new code only)
+    deps: [image-build-builder]
+    vars:
+      LINT_ARGS: '--config=./.golangci.yml{{if eq .LINT_NEW_ONLY "true"}} --new{{end}}'
+    cmds:
+      - printf "\033[33;1m==== Running linting ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c
+        'GOFLAGS=-buildvcs=false golangci-lint run {{.LINT_ARGS}} && typos'
+
+  clean:
+    desc: Clean build artifacts, tools and caches
+    cmds:
+      - rm -rf bin build {{.BUILDER_STAMP}}
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c 'go clean -testcache -cache'
+    ignore_error: true
+
+  # ---------------------------------------------------------------------------
+  # Build
+  # ---------------------------------------------------------------------------
+  build:
+    desc: Build epp and sidecar binaries
+    deps: [build-epp, build-sidecar]
+
+  build-epp:
+    desc: Build the EPP binary
+    deps: [image-build-builder]
+    cmds:
+      - printf "\033[33;1m==== Building epp ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c 'go build -o bin/epp cmd/epp/main.go'
+
+  build-sidecar:
+    desc: Build the PD sidecar binary
+    deps: [image-build-builder]
+    cmds:
+      - printf "\033[33;1m==== Building sidecar ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c 'go build -o bin/{{.SIDECAR_NAME}} cmd/{{.SIDECAR_NAME}}/main.go'
+
+  # ---------------------------------------------------------------------------
+  # Container image build / push / pull
+  # ---------------------------------------------------------------------------
+  image-build:
+    desc: Build EPP and sidecar container images
+    deps: [image-build-epp, image-build-sidecar]
+
+  image-build-epp:
+    desc: Build EPP container image
+    deps: [check-container-tool]
+    cmds:
+      - printf "\033[33;1m==== Building Docker image {{.EPP_IMAGE}} ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} build
+        --platform linux/{{.TARGETARCH}}
+        --build-arg TARGETOS=linux
+        --build-arg TARGETARCH={{.TARGETARCH}}
+        --build-arg COMMIT_SHA={{.GIT_COMMIT_SHA}}
+        --build-arg BUILD_REF={{.BUILD_REF}}
+        --build-arg LDFLAGS="{{.LDFLAGS}}"
+        {{if .BASE_IMAGE}}--build-arg BASE_IMAGE="{{.BASE_IMAGE}}"{{end}}
+        -t {{.EPP_IMAGE}} -f Dockerfile.epp .
+
+  image-build-sidecar:
+    desc: Build sidecar container image
+    deps: [check-container-tool]
+    cmds:
+      - printf "\033[33;1m==== Building Docker image {{.SIDECAR_IMAGE}} ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} build
+        --platform linux/{{.TARGETARCH}}
+        --build-arg TARGETOS=linux
+        --build-arg TARGETARCH={{.TARGETARCH}}
+        --build-arg COMMIT_SHA={{.GIT_COMMIT_SHA}}
+        --build-arg BUILD_REF={{.BUILD_REF}}
+        --build-arg LDFLAGS="{{.LDFLAGS}}"
+        {{if .BASE_IMAGE}}--build-arg BASE_IMAGE="{{.BASE_IMAGE}}"{{end}}
+        -t {{.SIDECAR_IMAGE}} -f Dockerfile.sidecar .
+
+  image-push:
+    desc: Push EPP and sidecar images to registry
+    deps: [image-push-epp, image-push-sidecar]
+
+  image-push-epp:
+    desc: Push EPP image to registry
+    deps: [check-container-tool]
+    cmds:
+      - printf "\033[33;1m==== Pushing Container image {{.EPP_IMAGE}} ====\033[0m\n"
+      - "{{.CONTAINER_RUNTIME}} push {{.EPP_IMAGE}}"
+
+  image-push-sidecar:
+    desc: Push sidecar image to registry
+    deps: [check-container-tool]
+    cmds:
+      - printf "\033[33;1m==== Pushing Container image {{.SIDECAR_IMAGE}} ====\033[0m\n"
+      - "{{.CONTAINER_RUNTIME}} push {{.SIDECAR_IMAGE}}"
+
+  image-pull:
+    desc: Pull all related images
+    deps: [check-container-tool]
+    cmds:
+      - printf "\033[33;1m==== Pulling Container images ====\033[0m\n"
+      - TARGETARCH={{.TARGETARCH}} ./scripts/pull_images.sh
+
+  # ---------------------------------------------------------------------------
+  # Tests
+  # ---------------------------------------------------------------------------
+  test:
+    desc: Run all tests (unit and e2e)
+    deps: [test-unit, test-e2e]
+
+  test-unit:
+    desc: Run all unit tests (epp + sidecar)
+    deps: [test-unit-epp, test-unit-sidecar]
+
+  test-unit-epp:
+    desc: Run EPP unit tests
+    deps: [image-build-builder]
+    cmds:
+      - mkdir -p {{.COVERAGE_DIR}}
+      - printf "\033[33;1m==== Running epp Unit Tests ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c
+        'go test -v -race -coverprofile={{.COVERAGE_DIR}}/epp.out -covermode=atomic {{.EPP_TEST_PACKAGES}}'
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c
+        'go tool cover -func={{.COVERAGE_DIR}}/epp.out | tail -1'
+
+  test-unit-sidecar:
+    desc: Run sidecar unit tests
+    deps: [image-build-builder]
+    cmds:
+      - mkdir -p {{.COVERAGE_DIR}}
+      - printf "\033[33;1m==== Running sidecar Unit Tests ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c
+        'go test -v -race -coverprofile={{.COVERAGE_DIR}}/sidecar.out -covermode=atomic {{.SIDECAR_TEST_PACKAGES}}'
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c
+        'go tool cover -func={{.COVERAGE_DIR}}/sidecar.out | tail -1'
+
+  test-filter:
+    desc: "Run filtered unit tests (usage: task test-filter PATTERN=TestName TYPE=epp)"
+    deps: [image-build-builder]
+    vars:
+      TEST_TYPE: '{{.TYPE | default "epp"}}'
+      TEST_PACKAGES: '{{if eq (default "epp" .TYPE) "sidecar"}}{{.SIDECAR_TEST_PACKAGES}}{{else}}{{.EPP_TEST_PACKAGES}}{{end}}'
+    preconditions:
+      - sh: '[ -n "{{.PATTERN}}" ]'
+        msg: "PATTERN is required. Usage: task test-filter PATTERN=TestName [TYPE=epp|sidecar]"
+    cmds:
+      - printf "\033[33;1m==== Running Filtered Tests (pattern={{.PATTERN}}, type={{.TEST_TYPE}}) ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c
+        'go test -v -run "{{.PATTERN}}" {{.TEST_PACKAGES}}'
+
+  test-integration:
+    desc: Run integration tests (requires KUBECONFIG and running cluster)
+    deps: [image-build-builder]
+    cmds:
+      - mkdir -p {{.COVERAGE_DIR}}
+      - printf "\033[33;1m==== Running Integration Tests ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        --network=host
+        -v {{.HOST_KUBECONFIG}}:/.kube/config:ro
+        -e KUBECONFIG=/.kube/config
+        {{.BUILDER_IMAGE}} sh -c
+        'go test -v -race -tags=integration_tests -coverprofile={{.COVERAGE_DIR}}/integration.out -covermode=atomic ./test/integration/'
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c
+        'go tool cover -func={{.COVERAGE_DIR}}/integration.out | tail -1'
+
+  test-e2e:
+    desc: Run end-to-end tests against a new kind cluster
+    deps: [image-build-builder, image-build, image-pull]
+    cmds:
+      - printf "\033[33;1m==== Running End to End Tests ====\033[0m\n"
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        --network=host
+        {{.BUILDER_SOCK_FLAGS}}
+        {{.BUILDER_E2E_ENV_FLAGS}}
+        {{.BUILDER_IMAGE}} ./test/scripts/run_e2e.sh
+
+  bench-tokenizer:
+    desc: Run external tokenizer + scorer benchmark (requires kind cluster with EPP deployed)
+    deps: [image-build-builder]
+    cmds:
+      - printf "\033[33;1m==== Running External Tokenizer Benchmark ====\033[0m\n"
+      - printf "Ensure the kind cluster is running with the external tokenizer config.\n"
+      - printf "Run 'EXTERNAL_TOKENIZER_ENABLED=true KV_CACHE_ENABLED=true task env-dev-kind' first.\n\n"
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        --network=host
+        -v {{.HOST_KUBECONFIG}}:/.kube/config:ro
+        -e KUBECONFIG=/.kube/config
+        {{.BUILDER_IMAGE}} sh -c
+        'go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/'
+
+  # ---------------------------------------------------------------------------
+  # Coverage
+  # ---------------------------------------------------------------------------
+  test-coverage:
+    desc: Run all unit tests with coverage (alias for test-unit)
+    deps: [test-unit-epp, test-unit-sidecar]
+
+  coverage-report:
+    desc: Generate HTML coverage reports (open coverage/*.html in browser)
+    deps: [image-build-builder]
+    cmds:
+      - >
+        {{.CONTAINER_RUNTIME}} run --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} sh -c
+        'for f in {{.COVERAGE_DIR}}/*.out; do
+           name=$(basename "$f" .out);
+           go tool cover -html="$f" -o "{{.COVERAGE_DIR}}/$name.html";
+           printf "  $name → {{.COVERAGE_DIR}}/$name.html\n";
+         done'
+
+  coverage-compare:
+    desc: "Compare coverage vs baseline (BASE_REF=git-ref, default main; COVERAGE_LABEL=label)"
+    deps: [image-build-builder]
+    cmds:
+      - |
+        if [ -n "{{.BASELINE_DIR}}" ]; then
+          ./scripts/compare-coverage.sh "{{.BASELINE_DIR}}" "{{.COVERAGE_DIR}}" "{{.COVERAGE_THRESHOLD}}" "{{.COVERAGE_LABEL}}"
+        else
+          printf "\033[33;1m==== Building Baseline Coverage from {{.BASE_REF}} ====\033[0m\n"
+          EXISTING=$(git worktree list --porcelain \
+            | awk '/^worktree /{wt=$2} /^branch refs\/heads\/{{.BASE_REF}}$/{print wt}')
+          if [ -n "$EXISTING" ]; then
+            WORKTREE="$EXISTING"; CLEANUP=0
+          else
+            WORKTREE=$(mktemp -u /tmp/cov-baseline-XXXXXX)
+            git worktree add --quiet "$WORKTREE" "{{.BASE_REF}}"
+            CLEANUP=1
+          fi
+          mkdir -p "{{.COVERAGE_DIR}}/baseline"
+          {{.CONTAINER_RUNTIME}} run --rm \
+            {{.BUILDER_USER_FLAGS}} \
+            -v $(pwd):/app:Z -w /app \
+            -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod \
+            -v {{.GO_BUILD_CACHE_VOL}}:/go/cache \
+            -v "$WORKTREE":/baseline:Z \
+            {{.BUILDER_IMAGE}} sh -c "
+              cd /baseline &&
+              go test -race -coverprofile=/app/{{.COVERAGE_DIR}}/baseline/epp.out -covermode=atomic \
+                \$(go list ./... | grep -v /test/ | grep -v ./pkg/sidecar/ | tr '\n' ' ') &&
+              go test -race -coverprofile=/app/{{.COVERAGE_DIR}}/baseline/sidecar.out -covermode=atomic \
+                ./pkg/sidecar/..."
+          [ "$CLEANUP" -eq 1 ] && git worktree remove --force "$WORKTREE"
+          ./scripts/compare-coverage.sh "{{.COVERAGE_DIR}}/baseline" "{{.COVERAGE_DIR}}" "{{.COVERAGE_THRESHOLD}}" "{{.COVERAGE_LABEL}}"
+        fi
+
+  # ---------------------------------------------------------------------------
+  # Kind environment
+  # ---------------------------------------------------------------------------
+  env-dev-kind:
+    desc: Deploy EPP + vLLM sim into local kind cluster
+    deps: [image-build, image-pull]
+    cmds:
+      - |
+        if [ "$PD_ENABLED" = "true" ] && [ "$KV_CACHE_ENABLED" = "true" ]; then
+          echo "Error: Both PD_ENABLED and KV_CACHE_ENABLED are true. Skipping env-dev-kind."
+          exit 1
+        fi
+        CLUSTER_NAME={{.KIND_CLUSTER_NAME}} \
+        GATEWAY_HOST_PORT={{.KIND_GATEWAY_HOST_PORT}} \
+        IMAGE_REGISTRY={{.IMAGE_REGISTRY}} \
+        EPP_IMAGE={{.EPP_IMAGE}} \
+        VLLM_SIMULATOR_IMAGE={{.VLLM_SIMULATOR_IMAGE}} \
+        SIDECAR_IMAGE={{.SIDECAR_IMAGE}} \
+        UDS_TOKENIZER_IMAGE={{.UDS_TOKENIZER_IMAGE}} \
+        ./scripts/kind-dev-env.sh
+
+  env-dev-kind-kvcache:
+    desc: Deploy kind env with KV cache / precise-prefix-cache scorer
+    cmds:
+      - KV_CACHE_ENABLED=true task env-dev-kind
+
+  env-dev-kind-external-tokenizer:
+    desc: Deploy kind env with external UDS tokenizer + precise-prefix-cache scorer
+    cmds:
+      - EXTERNAL_TOKENIZER_ENABLED=true task env-dev-kind
+
+  env-dev-kind-pd:
+    desc: Deploy kind env with Prefill/Decode disaggregation
+    cmds:
+      - PD_ENABLED=true task env-dev-kind
+
+  env-dev-kind-epd:
+    desc: Deploy kind env with Encode/Prefill/Decode disaggregation
+    cmds:
+      - EPD_ENABLED=true task env-dev-kind
+
+  clean-env-dev-kind:
+    desc: Delete the local kind development cluster
+    cmds:
+      - |
+        echo "INFO: cleaning up kind cluster {{.KIND_CLUSTER_NAME}}"
+        kind delete cluster --name {{.KIND_CLUSTER_NAME}}
+
+  # ---------------------------------------------------------------------------
+  # Kubernetes environment
+  # ---------------------------------------------------------------------------
+  env-dev-kubernetes:
+    desc: Deploy full dev environment to K8s/OpenShift cluster
+    deps: [check-kubectl, check-envsubst]
+    cmds:
+      - IMAGE_REGISTRY={{.IMAGE_REGISTRY}} ./scripts/kubernetes-dev-env.sh 2>&1
+
+  clean-env-dev-kubernetes:
+    desc: Tear down full dev environment from K8s/OpenShift cluster
+    deps: [check-kubectl, check-envsubst]
+    cmds:
+      - CLEAN=true ./scripts/kubernetes-dev-env.sh 2>&1
+      - |
+        echo "INFO: Finished cleanup of development environment for namespace {{.NAMESPACE}}"
+
+  install-rbac:
+    desc: Apply RBAC configuration to cluster
+    deps: [check-kubectl, check-envsubst]
+    cmds:
+      - echo "Applying RBAC configuration from deploy/rbac..."
+      - kubectl kustomize deploy/environments/kubernetes-base/rbac | envsubst '$$PROJECT_NAME $$NAMESPACE $$VERSION' | kubectl apply -f -
+
+  uninstall-rbac:
+    desc: Remove RBAC configuration from cluster
+    deps: [check-kubectl, check-envsubst]
+    cmds:
+      - echo "Removing RBAC configuration from deploy/rbac..."
+      - kubectl kustomize deploy/environments/kubernetes-base/rbac | envsubst '$$PROJECT_NAME $$NAMESPACE $$VERSION' | kubectl delete -f - || true
+
+  # ---------------------------------------------------------------------------
+  # Container run
+  # ---------------------------------------------------------------------------
+  run-container:
+    desc: Run EPP in a container
+    deps: [check-container-tool]
+    cmds:
+      - |
+        echo "Starting container with {{.CONTAINER_RUNTIME}}..."
+      - "{{.CONTAINER_RUNTIME}} run -d --name {{.PROJECT_NAME}}-container {{.EPP_IMAGE}}"
+      - |
+        echo "{{.CONTAINER_RUNTIME}} started successfully."
+        echo "To use {{.PROJECT_NAME}}, run:"
+        echo "alias {{.PROJECT_NAME}}='{{.CONTAINER_RUNTIME}} exec -it {{.PROJECT_NAME}}-container /app/{{.PROJECT_NAME}}'"
+
+  stop-container:
+    desc: Stop and remove container
+    deps: [check-container-tool]
+    cmds:
+      - echo "Stopping and removing container..."
+      - "{{.CONTAINER_RUNTIME}} stop {{.PROJECT_NAME}}-container && {{.CONTAINER_RUNTIME}} rm {{.PROJECT_NAME}}-container"
+      - |
+        echo "{{.CONTAINER_RUNTIME}} stopped and removed. Remove alias if set: unalias {{.PROJECT_NAME}}"
+
+  # ---------------------------------------------------------------------------
+  # Shell access (builder containers)
+  # ---------------------------------------------------------------------------
+  builder-shell:
+    desc: Open an interactive shell in the builder container
+    deps: [image-build-builder]
+    interactive: true
+    cmds:
+      - >
+        {{.CONTAINER_RUNTIME}} run -it --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        {{.BUILDER_IMAGE}} bash
+
+  builder-cluster-shell:
+    desc: Open an interactive shell with cluster access
+    deps: [image-build-builder]
+    interactive: true
+    cmds:
+      - >
+        {{.CONTAINER_RUNTIME}} run -it --rm
+        {{.BUILDER_USER_FLAGS}}
+        -v $(pwd):/app:Z -w /app
+        -v {{.GO_MOD_CACHE_VOL}}:/go/pkg/mod
+        -v {{.GO_BUILD_CACHE_VOL}}:/go/cache
+        --network=host
+        -v {{.HOST_KUBECONFIG}}:/.kube/config:ro
+        -e KUBECONFIG=/.kube/config
+        {{.BUILDER_IMAGE}} bash
+
+  # ---------------------------------------------------------------------------
+  # Standalone EPP (no Kubernetes InferencePool CRD needed)
+  # ---------------------------------------------------------------------------
+  run-epp:
+    desc: "Run EPP binary locally in standalone mode with precise prefix cache (usage: task run-epp SELECTOR='app=vllm' PORTS=8000)"
+    cmds:
+      - |
+        go run ./cmd/epp/... \
+          --endpoint-selector "{{.SELECTOR | default "app=vllm"}}" \
+          --endpoint-target-ports {{.PORTS | default "8000"}} \
+          --config-file {{.CONFIG | default "deploy/config/sim-epp-kvcache-config.yaml"}} \
+          --pool-namespace {{.NAMESPACE | default "default"}} \
+          --secure-serving=false \
+          --metrics-endpoint-auth=false \
+          {{.EXTRA_FLAGS}}
+
+  test-kvcache-e2e:
+    desc: "E2E test for KV cache manager + UDS tokenizer (requires tokenizer running at /tmp/tokenizer/tokenizer-uds.socket; usage: task test-kvcache-e2e MODEL_NAME=Qwen/Qwen2.5-0.5B-Instruct)"
+    cmds:
+      - |
+        MODEL_NAME={{.MODEL_NAME | default "Qwen/Qwen2.5-0.5B-Instruct"}} \
+        go test -tags gaie_tokenized_prompt -v -count=1 -run TestPrefixCacheTracking_Score_UDS \
+          ./pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache/...
+
+  test-kvcache-e2e-mock:
+    desc: "Self-contained KV cache e2e tests using an in-process mock tokenizer (no external process required)"
+    cmds:
+      - |
+        go test -v -count=1 -run TestPrefixCacheTracking_Score_MockTokenizer \
+          ./pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache/...
+
+  run-epp-external-tokenizer:
+    desc: "Run EPP with external UDS tokenizer (requires tokenizer already running at /tmp/tokenizer/tokenizer-uds.socket; usage: task run-epp-external-tokenizer MODEL_NAME=Qwen/Qwen2.5-0.5B-Instruct SELECTOR='app=vllm' PORTS=8000)"
+    cmds:
+      - |
+        MODEL_NAME={{.MODEL_NAME | default "Qwen/Qwen2.5-0.5B-Instruct"}} \
+        POD_NAME={{.POD_NAME | default "epp-local-dev-abc12-xyz34"}} \
+        go run -tags gaie_tokenized_prompt ./cmd/epp/... \
+          --endpoint-selector "{{.SELECTOR | default "app=vllm"}}" \
+          --endpoint-target-ports {{.PORTS | default "8000"}} \
+          --pool-name {{.POOL_NAME | default "epp-local-dev"}} \
+          --config-file {{.CONFIG | default "deploy/config/sim-epp-external-tokenizer-config.yaml"}} \
+          --pool-namespace {{.NAMESPACE | default "default"}} \
+          --secure-serving=false \
+          --metrics-endpoint-auth=false \
+          {{.EXTRA_FLAGS}}
+
+  # ---------------------------------------------------------------------------
+  # Environment info
+  # ---------------------------------------------------------------------------
+  env:
+    desc: Print environment variables
+    cmds:
+      - |
+        echo "TARGETOS={{.TARGETOS}}"
+        echo "TARGETARCH={{.TARGETARCH}}"
+        echo "CONTAINER_RUNTIME={{.CONTAINER_RUNTIME}}"
+        echo "EPP_IMAGE_NAME={{.EPP_IMAGE_NAME}}"
+        echo "EPP_TAG={{.EPP_TAG}}"
+        echo "EPP_IMAGE={{.EPP_IMAGE}}"
+        echo "SIDECAR_TAG={{.SIDECAR_TAG}}"
+        echo "SIDECAR_IMAGE={{.SIDECAR_IMAGE}}"
+        echo "VLLM_SIMULATOR_TAG={{.VLLM_SIMULATOR_TAG}}"
+        echo "VLLM_SIMULATOR_IMAGE={{.VLLM_SIMULATOR_IMAGE}}"
+        echo "UDS_TOKENIZER_TAG={{.UDS_TOKENIZER_TAG}}"
+        echo "UDS_TOKENIZER_IMAGE={{.UDS_TOKENIZER_IMAGE}}"
+        echo "BUILDER_IMAGE={{.BUILDER_IMAGE}}"
