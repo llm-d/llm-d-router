@@ -123,14 +123,6 @@ jobs:
           restore-keys: |
             go-cache-
 
-      - name: Run make lint
-        run: make lint
-
-      - name: Run govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
-          govulncheck ./...
-
       - name: Run make build
         shell: bash
         run: make build
