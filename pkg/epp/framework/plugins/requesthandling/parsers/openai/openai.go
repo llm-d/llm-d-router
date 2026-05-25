@@ -264,7 +264,46 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	if responseErr != nil {
 		return nil, responseErr
 	}
+usg, ok := responseBody["usage"].(map[string]any)
+if !ok {
+  return nil, nil
+}
 
+usage := fwkrh.Usage{}
+
+// Chat/Completions APIs use prompt_tokens. Responses/Conversations APIs use input_tokens.
+for _, it := range []string{"prompt_tokens", "input_tokens"} {
+  if v, ok := usg[it]; ok && v != nil {
+    usage.PromptTokens = toInt(v)
+    break
+  } 
+}
+
+// Chat/Completions APIs use completion_tokens. Responses/Conversations APIs use output_tokens.
+for _, ot := range []string{"completion_tokens", "output_tokens"} {
+  if v, ok := usg[ot]; ok && v != nil {
+    usage.CompletionTokens = toInt(v)
+    break
+  } 
+}
+
+// Chat/Completions APIs use prompt_tokens_details. Responses/Conversations APIs use input_tokens_details.
+for _, details := range []string{"prompt_tokens_details", "input_tokens_details"} {
+  if detailsMap, ok := usg[details].(map[string]any); ok {
+    if cachedTokens, ok := detailsMap["cached_tokens"]; ok {
+      usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
+        CachedTokens: toInt(cachedTokens),
+      }
+    }
+  }
+}
+
+// total_tokens field name is consistent across all API types
+if v, ok := usg["total_tokens"]; ok && v != nil {
+  usage.TotalTokens = toInt(v)
+}
+
+return &usage, nil
 	if responseBody["usage"] != nil {
 		usg, ok := responseBody["usage"].(map[string]any)
 		if !ok {
