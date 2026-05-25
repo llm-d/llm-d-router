@@ -90,6 +90,26 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 				"replacement", "llm-d.ai/v1alpha1/EndpointPickerConfig")
 		}
 
+		if rawConfig.SaturationDetector != nil {
+			logger.Info("DEPRECATION: top-level saturationDetector is deprecated, use flowControl.saturationDetector instead")
+			if rawConfig.FlowControl == nil {
+				rawConfig.FlowControl = &configapi.FlowControlConfig{}
+			}
+			if rawConfig.FlowControl.SaturationDetector == nil {
+				rawConfig.FlowControl.SaturationDetector = rawConfig.SaturationDetector
+			}
+		}
+
+		if rawConfig.Parser != nil {
+			logger.Info("DEPRECATION: top-level parser is deprecated, use requestHandler.parser instead")
+			if rawConfig.RequestHandler == nil {
+				rawConfig.RequestHandler = &configapi.RequestHandlerConfig{}
+			}
+			if rawConfig.RequestHandler.Parser == nil {
+				rawConfig.RequestHandler.Parser = rawConfig.Parser
+			}
+		}
+
 		logger.Info("Loaded raw configuration", "config", rawConfig.String())
 	} else {
 		logger.Info("A configuration wasn't specified. A default one is being used.")

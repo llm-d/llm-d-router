@@ -739,3 +739,39 @@ schedulingProfiles:
     weight: 20
   - pluginRef: maxScorePicker
 `
+
+// successDeprecatedTopLevelSaturationDetectorText tests that top-level saturationDetector is correctly loaded,
+// copied to nested location, and handled.
+const successDeprecatedTopLevelSaturationDetectorText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+featureGates:
+- flowControl
+saturationDetector:
+  pluginRef: utilization-detector
+`
+
+// successDeprecatedTopLevelParserText tests that top-level parser is correctly loaded,
+// copied to nested location, and handled.
+const successDeprecatedTopLevelParserText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- type: openai-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+parser:
+  pluginRef: openai-parser
+`
+
