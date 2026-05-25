@@ -463,7 +463,10 @@ func (r *GenerateRequest) UnmarshalJSON(data []byte) error {
 	r.CacheSalt = raw.CacheSalt
 	r.TokenIDs = make([]uint32, len(raw.TokenIDs))
 	for i, v := range raw.TokenIDs {
-		r.TokenIDs[i] = uint32(v)
+		if v < 0 || v > math.MaxUint32 || v != math.Trunc(v) {
+            return fmt.Errorf("token_ids[%d]: invalid value %v", i, v)
+        }
+        r.TokenIDs[i] = uint32(v)
 	}
 	return nil
 }
