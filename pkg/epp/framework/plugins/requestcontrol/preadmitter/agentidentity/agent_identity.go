@@ -61,11 +61,11 @@ type Parameters struct {
 }
 
 // PluginFactory is the factory function for the agent identity plugin.
-func PluginFactory(name string, raw json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	var params Parameters
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &params); err != nil {
-			return nil, fmt.Errorf("agent-identity: failed to unmarshal parameters: %w", err)
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&params); err != nil {
+			return nil, fmt.Errorf("agent-identity: failed to decode parameters: %w", err)
 		}
 	}
 

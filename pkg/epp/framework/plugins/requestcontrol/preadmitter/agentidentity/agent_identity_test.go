@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"testing"
 
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -195,7 +196,7 @@ func TestPluginFactory_PriorityHeaders(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pi, err := PluginFactory("test", json.RawMessage(tt.raw), nil)
+			pi, err := PluginFactory("test", fwkplugin.StrictDecoder(json.RawMessage(tt.raw)), nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil")
@@ -217,7 +218,7 @@ func TestPluginFactory_PriorityHeaders(t *testing.T) {
 // via additionalSessionHeaders is honored at request time.
 func TestPreAdmit_CustomHeader(t *testing.T) {
 	pi, err := PluginFactory("test",
-		json.RawMessage(`{"additionalSessionHeaders":["x-tenant-id"]}`), nil)
+		fwkplugin.StrictDecoder(json.RawMessage(`{"additionalSessionHeaders":["x-tenant-id"]}`)), nil)
 	if err != nil {
 		t.Fatalf("PluginFactory: %v", err)
 	}
