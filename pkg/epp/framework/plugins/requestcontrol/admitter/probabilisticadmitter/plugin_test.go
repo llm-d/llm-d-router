@@ -132,7 +132,7 @@ func TestProtectedTiersAlwaysAdmitted(t *testing.T) {
 		req := &fwksched.InferenceRequest{
 			Objectives: fwksched.RequestObjectives{Priority: priority},
 		}
-		if err := admitter.AdmitRequest(context.Background(), req, pods); err != nil {
+		if err := admitter.Admit(context.Background(), req, pods); err != nil {
 			t.Errorf("priority %d should always be admitted, got: %v", priority, err)
 		}
 	}
@@ -145,7 +145,7 @@ func TestDroppableRejectedAtHighSaturation(t *testing.T) {
 	req := &fwksched.InferenceRequest{
 		Objectives: fwksched.RequestObjectives{Priority: -1},
 	}
-	if err := admitter.AdmitRequest(context.Background(), req, pods); err == nil {
+	if err := admitter.Admit(context.Background(), req, pods); err == nil {
 		t.Error("expected rejection at high saturation")
 	}
 }
@@ -156,7 +156,7 @@ func TestDroppableAdmittedAtZeroSaturation(t *testing.T) {
 	req := &fwksched.InferenceRequest{
 		Objectives: fwksched.RequestObjectives{Priority: -1},
 	}
-	if err := admitter.AdmitRequest(context.Background(), req, pods); err != nil {
+	if err := admitter.Admit(context.Background(), req, pods); err != nil {
 		t.Errorf("expected admission at zero saturation, got: %v", err)
 	}
 }
@@ -171,7 +171,7 @@ func TestNilMetricsTreatedAsSaturated(t *testing.T) {
 	req := &fwksched.InferenceRequest{
 		Objectives: fwksched.RequestObjectives{Priority: -1},
 	}
-	if err := admitter.AdmitRequest(context.Background(), req, []fwksched.Endpoint{pod}); err == nil {
+	if err := admitter.Admit(context.Background(), req, []fwksched.Endpoint{pod}); err == nil {
 		t.Error("expected rejection when pod has nil metrics")
 	}
 }
@@ -181,7 +181,7 @@ func TestNoPods(t *testing.T) {
 	req := &fwksched.InferenceRequest{
 		Objectives: fwksched.RequestObjectives{Priority: -1},
 	}
-	if err := admitter.AdmitRequest(context.Background(), req, nil); err != nil {
+	if err := admitter.Admit(context.Background(), req, nil); err != nil {
 		t.Errorf("no pods should admit, got: %v", err)
 	}
 }
@@ -189,7 +189,7 @@ func TestNoPods(t *testing.T) {
 func TestNilRequest(t *testing.T) {
 	admitter := newAdmitter(defaultParams())
 	pods := []fwksched.Endpoint{newEndpoint("pod-0", 0, 0)}
-	if err := admitter.AdmitRequest(context.Background(), nil, pods); err != nil {
+	if err := admitter.Admit(context.Background(), nil, pods); err != nil {
 		t.Errorf("nil request should admit, got: %v", err)
 	}
 }
@@ -204,7 +204,7 @@ func TestMultiplePodsSaturationAveraging(t *testing.T) {
 	req := &fwksched.InferenceRequest{
 		Objectives: fwksched.RequestObjectives{Priority: -1},
 	}
-	if err := admitter.AdmitRequest(context.Background(), req, pods); err == nil {
+	if err := admitter.Admit(context.Background(), req, pods); err == nil {
 		t.Error("expected rejection with avg saturation 1.0")
 	}
 }
@@ -220,7 +220,7 @@ func TestQuinticProperty(t *testing.T) {
 	if expected := math.Min(math.Pow(sat, 5)*300, 1.0); expected < 0.99 {
 		t.Errorf("expected prob~1.0 at sat=%.4f, got %.4f", sat, expected)
 	}
-	if err := admitter.AdmitRequest(context.Background(), req, pods); err == nil {
+	if err := admitter.Admit(context.Background(), req, pods); err == nil {
 		t.Error("expected rejection at sat≈0.34 (prob=1.0)")
 	}
 }
@@ -232,7 +232,7 @@ func TestErrorTypeIsStructured(t *testing.T) {
 	req := &fwksched.InferenceRequest{
 		Objectives: fwksched.RequestObjectives{Priority: -1},
 	}
-	err := admitter.AdmitRequest(context.Background(), req, pods)
+	err := admitter.Admit(context.Background(), req, pods)
 	if err == nil {
 		t.Fatal("expected rejection")
 	}
@@ -254,13 +254,13 @@ func TestProbabilisticShedding(t *testing.T) {
 
 	// rand=0.9 > prob≈0.096 → admit
 	if err := newAdmitter(defaultParams()).WithRandFn(func() float64 { return 0.9 }).
-		AdmitRequest(context.Background(), req, pods); err != nil {
+		Admit(context.Background(), req, pods); err != nil {
 		t.Errorf("expected admission with rand=0.9 > prob≈0.096, got: %v", err)
 	}
 
 	// rand=0.0 < prob≈0.096 → reject
 	if err := newAdmitter(defaultParams()).WithRandFn(func() float64 { return 0.0 }).
-		AdmitRequest(context.Background(), req, pods); err == nil {
+		Admit(context.Background(), req, pods); err == nil {
 		t.Error("expected rejection with rand=0.0 < prob≈0.096")
 	}
 }

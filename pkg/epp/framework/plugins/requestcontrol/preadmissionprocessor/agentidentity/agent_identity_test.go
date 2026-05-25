@@ -28,7 +28,7 @@ import (
 )
 
 // newDefaultPlugin builds a Plugin with no parameters — the built-in defaults.
-// All ProcessPreAdmission tests below use this so they exercise the same code
+// All PreAdmit tests below use this so they exercise the same code
 // path as production-default configs.
 func newDefaultPlugin(t *testing.T) *Plugin {
 	t.Helper()
@@ -39,7 +39,7 @@ func newDefaultPlugin(t *testing.T) *Plugin {
 	return pi.(*Plugin)
 }
 
-func TestProcessPreAdmission(t *testing.T) {
+func TestPreAdmit(t *testing.T) {
 	p := newDefaultPlugin(t)
 
 	tests := []struct {
@@ -155,7 +155,7 @@ func TestProcessPreAdmission(t *testing.T) {
 				Headers:    tt.headers,
 				Body:       tt.body,
 			}
-			err := p.ProcessPreAdmission(context.Background(), req)
+			err := p.PreAdmit(context.Background(), req)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -220,9 +220,9 @@ func TestPluginFactory_PriorityHeaders(t *testing.T) {
 	}
 }
 
-// TestProcessPreAdmission_CustomHeader proves end-to-end that a header added
+// TestPreAdmit_CustomHeader proves end-to-end that a header added
 // via additionalSessionHeaders is honored at request time.
-func TestProcessPreAdmission_CustomHeader(t *testing.T) {
+func TestPreAdmit_CustomHeader(t *testing.T) {
 	pi, err := PluginFactory("test",
 		json.RawMessage(`{"additionalSessionHeaders":["x-tenant-id"]}`), nil)
 	if err != nil {
@@ -234,8 +234,8 @@ func TestProcessPreAdmission_CustomHeader(t *testing.T) {
 		FairnessID: metadata.DefaultFairnessID,
 		Headers:    map[string]string{"x-tenant-id": "tenant-42"},
 	}
-	if err := p.ProcessPreAdmission(context.Background(), req); err != nil {
-		t.Fatalf("ProcessPreAdmission: %v", err)
+	if err := p.PreAdmit(context.Background(), req); err != nil {
+		t.Fatalf("PreAdmit: %v", err)
 	}
 	if req.FairnessID != "tenant-42" {
 		t.Errorf("FairnessID = %q, want %q", req.FairnessID, "tenant-42")
@@ -249,8 +249,8 @@ func TestProcessPreAdmission_CustomHeader(t *testing.T) {
 			ClaudeCodeSessionHeader: "claude-session",
 		},
 	}
-	if err := p.ProcessPreAdmission(context.Background(), req2); err != nil {
-		t.Fatalf("ProcessPreAdmission: %v", err)
+	if err := p.PreAdmit(context.Background(), req2); err != nil {
+		t.Fatalf("PreAdmit: %v", err)
 	}
 	if req2.FairnessID != "tenant-42" {
 		t.Errorf("FairnessID = %q, want %q (custom should win)", req2.FairnessID, "tenant-42")

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package agentidentity provides a PreAdmissionProcessor plugin that resolves
+// Package agentidentity provides a PreAdmitter plugin that resolves
 // agent identity from provider-specific headers into the FairnessID field.
 package agentidentity
 
@@ -101,7 +101,7 @@ func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-func (p *Plugin) ProcessPreAdmission(_ context.Context, request *scheduling.InferenceRequest) error {
+func (p *Plugin) PreAdmit(_ context.Context, request *scheduling.InferenceRequest) error {
 	if request.FairnessID != "" && request.FairnessID != metadata.DefaultFairnessID {
 		return nil
 	}

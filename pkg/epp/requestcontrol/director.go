@@ -502,13 +502,13 @@ func (d *Director) runPreAdmissionPlugins(ctx context.Context, request *fwksched
 	}
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	for _, plugin := range d.requestControlPlugins.preAdmissionPlugins {
-		loggerDebug.Info("Running PreAdmissionProcessor plugin", "plugin", plugin.TypedName())
+		loggerDebug.Info("Running PreAdmitter plugin", "plugin", plugin.TypedName())
 		before := time.Now()
-		if err := plugin.ProcessPreAdmission(ctx, request); err != nil {
+		if err := plugin.PreAdmit(ctx, request); err != nil {
 			return err
 		}
 		metrics.RecordPluginProcessingLatency(fwkrc.PreAdmissionExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
-		loggerDebug.Info("Completed running PreAdmissionProcessor plugin successfully", "plugin", plugin.TypedName())
+		loggerDebug.Info("Completed running PreAdmitter plugin successfully", "plugin", plugin.TypedName())
 	}
 	return nil
 }
@@ -525,12 +525,12 @@ func (d *Director) runAdmissionPlugins(ctx context.Context,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) bool {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	for _, plugin := range d.requestControlPlugins.admissionPlugins {
-		loggerDebug.Info("Running AdmitRequest plugin", "plugin", plugin.TypedName())
-		if denyReason := plugin.AdmitRequest(ctx, request, endpoints); denyReason != nil {
-			loggerDebug.Info("AdmitRequest plugin denied the request", "plugin", plugin.TypedName(), "reason", denyReason.Error())
+		loggerDebug.Info("Running Admit plugin", "plugin", plugin.TypedName())
+		if denyReason := plugin.Admit(ctx, request, endpoints); denyReason != nil {
+			loggerDebug.Info("Admit plugin denied the request", "plugin", plugin.TypedName(), "reason", denyReason.Error())
 			return false
 		}
-		loggerDebug.Info("Completed running AdmitRequest plugin successfully", "plugin", plugin.TypedName())
+		loggerDebug.Info("Completed running Admit plugin successfully", "plugin", plugin.TypedName())
 	}
 	return true
 }
