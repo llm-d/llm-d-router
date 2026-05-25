@@ -105,13 +105,12 @@ jobs:
       - name: Verify go.mod and go.sum are tidy
         run: go mod tidy -diff
 
-      - name: Create and resolve Go cache volumes
+      - name: Create Go cache dirs
         id: go-cache
         run: |
-          docker volume create llm-d-gomodcache
-          docker volume create llm-d-gobuildcache
-          echo "mod=$(docker volume inspect llm-d-gomodcache -f '{{.Mountpoint}}')" >> $GITHUB_OUTPUT
-          echo "build=$(docker volume inspect llm-d-gobuildcache -f '{{.Mountpoint}}')" >> $GITHUB_OUTPUT
+          mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
+          echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
+          echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
 
       - name: Cache Go modules and build cache
         uses: actions/cache@v5
@@ -119,9 +118,9 @@ jobs:
           path: |
             ${{ steps.go-cache.outputs.mod }}
             ${{ steps.go-cache.outputs.build }}
-          key: go-cache-${{ hashFiles('go.sum') }}
+          key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            go-cache-
+            go-cache-${{ runner.os }}-
 
       - name: Run make lint
         run: make lint
@@ -147,10 +146,16 @@ jobs:
 
       - name: Run unit tests
         shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make test-unit
 
       - name: Run hermetic integration tests
         shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make test-integration-hermetic
 
       - name: Compare coverage against main baseline
