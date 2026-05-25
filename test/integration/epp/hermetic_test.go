@@ -79,7 +79,7 @@ func TestMain(m *testing.M) {
 	}
 	gaieModulePath := strings.TrimSpace(string(out))
 	crdPaths := []string{
-		filepath.Join(gaieModulePath, "config", "crd", "bases", "inference.networking.k8s.io_inferencepools.yaml"),
+		filepath.Join(gaieModulePath, "config", "crd", "bases"),
 		filepath.Join(repoRootPath, "config", "crd", "bases"),
 	}
 

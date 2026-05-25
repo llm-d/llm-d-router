@@ -7,8 +7,8 @@ rules:
   - "inference.networking.x-k8s.io"
   resources:
   - "inferencepools"
-  - "inferenceobjectives"
-  - "inferencemodelrewrites"
+  - "inferenceobjectives" # TODO: remove this in issue 1298
+  - "inferencemodelrewrites"  # TODO: remove this in issue 1298
   verbs:
   - "get"
   - "watch"
@@ -17,6 +17,15 @@ rules:
   - "inference.networking.k8s.io"
   resources:
   - "inferencepools"
+  verbs:
+  - "get"
+  - "watch"
+  - "list"
+- apiGroups:
+  - "llm-d.ai"
+  resources:
+  - "inferenceobjectives"
+  - "inferencemodelrewrites"
   verbs:
   - "get"
   - "watch"
