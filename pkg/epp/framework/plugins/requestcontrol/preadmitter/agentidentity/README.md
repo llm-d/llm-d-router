@@ -1,7 +1,7 @@
 # Agent Identity
 
 **Type:** `agent-identity`
-**Interfaces:** `requestcontrol.PreAdmissionProcessor`
+**Interfaces:** `requestcontrol.PreAdmitter`
 
 Resolves a per-session identity from agent-specific HTTP headers and writes it into `InferenceRequest.FairnessID`, so every turn of an agent session lands in the same flow-control fairness queue.
 
@@ -31,7 +31,7 @@ The plugin is stateless and safe under concurrent use.
 ## Configuration
 
 **Location:** Top-level `plugins:` list in the `EndpointPickerConfig`.
-**Enabled by default:** No. Add a `- type: agent-identity` entry to enable; the runner discovers it as a `PreAdmissionProcessor` and wires it in.
+**Enabled by default:** No. Add a `- type: agent-identity` entry to enable; the runner discovers it as a `PreAdmitter` and wires it in.
 
 ### Parameters
 
