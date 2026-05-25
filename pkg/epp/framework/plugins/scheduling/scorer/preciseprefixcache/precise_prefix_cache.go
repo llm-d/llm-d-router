@@ -25,6 +25,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
@@ -731,7 +732,9 @@ func (s *Scorer) computeBlockKeys(ctx context.Context,
 		//nolint:staticcheck // SA1019: legacy path retained for tokenizersPoolConfig configs.
 		keys, err = s.kvCacheIndexer.ComputeBlockKeys(ctx, nil, request.Body.Completions.Prompt.Raw, request.TargetModel)
 	case request.Body.Generate != nil:
-		keys, err = s.kvCacheIndexer.ComputeBlockKeysFromTokens(ctx, request.Body.Generate.TokenIDs, request.TargetModel, nil)
+		keys, err = s.kvCacheIndexer.ComputeBlockKeysFromTokens(
+			ctx, request.Body.Generate.TokenIDs, request.TargetModel,
+			generateExtraFeatures(request.Body.Generate, s.blockSizeTokens))
 	default:
 		return nil, nil
 	}
@@ -739,6 +742,17 @@ func (s *Scorer) computeBlockKeys(ctx context.Context,
 		return nil, nil
 	}
 	return keys, err
+}
+
+// generateExtraFeatures derives KV-block extra features from a GenerateRequest's
+// pre-tokenized multimodal hashes. Returns nil when no Features are present, so
+// the scorer's text-only path is unaffected.
+func generateExtraFeatures(g *fwkrh.GenerateRequest, blockSize int) []*kvblock.BlockExtraFeatures {
+	if g == nil || g.Features == nil || len(g.Features.MMHashes) == 0 {
+		return nil
+	}
+	return kvblock.ComputeBlockExtraFeatures(
+		g.Features.MMHashes, g.Features.MMPlaceholders, blockSize, len(g.TokenIDs))
 }
 
 // extractPodSet builds a set of pod identifiers from endpoints for filtered index lookups.
@@ -862,7 +876,8 @@ func (s *Scorer) getScores(ctx context.Context, request *scheduling.InferenceReq
 		tokenIDs := request.Body.Generate.TokenIDs
 		traceLogger.Info("Scoring generate request token IDs directly", "tokenCount", len(tokenIDs))
 
-		scores, err := s.kvCacheIndexer.ScoreTokens(ctx, tokenIDs, request.TargetModel, nil, nil)
+		extraFeatures := generateExtraFeatures(request.Body.Generate, s.blockSizeTokens)
+		scores, err := s.kvCacheIndexer.ScoreTokens(ctx, tokenIDs, request.TargetModel, nil, extraFeatures)
 		if err != nil {
 			if errors.Is(err, kvcache.ErrInternalTokenizationDisabled) {
 				return map[string]float64{}, 0, nil
