@@ -24,7 +24,6 @@ import (
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // newDefaultPlugin builds a Plugin with no parameters — the built-in defaults.
@@ -56,12 +55,6 @@ func TestPreAdmit(t *testing.T) {
 			wantFairnessID: "my-explicit-id",
 		},
 		{
-			name:           "claude code session header used when fairness ID is default",
-			fairnessID:     metadata.DefaultFairnessID,
-			headers:        map[string]string{ClaudeCodeSessionHeader: "session-abc"},
-			wantFairnessID: "session-abc",
-		},
-		{
 			name:           "claude code session header used when fairness ID is empty",
 			fairnessID:     "",
 			headers:        map[string]string{ClaudeCodeSessionHeader: "session-abc"},
@@ -69,25 +62,25 @@ func TestPreAdmit(t *testing.T) {
 		},
 		{
 			name:           "opencode session header",
-			fairnessID:     metadata.DefaultFairnessID,
+			fairnessID:     "",
 			headers:        map[string]string{OpenCodeSessionHeader: "oc-session-1"},
 			wantFairnessID: "oc-session-1",
 		},
 		{
 			name:           "codex session header (hyphenated, >= 0.131.0)",
-			fairnessID:     metadata.DefaultFairnessID,
+			fairnessID:     "",
 			headers:        map[string]string{CodexSessionHeader: "codex-session-1"},
 			wantFairnessID: "codex-session-1",
 		},
 		{
 			name:           "codex legacy session header (underscored, <= 0.130.x)",
-			fairnessID:     metadata.DefaultFairnessID,
+			fairnessID:     "",
 			headers:        map[string]string{CodexSessionHeaderLegacy: "codex-legacy-1"},
 			wantFairnessID: "codex-legacy-1",
 		},
 		{
 			name:       "priority order: codex hyphenated wins over legacy underscored",
-			fairnessID: metadata.DefaultFairnessID,
+			fairnessID: "",
 			headers: map[string]string{
 				CodexSessionHeader:       "codex-new",
 				CodexSessionHeaderLegacy: "codex-old",
@@ -96,7 +89,7 @@ func TestPreAdmit(t *testing.T) {
 		},
 		{
 			name:       "priority order: claude code wins over opencode",
-			fairnessID: metadata.DefaultFairnessID,
+			fairnessID: "",
 			headers: map[string]string{
 				ClaudeCodeSessionHeader: "session-abc",
 				OpenCodeSessionHeader:   "oc-session-1",
@@ -105,7 +98,7 @@ func TestPreAdmit(t *testing.T) {
 		},
 		{
 			name:       "priority order: opencode wins over codex",
-			fairnessID: metadata.DefaultFairnessID,
+			fairnessID: "",
 			headers: map[string]string{
 				OpenCodeSessionHeader: "oc-session-1",
 				CodexSessionHeader:    "codex-session-1",
@@ -114,37 +107,37 @@ func TestPreAdmit(t *testing.T) {
 		},
 		{
 			name:       "previous_response_id in body is ignored",
-			fairnessID: metadata.DefaultFairnessID,
+			fairnessID: "",
 			headers:    map[string]string{},
 			body: &fwkrh.InferenceRequestBody{
 				Payload: fwkrh.PayloadMap{"previous_response_id": "resp-456"},
 			},
-			wantFairnessID: metadata.DefaultFairnessID,
+			wantFairnessID: "",
 		},
 		{
 			name:           "nil body does not panic",
-			fairnessID:     metadata.DefaultFairnessID,
+			fairnessID:     "",
 			headers:        map[string]string{},
 			body:           nil,
-			wantFairnessID: metadata.DefaultFairnessID,
+			wantFairnessID: "",
 		},
 		{
-			name:           "no matching headers keeps default",
-			fairnessID:     metadata.DefaultFairnessID,
+			name:           "no matching headers leaves fairness ID empty",
+			fairnessID:     "",
 			headers:        map[string]string{"x-unrelated": "value"},
-			wantFairnessID: metadata.DefaultFairnessID,
+			wantFairnessID: "",
 		},
 		{
-			name:           "empty headers keeps default",
-			fairnessID:     metadata.DefaultFairnessID,
+			name:           "empty headers leaves fairness ID empty",
+			fairnessID:     "",
 			headers:        map[string]string{},
-			wantFairnessID: metadata.DefaultFairnessID,
+			wantFairnessID: "",
 		},
 		{
 			name:           "nil headers does not panic",
-			fairnessID:     metadata.DefaultFairnessID,
+			fairnessID:     "",
 			headers:        nil,
-			wantFairnessID: metadata.DefaultFairnessID,
+			wantFairnessID: "",
 		},
 	}
 
@@ -231,8 +224,7 @@ func TestPreAdmit_CustomHeader(t *testing.T) {
 	p := pi.(*Plugin)
 
 	req := &scheduling.InferenceRequest{
-		FairnessID: metadata.DefaultFairnessID,
-		Headers:    map[string]string{"x-tenant-id": "tenant-42"},
+		Headers: map[string]string{"x-tenant-id": "tenant-42"},
 	}
 	if err := p.PreAdmit(context.Background(), req); err != nil {
 		t.Fatalf("PreAdmit: %v", err)
@@ -243,7 +235,6 @@ func TestPreAdmit_CustomHeader(t *testing.T) {
 
 	// And it wins over a default-bucket header (because it is prepended).
 	req2 := &scheduling.InferenceRequest{
-		FairnessID: metadata.DefaultFairnessID,
 		Headers: map[string]string{
 			"x-tenant-id":           "tenant-42",
 			ClaudeCodeSessionHeader: "claude-session",

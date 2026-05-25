@@ -203,9 +203,6 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	)
 
 	fairnessID, _ := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
-	if fairnessID == "" {
-		fairnessID = metadata.DefaultFairnessID
-	}
 
 	// Prepare InferenceRequest (needed for both saturation detection and Scheduler)
 	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{
@@ -225,7 +222,11 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runPreAdmissionPlugins(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
+	if reqCtx.SchedulingRequest.FairnessID == "" {
+		reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
+	}
 
+	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
 	}
@@ -247,8 +248,8 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 
 	// Run admit request plugins
-	if !d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods) {
-		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: "request cannot be admitted"}
+	if denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
+		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: fmt.Sprintf("request cannot be admitted: %s", denyReason.Error())}
 	}
 
 	result, err := d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
@@ -522,17 +523,17 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 }
 
 func (d *Director) runAdmissionPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) bool {
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	for _, plugin := range d.requestControlPlugins.admissionPlugins {
 		loggerDebug.Info("Running Admit plugin", "plugin", plugin.TypedName())
 		if denyReason := plugin.Admit(ctx, request, endpoints); denyReason != nil {
 			loggerDebug.Info("Admit plugin denied the request", "plugin", plugin.TypedName(), "reason", denyReason.Error())
-			return false
+			return denyReason
 		}
 		loggerDebug.Info("Completed running Admit plugin successfully", "plugin", plugin.TypedName())
 	}
-	return true
+	return nil
 }
 
 func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {

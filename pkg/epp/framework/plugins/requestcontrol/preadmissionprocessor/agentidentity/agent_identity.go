@@ -26,7 +26,6 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
@@ -102,7 +101,7 @@ func (p *Plugin) TypedName() plugin.TypedName {
 }
 
 func (p *Plugin) PreAdmit(_ context.Context, request *scheduling.InferenceRequest) error {
-	if request.FairnessID != "" && request.FairnessID != metadata.DefaultFairnessID {
+	if request.FairnessID != "" {
 		return nil
 	}
 
