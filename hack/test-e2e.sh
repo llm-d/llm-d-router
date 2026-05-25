@@ -23,7 +23,9 @@ SIM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:v0.8.2}"
 MANIFEST_PATH="${MANIFEST_PATH:-${DIR}/../test/testdata/sim-deployment.yaml}"
 USE_KIND="${USE_KIND:-true}"
 
-# Tracks the name of a Kind cluster created by this script so cleanup knows
+KIND_CLUSTER_NAME="inference-e2e"
+
+# Tracks whether this script created the cluster so cleanup knows
 # whether to delete it (we never delete a cluster we didn't create ourselves).
 CREATED_CLUSTER=""
 
@@ -60,16 +62,18 @@ trap cleanup INT TERM
 
 if [ "${USE_KIND}" = "true" ]; then
   install_kind
-  if ! kubectl config current-context >/dev/null 2>&1; then
-    echo "No active kubecontext found. Creating a kind cluster for running the tests..."
-    kind create cluster --name inference-e2e
-    CREATED_CLUSTER=inference-e2e
-    load_images inference-e2e
+  current_context=$(kubectl config current-context 2>/dev/null || true)
+  if [ "${current_context}" = "kind-${KIND_CLUSTER_NAME}" ]; then
+    echo "Found an active kind cluster '${KIND_CLUSTER_NAME}' for running the tests..."
+    load_images "${KIND_CLUSTER_NAME}"
   else
-    current_context=$(kubectl config current-context)
-    current_kind_cluster="${current_context#kind-}"
-    echo "Found an active kind cluster '${current_kind_cluster}' for running the tests..."
-    load_images "${current_kind_cluster}"
+    if [ -n "${current_context}" ]; then
+      echo "WARNING: current kubecontext '${current_context}' is not kind-${KIND_CLUSTER_NAME}, ignoring it."
+    fi
+    echo "Creating kind cluster '${KIND_CLUSTER_NAME}' for running the tests..."
+    kind create cluster --name "${KIND_CLUSTER_NAME}"
+    CREATED_CLUSTER="${KIND_CLUSTER_NAME}"
+    load_images "${KIND_CLUSTER_NAME}"
   fi
 else
   # USE_KIND=false: caller is responsible for loading images into the cluster.
