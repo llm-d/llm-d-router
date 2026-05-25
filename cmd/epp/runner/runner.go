@@ -21,10 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	nhpprof "net/http/pprof"
 	"os"
 	"regexp"
-	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -1015,17 +1013,9 @@ func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	if enablePprof {
-		mux.HandleFunc("/debug/pprof/", nhpprof.Index)
-		mux.HandleFunc("/debug/pprof/cmdline", nhpprof.Cmdline)
-		mux.HandleFunc("/debug/pprof/profile", nhpprof.Profile)
-		mux.HandleFunc("/debug/pprof/symbol", nhpprof.Symbol)
-		mux.HandleFunc("/debug/pprof/trace", nhpprof.Trace)
-		mux.Handle("/debug/pprof/goroutine", nhpprof.Handler("goroutine"))
-		mux.Handle("/debug/pprof/heap", nhpprof.Handler("heap"))
-		mux.Handle("/debug/pprof/allocs", nhpprof.Handler("allocs"))
-		mux.Handle("/debug/pprof/threadcreate", nhpprof.Handler("threadcreate"))
-		mux.Handle("/debug/pprof/block", nhpprof.Handler("block"))
-		runtime.SetBlockProfileRate(1)
+		for path, h := range profiling.PprofHandlers() {
+			mux.Handle(path, h)
+		}
 	}
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux}
 	go func() {
