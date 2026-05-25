@@ -91,7 +91,7 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 		}
 
 		if rawConfig.SaturationDetector != nil {
-			logger.Info("DEPRECATION: top-level saturationDetector is deprecated, use flowControl.saturationDetector instead")
+			logger.Info("DEPRECATION: top-level saturationDetector is deprecated, use flowControl.saturationDetector instead. If both are set, the new field is used.")
 			if rawConfig.FlowControl == nil {
 				rawConfig.FlowControl = &configapi.FlowControlConfig{}
 			}
@@ -101,7 +101,7 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 		}
 
 		if rawConfig.Parser != nil {
-			logger.Info("DEPRECATION: top-level parser is deprecated, use requestHandler.parser instead")
+			logger.Info("DEPRECATION: top-level parser is deprecated, use requestHandler.parser instead. If both are set, the new field is used.")
 			if rawConfig.RequestHandler == nil {
 				rawConfig.RequestHandler = &configapi.RequestHandlerConfig{}
 			}

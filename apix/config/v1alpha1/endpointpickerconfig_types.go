@@ -65,14 +65,14 @@ type EndpointPickerConfig struct {
 	// +optional
 	// SaturationDetector specifies which saturation detector plugin to use.
 	//
-	// Deprecated: use flowControl.saturationDetector instead.
+	// Deprecated: use flowControl.saturationDetector instead. If both are set, the new field is used.
 	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
 	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
 
 	// +optional
 	// Parser specifies the parsing logic used by the EPP to process protocol messages.
 	//
-	// Deprecated: use requestHandler.parser instead.
+	// Deprecated: use requestHandler.parser instead. If both are set, the new field is used.
 	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
 	Parser *ParserConfig `json:"parser,omitempty"`
 }
