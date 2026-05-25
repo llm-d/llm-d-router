@@ -39,7 +39,7 @@ type Config struct {
 	// Optional: If zero, no TTL is applied by default and we rely solely on request context cancellation.
 	DefaultRequestTTL time.Duration
 
-	// ExpiryCleanupInterval is the interval at which each shard processor scans its queues for expired items.
+	// ExpiryCleanupInterval is the interval at which each processor scans its queues for expired items.
 	// Optional: Defaults to `defaultExpiryCleanupInterval` (1 second).
 	ExpiryCleanupInterval time.Duration
 
@@ -48,7 +48,7 @@ type Config struct {
 	// Optional: Defaults to `defaultProcessorReconciliationInterval` (5 seconds).
 	ProcessorReconciliationInterval time.Duration
 
-	// EnqueueChannelBufferSize is the size of the buffered channel that accepts incoming requests for each shard
+	// EnqueueChannelBufferSize is the size of the buffered channel that accepts incoming requests for each
 	// processor. This buffer acts as a shock absorber, decoupling the high-frequency distributor from the processor's
 	// serial execution loop and allowing the system to handle short bursts of traffic without blocking.
 	// Optional: Defaults to `defaultEnqueueChannelBufferSize` (100).

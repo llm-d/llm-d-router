@@ -84,7 +84,7 @@ type testHarness struct {
 	startSignal chan struct{}
 
 	// Core components under test
-	processor          *ShardProcessor
+	processor          *Processor
 	clock              *testclock.FakeClock
 	logger             logr.Logger
 	saturationDetector *mockSaturationDetector
@@ -132,7 +132,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		}
 	}
 
-	h.processor = NewShardProcessor(
+	h.processor = NewProcessor(
 		h.ctx,
 		"test-pool",
 		h,

@@ -16,9 +16,9 @@ limitations under the License.
 
 // Package controller contains the implementation of the FlowController engine.
 //
-// The FlowController is the central processing engine of the Flow Control layer. It is a sharded, high-throughput
+// The FlowController is the central processing engine of the Flow Control layer. It is a high-throughput
 // component responsible for managing the lifecycle of all incoming requests. It achieves this by acting as a stateless
-// supervisor that orchestrates a pool of stateful workers (ShardProcessors), distributing incoming requests among them.
+// supervisor that orchestrates a  stateful worker (SProcessor).
 package controller
 
 import (
@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -55,8 +54,8 @@ type processor interface {
 	SubmitOrBlock(ctx context.Context, item *internal.FlowItem) error
 }
 
-// shardProcessorFactory defines the signature for creating a shardProcessor.
-type shardProcessorFactory func(
+// processorFactory defines the signature for creating a Processor.
+type processorFactory func(
 	ctx context.Context,
 	registry contracts.FlowRegistry,
 	saturationDetector flowcontrol.SaturationDetector,
@@ -68,19 +67,11 @@ type shardProcessorFactory func(
 	logger logr.Logger,
 ) processor
 
-var _ processor = &internal.ShardProcessor{}
-
-// managedWorker holds the state for a single supervised worker.
-type managedWorker struct {
-	processor processor
-}
+var _ processor = &internal.Processor{}
 
 // FlowController is the central, high-throughput engine of the Flow Control layer.
-// It is designed as a stateless distributor that orchestrates a pool of stateful workers (ShardProcessor), following a
+// It is designed as a stateless distributor that orchestrates a stateful worker (Processor), following a
 // supervisor-worker pattern.
-//
-// The controller's run loop executes periodically, acting as a garbage collector that keeps the pool of running
-// workers synchronized with the dynamic shard topology of the FlowRegistry.
 //
 // Request Lifecycle Management:
 //
@@ -92,14 +83,15 @@ type managedWorker struct {
 type FlowController struct {
 	// --- Immutable dependencies (set at construction) ---
 
-	config                *Config
-	registry              registryClient
-	saturationDetector    flowcontrol.SaturationDetector
-	endpointCandidates    contracts.EndpointCandidates
-	usageLimitPolicy      flowcontrol.UsageLimitPolicy
-	clock                 clock.WithTicker
-	logger                logr.Logger
-	shardProcessorFactory shardProcessorFactory
+	config             *Config
+	registry           registryClient
+	saturationDetector flowcontrol.SaturationDetector
+	endpointCandidates contracts.EndpointCandidates
+	usageLimitPolicy   flowcontrol.UsageLimitPolicy
+	clock              clock.WithTicker
+	logger             logr.Logger
+	processorFactory   processorFactory
+	processor          processor
 
 	// --- Lifecycle state ---
 
@@ -108,9 +100,6 @@ type FlowController struct {
 	parentCtx context.Context
 
 	// --- Concurrent state ---
-
-	// worker is a highly concurrent pointer storing the managedWorker.
-	worker atomic.Pointer[managedWorker]
 
 	// wg waits for all worker goroutines to terminate during shutdown.
 	wg sync.WaitGroup
@@ -132,7 +121,7 @@ func NewFlowController(
 	poolName string,
 	config *Config,
 	deps Deps,
-) (*FlowController, error) {
+) *FlowController {
 	if deps.Clock == nil {
 		deps.Clock = clock.RealClock{}
 	}
@@ -147,7 +136,7 @@ func NewFlowController(
 		parentCtx:          ctx,
 	}
 
-	fc.shardProcessorFactory = func(
+	fc.processorFactory = func(
 		ctx context.Context,
 		registry contracts.FlowRegistry,
 		saturationDetector flowcontrol.SaturationDetector,
@@ -158,7 +147,7 @@ func NewFlowController(
 		enqueueChannelBufferSize int,
 		logger logr.Logger,
 	) processor {
-		return internal.NewShardProcessor(
+		return internal.NewProcessor(
 			ctx,
 			poolName,
 			registry,
@@ -172,7 +161,28 @@ func NewFlowController(
 		)
 	}
 
-	return fc, nil
+	return fc
+}
+
+func (fc *FlowController) Start() {
+	// Construct a new worker, but do not start its goroutine yet.
+	fc.processor = fc.processorFactory(
+		fc.parentCtx,
+		fc.registry,
+		fc.saturationDetector,
+		fc.endpointCandidates,
+		fc.usageLimitPolicy,
+		fc.clock,
+		fc.config.ExpiryCleanupInterval,
+		fc.config.EnqueueChannelBufferSize,
+		fc.logger,
+	)
+
+	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor.")
+	fc.wg.Go(func() {
+		fc.processor.Run(fc.parentCtx)
+	})
+
 }
 
 // EnqueueAndWait is the primary, synchronous entry point to the Flow Control system. It submits a request and blocks
@@ -262,7 +272,7 @@ func (fc *FlowController) EnqueueAndWait(
 }
 
 // tryDistribution handles a single attempt to select a shard and submit a request.
-// It uses the provided `conn` to identify candidate shards.
+// It uses the provided `conn` to access the registry data plane.
 // If this function returns an error, it guarantees that the provided `item` has been finalized.
 func (fc *FlowController) tryDistribution(
 	reqCtx context.Context,
@@ -281,7 +291,6 @@ func (fc *FlowController) tryDistribution(
 	// We must create a fresh FlowItem on each attempt as finalization is per-lifecycle.
 	item := internal.NewItem(req, effectiveTTL, enqueueTime)
 
-	worker := fc.getOrStartWorker()
 	dp := conn.GetDataPlane()
 	_, err := dp.ManagedQueue(conn.FlowKey())
 	if err != nil {
@@ -292,7 +301,7 @@ func (fc *FlowController) tryDistribution(
 		return item, err
 	}
 
-	outcome, err := fc.distributeRequest(reqCtx, item, worker)
+	outcome, err := fc.distributeRequest(reqCtx, item)
 	if err == nil {
 		// Success: Ownership of the item has been transferred to the processor.
 		return item, nil
@@ -372,59 +381,17 @@ func (fc *FlowController) createRequestContext(
 func (fc *FlowController) distributeRequest(
 	ctx context.Context,
 	item *internal.FlowItem,
-	worker *managedWorker,
 ) (types.QueueOutcome, error) {
 	reqID := item.OriginalRequest().ID()
-	if err := worker.processor.Submit(item); err == nil {
+	if err := fc.processor.Submit(item); err == nil {
 		return types.QueueOutcomeNotYetFinalized, nil
 	}
 
 	// processor is busy. Attempt a single blocking submission to the candidate.
 	fc.logger.V(logutil.TRACE).Info("Processor is busy, attempting blocking submit", "requestID", reqID)
-	err := worker.processor.SubmitOrBlock(ctx, item)
+	err := fc.processor.SubmitOrBlock(ctx, item)
 	if err != nil {
 		return types.QueueOutcomeRejectedOther, fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
 	}
 	return types.QueueOutcomeNotYetFinalized, nil // Success, ownership transferred.
-}
-
-// getOrStartWorker implements the lazy-loading and startup of shard processors.
-// It ensures that exactly one worker goroutine is started for each shard, using atomic operations
-// (sync.Map.LoadOrStore). The worker's processor goroutine is only started after it has successfully been registered,
-// preventing race conditions where multiple goroutines create and start the same worker.
-func (fc *FlowController) getOrStartWorker() *managedWorker {
-	if w := fc.worker.Load(); w != nil {
-		return w
-	}
-
-	// Construct a new worker, but do not start its goroutine yet.
-	processor := fc.shardProcessorFactory(
-		fc.parentCtx,
-		fc.registry,
-		fc.saturationDetector,
-		fc.endpointCandidates,
-		fc.usageLimitPolicy,
-		fc.clock,
-		fc.config.ExpiryCleanupInterval,
-		fc.config.EnqueueChannelBufferSize,
-		fc.logger,
-	)
-	newWorker := &managedWorker{
-		processor: processor,
-	}
-
-	// Atomically load or store. This is the critical synchronization step.
-	swapped := fc.worker.CompareAndSwap(nil, newWorker)
-	if !swapped {
-		// Another goroutine beat us to it. The `newWorker` we created was not stored.
-		return fc.worker.Load()
-	}
-
-	// We won the race. The newWorker was stored. Now, start the processor's long-running goroutine.
-	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor worker.")
-	fc.wg.Go(func() {
-		processor.Run(fc.parentCtx)
-	})
-
-	return newWorker
 }
