@@ -13,13 +13,13 @@ Without it, every request from a given agent session falls into the default fair
 
 ## How It Works
 
-1. If `request.FairnessID` is already set to something other than `metadata.DefaultFairnessID`, return immediately — an explicit upstream `x-llm-d-inference-fairness-id` (or its deprecated alias `x-gateway-inference-fairness-id`) always wins over a derived one.
+1. If `request.FairnessID` is already non-empty, return immediately — an explicit upstream `x-llm-d-inference-fairness-id` (or its deprecated alias `x-gateway-inference-fairness-id`) is read into `FairnessID` before the plugin runs and always wins over a derived one.
 2. Otherwise, walk the priority list of agent session headers and copy the first non-empty match into `request.FairnessID`. Operator-supplied entries from `additionalSessionHeaders` come first, followed by the built-in defaults in this order:
    1. `x-claude-code-session-id` (Claude Code)
    2. `x-session-affinity` (OpenCode)
    3. `session-id` (Codex)
    4. `session_id` (Codex, legacy underscored fallback)
-3. If nothing matches, leave `FairnessID` as the default and return — the request is still admitted, just into the shared default queue.
+3. If nothing matches, leave `FairnessID` empty and return — the director applies `metadata.DefaultFairnessID` after the plugin returns, so the request is still admitted, just into the shared default queue.
 
 The plugin is stateless and safe under concurrent use.
 
