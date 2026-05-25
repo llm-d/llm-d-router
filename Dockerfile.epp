@@ -30,7 +30,10 @@ COPY internal/ internal/
 COPY pkg/      pkg/
 COPY version/  version/
 
-RUN go mod download
+# Precompile the binary's dependency graph without version flags so this layer is
+# stable across commits; only the link step below reruns when COMMIT_SHA changes.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -o /dev/null cmd/epp/main.go
 
 # Build EPP
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
