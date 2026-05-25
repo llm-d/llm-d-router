@@ -160,7 +160,7 @@ func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) 
 		return len(request.Body.Generate.TokenIDs), nil
 	}
 	if request.Body.ChatCompletions == nil {
-		return 0, errors.New("request has neither completions nor chat completions body")
+		return 0, errors.New("unsupported request body type")
 	}
 	prompt, err := json.Marshal(request.Body.ChatCompletions.Messages)
 	if err != nil {
