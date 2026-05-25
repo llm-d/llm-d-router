@@ -45,12 +45,13 @@ var (
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
 type dataProducer struct {
-	typedName   plugin.TypedName
-	config      config
-	indexerInst indexerInterface
-	pluginState *plugin.PluginState
-	wg          sync.WaitGroup // Used for waiting on async cache updates in tests.
-	dk          plugin.DataKey
+	typedName      plugin.TypedName
+	config         config
+	indexerInst    indexerInterface
+	pluginState    *plugin.PluginState
+	tokenEstimator TokenEstimator
+	wg             sync.WaitGroup // Used for waiting on async cache updates in tests.
+	dk             plugin.DataKey
 }
 
 // TypedName returns the type and name of the plugin.
@@ -67,10 +68,9 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 func newDataProducer(ctx context.Context, name string, config config, handle plugin.Handle) (*dataProducer, error) {
 	log.FromContext(ctx).V(logutil.DEFAULT).Info("Prefix DataProducer initialized", "config", config)
 
-	//nolint:staticcheck // BlockSize is deprecated, but we check it here to provide a migration path for users.
-	if config.BlockSize > 0 && config.BlockSizeTokens <= 0 {
-		return nil, fmt.Errorf("invalid configuration: BlockSize (%d) is deprecated; please use BlockSizeTokens instead to define the cache block size in tokens", config.BlockSize)
-	}
+	// Note: 'blockSize' deprecation handling lives in ApproxPrefixCacheFactory so it
+	// applies to JSON-decoded configs uniformly with the strict-parsing policy (#1068).
+	// Direct callers of newDataProducer are expected to populate BlockSizeTokens.
 
 	if !config.AutoTune && config.BlockSizeTokens <= 0 {
 		return nil, fmt.Errorf("invalid configuration: BlockSizeTokens must be > 0 when AutoTune is disabled (current value: %d)", config.BlockSizeTokens)
@@ -91,10 +91,11 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 			Type: ApproxPrefixCachePluginType,
 			Name: name,
 		},
-		config:      config,
-		indexerInst: indexer,
-		pluginState: plugin.NewPluginState(ctx),
-		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		config:         config,
+		indexerInst:    indexer,
+		pluginState:    plugin.NewPluginState(ctx),
+		tokenEstimator: NewApproximatePrefixCacheTokenEstimator(ctx, config.MultimodalTokenEstimator),
+		dk:             attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
 	if handle != nil {
@@ -147,7 +148,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
 		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
 	}
-	hashes := hashPrompt(ctx, request, blockSize, maxBlocks)
+	hashes := getBlockHashes(ctx, request, blockSize, maxBlocks, p.tokenEstimator)
 	total := len(hashes)
 	prefixCacheServers := p.matchLongestPrefix(ctx, hashes)
 
@@ -254,12 +255,27 @@ func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
 }
 
 // ApproxPrefixCacheFactory is the factory function for the prefix cache data producer plugin.
-func ApproxPrefixCacheFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func ApproxPrefixCacheFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	parameters := defaultConfig
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal prefix cache parameters: %w", err)
 		}
+	}
+
+	// Deprecated 'blockSize' is accepted with a warning and mapped to
+	// 'blockSizeTokens'. Removed (truly unknown) fields are rejected by the
+	// strict decoder above. See #1068.
+	if parameters.BlockSize > 0 {
+		log.FromContext(handle.Context()).V(logutil.DEFAULT).Info(
+			"'blockSize' is deprecated; use 'blockSizeTokens' instead",
+			"blockSize", parameters.BlockSize,
+		)
+		if parameters.BlockSizeTokens == defaultBlockSizeTokens {
+			// BlockSizeTokens left at its default — map the deprecated value into it.
+			parameters.BlockSizeTokens = parameters.BlockSize
+		}
+		parameters.BlockSize = 0
 	}
 
 	// pluginState will be initialized by newDataProducer as we pass nil here.

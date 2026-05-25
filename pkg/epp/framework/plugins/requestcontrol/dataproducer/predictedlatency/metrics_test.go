@@ -93,11 +93,19 @@ func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*d
 
 func resetMetrics() {
 	inferenceGauges.Reset()
+	llmdInferenceGauges.Reset()
 	requestTTFT.Reset()
+	llmdRequestTTFT.Reset()
 	requestPredictedTTFT.Reset()
+	llmdRequestPredictedTTFT.Reset()
 	requestTTFTPredictionDuration.Reset()
+	llmdRequestTTFTPredictionDuration.Reset()
 	requestTPOT.Reset()
+	llmdRequestTPOT.Reset()
 	requestPredictedTPOT.Reset()
+	llmdRequestPredictedTPOT.Reset()
 	requestTPOTPredictionDuration.Reset()
+	llmdRequestTPOTPredictionDuration.Reset()
 	sloViolationCounter.Reset()
+	llmdSloViolationCounter.Reset()
 }

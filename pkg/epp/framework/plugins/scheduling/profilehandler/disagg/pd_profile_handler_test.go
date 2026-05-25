@@ -122,7 +122,7 @@ func TestPdProfileHandlerFactory(t *testing.T) {
 				assert.NoError(t, err)
 				rawParams = json.RawMessage(bytes)
 			}
-			plugin, err := PdProfileHandlerFactory(tt.pluginName, rawParams, handle)
+			plugin, err := PdProfileHandlerFactory(tt.pluginName, plugin.StrictDecoder(rawParams), handle)
 
 			if tt.expectErr {
 				assert.Error(t, err)
@@ -162,7 +162,7 @@ func TestPdProfileHandlerFactoryInvalidJSON(t *testing.T) {
 	for _, tt := range invalidTests {
 		t.Run(tt.name, func(t *testing.T) {
 			rawParams := json.RawMessage(tt.jsonParams)
-			plugin, err := PdProfileHandlerFactory("test", rawParams, handle)
+			plugin, err := PdProfileHandlerFactory("test", plugin.StrictDecoder(rawParams), handle)
 
 			assert.Error(t, err)
 			assert.Nil(t, plugin)

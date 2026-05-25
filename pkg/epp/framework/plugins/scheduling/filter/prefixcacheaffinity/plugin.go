@@ -32,6 +32,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
@@ -57,8 +58,15 @@ type Config struct {
 	// Set to 0 to always stick. Default: 5000.
 	MaxTTFTPenaltyMs float64 `json:"maxTTFTPenaltyMs,omitempty"`
 
+	// MaxTokensInFlightPenalty is the max in-flight token penalty before breaking
+	// stickiness. If the best sticky endpoint's in-flight tokens exceed the best
+	// non-sticky endpoint's in-flight tokens by more than this value, all endpoints
+	// are kept. Set to 0 to disable this gate. Default: 0 (disabled).
+	MaxTokensInFlightPenalty int64 `json:"maxTokensInFlightPenalty,omitempty"`
+
 	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
 	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
+	InFlightLoadProducerName          string `json:"inFlightLoadProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -72,12 +80,13 @@ type Plugin struct {
 	config                       Config
 	prefixMatchDataKey           fwkplugin.DataKey
 	latencyPredictionInfoDataKey fwkplugin.DataKey
+	inFlightLoadDataKey          fwkplugin.DataKey
 }
 
-func Factory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	config := DefaultConfig
-	if len(rawParameters) > 0 {
-		if err := json.Unmarshal(rawParameters, &config); err != nil {
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 		}
 	}
@@ -89,6 +98,7 @@ func Factory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fw
 		config:                       config,
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
+		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 	}, nil
 }
 
@@ -101,6 +111,9 @@ func (c *Config) validate() error {
 	}
 	if c.MaxTTFTPenaltyMs < 0 {
 		return fmt.Errorf("maxTTFTPenaltyMs must be >= 0, got %f", c.MaxTTFTPenaltyMs)
+	}
+	if c.MaxTokensInFlightPenalty < 0 {
+		return fmt.Errorf("maxTokensInFlightPenalty must be >= 0, got %d", c.MaxTokensInFlightPenalty)
 	}
 	return nil
 }
@@ -152,16 +165,34 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.CycleState, _ *fwksched
 		}
 	}
 
+	// In-flight tokens load gate: break stickiness if sticky endpoints are too loaded.
+	if p.config.MaxTokensInFlightPenalty > 0 && len(nonSticky) > 0 {
+		bestStickyTokens := p.bestInFlightTokens(sticky)
+		bestNonStickyTokens := p.bestInFlightTokens(nonSticky)
+		if bestStickyTokens-bestNonStickyTokens > p.config.MaxTokensInFlightPenalty {
+			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: in-flight tokens load gate broken",
+				"bestStickyTokens", bestStickyTokens, "bestNonStickyTokens", bestNonStickyTokens,
+				"penalty", bestStickyTokens-bestNonStickyTokens, "maxPenalty", p.config.MaxTokensInFlightPenalty)
+			return endpoints
+		}
+	}
+
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
 		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints))
 	return sticky
 }
 
 func (p *Plugin) Consumes() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{
-		p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
-		p.prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfo{},
+	res := map[fwkplugin.DataKey]any{
+		p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{},
 	}
+	if p.config.MaxTTFTPenaltyMs > 0 {
+		res[p.latencyPredictionInfoDataKey] = attrlatency.LatencyPredictionInfo{}
+	}
+	if p.config.MaxTokensInFlightPenalty > 0 {
+		res[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
+	}
+	return res
 }
 
 func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {
@@ -185,6 +216,24 @@ func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) float64 {
 			if info.TTFT() < best {
 				best = info.TTFT()
 			}
+		}
+	}
+	return best
+}
+
+// bestInFlightTokens returns the lowest in-flight token count across endpoints.
+// Endpoints without the attribute are treated as 0 (no observed load).
+func (p *Plugin) bestInFlightTokens(endpoints []fwksched.Endpoint) int64 {
+	best := int64(math.MaxInt64)
+	for _, ep := range endpoints {
+		var tokens int64
+		if raw, ok := ep.Get(p.inFlightLoadDataKey.String()); ok {
+			if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
+				tokens = load.Tokens
+			}
+		}
+		if tokens < best {
+			best = tokens
 		}
 	}
 	return best

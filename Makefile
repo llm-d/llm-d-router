@@ -312,23 +312,28 @@ post-deploy-test: ## Run post deployment tests
 	@echo "Success!"
 	@echo "Post-deployment tests passed."
 
+.PHONY: verify-manifests
+verify-manifests: kubectl-validate ## Validate deployment manifests.
+	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
+
 ##@ Helm
 
 .PHONY: verify-helm-charts
 verify-helm-charts: helm-install kubectl-validate ## Render and validate Helm charts.
 	HELM="$(HELM)" KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-helm.sh $(MODE)
 
-.PHONY: verify-manifests
-verify-manifests: kubectl-validate ## Validate deployment manifests.
-	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
+.PHONY: helm-push
+helm-push: yq helm-install ## Package and push a specified Helm chart. Usage: make helm-push CHART=<chart_name>
+	@if [ -z "$(CHART)" ]; then echo "Error: CHART variable is required (e.g. CHART=llm-d-router-standalone)"; exit 1; fi
+	CHART=$(CHART) EXTRA_TAG="$(EXTRA_TAG)" CHART_SUFFIX="$(CHART_SUFFIX)" EPP_RELEASE_IMAGE_REPOSITORY="$(EPP_RELEASE_IMAGE_REPOSITORY)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 
-.PHONY: inferencepool-helm-chart-push
-inferencepool-helm-chart-push: yq helm-install ## Package and push the InferencePool Helm chart.
-	CHART=inferencepool EXTRA_TAG="$(EXTRA_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
+.PHONY: helm-push-gateway
+helm-push-gateway: ## Package and push the llm-d-router-gateway Helm chart.
+	$(MAKE) helm-push CHART=llm-d-router-gateway
 
-.PHONY: standalone-helm-chart-push
-standalone-helm-chart-push: yq helm-install ## Package and push the standalone EPP Helm chart.
-	CHART=standalone EXTRA_TAG="$(EXTRA_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
+.PHONY: helm-push-standalone
+helm-push-standalone: ## Package and push the llm-d-router-standalone Helm chart.
+	$(MAKE) helm-push CHART=llm-d-router-standalone
 
 
 ##@ Coverage

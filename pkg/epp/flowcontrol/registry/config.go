@@ -129,6 +129,12 @@ type Config struct {
 	// If nil, it is automatically populated with system defaults during NewConfig.
 	DefaultPriorityBand *PriorityBandConfig
 
+	// DefaultNegativePriorityBand is an optional template for dynamically provisioning priority bands when a request
+	// arrives with a priority level strictly below zero. This allows setting lower capacity limits (or zero) for
+	// negative-priority traffic to designate it as sheddable.
+	// If nil, negative priorities fall back to DefaultPriorityBand.
+	DefaultNegativePriorityBand *PriorityBandConfig
+
 	// FlowGCTimeout defines the interval at which the registry scans for and garbage collects idle flows.
 	// A flow is collected if it has been observed to be Idle for at least one full scan interval.
 	// Optional: Defaults to `defaultFlowGCTimeout` (1 hour).
@@ -249,6 +255,15 @@ func WithPriorityBand(band *PriorityBandConfig) ConfigOption {
 func WithDefaultPriorityBand(band *PriorityBandConfig) ConfigOption {
 	return func(b *configBuilder) error {
 		b.config.DefaultPriorityBand = band
+		return nil
+	}
+}
+
+// WithDefaultNegativePriorityBand sets the template configuration used for dynamically provisioning priority bands
+// with priority levels strictly below zero.
+func WithDefaultNegativePriorityBand(band *PriorityBandConfig) ConfigOption {
+	return func(b *configBuilder) error {
+		b.config.DefaultNegativePriorityBand = band
 		return nil
 	}
 }
@@ -397,6 +412,14 @@ func NewConfigFromAPI(apiConfig *configapi.FlowControlConfig, handle plugin.Hand
 		opts = append(opts, WithDefaultPriorityBand(templateBand))
 	}
 
+	if apiConfig.DefaultNegativePriorityBand != nil {
+		templateBand, err := buildDefaultPriorityBandTemplate(handle, apiConfig.DefaultNegativePriorityBand)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, WithDefaultNegativePriorityBand(templateBand))
+	}
+
 	for _, band := range apiConfig.PriorityBands {
 		pb, err := buildPriorityBand(handle, band)
 		if err != nil {
@@ -510,6 +533,13 @@ func NewConfig(handle plugin.Handle, opts ...ConfigOption) (*Config, error) {
 		}
 	}
 
+	// Apply defaults to DefaultNegativePriorityBand if set.
+	if builder.config.DefaultNegativePriorityBand != nil {
+		if err := builder.config.DefaultNegativePriorityBand.applyDefaults(handle); err != nil {
+			return nil, fmt.Errorf("failed to apply defaults to DefaultNegativePriorityBand: %w", err)
+		}
+	}
+
 	// Apply defaults to all explicitly configured bands.
 	for _, band := range builder.config.PriorityBands {
 		if err := band.applyDefaults(handle); err != nil {
@@ -618,6 +648,14 @@ func (c *Config) validate(checker capabilityChecker) error {
 		return fmt.Errorf("invalid DefaultPriorityBand configuration: %w", err)
 	}
 
+	if c.DefaultNegativePriorityBand != nil {
+		negTemplateCopy := *c.DefaultNegativePriorityBand
+		negTemplateCopy.Priority = -1
+		if err := negTemplateCopy.validate(checker); err != nil {
+			return fmt.Errorf("invalid DefaultNegativePriorityBand configuration: %w", err)
+		}
+	}
+
 	// Validate statically configured bands.
 	for _, band := range c.PriorityBands {
 		if err := band.validate(checker); err != nil {
@@ -625,57 +663,6 @@ func (c *Config) validate(checker capabilityChecker) error {
 		}
 	}
 	return nil
-}
-
-// --- Sharding & Partitioning ---
-
-// ShardConfig holds the partitioned configuration for a single registryShard.
-type ShardConfig struct {
-	MaxBytes      uint64
-	MaxRequests   uint64
-	PriorityBands map[int]*PriorityBandConfig
-}
-
-// partition derives a `ShardConfig` from the master `Config` for a specific shard index.
-// It calculates the capacity distribution, ensuring that the total global capacity is distributed completely and
-// evenly.
-func (c *Config) partition(shardIndex, totalShards int) *ShardConfig {
-	shardCfg := &ShardConfig{
-		MaxBytes:      partitionUint64(c.MaxBytes, shardIndex, totalShards),
-		MaxRequests:   partitionUint64(c.MaxRequests, shardIndex, totalShards),
-		PriorityBands: make(map[int]*PriorityBandConfig, len(c.PriorityBands)),
-	}
-
-	for _, template := range c.PriorityBands {
-		shardBand := &PriorityBandConfig{
-			Priority:       template.Priority,
-			OrderingPolicy: template.OrderingPolicy,
-			FairnessPolicy: template.FairnessPolicy,
-			Queue:          template.Queue,
-			MaxBytes:       partitionUint64(template.MaxBytes, shardIndex, totalShards),
-			MaxRequests:    partitionUint64(template.MaxRequests, shardIndex, totalShards),
-		}
-
-		shardCfg.PriorityBands[shardBand.Priority] = shardBand
-	}
-	return shardCfg
-}
-
-// partitionUint64 distributes a total uint64 value across a number of partitions.
-// It distributes the remainder of the division one by one to the first few partitions.
-func partitionUint64(total uint64, partitionIndex, totalPartitions int) uint64 {
-	if total == 0 {
-		return 0
-	}
-
-	t := uint64(totalPartitions)
-	base := total / t
-	remainder := total % t
-
-	if uint64(partitionIndex) < remainder {
-		return base + 1
-	}
-	return base
 }
 
 // Clone creates a deep copy of the Config.
@@ -690,6 +677,11 @@ func (c *Config) Clone() *Config {
 	if c.DefaultPriorityBand != nil {
 		val := *c.DefaultPriorityBand
 		clone.DefaultPriorityBand = &val
+	}
+
+	if c.DefaultNegativePriorityBand != nil {
+		val := *c.DefaultNegativePriorityBand
+		clone.DefaultNegativePriorityBand = &val
 	}
 
 	if c.PriorityBands != nil {

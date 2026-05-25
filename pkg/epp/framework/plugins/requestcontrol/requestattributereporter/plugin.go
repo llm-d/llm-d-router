@@ -74,9 +74,9 @@ type AttributeKey struct {
 	Name string `json:"name"`
 }
 
-func RequestAttributeReporterPluginFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func RequestAttributeReporterPluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	pluginConfig := Config{}
-	if err := json.Unmarshal(rawParameters, &pluginConfig); err != nil {
+	if err := rawParameters.Decode(&pluginConfig); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 

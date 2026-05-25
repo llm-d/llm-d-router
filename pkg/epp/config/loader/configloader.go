@@ -203,7 +203,7 @@ func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplug
 		if !ok {
 			return fmt.Errorf("plugin type '%s' is not registered", spec.Type)
 		}
-		plugin, err := factory(spec.Name, spec.Parameters, handle)
+		plugin, err := factory(spec.Name, fwkplugin.StrictDecoder(spec.Parameters), handle)
 		if err != nil {
 			return fmt.Errorf("failed to create plugin '%s' (type: %s): %w", spec.Name, spec.Type, err)
 		}

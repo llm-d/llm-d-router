@@ -26,13 +26,14 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 // makeEndpoint creates a test endpoint with the given prefix cache match ratio
-// (prefixMatch out of 100 total blocks) and predicted TTFT.
-func makeEndpoint(name string, prefixMatch int, ttft float64) fwksched.Endpoint {
+// (prefixMatch out of 100 total blocks), predicted TTFT, and in-flight tokens.
+func makeEndpoint(name string, prefixMatch int, ttft float64, tokens int64) fwksched.Endpoint {
 	meta := &fwkdl.EndpointMetadata{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: "default"},
 	}
@@ -43,6 +44,9 @@ func makeEndpoint(name string, prefixMatch int, ttft float64) fwksched.Endpoint 
 	if ttft >= 0 {
 		ep.Put(attrlatency.LatencyPredictionInfoDataKey.String(), attrlatency.NewLatencyPredictionInfo(true, true, 0, 0, ttft, 0, 0))
 	}
+	if tokens >= 0 {
+		ep.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: tokens})
+	}
 	return ep
 }
 
@@ -52,14 +56,15 @@ func newTestPlugin(config Config) *Plugin {
 		config:                       config,
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
+		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 	}
 }
 
 func TestFilter_AffinityThresholdDisabled(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 0, 10),
-		makeEndpoint("b", 90, 20),
+		makeEndpoint("a", 0, 10, 0),
+		makeEndpoint("b", 90, 20, 0),
 	}
 	result := p.Filter(context.Background(), nil, nil, endpoints)
 	assert.Equal(t, 2, len(result), "affinityThreshold=0 should return all")
@@ -67,7 +72,7 @@ func TestFilter_AffinityThresholdDisabled(t *testing.T) {
 
 func TestFilter_SingleEndpoint(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80})
-	endpoints := []fwksched.Endpoint{makeEndpoint("a", 90, 10)}
+	endpoints := []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0)}
 	result := p.Filter(context.Background(), nil, nil, endpoints)
 	assert.Equal(t, 1, len(result), "single endpoint should always pass")
 }
@@ -75,9 +80,9 @@ func TestFilter_SingleEndpoint(t *testing.T) {
 func TestFilter_NoStickyEndpoints(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 10, 10),
-		makeEndpoint("b", 20, 20),
-		makeEndpoint("c", 50, 30),
+		makeEndpoint("a", 10, 10, 0),
+		makeEndpoint("b", 20, 20, 0),
+		makeEndpoint("c", 50, 30, 0),
 	}
 	result := p.Filter(context.Background(), nil, nil, endpoints)
 	assert.Equal(t, 3, len(result), "no sticky endpoints should return all")
@@ -86,9 +91,9 @@ func TestFilter_NoStickyEndpoints(t *testing.T) {
 func TestFilter_NarrowToSticky(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 5000})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 100),
-		makeEndpoint("b", 85, 120),
-		makeEndpoint("c", 10, 50),
+		makeEndpoint("a", 90, 100, 0),
+		makeEndpoint("b", 85, 120, 0),
+		makeEndpoint("c", 10, 50, 0),
 	}
 	result := p.Filter(context.Background(), nil, nil, endpoints)
 	assert.Equal(t, 2, len(result), "should narrow to sticky endpoints")
@@ -97,25 +102,91 @@ func TestFilter_NarrowToSticky(t *testing.T) {
 func TestFilter_TTFTPenaltyBreaksStickiness(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 500),
-		makeEndpoint("b", 10, 50),
+		makeEndpoint("a", 90, 500, 0),
+		makeEndpoint("b", 10, 50, 0),
 	}
 	result := p.Filter(context.Background(), nil, nil, endpoints)
 	assert.Equal(t, 2, len(result), "TTFT penalty should break stickiness")
 }
 
+func TestFilter_InFlightTokenPenaltyBreaksStickiness(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTokensInFlightPenalty: 100})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, 10, 500),
+		makeEndpoint("b", 10, 10, 50),
+	}
+	result := p.Filter(context.Background(), nil, nil, endpoints)
+	assert.Equal(t, 2, len(result), "In-flight token penalty should break stickiness")
+}
+
+func TestFilter_InFlightTokenPenaltyWithinThreshold(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTokensInFlightPenalty: 1000})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, 10, 500),
+		makeEndpoint("b", 10, 10, 50),
+	}
+	result := p.Filter(context.Background(), nil, nil, endpoints)
+	assert.Equal(t, 1, len(result), "In-flight token penalty within threshold should NOT break stickiness")
+	assert.Equal(t, "a", result[0].GetMetadata().NamespacedName.Name)
+}
+
+func TestFilter_InFlightTokenPenaltyDisabled(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTokensInFlightPenalty: 0})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, 10, 5000), // Huge penalty
+		makeEndpoint("b", 10, 10, 50),
+	}
+	result := p.Filter(context.Background(), nil, nil, endpoints)
+	assert.Equal(t, 1, len(result), "In-flight token penalty=0 should NOT break stickiness")
+	assert.Equal(t, "a", result[0].GetMetadata().NamespacedName.Name)
+}
+
 func TestFilter_ExplorationProbability(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 1.0})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 100),
-		makeEndpoint("b", 10, 50),
+		makeEndpoint("a", 90, 100, 0),
+		makeEndpoint("b", 10, 50, 0),
 	}
 	result := p.Filter(context.Background(), nil, nil, endpoints)
 	assert.Equal(t, 2, len(result), "epsilon=1.0 should always skip gate")
 }
 
+func TestConsumes_ConditionalAttributes(t *testing.T) {
+	// Everything disabled
+	p := newTestPlugin(Config{MaxTTFTPenaltyMs: 0, MaxTokensInFlightPenalty: 0})
+	consumed := p.Consumes()
+	_, ok := consumed[p.inFlightLoadDataKey]
+	assert.False(t, ok, "InFlightLoadDataKey should not be consumed when penalty is 0")
+	_, ok = consumed[p.latencyPredictionInfoDataKey]
+	assert.False(t, ok, "LatencyPredictionInfoDataKey should not be consumed when penalty is 0")
+
+	// Only TTFT enabled
+	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, MaxTokensInFlightPenalty: 0})
+	consumed = p.Consumes()
+	_, ok = consumed[p.inFlightLoadDataKey]
+	assert.False(t, ok)
+	_, ok = consumed[p.latencyPredictionInfoDataKey]
+	assert.True(t, ok)
+
+	// Only In-flight enabled
+	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 0, MaxTokensInFlightPenalty: 100})
+	consumed = p.Consumes()
+	_, ok = consumed[p.inFlightLoadDataKey]
+	assert.True(t, ok)
+	_, ok = consumed[p.latencyPredictionInfoDataKey]
+	assert.False(t, ok)
+
+	// Both enabled
+	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, MaxTokensInFlightPenalty: 100})
+	consumed = p.Consumes()
+	_, ok = consumed[p.inFlightLoadDataKey]
+	assert.True(t, ok)
+	_, ok = consumed[p.latencyPredictionInfoDataKey]
+	assert.True(t, ok)
+}
+
 func TestFactory_ValidConfig(t *testing.T) {
-	plugin, err := Factory("test", nil, nil)
+	plugin, err := Factory("test", fwkplugin.StrictDecoder(nil), nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, plugin)
 	assert.Equal(t, PluginType, plugin.TypedName().Type)
@@ -123,7 +194,7 @@ func TestFactory_ValidConfig(t *testing.T) {
 
 func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	// Setting only affinityThreshold should preserve defaults for other params.
-	plugin, err := Factory("test", []byte(`{"affinityThreshold": 0.95}`), nil)
+	plugin, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"affinityThreshold": 0.95}`)), nil)
 	assert.NoError(t, err)
 	p := plugin.(*Plugin)
 	assert.Equal(t, 0.95, p.config.AffinityThreshold)
@@ -131,7 +202,7 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultConfig.MaxTTFTPenaltyMs, p.config.MaxTTFTPenaltyMs)
 
 	// Setting only explorationProbability should preserve defaults for other params.
-	plugin, err = Factory("test", []byte(`{"explorationProbability": 0.05}`), nil)
+	plugin, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"explorationProbability": 0.05}`)), nil)
 	assert.NoError(t, err)
 	p = plugin.(*Plugin)
 	assert.Equal(t, DefaultConfig.AffinityThreshold, p.config.AffinityThreshold)
@@ -139,7 +210,7 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultConfig.MaxTTFTPenaltyMs, p.config.MaxTTFTPenaltyMs)
 
 	// Setting only maxTTFTPenaltyMs should preserve defaults for other params.
-	plugin, err = Factory("test", []byte(`{"maxTTFTPenaltyMs": 10000}`), nil)
+	plugin, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"maxTTFTPenaltyMs": 10000}`)), nil)
 	assert.NoError(t, err)
 	p = plugin.(*Plugin)
 	assert.Equal(t, DefaultConfig.AffinityThreshold, p.config.AffinityThreshold)
@@ -148,13 +219,13 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 }
 
 func TestFactory_InvalidAffinityThreshold(t *testing.T) {
-	_, err := Factory("test", []byte(`{"affinityThreshold": 1.5}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"affinityThreshold": 1.5}`)), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "affinityThreshold must be <= 1.0")
 }
 
 func TestFactory_InvalidExplorationProbability(t *testing.T) {
-	_, err := Factory("test", []byte(`{"explorationProbability": -0.1}`), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"explorationProbability": -0.1}`)), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "explorationProbability must be in [0, 1]")
 }

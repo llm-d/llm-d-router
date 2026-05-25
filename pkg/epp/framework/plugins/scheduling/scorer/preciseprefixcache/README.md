@@ -31,7 +31,7 @@ plugins:
     parameters:
       modelName: hf-repo/model-name
       vllm:
-        http: http://localhost:8000
+        url: http://localhost:8000
   - type: precise-prefix-cache-scorer
     parameters:
       tokenProcessorConfig:
@@ -71,7 +71,7 @@ plugins:
     parameters:
       modelName: hf-repo/model-name
       vllm:
-        http: http://localhost:8000
+        url: http://localhost:8000
   - type: precise-prefix-cache-scorer
     parameters:
       tokenProcessorConfig:

@@ -4,10 +4,11 @@ package e2e
 const simpleConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 256
+- type: prefix-cache-scorer
 - type: decode-filter
 - type: max-score-picker
 - type: single-profile-handler
@@ -26,11 +27,12 @@ const deprecatedPdConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: prefill-header-handler
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 256
+- type: prefix-cache-scorer
 - type: prefill-filter
 - type: decode-filter
 - type: max-score-picker
@@ -85,11 +87,12 @@ plugins:
 - type: encode-filter
 - type: prefill-filter
 - type: decode-filter
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 256
+- type: prefix-cache-scorer
 - type: max-score-picker
 - type: always-disagg-multimodal-decider
 - type: prefix-based-pd-decider
@@ -122,11 +125,12 @@ schedulingProfiles:
 const pdConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 256
+- type: prefix-cache-scorer
 - type: prefill-filter
 - type: decode-filter
 - type: max-score-picker
@@ -156,11 +160,11 @@ schedulingProfiles:
 const decodeOnlyConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
-    hashBlockSize: 10
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 256
+- type: prefix-cache-scorer
 - type: encode-filter
 - type: prefill-filter
 - type: decode-filter
@@ -183,7 +187,7 @@ plugins:
   parameters:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
-      http: http://localhost:8000
+      url: http://localhost:8000
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:
@@ -215,7 +219,7 @@ plugins:
   parameters:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
-      http: http://localhost:8000
+      url: http://localhost:8000
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:

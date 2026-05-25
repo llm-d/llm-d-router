@@ -60,14 +60,14 @@ func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource, 
 
 // MetricsDataSourceFactory is a factory function used to instantiate data layer's
 // metrics data source plugins specified in a configuration.
-func MetricsDataSourceFactory(name string, parameters json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	cfg, err := defaultDataSourceConfigParams()
 	if err != nil {
 		return nil, err
 	}
 
 	if parameters != nil { // overlay the defaults with configured values
-		if err := json.Unmarshal(parameters, cfg); err != nil {
+		if err := parameters.Decode(cfg); err != nil {
 			return nil, err
 		}
 	}

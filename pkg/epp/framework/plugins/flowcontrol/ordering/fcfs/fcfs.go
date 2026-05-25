@@ -33,7 +33,7 @@ import (
 // For detailed documentation on behavior and queue pairing, see README.md.
 const FCFSOrderingPolicyType = "fcfs-ordering-policy"
 
-func FCFSOrderingPolicyFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func FCFSOrderingPolicyFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return newFCFS().withName(name), nil
 }
 

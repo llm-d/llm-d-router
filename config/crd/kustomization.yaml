@@ -1,8 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Forwarding shim so upstream testutils.DeleteClusterResources (which hardcodes
-# ../../../config/crd/ relative to test/e2e/epp/) resolves to the same CRDs as
-# deploy/components/crds-gie.
 resources:
 - ../../deploy/components/crds-gie
+- bases/llm-d.ai_inferenceobjectives.yaml
+- bases/llm-d.ai_inferencemodelrewrites.yaml

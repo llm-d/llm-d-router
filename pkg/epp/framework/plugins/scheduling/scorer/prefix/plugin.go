@@ -52,11 +52,11 @@ const (
 )
 
 // PrefixCachePluginFactory defines the factory function for the Prefix plugin.
-func PrefixCachePluginFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func PrefixCachePluginFactory(name string, decoder *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	var cfg Config
-	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &cfg); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal prefix cache scorer parameters: %w", err)
+	if decoder != nil {
+		if err := decoder.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("failed to decode prefix cache scorer parameters: %w", err)
 		}
 	}
 

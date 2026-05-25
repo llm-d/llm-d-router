@@ -57,7 +57,7 @@ plugins:
     parameters:
       modelName: meta-llama/Llama-3.1-8B-Instruct
       vllm:
-        http: http://localhost:8000
+        url: http://localhost:8000
   - type: context-length-aware
     parameters:
       label: llm-d.ai/context-length-range

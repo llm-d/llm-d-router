@@ -263,4 +263,4 @@ None.
 
 ## Related Documentation
 
-- [Disaggregation Architecture](/docs/disaggregation.md)
+- [Disaggregation Architecture](../../../../../../../docs/disaggregation.md)

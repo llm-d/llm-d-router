@@ -41,7 +41,7 @@ func snapshotRegistries(t *testing.T) {
 	})
 }
 
-func dummyFactory(name string, parameters json.RawMessage, handle Handle) (Plugin, error) {
+func dummyFactory(name string, parameters *json.Decoder, handle Handle) (Plugin, error) {
 	return &basePlugin{name: TypedName{Type: "dummy", Name: name}}, nil
 }
 
@@ -65,7 +65,7 @@ func TestRegister_Overwrites(t *testing.T) {
 	Register("dup-type", dummyFactory)
 
 	var sentinel Plugin = &basePlugin{name: TypedName{Type: "sentinel", Name: "sentinel"}}
-	Register("dup-type", func(name string, parameters json.RawMessage, handle Handle) (Plugin, error) {
+	Register("dup-type", func(name string, parameters *json.Decoder, handle Handle) (Plugin, error) {
 		return sentinel, nil
 	})
 

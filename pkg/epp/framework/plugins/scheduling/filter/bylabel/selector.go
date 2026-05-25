@@ -31,10 +31,10 @@ var _ scheduling.Filter = &Selector{}
 var LabelSelectorFilterFactory = SelectorFactory
 
 // SelectorFactory defines the factory function for the Selector filter.
-func SelectorFactory(name string, rawParameters json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func SelectorFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	parameters := metav1.LabelSelector{}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' filter - %w", LabelSelectorFilterType, err)
 		}
 	}
@@ -46,7 +46,7 @@ func SelectorFactory(name string, rawParameters json.RawMessage, _ plugin.Handle
 // rather than the canonical "label-selector-filter". It also logs a deprecation warning.
 //
 // Deprecated: Use SelectorFactory instead.
-func DeprecatedSelectorFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func DeprecatedSelectorFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	if handle != nil {
 		log.FromContext(handle.Context()).Info("Deprecated: plugin type 'by-label-selector' is deprecated, use 'label-selector-filter' instead")
 	}

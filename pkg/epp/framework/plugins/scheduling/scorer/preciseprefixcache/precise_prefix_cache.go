@@ -121,7 +121,7 @@ func (s *precisePluginState) Clone() plugin.StateData {
 
 // PluginFactory defines the factory function for creating
 // a new instance of the PrefixCacheTrackingPlugin.
-func PluginFactory(name string, rawParameters json.RawMessage,
+func PluginFactory(name string, rawParameters *json.Decoder,
 	handle plugin.Handle,
 ) (plugin.Plugin, error) {
 	indexerConfig, err := kvcache.NewDefaultConfig()
@@ -135,7 +135,7 @@ func PluginFactory(name string, rawParameters json.RawMessage,
 	}
 
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PrecisePrefixCachePluginType, err)
 		}
 	}
@@ -659,6 +659,10 @@ func (s *Scorer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetad
 	// the legacy single-port-per-pod behaviour; multi-rank wide-EP / DP
 	// pods get one subscriber per rank automatically.
 	port := s.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid KV-events ZMQ port %d for endpoint %s (socketPort=%d, rankIndex=%d)",
+			port, endpointKey, s.kvEventsConfig.PodDiscoveryConfig.SocketPort, meta.GetRankIndex())
+	}
 	zmqEndpoint := fmt.Sprintf("tcp://%s:%d", meta.Address, port)
 
 	logger := log.FromContext(ctx).WithName(s.typedName.String())

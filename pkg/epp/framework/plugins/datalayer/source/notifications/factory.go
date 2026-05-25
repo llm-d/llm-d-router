@@ -40,13 +40,13 @@ type notificationSourceParams struct {
 }
 
 // NotificationSourceFactory is the factory function for k8s notification source plugins.
-func NotificationSourceFactory(name string, parameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func NotificationSourceFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	if parameters == nil {
 		return nil, errors.New("k8s-notification-source requires parameters (group, version, kind)")
 	}
 
 	var params notificationSourceParams
-	if err := json.Unmarshal(parameters, &params); err != nil {
+	if err := parameters.Decode(&params); err != nil {
 		return nil, fmt.Errorf("failed to parse notification source parameters: %w", err)
 	}
 
@@ -69,7 +69,7 @@ func NotificationSourceFactory(name string, parameters json.RawMessage, _ fwkplu
 }
 
 // EndpointSourceFactory is the factory function for endpoint notification source plugins.
-func EndpointSourceFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func EndpointSourceFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	if name == "" {
 		name = EndpointNotificationSourceType
 	}

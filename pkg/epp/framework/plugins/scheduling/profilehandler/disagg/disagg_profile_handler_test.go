@@ -226,7 +226,7 @@ func TestHandlerFactory(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", b, handle)
+			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
 			if tt.expectErr {
 				assert.Error(t, err)
 				assert.Nil(t, p)
@@ -259,10 +259,10 @@ func TestHandlerFactory_DeprecatedFlatParams(t *testing.T) {
 			"encodeProfile":            "my-encode",
 			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
 		}, false},
-		{"nested format with unknown extra fields is accepted", map[string]any{
+		{"nested format with unknown extra fields is rejected", map[string]any{
 			"profiles":     map[string]any{"decode": "decode"},
 			"unknownField": "ignored",
-		}, false},
+		}, true},
 		{"mixing deprecated and nested fields is an error", map[string]any{
 			"decodeProfile": "my-decode",
 			"profiles":      map[string]any{"decode": "other-decode"},
@@ -275,7 +275,7 @@ func TestHandlerFactory_DeprecatedFlatParams(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", b, handle)
+			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
 			if tt.expectErr {
 				assert.Error(t, err)
 				assert.Nil(t, p)
@@ -305,14 +305,14 @@ func TestHandlerFactory_PdProfileHandlerParams(t *testing.T) {
 			"prefillProfile":    "prefill",
 			"deciderPluginName": PrefixBasedPDDeciderPluginType,
 		}, false},
-		{"pd-profile-handler with all params including ignored fields", map[string]any{
+		{"pd-profile-handler with unknown fields is rejected", map[string]any{
 			"decodeProfile":     "decode",
 			"prefillProfile":    "prefill",
 			"deciderPluginName": PrefixBasedPDDeciderPluginType,
-			"prefixPluginType":  "prefix-cache-scorer", // ignored by Handler
-			"prefixPluginName":  "prefix-cache-scorer", // ignored by Handler
-			"primaryPort":       8080,                  // ignored by Handler
-		}, false},
+			"prefixPluginType":  "prefix-cache-scorer", // unknown to both schemas (#1068)
+			"prefixPluginName":  "prefix-cache-scorer",
+			"primaryPort":       8080,
+		}, true},
 		{"pd-profile-handler unknown deciderPluginName", map[string]any{
 			"deciderPluginName": "INVALID",
 		}, true},
@@ -320,7 +320,7 @@ func TestHandlerFactory_PdProfileHandlerParams(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", b, handle)
+			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
 			if tt.expectErr {
 				assert.Error(t, err)
 				assert.Nil(t, p)
@@ -336,7 +336,7 @@ func TestHandlerFactory_InvalidJSON(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := handleWithDeciders(ctx)
 	for _, raw := range []string{`{"deciders": `} {
-		p, err := HandlerFactory("h", json.RawMessage(raw), handle)
+		p, err := HandlerFactory("h", plugin.StrictDecoder(json.RawMessage(raw)), handle)
 		assert.Error(t, err)
 		assert.Nil(t, p)
 	}
@@ -1281,7 +1281,7 @@ func TestHandler_Factory_NilDeciders(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", b, handle)
+			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
 			if tt.expectErr {
 				assert.Error(t, err, tt.description)
 				assert.Nil(t, p)

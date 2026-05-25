@@ -55,7 +55,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 	tests := []struct {
 		name    string
 		setup   func(*datalayer.Runtime) (*mocks.NotificationExtractor, error)
-		trigger func(*testSetup) error
+		trigger func(*testing.T, *testSetup, *mocks.NotificationExtractor) error
 		verify  func(*mocks.NotificationExtractor, int) bool
 	}{
 		{
@@ -63,7 +63,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 			setup: func(r *datalayer.Runtime) (*mocks.NotificationExtractor, error) {
 				return setupRuntimeWithExtractor(r, "test-extractor-add")
 			},
-			trigger: func(s *testSetup) error {
+			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod", s.namespace)
 				return s.mgrClient.Create(s.ctx, pod)
 			},
@@ -85,7 +85,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 			setup: func(r *datalayer.Runtime) (*mocks.NotificationExtractor, error) {
 				return setupRuntimeWithExtractor(r, "test-extractor-update")
 			},
-			trigger: func(s *testSetup) error {
+			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-update", s.namespace)
 				if err := s.mgrClient.Create(s.ctx, pod); err != nil {
 					return err
@@ -110,13 +110,25 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 			setup: func(r *datalayer.Runtime) (*mocks.NotificationExtractor, error) {
 				return setupRuntimeWithExtractor(r, "test-extractor-delete")
 			},
-			trigger: func(s *testSetup) error {
+			trigger: func(t *testing.T, s *testSetup, ext *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-delete", s.namespace)
 				if err := s.mgrClient.Create(s.ctx, pod); err != nil {
 					return err
 				}
-				// Wait a bit to ensure the pod is synced before deletion
-				time.Sleep(100 * time.Millisecond)
+				// Wait for the informer to deliver the add event before deleting.
+				// GetEvents() returns a locked, immutable snapshot so iterating the
+				// local variable below is free of data races with concurrent
+				// ExtractNotification calls from the informer goroutine.
+				require.Eventually(t, func() bool {
+					snapshot := ext.GetEvents()
+					for _, e := range snapshot {
+						if e.Type == fwkdl.EventAddOrUpdate && e.Object.GetName() == pod.Name {
+							return true
+						}
+					}
+					return false
+				}, eventWaitTimeout, eventPollInterval,
+					"add event for pod %q not received before delete", pod.Name)
 				return s.mgrClient.Delete(s.ctx, pod)
 			},
 			verify: func(ext *mocks.NotificationExtractor, initialCount int) bool {
@@ -146,7 +158,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 				}
 				return ext1, r.Configure(cfg, false, "", logger)
 			},
-			trigger: func(s *testSetup) error {
+			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-multi", s.namespace)
 				return s.mgrClient.Create(s.ctx, pod)
 			},
@@ -169,7 +181,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 				}
 				return workingExtractor, r.Configure(cfg, false, "", logger)
 			},
-			trigger: func(s *testSetup) error {
+			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-error", s.namespace)
 				return s.mgrClient.Create(s.ctx, pod)
 			},
@@ -193,7 +205,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 
 			initialCount := len(extractor.GetEvents())
 
-			err = tc.trigger(setup)
+			err = tc.trigger(t, setup, extractor)
 			require.NoError(t, err)
 
 			require.Eventually(t, func() bool {

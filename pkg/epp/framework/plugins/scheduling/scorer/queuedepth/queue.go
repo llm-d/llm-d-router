@@ -34,7 +34,7 @@ const (
 var _ fwksched.Scorer = &QueueScorer{}
 
 // QueueScorerFactory defines the factory function for QueueScorer.
-func QueueScorerFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func QueueScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewQueueScorer().WithName(name), nil
 }
 
