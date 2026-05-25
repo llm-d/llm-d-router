@@ -17,6 +17,7 @@ limitations under the License.
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -52,7 +53,7 @@ func TestResolveDiscovery_FileDiscovery(t *testing.T) {
 	require.NoError(t, f.Close())
 
 	params, _ := json.Marshal(map[string]any{"path": f.Name()})
-	p, err := discoveryfile.Factory("my-disc", params, nil)
+	p, err := discoveryfile.Factory("my-disc", json.NewDecoder(bytes.NewReader(params)), nil)
 	require.NoError(t, err)
 
 	r := &Runner{PluginHandle: newHandleWithPlugin(t, "my-disc", p)}
