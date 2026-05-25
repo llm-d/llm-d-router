@@ -15,6 +15,24 @@ const (
 
 	// DataParallelEndpointHeader is the header name used to indicate the worker <ip:port> for Data Parallel
 	DataParallelEndpointHeader = "x-data-parallel-host-port"
+
+	// DefaultPoolGroup is the default InferencePool API group
+	DefaultPoolGroup = "inference.networking.k8s.io"
+
+	// LegacyPoolGroup is the legacy InferencePool API group
+	LegacyPoolGroup = "inference.networking.x-k8s.io"
+
+	// KVConnectorNIXLV2 enables the P/D KV NIXL v2 protocol
+	KVConnectorNIXLV2 = "nixlv2"
+
+	// KVConnectorSharedStorage enables the P/D KV Shared Storage protocol
+	KVConnectorSharedStorage = "shared-storage"
+
+	// KVConnectorSGLang enables SGLang the P/D KV disaggregation protocol
+	KVConnectorSGLang = "sglang"
+
+	// ECExampleConnector enables the Encoder disaggregation protocol (E/PD, E/P/D)
+	ECExampleConnector = "ec-example"
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.

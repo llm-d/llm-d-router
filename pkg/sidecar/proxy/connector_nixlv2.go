@@ -29,6 +29,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
@@ -61,7 +62,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	prefillSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
 		attribute.String("llm_d.pd_proxy.prefill_target", prefillPodHostPort),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorNIXLV2),
+		attribute.String("llm_d.pd_proxy.connector", routing.KVConnectorNIXLV2),
 	)
 	prefillStart := time.Now()
 
@@ -197,7 +198,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	decodeSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorNIXLV2),
+		attribute.String("llm_d.pd_proxy.connector", routing.KVConnectorNIXLV2),
 	)
 	decodeStart := time.Now()
 

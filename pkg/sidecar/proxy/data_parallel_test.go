@@ -56,11 +56,11 @@ var _ = Describe("Data Parallel support", func() {
 			cfg := Config{
 				Port:             strconv.Itoa(fakeProxyPort),
 				DecoderURL:       decodeURL,
-				KVConnector:      KVConnectorNIXLV2,
+				KVConnector:      routing.KVConnectorNIXLV2,
 				DataParallelSize: testDataParallelSize,
 			}
 			theProxy := NewProxy(cfg)
-			theProxy.allowlistValidator, err = NewAllowlistValidator(false, DefaultPoolGroup, "", "")
+			theProxy.allowlistValidator, err = NewAllowlistValidator(false, routing.DefaultPoolGroup, "", "")
 			Expect(err).ToNot(HaveOccurred())
 
 			err = theProxy.startDataParallel(ctx, grp)

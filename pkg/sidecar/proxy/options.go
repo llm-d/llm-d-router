@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"sigs.k8s.io/yaml"
 )
 
@@ -141,14 +142,14 @@ type Options struct {
 var (
 	// supportedKVConnectors defines all valid P/D KV connector types
 	supportedKVConnectors = map[string]struct{}{
-		KVConnectorNIXLV2:        {},
-		KVConnectorSharedStorage: {},
-		KVConnectorSGLang:        {},
+		routing.KVConnectorNIXLV2:        {},
+		routing.KVConnectorSharedStorage: {},
+		routing.KVConnectorSGLang:        {},
 	}
 
 	// supportedECConnectors defines all valid E/P EC connector types
 	supportedECConnectors = map[string]struct{}{
-		ECExampleConnector: {},
+		routing.ECExampleConnector: {},
 	}
 
 	// supportedTLSStages defines all valid stages for TLS configuration
@@ -158,8 +159,8 @@ var (
 		encodeStage:  {},
 	}
 
-	supportedKVConnectorNamesStr = strings.Join([]string{KVConnectorNIXLV2, KVConnectorSharedStorage, KVConnectorSGLang}, ", ")
-	supportedECConnectorNamesStr = strings.Join([]string{ECExampleConnector}, ", ")
+	supportedKVConnectorNamesStr = strings.Join([]string{routing.KVConnectorNIXLV2, routing.KVConnectorSharedStorage, routing.KVConnectorSGLang}, ", ")
+	supportedECConnectorNamesStr = strings.Join([]string{routing.ECExampleConnector}, ", ")
 	supportedTLSStageNamesStr    = strings.Join([]string{prefillStage, decodeStage, encodeStage}, ", ")
 )
 
@@ -177,14 +178,14 @@ func NewOptions() *Options {
 			SecureServing:           true,
 			EnablePrefillerSampling: enablePrefillerSampling,
 			MaxIdleConnsPerHost:     defaultMaxIdleConnsPerHost,
-			PoolGroup:               DefaultPoolGroup,
+			PoolGroup:               routing.DefaultPoolGroup,
 			InferencePoolNamespace:  os.Getenv(envInferencePoolNamespace),
 			InferencePoolName:       os.Getenv(envInferencePoolName),
 			DecodeChunkSize:         0,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
-		connector:     KVConnectorNIXLV2,
+		connector:     routing.KVConnectorNIXLV2,
 	}
 }
 

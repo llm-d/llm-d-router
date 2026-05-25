@@ -19,6 +19,8 @@ package proxy
 import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
+
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"k8s.io/utils/set"
 )
 
@@ -28,7 +30,7 @@ var _ = Describe("AllowlistValidator", func() {
 
 		BeforeEach(func() {
 			var err error
-			validator, err = NewAllowlistValidator(false, DefaultPoolGroup, "test-namespace", "test-pool")
+			validator, err = NewAllowlistValidator(false, routing.DefaultPoolGroup, "test-namespace", "test-pool")
 			Expect(err).ToNot(HaveOccurred())
 		})
 

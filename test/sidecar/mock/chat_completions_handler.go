@@ -24,7 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // Role of the mocked handler
@@ -84,7 +84,7 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	var rawResponse string
 
 	switch cc.Connector {
-	case constants.KVConnectorNIXLV2:
+	case routing.KVConnectorNIXLV2:
 		switch cc.Role {
 		case RoleDecode:
 			rawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
@@ -142,7 +142,7 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 
 		}
 
-	case constants.KVConnectorSharedStorage:
+	case routing.KVConnectorSharedStorage:
 		// Shared Storage protocol just returns empty response
 		rawResponse = `{}`
 

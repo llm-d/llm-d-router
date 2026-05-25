@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
@@ -47,7 +48,7 @@ var (
 	scheme                       = runtime.NewScheme()
 	registeredFeatureGatesMu     sync.RWMutex
 	registeredFeatureGates       = sets.New[string]()
-	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: "v1alpha1"}
+	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: routing.LegacyPoolGroup, Version: "v1alpha1"}
 )
 
 func init() {

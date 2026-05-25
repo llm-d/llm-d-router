@@ -35,7 +35,7 @@ type contextKey string
 
 const requestStartTimeKey contextKey = "request_start_time"
 
-var (
+const (
 	// ChatCompletionsPath is the OpenAI chat completions path
 	ChatCompletionsPath = "/v1/chat/completions"
 

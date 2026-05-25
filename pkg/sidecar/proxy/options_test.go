@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 )
@@ -62,7 +63,7 @@ inference-pool: "file-ns/inference-pool-file"
 pool-group: "pool-group-file"
 max-idle-conns-per-host: 300
 decode-chunk-size: 128
-`, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector))
+`, routing.KVConnectorSGLang, routing.KVConnectorNIXLV2, routing.ECExampleConnector))
 }
 
 func createConfigWithUnknownKeys(t *testing.T) string {
@@ -104,7 +105,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		pool-group: pool-group-inline,
 		max-idle-conns-per-host: 200,
 		decode-chunk-size: 256
-	}`, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector)
+	}`, routing.KVConnectorSGLang, routing.KVConnectorNIXLV2, routing.ECExampleConnector)
 	invalidInlineYAML := "{port: 8200, invalid-yaml}"
 
 	// -- file YAML for testing ---
@@ -130,9 +131,9 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.DataParallelSize = 3
 				o.MaxIdleConnsPerHost = 200
 
-				o.KVConnector = KVConnectorSGLang
-				o.connector = KVConnectorNIXLV2
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = routing.KVConnectorSGLang
+				o.connector = routing.KVConnectorNIXLV2
+				o.ECConnector = routing.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -173,8 +174,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.DataParallelSize = 5
 				o.MaxIdleConnsPerHost = 300
 
-				o.KVConnector = KVConnectorSGLang
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = routing.KVConnectorSGLang
+				o.ECConnector = routing.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -210,8 +211,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				port:                    "8111",
 				vllmPort:                "8222",
 				dataParallelSize:        2,
-				kvConnector:             KVConnectorSGLang,
-				ecConnector:             ECExampleConnector,
+				kvConnector:             routing.KVConnectorSGLang,
+				ecConnector:             routing.ECExampleConnector,
 				enableSSRFProtection:    true,
 				enablePrefillerSampling: true,
 				enableTLS:               &[]string{prefillStage},
@@ -228,8 +229,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.DataParallelSize = 2
 				o.MaxIdleConnsPerHost = 200
 
-				o.KVConnector = KVConnectorSGLang
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = routing.KVConnectorSGLang
+				o.ECConnector = routing.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -265,8 +266,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				port:                    "8111",
 				vllmPort:                "8222",
 				dataParallelSize:        2,
-				kvConnector:             KVConnectorSGLang,
-				ecConnector:             ECExampleConnector,
+				kvConnector:             routing.KVConnectorSGLang,
+				ecConnector:             routing.ECExampleConnector,
 				enableSSRFProtection:    true,
 				enablePrefillerSampling: true,
 				enableTLS:               &[]string{prefillStage},
@@ -284,8 +285,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.DataParallelSize = 2
 				o.MaxIdleConnsPerHost = 400
 
-				o.KVConnector = KVConnectorSGLang
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = routing.KVConnectorSGLang
+				o.ECConnector = routing.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -554,9 +555,9 @@ func TestValidateConnector(t *testing.T) {
 		connector string
 		wantErr   bool
 	}{
-		{"valid nixlv2", KVConnectorNIXLV2, false},
-		{"valid shared-storage", KVConnectorSharedStorage, false},
-		{"valid sglang", KVConnectorSGLang, false},
+		{"valid nixlv2", routing.KVConnectorNIXLV2, false},
+		{"valid shared-storage", routing.KVConnectorSharedStorage, false},
+		{"valid sglang", routing.KVConnectorSGLang, false},
 		{"invalid connector", "invalid", true},
 	}
 

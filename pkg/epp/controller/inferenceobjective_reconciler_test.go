@@ -34,6 +34,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/common"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
@@ -48,25 +49,25 @@ var (
 			Priority(int32(1)).
 			CreationTimestamp(metav1.Unix(1000, 0)).
 			PoolName(inferencePool.Name).
-			PoolGroup("inference.networking.k8s.io").ObjRef()
+			PoolGroup(routing.DefaultPoolGroup).ObjRef()
 	infObjective1Pool2 = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				Priority(*infObjective1.Spec.Priority).
 				CreationTimestamp(metav1.Unix(1001, 0)).
 				PoolName("test-pool2").
-				PoolGroup("inference.networking.k8s.io").ObjRef()
+				PoolGroup(routing.DefaultPoolGroup).ObjRef()
 	infObjective1Critical = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				Priority(int32(2)).
 				CreationTimestamp(metav1.Unix(1003, 0)).
 				PoolName(inferencePool.Name).
-				PoolGroup("inference.networking.k8s.io").ObjRef()
+				PoolGroup(routing.DefaultPoolGroup).ObjRef()
 	infObjective1Deleted = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				CreationTimestamp(metav1.Unix(1004, 0)).
 				DeletionTimestamp().
 				PoolName(inferencePool.Name).
-				PoolGroup("inference.networking.k8s.io").ObjRef()
+				PoolGroup(routing.DefaultPoolGroup).ObjRef()
 	infObjective1DiffGroup = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(inferencePool.Namespace).
 				Priority(int32(1)).
@@ -77,7 +78,7 @@ var (
 			Namespace(inferencePool.Namespace).
 			CreationTimestamp(metav1.Unix(1000, 0)).
 			PoolName(inferencePool.Name).
-			PoolGroup("inference.networking.k8s.io").ObjRef()
+			PoolGroup(routing.DefaultPoolGroup).ObjRef()
 )
 
 func TestInferenceObjectiveReconciler(t *testing.T) {
