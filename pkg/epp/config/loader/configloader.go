@@ -174,7 +174,7 @@ func InstantiateAndConfigure(
 	var flowControlConfig *flowcontrol.Config
 	if featureGates[flowcontrol.FeatureGate] {
 		var err error
-		flowControlConfig, err = flowcontrol.NewConfigFromAPI(rawConfig.FlowControl, handle)
+		flowControlConfig, err = buildFlowControlConfig(rawConfig.FlowControl, handle)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load flow control config: %w", err)
 		}
