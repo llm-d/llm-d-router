@@ -20,8 +20,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -441,6 +444,10 @@ func (e *EmbeddingsRequest) String() string {
 type GenerateRequest struct {
 	// TokenIDs are the pre-tokenized input token IDs.
 	TokenIDs []uint32 `json:"token_ids"`
+	// Features carries multimodal metadata (per-modality content hashes and
+	// placeholder ranges) parsed out of the wire `features` block. Populated
+	// by UnmarshalJSON; not itself a JSON-tagged field.
+	Features *tokenization.MultiModalFeatures `json:"-"`
 	// CacheSalt is an optional request parameter to isolate prefix caches for security reasons.
 	CacheSalt string `json:"cache_salt,omitempty"`
 }
@@ -449,13 +456,30 @@ func (r *GenerateRequest) String() string {
 	if r == nil {
 		return nilStr
 	}
-	return fmt.Sprintf("{TokenIDsCount: %d}", len(r.TokenIDs))
+	mmItems := 0
+	mmModalities := 0
+	if r.Features != nil {
+		mmModalities = len(r.Features.MMHashes)
+		for _, hashes := range r.Features.MMHashes {
+			mmItems += len(hashes)
+		}
+	}
+	return fmt.Sprintf("{TokenIDsCount: %d, MMModalities: %d, MMItems: %d}",
+		len(r.TokenIDs), mmModalities, mmItems)
 }
 
 func (r *GenerateRequest) UnmarshalJSON(data []byte) error {
+	type wirePlaceholder struct {
+		Offset int `json:"offset"`
+		Length int `json:"length"`
+	}
 	var raw struct {
 		TokenIDs  []float64 `json:"token_ids"`
 		CacheSalt string    `json:"cache_salt,omitempty"`
+		Features  *struct {
+			MMHashes       map[string][]string          `json:"mm_hashes"`
+			MMPlaceholders map[string][]wirePlaceholder `json:"mm_placeholders"`
+		} `json:"features,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -464,9 +488,23 @@ func (r *GenerateRequest) UnmarshalJSON(data []byte) error {
 	r.TokenIDs = make([]uint32, len(raw.TokenIDs))
 	for i, v := range raw.TokenIDs {
 		if v < 0 || v > math.MaxUint32 || v != math.Trunc(v) {
-            return fmt.Errorf("token_ids[%d]: invalid value %v", i, v)
-        }
-        r.TokenIDs[i] = uint32(v)
+			return fmt.Errorf("token_ids[%d]: invalid value %v", i, v)
+		}
+		r.TokenIDs[i] = uint32(v)
+	}
+	if raw.Features != nil {
+		ranges := make(map[string][]kvblock.PlaceholderRange, len(raw.Features.MMPlaceholders))
+		for modality, ws := range raw.Features.MMPlaceholders {
+			out := make([]kvblock.PlaceholderRange, len(ws))
+			for i, w := range ws {
+				out[i] = kvblock.PlaceholderRange{Offset: w.Offset, Length: w.Length}
+			}
+			ranges[modality] = out
+		}
+		r.Features = &tokenization.MultiModalFeatures{
+			MMHashes:       raw.Features.MMHashes,
+			MMPlaceholders: ranges,
+		}
 	}
 	return nil
 }

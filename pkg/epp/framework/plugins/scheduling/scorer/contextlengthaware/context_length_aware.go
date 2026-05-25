@@ -220,7 +220,7 @@ func estimateContextLength(request *scheduling.InferenceRequest) int {
 	if request == nil || request.Body == nil {
 		return 0
 	}
-	//Generate requests carry pre-tokenized input — use exact count directly.
+	// Generate requests carry pre-tokenized input — use exact count directly.
 	if request.Body.Generate != nil {
 		return len(request.Body.Generate.TokenIDs)
 	}

@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -880,6 +882,58 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"token_ids": []any{float64(5), float64(6), float64(7)},
+				},
+			},
+		},
+		{
+			name:    "generate request with multimodal features",
+			headers: map[string]string{":path": "/inference/v1/generate"},
+			body: map[string]any{
+				"token_ids": []any{151644, 872, 198, 3838, 374, 279, 6722, 315, 9625, 30, 151645, 198, 151644, 77091, 198},
+				"features": map[string]any{
+					"mm_hashes": map[string]any{
+						"image": []any{"abc123hash", "def456hash"},
+					},
+					"mm_placeholders": map[string]any{
+						"image": []any{
+							map[string]any{"offset": 1, "length": 3},
+							map[string]any{"offset": 4, "length": 3},
+						},
+					},
+				},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs: []uint32{151644, 872, 198, 3838, 374, 279, 6722, 315, 9625, 30, 151645, 198, 151644, 77091, 198},
+					Features: &tokenization.MultiModalFeatures{
+						MMHashes: map[string][]string{
+							"image": {"abc123hash", "def456hash"},
+						},
+						MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+							"image": {
+								{Offset: 1, Length: 3},
+								{Offset: 4, Length: 3},
+							},
+						},
+					},
+				},
+				Payload: fwkrh.PayloadMap{
+					"token_ids": []any{
+						float64(151644), float64(872), float64(198), float64(3838), float64(374), float64(279),
+						float64(6722), float64(315), float64(9625), float64(30), float64(151645), float64(198),
+						float64(151644), float64(77091), float64(198),
+					},
+					"features": map[string]any{
+						"mm_hashes": map[string]any{
+							"image": []any{"abc123hash", "def456hash"},
+						},
+						"mm_placeholders": map[string]any{
+							"image": []any{
+								map[string]any{"offset": float64(1), "length": float64(3)},
+								map[string]any{"offset": float64(4), "length": float64(3)},
+							},
+						},
+					},
 				},
 			},
 		},

@@ -221,7 +221,10 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 	case request.Body.Generate != nil:
 		// Generate requests carry pre-tokenized input — use token IDs directly, no tokenizer call needed.
 		traceLogger.Info("Using pre-tokenized token IDs from generate request", "tokenCount", len(request.Body.Generate.TokenIDs))
-		return &fwkrh.TokenizedPrompt{TokenIDs: request.Body.Generate.TokenIDs}, nil
+		return &fwkrh.TokenizedPrompt{
+			TokenIDs:           request.Body.Generate.TokenIDs,
+			MultiModalFeatures: convertMMFeaturesToUpstream(request.Body.Generate.Features),
+		}, nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping tokenization")
 	}
