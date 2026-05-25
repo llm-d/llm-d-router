@@ -220,7 +220,10 @@ func estimateContextLength(request *scheduling.InferenceRequest) int {
 	if request == nil || request.Body == nil {
 		return 0
 	}
-
+	//Generate requests carry pre-tokenized input — use exact count directly.
+	if request.Body.Generate != nil {
+		return len(request.Body.Generate.TokenIDs)
+	}
 	totalChars := 0
 
 	// Handle chat completions
@@ -237,11 +240,6 @@ func estimateContextLength(request *scheduling.InferenceRequest) int {
 
 	// Convert characters to approximate token count
 	estimatedTokens := int(float64(totalChars) * charToTokenMultiplier)
-
-	// Generate requests carry pre-tokenized input — use exact count directly.
-	if request.Body.Generate != nil {
-		estimatedTokens += len(request.Body.Generate.TokenIDs)
-	}
 
 	return estimatedTokens
 }
