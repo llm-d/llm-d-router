@@ -22,6 +22,7 @@ import (
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
+	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,8 +36,9 @@ import (
 )
 
 type mockKVCacheIndexer struct {
-	getPodScoresFunc func(ctx context.Context, renderReq *types.RenderChatRequest, prompt, modelName string, podIdentifiers []string) (map[string]float64, error)
-	scoreTokensFunc  func(ctx context.Context, tokens []uint32, modelName string, podIdentifiers []string, extraFeatures []*kvblock.BlockExtraFeatures) (map[string]float64, error)
+	getPodScoresFunc             func(ctx context.Context, renderReq *types.RenderChatRequest, prompt, modelName string, podIdentifiers []string) (map[string]float64, error)
+	scoreTokensFunc              func(ctx context.Context, tokens []uint32, modelName string, podIdentifiers []string, extraFeatures []*kvblock.BlockExtraFeatures) (map[string]float64, error)
+	computeBlockKeysFromTokensFn func(ctx context.Context, tokens []uint32, modelName string, extraFeatures []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error)
 }
 
 func (m *mockKVCacheIndexer) GetPodScores(ctx context.Context, renderReq *types.RenderChatRequest, prompt, modelName string, podIdentifiers []string) (map[string]float64, error) {
@@ -58,6 +60,9 @@ func (m *mockKVCacheIndexer) ComputeBlockKeys(ctx context.Context, renderReq *ty
 }
 
 func (m *mockKVCacheIndexer) ComputeBlockKeysFromTokens(ctx context.Context, tokens []uint32, modelName string, extraFeatures []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+	if m.computeBlockKeysFromTokensFn != nil {
+		return m.computeBlockKeysFromTokensFn(ctx, tokens, modelName, extraFeatures)
+	}
 	return nil, nil
 }
 
@@ -217,4 +222,158 @@ func TestScorer_SkipsTokenizedPromptWhenEmpty(t *testing.T) {
 
 	scorer.Score(ctx, scheduling.NewCycleState(), request, testEndpoints)
 	assert.False(t, fromTokensCalled, "ScoreTokens should not be called with empty TokenIDs")
+}
+
+// TestScorer_GenerateFallback_UsesTokenIDs covers the getScores fallback path
+// when no TokenizedPrompt is set: a Generate body should drive ScoreTokens.
+func TestScorer_GenerateFallback_UsesTokenIDs(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	tokenIDs := []uint32{10, 20, 30, 40, 50}
+	var capturedTokens []uint32
+	var capturedModel string
+	var capturedExtraFeatures []*kvblock.BlockExtraFeatures
+
+	scorer := &Scorer{
+		typedName:      plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: "test"},
+		kvEventsConfig: &kvevents.Config{},
+		pluginState:    plugin.NewPluginState(ctx),
+		kvCacheIndexer: &mockKVCacheIndexer{
+			scoreTokensFunc: func(_ context.Context, tokens []uint32, modelName string, _ []string, extraFeatures []*kvblock.BlockExtraFeatures) (map[string]float64, error) {
+				capturedTokens = tokens
+				capturedModel = modelName
+				capturedExtraFeatures = extraFeatures
+				return map[string]float64{"10.0.0.1:8080": 1.0}, nil
+			},
+		},
+	}
+
+	request := &scheduling.InferenceRequest{
+		RequestID:   "test-generate-fallback",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Generate: &fwkrh.GenerateRequest{TokenIDs: tokenIDs},
+		},
+	}
+
+	scorer.Score(ctx, scheduling.NewCycleState(), request, testEndpoints)
+
+	assert.Equal(t, tokenIDs, capturedTokens)
+	assert.Equal(t, "test-model", capturedModel)
+	assert.Nil(t, capturedExtraFeatures, "extraFeatures should be nil for text-only generate request")
+}
+
+// TestScorer_GenerateFallback_PassesFeaturesToScoreTokens locks in that the
+// getScores fallback honors Body.Generate.Features so two requests with the
+// same token_ids but different image hashes route distinctly.
+func TestScorer_GenerateFallback_PassesFeaturesToScoreTokens(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	tokenIDs := []uint32{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160}
+	var capturedExtraFeatures []*kvblock.BlockExtraFeatures
+
+	scorer := &Scorer{
+		typedName:       plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: "test"},
+		kvEventsConfig:  &kvevents.Config{},
+		pluginState:     plugin.NewPluginState(ctx),
+		blockSizeTokens: 16,
+		kvCacheIndexer: &mockKVCacheIndexer{
+			scoreTokensFunc: func(_ context.Context, _ []uint32, _ string, _ []string, extraFeatures []*kvblock.BlockExtraFeatures) (map[string]float64, error) {
+				capturedExtraFeatures = extraFeatures
+				return map[string]float64{"10.0.0.1:8080": 1.0}, nil
+			},
+		},
+	}
+
+	request := &scheduling.InferenceRequest{
+		RequestID:   "test-generate-mm",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Generate: &fwkrh.GenerateRequest{
+				TokenIDs: tokenIDs,
+				Features: &tokenization.MultiModalFeatures{
+					MMHashes: map[string][]string{"image": {"abc123hash"}},
+					MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+						"image": {{Offset: 2, Length: 4}},
+					},
+				},
+			},
+		},
+	}
+
+	scorer.Score(ctx, scheduling.NewCycleState(), request, testEndpoints)
+
+	require.NotNil(t, capturedExtraFeatures, "extraFeatures should be passed when Generate.Features is present")
+}
+
+// TestScorer_ComputeBlockKeys_GenerateFallback exercises computeBlockKeys
+// directly and locks in that Body.Generate.Features flows through to
+// ComputeBlockKeysFromTokens via extraFeatures.
+func TestScorer_ComputeBlockKeys_GenerateFallback(t *testing.T) {
+	tokenIDs := []uint32{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160}
+
+	tests := []struct {
+		name            string
+		body            *fwkrh.InferenceRequestBody
+		wantExtraNonNil bool
+		wantTokenIDs    []uint32
+	}{
+		{
+			name: "text-only generate request — extraFeatures nil",
+			body: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{TokenIDs: tokenIDs},
+			},
+			wantExtraNonNil: false,
+			wantTokenIDs:    tokenIDs,
+		},
+		{
+			name: "generate request with multimodal Features — extraFeatures non-nil",
+			body: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs: tokenIDs,
+					Features: &tokenization.MultiModalFeatures{
+						MMHashes: map[string][]string{"image": {"abc123hash"}},
+						MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+							"image": {{Offset: 2, Length: 4}},
+						},
+					},
+				},
+			},
+			wantExtraNonNil: true,
+			wantTokenIDs:    tokenIDs,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			var capturedTokens []uint32
+			var capturedExtra []*kvblock.BlockExtraFeatures
+
+			scorer := &Scorer{
+				typedName:       plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: "test"},
+				blockSizeTokens: 16,
+				kvCacheIndexer: &mockKVCacheIndexer{
+					computeBlockKeysFromTokensFn: func(_ context.Context, tokens []uint32, _ string, extra []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+						capturedTokens = tokens
+						capturedExtra = extra
+						return nil, nil
+					},
+				},
+			}
+
+			request := &scheduling.InferenceRequest{
+				RequestID:   "test-compute-block-keys",
+				TargetModel: "test-model",
+				Body:        tc.body,
+			}
+
+			_, err := scorer.computeBlockKeys(ctx, request)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantTokenIDs, capturedTokens)
+			if tc.wantExtraNonNil {
+				assert.NotNil(t, capturedExtra, "extraFeatures should be non-nil when Features present")
+			} else {
+				assert.Nil(t, capturedExtra, "extraFeatures should be nil for text-only request")
+			}
+		})
+	}
 }
