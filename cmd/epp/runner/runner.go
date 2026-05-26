@@ -379,7 +379,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
-	endpointCandidates, admissionController := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+	endpointCandidates, admissionController, priorityBandControlPlane := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
@@ -397,6 +397,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		Director:                         director,
 		ParserRegistry:                   r.parserRegistry,
 		SaturationDetector:               eppConfig.SaturationDetector,
+		PriorityBandControlPlane:         priorityBandControlPlane,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 	}
@@ -822,11 +823,12 @@ func (r *Runner) initAdmissionControl(
 	opts *runserver.Options,
 	eppConfig *config.Config,
 	endpointCandidates contracts.EndpointCandidates,
-) (contracts.EndpointCandidates, requestcontrol.AdmissionController) {
+) (contracts.EndpointCandidates, requestcontrol.AdmissionController, contracts.PriorityBandControlPlane) {
 	if !r.featureGates[flowcontrol.FeatureGate] {
 		setupLog.Info("Experimental Flow Control layer is disabled, using legacy admission control")
 		return endpointCandidates,
-			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
+			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates),
+			nil
 	}
 	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
 	setupLog.Info("Initializing experimental Flow Control layer")
@@ -843,7 +845,7 @@ func (r *Runner) initAdmissionControl(
 		},
 	)
 	go registry.Run(ctx)
-	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
+	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName), registry
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
@@ -918,7 +920,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// EndpointPickerConfig.flowControl still apply.
 	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
-	endpointCandidates, admissionController := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+	// File-discovery mode has no InferenceObjective reconciler to drive the
+	// control plane; static bands from config apply at registry construction.
+	endpointCandidates, admissionController, _ := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
 	gknn := common.GKNN{

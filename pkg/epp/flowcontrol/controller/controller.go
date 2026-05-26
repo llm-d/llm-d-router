@@ -57,6 +57,7 @@ type processor interface {
 type processorFactory func(
 	ctx context.Context,
 	registry contracts.FlowRegistry,
+	registryBackground contracts.FlowRegistryBackground,
 	saturationDetector flowcontrol.SaturationDetector,
 	endpointCandidates contracts.EndpointCandidates,
 	usageLimitPolicy flowcontrol.UsageLimitPolicy,
@@ -82,15 +83,17 @@ var _ processor = &internal.Processor{}
 type FlowController struct {
 	// --- Immutable dependencies (set at construction) ---
 
-	config             *Config
-	registry           registryClient
-	saturationDetector flowcontrol.SaturationDetector
-	endpointCandidates contracts.EndpointCandidates
-	usageLimitPolicy   flowcontrol.UsageLimitPolicy
-	clock              clock.WithTicker
-	logger             logr.Logger
-	processorFactory   processorFactory
-	processor          processor
+	config                *Config
+	registry              registryClient
+	flowRegistry          contracts.FlowRegistry
+	registryBackground    contracts.FlowRegistryBackground
+	saturationDetector    flowcontrol.SaturationDetector
+	endpointCandidates    contracts.EndpointCandidates
+	usageLimitPolicy      flowcontrol.UsageLimitPolicy
+	clock                 clock.WithTicker
+	logger                logr.Logger
+	processorFactory      processorFactory
+	processor             processor
 
 	// --- Lifecycle state ---
 
@@ -120,9 +123,15 @@ func NewFlowController(
 	if deps.Clock == nil {
 		deps.Clock = clock.RealClock{}
 	}
+	var registryBackground contracts.FlowRegistryBackground
+	if bg, ok := deps.Registry.(contracts.FlowRegistryBackground); ok {
+		registryBackground = bg
+	}
 	fc := &FlowController{
 		config:             config,
 		registry:           deps.Registry,
+		flowRegistry:       deps.Registry,
+		registryBackground: registryBackground,
 		saturationDetector: deps.SaturationDetector,
 		endpointCandidates: deps.EndpointCandidates,
 		usageLimitPolicy:   deps.UsageLimitPolicy,
@@ -135,6 +144,7 @@ func NewFlowController(
 		fc.processorFactory = func(
 			ctx context.Context,
 			registry contracts.FlowRegistry,
+			registryBackground contracts.FlowRegistryBackground,
 			saturationDetector flowcontrol.SaturationDetector,
 			endpointCandidates contracts.EndpointCandidates,
 			usageLimitPolicy flowcontrol.UsageLimitPolicy,
@@ -147,6 +157,7 @@ func NewFlowController(
 				ctx,
 				poolName,
 				registry,
+				registryBackground,
 				saturationDetector,
 				endpointCandidates,
 				usageLimitPolicy,
@@ -163,7 +174,8 @@ func NewFlowController(
 	// Construct a new worker, but do not start its goroutine yet.
 	fc.processor = fc.processorFactory(
 		fc.parentCtx,
-		fc.registry,
+		fc.flowRegistry,
+		fc.registryBackground,
 		fc.saturationDetector,
 		fc.endpointCandidates,
 		fc.usageLimitPolicy,
@@ -227,7 +239,7 @@ func (fc *FlowController) EnqueueAndWait(
 
 	// 2. Acquire a lease for the Flow.
 	// We hold this lease for the entire duration of the request (Distribution + Queueing).
-	err := fc.registry.WithConnection(flowKey, func(conn contracts.ActiveFlowConnection) error {
+	err := fc.withConnectionWithDemotion(flowKey, func(conn contracts.ActiveFlowConnection) error {
 
 		select { // Non-blocking check on controller lifecycle.
 		case <-fc.parentCtx.Done():
@@ -264,6 +276,26 @@ func (fc *FlowController) EnqueueAndWait(
 	}
 
 	return finalOutcome, err
+}
+
+// withConnectionWithDemotion acquires a flow connection, demoting to priority 0 when the requested band is not yet provisioned.
+func (fc *FlowController) withConnectionWithDemotion(
+	key flowcontrol.FlowKey,
+	fn func(conn contracts.ActiveFlowConnection) error,
+) error {
+	err := fc.registry.WithConnection(key, fn)
+	if err == nil || !errors.Is(err, contracts.ErrPriorityBandNotFound) || key.Priority == 0 {
+		return err
+	}
+
+	fc.logger.V(logutil.DEFAULT).Info(
+		"Priority band not provisioned, demoting request to priority 0",
+		"originalPriority", key.Priority,
+		"flowID", key.ID,
+	)
+	demotedKey := key
+	demotedKey.Priority = 0
+	return fc.registry.WithConnection(demotedKey, fn)
 }
 
 // tryDistribution handles a single attempt to select a shard and submit a request.

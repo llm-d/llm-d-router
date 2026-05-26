@@ -75,11 +75,10 @@ func newRegistryTestHarness(t *testing.T, opts harnessOptions) *registryTestHarn
 	fr := NewFlowRegistry(cfg, logr.Discard(), registryOpts...)
 
 	if !opts.manualGC {
-		// Start the GC loop in the background.
 		ctx, cancel := context.WithCancel(context.Background())
 		var wg sync.WaitGroup
 		wg.Go(func() {
-			fr.Run(ctx)
+			fr.RunMaintenanceLoop(ctx)
 		})
 		t.Cleanup(func() {
 			cancel()
@@ -113,6 +112,12 @@ func (h *registryTestHarness) assertFlowDoesNotExist(key flowcontrol.FlowKey, ms
 // openConnectionOnFlow ensures a flow is registered for the provided `key`.
 func (h *registryTestHarness) openConnectionOnFlow(key flowcontrol.FlowKey) {
 	h.t.Helper()
+	h.fr.mu.RLock()
+	_, exists := h.fr.config.PriorityBands[key.Priority]
+	h.fr.mu.RUnlock()
+	if !exists {
+		h.fr.ApplyDesiredPriorities(map[int]struct{}{key.Priority: {}})
+	}
 	err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error { return nil })
 	require.NoError(h.t, err, "Registering flow %s should not fail", key)
 	h.assertFlowExists(key, "Flow %s should exist after registration", key)
@@ -343,17 +348,49 @@ func TestFlowRegistry_GarbageCollection(t *testing.T) {
 func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 	t.Parallel()
 
+	t.Run("SubmitDesiredPriorities_DoesNotBlockWithoutProcessor", func(t *testing.T) {
+		t.Parallel()
+		h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := range 100 {
+				h.fr.SubmitDesiredPriorities(map[int]struct{}{i: {}})
+			}
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("SubmitDesiredPriorities blocked without a processor consumer")
+		}
+	})
+
+	t.Run("ShouldRejectUnknownPriority_WhenBandNotProvisioned", func(t *testing.T) {
+		t.Parallel()
+		h := newRegistryTestHarness(t, harnessOptions{})
+		key := flowcontrol.FlowKey{ID: "unprovisioned-flow", Priority: 55}
+
+		err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+			return nil
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, contracts.ErrPriorityBandNotFound)
+	})
+
 	t.Run("ShouldCreateBand_WhenPriorityIsUnknown", func(t *testing.T) {
 		t.Parallel()
 		h := newRegistryTestHarness(t, harnessOptions{})
 		dynamicPrio := 55
 		key := flowcontrol.FlowKey{ID: "dynamic-flow", Priority: dynamicPrio}
 
-		// Connect with a new priority.
+		h.fr.ApplyDesiredPriorities(map[int]struct{}{dynamicPrio: {}})
+
 		err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
 			return nil
 		})
-		require.NoError(t, err, "WithConnection should succeed for dynamic priority")
+		require.NoError(t, err, "WithConnection should succeed after control-plane provisioning")
 
 		h.fr.mu.RLock()
 		_, existsInConfig := h.fr.config.PriorityBands[dynamicPrio]
@@ -374,6 +411,8 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 		dynamicPrio := 77
 		key := flowcontrol.FlowKey{ID: "race-flow", Priority: dynamicPrio}
 
+		h.fr.ApplyDesiredPriorities(map[int]struct{}{dynamicPrio: {}})
+
 		var wg sync.WaitGroup
 		concurrency := 10
 		wg.Add(concurrency)
@@ -381,7 +420,6 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 		for range concurrency {
 			go func() {
 				defer wg.Done()
-				// Everyone tries to trigger provisioning simultaneously.
 				_ = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error { return nil })
 			}()
 		}
@@ -399,7 +437,7 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 		dynamicPrio := 88
 		key := flowcontrol.FlowKey{ID: "scaling-flow", Priority: dynamicPrio}
 
-		// Create dynamic band
+		h.fr.ApplyDesiredPriorities(map[int]struct{}{dynamicPrio: {}})
 		h.openConnectionOnFlow(key)
 
 		_, policyErr := h.fr.FairnessPolicy(dynamicPrio)
@@ -427,6 +465,7 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 		negativePrio := -5
 		key := flowcontrol.FlowKey{ID: "negative-flow", Priority: negativePrio}
 
+		h.fr.ApplyDesiredPriorities(map[int]struct{}{negativePrio: {}})
 		err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
 			return nil
 		})
@@ -452,6 +491,7 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 		negativePrio := -3
 		key := flowcontrol.FlowKey{ID: "fallback-flow", Priority: negativePrio}
 
+		h.fr.ApplyDesiredPriorities(map[int]struct{}{negativePrio: {}})
 		err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
 			return nil
 		})
@@ -482,6 +522,7 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 		positivePrio := 42
 		key := flowcontrol.FlowKey{ID: "positive-flow", Priority: positivePrio}
 
+		h.fr.ApplyDesiredPriorities(map[int]struct{}{positivePrio: {}})
 		err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
 			return nil
 		})
@@ -1208,14 +1249,13 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 	})
 }
 
-// TestFlowRegistry_JITErrorScoping ensures that JIT provisioning errors are correctly propagated to all concurrent
+// TestFlowRegistry_FlowErrorScoping ensures that flow provisioning errors are correctly propagated to all concurrent
 // requests waiting on the same flow initialization.
-func TestFlowRegistry_JITErrorScoping(t *testing.T) {
+func TestFlowRegistry_FlowErrorScoping(t *testing.T) {
 	t.Parallel()
 	defaults := newTestPriorityBandPolicyDefaults()
 
 	// Create a registry with a capability checker that passes validation but using a queue name that doesn't exist.
-	// This ensures NewConfig succeeds, but JIT (ensureFlowInfrastructure) fails when trying to instantiate the queue.
 	failQueueName := queue.RegisteredQueueName("NonExistentQueue")
 	mockChecker := &mockCapabilityChecker{
 		checkCompatibilityFunc: func(p flowcontrol.OrderingPolicy, q queue.RegisteredQueueName) error {
@@ -1223,8 +1263,8 @@ func TestFlowRegistry_JITErrorScoping(t *testing.T) {
 		},
 	}
 
-	// We create a custom band config that uses this failing queue.
-	// We set it as the default band so that dynamic provisioning is used.
+	// Set the failing queue as the default band so the priority provisioned
+	// below inherits it and flow initialization fails.
 	failingBand, err := NewPriorityBandConfig(0, defaults, WithQueue(failQueueName))
 	require.NoError(t, err)
 
@@ -1234,15 +1274,13 @@ func TestFlowRegistry_JITErrorScoping(t *testing.T) {
 	registry := NewFlowRegistry(cfg, logr.Discard())
 
 	key := flowcontrol.FlowKey{
-		Priority: 100, // Dynamic, will trigger ensurePriorityBand
+		Priority: 100,
 		ID:       "flow-should-fail",
 	}
+	registry.ApplyDesiredPriorities(map[int]struct{}{100: {}})
 
 	// Simulate contention:
-	// We acquire the registry RLock.
-	// JIT provisioning (dynamic band) requires registry Lock (Write Lock).
-	// So the first thread to reach ensurePriorityBand will block until we release this lock.
-	// All other threads will pile up behind it on sync.Once.
+	// We acquire the registry RLock while flow infrastructure is provisioned.
 	registry.mu.RLock()
 
 	const concurrency = 10
@@ -1279,6 +1317,6 @@ func TestFlowRegistry_JITErrorScoping(t *testing.T) {
 	wg.Wait()
 
 	// Assertion: all requests should fail.
-	assert.Equal(t, int32(concurrency), errorCount.Load(), "All requests should fail JIT provisioning")
-	assert.Equal(t, int32(0), successCount.Load(), "No request should succeed if JIT failed")
+	assert.Equal(t, int32(concurrency), errorCount.Load(), "All requests should fail flow provisioning")
+	assert.Equal(t, int32(0), successCount.Load(), "No request should succeed if flow provisioning failed")
 }

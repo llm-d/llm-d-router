@@ -187,7 +187,6 @@ func (r *benchRequest) ReceivedTimestamp() time.Time                   { return 
 
 // setupRegistry provisions the concrete FlowRegistry.
 func setupRegistry(
-	ctx context.Context,
 	b *testing.B,
 	defaults registry.PriorityBandPolicyDefaults,
 	p priorityLevels,
@@ -215,8 +214,7 @@ func setupRegistry(
 	}
 
 	reg := registry.NewFlowRegistry(regCfg, logr.Discard())
-
-	go reg.Run(ctx)
+	// Registry maintenance (GC, priority band sync) runs in the ShardProcessor loop started by FlowController.
 	return reg
 }
 
@@ -249,7 +247,7 @@ func setupBenchmarkHarness(
 		FairnessPolicy: fPolicy.(flowcontrol.FairnessPolicy),
 	}
 
-	reg := setupRegistry(ctx, b, defaults, p)
+	reg := setupRegistry(b, defaults, p)
 
 	detector := customDetector
 	if detector == nil {

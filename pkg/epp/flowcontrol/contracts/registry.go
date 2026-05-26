@@ -17,6 +17,8 @@ limitations under the License.
 package contracts
 
 import (
+	"time"
+
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
@@ -31,16 +33,34 @@ import (
 // A flow instance, identified by its immutable FlowKey, has a lease-based lifecycle managed by this interface.
 // Any implementation MUST adhere to this lifecycle:
 //
-//  1. Lease Acquisition: A client calls Connect to acquire a lease. This signals that the flow is in use and protects
-//     it from garbage collection. If the flow does not exist, it is created Just-In-Time (JIT).
+//  1. Lease Acquisition: A client calls WithConnection to acquire a lease. This signals that the flow is in use and
+//     protects it from garbage collection. If the flow instance does not exist, it is created on first use.
+//     Priority bands must be provisioned by the control plane before use; they are not created on the request path.
 //  2. Active State: A flow is "Active" as long as its lease count is greater than zero.
-//  3. Lease Release: The client MUST call `Close()` on the returned `FlowConnection` to release the lease.
+//  3. Lease Release: When the WithConnection callback returns, the lease is released.
 //     When the lease count drops to zero, the flow becomes "Idle".
 //  4. Garbage Collection: The implementation MUST automatically garbage collect a flow after it has remained
 //     continuously Idle for a configurable duration.
 type FlowRegistry interface {
 	FlowRegistryObserver
 	FlowRegistryDataPlane
+	PriorityBandControlPlane
+	FlowRegistryBackground
+}
+
+// PriorityBandControlPlane submits priority band topology updates from the control plane.
+type PriorityBandControlPlane interface {
+	// SubmitDesiredPriorities queues the set of priority levels that should remain provisioned.
+	// Dynamic bands not in this set become eligible for removal once idle.
+	SubmitDesiredPriorities(desired map[int]struct{})
+}
+
+// FlowRegistryBackground exposes hooks consumed by the ShardProcessor maintenance loop.
+type FlowRegistryBackground interface {
+	PriorityBandUpdateChannel() <-chan map[int]struct{}
+	FlowGCTimeout() time.Duration
+	ApplyDesiredPriorities(desired map[int]struct{})
+	ExecuteGCCycle()
 }
 
 // FlowRegistryObserver defines the read-only, observation interface for the registry.
@@ -55,8 +75,8 @@ type FlowRegistryDataPlane interface {
 	// It is the primary and sole entry point for interacting with the data path.
 	//
 	// This method handles the entire lifecycle of a flow connection:
-	// 1. Just-In-Time (JIT) Registration: If the flow for the given FlowKey does not exist, it is created and registered
-	//    automatically.
+	// 1. Flow Registration: If the flow for the given FlowKey does not exist, it is created and registered
+	//    automatically. Priority bands must be provisioned by the control plane before use.
 	// 2. Lease Acquisition: It acquires a lifecycle lease, protecting the flow from garbage collection.
 	// 3. Callback Execution: It invokes the provided function `fn`, passing in a temporary `ActiveFlowConnection` handle.
 	// 4. Guaranteed Lease Release: It ensures the lease is safely released when the callback function returns.
