@@ -305,7 +305,7 @@ outside K8s. Pass `--pool-namespace` explicitly so labels reflect your
 environment:
 
 ```
-llm-d-inference-scheduler \
+epp \
   --pool-name slurm-job-42 \
   --pool-namespace slurm \
   --config-file /etc/epp/config.yaml
@@ -333,7 +333,7 @@ localhost:9090  <-- EPP Prometheus metrics
 
 ### What you need
 
-- `llm-d-inference-scheduler` binary built from this repo.
+- `epp` binary built from this repo (`go build -o epp ./cmd/epp`).
 - Envoy v1.31+ binary or Docker image.
 - vLLM (or a compatible inference server) running on the target addresses.
 
@@ -390,7 +390,7 @@ dataLayer:
 ### 3. Start the EPP
 
 ```bash
-llm-d-inference-scheduler \
+epp \
   --pool-name epp \
   --config-file /etc/epp/config.yaml \
   --grpc-port 9002 \
@@ -398,9 +398,10 @@ llm-d-inference-scheduler \
   --metrics-port 9090
 ```
 
-`--pool-name` is required even in file discovery mode; it is used as the
-internal pool identifier in the scheduler and metrics.  The value is
-arbitrary -- it does not need to match any Kubernetes object.
+`--pool-name` is optional in file discovery mode and defaults to `epp` if
+unset. It is used as the internal pool identifier in the scheduler and
+metrics. The value is arbitrary -- it does not need to match any
+Kubernetes object.
 
 The EPP logs `EPP starting (file discovery mode)` on startup and emits a
 log line for each endpoint loaded from the file.
@@ -527,8 +528,8 @@ import (
 
     "k8s.io/apimachinery/pkg/types"
 
-    fwkdl    "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-    fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+    fwkdl    "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+    fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const PluginType = "my-discovery"
@@ -540,7 +541,7 @@ type MyDiscovery struct {
 
 var _ fwkdl.EndpointDiscovery = (*MyDiscovery)(nil)
 
-func Factory(name string, params json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func Factory(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
     if name == "" {
         name = PluginType
     }
