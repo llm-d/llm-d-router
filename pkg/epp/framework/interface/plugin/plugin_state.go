@@ -43,10 +43,15 @@ func NewPluginState(ctx context.Context) *PluginState {
 	return pluginState
 }
 
-// PluginState provides a mechanism for plugins to store and retrieve arbitrary data by multiple extension points.
-// Data stored by the plugin in one extension point can be written, read or altered by another extension point.
-// The data stored in PluginState is always stored in the context of a given request.
-// If the data hasn't been accessed during "stalenessThreshold", it is cleaned by a cleanup internal mechanism.
+// PluginState is per-plugin scratch storage scoped to a single request. A plugin's
+// extension points (e.g. PreRequest, ResponseBody) can write, read, and alter entries
+// here to coordinate within that plugin. Entries are keyed by RequestID and reaped
+// after "stalenessThreshold" of inactivity.
+//
+// PluginState is not a cross-plugin handoff channel. Data shared between plugins must
+// flow through the Producer/Consumer DAG: write to Endpoint AttributeMap for
+// per-endpoint data, or to the InferenceRequest attribute store for per-request data.
+// The DAG validates type compatibility and execution ordering; PluginState does not.
 //
 // Note: PluginState uses a sync.Map to back the storage, because it is thread safe.
 // It's aimed to optimize for the "write once and read many times" scenarios.
