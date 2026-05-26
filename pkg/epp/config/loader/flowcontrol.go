@@ -108,7 +108,7 @@ func buildRegistryConfig(
 	}
 
 	if apiConfig.DefaultPriorityBand != nil {
-		pb, err := buildPriorityBand(defaults, handle, apiConfig.DefaultPriorityBand)
+		pb, err := buildPriorityBand(defaults, handle, apiConfig.DefaultPriorityBand, "default priority band")
 		if err != nil {
 			return nil, err
 		}
@@ -116,15 +116,17 @@ func buildRegistryConfig(
 	}
 
 	if apiConfig.DefaultNegativePriorityBand != nil {
-		pb, err := buildPriorityBand(defaults, handle, apiConfig.DefaultNegativePriorityBand)
+		pb, err := buildPriorityBand(defaults, handle, apiConfig.DefaultNegativePriorityBand, "default negative priority band")
 		if err != nil {
 			return nil, err
 		}
 		opts = append(opts, registry.WithDefaultNegativePriorityBand(pb))
 	}
 
-	for _, band := range apiConfig.PriorityBands {
-		pb, err := buildPriorityBand(defaults, handle, &band)
+	for i := range apiConfig.PriorityBands {
+		band := &apiConfig.PriorityBands[i]
+		label := fmt.Sprintf("priority band %d", band.Priority)
+		pb, err := buildPriorityBand(defaults, handle, band, label)
 		if err != nil {
 			return nil, err
 		}
@@ -135,15 +137,17 @@ func buildRegistryConfig(
 }
 
 // buildPriorityBand translates a single API PriorityBandConfig into a registry.PriorityBandConfig,
-// resolving any per-band policy overrides via the handle.
+// resolving any per-band policy overrides via the handle. The label is used in error messages
+// (e.g., "default priority band", "priority band 5").
 func buildPriorityBand(
 	defaults registry.PriorityBandPolicyDefaults,
 	handle fwkplugin.Handle,
 	band *configapi.PriorityBandConfig,
+	label string,
 ) (*registry.PriorityBandConfig, error) {
 	bandOpts := make([]registry.PriorityBandConfigOption, 0, 4)
 
-	maxBytes, err := resolveQuantity(band.MaxBytes, fmt.Sprintf("priority band %d MaxBytes", band.Priority))
+	maxBytes, err := resolveQuantity(band.MaxBytes, label+" MaxBytes")
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +155,7 @@ func buildPriorityBand(
 		bandOpts = append(bandOpts, registry.WithBandMaxBytes(maxBytes))
 	}
 
-	maxRequests, err := resolveQuantity(band.MaxRequests, fmt.Sprintf("priority band %d MaxRequests", band.Priority))
+	maxRequests, err := resolveQuantity(band.MaxRequests, label+" MaxRequests")
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +180,7 @@ func buildPriorityBand(
 
 	pb, err := registry.NewPriorityBandConfig(band.Priority, defaults, bandOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create priority band config for priority %d: %w", band.Priority, err)
+		return nil, fmt.Errorf("failed to create %s config: %w", label, err)
 	}
 	return pb, nil
 }

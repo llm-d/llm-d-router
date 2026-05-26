@@ -236,7 +236,7 @@ func TestBuildRegistryConfig(t *testing.T) {
 					MaxBytes: ptr.To(resource.MustParse("-5")),
 				},
 			},
-			expectedErr: "MaxBytes must be non-negative",
+			expectedErr: "default priority band MaxBytes must be non-negative",
 		},
 
 		// --- MaxRequests: Happy Paths ---
@@ -359,7 +359,7 @@ func TestBuildRegistryConfig(t *testing.T) {
 					MaxRequests: ptr.To(resource.MustParse("-5")),
 				},
 			},
-			expectedErr: "MaxRequests must be non-negative",
+			expectedErr: "default priority band MaxRequests must be non-negative",
 		},
 
 		// --- DefaultNegativePriorityBand ---
@@ -399,7 +399,7 @@ func TestBuildRegistryConfig(t *testing.T) {
 					MaxBytes: ptr.To(resource.MustParse("-1")),
 				},
 			},
-			expectedErr: "MaxBytes must be non-negative",
+			expectedErr: "default negative priority band MaxBytes must be non-negative",
 		},
 	}
 

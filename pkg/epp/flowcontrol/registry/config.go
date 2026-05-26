@@ -316,7 +316,7 @@ type PriorityBandConfigOption func(*PriorityBandConfig) error
 func WithOrderingPolicy(policy flowcontrol.OrderingPolicy) PriorityBandConfigOption {
 	return func(p *PriorityBandConfig) error {
 		if policy == nil {
-			return errors.New("OrderingPolicy cannot be nil")
+			return errors.New("ordering policy cannot be nil")
 		}
 		p.OrderingPolicy = policy
 		return nil
@@ -327,7 +327,7 @@ func WithOrderingPolicy(policy flowcontrol.OrderingPolicy) PriorityBandConfigOpt
 func WithFairnessPolicy(policy flowcontrol.FairnessPolicy) PriorityBandConfigOption {
 	return func(p *PriorityBandConfig) error {
 		if policy == nil {
-			return errors.New("FairnessPolicy cannot be nil")
+			return errors.New("fairness policy cannot be nil")
 		}
 		p.FairnessPolicy = policy
 		return nil
@@ -365,7 +365,7 @@ func WithBandMaxRequests(maxRequests uint64) PriorityBandConfigOption {
 // validation.
 //
 // Arguments:
-//   - defaults: D`efault policy instances, provided by the config loader.
+//   - defaults: Default policy instances, provided by the config loader.
 //   - opts: Optional configuration overrides.
 func NewConfig(defaults PriorityBandPolicyDefaults, opts ...ConfigOption) (*Config, error) {
 	builder := &configBuilder{

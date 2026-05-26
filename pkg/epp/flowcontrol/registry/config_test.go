@@ -342,7 +342,7 @@ func TestNewPriorityBandConfig(t *testing.T) {
 		t.Parallel()
 		pb, err := NewPriorityBandConfig(1, defaults, WithFairnessPolicy(nil))
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "FairnessPolicy cannot be nil")
+		assert.Contains(t, err.Error(), "fairness policy cannot be nil")
 		assert.Nil(t, pb)
 	})
 
