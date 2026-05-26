@@ -33,42 +33,36 @@ func TestHandleRequestHeaders(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		headers        []*configPb.HeaderValue
-		wantHeaders    map[string]string
-		wantFairnessID string
-		wantObjective  string
-		wantTarget     string
+		name          string
+		headers       []*configPb.HeaderValue
+		wantHeaders   map[string]string
+		wantObjective string
+		wantTarget    string
 	}{
 		{
-			name: "Extracts old Fairness ID alias",
+			name: "Lowercases mixed-case header keys",
 			headers: []*configPb.HeaderValue{
 				{Key: "X-Test", Value: "val"},
-				{Key: "X-Gateway-Inference-Fairness-Id", Value: "user-123"},
 			},
-			wantHeaders:    map[string]string{"x-test": "val"},
-			wantFairnessID: "user-123",
+			wantHeaders: map[string]string{"x-test": "val"},
 		},
 		{
 			name: "Prefers RawValue over Value",
 			headers: []*configPb.HeaderValue{
-				{Key: metadata.FlowFairnessIDKey, RawValue: []byte("binary-id"), Value: "wrong-id"},
+				{Key: metadata.ObjectiveKey, RawValue: []byte("binary-id"), Value: "wrong-id"},
 			},
-			wantFairnessID: "binary-id",
+			wantObjective: "binary-id",
 		},
 		{
 			name: "Prefers new control headers over old aliases",
 			headers: []*configPb.HeaderValue{
-				{Key: metadata.OldFlowFairnessIDKey, Value: "old-user"},
-				{Key: metadata.FlowFairnessIDKey, Value: "new-user"},
 				{Key: metadata.OldObjectiveKey, Value: "old-objective"},
 				{Key: metadata.ObjectiveKey, Value: "new-objective"},
 				{Key: metadata.OldModelNameRewriteKey, Value: "old-model"},
 				{Key: metadata.ModelNameRewriteKey, Value: "new-model"},
 			},
-			wantFairnessID: "new-user",
-			wantObjective:  "new-objective",
-			wantTarget:     "new-model",
+			wantObjective: "new-objective",
+			wantTarget:    "new-model",
 		},
 	}
 
@@ -87,7 +81,6 @@ func TestHandleRequestHeaders(t *testing.T) {
 			err := server.HandleRequestHeaders(context.Background(), reqCtx, req)
 			assert.NoError(t, err, "HandleRequestHeaders should not return an error")
 
-			assert.Equal(t, tc.wantFairnessID, reqCtx.FairnessID, "FairnessID should match expected value")
 			assert.Equal(t, tc.wantObjective, reqCtx.ObjectiveKey, "ObjectiveKey should match expected value")
 			assert.Equal(t, tc.wantTarget, reqCtx.TargetModelName, "TargetModelName should match expected value")
 

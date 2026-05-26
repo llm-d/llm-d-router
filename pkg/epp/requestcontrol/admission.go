@@ -113,7 +113,7 @@ func (lac *LegacyAdmissionController) Admit(
 ) error {
 	logger := log.FromContext(ctx)
 	logger.V(logutil.TRACE).Info("Executing LegacyAdmissionController",
-		"priority", priority, "fairnessID", reqCtx.FairnessID)
+		"priority", priority, "fairnessID", reqCtx.SchedulingRequest.FairnessID)
 	if err := rejectIfSheddableAndSaturated(
 		ctx,
 		lac.saturationDetector,
@@ -153,10 +153,10 @@ func (fcac *FlowControlAdmissionController) Admit(
 ) error {
 	logger := log.FromContext(ctx)
 	logger.V(logutil.TRACE).Info("Executing FlowControlAdmissionController",
-		"requestID", reqCtx.SchedulingRequest.RequestID, "priority", priority, "fairnessID", reqCtx.FairnessID)
+		"requestID", reqCtx.SchedulingRequest.RequestID, "priority", priority, "fairnessID", reqCtx.SchedulingRequest.FairnessID)
 
 	fcReq := &flowControlRequest{
-		fairnessID:        reqCtx.FairnessID,
+		fairnessID:        reqCtx.SchedulingRequest.FairnessID,
 		priority:          priority,
 		requestByteSize:   uint64(reqCtx.RequestSize),
 		inferenceRequest:  reqCtx.SchedulingRequest,
