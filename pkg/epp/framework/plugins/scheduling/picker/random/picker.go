@@ -83,7 +83,7 @@ func (p *RandomPicker) TypedName() fwkplugin.TypedName {
 }
 
 // Pick selects random endpoint(s) from the list of candidates.
-func (p *RandomPicker) Pick(ctx context.Context, _ *fwksched.CycleState, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
+func (p *RandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
 	log.FromContext(ctx).V(logutil.DEBUG).Info("Selecting endpoints from candidates randomly", "max-num-of-endpoints", p.maxNumOfEndpoints,
 		"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
 

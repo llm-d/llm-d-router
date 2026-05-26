@@ -111,7 +111,7 @@ func TestScorer_UsesTokenizedPrompt(t *testing.T) {
 		},
 	}
 
-	scorer.Score(ctx, scheduling.NewCycleState(), request, testEndpoints)
+	scorer.Score(ctx, request, testEndpoints)
 
 	require.Equal(t, tokenIDs, capturedTokens)
 	require.Equal(t, "test-model", capturedModel)
@@ -148,7 +148,7 @@ func TestScorer_PassesExtraFeaturesToScoreTokens(t *testing.T) {
 		},
 	}
 
-	scorer.Score(ctx, scheduling.NewCycleState(), request, testEndpoints)
+	scorer.Score(ctx, request, testEndpoints)
 
 	require.NotNil(t, capturedExtraFeatures, "extraFeatures should be passed to ScoreTokens when MMFeatures present")
 }
@@ -181,7 +181,7 @@ func TestScorer_NilExtraFeaturesForTextOnly(t *testing.T) {
 		},
 	}
 
-	scorer.Score(ctx, scheduling.NewCycleState(), request, testEndpoints)
+	scorer.Score(ctx, request, testEndpoints)
 
 	require.True(t, called, "ScoreTokens should have been called")
 	assert.Nil(t, capturedExtraFeatures, "extraFeatures should be nil for text-only requests")
@@ -215,6 +215,6 @@ func TestScorer_SkipsTokenizedPromptWhenEmpty(t *testing.T) {
 		},
 	}
 
-	scorer.Score(ctx, scheduling.NewCycleState(), request, testEndpoints)
+	scorer.Score(ctx, request, testEndpoints)
 	assert.False(t, fromTokensCalled, "ScoreTokens should not be called with empty TokenIDs")
 }

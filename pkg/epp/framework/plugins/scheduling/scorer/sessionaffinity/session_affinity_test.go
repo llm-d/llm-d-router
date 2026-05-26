@@ -86,7 +86,7 @@ func TestSessionAffinity_Score(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			gotScores := sessionAffinityScorer.Score(context.Background(), nil, test.req, test.input)
+			gotScores := sessionAffinityScorer.Score(context.Background(), test.req, test.input)
 
 			if diff := cmp.Diff(test.wantScores, gotScores); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)

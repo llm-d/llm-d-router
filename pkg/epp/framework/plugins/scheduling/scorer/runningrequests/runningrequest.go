@@ -75,7 +75,7 @@ func (s *RunningRequestsSizeScorer) WithName(name string) *RunningRequestsSizeSc
 }
 
 // Score returns the scoring result for the given list of pods based on context.
-func (s *RunningRequestsSizeScorer) Score(_ context.Context, _ *fwksched.CycleState, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+func (s *RunningRequestsSizeScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	minQueueSize := math.MaxInt
 	maxQueueSize := math.MinInt
 

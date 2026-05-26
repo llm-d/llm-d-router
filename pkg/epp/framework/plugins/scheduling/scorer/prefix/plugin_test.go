@@ -41,7 +41,7 @@ func TestPrefixPluginScore(t *testing.T) {
 	endpoint2.Put(key, attrprefix.NewPrefixCacheMatchInfo(2, 10, 1))
 
 	endpoints := []fwksched.Endpoint{endpoint1, endpoint2}
-	scores := p.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
+	scores := p.Score(context.Background(), nil, endpoints)
 
 	assert.Equal(t, 0.5, scores[endpoint1])
 	assert.Equal(t, 0.2, scores[endpoint2])

@@ -141,7 +141,6 @@ func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint
 // It applies a relaxed limit (Threshold * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
 func (d *Detector) Filter(
 	_ context.Context,
-	_ *fwksched.CycleState,
 	_ *fwksched.InferenceRequest,
 	endpoints []fwksched.Endpoint,
 ) []fwksched.Endpoint {

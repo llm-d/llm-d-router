@@ -52,7 +52,7 @@ func newTestPlugin(config Config) *Plugin {
 func TestFilter_SingleEndpoint(t *testing.T) {
 	p := newTestPlugin(DefaultConfig)
 	endpoints := []fwksched.Endpoint{makeEndpoint("a", 10, 5, true)}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result))
 }
 
@@ -62,7 +62,7 @@ func TestFilter_NoPredictions(t *testing.T) {
 		makeEndpoint("a", 0, 0, false),
 		makeEndpoint("b", 0, 0, false),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "no predictions should keep all")
 }
 
@@ -72,7 +72,7 @@ func TestFilter_AllPositive(t *testing.T) {
 		makeEndpoint("a", 100, 50, true),
 		makeEndpoint("b", 200, 80, true),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "only positive tier, keep all")
 }
 
@@ -82,7 +82,7 @@ func TestFilter_AllNegative(t *testing.T) {
 		makeEndpoint("a", -100, -50, true),
 		makeEndpoint("b", -200, -80, true),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "only negative tier, keep all")
 }
 
@@ -93,7 +93,7 @@ func TestFilter_BothTiers_SelectPositive(t *testing.T) {
 		makeEndpoint("pos2", 200, 80, true),
 		makeEndpoint("neg1", -100, -50, true),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "should select positive tier")
 	assert.Equal(t, "pos1", result[0].GetMetadata().NamespacedName.Name)
 }
@@ -104,7 +104,7 @@ func TestFilter_BothTiers_EpsilonExploreNeg(t *testing.T) {
 		makeEndpoint("pos1", 100, 50, true),
 		makeEndpoint("neg1", -100, -50, true),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result), "should select negative tier")
 	assert.Equal(t, "neg1", result[0].GetMetadata().NamespacedName.Name)
 }
@@ -115,7 +115,7 @@ func TestFilter_NoPredictionGoesToNegative(t *testing.T) {
 		makeEndpoint("pos1", 100, 50, true),
 		makeEndpoint("nopred", 0, 0, false),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	// nopred goes to negative, epsilon selects negative
 	assert.Equal(t, 1, len(result))
 	assert.Equal(t, "nopred", result[0].GetMetadata().NamespacedName.Name)

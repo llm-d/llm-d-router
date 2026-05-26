@@ -790,7 +790,7 @@ func (m *mockScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-func (m *mockScorer) Score(context.Context, *fwksched.CycleState, *fwksched.InferenceRequest, []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+func (m *mockScorer) Score(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	return nil
 }
 
@@ -800,7 +800,7 @@ type mockPicker struct{ mockPlugin }
 // compile-time type assertion
 var _ fwksched.Picker = &mockPicker{}
 
-func (m *mockPicker) Pick(context.Context, *fwksched.CycleState, []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
+func (m *mockPicker) Pick(context.Context, []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
 	return nil
 }
 
@@ -810,11 +810,11 @@ type mockHandler struct{ mockPlugin }
 // compile-time type assertion
 var _ fwksched.ProfileHandler = &mockHandler{}
 
-func (m *mockHandler) Pick(context.Context, *fwksched.CycleState, *fwksched.InferenceRequest, map[string]fwksched.SchedulerProfile,
+func (m *mockHandler) Pick(context.Context, *fwksched.InferenceRequest, map[string]fwksched.SchedulerProfile,
 	map[string]*fwksched.ProfileRunResult) map[string]fwksched.SchedulerProfile {
 	return nil
 }
-func (m *mockHandler) ProcessResults(context.Context, *fwksched.CycleState, *fwksched.InferenceRequest,
+func (m *mockHandler) ProcessResults(context.Context, *fwksched.InferenceRequest,
 	map[string]*fwksched.ProfileRunResult) (*fwksched.SchedulingResult, error) {
 	return nil, errors.New("sentinel error for mock handler")
 }

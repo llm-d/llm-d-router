@@ -146,7 +146,7 @@ func (s *ActiveRequest) Consumes() map[plugin.DataKey]any {
 
 // Score scores the given endpoints based on the number of active requests
 // being served by each endpoint. The score is normalized to a range of 0-1.
-func (s *ActiveRequest) Score(ctx context.Context, _ *scheduling.CycleState, _ *scheduling.InferenceRequest,
+func (s *ActiveRequest) Score(ctx context.Context, _ *scheduling.InferenceRequest,
 	endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	requestCounts := make(map[scheduling.Endpoint]int64, len(endpoints))
 	logCounts := make(map[string]int64, len(endpoints))

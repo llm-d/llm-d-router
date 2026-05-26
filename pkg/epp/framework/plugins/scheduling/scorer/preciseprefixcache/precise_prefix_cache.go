@@ -406,7 +406,7 @@ func (s *Scorer) Produce(ctx context.Context,
 
 // Score returns score/totalBlocks per endpoint, clipped to [0, 1]. Reuses
 // Produce's cached blockKeys/scores when present; otherwise calls getScores.
-func (s *Scorer) Score(ctx context.Context, cycleState *scheduling.CycleState, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *Scorer) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	// Start tracing span for scoring operation
 	tracer := telemetry.Tracer()
 	ctx, span := tracer.Start(ctx, "llm_d.epp.scorer.prefix_cache",
@@ -459,7 +459,7 @@ func (s *Scorer) Score(ctx context.Context, cycleState *scheduling.CycleState, r
 	} else {
 		// Fallback: compute scores directly (backward compatible path).
 		var scoreErr error
-		scores, totalBlocks, scoreErr = s.getScores(ctx, cycleState, request)
+		scores, totalBlocks, scoreErr = s.getScores(ctx, request)
 		if scoreErr != nil {
 			logger.Error(scoreErr, "Failed to get endpoint scores")
 			span.SetStatus(codes.Error, scoreErr.Error())
@@ -772,7 +772,7 @@ func (s *Scorer) scoreBlockKeys(ctx context.Context, blockKeys []kvblock.BlockHa
 // getScores returns (scores, totalBlocks). Tokens path uses ScoreTokens;
 // prompt/chat fallback uses ComputeBlockKeys + scoreBlockKeys (single
 // tokenization).
-func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest) (map[string]float64, int, error) {
+func (s *Scorer) getScores(ctx context.Context, request *scheduling.InferenceRequest) (map[string]float64, int, error) {
 	logger := log.FromContext(ctx).WithName(s.typedName.String())
 	traceLogger := logger.V(logging.TRACE)
 

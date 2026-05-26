@@ -182,14 +182,14 @@ func TestDetector_Configuration(t *testing.T) {
 		endpointName := "test-endpoint"
 
 		driveLoad(ctx, reg, detector, endpointName, int(tc.effectiveHeadroomBurst-1))
-		kept := detector.Filter(ctx, nil, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
+		kept := detector.Filter(ctx, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
 		require.Len(t, kept, 1, "Endpoint should be retained when operating below burst capacity")
 
 		driveLoad(ctx, reg, detector, endpointName, 1)
 
 		t.Run("fallback to clean endpoint", func(t *testing.T) {
 			cleanEndpoint := "clean-endpoint"
-			kept = detector.Filter(ctx, nil, nil, []fwksched.Endpoint{
+			kept = detector.Filter(ctx, nil, []fwksched.Endpoint{
 				newStubSchedulingEndpoint(reg, endpointName),
 				newStubSchedulingEndpoint(reg, cleanEndpoint),
 			})
@@ -443,14 +443,14 @@ func TestDetector_TokenFilter(t *testing.T) {
 	}
 	driveTokenLoad(ctx, reg, detector, endpointName, reqs)
 
-	kept := detector.Filter(ctx, nil, nil, endpoints)
+	kept := detector.Filter(ctx, nil, endpoints)
 	require.Len(t, kept, 1, "endpoint should pass filter below burst limit")
 
 	// Add one more request to reach 120 tokens -> filtered out
 	driveTokenLoad(ctx, reg, detector, endpointName, []*fwksched.InferenceRequest{
 		makeTokenRequest("r12", prompt),
 	})
-	kept = detector.Filter(ctx, nil, nil, endpoints)
+	kept = detector.Filter(ctx, nil, endpoints)
 	require.Len(t, kept, 0, "endpoint should be filtered at burst limit")
 }
 

@@ -365,7 +365,7 @@ func TestDetector_Filter(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			detector := NewDetector("test-detector", *config, logr.Discard())
-			got := detector.Filter(context.Background(), nil, nil, tc.endpoints)
+			got := detector.Filter(context.Background(), nil, tc.endpoints)
 			require.Len(t, got, tc.wantLen)
 		})
 	}

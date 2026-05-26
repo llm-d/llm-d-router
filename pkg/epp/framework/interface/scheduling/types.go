@@ -168,5 +168,5 @@ type SchedulingResult struct {
 }
 
 type SchedulerProfile interface {
-	Run(ctx context.Context, request *InferenceRequest, cycleState *CycleState, candidateEndpoints []Endpoint) (*ProfileRunResult, error)
+	Run(ctx context.Context, request *InferenceRequest, candidateEndpoints []Endpoint) (*ProfileRunResult, error)
 }

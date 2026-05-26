@@ -537,7 +537,7 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 				}
 			}
 
-			got := prefixCacheScorer.Score(ctx, scheduling.NewCycleState(), tt.request, tt.endpoints)
+			got := prefixCacheScorer.Score(ctx, tt.request, tt.endpoints)
 
 			gotByAddress := make(map[string]float64)
 			for endpoint, score := range got {
@@ -831,7 +831,7 @@ func TestMMPipeline_ScoreTokensWithExtraFeatures_UDS(t *testing.T) {
 		},
 	}
 
-	scores := prefixCacheScorer.Score(ctx, scheduling.NewCycleState(), request, endpoints)
+	scores := prefixCacheScorer.Score(ctx, request, endpoints)
 
 	gotByAddress := make(map[string]float64)
 	for endpoint, score := range scores {

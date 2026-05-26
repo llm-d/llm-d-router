@@ -122,7 +122,7 @@ func (p *Plugin) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *Plugin) Filter(ctx context.Context, _ *fwksched.CycleState, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	logger := log.FromContext(ctx)
 
 	if len(endpoints) <= 1 || p.config.AffinityThreshold <= 0 {

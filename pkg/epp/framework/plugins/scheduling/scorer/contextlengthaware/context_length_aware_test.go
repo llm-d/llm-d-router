@@ -108,7 +108,7 @@ func TestContextLengthAwareFilter(t *testing.T) {
 	request := createRequest()
 
 	// With empty request body, context length is 0, matches 0-100 and 0-2000 ranges
-	filteredEndpoints := plugin.Filter(ctx, nil, request, endpoints)
+	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 
 	gotNames := make([]string, len(filteredEndpoints))
 	for i, endpoint := range filteredEndpoints {
@@ -144,7 +144,7 @@ func TestContextLengthAwareScore(t *testing.T) {
 	plugin := NewContextLengthAware("test-scorer", params)
 	request := createRequest()
 
-	scores := plugin.Score(ctx, nil, request, endpoints)
+	scores := plugin.Score(ctx, request, endpoints)
 
 	// With context length 0:
 	// - tight-range (0-20): in-range, should score high (> 0.3)
@@ -280,7 +280,7 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 		},
 	}
 
-	filteredEndpoints := plugin.Filter(ctx, scheduling.NewCycleState(), request, endpoints)
+	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
 	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
 }
@@ -316,7 +316,7 @@ func TestContextLengthAwareFallbackWithoutTokenizedPrompt(t *testing.T) {
 		},
 	}
 
-	filteredEndpoints := plugin.Filter(ctx, nil, request, endpoints)
+	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
 	assert.Equal(t, "matching-range", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
 }

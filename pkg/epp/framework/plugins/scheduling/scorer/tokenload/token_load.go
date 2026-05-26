@@ -84,7 +84,7 @@ func (s *TokenLoadScorer) Consumes() map[fwkplugin.DataKey]any {
 	}
 }
 
-func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.CycleState, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	logger := log.FromContext(ctx)
 

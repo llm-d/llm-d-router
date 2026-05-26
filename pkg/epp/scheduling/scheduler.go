@@ -61,12 +61,11 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	}()
 
 	profileRunResults := map[string]*fwksched.ProfileRunResult{}
-	cycleState := fwksched.NewCycleState()
 
 	for { // get the next set of profiles to run iteratively based on the request and the previous execution results
 		loggerVerbose.Info("Running profile handler, Pick profiles", "plugin", s.profileHandler.TypedName())
 		before := time.Now()
-		profiles := s.profileHandler.Pick(ctx, cycleState, request, s.profiles, profileRunResults)
+		profiles := s.profileHandler.Pick(ctx, request, s.profiles, profileRunResults)
 		metrics.RecordPluginProcessingLatency(profilePickerExtensionPoint, s.profileHandler.TypedName().Type, s.profileHandler.TypedName().Name, time.Since(before))
 		loggerVerbose.Info("Completed running profile handler Pick profiles successfully", "plugin", s.profileHandler.TypedName(), "result", profiles)
 		if len(profiles) == 0 { // profile picker didn't pick any profile to run
@@ -76,7 +75,7 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 		for name, profile := range profiles {
 			loggerVerbose.Info("Running scheduler profile", "profile", name)
 			// run the selected profiles and collect results (current code runs all profiles)
-			profileRunResult, err := profile.Run(ctx, request, cycleState, candidateEndpoints)
+			profileRunResult, err := profile.Run(ctx, request, candidateEndpoints)
 			if err != nil {
 				loggerVerbose.Info("failed to run scheduler profile", "profile", name, "error", err.Error())
 			} else {
@@ -94,7 +93,7 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 
 	loggerVerbose.Info("Running profile handler, ProcessResults", "plugin", s.profileHandler.TypedName())
 	before := time.Now()
-	result, err = s.profileHandler.ProcessResults(ctx, cycleState, request, profileRunResults)
+	result, err = s.profileHandler.ProcessResults(ctx, request, profileRunResults)
 	metrics.RecordPluginProcessingLatency(processProfilesResultsExtensionPoint, s.profileHandler.TypedName().Type, s.profileHandler.TypedName().Name, time.Since(before))
 	loggerVerbose.Info("Completed running profile handler ProcessResults successfully", "plugin", s.profileHandler.TypedName())
 

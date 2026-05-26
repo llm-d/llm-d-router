@@ -144,7 +144,7 @@ func (h *PdProfileHandler) WithName(name string) *PdProfileHandler {
 
 // Pick selects the SchedulingProfiles to run from the list of candidate profiles, while taking into consideration the request properties and the
 // previously executed cycles along with their results.
-func (h *PdProfileHandler) Pick(ctx context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
+func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
 	// Start tracing span for profile picking operation
 	tracer := telemetry.Tracer()
@@ -213,7 +213,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, _ *scheduling.CycleState, r
 // ProcessResults handles the outcome of the profile runs after the selected profiles ran.
 // In case of an error in any of the profiles, the matching entry in the profileResults will contain nil, to indicate there was
 // an error while running the profile.
-func (h *PdProfileHandler) ProcessResults(_ context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest,
+func (h *PdProfileHandler) ProcessResults(_ context.Context, request *scheduling.InferenceRequest,
 	profileResults map[string]*scheduling.ProfileRunResult) (*scheduling.SchedulingResult, error) {
 	decodeRunResults := profileResults[h.decodeProfile]
 	if decodeRunResults == nil { // if decode profile failed to run, we should fail

@@ -99,7 +99,7 @@ func (p *Plugin) Consumes() map[plugin.DataKey]any {
 }
 
 // Score returns the scoring result for the given list of pods based on prefix cache match info.
-func (p *Plugin) Score(ctx context.Context, _ *fwksched.CycleState, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	logger := log.FromContext(ctx)
 

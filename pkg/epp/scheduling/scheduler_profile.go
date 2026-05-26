@@ -114,20 +114,20 @@ func (p *SchedulerProfile) String() string {
 
 // Run runs a SchedulerProfile. It invokes all the SchedulerProfile plugins for the given request in this
 // order - Filters, Scorers, Picker. After completing all, it returns the result.
-func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, cycleState *fwksched.CycleState, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
-	endpoints := p.runFilterPlugins(ctx, request, cycleState, candidateEndpoints)
+func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+	endpoints := p.runFilterPlugins(ctx, request, candidateEndpoints)
 	if len(endpoints) == 0 {
 		return nil, errcommon.Error{Code: errcommon.Internal, Msg: "no endpoints available for the given request"}
 	}
 	// if we got here, there is at least one endpoint to score
-	weightedScorePerEndpoint := p.runScorerPlugins(ctx, request, cycleState, endpoints)
+	weightedScorePerEndpoint := p.runScorerPlugins(ctx, request, endpoints)
 
-	result := p.runPickerPlugin(ctx, cycleState, weightedScorePerEndpoint)
+	result := p.runPickerPlugin(ctx, weightedScorePerEndpoint)
 
 	return result, nil
 }
 
-func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksched.InferenceRequest, cycleState *fwksched.CycleState, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	logger := log.FromContext(ctx)
 	filteredEndpoints := endpoints
 	logger.V(logutil.DEBUG).Info("Before running filter plugins", "endpoints", filteredEndpoints)
@@ -135,7 +135,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 	for _, filter := range p.filters {
 		logger.V(logutil.VERBOSE).Info("Running filter plugin", "plugin", filter.TypedName())
 		before := time.Now()
-		filteredEndpoints = filter.Filter(ctx, cycleState, request, filteredEndpoints)
+		filteredEndpoints = filter.Filter(ctx, request, filteredEndpoints)
 		metrics.RecordPluginProcessingLatency(filterExtensionPoint, filter.TypedName().Type, filter.TypedName().Name, time.Since(before))
 		logger.V(logutil.DEBUG).Info("Completed running filter plugin successfully", "plugin", filter.TypedName(), "endpoints", filteredEndpoints)
 		if len(filteredEndpoints) == 0 {
@@ -148,7 +148,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 	return filteredEndpoints
 }
 
-func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksched.InferenceRequest, cycleState *fwksched.CycleState, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	logger := log.FromContext(ctx)
 	logger.V(logutil.DEBUG).Info("Before running scorer plugins", "endpoints", endpoints)
 
@@ -169,7 +169,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	for _, scorer := range p.scorers {
 		logger.V(logutil.VERBOSE).Info("Running scorer plugin", "plugin", scorer.TypedName())
 		before := time.Now()
-		scores := scorer.Score(ctx, cycleState, request, endpoints)
+		scores := scorer.Score(ctx, request, endpoints)
 		metrics.RecordPluginProcessingLatency(scorerExtensionPoint, scorer.TypedName().Type, scorer.TypedName().Name, time.Since(before))
 		for endpoint, score := range scores { // weight is relative to the sum of weights
 			if debugEnabled {
@@ -184,7 +184,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	return weightedScorePerEndpoint
 }
 
-func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, cycleState *fwksched.CycleState, weightedScorePerEndpoint map[fwksched.Endpoint]float64) *fwksched.ProfileRunResult {
+func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, weightedScorePerEndpoint map[fwksched.Endpoint]float64) *fwksched.ProfileRunResult {
 	logger := log.FromContext(ctx)
 
 	// Allocate the ScoredEndpoint values as a single contiguous backing array
@@ -205,7 +205,7 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, cycleState *fwks
 	logger.V(logutil.VERBOSE).Info("Running picker plugin", "plugin", p.picker.TypedName())
 	logger.V(logutil.DEBUG).Info("Candidate pods for picking", "endpoints-weighted-score", scoredEndpoints)
 	before := time.Now()
-	result := p.picker.Pick(ctx, cycleState, scoredEndpoints)
+	result := p.picker.Pick(ctx, scoredEndpoints)
 	metrics.RecordPluginProcessingLatency(pickerExtensionPoint, p.picker.TypedName().Type, p.picker.TypedName().Name, time.Since(before))
 	logger.V(logutil.DEBUG).Info("Completed running picker plugin successfully", "plugin", p.picker.TypedName(), "result", result)
 

@@ -31,14 +31,18 @@ Filters implement the [`scheduling.Filter`](https://github.com/llm-d/llm-d-route
 ```go
 type Filter interface {
     plugin.Plugin
-    Filter(ctx context.Context, cycleState *CycleState, request *InferenceRequest, pods []Endpoint) []Endpoint
+    Filter(ctx context.Context, request *InferenceRequest, pods []Endpoint) []Endpoint
 }
 ```
 
 Key types used in the filter signature:
-- `scheduling.CycleState` — per-scheduling-cycle state for plugin-to-plugin data sharing
 - `scheduling.InferenceRequest` — parsed request with model, body, headers, and objectives
 - `scheduling.Endpoint` — candidate endpoint interface exposing metadata (including labels) and metrics
+
+Plugins that need to share per-request data with downstream extension points use
+`plugin.PluginState` (keyed by request ID). Per-endpoint attributes that flow
+through the data layer's Produces/Consumes graph are written via
+`Endpoint.Put` / read via `Endpoint.Get`.
 
 The `Filter` function accepts the request and a slice of candidate endpoints. Each endpoint exposes relevant inference attributes, such as model server metrics, which can be used to make scheduling decisions. The function returns a (possibly smaller) slice of endpoints which satisfy the filtering criteria.
 
@@ -133,7 +137,7 @@ func (blf *Selector) TypedName() plugin.TypedName {
     return blf.typedName
 }
 
-func (blf *Selector) Filter(_ context.Context, _ *scheduling.CycleState, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+func (blf *Selector) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
     filtered := []scheduling.Endpoint{}
 
     for _, endpoint := range endpoints {
@@ -146,7 +150,7 @@ func (blf *Selector) Filter(_ context.Context, _ *scheduling.CycleState, _ *sche
 }
 ```
 
-Since the filter is only matching on candidate endpoint labels, we leave the `context.Context`, `CycleState`, and `InferenceRequest` parameters unnamed. Filters that need access to LLM request information (e.g., filtering based on prompt length) may use them.
+Since the filter is only matching on candidate endpoint labels, we leave the `context.Context` and `InferenceRequest` parameters unnamed. Filters that need access to LLM request information (e.g., filtering based on prompt length) may use them.
 
 ## Hooking the filter into the scheduling flow
 

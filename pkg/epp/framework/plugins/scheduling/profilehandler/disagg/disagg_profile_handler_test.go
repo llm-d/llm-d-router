@@ -54,7 +54,7 @@ func makeProfileRunResult(names ...string) *scheduling.ProfileRunResult {
 
 type mockProfile struct{}
 
-func (p *mockProfile) Run(_ context.Context, _ *scheduling.InferenceRequest, _ *scheduling.CycleState, _ []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
+func (p *mockProfile) Run(_ context.Context, _ *scheduling.InferenceRequest, _ []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
 	return &scheduling.ProfileRunResult{}, nil
 }
 
@@ -410,7 +410,7 @@ func TestHandler_Pick_PD(t *testing.T) {
 			inputTokens := len(req.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
 			injectPrefixCache(tt.profileResults, tt.cachedTokens, inputTokens)
 
-			got := h.Pick(ctx, nil, req, profiles, tt.profileResults)
+			got := h.Pick(ctx, req, profiles, tt.profileResults)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
 	}
@@ -435,7 +435,7 @@ func TestHandler_Pick_PD_InputTokenError(t *testing.T) {
 	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
 		decider, nil)
 
-	got := h.Pick(ctx, nil, req, profiles, results)
+	got := h.Pick(ctx, req, profiles, results)
 	assert.Empty(t, got, "should return empty map on input token estimation error")
 }
 
@@ -497,7 +497,7 @@ func TestHandler_Pick_PD_Series(t *testing.T) {
 				}
 				inputTokens := len(step.req.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
 				injectPrefixCache(results, step.cachedTokens, inputTokens)
-				got := h.Pick(ctx, &scheduling.CycleState{}, step.req, profiles, results)
+				got := h.Pick(ctx, step.req, profiles, results)
 				assert.ElementsMatch(t, step.want, profileNames(got))
 			}
 		})
@@ -550,7 +550,7 @@ func TestHandler_ProcessResults_PD(t *testing.T) {
 				decider, nil)
 
 			req := &scheduling.InferenceRequest{Headers: map[string]string{}}
-			res, err := h.ProcessResults(context.Background(), nil, req, tt.results)
+			res, err := h.ProcessResults(context.Background(), req, tt.results)
 			if tt.expectErr {
 				assert.Error(t, err)
 				return
@@ -567,7 +567,7 @@ func TestHandler_ProcessResults_NilRequest(t *testing.T) {
 	results := map[string]*scheduling.ProfileRunResult{
 		defaultDecodeProfile: makeProfileRunResult("pod1"),
 	}
-	_, err := h.ProcessResults(context.Background(), nil, nil, results)
+	_, err := h.ProcessResults(context.Background(), nil, results)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "request is nil")
 }
@@ -592,14 +592,14 @@ func TestHandler_Pick_CustomProfiles(t *testing.T) {
 	)
 
 	// Stage 1: decode not run → run decode
-	got := h.Pick(ctx, nil, chatRequest(true, false, false), profiles, map[string]*scheduling.ProfileRunResult{})
+	got := h.Pick(ctx, chatRequest(true, false, false), profiles, map[string]*scheduling.ProfileRunResult{})
 	assert.ElementsMatch(t, []string{customDecodeProfile}, profileNames(got))
 
 	// Stage 2: decode done, multimodal → run encode
 	results := map[string]*scheduling.ProfileRunResult{
 		customDecodeProfile: makeProfileRunResult("pod1"),
 	}
-	got = h.Pick(ctx, nil, chatRequest(true, false, false), profiles, results)
+	got = h.Pick(ctx, chatRequest(true, false, false), profiles, results)
 	assert.ElementsMatch(t, []string{customEncodeProfile}, profileNames(got))
 }
 
@@ -616,7 +616,7 @@ func TestHandler_ProcessResults_CustomProfiles(t *testing.T) {
 	}
 
 	req := &scheduling.InferenceRequest{Headers: map[string]string{}}
-	res, err := h.ProcessResults(context.Background(), nil, req, results)
+	res, err := h.ProcessResults(context.Background(), req, results)
 	assert.NoError(t, err)
 	assert.Equal(t, customDecodeProfile, res.PrimaryProfileName)
 	assert.Contains(t, res.ProfileResults, customDecodeProfile)
@@ -707,7 +707,7 @@ func TestHandler_Pick_EPD(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewDisaggProfileHandler(defaultDecodeProfile, "", defaultEncodeProfile, nil, newAlwaysDisaggEncodeDecider())
-			got := h.Pick(ctx, nil, tt.req, profiles, tt.results)
+			got := h.Pick(ctx, tt.req, profiles, tt.results)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
 	}
@@ -737,7 +737,7 @@ func TestHandler_Pick_EPD_EncodeDecider(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewDisaggProfileHandler(defaultDecodeProfile, "", defaultEncodeProfile,
 				nil, &mockEncodeDecider{allow: tt.allow})
-			got := h.Pick(ctx, nil, chatRequest(true, false, false), profiles, results)
+			got := h.Pick(ctx, chatRequest(true, false, false), profiles, results)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
 	}
@@ -794,7 +794,7 @@ func TestHandler_ProcessResults_EPD(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewDisaggProfileHandler(defaultDecodeProfile, "", defaultEncodeProfile, nil, newAlwaysDisaggEncodeDecider())
-			res, err := h.ProcessResults(context.Background(), nil, &scheduling.InferenceRequest{}, tt.results)
+			res, err := h.ProcessResults(context.Background(), &scheduling.InferenceRequest{}, tt.results)
 			if tt.expectErr {
 				assert.Error(t, err)
 				return
@@ -920,7 +920,7 @@ func TestHandler_Pick_EPD_Full(t *testing.T) {
 			}
 			injectPrefixCache(tt.results, tt.cachedTokens, inputTokens)
 
-			got := h.Pick(ctx, nil, tt.req, profiles, tt.results)
+			got := h.Pick(ctx, tt.req, profiles, tt.results)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
 	}
@@ -963,7 +963,7 @@ func TestHandler_Pick_EPD_Full_EncodeDecider(t *testing.T) {
 			inputTokens := len(testLongPrompt) / AverageCharactersPerToken
 			injectPrefixCache(results, 0, inputTokens)
 
-			got := h.Pick(ctx, nil, multimodalLong, profiles, results)
+			got := h.Pick(ctx, multimodalLong, profiles, results)
 			assert.ElementsMatch(t, tt.wantNext, profileNames(got))
 		})
 	}
@@ -1029,7 +1029,7 @@ func TestHandler_ProcessResults_EPD_Full(t *testing.T) {
 				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
 				decider, newAlwaysDisaggEncodeDecider(),
 			)
-			res, err := h.ProcessResults(context.Background(), nil, &scheduling.InferenceRequest{}, tt.results)
+			res, err := h.ProcessResults(context.Background(), &scheduling.InferenceRequest{}, tt.results)
 			if tt.expectErr {
 				assert.Error(t, err)
 				return
@@ -1143,7 +1143,7 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 				injectPrefixCache(tt.results, 0, inputTokens)
 			}
 
-			got := h.Pick(ctx, nil, tt.req, profiles, tt.results)
+			got := h.Pick(ctx, tt.req, profiles, tt.results)
 			assert.ElementsMatch(t, tt.want, profileNames(got), tt.description)
 		})
 	}
@@ -1222,7 +1222,7 @@ func TestHandler_ProcessResults_NilDeciders(t *testing.T) {
 				tt.pdDecider, tt.encodeDecider,
 			)
 
-			res, err := h.ProcessResults(context.Background(), nil, &scheduling.InferenceRequest{}, tt.results)
+			res, err := h.ProcessResults(context.Background(), &scheduling.InferenceRequest{}, tt.results)
 			if tt.expectErr {
 				assert.Error(t, err, tt.description)
 				return

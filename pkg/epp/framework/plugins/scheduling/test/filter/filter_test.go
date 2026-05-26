@@ -119,7 +119,7 @@ func TestFilter(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := NewHeaderBasedTestingFilter().Filter(context.Background(), fwksched.NewCycleState(), tc.req, tc.input)
+			got := NewHeaderBasedTestingFilter().Filter(context.Background(), tc.req, tc.input)
 			if diff := cmp.Diff(tc.output, got, cmp.Comparer(fwksched.EndpointComparer)); diff != "" {
 				t.Fatalf("Unexpected output (-want +got): %s", diff)
 			}
