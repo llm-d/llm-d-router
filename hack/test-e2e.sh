@@ -68,11 +68,17 @@ if [ "${USE_KIND}" = "true" ]; then
     load_images "${KIND_CLUSTER_NAME}"
   else
     if [ -n "${current_context}" ]; then
-      echo "WARNING: current kubecontext '${current_context}' is not kind-${KIND_CLUSTER_NAME}, ignoring it."
+      echo "WARNING: current kubecontext '${current_context}' is not kind-${KIND_CLUSTER_NAME}, wont use it." >&2
     fi
-    echo "Creating kind cluster '${KIND_CLUSTER_NAME}' for running the tests..."
-    kind create cluster --name "${KIND_CLUSTER_NAME}"
-    CREATED_CLUSTER="${KIND_CLUSTER_NAME}"
+    # if the cluster already exists but isn't the current context
+    if kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
+      echo "Found existing kind cluster '${KIND_CLUSTER_NAME}', switching context..."
+      kubectl config use-context "kind-${KIND_CLUSTER_NAME}"
+    else
+      echo "Creating new kind cluster '${KIND_CLUSTER_NAME}' for running the tests..."
+      kind create cluster --name "${KIND_CLUSTER_NAME}"
+      CREATED_CLUSTER="${KIND_CLUSTER_NAME}"
+    fi
     load_images "${KIND_CLUSTER_NAME}"
   fi
 else
