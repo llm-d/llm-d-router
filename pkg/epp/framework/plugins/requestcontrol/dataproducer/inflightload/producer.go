@@ -195,7 +195,10 @@ func (p *InFlightLoadProducer) ExtractEndpoint(ctx context.Context, event datala
 }
 
 func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	inputTokens := p.tokenEstimator.EstimateInput(request)
+	var inputTokens int64
+	if request != nil {
+		inputTokens = p.tokenEstimator.EstimateInput(request)
+	}
 
 	for _, e := range endpoints {
 		if e == nil || e.GetMetadata() == nil {
