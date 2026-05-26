@@ -1,14 +1,9 @@
-# Model Server Protocol
+# Plugin Metric Protocol
 
 This document describes the contract the EPP expects from model servers
 it routes traffic to. Because the EPP uses a pluggable architecture, the
 requirements below describe what is needed to use the built-in plugins;
 individual plugins may relax or extend these requirements.
-
-## Inference API Protocol
-
-The model server MUST implement OpenAI’s [Completions](https://platform.openai.com/docs/api-reference/completions)
-and [Chat](https://platform.openai.com/docs/api-reference/chat) APIs.
 
 ## Metrics Reporting
 
@@ -17,21 +12,26 @@ decisions. The model servers MUST provide the following metrics via a Prometheus
 metric names don't necessarily need to be the same as the recommended names here, however the
 metric types and semantics MUST follow this doc.
 
+The **Required by** column lists the plugins that need each metric to function. You only need
+to expose the metrics for plugins you actually enable.
+
 Note the requirements here are aligned with the
 [model server metrics standardization](https://docs.google.com/document/d/1SpSp1E6moa4HSrJnS4x3NpLuj88sMXr2tbofKlzTZpk)
 effort.
 
 
-| Metric | Type | Description | vLLM metric | Triton TensorRT-LLM| trtllm-serve | SGLang |
-| ----- | ---- | ------------ | ---- | ---- | ---- | ---- |
-| TotalQueuedRequests         | Gauge     | The current total number of requests in the queue.| `vllm:num_requests_waiting`| `nv_trt_llm_request_metrics{request_type=waiting}`| `trtllm_num_requests_waiting` | `sglang:num_queue_reqs`
-| TotalRunningRequests         | Gauge     | The current total number of requests actively being served on the model server.| `vllm:num_requests_running`| `nv_trt_llm_request_metrics{request_type=scheduled}`| `trtllm_num_requests_running` | `sglang:num_running_reqs`
-| KVCacheUtilization| Gauge     | The current KV cache utilization in percentage.| `vllm:kv_cache_usage_perc`| `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=fraction}`| `trtllm_kv_cache_utilization` | `sglang:token_usage`
-| [Optional] BlockSize         | Labeled/Gauge     | The block size in tokens to allocate memory, used by the prefix cache scorer. If this metric is not available, the BlockSize will be derived from the [precise prefix cache plugin config](../pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache/README.md).| name: `vllm:cache_config_info`, label name: `block_size`| `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=tokens_per}` | `trtllm_kv_cache_tokens_per_block` | name: `sglang:cache_config_info`, label name: `page_size`
-| [Optional] NumGPUBlocks| Labeled/Gauge     | The total number of blocks in the HBM KV cache, used by the prefix cache scorer. If this metric is not available, the NumGPUBlocks will be derived from the [precise prefix cache plugin config](../pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache/README.md).| name: `vllm:cache_config_info`, label name: `num_gpu_blocks`| `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}` | `trtllm_kv_cache_max_blocks` | name: `sglang:cache_config_info`, label name: `num_pages`
+| Metric | Required by | Type | Description | vLLM metric | Triton TensorRT-LLM | trtllm-serve | SGLang |
+| ----- | ---- | ---- | ------------ | ---- | ---- | ---- | ---- |
+| TotalQueuedRequests         | `queue-scorer`, `load-aware-scorer`, `latency-scorer` (via `predicted-latency`) | Gauge     | The current total number of requests in the queue.| `vllm:num_requests_waiting`| `nv_trt_llm_request_metrics{request_type=waiting}`| `trtllm_num_requests_waiting` | `sglang:num_queue_reqs`
+| TotalRunningRequests         | `running-requests-size-scorer`, `latency-scorer` (via `predicted-latency`) | Gauge     | The current total number of requests actively being served on the model server.| `vllm:num_requests_running`| `nv_trt_llm_request_metrics{request_type=scheduled}`| `trtllm_num_requests_running` | `sglang:num_running_reqs`
+| KVCacheUtilization| `kv-cache-utilization-scorer`, `latency-scorer` (via `predicted-latency`) | Gauge     | The current KV cache utilization in percentage.| `vllm:kv_cache_usage_perc`| `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=fraction}`| `trtllm_kv_cache_utilization` | `sglang:token_usage`
+| [Optional] BlockSize         | `prefix-cache-scorer`, `prefix-cache-affinity-filter` (via `approximate-prefix` when `AutoTune` is enabled) | Labeled/Gauge     | The block size in tokens to allocate memory. Used to auto-tune the approximate prefix cache; otherwise the value is taken from the `approximate-prefix` plugin's `BlockSizeTokens` config.| name: `vllm:cache_config_info`, label name: `block_size`| `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=tokens_per}` | `trtllm_kv_cache_tokens_per_block` | name: `sglang:cache_config_info`, label name: `page_size`
+| [Optional] NumGPUBlocks| `prefix-cache-scorer`, `prefix-cache-affinity-filter` (via `approximate-prefix` when `AutoTune` is enabled) | Labeled/Gauge     | The total number of blocks in the HBM KV cache. Used to auto-tune the approximate prefix cache.| name: `vllm:cache_config_info`, label name: `num_gpu_blocks`| `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}` | `trtllm_kv_cache_max_blocks` | name: `sglang:cache_config_info`, label name: `num_pages`
 
 
 ## LoRA Adapter Serving
+
+**Required by:** `lora-affinity-scorer`
 
 Model servers that support dynamic LoRA serving can benefit from the LoRA affinity algorithm. Note
 the current LoRA affinity algorithm in this EPP is highly biased towards vLLM's current
@@ -54,6 +54,8 @@ The model server MUST expose the following LoRA adapter metrics via the same Pro
   * `waiting_lora_adapters`: A comma separated list of adapters that are waiting to be served. Example: `"waiting_lora_adapters": "adapter1, adapter2"`
 
 ## Prefix Cache Reuse
+
+**Required by:** `precise-prefix-cache-scorer`, `prefix-cache-scorer`, `prefix-cache-affinity-filter`
 
 The EPP supports prefix cache optimized request scheduling via the
 [precise prefix cache plugin](../pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache/README.md).
