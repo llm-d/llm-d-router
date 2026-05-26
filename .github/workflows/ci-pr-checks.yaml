@@ -96,6 +96,12 @@ jobs:
       - name: Sanity check repo contents
         run: ls -la
 
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false # only needed for `go list` in Makefile; module cache managed by the explicit cache step below
+
       - name: Create and resolve Go cache volumes
         id: go-cache
         run: |
