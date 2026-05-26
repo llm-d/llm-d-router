@@ -118,12 +118,14 @@ var _ = Describe("Reverse Proxy", func() {
 			Entry("when the path is /v1/chat/completions and secure proxy is false", "/v1/chat/completions", false),
 			Entry("when the path is /v1/completions and secure proxy is false", "/v1/completions", false),
 			Entry("when the path is /v1/embeddings and secure proxy is false", "/v1/embeddings", false),
+			Entry("when the path is /v1/rerank and secure proxy is false", "/v1/rerank", false),
 			Entry("when the path is /score and secure proxy is false", "/score", false),
 			Entry("when the path is /healthz and secure proxy is false", "/healthz", false),
 
 			Entry("when the path is /v1/chat/completions and secure proxy is true", "/v1/chat/completions", true),
 			Entry("when the path is /v1/completions and secure proxy is true", "/v1/completions", true),
 			Entry("when the path is /v1/embeddings and secure proxy is true", "/v1/embeddings", true),
+			Entry("when the path is /v1/rerank and secure proxy is true", "/v1/rerank", true),
 			Entry("when the path is /score and secure proxy is true", "/score", true),
 			Entry("when the path is /healthz and secure proxy is true", "/healthz", true),
 		)
