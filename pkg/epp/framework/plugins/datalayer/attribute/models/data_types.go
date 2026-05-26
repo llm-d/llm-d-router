@@ -49,9 +49,10 @@ func (m ModelDataCollection) Clone() fwkdl.Cloneable {
 	if m == nil {
 		return nil
 	}
-	clone := make([]ModelData, len(m))
+
+	clone := make(ModelDataCollection, len(m))
 	copy(clone, m)
-	return (*ModelDataCollection)(&clone)
+	return clone
 }
 
 func (m ModelDataCollection) String() string {
