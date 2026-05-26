@@ -70,23 +70,14 @@ var _ = Describe("AllowlistValidator", func() {
 
 		It("should parse host:port correctly", func() {
 			// Test host:port format parsing
-			normalized := validator.normalizeHostPort("10.244.1.100:8000")
-			Expect(normalized).To(Equal("10.244.1.100"))
-
-			normalized = validator.normalizeHostPort("valid-pod:8000")
-			Expect(normalized).To(Equal("valid-pod"))
-
+			Expect(extractHost("10.244.1.100:8000")).To(Equal("10.244.1.100"))
+			Expect(extractHost("valid-pod:8000")).To(Equal("valid-pod"))
 			// Just hostname (no port)
-			normalized = validator.normalizeHostPort("valid-pod")
-			Expect(normalized).To(Equal("valid-pod"))
-
-			// IPv6 addresses (net.SplitHostPort handles these correctly)
-			normalized = validator.normalizeHostPort("[::1]:8000")
-			Expect(normalized).To(Equal("::1"))
-
+			Expect(extractHost("valid-pod")).To(Equal("valid-pod"))
+			// IPv6 addresses (net.SplitHostPort handles these correctly
+			Expect(extractHost("[::1]:8000")).To(Equal("::1"))
 			// IPv6 without port
-			normalized = validator.normalizeHostPort("::1")
-			Expect(normalized).To(Equal("::1"))
+			Expect(extractHost("::1")).To(Equal("::1"))
 		})
 	})
 })

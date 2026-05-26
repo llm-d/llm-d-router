@@ -49,10 +49,10 @@ type Config struct {
 }
 
 // Factory creates a multimodal encoder-cache affinity scorer.
-func Factory(name string, rawParameters json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	var cfg Config
-	if len(rawParameters) > 0 {
-		if err := json.Unmarshal(rawParameters, &cfg); err != nil {
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse parameters for %q scorer: %w", Type, err)
 		}
 	}

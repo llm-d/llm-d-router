@@ -83,7 +83,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			prefillReplicas := 1
 			decodeReplicas := 4
-			modelServers := createModelServersPDNixl(prefillReplicas, decodeReplicas)
+			modelServers := createModelServersPDNixlV2(prefillReplicas, decodeReplicas)
 
 			epp := createEndPointPicker(deprecatedPdConfig)
 

@@ -17,31 +17,42 @@ limitations under the License.
 package profiling
 
 import (
+	"net/http"
 	"net/http/pprof"
 	"runtime"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-// setupPprofHandlers only implements the pre-defined profiles:
-// https://cs.opensource.google/go/go/+/refs/tags/go1.24.4:src/runtime/pprof/pprof.go;l=108
-func SetupPprofHandlers(mgr ctrl.Manager) error {
-	profiles := []string{
-		"heap",
-		"goroutine",
-		"allocs",
-		"threadcreate",
-		"block",
-		"mutex",
+// PprofHandlers returns the pprof endpoints to mount on a metrics server,
+// keyed by URL path. The runtime block/mutex profile rates are turned on as a
+// side effect so the corresponding handlers return non-empty data; safe to
+// call once per process.
+func PprofHandlers() map[string]http.Handler {
+	runtime.SetMutexProfileFraction(1)
+	runtime.SetBlockProfileRate(1)
+	return map[string]http.Handler{
+		"/debug/pprof/":             http.HandlerFunc(pprof.Index),
+		"/debug/pprof/cmdline":      http.HandlerFunc(pprof.Cmdline),
+		"/debug/pprof/profile":      http.HandlerFunc(pprof.Profile),
+		"/debug/pprof/symbol":       http.HandlerFunc(pprof.Symbol),
+		"/debug/pprof/trace":        http.HandlerFunc(pprof.Trace),
+		"/debug/pprof/heap":         pprof.Handler("heap"),
+		"/debug/pprof/goroutine":    pprof.Handler("goroutine"),
+		"/debug/pprof/allocs":       pprof.Handler("allocs"),
+		"/debug/pprof/threadcreate": pprof.Handler("threadcreate"),
+		"/debug/pprof/block":        pprof.Handler("block"),
+		"/debug/pprof/mutex":        pprof.Handler("mutex"),
 	}
-	for _, p := range profiles {
-		if err := mgr.AddMetricsServerExtraHandler("/debug/pprof/"+p, pprof.Handler(p)); err != nil {
+}
+
+// SetupPprofHandlers registers the pprof endpoints on the controller-runtime
+// manager's metrics server.
+func SetupPprofHandlers(mgr ctrl.Manager) error {
+	for path, h := range PprofHandlers() {
+		if err := mgr.AddMetricsServerExtraHandler(path, h); err != nil {
 			return err
 		}
 	}
-
-	runtime.SetMutexProfileFraction(1)
-	runtime.SetBlockProfileRate(1)
-
 	return nil
 }

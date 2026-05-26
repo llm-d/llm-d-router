@@ -106,7 +106,7 @@ func TestHeadersHandlerFactory(t *testing.T) {
 				raw = json.RawMessage(tt.rawParams)
 			}
 
-			p, err := HeadersHandlerFactory(tt.pluginName, raw, nil)
+			p, err := HeadersHandlerFactory(tt.pluginName, fwkplugin.StrictDecoder(raw), nil)
 			if tt.expectErr {
 				assert.Error(t, err)
 				assert.Nil(t, p)
@@ -161,7 +161,7 @@ func TestPrefillHeaderHandlerBackwardCompat(t *testing.T) {
 	require.True(t, ok, "prefill-header-handler must be in the registry")
 
 	raw := json.RawMessage(`{"prefillProfile": "prefill"}`)
-	p, err := factory("compat-handler", raw, nil)
+	p, err := factory("compat-handler", fwkplugin.StrictDecoder(raw), nil)
 	require.NoError(t, err)
 	require.NotNil(t, p)
 

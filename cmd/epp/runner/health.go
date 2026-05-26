@@ -117,12 +117,15 @@ func (s *healthServer) checkProtocolSupport(isLive bool) bool {
 	if len(supported) == 0 {
 		return true
 	}
-	appProtocol := pool.AppProtocol
-	if appProtocol == "" {
-		appProtocol = v1.AppProtocolHTTP
+	// An unset AppProtocol means the operator did not declare a protocol on the
+	// pool. Treat that as "no protocol constraint" rather than silently
+	// defaulting to HTTP, which would lock out file-discovery deployments and
+	// any K8s pool that uses a non-HTTP parser without setting AppProtocol.
+	if pool.AppProtocol == "" {
+		return true
 	}
 	for _, p := range supported {
-		if p == appProtocol {
+		if p == pool.AppProtocol {
 			return true
 		}
 	}

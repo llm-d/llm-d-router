@@ -40,13 +40,13 @@ func writeTempYAML(t *testing.T, name, content string) string {
 
 func createConfigWithValidYAML(t *testing.T) string {
 	t.Helper()
-	return writeTempYAML(t, "valid.yaml", `
+	return writeTempYAML(t, "valid.yaml", fmt.Sprintf(`
 port: 8100
 vllm-port: 8200
 data-parallel-size: 5
-kv-connector: "sglang"
-connector: "nixlv2"
-ec-connector: "ec-example"
+kv-connector: %q
+connector: %q
+ec-connector: %q
 enable-ssrf-protection: true
 enable-prefiller-sampling: true
 enable-tls:
@@ -62,7 +62,7 @@ inference-pool: "file-ns/inference-pool-file"
 pool-group: "pool-group-file"
 max-idle-conns-per-host: 300
 decode-chunk-size: 128
-`)
+`, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector))
 }
 
 func createConfigWithUnknownKeys(t *testing.T) string {
@@ -84,14 +84,13 @@ invalid-yaml,
 
 func TestSidecarConfiguration(t *testing.T) {
 	// --- inline YAML for testing ---
-	inlineYAML :=
-		`{
+	inlineYAML := fmt.Sprintf(`{
 		port: 8011,
 		vllm-port: 8021,
 		data-parallel-size: 3,
-		kv-connector: sglang,
-		connector: nixlv2,
-		ec-connector: ec-example,
+		kv-connector: %s,
+		connector: %s,
+		ec-connector: %s,
 		enable-ssrf-protection: true,
 		enable-prefiller-sampling: true,
 		enable-tls: ['prefiller', 'decoder'],
@@ -105,7 +104,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		pool-group: pool-group-inline,
 		max-idle-conns-per-host: 200,
 		decode-chunk-size: 256
-	}`
+	}`, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector)
 	invalidInlineYAML := "{port: 8200, invalid-yaml}"
 
 	// -- file YAML for testing ---

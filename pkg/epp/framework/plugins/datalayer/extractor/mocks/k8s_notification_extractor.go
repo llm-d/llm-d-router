@@ -77,7 +77,10 @@ func (m *NotificationExtractor) ExtractNotification(_ context.Context, event fwk
 	return m.extractErr
 }
 
-// GetEvents returns a copy of all recorded events.
+// GetEvents returns an immutable snapshot of all recorded events.
+// It is safe to call concurrently: the snapshot is copied under the internal
+// lock, so callers can iterate the returned slice without holding any lock and
+// without racing against concurrent ExtractNotification calls.
 func (m *NotificationExtractor) GetEvents() []fwkdl.NotificationEvent {
 	m.mu.Lock()
 	defer m.mu.Unlock()

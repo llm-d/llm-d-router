@@ -34,7 +34,7 @@ const (
 var _ fwksched.ProfileHandler = &SingleProfileHandler{}
 
 // SingleProfileHandlerFactory defines the factory function for SingleProfileHandler.
-func SingleProfileHandlerFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func SingleProfileHandlerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewSingleProfileHandler().WithName(name), nil
 }
 

@@ -43,12 +43,12 @@ const (
 // ConcurrencyDetectorFactory instantiates the detector plugin using the provided JSON parameters.
 func ConcurrencyDetectorFactory(
 	name string,
-	params json.RawMessage,
+	params *json.Decoder,
 	handle fwkplugin.Handle,
 ) (fwkplugin.Plugin, error) {
 	var apiCfg apiConfig
-	if len(params) > 0 {
-		if err := json.Unmarshal(params, &apiCfg); err != nil {
+	if params != nil {
+		if err := params.Decode(&apiCfg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal concurrency detector config: %w", err)
 		}
 	}

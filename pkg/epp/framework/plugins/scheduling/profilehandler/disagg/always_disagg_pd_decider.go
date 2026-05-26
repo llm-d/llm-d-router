@@ -23,7 +23,7 @@ type AlwaysDisaggPDDecider struct {
 
 // AlwaysDisaggPDDeciderPluginFactory defines the factory function for creating
 // a new instance of the AlwaysDisaggPDDecider.
-func AlwaysDisaggPDDeciderPluginFactory(name string, _ json.RawMessage,
+func AlwaysDisaggPDDeciderPluginFactory(name string, _ *json.Decoder,
 	_ plugin.Handle) (plugin.Plugin, error) {
 	return newAlwaysDisaggPDDecider().WithName(name), nil
 }

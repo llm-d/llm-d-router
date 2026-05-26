@@ -866,14 +866,38 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
-			name: "Full Usage with Cached Token details",
+			name: "Full usage with standard cached token details",
 			body: []byte(`{
-				"object": "chat.completion",
+					"object": "chat.completion",
+					"usage": {
+						"prompt_tokens": 100,
+						"completion_tokens": 50,
+						"total_tokens": 150,
+						"prompt_tokens_details": {
+							"cached_tokens": 40
+						}
+					}
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     100,
+					CompletionTokens: 50,
+					TotalTokens:      150,
+					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+						CachedTokens: 40,
+					},
+				},
+			},
+		},
+		{
+			name: "Responses API with cached input token details",
+			body: []byte(`{
+				"object": "response",
 				"usage": {
-					"prompt_tokens": 100,
-					"completion_tokens": 50,
+					"input_tokens": 100,
+					"output_tokens": 50,
 					"total_tokens": 150,
-					"prompt_token_details": {
+					"input_tokens_details": {
 						"cached_tokens": 40
 					}
 				}
@@ -955,7 +979,7 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 		},
 		{
 			name:  "Usage and DONE in the same multi-line response",
-			chunk: []byte("data: {\"usage\":{\"prompt_tokens\":10,\"prompt_token_details\":{\"cached_tokens\":10}}}\ndata: [DONE]"),
+			chunk: []byte("data: {\"usage\":{\"prompt_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":10}}}\ndata: [DONE]"),
 			want: &fwkrh.ParsedResponse{
 				Usage: &fwkrh.Usage{
 					PromptTokens: 10,
@@ -994,6 +1018,9 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 					PromptTokens:     31,
 					CompletionTokens: 3,
 					TotalTokens:      34,
+					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+						CachedTokens: 16,
+					},
 				},
 			},
 		},

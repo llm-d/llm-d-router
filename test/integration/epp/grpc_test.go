@@ -49,8 +49,9 @@ schedulingProfiles:
       - pluginRef: kv-cache-utilization-scorer
       - pluginRef: prefix-cache-scorer
       - pluginRef: lora-affinity-scorer
-parser:
-  pluginRef: vllmgrpc-parser
+requestHandler:
+  parser:
+    pluginRef: vllmgrpc-parser
 featureGates:
   - enableLegacyMetrics
 `

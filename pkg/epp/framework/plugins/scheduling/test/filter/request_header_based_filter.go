@@ -36,7 +36,7 @@ const (
 var _ fwksched.Filter = &HeaderBasedTestingFilter{}
 
 // HeaderBasedTestingFilterFactory defines the factory function for HeaderBasedTestingFilter.
-func HeaderBasedTestingFilterFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func HeaderBasedTestingFilterFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewHeaderBasedTestingFilter().WithName(name), nil
 }
 

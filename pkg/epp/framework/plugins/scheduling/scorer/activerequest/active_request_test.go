@@ -7,20 +7,21 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	"github.com/llm-d/llm-d-router/test/utils"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 // Test helper functions
 
 func newTestEndpoint(name string, queueSize int) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
-		&fwkdl.Metrics{
+		&datalayer.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
+		&datalayer.Metrics{
 			WaitingQueueSize: queueSize,
 		},
 		nil,
@@ -94,7 +95,7 @@ func TestActiveRequestScorer_Score(t *testing.T) {
 func TestActiveRequestScorer_UsesInFlightLoadProducerLifecycle(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
-	producerPlugin, err := inflightload.InFlightLoadProducerFactory(inflightload.InFlightLoadProducerType, nil, nil)
+	producerPlugin, err := inflightload.InFlightLoadProducerFactory(inflightload.InFlightLoadProducerType, nil, igwtestutils.NewTestHandle(ctx))
 	require.NoError(t, err)
 	producer := producerPlugin.(*inflightload.InFlightLoadProducer)
 	scorer := NewActiveRequest(ctx, nil)

@@ -38,7 +38,7 @@ const (
 )
 
 // DecodeRoleFactory defines the factory function for the Decode filter.
-func DecodeRoleFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func DecodeRoleFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return NewDecodeRole().WithName(name), nil
 }
 
@@ -48,7 +48,7 @@ func NewDecodeRole() *ByLabel {
 }
 
 // PrefillRoleFactory defines the factory function for the Prefill filter.
-func PrefillRoleFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func PrefillRoleFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return NewPrefillRole().WithName(name), nil
 }
 
@@ -58,7 +58,7 @@ func NewPrefillRole() *ByLabel {
 }
 
 // EncodeRoleFactory defines the factory function for the Encode filter.
-func EncodeRoleFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func EncodeRoleFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return NewEncodeRole().WithName(name), nil
 }
 

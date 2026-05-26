@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 
@@ -211,21 +210,8 @@ func (s *Server) fanoutEncoderPrimer(originalRequest map[string]any, encoderHost
 func (s *Server) handleEPD(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
 	s.logger.V(4).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
-	// Read request body
-	defer func() { _ = r.Body.Close() }()
-	original, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(err.Error()))
-		return
-	}
-
-	// Parse completion request
-	var completionRequest map[string]any
-	if err := json.Unmarshal(original, &completionRequest); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	_, completionRequest, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -265,7 +251,7 @@ func (s *Server) handleEPD(w http.ResponseWriter, r *http.Request, prefillEndPoi
 	}
 
 	// Clone request with modified body and add request ID header
-	pdRequest := cloneRequestWithBody(r, modifiedBody)
+	pdRequest := cloneRequestWithBody(r.Context(), r, modifiedBody)
 	pdRequest.Header.Add(requestHeaderRequestID, requestID)
 
 	// If prefiller is configured, use P/D protocol; otherwise go directly to decoder

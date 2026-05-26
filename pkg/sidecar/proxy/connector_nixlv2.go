@@ -36,21 +36,8 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
 	s.logger.V(4).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
 
-	// Read request body
-	defer r.Body.Close() //nolint:errcheck
-	original, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest) // TODO: check FastAPI error code when failing to read body
-		w.Write([]byte(err.Error()))         //nolint:errcheck
-		return
-	}
-
-	// Parse completion request
-	var completionRequest map[string]any
-	if err := json.Unmarshal(original, &completionRequest); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	original, completionRequest, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -74,7 +61,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	prefillSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
 		attribute.String("llm_d.pd_proxy.prefill_target", prefillPodHostPort),
-		attribute.String("llm_d.pd_proxy.connector", "nixlv2"),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorNIXLV2),
 	)
 	prefillStart := time.Now()
 
@@ -159,7 +146,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 		if shouldFallbackToDecode(pw) {
 			s.logger.Info("fallback to decode", "request_id", uuidStr)
-			fallbackReq := cloneRequestWithBody(r, original)
+			fallbackReq := cloneRequestWithBody(r.Context(), r, original)
 			s.dispatchDecode(w, fallbackReq, originalRequest)
 		} else {
 			for key, values := range pw.Header() {
@@ -210,7 +197,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	decodeSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
-		attribute.String("llm_d.pd_proxy.connector", "nixlv2"),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorNIXLV2),
 	)
 	decodeStart := time.Now()
 

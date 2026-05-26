@@ -7,7 +7,7 @@ plugins:
   parameters:
     modelName: TinyLlama/TinyLlama-1.1B-Chat-v1.0  # replace to use a different model
     vllm:
-      http: http://localhost:8000
+      url: http://localhost:8000
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:

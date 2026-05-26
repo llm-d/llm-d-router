@@ -17,11 +17,9 @@ limitations under the License.
 package proxy
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"strings"
@@ -30,21 +28,8 @@ import (
 func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
 	s.logger.V(4).Info("running Shared Storage protocol", "url", prefillPodHostPort)
 
-	// Read and parse request body
-	defer r.Body.Close() //nolint:errcheck
-	original, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest) // TODO: check FastAPI error code when failing to read body
-		w.Write([]byte(err.Error()))         //nolint:errcheck
-		return
-	}
-
-	// Parse completion request
-	var completionRequest map[string]any
-	if err := json.Unmarshal(original, &completionRequest); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send Invalid JSON error response to client")
-		}
+	original, completionRequest, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -54,7 +39,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	// For more information refer to the RFC https://github.com/vllm-project/vllm/issues/24256
 	if cacheHitThreshold, hasCacheHitThreshold := completionRequest[requestFieldCacheHitThreshold]; hasCacheHitThreshold {
 		s.logger.V(4).Info("cache_hit_threshold field found in the request, trying to decode first", requestFieldCacheHitThreshold, cacheHitThreshold)
-		decodeReq := cloneRequestWithBody(r, original)
+		decodeReq := cloneRequestWithBody(r.Context(), r, original)
 		needsPrefill, err := s.tryDecode(w, decodeReq, completionRequest)
 		if err != nil {
 			return
@@ -83,7 +68,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 		return
 	}
 
-	decodeReq := cloneRequestWithBody(r, decodeRequestBody)
+	decodeReq := cloneRequestWithBody(r.Context(), r, decodeRequestBody)
 	s.decoderProxy.ServeHTTP(w, decodeReq)
 }
 
@@ -240,7 +225,7 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		}
 		return err
 	}
-	preq := cloneRequestWithBody(r, pbody)
+	preq := cloneRequestWithBody(r.Context(), r, pbody)
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
 	if err != nil {
@@ -266,11 +251,4 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 
 	s.logger.V(4).Info("prefill completed successfully")
 	return nil
-}
-
-func cloneRequestWithBody(r *http.Request, body []byte) *http.Request {
-	cloned := r.Clone(r.Context())
-	cloned.Body = io.NopCloser(bytes.NewReader(body))
-	cloned.ContentLength = int64(len(body))
-	return cloned
 }

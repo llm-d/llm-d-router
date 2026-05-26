@@ -17,7 +17,8 @@ schedulingProfiles:
     plugins:
       - pluginRef: openai-parser
       - pluginRef: total-tokens-cost-reporter
-parser:
-  pluginRef: openai-parser
+requestHandler:
+  parser:
+    pluginRef: openai-parser
 featureGates:
   - enableLegacyMetrics

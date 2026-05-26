@@ -325,3 +325,20 @@ EPP resource validations
 {{- $_ := required ".Values.router.epp.resources.requests.cpu is required. EPP is a critical component that must have CPU requests set." .Values.router.epp.resources.requests.cpu }}
 {{- $_ := required ".Values.router.epp.resources.requests.memory is required. EPP is a critical component that must have memory requests set." .Values.router.epp.resources.requests.memory }}
 {{- end -}}
+
+{{/*
+EPP generic validations
+*/}}
+{{- define "llm-d-router.validations.epp" -}}
+{{- include "llm-d-router.validations.epp.resources" . }}
+{{- include "llm-d-router.validations.epp.inferenceObjectives" . }}
+{{- end -}}
+
+{{/*
+EPP inferenceObjectives validations
+*/}}
+{{- define "llm-d-router.validations.epp.inferenceObjectives" -}}
+{{- if and (eq .Values.router.inferencePool.create false) .Values.router.inferenceObjectives }}
+{{- fail ".Values.router.inferenceObjectives can only be configured when .Values.router.inferencePool.create is true." }}
+{{- end }}
+{{- end -}}

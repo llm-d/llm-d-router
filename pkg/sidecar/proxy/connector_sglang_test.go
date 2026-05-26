@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -99,7 +98,7 @@ var _ = Describe("SGLang Connector", func() {
 		Expect(prq1).To(HaveKey(requestFieldBootstrapPort))
 		Expect(prq1).To(HaveKey(requestFieldBootstrapRoom))
 
-		expectedHost := strings.Split(prefillHostPort, ":")[0]
+		expectedHost := extractHost(prefillHostPort)
 		Expect(prq1[requestFieldBootstrapHost]).To(Equal(expectedHost))
 		Expect(prq1[requestFieldBootstrapPort]).To(Equal(float64(sglangBootstrapPort)))
 		Expect(prq1[requestFieldBootstrapRoom]).ToNot(BeNil())

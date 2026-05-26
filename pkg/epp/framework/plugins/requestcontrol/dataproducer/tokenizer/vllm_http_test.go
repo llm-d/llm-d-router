@@ -37,7 +37,7 @@ const testHTTPModel = "test-model"
 
 func newHTTPRenderer(t *testing.T, srv *httptest.Server) *vllmHTTPRenderer {
 	t.Helper()
-	r, err := newVLLMHTTPRenderer(&vllmConfig{HTTP: srv.URL}, testHTTPModel)
+	r, err := newVLLMHTTPRenderer(&vllmConfig{URL: srv.URL}, testHTTPModel)
 	require.NoError(t, err)
 	return r
 }
@@ -142,10 +142,10 @@ func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 	params := `{
 		"modelName": "m",
 		"udsTokenizerConfig": {"socketFile": "/tmp/foo.sock"},
-		"vllm": {"http": "http://localhost:8000"}
+		"vllm": {"url": "http://localhost:8000"}
 	}`
 	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
-	p, err := PluginFactory("test", json.RawMessage(params), handle)
+	p, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(params)), handle)
 	require.Error(t, err)
 	assert.Nil(t, p)
 	assert.Contains(t, err.Error(), "only one of")
@@ -157,7 +157,7 @@ func TestPluginFactory_HTTPBackend_BadTimeout(t *testing.T) {
 		"vllm": {"timeout": "nope"}
 	}`
 	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
-	p, err := PluginFactory("test", json.RawMessage(params), handle)
+	p, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(params)), handle)
 	require.Error(t, err)
 	assert.Nil(t, p)
 	assert.Contains(t, err.Error(), "invalid 'timeout'")

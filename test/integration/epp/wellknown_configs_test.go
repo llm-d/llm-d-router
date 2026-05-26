@@ -76,7 +76,7 @@ plugins:
 - type: prefix-cache-scorer
   name: cpu-prefix-cache-scorer
   parameters:
-    producer: cpu-prefix-cache-producer
+    prefixMatchInfoProducerName: cpu-prefix-cache-producer
 schedulingProfiles:
 - name: default
   plugins:
@@ -214,9 +214,6 @@ plugins:
 - type: active-request-scorer
 - type: queue-scorer
 - type: pd-profile-handler
-  parameters:
-    threshold: 0
-    hashBlockSize: 5
 schedulingProfiles:
 - name: prefill
   plugins:
@@ -273,9 +270,9 @@ schedulingProfiles:
     weight: 2
   - pluginRef: prefix-cache-scorer
     weight: 3
-saturationDetector:
-  pluginRef: concurrency-detector
 flowControl:
+  saturationDetector:
+    pluginRef: concurrency-detector
   maxBytes: "10Gi"
   maxRequests: "1k"
   defaultRequestTTL: "60s"

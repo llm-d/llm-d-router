@@ -110,7 +110,7 @@ const (
 			"prompt_tokens": 11,
 			"total_tokens": 111,
 			"completion_tokens": 100,
-			"prompt_token_details": {
+			"prompt_tokens_details": {
 				"cached_tokens": 10
 			}
 		}
@@ -123,7 +123,7 @@ const (
 	streamingBodyWithUsage = `data: {"id":"cmpl-41764c93-f9d2-4f31-be08-3ba04fa25394","object":"text_completion","created":1740002445,"model":"food-review-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}
 data: [DONE]
 	`
-	streamingBodyWithUsageAndCachedTokens = `data: {"id":"cmpl-41764c93-f9d2-4f31-be08-3ba04fa25394","object":"text_completion","created":1740002445,"model":"food-review-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10,"prompt_token_details":{"cached_tokens":5}}}
+	streamingBodyWithUsageAndCachedTokens = `data: {"id":"cmpl-41764c93-f9d2-4f31-be08-3ba04fa25394","object":"text_completion","created":1740002445,"model":"food-review-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":5}}}
 data: [DONE]
 	`
 )

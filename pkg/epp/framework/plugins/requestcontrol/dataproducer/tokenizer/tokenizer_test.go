@@ -90,7 +90,7 @@ func TestPluginFactory_Validation(t *testing.T) {
 				rawParams = json.RawMessage(tt.params)
 			}
 
-			p, err := PluginFactory("test-tokenizer", rawParams, handle)
+			p, err := PluginFactory("test-tokenizer", plugin.StrictDecoder(rawParams), handle)
 			if tt.expectErr {
 				require.Error(t, err)
 				assert.Nil(t, p)

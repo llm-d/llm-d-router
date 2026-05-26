@@ -82,7 +82,7 @@ func TestConcurrencyDetectorFactory(t *testing.T) {
 	}{
 		{
 			name:       "valid configuration",
-			configJSON: []byte(`{"mode": "requests", "maxConcurrency": 50, "headroom": 0.2}`),
+			configJSON: []byte(`{"maxConcurrency": 50, "headroom": 0.2}`),
 			wantError:  false,
 		},
 		{
@@ -127,7 +127,7 @@ func TestConcurrencyDetectorFactory(t *testing.T) {
 			t.Parallel()
 
 			plugin, err := ConcurrencyDetectorFactory("test-concurrency-detector",
-				tc.configJSON, fwkplugin.NewEppHandle(t.Context(), func() []types.NamespacedName { return nil }))
+				fwkplugin.StrictDecoder(tc.configJSON), fwkplugin.NewEppHandle(t.Context(), func() []types.NamespacedName { return nil }))
 			if tc.wantError {
 				require.Error(t, err, "Expected initialization to fail on invalid configuration")
 				require.Nil(t, plugin, "Plugin must be nil when initialization fails")
@@ -202,7 +202,7 @@ func TestDetector_Configuration(t *testing.T) {
 // TestDetector_TypedName verifies that the runtime type identification of the plugin is populated
 func TestDetector_TypedName(t *testing.T) {
 	t.Parallel()
-	plugin, err := ConcurrencyDetectorFactory("test-plugin", []byte(`{}`), fwkplugin.NewEppHandle(
+	plugin, err := ConcurrencyDetectorFactory("test-plugin", fwkplugin.StrictDecoder([]byte(`{}`)), fwkplugin.NewEppHandle(
 		t.Context(), func() []types.NamespacedName { return nil }))
 	require.NoError(t, err, "Plugin initialization should succeed")
 	require.Equal(t, "test-plugin", plugin.TypedName().Name)

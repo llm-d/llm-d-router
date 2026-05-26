@@ -48,14 +48,14 @@ type PrefixBasedPDDecider struct {
 
 // PrefixBasedPDDeciderPluginFactory defines the factory function for creating
 // a new instance of the prefixBasedPDDecider.
-func PrefixBasedPDDeciderPluginFactory(name string, rawParameters json.RawMessage,
+func PrefixBasedPDDeciderPluginFactory(name string, rawParameters *json.Decoder,
 	handle plugin.Handle) (plugin.Plugin, error) {
 	config := PrefixBasedPDDeciderConfig{
 		NonCachedTokens: 0,
 	}
 
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &config); err != nil {
+		if err := rawParameters.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PrefixBasedPDDeciderPluginType, err)
 		}
 	}
@@ -153,15 +153,9 @@ func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) 
 	if request == nil || request.Body == nil {
 		return 0, errors.New("request or request body is nil")
 	}
-	if request.Body.Completions != nil {
-		return len(request.Body.Completions.Prompt.Raw) / AverageCharactersPerToken, nil
+
+	if tokenCountHint := request.Body.InputTokenCountHint(); tokenCountHint >= 0 {
+		return tokenCountHint, nil
 	}
-	if request.Body.ChatCompletions == nil {
-		return 0, errors.New("request has neither completions nor chat completions body")
-	}
-	prompt, err := json.Marshal(request.Body.ChatCompletions.Messages)
-	if err != nil {
-		return 0, err
-	}
-	return len(prompt) / AverageCharactersPerToken, nil
+	return len(request.Body.PromptText()) / AverageCharactersPerToken, nil
 }

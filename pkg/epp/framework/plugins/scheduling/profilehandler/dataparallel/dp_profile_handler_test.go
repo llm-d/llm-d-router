@@ -123,7 +123,7 @@ func TestProfileHandlerFactory(t *testing.T) {
 				rawParams = json.RawMessage(tt.jsonParams)
 			}
 			handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
-			plugin, err := ProfileHandlerFactory(tt.pluginName, rawParams, handle)
+			plugin, err := ProfileHandlerFactory(tt.pluginName, plugin.StrictDecoder(rawParams), handle)
 
 			if tt.expectErr {
 				assert.Error(t, err)
@@ -160,7 +160,7 @@ func TestProfileHandlerFactoryInvalidJSON(t *testing.T) {
 
 			rawParams := json.RawMessage(tt.jsonParams)
 			handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
-			plugin, err := ProfileHandlerFactory("test", rawParams, handle)
+			plugin, err := ProfileHandlerFactory("test", plugin.StrictDecoder(rawParams), handle)
 
 			assert.Error(t, err)
 			assert.Nil(t, plugin)

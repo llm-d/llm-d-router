@@ -9,7 +9,7 @@ plugins:
   parameters:
     modelName: "${MODEL_NAME}"
     vllm:
-      http: "http://localhost:8000"
+      url: "http://localhost:8000"
       # timeout: "5s"
       # mmTimeout: "30s"
 - type: precise-prefix-cache-scorer

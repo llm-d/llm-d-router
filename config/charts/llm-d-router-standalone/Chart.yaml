@@ -1,13 +1,9 @@
 apiVersion: v2
 name: llm-d-router-standalone
 description: A Helm chart for Endpoint Picker
-
 type: application
-
 version: 0.0.0
-
 appVersion: "0.0.0"
-
 dependencies:
   - name: router
     version: 0.0.0

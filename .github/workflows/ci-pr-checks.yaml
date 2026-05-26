@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       src: ${{ steps.filter.outputs.src }}
+      helm: ${{ steps.filter.outputs.helm }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -46,6 +47,25 @@ jobs:
               - go.mod
               - scripts/**
               - .github/workflows/ci-pr-checks.yaml
+            helm:
+              - 'config/charts/**'
+              - 'hack/verify-helm.sh'
+  verify-helm-charts:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.helm == 'true' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run make verify-helm-charts
+        run: make verify-helm-charts
+
   lint-and-test:
     needs: check-changes
     if: ${{ needs.check-changes.outputs.src == 'true' }}

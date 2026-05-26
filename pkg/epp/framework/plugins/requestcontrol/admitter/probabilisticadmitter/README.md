@@ -59,7 +59,7 @@ saturation ≈ 0.34. This creates a dead zone at low load with a steep ramp at m
 
 ### Example Configuration
 
-See [`deploy/config/probabilistic-admitter-epp-config.yaml`](/deploy/config/probabilistic-admitter-epp-config.yaml) for the full EPP config. The
+See [`deploy/config/probabilistic-admitter-epp-config.yaml`](../../../../../../../deploy/config/probabilistic-admitter-epp-config.yaml) for the full EPP config. The
 key snippet:
 
 ```yaml
@@ -72,8 +72,9 @@ plugins:
   parameters:
     queueDepthThreshold: 999999999
     kvCacheUtilThreshold: 1.0
-saturationDetector:
-  pluginRef: utilization-detector
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
 schedulingProfiles:
 - name: default
   plugins:
@@ -85,7 +86,7 @@ all sheddable requests once queue depth or KV cache crosses its thresholds (a ha
 cutoff). Setting `queueDepthThreshold: 999999999` and `kvCacheUtilThreshold: 1.0` makes
 that gate effectively unreachable so it never fires, letting the `probabilistic-admitter` be
 the sole decision-maker for shedding using its gradual probability curve instead of the
-system's all-or-nothing behavior. The `saturationDetector: pluginRef: utilization-detector`
+system's all-or-nothing behavior. The `flowControl: saturationDetector: pluginRef: utilization-detector`
 line is still required because the EPP framework expects a saturation detector to be
 registered - you can't omit it, only neuter it.
 

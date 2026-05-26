@@ -33,7 +33,7 @@ const (
 var _ fwksched.Scorer = &KVCacheUtilizationScorer{}
 
 // KvCacheUtilizationScorerFactory defines the factory function for KVCacheUtilizationScorer.
-func KvCacheUtilizationScorerFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func KvCacheUtilizationScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewKVCacheUtilizationScorer().WithName(name), nil
 }
 

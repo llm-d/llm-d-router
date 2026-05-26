@@ -30,6 +30,7 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-parser:
-  pluginRef: vllmgrpcParser
+requestHandler:
+  parser:
+    pluginRef: vllmgrpcParser
 ```

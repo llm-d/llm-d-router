@@ -21,10 +21,9 @@ provider:
         #   http:
         #     maxRequestsPerConnection: 256000
 
-# experimentalHttpRoute section is used to deploy httproute as part of the epp helm chart.
-# this section is temporary and should be extracted to a separate chart.
-experimentalHttpRoute:
-  enabled: false # a flag to indicate whether to create the httproute as part of the chart or not.
+# httpRoute section is used to deploy an HTTPRoute resource as part of the gateway chart.
+httpRoute:
+  create: false # a flag to indicate whether to create the httproute as part of the chart or not.
   inferenceGatewayName: inference-gateway
   inferenceGatewayNamespace: ""
   # HTTPRoute request timeout. Defaults to "300s". Unused when provider.name is gke.
@@ -32,16 +31,3 @@ experimentalHttpRoute:
   # Example header matches:
   # headerMatches:
   #  x-my-custom-route-header: route-name
-
-
-# Optional: Define InferenceObjective(s) for this InferencePool.
-# Each InferenceObjective associates a name and priority with the InferencePool
-# created in the chart release.
-# Users reference these objectives by name in their request headers.
-# This is only used for when InferenceObjectives are known ahead of time,
-# they can still be created out of band of the chart release as needed.
-inferenceObjectives: []
-#   - name: high-priority
-#     priority: 5
-#   - name: low-priority
-#     priority: 1

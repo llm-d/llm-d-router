@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"strings"
@@ -70,23 +69,12 @@ func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, completi
 // runChunkedDecode reads and parses the body, then delegates to
 // runChunkedDecodeFromMap.
 func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close() //nolint:errcheck
-	original, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error())) //nolint:errcheck
+	original, completionRequest, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
-	var completionRequest map[string]any
-	if err := json.Unmarshal(original, &completionRequest); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
-		return
-	}
-
-	s.runChunkedDecodeFromMap(w, cloneRequestWithBody(r, original), completionRequest)
+	s.runChunkedDecodeFromMap(w, cloneRequestWithBody(r.Context(), r, original), completionRequest)
 }
 
 // runChunkedDecodeFromMap executes chunked decode given an already-parsed completionRequest map.
@@ -181,7 +169,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			"chunk", chunkIndex, "chunkBudget", chunkBudget, "totalTokensSoFar", totalTokens)
 
 		bw := &bufferedResponseWriter{}
-		s.decoderProxy.ServeHTTP(bw, cloneRequestWithBody(r.WithContext(ctx), chunkBody))
+		s.decoderProxy.ServeHTTP(bw, cloneRequestWithBody(ctx, r, chunkBody))
 
 		if isHTTPError(bw.statusCode) {
 			s.logger.Error(fmt.Errorf("chunk %d failed with status %d", chunkIndex, bw.statusCode),

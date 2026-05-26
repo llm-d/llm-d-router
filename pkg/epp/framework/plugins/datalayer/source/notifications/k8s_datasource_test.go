@@ -178,7 +178,7 @@ func TestNotificationSourceFactory(t *testing.T) {
 			t.Parallel()
 
 			rawParams := marshalParams(t, tt.params)
-			plugin, err := NotificationSourceFactory(tt.pluginName, rawParams, nil)
+			plugin, err := NotificationSourceFactory(tt.pluginName, fwkplugin.StrictDecoder(rawParams), nil)
 
 			if tt.expectedError != "" {
 				require.Error(t, err)

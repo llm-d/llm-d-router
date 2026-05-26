@@ -7,6 +7,14 @@ inputs:
   extra_tag:
     description: 'Tag for the EPP image and chart version (e.g., v0.1.0 or branch name)'
     required: true
+  chart_suffix:
+    description: 'Optional suffix to append to the chart name (e.g. -dev)'
+    required: false
+    default: ''
+  epp_image_repository:
+    description: 'EPP image repository name (e.g. llm-d-router-endpoint-picker or llm-d-router-endpoint-picker-dev)'
+    required: false
+    default: 'llm-d-router-endpoint-picker'
 runs:
   using: 'composite'
   steps:
@@ -14,5 +22,7 @@ runs:
       shell: bash
       env:
         EXTRA_TAG: "${{ inputs.extra_tag }}"
+        CHART_SUFFIX: "${{ inputs.chart_suffix }}"
+        EPP_RELEASE_IMAGE_REPOSITORY: "${{ inputs.epp_image_repository }}"
       run: |
         make helm-push CHART="${{ inputs.chart_name }}"
