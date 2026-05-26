@@ -394,6 +394,8 @@ func (s *Server) createRoutes() *http.ServeMux {
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 
+	// All other paths (e.g. /v1/rerank, /v1/embeddings) are proxied directly to the
+	// decoder without KV-cache-aware scheduling, as they do not produce generated tokens.
 	mux.Handle("/", s.decoderProxy)
 
 	return mux
