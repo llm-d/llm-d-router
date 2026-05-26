@@ -44,6 +44,11 @@ var (
 
 	// ResponsesPath is the OpenAI Responses API path
 	ResponsesPath = "/v1/responses"
+
+	// RerankPath is the OpenAI-compatible rerank path used by vLLM and compatible servers.
+	// Rerank requests do not require KV-cache-aware scheduling and are proxied directly
+	// to the decoder without modification.
+	RerankPath = "/v1/rerank"
 )
 
 func openAIAPIAttr(apiType APIType) attribute.KeyValue {
