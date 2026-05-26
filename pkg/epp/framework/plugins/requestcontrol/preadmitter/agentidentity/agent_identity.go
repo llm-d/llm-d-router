@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -89,6 +90,9 @@ func mergeHeaders(extras, defaults []string) []string {
 	}
 	return merged
 }
+
+// compile-time interface assertion
+var _ requestcontrol.PreAdmitter = &Plugin{}
 
 // Plugin resolves agent identity from provider-specific headers into FairnessID.
 type Plugin struct {
