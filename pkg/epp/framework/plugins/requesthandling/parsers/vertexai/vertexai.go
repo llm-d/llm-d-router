@@ -38,9 +38,17 @@ import (
 const (
 	VertexAIParserType = "vertexai-parser"
 
+	// chatCompletionsMethod is the gRPC method path suffix for Vertex AI's OpenAI-compatible
+	// ChatCompletions service (maps to aiplatformpb.ChatCompletionsRequest).
 	chatCompletionsMethod         = "PredictionService/ChatCompletions"
+	// streamRawPredictServiceMethod is the gRPC method path suffix for Vertex AI's flexible,
+	// low-level raw prediction streaming service (maps to aiplatformpb.StreamRawPredictRequest).
 	streamRawPredictServiceMethod = "PredictionService/StreamRawPredict"
+	// openAIChatCompletionsPath is the standard OpenAI endpoint path for Chat Completions,
+	// used to route extracted JSON payloads to the OpenAI parser.
 	openAIChatCompletionsPath     = "/chat/completions"
+	// openAIResponsesPath is the OpenAI-compatible path for raw responses, used to route
+	// extracted StreamRawPredict JSON payloads to the OpenAI parser.
 	openAIResponsesPath           = "/responses"
 )
 
