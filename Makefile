@@ -61,9 +61,9 @@ GIT_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null)
 ROOT_RELEASE_TAG_MATCH ?= v[0-9]*
 BUILD_REF ?= $(shell git describe --tags --match '$(ROOT_RELEASE_TAG_MATCH)' --abbrev=0 2>/dev/null)
 
-# Named volumes for Go module and build caches, persisted across container runs and image rebuilds.
-GO_MOD_CACHE_VOL ?= llm-d-gomodcache
-GO_BUILD_CACHE_VOL ?= llm-d-gobuildcache
+# Host directories for Go module and build caches, bind-mounted into the builder container.
+GO_MOD_CACHE_VOL ?= $(HOME)/.cache/llm-d-gomodcache
+GO_BUILD_CACHE_VOL ?= $(HOME)/.cache/llm-d-gobuildcache
 
 # Common flags for running the builder container: mounts source, Go caches, and runs as current user.
 # Podman rootless requires --userns=keep-id to correctly map host UID; docker uses -u directly.
@@ -418,6 +418,7 @@ BUILDER_STAMP = build/.builder.stamp
 
 .PHONY: image-build-builder
 image-build-builder: check-container-tool ## Build builder image if missing locally, stamp missing, or Dockerfile.builder newer than stamp
+	@mkdir -p $(GO_MOD_CACHE_VOL) $(GO_BUILD_CACHE_VOL)
 	@if ! $(CONTAINER_RUNTIME) image inspect $(BUILDER_IMAGE) >/dev/null 2>&1 || \
 	    [ ! -f $(BUILDER_STAMP) ] || \
 	    [ Dockerfile.builder -nt $(BUILDER_STAMP) ]; then \
