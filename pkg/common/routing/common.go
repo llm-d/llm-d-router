@@ -28,7 +28,7 @@ const (
 
 	// PreferIfAvailable is the preference token the coordinator sets to mark a
 	// request as a speculative early-decode attempt: route to a decode worker
-	// only if its KV cache already covers the prompt (at leat partially); otherwise EPP surfaces
+	// only if its KV cache already covers the prompt (at least partially); otherwise EPP surfaces
 	// 412 Precondition Failed so the coordinator restarts the pipeline.
 	PreferIfAvailable = "if-available"
 )
