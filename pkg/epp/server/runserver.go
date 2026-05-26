@@ -65,6 +65,7 @@ type ExtProcServerRunner struct {
 	UseExperimentalDatalayerV2       bool // Pluggable data layer feature flag
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
+	EvictChannelLookup               handlers.EvictChannelLookup
 }
 
 // NewDefaultExtProcServerRunner creates a runner with default values.
@@ -199,6 +200,9 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			poolCap = 4 * 1024 * 1024 // gRPC default 4MB
 		}
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.Parser, poolCap)
+		if r.EvictChannelLookup != nil {
+			extProcServer.SetEvictChannelLookup(r.EvictChannelLookup)
+		}
 		extProcPb.RegisterExternalProcessorServer(srv, extProcServer)
 
 		if r.HealthChecking {

@@ -44,6 +44,7 @@ func TestNewConfig(t *testing.T) {
 				DefaultRequestTTL:        0,
 				ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
+				EvictionCooldown:         defaultEvictionCooldown,
 			},
 		},
 		{
@@ -56,6 +57,7 @@ func TestNewConfig(t *testing.T) {
 				DefaultRequestTTL:        10 * time.Second,
 				ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
+				EvictionCooldown:         defaultEvictionCooldown,
 			},
 		},
 		{
@@ -70,6 +72,7 @@ func TestNewConfig(t *testing.T) {
 				DefaultRequestTTL:        10 * time.Second,
 				ExpiryCleanupInterval:    2 * time.Second,
 				EnqueueChannelBufferSize: 50,
+				EvictionCooldown:         defaultEvictionCooldown,
 			},
 		},
 		{

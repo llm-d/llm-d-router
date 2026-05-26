@@ -64,6 +64,7 @@ type processorFactory func(
 	cleanupSweepInterval time.Duration,
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
+	opts internal.ProcessorOptions,
 ) processor
 
 var _ processor = &internal.Processor{}
@@ -92,6 +93,8 @@ type FlowController struct {
 	processorFactory   processorFactory
 	processor          processor
 
+	evictionHandler types.EvictionHandler
+
 	// --- Lifecycle state ---
 
 	// parentCtx is the root context for the controller's lifecycle, established when NewFlowController is called.
@@ -107,6 +110,7 @@ type Deps struct {
 	UsageLimitPolicy   flowcontrol.UsageLimitPolicy
 	Clock              clock.WithTicker
 	ProcessorFactory   processorFactory
+	EvictionHandler    types.EvictionHandler
 }
 
 // NewFlowController creates and starts a new FlowController instance.
@@ -129,6 +133,7 @@ func NewFlowController(
 		clock:              deps.Clock,
 		logger:             log.FromContext(ctx).WithName("flow-controller"),
 		parentCtx:          ctx,
+		evictionHandler:    deps.EvictionHandler,
 	}
 
 	if deps.ProcessorFactory == nil {
@@ -142,6 +147,7 @@ func NewFlowController(
 			cleanupSweepInterval time.Duration,
 			enqueueChannelBufferSize int,
 			logger logr.Logger,
+			opts internal.ProcessorOptions,
 		) processor {
 			return internal.NewProcessor(
 				ctx,
@@ -154,13 +160,14 @@ func NewFlowController(
 				cleanupSweepInterval,
 				enqueueChannelBufferSize,
 				logger,
+				opts,
 			)
 		}
 	} else {
 		fc.processorFactory = deps.ProcessorFactory
 	}
 
-	// Construct a new worker, but do not start its goroutine yet.
+	// Construct the processor.
 	fc.processor = fc.processorFactory(
 		fc.parentCtx,
 		fc.registry,
@@ -171,6 +178,10 @@ func NewFlowController(
 		fc.config.ExpiryCleanupInterval,
 		fc.config.EnqueueChannelBufferSize,
 		fc.logger,
+		internal.ProcessorOptions{
+			EvictionHandler:  fc.evictionHandler,
+			EvictionCooldown: fc.config.EvictionCooldown,
+		},
 	)
 
 	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor.")
