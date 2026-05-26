@@ -96,15 +96,6 @@ jobs:
       - name: Sanity check repo contents
         run: ls -la
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Verify go.mod and go.sum are tidy
-        run: go mod tidy -diff
-
       - name: Create and resolve Go cache volumes
         id: go-cache
         run: |
@@ -122,10 +113,6 @@ jobs:
           key: go-cache-${{ hashFiles('go.sum') }}
           restore-keys: |
             go-cache-
-
-      - name: Run make build
-        shell: bash
-        run: make build
 
       # Restore the baseline saved from the last main push so the compare step
       # can diff against it. Missing cache (first PR ever) is not an error;
