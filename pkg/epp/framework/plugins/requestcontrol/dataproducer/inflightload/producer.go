@@ -71,14 +71,13 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 	}
 
 	return &InFlightLoadProducer{
-		typedName:                           fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
-		requestTracker:                      newConcurrencyTracker(),
-		tokenTracker:                        newConcurrencyTracker(),
-		tokenEstimator:                      NewSimpleTokenEstimator(),
-		addEstimatedOutputTokens:            cfg.AddEstimatedOutputTokens,
-		dk:                                  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
-		currentRequestEndpointImpactDataKey: attrconcurrency.CurrentRequestEndpointImpactDataKey.WithNonEmptyProducerName(name),
-		PluginState:                         fwkplugin.NewPluginState(ctx),
+		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
+		requestTracker:           newConcurrencyTracker(),
+		tokenTracker:             newConcurrencyTracker(),
+		tokenEstimator:           NewSimpleTokenEstimator(),
+		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
+		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
+		PluginState:              fwkplugin.NewPluginState(ctx),
 	}, nil
 }
 
@@ -91,14 +90,13 @@ var (
 )
 
 type InFlightLoadProducer struct {
-	typedName                           fwkplugin.TypedName
-	requestTracker                      *concurrencyTracker
-	tokenTracker                        *concurrencyTracker
-	tokenEstimator                      TokenEstimator
-	addEstimatedOutputTokens            bool
-	PluginState                         *fwkplugin.PluginState
-	dk                                  fwkplugin.DataKey
-	currentRequestEndpointImpactDataKey fwkplugin.DataKey
+	typedName                fwkplugin.TypedName
+	requestTracker           *concurrencyTracker
+	tokenTracker             *concurrencyTracker
+	tokenEstimator           TokenEstimator
+	addEstimatedOutputTokens bool
+	PluginState              *fwkplugin.PluginState
+	dk                       fwkplugin.DataKey
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -204,19 +202,19 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 			continue
 		}
 		endpointID := e.GetMetadata().NamespacedName.String()
-		e.Put(p.dk.String(), &attrconcurrency.InFlightLoad{
+
+		load := &attrconcurrency.InFlightLoad{
 			Tokens:   p.tokenTracker.get(endpointID),
 			Requests: p.requestTracker.get(endpointID),
-		})
-
-		if request != nil {
-			// Estimate the load this request would add if scheduled to this endpoint.
-			tokens := p.estimateRequestTokens(e, inputTokens)
-			e.Put(p.currentRequestEndpointImpactDataKey.String(), &attrconcurrency.InFlightLoad{
-				Tokens:   tokens,
-				Requests: 1,
-			})
 		}
+		if request != nil {
+			// Project this request's additional work onto the endpoint: uncached
+			// input tokens (per its prefix-cache state) plus estimated output
+			// when the producer is configured to include it. Per-cycle, not
+			// persisted in the tracker — that happens only on PreRequest.
+			load.UncachedRequestTokens = p.estimateRequestTokens(e, inputTokens)
+		}
+		e.Put(p.dk.String(), load)
 	}
 	return nil
 }
@@ -441,8 +439,7 @@ func nonNeg(v int64) int64 {
 
 func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
-		p.dk:                                  attrconcurrency.InFlightLoad{},
-		p.currentRequestEndpointImpactDataKey: attrconcurrency.InFlightLoad{},
+		p.dk: attrconcurrency.InFlightLoad{},
 	}
 }
 
