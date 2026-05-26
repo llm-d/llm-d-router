@@ -63,11 +63,15 @@ func defaultManagerOptions(cfg ControllerConfig, gknn common.GKNN, metricsServer
 			opt.Cache.ByObject[&v1alpha2.InferenceObjective{}] = cache.ByObject{Namespaces: map[string]cache.Config{
 				gknn.Namespace: {},
 			}}
+		} else {
+			ctrl.Log.WithName("controllerManager").Info("Warning: InferenceObjective GVK does not exist on the server. Skipping its reconciler/cache.")
 		}
 		if cfg.hasInferenceModelRewrites {
 			opt.Cache.ByObject[&v1alpha2.InferenceModelRewrite{}] = cache.ByObject{Namespaces: map[string]cache.Config{
 				gknn.Namespace: {},
 			}}
+		} else {
+			ctrl.Log.WithName("controllerManager").Info("Warning: InferenceModelRewrite GVK does not exist on the server. Skipping its reconciler/cache.")
 		}
 
 		opt.Cache.ByObject[&v1.InferencePool{}] = cache.ByObject{
