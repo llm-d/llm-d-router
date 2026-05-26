@@ -245,6 +245,45 @@ jobs:
         shell: bash
         run: docker system prune -af
 
+      # Cache the vllm rendering image across runs so e2e does not re-pull it
+      # from Docker Hub every time. Must run after `docker system prune -af`
+      # above, which would otherwise wipe the loaded image.
+      - name: Resolve VLLM_RENDER_IMAGE
+        id: vllm-image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=$(make -s env | awk -F= '/^VLLM_RENDER_IMAGE=/{print $2}')
+          [[ -n "$image" ]] || { echo "Could not resolve VLLM_RENDER_IMAGE from 'make env'"; exit 1; }
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vllm rendering image
+        id: vllm-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/vllm-render-image.tar
+          key: docker-${{ steps.vllm-image.outputs.image }}
+
+      - name: Load or pull vllm rendering image
+        shell: bash
+        env:
+          VLLM_RENDER_IMAGE: ${{ steps.vllm-image.outputs.image }}
+          IMAGE_TAR: ${{ runner.temp }}/vllm-render-image.tar
+          CACHE_HIT: ${{ steps.vllm-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          if [[ "$CACHE_HIT" == "true" ]]; then
+            docker load -i "$IMAGE_TAR"
+            # Cache is already populated; drop the tarball to free disk for kind.
+            rm -f "$IMAGE_TAR"
+          else
+            docker pull "$VLLM_RENDER_IMAGE"
+            # Stage to .tmp so an interrupted save cannot publish a partial tar
+            # that would poison the cache for subsequent runs.
+            docker save "$VLLM_RENDER_IMAGE" -o "$IMAGE_TAR.tmp"
+            mv "$IMAGE_TAR.tmp" "$IMAGE_TAR"
+          fi
+
       - name: Run make test-e2e
         shell: bash
         run: make test-e2e
