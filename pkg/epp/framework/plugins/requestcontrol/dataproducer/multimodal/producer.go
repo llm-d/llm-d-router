@@ -192,11 +192,28 @@ func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
 		return itemsFromTokenizedPrompt(request.Body.TokenizedPrompt.MultiModalFeatures)
 	}
 
+	if g := request.Body.Generate; g != nil && g.Features != nil && len(g.Features.MMHashes) > 0 {
+		return itemsFromGenerateFeatures(g.Features.MMHashes)
+	}
+
 	if request.Body.ChatCompletions != nil {
 		return itemsFromChat(request.Body.ChatCompletions)
 	}
 
 	return nil
+}
+
+func itemsFromGenerateFeatures(mmHashes map[string][]string) []attrmm.MatchItem {
+	itemsByHash := map[string]attrmm.MatchItem{}
+	for _, hashes := range mmHashes {
+		for _, hash := range hashes {
+			if hash == "" {
+				continue
+			}
+			addItem(itemsByHash, hash)
+		}
+	}
+	return itemSlice(itemsByHash)
 }
 
 func itemsFromTokenizedPrompt(features []fwkrh.MultiModalFeature) []attrmm.MatchItem {
