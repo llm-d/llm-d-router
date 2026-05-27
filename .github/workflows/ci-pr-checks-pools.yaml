@@ -1,0 +1,78 @@
+name: CI - Pools E2E
+
+on:
+  push:
+    branches:
+      - main
+      - 'release-*'
+  pull_request:
+    branches:
+      - main
+  pull_request_target:
+    branches:
+      - main
+    types: [ opened, synchronize, reopened ]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-changes:
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    outputs:
+      src: ${{ steps.filter.outputs.src }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            src:
+              - '**/*.go'
+              - Dockerfile.*
+              - Makefile*
+              - go.mod
+              - scripts/**
+              - 'deploy/components/inference-gateway/epd-pools/**'
+              - .github/workflows/ci-pr-checks-pools.yaml
+
+  pools-e2e:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.src == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        uses: justinthelaw/maximize-github-runner-space@v0.9.0
+        with:
+          cleanup-profile: custom
+          remove-android: 'true'
+          remove-dotnet: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-cached-tools: 'true'
+          remove-swift: 'true'
+          remove-julia: 'true'
+          remove-rust: 'true'
+          remove-miniconda: 'true'
+          swapfile-size: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run make test-e2e-pools
+        shell: bash
+        run: make test-e2e-pools
