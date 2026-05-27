@@ -19,6 +19,7 @@ package vllmhttp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -209,6 +210,44 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 			}
 			if diff := cmp.Diff(tt.want, got.Body); diff != "" {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestVllmHTTPParser_ParseRequest_GenerateErrorPaths confirms that
+// unmarshal errors and the empty-token_ids case surface distinct messages,
+// so callers see the underlying validation problem (e.g. negative token IDs)
+// instead of a generic "must have non-empty token_ids" message.
+func TestVllmHTTPParser_ParseRequest_GenerateErrorPaths(t *testing.T) {
+	parser := NewVllmHTTPParser()
+	headers := map[string]string{":path": "/inference/v1/generate"}
+
+	tests := []struct {
+		name        string
+		body        string
+		errContains string
+	}{
+		{
+			name:        "negative token id surfaces unmarshal error",
+			body:        `{"token_ids":[1,2,-1]}`,
+			errContains: "token_ids[2]: invalid value",
+		},
+		{
+			name:        "empty token_ids surfaces empty-field error",
+			body:        `{"token_ids":[]}`,
+			errContains: "must have non-empty token_ids field",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parser.ParseRequest(context.Background(), []byte(tt.body), headers)
+			if err == nil {
+				t.Fatalf("ParseRequest() error = nil, want error containing %q", tt.errContains)
+			}
+			if !strings.Contains(err.Error(), tt.errContains) {
+				t.Errorf("ParseRequest() error = %q, want substring %q", err.Error(), tt.errContains)
 			}
 		})
 	}

@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -110,7 +111,10 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 	}
 
 	var generate fwkrh.GenerateRequest
-	if err := json.Unmarshal(rawBody, &generate); err != nil || len(generate.TokenIDs) == 0 {
+	if err := json.Unmarshal(rawBody, &generate); err != nil {
+		return nil, fmt.Errorf("invalid generate request: %w", err)
+	}
+	if len(generate.TokenIDs) == 0 {
 		return nil, errors.New("invalid generate request: must have non-empty token_ids field")
 	}
 
