@@ -61,7 +61,7 @@ func (RawPayload) IsParsed() bool    { return false }
 
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
-// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, or EmbeddingsRequest.
+// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, EmbeddingsRequest, or RerankRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
@@ -73,6 +73,8 @@ type InferenceRequestBody struct {
 	Conversations *ConversationsRequest `json:"conversations,omitempty"`
 	// EmbeddingsRequest is the representation of the OpenAI /v1/embeddings request body.
 	Embeddings *EmbeddingsRequest `json:"embeddings,omitempty"`
+	// RerankRequest is the representation of the OpenAI-compatible /v1/rerank request body.
+	Rerank *RerankRequest `json:"rerank,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
@@ -138,6 +140,8 @@ func (r *InferenceRequestBody) PromptText() string {
 		return string(b)
 	case r.Embeddings != nil:
 		return r.Embeddings.Input.PlainText()
+	case r.Rerank != nil:
+		return r.Rerank.Query
 	default:
 		return ""
 	}
@@ -171,6 +175,9 @@ func (r *InferenceRequestBody) CacheSalt() string {
 	}
 	if r.Embeddings != nil {
 		return r.Embeddings.CacheSalt
+	}
+	if r.Rerank != nil {
+		return r.Rerank.CacheSalt
 	}
 	return ""
 }
@@ -422,6 +429,24 @@ func (e *EmbeddingsRequest) String() string {
 		return nilStr
 	}
 	return fmt.Sprintf("{InputType: %T}", e.Input)
+}
+
+// RerankRequest represents the OpenAI-compatible /v1/rerank request body structure.
+// See https://platform.openai.com/docs/api-reference/reranking/create.
+type RerankRequest struct {
+	// Query is the text query to compare documents against.
+	Query string `json:"query"`
+	// Documents is the list of documents to rerank.
+	Documents []string `json:"documents,omitempty"`
+	// CacheSalt is an optional request parameter to isolate prefix caches for security reasons.
+	CacheSalt string `json:"cache_salt,omitempty"`
+}
+
+func (r *RerankRequest) String() string {
+	if r == nil {
+		return nilStr
+	}
+	return fmt.Sprintf("{QueryLength: %d, DocumentCount: %d}", len(r.Query), len(r.Documents))
 }
 
 // ConversationItem represents a single item in a conversation
