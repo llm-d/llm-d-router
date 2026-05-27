@@ -39,6 +39,7 @@ const (
 	chatCompletionsAPI = "chat/completions"
 	completionsAPI     = "completions"
 	embeddingsAPI      = "embeddings"
+	rerankAPI          = "rerank"
 
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
@@ -188,6 +189,9 @@ func determineAPITypeFromPath(path string) string {
 	if strings.HasSuffix(path, "/embeddings") {
 		return embeddingsAPI
 	}
+	if strings.HasSuffix(path, "/rerank") {
+		return rerankAPI
+	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
 	return completionsAPI
@@ -236,6 +240,14 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 			return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
 		}
 		return nil, errors.New("invalid embeddings request: must have input field")
+
+	case rerankAPI:
+		var rerank fwkrh.RerankRequest
+		if err := json.Unmarshal(rawBody, &rerank); err == nil && rerank.Query != "" {
+			return &fwkrh.InferenceRequestBody{Rerank: &rerank}, nil
+		}
+		return nil, errors.New("invalid rerank request: must have query field")
+
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}
