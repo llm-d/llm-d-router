@@ -899,8 +899,14 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// notification sources into the manager, is intentionally skipped below).
 	// Surface this once at startup so operators porting a K8s config see why
 	// related behavior differs.
+	//
+	// Note on InferenceObjective: with no objective CRDs to consult, per-request
+	// priority falls back to Director.defaultPriority (see
+	// pkg/epp/requestcontrol/director.go). Static priority bands configured in
+	// EndpointPickerConfig.flowControl are honored and applied via the FlowControl
+	// layer when the feature gate is enabled.
 	setupLog.Info("file-discovery mode: Kubernetes-only features are inactive " +
-		"(InferenceModelRewrite, InferenceObjective, and any " +
+		"(InferenceModelRewrite, InferenceObjective reconciler, and any " +
 		"k8s-notification-source data layer plugins); see docs/discovery.md")
 
 	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
@@ -929,9 +935,41 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
-	endpointCandidates := requestcontrol.NewDatastoreEndpointCandidates(ds,
+
+	// --- Admission Control Initialization ---
+	// Mirrors the K8s path in Run(): FlowControl is gated by the same feature
+	// gate and reads its bands, fairness, ordering, and usage-limit policies
+	// from EndpointPickerConfig.flowControl. Outside Kubernetes there is no
+	// InferenceObjective CRD, so per-request priority falls back to the
+	// Director's defaultPriority (see requestcontrol/director.go); static bands
+	// in the config still apply.
+	var admissionController requestcontrol.AdmissionController
+	var endpointCandidates contracts.EndpointCandidates
+	endpointCandidates = requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter))
-	admissionController := requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
+	if r.featureGates[flowcontrol.FeatureGate] {
+		endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, time.Millisecond*50)
+		setupLog.Info("Initializing experimental Flow Control layer (file-discovery mode)")
+		registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
+		fc, err := fccontroller.NewFlowController(
+			ctx,
+			opts.PoolName,
+			eppConfig.FlowControlConfig.Controller,
+			fccontroller.Deps{
+				Registry:           registry,
+				SaturationDetector: eppConfig.SaturationDetector,
+				EndpointCandidates: endpointCandidates,
+				UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to initialize Flow Controller: %w", err)
+		}
+		go registry.Run(ctx)
+		admissionController = requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
+	} else {
+		admissionController = requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
+	}
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
 	gknn := common.GKNN{
