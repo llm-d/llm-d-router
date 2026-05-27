@@ -26,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -98,11 +97,6 @@ type FlowController struct {
 	// parentCtx is the root context for the controller's lifecycle, established when NewFlowController is called.
 	// It is the parent for all long-lived worker goroutines.
 	parentCtx context.Context
-
-	// --- Concurrent state ---
-
-	// wg waits for all worker goroutines to terminate during shutdown.
-	wg sync.WaitGroup
 }
 
 // Deps groups the external FlowController build dependencies to construct a FlowController.
