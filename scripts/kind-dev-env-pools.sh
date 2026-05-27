@@ -129,22 +129,6 @@ Watch the coordinator logs with:
 
   \$ kubectl --context ${KUBE_CONTEXT} logs -f deployments/llm-d-coordinator -c coordinator
 
-Drive the pipeline with a two-image chat-completions request:
-
-  \$ curl -s -w '\n' http://localhost:${COORDINATOR_HOST_PORT}/v1/chat/completions \\
-      -H 'Content-Type: application/json' \\
-      -d '{
-        "model": "${MODEL_NAME}",
-        "messages": [{"role":"user","content":[
-          {"type":"text","text":"Describe each image."},
-          {"type":"image_url","image_url":{"url":"http://mock-downloader1.default.svc:9000/img.jpg"}},
-          {"type":"image_url","image_url":{"url":"http://mock-downloader2.default.svc:9001/img2.jpg"}}
-        ]}],
-        "max_tokens": 256
-      }' | jq
-
-See DEVELOPMENT.md §5 (Coordinator-driven E/P/D with Pools) for details.
-
 -----------------------------------------
 EOF
 

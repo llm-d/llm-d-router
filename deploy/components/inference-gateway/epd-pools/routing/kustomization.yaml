@@ -1,12 +1,4 @@
-# ------------------------------------------------------------------------------
 # Phase-based HTTPRoutes
-#
-# Three separate HTTPRoute resources. Each forwards traffic carrying a
-# specific `EPP-Phase` header value to its phase pool's EPP. The coordinator
-# emits the header on each leg of its pipeline; this routing layer turns the
-# header back into a pool selection. Pulled in by envs that deploy all three
-# phase pools (e.g. e-p-d-pools).
-# ------------------------------------------------------------------------------
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

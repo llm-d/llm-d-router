@@ -293,11 +293,6 @@ controlled by two independent boolean flags:
 | `DISAGG_E` | `false` | Deploy a separate **Encoder** pod |
 | `DISAGG_P` | `false` | Deploy a separate **Prefill** pod |
 
-The `e-p-d-pools` topology (coordinator + render + mock downloaders + one
-`InferencePool` per phase) is selected by a separate make target,
-`make pools-env-dev-kind`, rather than these flags. See
-[§5 Coordinator-driven E/P/D with Pools](#5-coordinator-driven-epd-with-pools-e-p-d-pools).
-
 The combination of these flags determines the scenario:
 
 | `DISAGG_E` | `DISAGG_P` | Scenario | Components |
@@ -400,43 +395,18 @@ curl -s http://localhost:30080/v1/chat/completions \
 
 #### 5. Coordinator-driven E/P/D with Pools (`e-p-d-pools`)
 
-A standalone topology that wires the coordinator pipeline (replace-media-urls
-→ render → encode → prefill → decode) over three phase-specific
-`InferencePool` resources. Brings up: encoder, prefill, decoder, the
-coordinator carrying a CPU-only
-`vllm launch render` sidecar over loopback, and two mock multimedia
-downloaders that stand in for real public media URLs.
+
+Defines a standalone topology where traffic is managed by three discrete HTTPRoutes, each routing to an isolated InferencePool configured for encoder, prefill, or decoder deployments.
+
+The environment provisions:
+- Individual worker nodes for the encoder, prefill, and decoder tiers.
+- A centralized cluster coordinator.
+- A CPU-only vllm launch render sidecar bound to the coordinator over a loopback interface.
+- Two mock multimedia downloaders to simulate real-world public media URL resolution.
 
 ```bash
 make pools-env-dev-kind
 ```
-
-This target runs `scripts/kind-dev-env-pools.sh`, which selects the
-`deploy/environments/dev/e-p-d-pools` env unconditionally and is independent
-of `DISAGG_E`/`DISAGG_P` — use `make env-dev-kind` for those.
-
-Verify the pools wired and drive the pipeline through the coordinator:
-```bash
-kubectl get inferencepools
-# expect: pool-encode, pool-prefill, pool-decode
-
-kubectl port-forward svc/llm-d-coordinator 8080:8080 &
-curl -s http://localhost:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "Qwen/Qwen3-VL-2B-Instruct",
-    "messages": [{"role":"user","content":[
-      {"type":"text","text":"Describe what you see in each image."},
-      {"type":"image_url","image_url":{"url":"http://mock-downloader1.default.svc:9000/img.jpg"}},
-      {"type":"image_url","image_url":{"url":"http://mock-downloader2.default.svc:9001/img2.jpg"}}
-    ]}],
-    "max_tokens": 256
-  }' | jq
-```
-
-> **Simulator caveat:** under simulator-only, encode and prefill don't compute
-> real multimodal tokens — the test pipeline verifies wiring and routing, not
-> model correctness. Real-vLLM coverage is out of scope for this env.
 
 #### 6. Disaggregated Setup Verification
 
