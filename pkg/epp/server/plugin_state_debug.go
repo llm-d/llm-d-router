@@ -20,10 +20,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
-
-	ctrl "sigs.k8s.io/controller-runtime"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
@@ -39,15 +38,23 @@ type pluginStateDebugResponse struct {
 }
 
 type pluginStateDebugEntry struct {
-	Type  string `json:"type"`
-	State any    `json:"state"`
+	Type  string          `json:"type"`
+	State json.RawMessage `json:"state"`
 }
 
-func SetupPluginStateDebugHandler(mgr ctrl.Manager, plugins fwkplugin.HandlePlugins) error {
+// MetricsHandlerRegistrar registers HTTP handlers on the process metrics/admin server.
+type MetricsHandlerRegistrar interface {
+	AddMetricsServerExtraHandler(path string, handler http.Handler) error
+}
+
+func SetupPluginStateDebugHandler(registrar MetricsHandlerRegistrar, plugins fwkplugin.HandlePlugins) error {
+	if registrar == nil {
+		return errors.New("metrics handler registrar is not configured")
+	}
 	if plugins == nil {
 		return errors.New("plugin handle is not configured")
 	}
-	return mgr.AddMetricsServerExtraHandler(PluginStateDebugPath, NewPluginStateDebugHandler(plugins))
+	return registrar.AddMetricsServerExtraHandler(PluginStateDebugPath, NewPluginStateDebugHandler(plugins))
 }
 
 func NewPluginStateDebugHandler(plugins fwkplugin.HandlePlugins) http.Handler {
@@ -58,12 +65,23 @@ func NewPluginStateDebugHandler(plugins fwkplugin.HandlePlugins) http.Handler {
 			return
 		}
 
+		if !isLoopbackRequest(r) {
+			http.Error(w, "plugin state debug endpoint is only available from localhost", http.StatusForbidden)
+			return
+		}
+
 		if plugins == nil {
 			http.Error(w, "plugin handle is not configured", http.StatusInternalServerError)
 			return
 		}
 
-		payload, err := json.Marshal(collectPluginState(plugins))
+		state, err := collectPluginState(plugins)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to collect plugin state: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		payload, err := json.Marshal(state)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to encode plugin state: %v", err), http.StatusInternalServerError)
 			return
@@ -75,7 +93,7 @@ func NewPluginStateDebugHandler(plugins fwkplugin.HandlePlugins) http.Handler {
 	})
 }
 
-func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugResponse {
+func collectPluginState(plugins fwkplugin.HandlePlugins) (pluginStateDebugResponse, error) {
 	allPlugins := plugins.GetAllPluginsWithNames()
 	response := pluginStateDebugResponse{
 		Timestamp: nowFunc().UTC().Format(time.RFC3339Nano),
@@ -89,10 +107,29 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugRespons
 		if !ok {
 			continue
 		}
+		state, err := dumper.DumpState()
+		if err != nil {
+			return pluginStateDebugResponse{}, fmt.Errorf("plugin %q failed to dump state: %w", name, err)
+		}
+		if len(state) == 0 {
+			state = json.RawMessage("null")
+		}
+		if !json.Valid(state) {
+			return pluginStateDebugResponse{}, fmt.Errorf("plugin %q returned invalid JSON state", name)
+		}
 		response.Plugins[name] = pluginStateDebugEntry{
 			Type:  plugin.TypedName().Type,
-			State: dumper.DumpState(),
+			State: state,
 		}
 	}
-	return response
+	return response, nil
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -271,14 +271,44 @@ func TestInFlightLoadProducer_DumpState(t *testing.T) {
 	producer.tokenTracker.add(podA, 10)
 	producer.tokenTracker.add(podB, 20)
 
-	state, ok := producer.DumpState().(InFlightLoadState)
-	require.True(t, ok)
-	require.Equal(t, InFlightLoadState{
-		Endpoints: []EndpointInFlightLoadState{
-			{Endpoint: podA, Requests: 0, Tokens: 10},
+	payload, err := producer.DumpState()
+	require.NoError(t, err)
+
+	var state inFlightLoadState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	require.Equal(t, inFlightLoadState{
+		Endpoints: []endpointInFlightLoadState{
 			{Endpoint: podB, Requests: 2, Tokens: 20},
+			{Endpoint: podA, Requests: 0, Tokens: 10},
 		},
+		TotalEndpoints: 2,
+		MaxEndpoints:   maxDebugDumpEndpoints,
 	}, state)
+}
+
+func TestInFlightLoadProducer_DumpStateCapsEndpoints(t *testing.T) {
+	t.Parallel()
+
+	producer := &InFlightLoadProducer{
+		requestTracker: newConcurrencyTracker(),
+		tokenTracker:   newConcurrencyTracker(),
+	}
+	for i := range maxDebugDumpEndpoints + 5 {
+		endpointID := fullEndpointName(fmt.Sprintf("pod-%03d", i))
+		producer.requestTracker.add(endpointID, int64(i))
+	}
+
+	payload, err := producer.DumpState()
+	require.NoError(t, err)
+
+	var state inFlightLoadState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	require.True(t, state.Truncated)
+	require.Equal(t, maxDebugDumpEndpoints+5, state.TotalEndpoints)
+	require.Equal(t, maxDebugDumpEndpoints, state.MaxEndpoints)
+	require.Len(t, state.Endpoints, maxDebugDumpEndpoints)
+	require.Equal(t, fullEndpointName("pod-104"), state.Endpoints[0].Endpoint)
+	require.Equal(t, int64(104), state.Endpoints[0].Requests)
 }
 
 func TestInFlightLoadProducer_ConcurrencyStress(t *testing.T) {

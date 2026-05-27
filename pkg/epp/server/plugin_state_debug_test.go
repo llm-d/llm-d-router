@@ -39,11 +39,12 @@ func (p *stateDebugTestPlugin) TypedName() fwkplugin.TypedName {
 
 type stateDebugTestDumper struct {
 	stateDebugTestPlugin
-	state any
+	state json.RawMessage
+	err   error
 }
 
-func (p *stateDebugTestDumper) DumpState() any {
-	return p.state
+func (p *stateDebugTestDumper) DumpState() (json.RawMessage, error) {
+	return p.state, p.err
 }
 
 func withFrozenNow(t *testing.T, fixed time.Time) {
@@ -62,15 +63,16 @@ func TestPluginStateDebugHandlerIncludesDumpers(t *testing.T) {
 	})
 	handle.AddPlugin("z-dumper", &stateDebugTestDumper{
 		stateDebugTestPlugin: stateDebugTestPlugin{typedName: fwkplugin.TypedName{Type: "test-type", Name: "z-dumper"}},
-		state:                map[string]any{"count": 2},
+		state:                json.RawMessage(`{"count":2}`),
 	})
 	handle.AddPlugin("a-dumper", &stateDebugTestDumper{
 		stateDebugTestPlugin: stateDebugTestPlugin{typedName: fwkplugin.TypedName{Type: "test-type", Name: "a-dumper"}},
-		state:                map[string]any{"value": "first"},
+		state:                json.RawMessage(`{"value":"first"}`),
 	})
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, PluginStateDebugPath, nil)
+	request.RemoteAddr = "127.0.0.1:1234"
 	NewPluginStateDebugHandler(handle).ServeHTTP(recorder, request)
 
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -102,17 +104,30 @@ func TestPluginStateDebugHandlerRejectsNonGet(t *testing.T) {
 	require.Equal(t, http.MethodGet, recorder.Header().Get("Allow"))
 }
 
+func TestPluginStateDebugHandlerRejectsNonLocalRequests(t *testing.T) {
+	handle := fwkplugin.NewEppHandle(context.Background(), nil)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, PluginStateDebugPath, nil)
+	request.RemoteAddr = "10.0.0.2:1234"
+
+	NewPluginStateDebugHandler(handle).ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusForbidden, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "only available from localhost")
+}
+
 func TestPluginStateDebugHandlerReportsEncodingErrors(t *testing.T) {
 	handle := fwkplugin.NewEppHandle(context.Background(), nil)
 	handle.AddPlugin("bad-dumper", &stateDebugTestDumper{
 		stateDebugTestPlugin: stateDebugTestPlugin{typedName: fwkplugin.TypedName{Type: "test-type", Name: "bad-dumper"}},
-		state:                func() {},
+		state:                json.RawMessage(`{`),
 	})
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, PluginStateDebugPath, nil)
+	request.RemoteAddr = "127.0.0.1:1234"
 	NewPluginStateDebugHandler(handle).ServeHTTP(recorder, request)
 
 	require.Equal(t, http.StatusInternalServerError, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "failed to encode plugin state")
+	require.Contains(t, recorder.Body.String(), "failed to collect plugin state")
 }
