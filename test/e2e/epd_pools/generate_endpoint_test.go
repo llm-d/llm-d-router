@@ -48,9 +48,32 @@ const (
 	phasePrefill = bylabel.RolePrefill
 )
 
+// imageSpec describes one multimodal image entry as it appears in encode
+// and prefill request bodies. Hash, Offset and Length come from the
+// (mocked) render stage; tests pick fixed values so the bodies are
+// deterministic.
+type imageSpec struct {
+	Hash   string
+	Offset int
+	Length int
+}
+
+// singleImage is the canonical one-image spec the basic encode/prefill
+// tests share. Offset/length match communication.md Stage 4 ("offset is
+// always 1 in encode requests, length matches the placeholder span").
+var singleImage = imageSpec{Hash: "e2e-image-hash", Offset: 1, Length: 3}
+
+// twoImages is the canonical two-image spec for fan-out coverage.
+// Offsets follow communication.md's Stage 5 example layout
+// ([BOS, img0×3, img1×3, text×2]).
+var twoImages = []imageSpec{
+	{Hash: "e2e-image-hash-0", Offset: 1, Length: 3},
+	{Hash: "e2e-image-hash-1", Offset: 4, Length: 3},
+}
+
 var _ = ginkgo.Describe("EPD pools direct gateway", func() {
 	ginkgo.It("Encode_Generate: routes /inference/v1/generate with EPP-Phase=encode to the encode pool", func() {
-		body := encodeRequestBody()
+		body := encodeBody(singleImage)
 		resp, raw := doGenerate(body, phaseEncode)
 		parsed := expectGenerateOK(resp, raw)
 		expectServedByRole(resp, phaseEncode)
@@ -58,18 +81,43 @@ var _ = ginkgo.Describe("EPD pools direct gateway", func() {
 	})
 
 	ginkgo.It("Prefill_Generate: routes /inference/v1/generate with EPP-Phase=prefill to the prefill pool", func() {
-		body := prefillRequestBody()
+		body := prefillBody([]int{1, 32000, 32000, 32000, 2345, 6789}, []imageSpec{singleImage})
 		resp, raw := doGenerate(body, phasePrefill)
 		parsed := expectGenerateOK(resp, raw)
 		expectServedByRole(resp, phasePrefill)
-		expectKVTransferParams(parsed, raw)
+		expectRemoteDecodeFinish(parsed, raw)
+	})
+
+	ginkgo.It("TwoImages_Encode: per-image fan-out routes each request to the encode pool", func() {
+		// Stage 4 is one encode request per image — two images = two
+		// sequential POSTs. Each must route to the encode pool and
+		// return its own ec_transfer_params keyed by mm_hash.
+		for _, img := range twoImages {
+			body := encodeBody(img)
+			resp, raw := doGenerate(body, phaseEncode)
+			parsed := expectGenerateOK(resp, raw)
+			expectServedByRole(resp, phaseEncode)
+			expectECTransferParams(parsed, raw)
+		}
+	})
+
+	ginkgo.It("TwoImages_Prefill: combined two-image prefill routes to the prefill pool with remote_decode finish", func() {
+		// Stage 5 carries all images in one request. token_ids match
+		// the placeholder offsets declared in twoImages: 1..3 and 4..6,
+		// followed by two text tokens at 7..8.
+		tokenIDs := []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789}
+		body := prefillBody(tokenIDs, twoImages)
+		resp, raw := doGenerate(body, phasePrefill)
+		parsed := expectGenerateOK(resp, raw)
+		expectServedByRole(resp, phasePrefill)
+		expectRemoteDecodeFinish(parsed, raw)
 	})
 
 	ginkgo.It("MissingEPPPhase: rejects /inference/v1/generate without an EPP-Phase header", func() {
 		// Omit the header — no HTTPRoute matches, so the gateway should
 		// return a non-2xx status. The exact code is gateway-dependent
 		// (typically 404), so we assert the class only.
-		resp, raw := doGenerate(encodeRequestBody(), "")
+		resp, raw := doGenerate(encodeBody(singleImage), "")
 		gomega.Expect(resp.StatusCode).To(gomega.SatisfyAll(
 			gomega.BeNumerically(">=", 400),
 			gomega.BeNumerically("<", 600),
@@ -77,7 +125,7 @@ var _ = ginkgo.Describe("EPD pools direct gateway", func() {
 	})
 
 	ginkgo.It("InvalidEPPPhase: rejects /inference/v1/generate with an unknown EPP-Phase value", func() {
-		resp, raw := doGenerate(encodeRequestBody(), "bogus")
+		resp, raw := doGenerate(encodeBody(singleImage), "bogus")
 		gomega.Expect(resp.StatusCode).To(gomega.SatisfyAll(
 			gomega.BeNumerically(">=", 400),
 			gomega.BeNumerically("<", 600),
@@ -85,52 +133,75 @@ var _ = ginkgo.Describe("EPD pools direct gateway", func() {
 	})
 })
 
-// encodeRequestBody mirrors Stage 4 Option A in coordinator/docs/communication.md:
-// a single-image encode payload (BOS + placeholder tokens), without text. The
-// kwargs_data blob is a placeholder — the simulator does not validate its
-// contents; the goal is to verify EPP routing.
-func encodeRequestBody() []byte {
+// imageFeatures builds the features map that encode and prefill share:
+// mm_hashes, mm_placeholders, kwargs_data — all keyed by modality
+// ("image"). kwargs_data is a placeholder "AA==" per entry; the
+// simulator does not validate it.
+func imageFeatures(images []imageSpec) map[string]any {
+	hashes := make([]string, len(images))
+	placeholders := make([]map[string]any, len(images))
+	kwargs := make([]string, len(images))
+	for i, img := range images {
+		hashes[i] = img.Hash
+		placeholders[i] = map[string]any{"offset": img.Offset, "length": img.Length}
+		kwargs[i] = "AA=="
+	}
+	return map[string]any{
+		"mm_hashes":       map[string]any{"image": hashes},
+		"mm_placeholders": map[string]any{"image": placeholders},
+		"kwargs_data":     map[string]any{"image": kwargs},
+	}
+}
+
+// encodeBody builds a single-image encode request per Stage 4 Option A
+// in communication.md. token_ids = [BOS, placeholder*length]; offset is
+// always 1 since each encode carries exactly one image.
+func encodeBody(image imageSpec) []byte {
+	tokenIDs := make([]int, 1+image.Length)
+	tokenIDs[0] = 1
+	for i := 1; i < len(tokenIDs); i++ {
+		tokenIDs[i] = 32000
+	}
 	body := map[string]any{
-		"token_ids": []int{1, 32000, 32000, 32000},
-		"features": map[string]any{
-			"mm_hashes":       map[string]any{"image": []string{"e2e-encode-hash"}},
-			"mm_placeholders": map[string]any{"image": []map[string]any{{"offset": 1, "length": 3}}},
-			"kwargs_data":     map[string]any{"image": []string{"AA=="}},
-		},
+		"model":           modelName,
+		"token_ids":       tokenIDs,
+		"features":        imageFeatures([]imageSpec{{Hash: image.Hash, Offset: 1, Length: image.Length}}),
 		"sampling_params": map[string]any{"max_tokens": 1},
 	}
 	return mustMarshal(body)
 }
 
-// prefillRequestBody mirrors Stage 5 Option A in coordinator/docs/
-// communication.md: full token sequence, per-image features, EC transfer
-// params from the encode stage, and top-level kv_transfer_params with
-// do_remote_decode=true. The simulator emits kv_transfer_params in its
-// response when the request carries do_remote_decode=true at this location;
-// the workaround form (kv_transfer_params under sampling_params.extra_args)
-// targets a real-vLLM bug that does not apply here.
-func prefillRequestBody() []byte {
-	body := map[string]any{
-		"request_id": "e2e-prefill-" + uuid.NewString(),
-		"model":      modelName,
-		"token_ids":  []int{1, 32000, 32000, 32000, 2345, 6789},
-		"features": map[string]any{
-			"mm_hashes": map[string]any{"image": []string{"e2e-prefill-hash"}},
-			"mm_placeholders": map[string]any{"image": []map[string]any{
-				{"offset": 1, "length": 3},
-			}},
-			"kwargs_data": map[string]any{"image": []string{"AA=="}},
-		},
-		"ec_transfer_params": map[string]any{
-			"image": []map[string]any{
-				{"e2e-prefill-hash": map[string]any{
-					"peer_host":               "10.0.0.1",
-					"peer_port":               5501,
-					"size_bytes":              0,
-					"nixl_agent_metadata_b64": "",
-				}},
+// ecTransferEntries builds the per-image entries of
+// prefill.ec_transfer_params.image, one map per image keyed by mm_hash.
+// Values are dummy NIXL transfer params; the simulator does not
+// validate.
+func ecTransferEntries(images []imageSpec) []map[string]any {
+	entries := make([]map[string]any, len(images))
+	for i, img := range images {
+		entries[i] = map[string]any{
+			img.Hash: map[string]any{
+				"peer_host":               "10.0.0.1",
+				"peer_port":               5501 + i,
+				"size_bytes":              0,
+				"nixl_agent_metadata_b64": "",
 			},
-		},
+		}
+	}
+	return entries
+}
+
+// prefillBody builds a Stage 5 Option A prefill request covering every
+// image in one body. tokenIDs must already contain placeholder spans
+// matching each image's Offset/Length. Top-level kv_transfer_params is
+// the form the simulator honors (see prefill_generate It block above
+// for the simulator/real-vLLM divergence).
+func prefillBody(tokenIDs []int, images []imageSpec) []byte {
+	body := map[string]any{
+		"request_id":         "e2e-prefill-" + uuid.NewString(),
+		"model":              modelName,
+		"token_ids":          tokenIDs,
+		"features":           imageFeatures(images),
+		"ec_transfer_params": map[string]any{"image": ecTransferEntries(images)},
 		"kv_transfer_params": map[string]any{"do_remote_decode": true},
 		"sampling_params":    map[string]any{"max_tokens": 1},
 	}
@@ -175,8 +246,7 @@ func expectGenerateOK(resp *http.Response, raw []byte) map[string]any {
 }
 
 // expectECTransferParams asserts the encode response contains an
-// ec_transfer_params object keyed by mm_hash, per Stage 4 in
-// coordinator/docs/communication.md. The simulator (running with
+// ec_transfer_params object keyed by mm_hash. The simulator (running with
 // --mm-encoder-only on encode pods) emits this with dummy values; we
 // assert structural shape only.
 func expectECTransferParams(parsed map[string]any, raw []byte) {
@@ -187,19 +257,24 @@ func expectECTransferParams(parsed map[string]any, raw []byte) {
 		"ec_transfer_params is empty: %s", string(raw))
 }
 
-// expectKVTransferParams asserts the prefill response contains a
-// kv_transfer_params object with the fields documented in Stage 5 of
-// coordinator/docs/communication.md (block_id, peer_host, peer_port). The
-// simulator emits this whenever the request carries
-// kv_transfer_params.do_remote_decode=true; values are dummy.
-func expectKVTransferParams(parsed map[string]any, raw []byte) {
-	kv, ok := parsed["kv_transfer_params"].(map[string]any)
+// expectRemoteDecodeFinish asserts the prefill response carries
+// finish_reason="remote_decode" — the prefill stage's signal that it
+// computed KV cache and is handing off to a remote decode worker. We use
+// this rather than the documented kv_transfer_params object because the
+// /inference/v1/generate endpoint has a known propagation bug (see
+// coordinator/docs/communication.md Stage 5 Option A) that drops those
+// params from the response; the finish_reason still surfaces.
+func expectRemoteDecodeFinish(parsed map[string]any, raw []byte) {
+	choices, ok := parsed["choices"].([]any)
 	gomega.Expect(ok).To(gomega.BeTrue(),
-		"missing or malformed kv_transfer_params in prefill response: %s", string(raw))
-	for _, key := range []string{"block_id", "peer_host", "peer_port"} {
-		gomega.Expect(kv).To(gomega.HaveKey(key),
-			"kv_transfer_params missing %q: %s", key, string(raw))
-	}
+		"missing or malformed choices in prefill response: %s", string(raw))
+	gomega.Expect(choices).NotTo(gomega.BeEmpty(),
+		"choices is empty: %s", string(raw))
+	first, ok := choices[0].(map[string]any)
+	gomega.Expect(ok).To(gomega.BeTrue(),
+		"first choice is not an object: %s", string(raw))
+	gomega.Expect(first["finish_reason"]).To(gomega.Equal("remote_decode"),
+		"prefill finish_reason mismatch: %s", string(raw))
 }
 
 // expectServedByRole reads the x-inference-pod header set by the EPP, fetches

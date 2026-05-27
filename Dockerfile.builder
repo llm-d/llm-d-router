@@ -15,7 +15,7 @@ ARG ENVTEST_K8S_VERSION=1.31.0
 ARG GOVULNCHECK_VERSION=v1.3.0
 ARG HELM_VERSION=v3.17.4
 
-RUN dnf install -y podman gcc-toolset-12 && dnf clean all
+RUN dnf install -y podman gcc-toolset-12 gettext && dnf clean all
 
 # The base image ships GCC 8 (RHEL 8 default), which lacks the ARM64 LSE
 # atomic emulation helpers (__aarch64_ldadd8_sync etc.) required by Go's
