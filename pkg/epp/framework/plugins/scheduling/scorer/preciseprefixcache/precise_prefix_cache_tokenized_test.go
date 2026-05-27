@@ -255,7 +255,7 @@ func TestScorer_GenerateFallback_UsesTokenIDs(t *testing.T) {
 		},
 	}
 
-	scorer.Score(ctx, scheduling.NewCycleState(), request, testEndpoints)
+	scorer.Score(ctx, request, testEndpoints)
 
 	assert.Equal(t, tokenIDs, capturedTokens)
 	assert.Equal(t, "test-model", capturedModel)
@@ -299,7 +299,7 @@ func TestScorer_GenerateFallback_PassesFeaturesToScoreTokens(t *testing.T) {
 		},
 	}
 
-	scorer.Score(ctx, scheduling.NewCycleState(), request, testEndpoints)
+	scorer.Score(ctx, request, testEndpoints)
 
 	require.NotNil(t, capturedExtraFeatures, "extraFeatures should be passed when Generate.Features is present")
 }

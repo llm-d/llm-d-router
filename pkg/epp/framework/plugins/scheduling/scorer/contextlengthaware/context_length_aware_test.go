@@ -316,7 +316,7 @@ func TestContextLengthAwareGenerateRequest(t *testing.T) {
 		},
 	}
 
-	filteredEndpoints := plugin.Filter(ctx, nil, request, endpoints)
+	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
 	assert.Equal(t, "matching-range", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
 }
