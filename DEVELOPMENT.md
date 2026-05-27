@@ -505,7 +505,7 @@ components:
 Then deploy with:
 
 ```bash
-VLLM_IMAGE=vllm/vllm-openai:v0.16.0 \
+VLLM_IMAGE=vllm/vllm-openai:v0.21.0 \
   kubectl kustomize deploy/environments/prod/p-d \
   | envsubst | kubectl apply -f -
 ```
