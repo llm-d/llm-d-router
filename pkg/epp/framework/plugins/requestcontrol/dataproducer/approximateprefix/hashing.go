@@ -151,13 +151,7 @@ func getKVCacheBlocksFromRawPrompt(ctx context.Context, request *scheduling.Infe
 		return getKVCacheBlocksFromRawBytes(rawBytes, blockSizeTokens), nil
 
 	case request.Body.Generate != nil:
-		// Serialize token IDs as little-endian uint32 bytes for cache key generation.
-		ids := request.Body.Generate.TokenIDs
-		buf := make([]byte, len(ids)*4)
-		for i, id := range ids {
-			binary.LittleEndian.PutUint32(buf[i*4:], id)
-		}
-		return getKVCacheBlocksFromRawBytes(buf, blockSizeTokens), nil
+		return getKVCacheBlocksFromTokens(request.Body.Generate.TokenIDs, blockSizeTokens), nil
 
 	case request.Body.Embeddings != nil:
 		rawBytes, err := json.Marshal(request.Body.Embeddings.Input)
@@ -168,6 +162,23 @@ func getKVCacheBlocksFromRawPrompt(ctx context.Context, request *scheduling.Infe
 
 	default:
 		return nil, errors.New("invalid request body: no recognized API format found")
+	}
+}
+
+func getKVCacheBlocksFromTokens(ids []uint32, blockSizeTokens int) iter.Seq[HashBlock] {
+	return func(yield func(HashBlock) bool) {
+		if len(ids) == 0 || blockSizeTokens <= 0 {
+			return
+		}
+		for i := 0; i < len(ids); i += blockSizeTokens {
+			end := i + blockSizeTokens
+			if end > len(ids) {
+				end = len(ids)
+			}
+			if !yield(HashBlock{Tokens: ids[i:end]}) {
+				return
+			}
+		}
 	}
 }
 
