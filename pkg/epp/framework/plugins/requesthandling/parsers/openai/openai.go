@@ -236,7 +236,6 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 			return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
 		}
 		return nil, errors.New("invalid embeddings request: must have input field")
-
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}

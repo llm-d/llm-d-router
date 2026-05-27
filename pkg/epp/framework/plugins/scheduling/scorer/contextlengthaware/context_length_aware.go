@@ -239,7 +239,6 @@ func estimateContextLength(request *scheduling.InferenceRequest) int {
 
 	// Convert characters to approximate token count
 	estimatedTokens := int(float64(totalChars) * charToTokenMultiplier)
-
 	return estimatedTokens
 }
 
