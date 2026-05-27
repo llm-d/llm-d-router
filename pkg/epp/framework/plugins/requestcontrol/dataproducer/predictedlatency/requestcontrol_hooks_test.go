@@ -32,6 +32,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -105,6 +106,17 @@ func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
 
 	assert.NotNil(t, ctx)
 	assert.Equal(t, "You are a helpful assistant. Tell me a joke. ", ctx.promptText)
+}
+
+func TestNewPredictedLatencyContext_GenerateUsesTokenIDCount(t *testing.T) {
+	request := createTestInferenceRequestWithBody("test-generate", 1.0, 0.05, &fwkrh.InferenceRequestBody{
+		Generate: &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5}},
+	})
+	ctx := newPredictedLatencyContext(request)
+
+	assert.NotNil(t, ctx)
+	assert.Empty(t, ctx.promptText)
+	assert.Equal(t, 5, ctx.inputTokenCount)
 }
 
 func TestPredictedLatency_SetAndGetSLOContext(t *testing.T) {
