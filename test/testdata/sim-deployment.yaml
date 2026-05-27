@@ -15,7 +15,7 @@ spec:
     spec:
       initContainers:
       - name: vllm-render
-        image: vllm/vllm-openai-cpu:v0.19.1
+        image: vllm/vllm-openai-cpu:v0.21.0
         imagePullPolicy: IfNotPresent
         restartPolicy: Always
         command: ["vllm"]
