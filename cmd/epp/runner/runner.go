@@ -381,30 +381,11 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		return nil, nil, err
 	}
 
-	// --- Admission Control Initialization ---
-	var admissionController requestcontrol.AdmissionController
-	var endpointCandidates contracts.EndpointCandidates
-	endpointCandidates = requestcontrol.NewDatastoreEndpointCandidates(ds, requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter))
-	if r.featureGates[flowcontrol.FeatureGate] {
-		endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, time.Millisecond*50)
-		setupLog.Info("Initializing experimental Flow Control layer")
-		registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
-		fc := fccontroller.NewFlowController(
-			ctx,
-			opts.PoolName,
-			eppConfig.FlowControlConfig.Controller,
-			fccontroller.Deps{
-				Registry:           registry,
-				SaturationDetector: eppConfig.SaturationDetector,
-				EndpointCandidates: endpointCandidates,
-				UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
-			},
-		)
-		go registry.Run(ctx)
-		admissionController = requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
-	} else {
-		setupLog.Info("Experimental Flow Control layer is disabled, using legacy admission control")
-		admissionController = requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
+	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
+		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
+	endpointCandidates, admissionController, err := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
@@ -847,6 +828,41 @@ func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fw
 	return disc, nil
 }
 
+// initAdmissionControl builds the request admission controller, gated by the
+// FlowControl feature gate. With FC on it constructs the FlowRegistry and
+// FlowController and wraps endpointCandidates in a short-lived cache; with FC
+// off it returns the legacy saturation-only controller. Shared by the K8s and
+// file-discovery startup paths so the two cannot drift.
+func (r *Runner) initAdmissionControl(
+	ctx context.Context,
+	opts *runserver.Options,
+	eppConfig *config.Config,
+	endpointCandidates contracts.EndpointCandidates,
+) (contracts.EndpointCandidates, requestcontrol.AdmissionController, error) {
+	if !r.featureGates[flowcontrol.FeatureGate] {
+		setupLog.Info("Experimental Flow Control layer is disabled, using legacy admission control")
+		return endpointCandidates,
+			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates),
+			nil
+	}
+	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
+	setupLog.Info("Initializing experimental Flow Control layer")
+	registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
+	fc := fccontroller.NewFlowController(
+		ctx,
+		opts.PoolName,
+		eppConfig.FlowControlConfig.Controller,
+		fccontroller.Deps{
+			Registry:           registry,
+			SaturationDetector: eppConfig.SaturationDetector,
+			EndpointCandidates: endpointCandidates,
+			UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
+		},
+	)
+	go registry.Run(ctx)
+	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName), nil
+}
+
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
 // It builds the EPP server stack without a Kubernetes cluster or controller manager.
 func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapi.EndpointPickerConfig) error {
@@ -936,39 +952,15 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
 
-	// --- Admission Control Initialization ---
-	// Mirrors the K8s path in Run(): FlowControl is gated by the same feature
-	// gate and reads its bands, fairness, ordering, and usage-limit policies
-	// from EndpointPickerConfig.flowControl. Outside Kubernetes there is no
-	// InferenceObjective CRD, so per-request priority falls back to the
-	// Director's defaultPriority (see requestcontrol/director.go); static bands
-	// in the config still apply.
-	var admissionController requestcontrol.AdmissionController
-	var endpointCandidates contracts.EndpointCandidates
-	endpointCandidates = requestcontrol.NewDatastoreEndpointCandidates(ds,
-		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter))
-	if r.featureGates[flowcontrol.FeatureGate] {
-		endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, time.Millisecond*50)
-		setupLog.Info("Initializing experimental Flow Control layer (file-discovery mode)")
-		registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
-		fc, err := fccontroller.NewFlowController(
-			ctx,
-			opts.PoolName,
-			eppConfig.FlowControlConfig.Controller,
-			fccontroller.Deps{
-				Registry:           registry,
-				SaturationDetector: eppConfig.SaturationDetector,
-				EndpointCandidates: endpointCandidates,
-				UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize Flow Controller: %w", err)
-		}
-		go registry.Run(ctx)
-		admissionController = requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
-	} else {
-		admissionController = requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
+	// Outside Kubernetes there is no InferenceObjective CRD, so per-request
+	// priority falls back to Director.defaultPriority (see
+	// pkg/epp/requestcontrol/director.go); static bands defined in
+	// EndpointPickerConfig.flowControl still apply.
+	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
+		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
+	endpointCandidates, admissionController, err := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+	if err != nil {
+		return err
 	}
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
