@@ -792,6 +792,55 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:    "rerank request body",
+			headers: map[string]string{":path": "/v1/rerank"},
+			body: map[string]any{
+				"model":     "Qwen3-Reranker-0.6B",
+				"query":     "What is the capital of France?",
+				"documents": []any{"Paris is the capital.", "Berlin is a city."},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Rerank: &fwkrh.RerankRequest{
+					Query:     "What is the capital of France?",
+					Documents: []string{"Paris is the capital.", "Berlin is a city."},
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":     "Qwen3-Reranker-0.6B",
+					"query":     "What is the capital of France?",
+					"documents": []any{"Paris is the capital.", "Berlin is a city."},
+				},
+			},
+		},
+		{
+			name:    "rerank request with provider-specific path prefix",
+			headers: map[string]string{":path": "/v1/models/my-model/rerank"},
+			body: map[string]any{
+				"model":     "my-model",
+				"query":     "search query",
+				"documents": []any{"doc1", "doc2"},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Rerank: &fwkrh.RerankRequest{
+					Query:     "search query",
+					Documents: []string{"doc1", "doc2"},
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":     "my-model",
+					"query":     "search query",
+					"documents": []any{"doc1", "doc2"},
+				},
+			},
+		},
+		{
+			name:    "rerank request missing query rejected",
+			headers: map[string]string{":path": "/v1/rerank"},
+			body: map[string]any{
+				"model":     "Qwen3-Reranker-0.6B",
+				"documents": []any{"doc1"},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
