@@ -8,17 +8,24 @@ You may obtain a copy of the License at
     http://www.apache.org/licenses/LICENSE-2.0
 */
 
-package coordinator
+package epd_pools
 
 import (
 	"os"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/types"
 	infextv1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
+
+var _ = ginkgo.Describe("e-p-d-pools env resources", func() {
+	ginkgo.It("AllPoolsWired: encode, prefill, decode InferencePools exist", func() {
+		expectAllPoolsExist(testConfig)
+	})
+})
 
 // expectedPools enumerates the three phase-specific InferencePools the
 // e-p-d-pools env brings up. Their existence is the single hard signal that

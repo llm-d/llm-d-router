@@ -84,8 +84,8 @@ export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.21.0}"
 export COORDINATOR_IMAGE="${COORDINATOR_IMAGE:-ghcr.io/revit13/llm-d-coordinator:dev}"
 
 # Mock downloader base images — only consumed by the e-p-d-pools env.
-export DOWNLOADER_HTTP_IMAGE="${DOWNLOADER_HTTP_IMAGE:-python:3.10-slim}"
-export DOWNLOADER_INIT_IMAGE="${DOWNLOADER_INIT_IMAGE:-busybox:1.36}"
+export MOCK_DOWNLOADER_HTTP_IMAGE="${MOCK_DOWNLOADER_HTTP_IMAGE:-python:3.10-slim}"
+export MOCK_DOWNLOADER_INIT_IMAGE="${MOCK_DOWNLOADER_INIT_IMAGE:-busybox:1.36}"
 
 # Set the inference pool name for the deployment
 export POOL_NAME="${POOL_NAME:-${MODEL_NAME_SAFE}-inference-pool}"
@@ -354,7 +354,7 @@ load_image() {
 
 IMAGES_TO_LOAD=("${VLLM_IMAGE}" "${EPP_IMAGE}" "${SIDECAR_IMAGE}" "${UDS_TOKENIZER_IMAGE}")
 if [ "${DISAGG_POOLS_TOPOLOGY}" == "true" ]; then
-    IMAGES_TO_LOAD+=("${COORDINATOR_IMAGE}" "${DOWNLOADER_HTTP_IMAGE}" "${DOWNLOADER_INIT_IMAGE}")
+    IMAGES_TO_LOAD+=("${COORDINATOR_IMAGE}" "${MOCK_DOWNLOADER_HTTP_IMAGE}" "${MOCK_DOWNLOADER_INIT_IMAGE}")
 fi
 
 for IMAGE in "${IMAGES_TO_LOAD[@]}"; do

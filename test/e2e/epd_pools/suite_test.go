@@ -8,14 +8,17 @@ You may obtain a copy of the License at
     http://www.apache.org/licenses/LICENSE-2.0
 */
 
-// Package coordinator runs end-to-end tests against the e-p-d-pools env: the
-// coordinator-driven multimodal pipeline with one InferencePool per phase, a
-// coordinator pod that carries a vllm-render sidecar over loopback, and two
-// mock media downloaders. Mirrors the lifecycle of test/e2e/e2e_suite_test.go:
-// BeforeSuite creates a kind cluster, exec's scripts/kind-dev-env.sh with
-// DISAGG_POOLS_TOPOLOGY=true to bring the env up, and ReportAfterSuite tears
-// the cluster down (gated by E2E_KEEP_CLUSTER_ON_FAILURE).
-package coordinator
+// Package epd_pools runs end-to-end tests against the e-p-d-pools env: one
+// InferencePool per phase (encode, prefill, decode) behind a single gateway
+// that routes on the EPP-Phase header. The coordinator and its vllm-render
+// sidecar are deployed but bypassed — tests POST directly to the gateway,
+// emitting the same per-stage payloads the coordinator would (see
+// coordinator/docs/communication.md). Mirrors the lifecycle of
+// test/e2e/e2e_suite_test.go: BeforeSuite creates a kind cluster, exec's
+// scripts/kind-dev-env.sh with DISAGG_POOLS_TOPOLOGY=true to bring the env
+// up, and ReportAfterSuite tears the cluster down (gated by
+// E2E_KEEP_CLUSTER_ON_FAILURE).
+package epd_pools
 
 import (
 	"fmt"
@@ -42,17 +45,24 @@ import (
 
 const (
 	// kindClusterName is the name of the kind cluster created for the
-	// coordinator e2e suite. Distinct from the single-pool e2e cluster
+	// e-p-d-pools e2e suite. Distinct from the single-pool e2e cluster
 	// (`e2e-tests`) and the dev cluster (`llm-d-router-dev`).
 	kindClusterName = "e2e-pools-tests"
 
 	defaultReadyTimeout = 10 * time.Minute
 	defaultInterval     = time.Second * 2
 
-	// coordinatorHostPort is the host port mapped to the coordinator
-	// NodePort 30081. Tests reach the coordinator via localhost:<port>
-	// because the builder container runs with --network=host.
+	// defaultCoordinatorHostPort is the host port mapped to the coordinator
+	// NodePort 30081. The coordinator is deployed for parity with prod but
+	// is bypassed by these tests; the mapping is kept so the env script
+	// (which provisions the NodePort) succeeds.
 	defaultCoordinatorHostPort = 30081
+
+	// defaultGatewayHostPort is the host port mapped to the gateway
+	// NodePort 30080. Tests POST directly here, emitting the same
+	// per-stage payloads the coordinator would (see coordinator
+	// communication.md).
+	defaultGatewayHostPort = 30080
 
 	// envSetupTimeout caps the kind-dev-env.sh exec — Istio install + image
 	// pulls + model loads can take several minutes on a cold run.
@@ -61,6 +71,7 @@ const (
 
 var (
 	port        string = env.GetEnvString("E2E_PORT", fmt.Sprintf("%d", defaultCoordinatorHostPort), ginkgo.GinkgoLogr)
+	gatewayPort string = env.GetEnvString("E2E_GATEWAY_PORT", fmt.Sprintf("%d", defaultGatewayHostPort), ginkgo.GinkgoLogr)
 	metricsPort string = env.GetEnvString("E2E_METRICS_PORT", "32090", ginkgo.GinkgoLogr)
 
 	testConfig *testutils.TestConfig
@@ -73,8 +84,8 @@ var (
 	sideCarImage        = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage     = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
 	coordinatorImage    = env.GetEnvString("COORDINATOR_IMAGE", "ghcr.io/revit13/llm-d-coordinator:dev", ginkgo.GinkgoLogr)
-	downloaderHTTPImage = env.GetEnvString("DOWNLOADER_HTTP_IMAGE", "python:3.10-slim", ginkgo.GinkgoLogr)
-	downloaderInitImage = env.GetEnvString("DOWNLOADER_INIT_IMAGE", "busybox:1.36", ginkgo.GinkgoLogr)
+	downloaderHTTPImage = env.GetEnvString("MOCK_DOWNLOADER_HTTP_IMAGE", "python:3.10-slim", ginkgo.GinkgoLogr)
+	downloaderInitImage = env.GetEnvString("MOCK_DOWNLOADER_INIT_IMAGE", "busybox:1.36", ginkgo.GinkgoLogr)
 	modelName           = env.GetEnvString("MODEL_NAME", "Qwen/Qwen3-VL-2B-Instruct", ginkgo.GinkgoLogr)
 
 	nsName     = env.GetEnvString("NAMESPACE", "default", ginkgo.GinkgoLogr)
@@ -83,13 +94,14 @@ var (
 	readyTimeout = env.GetEnvDuration("READY_TIMEOUT", defaultReadyTimeout, ginkgo.GinkgoLogr)
 	interval     = defaultInterval
 
-	// coordinatorBaseURL is the host-side base URL the tests POST to.
-	coordinatorBaseURL = fmt.Sprintf("http://localhost:%s", port)
+	// gatewayBaseURL is the host-side base URL the tests POST to. The
+	// gateway routes per-phase based on the EPP-Phase header.
+	gatewayBaseURL = fmt.Sprintf("http://localhost:%s", gatewayPort)
 )
 
-func TestCoordinatorE2E(t *testing.T) {
+func TestEPDPoolsE2E(t *testing.T) {
 	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "Coordinator E/P/D Pools E2E Suite")
+	ginkgo.RunSpecs(t, "EPD Pools E2E Suite")
 }
 
 var _ = ginkgo.BeforeSuite(func() {
@@ -141,6 +153,7 @@ func setupK8sCluster() {
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		}()
 		clusterConfig := strings.ReplaceAll(kindClusterConfig, "${PORT}", port)
+		clusterConfig = strings.ReplaceAll(clusterConfig, "${GATEWAY_PORT}", gatewayPort)
 		clusterConfig = strings.ReplaceAll(clusterConfig, "${METRICS_PORT}", metricsPort)
 		_, err := io.WriteString(stdin, clusterConfig)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -212,11 +225,11 @@ func setupK8sClient() {
 // catch-all single-pool stack.
 func bringUpEnv() {
 	cmd := exec.Command("./scripts/kind-dev-env.sh")
-	// Resolve to the repo root from test/e2e/coordinator (3 levels up).
+	// Resolve to the repo root from test/e2e/epd_pools (3 levels up).
 	cmd.Dir = "../../.."
 	cmd.Env = append(os.Environ(),
 		"CLUSTER_NAME="+kindClusterName,
-		"GATEWAY_HOST_PORT=30080",
+		fmt.Sprintf("GATEWAY_HOST_PORT=%s", gatewayPort),
 		fmt.Sprintf("COORDINATOR_HOST_PORT=%s", port),
 		"DISAGG_POOLS_TOPOLOGY=true",
 		"MODEL_NAME="+modelName,
@@ -225,8 +238,8 @@ func bringUpEnv() {
 		"SIDECAR_IMAGE="+sideCarImage,
 		"VLLM_RENDER_IMAGE="+vllmRenderImage,
 		"COORDINATOR_IMAGE="+coordinatorImage,
-		"DOWNLOADER_HTTP_IMAGE="+downloaderHTTPImage,
-		"DOWNLOADER_INIT_IMAGE="+downloaderInitImage,
+		"MOCK_DOWNLOADER_HTTP_IMAGE="+downloaderHTTPImage,
+		"MOCK_DOWNLOADER_INIT_IMAGE="+downloaderInitImage,
 		"CONTAINER_RUNTIME="+containerRuntime,
 	)
 	cmd.Stdout = ginkgo.GinkgoWriter
@@ -246,7 +259,7 @@ nodes:
 - image: kindest/node:v1.31.12
   extraPortMappings:
   - containerPort: 30080
-    hostPort: 30080
+    hostPort: ${GATEWAY_PORT}
     protocol: TCP
   - containerPort: 30081
     hostPort: ${PORT}

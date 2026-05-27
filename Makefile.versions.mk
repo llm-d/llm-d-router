@@ -38,5 +38,5 @@ export VLLM_RENDER_IMAGE   ?= vllm/vllm-openai-cpu:v0.21.0
 
 # Images consumed only by the e-p-d-pools env (DISAGG_POOLS_TOPOLOGY=true).
 export COORDINATOR_IMAGE     ?= ghcr.io/revit13/llm-d-coordinator:$(COORDINATOR_TAG)
-export DOWNLOADER_HTTP_IMAGE ?= python:3.10-slim
-export DOWNLOADER_INIT_IMAGE ?= busybox:1.36
+export MOCK_DOWNLOADER_HTTP_IMAGE ?= python:3.10-slim
+export MOCK_DOWNLOADER_INIT_IMAGE ?= busybox:1.36
