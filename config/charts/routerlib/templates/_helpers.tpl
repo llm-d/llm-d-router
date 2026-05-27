@@ -333,6 +333,23 @@ EPP generic validations
 {{- include "llm-d-router.validations.deprecations" . }}
 {{- include "llm-d-router.validations.epp.resources" . }}
 {{- include "llm-d-router.validations.epp.inferenceObjectives" . }}
+{{- include "llm-d-router.validations.epp.tokenizer" . }}
+{{- end -}}
+
+{{/*
+Tokenizer validations: enforce mutual exclusion of uds/render sidecars and
+require modelName for the render sidecar's command args.
+*/}}
+{{- define "llm-d-router.validations.epp.tokenizer" -}}
+{{- $tokenizer := .Values.router.tokenizer | default dict }}
+{{- $udsEnabled := dig "uds" "enabled" false $tokenizer }}
+{{- $renderEnabled := dig "render" "enabled" false $tokenizer }}
+{{- if and $udsEnabled $renderEnabled }}
+{{- fail ".Values.router.tokenizer.uds.enabled and .Values.router.tokenizer.render.enabled are mutually exclusive; enable at most one." }}
+{{- end }}
+{{- if and $renderEnabled (not (dig "modelName" "" $tokenizer)) }}
+{{- fail ".Values.router.tokenizer.modelName is required when render is enabled." }}
+{{- end }}
 {{- end -}}
 
 {{/*

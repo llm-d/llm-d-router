@@ -66,25 +66,63 @@ epp:
 proxy:
   enabled: false    
 
-# Tokenizer sidecar configuration
+# Tokenizer sidecar. uds and render are mutually exclusive (chart fails if
+# both enabled). modelName is passed to the render sidecar's command args
+# (required when render.enabled). EPP is wired to the sidecar via
+# `router.epp.pluginsCustomConfig`.
 tokenizer:
-  enabled: false
-  image:
-    registry: ghcr.io/llm-d
-    repository: llm-d-uds-tokenizer
-    tag: vllm-v0.19.1
-    pullPolicy: IfNotPresent
-  env:
-    - name: HF_TOKEN
-      valueFrom:
-        secretKeyRef:
-          name: llm-d-hf-token
-          key: HF_TOKEN
-  resources:
-    requests:
-      cpu: "8"
-      memory: 8Gi
-    
+  modelName: ""
+
+  # Deprecated. Use render instead.
+  uds:
+    enabled: false
+    image:
+      registry: ghcr.io/llm-d
+      repository: llm-d-uds-tokenizer
+      tag: vllm-v0.19.1
+      pullPolicy: IfNotPresent
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: llm-d-hf-token
+            key: HF_TOKEN
+    resources:
+      requests:
+        cpu: "8"
+        memory: 8Gi
+    volumeMounts: []
+
+  render:
+    enabled: false
+    image:
+      registry: docker.io
+      repository: vllm/vllm-openai-cpu
+      tag: v0.19.1
+      pullPolicy: IfNotPresent
+    port: 8000
+    command: []
+    args: []
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: llm-d-hf-token
+            key: HF_TOKEN
+    resources:
+      requests:
+        cpu: "4"
+        memory: 8Gi
+    volumeMounts: []
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: render-http
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 60
+
 # Monitoring configuration for EPP
 monitoring:
   interval: "10s"

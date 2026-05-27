@@ -303,51 +303,118 @@ router:
 
 ### 5. Sidecar Tokenizer Configuration (`router.tokenizer.*`)
 
-Runs a tokenizer sidecar container to expose a Unix Domain Socket (UDS) to EPP, allowing EPP to tokenize incoming requests and enable precise, token-count-aware routing policies (e.g., precise prefix-cache matching).
+Runs a tokenizer sidecar that EPP queries to tokenize incoming requests, enabling precise, token-count-aware routing policies (e.g., precise prefix-cache matching).
 
-#### Tokenizer Sidecar Parameters
+Two mutually exclusive backends are supported:
+
+* **`render`** — calls vLLM's `/v1/completions/render` and `/v1/chat/completions/render` over loopback HTTP. The sidecar runs `vllm launch render <modelName> --port=<port>`. Wire EPP to it via `router.epp.pluginsCustomConfig` with `type: token-producer` and `vllm:`. This is the recommended backend.
+* **`uds`** — *deprecated*. Runs the `llm-d-uds-tokenizer` image and exposes a gRPC-over-Unix-Domain-Socket to EPP at `/tmp/tokenizer/tokenizer-uds.socket`. Wire EPP to it via `router.epp.pluginsCustomConfig` with `type: tokenizer` and `udsTokenizerConfig:`. Kept for migration only and will be removed in a future release.
+
+Enabling both backends at install time is rejected by chart validation.
+
+#### Tokenizer Common Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.tokenizer.enabled` | Enable a tokenizer UDS sidecar container in the EPP deployment. | `false` |
-| `router.tokenizer.image.registry` | Tokenizer container image registry. | `ghcr.io/llm-d` |
-| `router.tokenizer.image.repository` | Tokenizer container image repository. | `llm-d-uds-tokenizer` |
-| `router.tokenizer.image.tag` | Tokenizer container image tag. | `vllm-v0.19.1` |
-| `router.tokenizer.image.pullPolicy` | Tokenizer container image pull policy. | `IfNotPresent` |
-| `router.tokenizer.env` | Extra environment variables for the tokenizer container (e.g., HuggingFace token). `TOKENIZERS_DIR` and `HF_HOME` are templated automatically. | `[HF_TOKEN]` |
-| `router.tokenizer.resources` | Tokenizer container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi` |
-| `router.tokenizer.volumeMounts` | Extra volume mounts for the tokenizer container (e.g., for model files). | `[]` |
+| `router.tokenizer.modelName` | **REQUIRED** when `render` is enabled. Model name passed as the first positional arg to the render sidecar's `vllm launch render` command. | `""` |
 
-#### Complete Tokenizer Sidecar Example
+#### Tokenizer Render (vLLM `/render`) Parameters
+
+| **Parameter Name** | **Description** | **Default** |
+| :--- | :--- | :--- |
+| `router.tokenizer.render.enabled` | Enable the vLLM `/render` sidecar in the EPP deployment. | `false` |
+| `router.tokenizer.render.image.registry` | Render container image registry. | `docker.io` |
+| `router.tokenizer.render.image.repository` | Render container image repository. | `vllm/vllm-openai-cpu` |
+| `router.tokenizer.render.image.tag` | Render container image tag. | `v0.19.1` |
+| `router.tokenizer.render.image.pullPolicy` | Render container image pull policy. | `IfNotPresent` |
+| `router.tokenizer.render.port` | Container port the sidecar listens on. | `8000` |
+| `router.tokenizer.render.command` | Override container command. Empty renders `["vllm", "launch", "render"]`. | `[]` |
+| `router.tokenizer.render.args` | Override container args. Empty renders `["<modelName>", "--port=<port>"]`. | `[]` |
+| `router.tokenizer.render.env` | Extra environment variables (e.g., HuggingFace token). | `[HF_TOKEN]` |
+| `router.tokenizer.render.resources` | Render container resource requests and limits. | `requests.cpu: "4"`, `requests.memory: 8Gi` |
+| `router.tokenizer.render.volumeMounts` | Extra volume mounts for the render container. | `[]` |
+| `router.tokenizer.render.readinessProbe` | Readiness probe spec. | `httpGet /health on the render-http named port`, `periodSeconds: 5` |
+
+#### Tokenizer UDS Parameters (deprecated)
+
+| **Parameter Name** | **Description** | **Default** |
+| :--- | :--- | :--- |
+| `router.tokenizer.uds.enabled` | Enable the deprecated UDS tokenizer sidecar. | `false` |
+| `router.tokenizer.uds.image.registry` | UDS tokenizer container image registry. | `ghcr.io/llm-d` |
+| `router.tokenizer.uds.image.repository` | UDS tokenizer container image repository. | `llm-d-uds-tokenizer` |
+| `router.tokenizer.uds.image.tag` | UDS tokenizer container image tag. | `vllm-v0.19.1` |
+| `router.tokenizer.uds.image.pullPolicy` | UDS tokenizer container image pull policy. | `IfNotPresent` |
+| `router.tokenizer.uds.env` | Extra environment variables. `TOKENIZERS_DIR` and `HF_HOME` are templated automatically. | `[HF_TOKEN]` |
+| `router.tokenizer.uds.resources` | UDS tokenizer container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi` |
+| `router.tokenizer.uds.volumeMounts` | Extra volume mounts for the UDS tokenizer container. | `[]` |
+
+#### Tokenizer Render Example (recommended)
 
 ```yaml
 router:
+  epp:
+    volumes:
+      - name: model-cache-volume
+        persistentVolumeClaim:
+          claimName: pvc-model-cache
   tokenizer:
-    enabled: true
-    image:
-      registry: ghcr.io/llm-d
-      repository: llm-d-uds-tokenizer
-      tag: vllm-v0.19.1
-    env:
-      - name: HF_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: my-hf-token-secret
-            key: token
-    resources:
-      requests:
-        cpu: "8"
-        memory: 8Gi
-      limits:
-        memory: 16Gi
-    volumeMounts:
-      # If pre-loading models from an external volume:
-      - mountPath: /models
-        name: model-cache-volume
-  volumes:
-    - name: model-cache-volume
-      persistentVolumeClaim:
-        claimName: pvc-model-cache
+    modelName: "Qwen/Qwen3-32B"
+    render:
+      enabled: true
+      image:
+        registry: docker.io
+        repository: vllm/vllm-openai-cpu
+        tag: v0.19.1
+      env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: my-hf-token-secret
+              key: token
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+        limits:
+          memory: 16Gi
+      volumeMounts:
+        # If pre-loading models from an external volume:
+        - mountPath: /models
+          name: model-cache-volume
+```
+
+#### Tokenizer UDS Example (deprecated)
+
+```yaml
+router:
+  epp:
+    volumes:
+      - name: model-cache-volume
+        persistentVolumeClaim:
+          claimName: pvc-model-cache
+  tokenizer:
+    uds:
+      enabled: true
+      image:
+        registry: ghcr.io/llm-d
+        repository: llm-d-uds-tokenizer
+        tag: vllm-v0.19.1
+      env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: my-hf-token-secret
+              key: token
+      resources:
+        requests:
+          cpu: "8"
+          memory: 8Gi
+        limits:
+          memory: 16Gi
+      volumeMounts:
+        # If pre-loading models from an external volume:
+        - mountPath: /models
+          name: model-cache-volume
 ```
 
 ---
