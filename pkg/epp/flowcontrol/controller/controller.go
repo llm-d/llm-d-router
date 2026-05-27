@@ -106,6 +106,7 @@ type Deps struct {
 	EndpointCandidates contracts.EndpointCandidates
 	UsageLimitPolicy   flowcontrol.UsageLimitPolicy
 	Clock              clock.WithTicker
+	ProcessorFactory   processorFactory
 }
 
 // NewFlowController creates and starts a new FlowController instance.
@@ -130,35 +131,35 @@ func NewFlowController(
 		parentCtx:          ctx,
 	}
 
-	fc.processorFactory = func(
-		ctx context.Context,
-		registry contracts.FlowRegistry,
-		saturationDetector flowcontrol.SaturationDetector,
-		endpointCandidates contracts.EndpointCandidates,
-		usageLimitPolicy flowcontrol.UsageLimitPolicy,
-		clock clock.WithTicker,
-		cleanupSweepInterval time.Duration,
-		enqueueChannelBufferSize int,
-		logger logr.Logger,
-	) processor {
-		return internal.NewProcessor(
-			ctx,
-			poolName,
-			registry,
-			saturationDetector,
-			endpointCandidates,
-			usageLimitPolicy,
-			clock,
-			cleanupSweepInterval,
-			enqueueChannelBufferSize,
-			logger,
-		)
+	if deps.ProcessorFactory == nil {
+		fc.processorFactory = func(
+			ctx context.Context,
+			registry contracts.FlowRegistry,
+			saturationDetector flowcontrol.SaturationDetector,
+			endpointCandidates contracts.EndpointCandidates,
+			usageLimitPolicy flowcontrol.UsageLimitPolicy,
+			clock clock.WithTicker,
+			cleanupSweepInterval time.Duration,
+			enqueueChannelBufferSize int,
+			logger logr.Logger,
+		) processor {
+			return internal.NewProcessor(
+				ctx,
+				poolName,
+				registry,
+				saturationDetector,
+				endpointCandidates,
+				usageLimitPolicy,
+				clock,
+				cleanupSweepInterval,
+				enqueueChannelBufferSize,
+				logger,
+			)
+		}
+	} else {
+		fc.processorFactory = deps.ProcessorFactory
 	}
 
-	return fc
-}
-
-func (fc *FlowController) Start() {
 	// Construct a new worker, but do not start its goroutine yet.
 	fc.processor = fc.processorFactory(
 		fc.parentCtx,
@@ -172,10 +173,13 @@ func (fc *FlowController) Start() {
 		fc.logger,
 	)
 
+	return fc
+}
+
+func (fc *FlowController) Start() {
 	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor.")
-	fc.wg.Go(func() {
-		fc.processor.Run(fc.parentCtx)
-	})
+
+	go fc.processor.Run(fc.parentCtx)
 
 }
 
