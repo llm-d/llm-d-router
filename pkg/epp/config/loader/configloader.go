@@ -48,7 +48,7 @@ var (
 	scheme                       = runtime.NewScheme()
 	registeredFeatureGatesMu     sync.RWMutex
 	registeredFeatureGates       = sets.New[string]()
-	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: routing.LegacyPoolGroup, Version: "v1alpha1"}
+	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: routing.LegacyK8SGroup, Version: "v1alpha1"}
 )
 
 func init() {

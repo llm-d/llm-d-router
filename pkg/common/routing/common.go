@@ -19,8 +19,7 @@ const (
 	// DefaultPoolGroup is the default InferencePool API group
 	DefaultPoolGroup = "inference.networking.k8s.io"
 
-	// LegacyPoolGroup is the legacy InferencePool API group
-	LegacyPoolGroup = "inference.networking.x-k8s.io"
+	LegacyK8SGroup = "inference.networking.x-k8s.io" // TODO: deprecated should be clean up
 
 	// KVConnectorNIXLV2 enables the P/D KV NIXL v2 protocol
 	KVConnectorNIXLV2 = "nixlv2"

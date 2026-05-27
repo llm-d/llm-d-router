@@ -93,7 +93,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "EndpointPickerConfig",
-					APIVersion: "llm-d.ai/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 				},
 				Plugins: []configapi.PluginSpec{
 					{Name: "test1", Type: testPluginType, Parameters: json.RawMessage(`{"threshold":10}`)},
@@ -167,7 +167,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "EndpointPickerConfig",
-					APIVersion: "llm-d.ai/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 				},
 				Plugins: []configapi.PluginSpec{
 					{Name: "test1", Type: testPluginType, Parameters: json.RawMessage(`{"threshold":10}`)},
@@ -182,7 +182,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			configText: "",
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: "llm-d.ai/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 					Kind:       "EndpointPickerConfig",
 				},
 				FeatureGates: configapi.FeatureGates{}, // Empty means datalayer enabled (default behavior)
@@ -247,7 +247,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "EndpointPickerConfig",
-					APIVersion: "llm-d.ai/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 				},
 				Plugins: []configapi.PluginSpec{
 					{Name: "maxScore", Type: "max-score-picker"},
@@ -281,7 +281,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "EndpointPickerConfig",
-					APIVersion: "llm-d.ai/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 				},
 				Plugins: []configapi.PluginSpec{
 					{Name: "maxScore", Type: "max-score-picker"},

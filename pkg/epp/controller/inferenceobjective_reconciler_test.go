@@ -73,7 +73,7 @@ var (
 				Priority(int32(1)).
 				CreationTimestamp(metav1.Unix(1005, 0)).
 				PoolName(inferencePool.Name).
-				PoolGroup("llm-d.ai").ObjRef()
+				PoolGroup(v1alpha2.GroupName).ObjRef()
 	infObjective2 = testutil.MakeInferenceObjective("model2").
 			Namespace(inferencePool.Namespace).
 			CreationTimestamp(metav1.Unix(1000, 0)).

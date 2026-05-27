@@ -49,7 +49,7 @@ func loadDefaultConfig() *configapi.EndpointPickerConfig {
 	prefixCacheScorerWeight := 3.0
 	return &configapi.EndpointPickerConfig{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "llm-d.ai/v1alpha1",
+			APIVersion: configapi.GroupVersion.String(),
 			Kind:       "EndpointPickerConfig",
 		},
 		FeatureGates: []string{}, // Data layer is now enabled by default (no feature gate needed)
