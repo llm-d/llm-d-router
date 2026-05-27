@@ -1,0 +1,12 @@
+# ------------------------------------------------------------------------------
+# Prefill InferencePool + EPP
+#
+# Selects pods labelled `llm-d.ai/role: prefill` and routes them through a
+# dedicated EPP.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- inference-pool.yaml
+- epp.yaml

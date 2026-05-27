@@ -1,11 +1,8 @@
 # ------------------------------------------------------------------------------
-# Inference Gateway
+# Inference Gateway — single-pool topology
 #
-# This provides a working stack for an inference Gateway, including the Gateway
-# itself, the Endpoint Picker (EPP) attached to it, and the Inference Pools and
-# Inference Models to collect pods from a model serving framework (e.g. VLLM,
-# or even just the VLLM Simulator).
-#
+# Single InferencePool + EPP behind a catch-all HTTPRoute. Pair with
+# components/inference-gateway/base/ (the Gateway CR lives there).
 # ------------------------------------------------------------------------------
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -16,5 +13,4 @@ resources:
 - inference-pools.yaml
 - services.yaml
 - deployment.yaml
-- gateways.yaml
 - httproutes.yaml

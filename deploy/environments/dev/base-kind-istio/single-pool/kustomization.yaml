@@ -1,0 +1,17 @@
+# ------------------------------------------------------------------------------
+# KIND base-kind-istio — single-pool topology
+#
+# Default topology: shared base + a single InferencePool/EPP behind a
+# catch-all HTTPRoute. The EPP is patched with KIND-specific args and an
+# `${EPP_NAME}-insecure-tls` DestinationRule disables sidecar mTLS to it.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../base/
+- ../../../../components/inference-gateway/single-pool/
+- destination-rules.yaml
+
+patches:
+- path: patch-deployments.yaml

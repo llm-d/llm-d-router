@@ -1,0 +1,15 @@
+# ------------------------------------------------------------------------------
+# Coordinator Component
+#
+# Multimodal pipeline coordinator. Drives the
+# replace-media-urls → render → encode → prefill → decode pipeline by
+# fanning requests out to per-phase EPPs through the gateway, and to a
+# standalone render service for media token generation.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- service-account.yaml
+- configmap.yaml
+- deployment.yaml

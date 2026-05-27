@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-d
+spec:
+  template:
+    metadata:
+      labels:
+        llm-d.ai/role: decode
+    spec:
+      initContainers:
+      - name: routing-sidecar
+        args:
+        - "--port=8000"
+        - "--vllm-port=8200"
+        - "--kv-connector=${KV_CONNECTOR_TYPE}"
+        - "--ec-connector=${EC_CONNECTOR_TYPE}"
+        - "--secure-proxy=false"
+        - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"

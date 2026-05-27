@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-d-coordinator
+  labels:
+    app: llm-d-coordinator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-d-coordinator
+  template:
+    metadata:
+      labels:
+        app: llm-d-coordinator
+    spec:
+      serviceAccountName: llm-d-coordinator
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: coordinator
+        image: ghcr.io/revit13/llm-d-coordinator:dev
+        imagePullPolicy: IfNotPresent
+        args:
+        - --config
+        - /etc/coordinator/coordinator.yaml
+        ports:
+        - name: http
+          containerPort: 8080
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: config
+          mountPath: /etc/coordinator
+      # vLLM render sidecar — exposes /v1/completions/render and
+      # /v1/chat/completions/render over loopback for the coordinator's
+      # render pipeline step. Mirrors the EPP's render sidecar shape so the
+      # tokenizer/processor path is real (not simulator).
+      - name: vllm-render
+        image: ${VLLM_RENDER_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["vllm", "launch", "render"]
+        args: ["${MODEL_NAME}", "--port=8000"]
+        ports:
+        - name: render-http
+          containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 60
+        volumeMounts:
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
+      volumes:
+      - name: config
+        configMap:
+          name: llm-d-coordinator-config
+      - name: model-cache
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-d-coordinator
+  labels:
+    app: llm-d-coordinator
+spec:
+  selector:
+    app: llm-d-coordinator
+  type: NodePort
+  ports:
+  - name: http
+    protocol: TCP
+    port: 8080
+    targetPort: 8080
+    nodePort: 30081

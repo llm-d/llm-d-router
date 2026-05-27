@@ -1,0 +1,22 @@
+# ------------------------------------------------------------------------------
+# KIND base-kind-istio — shared base
+#
+# Pieces every gateway topology needs on KIND:
+#  * Istio control plane
+#  * Inference Gateway CR (from components/inference-gateway/base/)
+#  * NodePort Service exposing the gateway proxy
+#  * Listener/class patch on the Gateway
+#
+# Topology-specific overlays (../single-pool/, ../epd-pools/) layer in
+# the EPP, InferencePools, and HTTPRoutes appropriate for each.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- services.yaml
+- ../../../../components/istio-control-plane/
+- ../../../../components/inference-gateway/base/
+
+patches:
+- path: patch-gateways.yaml

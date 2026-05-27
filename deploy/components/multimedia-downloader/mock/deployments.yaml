@@ -1,0 +1,134 @@
+# Mock multimedia downloaders. Each Deployment runs a plain `python3 -m
+# http.server` over an emptyDir seeded by an initContainer with a tiny
+# inline JPEG — no real download backend, no model weights, no host
+# bind-mounts. Stands in for the public media URLs that the coordinator's
+# replace-media-urls step would otherwise fetch. Both instances live in
+# one file because they only differ by name, port, and filename.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-downloader1
+  labels:
+    app: mock-downloader1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-downloader1
+  template:
+    metadata:
+      labels:
+        app: mock-downloader1
+    spec:
+      initContainers:
+      - name: seed-image
+        image: python:3.10-slim
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "-c"]
+        args:
+        - |
+          import base64
+          # Pillow-generated 64x64 black JPEG (691 bytes); valid SOI + JFIF +
+          # quant tables + Huffman + SOS. Sized large enough that
+          # Qwen3-VL's mm processor doesn't drop it as below tile minimum.
+          img = base64.b64decode(
+              "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8S"
+              "EhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEU"
+              "Hh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAAR"
+              "CABAAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAA"
+              "AgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkK"
+              "FhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWG"
+              "h4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl"
+              "5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREA"
+              "AgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYk"
+              "NOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOE"
+              "hYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk"
+              "5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD4yooooAKKKKACiiigAooooAKKKKACiiig"
+              "AooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//2Q=="
+          )
+          open("/tmp/img.jpg", "wb").write(img)
+        volumeMounts:
+        - name: srv
+          mountPath: /tmp
+      containers:
+      - name: http
+        image: python:3.10-slim
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "-m", "http.server", "9000", "--directory", "/tmp"]
+        ports:
+        - name: http
+          containerPort: 9000
+        readinessProbe:
+          tcpSocket:
+            port: 9000
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        volumeMounts:
+        - name: srv
+          mountPath: /tmp
+      volumes:
+      - name: srv
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-downloader2
+  labels:
+    app: mock-downloader2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-downloader2
+  template:
+    metadata:
+      labels:
+        app: mock-downloader2
+    spec:
+      initContainers:
+      - name: seed-image
+        image: python:3.10-slim
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "-c"]
+        args:
+        - |
+          import base64
+          img = base64.b64decode(
+              "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8S"
+              "EhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEU"
+              "Hh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAAR"
+              "CABAAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAA"
+              "AgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkK"
+              "FhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWG"
+              "h4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl"
+              "5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREA"
+              "AgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYk"
+              "NOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOE"
+              "hYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk"
+              "5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD4yooooAKKKKACiiigAooooAKKKKACiiig"
+              "AooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//2Q=="
+          )
+          open("/tmp/img2.jpg", "wb").write(img)
+        volumeMounts:
+        - name: srv
+          mountPath: /tmp
+      containers:
+      - name: http
+        image: python:3.10-slim
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "-m", "http.server", "9001", "--directory", "/tmp"]
+        ports:
+        - name: http
+          containerPort: 9001
+        readinessProbe:
+          tcpSocket:
+            port: 9001
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        volumeMounts:
+        - name: srv
+          mountPath: /tmp
+      volumes:
+      - name: srv
+        emptyDir: {}

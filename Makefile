@@ -41,6 +41,12 @@ export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 # plugin's HTTP backend.
 export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.19.1
 
+# Images consumed only by the e-p-d-pools env (make pools-env-dev-kind).
+COORDINATOR_TAG ?= dev
+export COORDINATOR_IMAGE ?= ghcr.io/revit13/llm-d-coordinator:$(COORDINATOR_TAG)
+export MOCK_DOWNLOADER_HTTP_IMAGE ?= python:3.10-slim
+export MOCK_DOWNLOADER_INIT_IMAGE ?= busybox:1.36
+
 BUILDER_TAG ?= dev
 BUILDER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(BUILDER_IMAGE_NAME)
 export BUILDER_IMAGE ?= $(BUILDER_TAG_BASE):$(BUILDER_TAG)

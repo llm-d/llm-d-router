@@ -19,6 +19,13 @@ env-dev-kind: image-build image-pull ## Run under kind ($(KIND_CLUSTER_NAME))
 		./scripts/kind-dev-env.sh; \
 	fi
 
+.PHONY: pools-env-dev-kind
+pools-env-dev-kind: image-build image-pull ## Run e-p-d-pools (coordinator) topology under kind ($(KIND_CLUSTER_NAME))
+	CLUSTER_NAME=$(KIND_CLUSTER_NAME) \
+	GATEWAY_HOST_PORT=$(KIND_GATEWAY_HOST_PORT) \
+	IMAGE_REGISTRY=$(IMAGE_REGISTRY) \
+	./scripts/kind-dev-env-pools.sh
+
 .PHONY: clean-env-dev-kind
 clean-env-dev-kind: ## Cleanup kind setup (delete cluster $(KIND_CLUSTER_NAME))
 	@echo "INFO: cleaning up kind cluster $(KIND_CLUSTER_NAME)"

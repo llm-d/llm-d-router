@@ -1,0 +1,13 @@
+# ------------------------------------------------------------------------------
+# Decode InferencePool + EPP
+#
+# Selects pods labelled `llm-d.ai/role: decode` and routes them through a
+# dedicated EPP. The EPP additionally exposes the ZMQ endpoint (5557) used by
+# the simulator overlay to publish KV cache events.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- inference-pool.yaml
+- epp.yaml

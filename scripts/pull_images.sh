@@ -16,6 +16,11 @@ export VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:${VLLM_SIMULA
 export SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar:${SIDECAR_TAG}}"
 export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.19.1}"
 
+# Images consumed only by the e-p-d-pools env (coordinator + mock downloaders).
+export COORDINATOR_IMAGE="${COORDINATOR_IMAGE:-ghcr.io/revit13/llm-d-coordinator:dev}"
+export MOCK_DOWNLOADER_HTTP_IMAGE="${MOCK_DOWNLOADER_HTTP_IMAGE:-python:3.10-slim}"
+export MOCK_DOWNLOADER_INIT_IMAGE="${MOCK_DOWNLOADER_INIT_IMAGE:-busybox:1.36}"
+
 TARGETOS="${TARGETOS:-linux}"
 TARGETARCH="${TARGETARCH:-$(go env GOARCH)}"
 
@@ -46,6 +51,9 @@ echo "Scheduler Image:     ${EPP_IMAGE}"
 echo "Simulator Image:     ${VLLM_IMAGE}"
 echo "Sidecar Image:       ${SIDECAR_IMAGE}"
 echo "vLLM Render Image:   ${VLLM_RENDER_IMAGE}"
+echo "Coordinator Image:   ${COORDINATOR_IMAGE}"
+echo "Downloader HTTP:     ${MOCK_DOWNLOADER_HTTP_IMAGE}"
+echo "Downloader Init:     ${MOCK_DOWNLOADER_INIT_IMAGE}"
 echo "----------------------------------------------------"
 
 echo "Pulling dependencies..."
@@ -53,4 +61,7 @@ ensure_image "${EPP_IMAGE}"
 ensure_image "${VLLM_IMAGE}"
 ensure_image "${SIDECAR_IMAGE}"
 ensure_image "${VLLM_RENDER_IMAGE}"
+ensure_image "${COORDINATOR_IMAGE}"
+ensure_image "${MOCK_DOWNLOADER_HTTP_IMAGE}"
+ensure_image "${MOCK_DOWNLOADER_INIT_IMAGE}"
 echo "Successfully pulled dependencies"

@@ -1,0 +1,26 @@
+# ------------------------------------------------------------------------------
+# E/P/D + Pools (coordinator-driven multimodal pipeline)
+#
+# Brings up the full coordinator-driven topology: encode/prefill/decode
+# deployments with one InferencePool per phase, the coordinator (which
+# carries a vllm-render sidecar over loopback), and two mock media
+# downloaders. Used by `make pools-env-dev-kind` (scripts/kind-dev-env-pools.sh).
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../../components/vllm-encode/
+- ../../../components/vllm-prefill/
+- ../../../components/vllm-decode/
+- ../../../components/coordinator/
+- ../../../components/multimedia-downloader/mock/
+
+# Inject the kv/ec connector args into the routing sidecar. Mirrors
+# ../e-p-d/patch-decode.yaml — kustomize forbids cross-root patch references,
+# so the file is duplicated here.
+patches:
+- path: patch-decode.yaml
+
+components:
+- ../../../components/overlays/simulator/

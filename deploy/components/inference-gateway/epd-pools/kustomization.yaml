@@ -1,0 +1,16 @@
+# ------------------------------------------------------------------------------
+# Inference Gateway — encode/prefill/decode pools topology
+#
+# Three phase-specific InferencePools + per-phase EPPs, with
+# header-based HTTPRoutes (EPP-Phase: encode|prefill|decode) wiring
+# the coordinator's pipeline through them. Pair with
+# components/inference-gateway/base/ (the Gateway CR lives there).
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- encode/
+- prefill/
+- decode/
+- routing/

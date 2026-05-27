@@ -13,8 +13,9 @@ ARG DOCKER_BUILDX_VERSION=v0.32.1
 ARG ENVTEST_VERSION=release-0.19
 ARG ENVTEST_K8S_VERSION=1.31.0
 ARG GOVULNCHECK_VERSION=v1.3.0
+ARG HELM_VERSION=v3.17.4
 
-RUN dnf install -y podman gcc-toolset-12 && dnf clean all
+RUN dnf install -y podman gcc-toolset-12 gettext && dnf clean all
 
 # The base image ships GCC 8 (RHEL 8 default), which lacks the ARM64 LSE
 # atomic emulation helpers (__aarch64_ldadd8_sync etc.) required by Go's
@@ -47,6 +48,11 @@ RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') && \
 RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') && \
     curl -sSfL https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_${GOARCH}.tar.gz | \
     tar -xz -C /usr/local/bin
+
+# Install helm — needed by `kubectl kustomize --enable-helm` for Istio chart inflation in e-p-d-pools env bring-up
+RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') && \
+    curl -sSfL https://get.helm.sh/helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz | \
+    tar -xz --strip-components=1 -C /usr/local/bin linux-${GOARCH}/helm
 
 # Install kind
 RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') && \

@@ -19,7 +19,8 @@ Documentation for developing the llm-d Router.
       - [2. Prefill/Decode (P/D) Disaggregation](#2-prefilldecode-pd-disaggregation)
       - [3. Encode/Prefill-Decode (E/PD) Disaggregation](#3-encodeprefill-decode-epd-disaggregation)
       - [4. Encode/Prefill/Decode (E/P/D) Disaggregation](#4-encodeprefilldecode-epd-disaggregation)
-      - [5. Disaggregated Setup Verification](#5-disaggregated-setup-verification)
+      - [5. Coordinator-driven E/P/D with Pools (`e-p-d-pools`)](#5-coordinator-driven-epd-with-pools-e-p-d-pools)
+      - [6. Disaggregated Setup Verification](#6-disaggregated-setup-verification)
     - [Combining Scenarios with Data Parallel and KV Cache](#combining-scenarios-with-data-parallel-and-kv-cache)
     - [Simulator vs Real vLLM](#simulator-vs-real-vllm)
       - [Deploying with Simulator (default)](#deploying-with-simulator-default)
@@ -292,6 +293,11 @@ controlled by two independent boolean flags:
 | `DISAGG_E` | `false` | Deploy a separate **Encoder** pod |
 | `DISAGG_P` | `false` | Deploy a separate **Prefill** pod |
 
+The `e-p-d-pools` topology (coordinator + render + mock downloaders + one
+`InferencePool` per phase) is selected by a separate make target,
+`make pools-env-dev-kind`, rather than these flags. See
+[§5 Coordinator-driven E/P/D with Pools](#5-coordinator-driven-epd-with-pools-e-p-d-pools).
+
 The combination of these flags determines the scenario:
 
 | `DISAGG_E` | `DISAGG_P` | Scenario | Components |
@@ -392,7 +398,47 @@ curl -s http://localhost:30080/v1/chat/completions \
   }' | jq
 ```
 
-#### 5. Disaggregated Setup Verification
+#### 5. Coordinator-driven E/P/D with Pools (`e-p-d-pools`)
+
+A standalone topology that wires the coordinator pipeline (replace-media-urls
+→ render → encode → prefill → decode) over three phase-specific
+`InferencePool` resources. Brings up: encoder, prefill, decoder, the
+coordinator carrying a CPU-only
+`vllm launch render` sidecar over loopback, and two mock multimedia
+downloaders that stand in for real public media URLs.
+
+```bash
+make pools-env-dev-kind
+```
+
+This target runs `scripts/kind-dev-env-pools.sh`, which selects the
+`deploy/environments/dev/e-p-d-pools` env unconditionally and is independent
+of `DISAGG_E`/`DISAGG_P` — use `make env-dev-kind` for those.
+
+Verify the pools wired and drive the pipeline through the coordinator:
+```bash
+kubectl get inferencepools
+# expect: pool-encode, pool-prefill, pool-decode
+
+kubectl port-forward svc/llm-d-coordinator 8080:8080 &
+curl -s http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-VL-2B-Instruct",
+    "messages": [{"role":"user","content":[
+      {"type":"text","text":"Describe what you see in each image."},
+      {"type":"image_url","image_url":{"url":"http://mock-downloader1.default.svc:9000/img.jpg"}},
+      {"type":"image_url","image_url":{"url":"http://mock-downloader2.default.svc:9001/img2.jpg"}}
+    ]}],
+    "max_tokens": 256
+  }' | jq
+```
+
+> **Simulator caveat:** under simulator-only, encode and prefill don't compute
+> real multimodal tokens — the test pipeline verifies wiring and routing, not
+> model correctness. Real-vLLM coverage is out of scope for this env.
+
+#### 6. Disaggregated Setup Verification
 
 After deploying any disaggregation mode, verify with a basic request:
 

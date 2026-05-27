@@ -5,7 +5,8 @@ namespace: ${NAMESPACE}
 
 resources:
 - secret.yaml
-- ../../../components/inference-gateway/
+- ../../../components/inference-gateway/base/
+- ../../../components/inference-gateway/single-pool/
 - gateway-parameters.yaml
 
 patches:

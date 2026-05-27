@@ -1,0 +1,15 @@
+# EPP config for the prefill-only EPP in the e-p-d-pools env.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: prefill-filter
+- type: queue-scorer
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: prefill-filter
+  - pluginRef: queue-scorer
+    weight: 1
+  - pluginRef: max-score-picker

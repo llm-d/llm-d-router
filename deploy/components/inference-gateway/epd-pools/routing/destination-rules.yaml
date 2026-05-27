@@ -1,0 +1,39 @@
+# **WARNING** Only use in testing scenarios
+#
+# DestinationRules disabling mTLS on the gateway → phase-EPP gRPC ext_proc
+# connections. Mirrors `${EPP_NAME}-insecure-tls` from base-kind-istio so
+# the new phase EPPs (which lack istio sidecars) can receive plain TLS
+# connections from the gateway. Without these, envoy ext_proc resets the
+# stream and the gateway returns HTTP 500 with an empty body.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: ${EPP_NAME}-encode-insecure-tls
+spec:
+  host: ${EPP_NAME}-encode
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: ${EPP_NAME}-prefill-insecure-tls
+spec:
+  host: ${EPP_NAME}-prefill
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: ${EPP_NAME}-decode-insecure-tls
+spec:
+  host: ${EPP_NAME}-decode
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true

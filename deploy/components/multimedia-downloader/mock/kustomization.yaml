@@ -1,0 +1,16 @@
+# ------------------------------------------------------------------------------
+# Multimedia Downloader Mock
+#
+# Two mock HTTP file servers that stand in for real media-hosting endpoints
+# during e2e tests. Each pod runs `python3 -m http.server` over an emptyDir
+# seeded by an initContainer with a tiny inline JPEG — no host bind-mounts,
+# no checked-in binary fixtures, no external network calls. Coordinator's
+# replace-media-urls step fetches from these instead of the public URLs
+# that real production payloads would carry.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- deployments.yaml
+- services.yaml
