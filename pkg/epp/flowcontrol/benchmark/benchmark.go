@@ -257,10 +257,9 @@ func setupBenchmarkHarness(
 	cfg := customCfg
 	if cfg == nil {
 		cfg = &controller.Config{
-			DefaultRequestTTL:               5 * time.Minute,
-			ProcessorReconciliationInterval: 1 * time.Hour, // Effectively disabled
-			ExpiryCleanupInterval:           1 * time.Hour, // Effectively disabled
-			EnqueueChannelBufferSize:        2000,
+			DefaultRequestTTL:        5 * time.Minute,
+			ExpiryCleanupInterval:    1 * time.Hour, // Effectively disabled
+			EnqueueChannelBufferSize: 2000,
 		}
 	}
 

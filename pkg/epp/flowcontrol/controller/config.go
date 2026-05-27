@@ -26,8 +26,6 @@ import (
 const (
 	// defaultExpiryCleanupInterval is the default frequency for scanning for expired items.
 	defaultExpiryCleanupInterval = 1 * time.Second
-	// defaultProcessorReconciliationInterval is the default frequency for the supervisor loop.
-	defaultProcessorReconciliationInterval = 5 * time.Second
 	// defaultEnqueueChannelBufferSize is the default size of a worker's incoming request buffer.
 	defaultEnqueueChannelBufferSize = 100
 )
@@ -42,11 +40,6 @@ type Config struct {
 	// ExpiryCleanupInterval is the interval at which each processor scans its queues for expired items.
 	// Optional: Defaults to `defaultExpiryCleanupInterval` (1 second).
 	ExpiryCleanupInterval time.Duration
-
-	// ProcessorReconciliationInterval is the frequency at which the `FlowController`'s supervisor loop garbage collects
-	// stale workers.
-	// Optional: Defaults to `defaultProcessorReconciliationInterval` (5 seconds).
-	ProcessorReconciliationInterval time.Duration
 
 	// EnqueueChannelBufferSize is the size of the buffered channel that accepts incoming requests for each
 	// processor. This buffer acts as a shock absorber, decoupling the high-frequency distributor from the processor's
@@ -72,9 +65,8 @@ func NewConfigFromAPI(apiConfig *configapi.FlowControlConfig) (*Config, error) {
 // NewConfig creates a new Config with the given options, applying defaults and validation.
 func NewConfig(opts ...ConfigOption) (*Config, error) {
 	c := &Config{
-		ExpiryCleanupInterval:           defaultExpiryCleanupInterval,
-		ProcessorReconciliationInterval: defaultProcessorReconciliationInterval,
-		EnqueueChannelBufferSize:        defaultEnqueueChannelBufferSize,
+		ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
+		EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
 	}
 
 	for _, opt := range opts {
@@ -101,13 +93,6 @@ func WithExpiryCleanupInterval(d time.Duration) ConfigOption {
 	}
 }
 
-// WithProcessorReconciliationInterval sets the processor reconciliation interval.
-func WithProcessorReconciliationInterval(d time.Duration) ConfigOption {
-	return func(c *Config) {
-		c.ProcessorReconciliationInterval = d
-	}
-}
-
 // WithEnqueueChannelBufferSize sets the size of the enqueue channel buffer.
 func WithEnqueueChannelBufferSize(size int) ConfigOption {
 	return func(c *Config) {
@@ -122,9 +107,6 @@ func (c *Config) validate() error {
 	}
 	if c.ExpiryCleanupInterval <= 0 {
 		return fmt.Errorf("ExpiryCleanupInterval must be positive, but got %v", c.ExpiryCleanupInterval)
-	}
-	if c.ProcessorReconciliationInterval <= 0 {
-		return fmt.Errorf("ProcessorReconciliationInterval must be positive, but got %v", c.ProcessorReconciliationInterval)
 	}
 	if c.EnqueueChannelBufferSize < 0 {
 		return fmt.Errorf("EnqueueChannelBufferSize cannot be negative, but got %d", c.EnqueueChannelBufferSize)
