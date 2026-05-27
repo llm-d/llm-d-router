@@ -950,6 +950,8 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		Parser:                           r.parser,
 		SaturationDetector:               eppConfig.SaturationDetector,
 		UseExperimentalDatalayerV2:       useNewMetrics,
+		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
+		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))

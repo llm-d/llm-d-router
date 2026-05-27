@@ -18,6 +18,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -26,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	pb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -94,6 +96,8 @@ dataLayer:
 	opts.PoolName = "test-pool"
 	opts.PoolNamespace = "test-ns"
 	opts.ConfigText = configText
+	opts.GRPCMaxRecvMsgSize = 6 * 1024 * 1024
+	opts.GRPCMaxSendMsgSize = 6 * 1024 * 1024
 
 	r := NewRunner()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -132,6 +136,45 @@ dataLayer:
 	extProcConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", grpcPort), time.Second)
 	require.NoError(t, err, "ext_proc port should accept TCP connections")
 	_ = extProcConn.Close()
+
+	// Verify that the gRPC maximum message size limit is correctly set to 6MB.
+	// We send a request body of 4.5MB which exceeds the default 4MB limit but is within 6MB.
+	cc, err := grpc.NewClient(fmt.Sprintf("127.0.0.1:%d", grpcPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	defer cc.Close()
+
+	client := pb.NewExternalProcessorClient(cc)
+	process, err := client.Process(ctx)
+	require.NoError(t, err)
+
+	largeBodySize := 4500000 // 4.5MB
+	largeBodyBytes := make([]byte, largeBodySize)
+	for i := range largeBodyBytes {
+		largeBodyBytes[i] = 'a'
+	}
+	largeBodyJSON, err := json.Marshal(map[string]any{
+		"model":  "stub",
+		"prompt": string(largeBodyBytes),
+	})
+	require.NoError(t, err)
+
+	request := &pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_RequestBody{
+			RequestBody: &pb.HttpBody{
+				Body:        largeBodyJSON,
+				EndOfStream: true,
+			},
+		},
+	}
+
+	err = process.Send(request)
+	if err == nil {
+		_, err = process.Recv()
+	}
+	if err != nil {
+		assert.NotContains(t, err.Error(), "ResourceExhausted")
+		assert.NotContains(t, err.Error(), "message larger than max")
+	}
 
 	// Confirm the resolved discovery plugin matches the one the loader registered.
 	disc, err := r.resolveDiscovery(rawConfig)
