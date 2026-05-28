@@ -27,7 +27,10 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
-const PluginStateDebugPath = "/debug/plugins/state"
+const (
+	PluginStateDebugPath       = "/debug/plugins/state"
+	pluginStateUnsupportedText = "plugin does not support state collection"
+)
 
 // nowFunc is overridable in tests for deterministic timestamps.
 var nowFunc = time.Now
@@ -38,8 +41,9 @@ type pluginStateDebugResponse struct {
 }
 
 type pluginStateDebugEntry struct {
-	Type  string          `json:"type"`
-	State json.RawMessage `json:"state"`
+	Type    string          `json:"type"`
+	State   json.RawMessage `json:"state,omitempty"`
+	Message string          `json:"message,omitempty"`
 }
 
 // MetricsHandlerRegistrar registers HTTP handlers on the process metrics/admin server.
@@ -105,6 +109,10 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) (pluginStateDebugRespon
 		}
 		dumper, ok := plugin.(fwkplugin.StateDumper)
 		if !ok {
+			response.Plugins[name] = pluginStateDebugEntry{
+				Type:    plugin.TypedName().Type,
+				Message: pluginStateUnsupportedText,
+			}
 			continue
 		}
 		state, err := dumper.DumpState()

@@ -1,0 +1,55 @@
+# Plugin Debug State
+
+The router exposes a plugin state debug endpoint on the metrics/admin server:
+
+```text
+/debug/plugins/state
+```
+
+The endpoint is intended for on-demand operational debugging. It returns a snapshot of configured plugins and any sanitized internal state exposed through the optional `plugin.StateDumper` interface. Plugins that do not implement `StateDumper` are still listed with a message indicating that state collection is unsupported.
+
+The handler only serves loopback clients. Operators can access it through local access to the metrics/admin server, such as a port-forward. When metrics endpoint authentication is enabled, the metrics/admin server authentication and authorization filters still apply.
+
+## Response format
+
+```json
+{
+  "timestamp": "2025-01-01T00:00:00Z",
+  "plugins": {
+    "inflight-load-producer": {
+      "type": "inflight-load-producer",
+      "state": {
+        "endpoints": [],
+        "totalEndpoints": 0,
+        "maxEndpoints": 100,
+        "truncated": false
+      }
+    },
+    "max-score-picker": {
+      "type": "max-score-picker",
+      "message": "plugin does not support state collection"
+    }
+  }
+}
+```
+
+Each `plugins` key is the configured plugin name. Entries include the plugin type and either:
+
+- `state`: plugin-defined JSON state for plugins that implement `StateDumper`.
+- `message`: an explanation for plugins that do not expose debug state.
+
+## Implementing StateDumper
+
+`StateDumper` implementations return `json.RawMessage` so each plugin owns serialization:
+
+```go
+type StateDumper interface {
+    DumpState() (json.RawMessage, error)
+}
+```
+
+Use state dumps for point-in-time debugging information that is hard to understand from metrics alone. Prefer metrics for numeric time series, alerting, dashboards, and aggregation over time.
+
+State dumps must not include request payloads, credentials, tokens, or other sensitive values. Dumps should stay bounded; summarize, cap, or omit large and high-cardinality state.
+
+The `inflight-load-producer` implementation reports the busiest endpoints up to a fixed cap, along with `totalEndpoints`, `maxEndpoints`, and `truncated` fields so operators can tell when the dump is partial.

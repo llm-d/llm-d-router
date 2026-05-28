@@ -54,7 +54,7 @@ func withFrozenNow(t *testing.T, fixed time.Time) {
 	t.Cleanup(func() { nowFunc = prev })
 }
 
-func TestPluginStateDebugHandlerIncludesDumpers(t *testing.T) {
+func TestPluginStateDebugHandlerIncludesPlugins(t *testing.T) {
 	withFrozenNow(t, time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC))
 
 	handle := fwkplugin.NewEppHandle(context.Background(), nil)
@@ -81,16 +81,17 @@ func TestPluginStateDebugHandlerIncludesDumpers(t *testing.T) {
 		"timestamp": "2025-01-02T03:04:05Z",
 		"plugins": {
 			"a-dumper": {"type":"test-type","state":{"value":"first"}},
+			"skip": {"type":"skip-type","message":"plugin does not support state collection"},
 			"z-dumper": {"type":"test-type","state":{"count":2}}
 		}
 	}`, recorder.Body.String())
 
 	var response pluginStateDebugResponse
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
-	require.Len(t, response.Plugins, 2)
+	require.Len(t, response.Plugins, 3)
 	require.Contains(t, response.Plugins, "a-dumper")
+	require.Equal(t, pluginStateUnsupportedText, response.Plugins["skip"].Message)
 	require.Contains(t, response.Plugins, "z-dumper")
-	require.NotContains(t, response.Plugins, "skip")
 }
 
 func TestPluginStateDebugHandlerRejectsNonGet(t *testing.T) {
