@@ -475,6 +475,10 @@ func TestServer_Skip(t *testing.T) {
 	_, err = process.Recv()
 	require.Error(t, err, "Expected error or EOF when receiving after skip")
 
+	// Verify that the director's HandleRequest was called even for skipped request
+	require.NotEmpty(t, director.requestHeaders, "HandleRequest should have been called for skipped request")
+	require.Equal(t, "test-request-id", director.requestHeaders["x-request-id"])
+
 	cancel()
 	<-errChan
 	testListener.Close()
