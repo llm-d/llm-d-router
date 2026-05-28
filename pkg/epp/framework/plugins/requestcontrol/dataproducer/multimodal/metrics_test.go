@@ -45,7 +45,7 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 
 	// Case 2: Cache Hits (add one to cache first)
 	producer.cache.Add("hash-1", map[string]struct{}{"pod-a": {}})
-	
+
 	items = []attrmm.MatchItem{
 		{Hash: "hash-1", Size: 1}, // Hit
 		{Hash: "hash-3", Size: 1}, // Miss
@@ -71,7 +71,7 @@ func TestProduceRecordsMetrics(t *testing.T) {
 	request := requestWithHashes("req-1", map[string]int{"hash-1": 1, "hash-2": 1})
 
 	initialQueries := testutil.ToFloat64(encoderCacheQueriesTotal)
-	
+
 	// Produce should call recordItemLookups
 	require.NoError(t, producer.Produce(context.Background(), request, nil))
 
