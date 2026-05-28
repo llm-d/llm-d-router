@@ -121,8 +121,7 @@ type ActiveFlowConnection interface {
 //
 // Conformance: Implementations MUST be goroutine-safe.
 type ManagedQueue interface {
-	// Add attempts to enqueue an item, performing an atomic check on the parent shard's lifecycle state before adding
-	// the item to the underlying queue.
+	// Add attempts to enqueue an item.
 	Add(item flowcontrol.QueueItemAccessor) error
 
 	// Remove atomically finds and removes an item from the underlying queue using its handle.

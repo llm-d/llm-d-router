@@ -837,8 +837,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 func TestFlowController_WorkerManagement(t *testing.T) {
 	t.Parallel()
 
-	// Startup validates that the controller correctly identifies and shuts down workers whose shards no longer
-	// exist in the registry.
+	// Startup validates that the worker starts
 	t.Run("Startup", func(t *testing.T) {
 		t.Parallel()
 
@@ -853,10 +852,6 @@ func TestFlowController_WorkerManagement(t *testing.T) {
 		processor := &mockProcessor{runStarted: make(chan struct{})}
 
 		h := newUnitHarness(t.Context(), t, &Config{}, mockRegistry, processor)
-
-		// Pre-populate the controller with initial worker, simulating a previous state.
-
-		// Start the worker using the internal mechanism.
 
 		// Wait for the worker goroutine to have started and captured its context.
 		select {

@@ -18,7 +18,7 @@ limitations under the License.
 //
 // The FlowController is the central processing engine of the Flow Control layer. It is a high-throughput
 // component responsible for managing the lifecycle of all incoming requests. It achieves this by acting as a stateless
-// supervisor that orchestrates a  stateful worker (SProcessor).
+// supervisor that orchestrates a stateful worker (Processor).
 package controller
 
 import (
