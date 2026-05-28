@@ -220,10 +220,19 @@ jobs:
           commit-sha: ${{ github.sha }}
 
   e2e-gaie:
-    needs: [check-changes, e2e-build]
+    needs: check-changes
     if: ${{ needs.check-changes.outputs.src == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: traffic
+            label-filter: "!GAIEMetrics && !GAIELeaderElection"
+          - name: metrics
+            label-filter: "GAIEMetrics"
+    name: e2e-gaie (${{ matrix.suite.name }})
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -248,11 +257,12 @@ jobs:
         if: steps.image-cache.outputs.cache-hit == 'true'
         run: docker load < /tmp/e2e-images.tar
 
-      - name: Run make test-e2e-gaie
+      - name: Run e2e-gaie (${{ matrix.suite.name }})
         shell: bash
         env:
           GO_MOD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-mod-cache }}
           GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
+          E2E_LABEL_FILTER: ${{ matrix.suite.label-filter }}
         run: make test-e2e-gaie-run
 
       - name: Save pinned e2e images to cache
@@ -264,7 +274,7 @@ jobs:
             -o /tmp/e2e-images.tar
 
   e2e-router:
-    needs: [check-changes, e2e-build]
+    needs: check-changes
     if: ${{ needs.check-changes.outputs.src == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -273,7 +283,13 @@ jobs:
       matrix:
         suite:
           - name: pd
-            label-filter: "!Disruptive && !Extended"
+            label-filter: "!Disruptive && !Extended && !SharedStorage && !Metrics"
+          - name: pd-shared-storage-deprecated
+            label-filter: "SharedStorage && DeprecatedPD"
+          - name: pd-shared-storage-disagg
+            label-filter: "SharedStorage && Disagg"
+          - name: pd-metrics
+            label-filter: "Metrics"
           - name: extended
             label-filter: "Extended"
           - name: disruption

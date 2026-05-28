@@ -51,10 +51,13 @@ const (
 	// servicesManifest is the manifest for the EPP's service resources.
 	servicesManifest = "../../deploy/environments/dev/e2e-infra/services.yaml"
 
-	// CI splits scheduler e2e specs with label filters:
-	// !Disruptive && !Extended, Extended, and Disruptive.
-	extendedTestLabel   = "Extended"
-	disruptiveTestLabel = "Disruptive"
+	// CI shards scheduler e2e specs with label filters.
+	extendedTestLabel      = "Extended"
+	disruptiveTestLabel    = "Disruptive"
+	sharedStorageTestLabel = "SharedStorage"
+	metricsTestLabel       = "Metrics"
+	deprecatedPDTestLabel  = "DeprecatedPD"
+	disaggTestLabel        = "Disagg"
 )
 
 var (

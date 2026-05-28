@@ -77,7 +77,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 		})
 	})
 
-	ginkgo.When("Running a PD configuration (deprecated pd-profile-handler)", func() {
+	ginkgo.When("Running a PD configuration (deprecated pd-profile-handler)", ginkgo.Label(metricsTestLabel, deprecatedPDTestLabel), func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects = createInferencePool(1, true)
 
@@ -150,12 +150,14 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 	for _, tc := range []struct {
 		name   string
 		config string
+		label  string
 	}{
-		{"deprecated pd-profile-handler", deprecatedPdConfig},
-		{"disagg-profile-handler", pdConfig},
+		{"deprecated pd-profile-handler", deprecatedPdConfig, deprecatedPDTestLabel},
+		{"disagg-profile-handler", pdConfig, disaggTestLabel},
 	} {
 		config := tc.config // capture for closure
-		ginkgo.When("Running a PD configuration with shared-storage connector using "+tc.name, func() {
+		label := tc.label
+		ginkgo.When("Running a PD configuration with shared-storage connector using "+tc.name, ginkgo.Label(sharedStorageTestLabel, label), func() {
 			ginkgo.It("should run regular (non-streaming) requests successfully", func() {
 				infPoolObjects = createInferencePool(1, true)
 
@@ -326,7 +328,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 		})
 	}
 
-	ginkgo.When("Running a PD configuration with disagg-profile-handler and metrics validation", func() {
+	ginkgo.When("Running a PD configuration with disagg-profile-handler and metrics validation", ginkgo.Label(metricsTestLabel, disaggTestLabel), func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects = createInferencePool(1, true)
 

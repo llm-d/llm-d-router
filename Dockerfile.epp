@@ -21,7 +21,8 @@ COPY go.mod go.mod
 COPY go.sum go.sum
 
 # Download dependencies - this layer is cached as long as go.mod/go.sum are unchanged
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # Copy the go source
 COPY apix/     apix/
@@ -30,10 +31,13 @@ COPY internal/ internal/
 COPY pkg/      pkg/
 COPY version/  version/
 
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # Build EPP
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags="${LDFLAGS} -X github.com/llm-d/llm-d-router/version.CommitSHA=${COMMIT_SHA} -X github.com/llm-d/llm-d-router/version.BuildRef=${BUILD_REF}" \
     -o bin/epp cmd/epp/main.go
 

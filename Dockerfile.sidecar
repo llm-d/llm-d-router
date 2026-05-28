@@ -18,7 +18,8 @@ WORKDIR /workspace
 COPY go.mod go.mod
 COPY go.sum go.sum
 # Download dependencies - this layer is cached as long as go.mod/go.sum are unchanged
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # Copy the go source
 COPY cmd/pd-sidecar/main.go cmd/cmd.go
@@ -31,7 +32,9 @@ COPY pkg/telemetry pkg/telemetry
 # was called. For example, if we call make image-build in a local env which has the Apple Silicon M1 SO
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o bin/pd-sidecar \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o bin/pd-sidecar \
        -ldflags="${LDFLAGS} -X github.com/llm-d/llm-d-router/pkg/sidecar/version.CommitSHA=${COMMIT_SHA} -X github.com/llm-d/llm-d-router/pkg/sidecar/version.BuildRef=${BUILD_REF}" \
        cmd/cmd.go
 
