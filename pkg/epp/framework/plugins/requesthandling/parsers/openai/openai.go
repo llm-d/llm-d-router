@@ -48,6 +48,7 @@ const (
 	// to account for optional parameters like "; charset=utf-8" often appended by proxies.
 	eventStreamType = "text/event-stream"
 
+	tokensField              = "tokens"
 	usageField               = "usage"
 	promptTokensField        = "prompt_tokens"
 	inputTokensField         = "input_tokens"
@@ -106,7 +107,7 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if err != nil {
 		return nil, err
 	}
-	delete(bodyMap, "tokens")
+	delete(bodyMap, tokensField)
 	extractedBody.Payload = fwkrh.PayloadMap(bodyMap)
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		extractedBody.Stream = true
