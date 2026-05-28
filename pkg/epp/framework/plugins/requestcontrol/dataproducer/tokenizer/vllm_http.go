@@ -176,7 +176,7 @@ func (r *vllmHTTPRenderer) chatTimeout(payload fwkrh.PayloadMap) time.Duration {
 		if !ok {
 			continue
 		}
-		// Array-shaped content is multimodal; use the longer timeout.
+		// Array-shaped content may require multimodal rendering; use the longer timeout.
 		if parts, ok := message["content"].([]any); ok && len(parts) > 0 {
 			return r.mmTimeout
 		}
