@@ -1043,9 +1043,22 @@ func toRawMap(cfg *configapi.EndpointPickerConfig) map[string]any {
 	if cfg == nil {
 		return nil
 	}
-	var rawMap map[string]any
-	if bytes, err := json.Marshal(cfg); err == nil {
-		_ = json.Unmarshal(bytes, &rawMap)
+
+	bytes, err := json.Marshal(cfg)
+	if err != nil {
+		return map[string]any{
+			"marshalError": err.Error(),
+			"configType":   fmt.Sprintf("%T", cfg),
+		}
 	}
+
+	var rawMap map[string]any
+	if err := json.Unmarshal(bytes, &rawMap); err != nil {
+		return map[string]any{
+			"unmarshalError": err.Error(),
+			"configType":     fmt.Sprintf("%T", cfg),
+		}
+	}
+
 	return rawMap
 }
