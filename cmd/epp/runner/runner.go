@@ -397,7 +397,6 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 				UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
 			},
 		)
-		fc.Start()
 		go registry.Run(ctx)
 		admissionController = requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
 	} else {

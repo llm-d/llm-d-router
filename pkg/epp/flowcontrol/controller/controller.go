@@ -173,14 +173,11 @@ func NewFlowController(
 		fc.logger,
 	)
 
-	return fc
-}
-
-func (fc *FlowController) Start() {
 	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor.")
 
 	go fc.processor.Run(fc.parentCtx)
 
+	return fc
 }
 
 // EnqueueAndWait is the primary, synchronous entry point to the Flow Control system. It submits a request and blocks

@@ -269,7 +269,6 @@ func setupBenchmarkHarness(
 		EndpointCandidates: &mocks.MockEndpointCandidates{},
 		UsageLimitPolicy:   usagelimits.DefaultPolicy()},
 	)
-	fc.Start()
 
 	return fc, detector
 }

@@ -159,7 +159,6 @@ func newIntegrationHarness(ctx context.Context, t *testing.T, cfg *Config, regis
 		UsageLimitPolicy:   usageLimitPolicy,
 		Clock:              mockClock,
 	})
-	fc.Start()
 
 	h := &testHarness{
 		fc:           fc,
@@ -322,7 +321,6 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				})
 			}
 			h.mockRegistry.FlowRegistryDataPlane = &mocks.MockRegistryDataPlane{}
-			h.fc.Start()
 
 			req := newTestRequest(defaultFlowKey)
 			// Use a context with a deadline in the past.
@@ -518,7 +516,6 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 						FlowKeyV:  key,
 					})
 				}
-				h.fc.Start()
 
 				// Act
 				var outcome types.QueueOutcome
@@ -580,7 +577,6 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				},
 			}
 			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: 10 * time.Second}, mockRegistry, processor)
-			h.fc.Start()
 
 			// Create a cancellable context for the request.
 			reqCtx, cancelReq := context.WithCancel(context.Background())
@@ -629,8 +625,6 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				})
 			}
 			h.mockRegistry.FlowRegistryDataPlane = &mocks.MockRegistryDataPlane{}
-
-			h.fc.Start()
 
 			reqCtx, cancelReq := context.WithCancel(context.Background())
 			req := newTestRequest(defaultFlowKey)
@@ -707,7 +701,6 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 					FlowKeyV:  key,
 				})
 			}
-			h.fc.Start()
 
 			req := newTestRequest(defaultFlowKey)
 			// Use a context for the call itself that won't time out independently.
@@ -802,7 +795,6 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			}
 
 			h := newUnitHarness(t.Context(), t, &Config{}, mockRegistry, processor)
-			h.fc.Start()
 
 			// 3. Run EnqueueAndWait in the background.
 			go func() {
@@ -865,7 +857,6 @@ func TestFlowController_WorkerManagement(t *testing.T) {
 		// Pre-populate the controller with initial worker, simulating a previous state.
 
 		// Start the worker using the internal mechanism.
-		h.fc.Start()
 
 		// Wait for the worker goroutine to have started and captured its context.
 		select {
