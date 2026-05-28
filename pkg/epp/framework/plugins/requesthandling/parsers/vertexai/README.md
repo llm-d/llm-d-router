@@ -1,45 +1,46 @@
 # Vertex AI Parser Plugin
 
-**Type:** `vertexai-parser`
+The Vertex AI Parser plugin (`vertexai-parser`) implements the `fwkrh.Parser` interface for the Vertex AI gRPC API. It enables the `llm-d-router` to parse and route incoming Vertex AI gRPC requests and extract metrics from their responses.
 
-Parses H2C (HTTP/2 cleartext) requests and responses in the Vertex AI gRPC API format. This parser is typically used when the EPP fronts a backend running the Vertex AI PredictionService.
+## How it Works
 
-Extracts raw JSON payloads embedded within Vertex AI's gRPC request/response framing (specifically under `HttpBody`) and delegates the extraction to the OpenAI parser.
+Vertex AI's flexible prediction services wrap standard OpenAI-compatible payloads inside gRPC protobuf envelopes. Instead of fully re-implementing the JSON parsing, the Vertex AI parser acts as a wrapper that:
+1. **Parses the outer gRPC frame** to extract the raw protobuf payload.
+2. **Unmarshals the protobuf request** into the corresponding Vertex AI message type.
+3. **Extracts the inner JSON payload** from the embedded `HttpBody`.
+4. **Delegates to the OpenAI parser** by cloning the HTTP headers, setting the path to an OpenAI-compatible route, and passing the extracted JSON.
+5. **Packages the results**, including the original protobuf request in the `Payload` metadata so downstream plugins can access the full gRPC context.
 
-Supports the following Vertex AI `PredictionService` endpoints:
+## Supported gRPC Methods
 
-- `PredictionService/ChatCompletions` (maps to standard `/chat/completions` OpenAI payloads)
-- `PredictionService/StreamRawPredict` (forced to use the OpenAI response API format, mapping to standard `/responses` OpenAI payloads)
+The parser automatically matches incoming requests based on the `:path` header suffix:
 
----
+| gRPC Method Suffix | Protocol Message | Inner OpenAI Path | Description |
+| :--- | :--- | :--- | :--- |
+| `PredictionService/ChatCompletions` | `aiplatformpb.ChatCompletionsRequest` | `/chat/completions` | OpenAI-compatible Chat Completions service. |
+| `PredictionService/StreamRawPredict` | `aiplatformpb.StreamRawPredictRequest` | `/responses` | Streaming raw prediction service. |
+| `PredictionService/RawPredict` | `aiplatformpb.RawPredictRequest` | `/responses` | Non-streaming raw prediction service. |
 
-## Protocol & API Reference
+## Response Parsing
 
-The gRPC services and payloads parsed by this plugin are defined in Google's official API definitions:
+For responses, the parser:
+1. Extracts the gRPC payload and unmarshals it into `httpbody.HttpBody`.
+2. Extracts the raw JSON data from the body.
+3. Delegates to the OpenAI parser to extract token usage metrics (`prompt_tokens`, `completion_tokens`, `total_tokens`) which are then recorded by the router.
 
-- [Vertex AI PredictionService Proto Definition](https://github.com/googleapis/googleapis/blob/89c3153888201c9e80bc5ec78d6ffca0debe6b52/google/cloud/aiplatform/v1beta1/prediction_service.proto)
+## Configuration
 
----
+To enable the Vertex AI parser, configure it in your `EndpointPickerConfig` under the `requestHandler` section:
 
-## Unsupported Endpoints
+```yaml
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+requestHandler:
+  parser:
+    pluginRef: vertexai-parser
+plugins:
+  - name: vertexai-parser
+    type: vertexai-parser
+```
 
-If an incoming gRPC request path does not match any of the supported Vertex AI endpoints:
-
-- The parser returns `&fwkrh.ParseResult{Skip: true}, nil`.
-- This instructs the EPP requesthandling framework to skip this parser and try the next registered parser in the configuration chain.
-
----
-
-## Adding a New Endpoint
-
-To add support for a new Vertex AI gRPC endpoint:
-
-1. **Define the Path Suffix**: In `vertexai.go`, declare the suffix constant for the new gRPC prediction endpoint (e.g., `PredictionService/NewMethod`) and its target OpenAI-style mapping path.
-2. **Update `ParseRequest`**: Add a new matched case in the `ParseRequest` switch block.
-3. **Update `vertexai_test.go`**
-
----
-
-## Related Documentation
-
-- [Parsers Index](../README.md)
+No additional parameters are required.
