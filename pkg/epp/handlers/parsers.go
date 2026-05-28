@@ -22,7 +22,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
-// Config holds the configuration for the SaturationDetector.
+// Config holds the configuration for the Parser.
 type Config struct {
 	Parser fwkrh.Parser
 }
