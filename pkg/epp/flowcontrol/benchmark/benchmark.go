@@ -257,22 +257,18 @@ func setupBenchmarkHarness(
 	cfg := customCfg
 	if cfg == nil {
 		cfg = &controller.Config{
-			DefaultRequestTTL:               5 * time.Minute,
-			ProcessorReconciliationInterval: 1 * time.Hour, // Effectively disabled
-			ExpiryCleanupInterval:           1 * time.Hour, // Effectively disabled
-			EnqueueChannelBufferSize:        2000,
+			DefaultRequestTTL:        5 * time.Minute,
+			ExpiryCleanupInterval:    1 * time.Hour, // Effectively disabled
+			EnqueueChannelBufferSize: 2000,
 		}
 	}
 
-	fc, err := controller.NewFlowController(ctx, "benchmark", cfg, controller.Deps{
+	fc := controller.NewFlowController(ctx, "benchmark", cfg, controller.Deps{
 		Registry:           reg,
 		SaturationDetector: detector,
 		EndpointCandidates: &mocks.MockEndpointCandidates{},
 		UsageLimitPolicy:   usagelimits.DefaultPolicy()},
 	)
-	if err != nil {
-		b.Fatalf("Failed to init FlowController: %v", err)
-	}
 
 	return fc, detector
 }

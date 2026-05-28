@@ -281,6 +281,24 @@ func TestGetContentBlocks(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			name: "Generate_TokenIDs",
+			request: &fwksched.InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					Generate: &fwkrh.GenerateRequest{
+						TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+					},
+				},
+			},
+			blockSizeTokens: 4,
+			multimodalCfg:   nil,
+			expectedContentBlocks: []HashBlock{
+				{Tokens: []uint32{1, 2, 3, 4}},
+				{Tokens: []uint32{5, 6, 7, 8}},
+				{Tokens: []uint32{9, 10}},
+			},
+			expectErr: false,
+		},
+		{
 			name: "Invalid_Body",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{},

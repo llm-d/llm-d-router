@@ -220,7 +220,9 @@ func estimateContextLength(request *scheduling.InferenceRequest) int {
 	if request == nil || request.Body == nil {
 		return 0
 	}
-
+	if request.Body.Generate != nil {
+		return len(request.Body.Generate.TokenIDs)
+	}
 	totalChars := 0
 
 	// Handle chat completions

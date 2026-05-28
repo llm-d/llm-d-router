@@ -39,7 +39,7 @@ export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 
 # CPU-only vLLM image that exposes `vllm launch render` for the token-producer
 # plugin's HTTP backend.
-export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.19.1
+export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.21.0
 
 # Images consumed only by the coordinator-e-p-d-pools env (make coordinator-epd-pools-env-dev-kind).
 COORDINATOR_TAG ?= dev

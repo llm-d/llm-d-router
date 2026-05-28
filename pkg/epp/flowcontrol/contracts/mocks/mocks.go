@@ -18,7 +18,7 @@ limitations under the License.
 //
 // # Testing Philosophy: High-Fidelity Mocks
 //
-// The components that consume these contracts, particularly the `controller.ShardProcessor`, are complex, concurrent
+// The components that consume these contracts, particularly the `controller.Processor`, are complex, concurrent
 // orchestrators. Testing them reliably requires more than simple stubs. It requires high-fidelity mocks that allow for
 // the deterministic simulation of race conditions and specific failure modes.
 //
@@ -66,14 +66,14 @@ func (m *MockRegistryDataPlane) FairnessPolicy(priority int) (flowcontrol.Fairne
 	if m.FairnessPolicyFunc != nil {
 		return m.FairnessPolicyFunc(priority)
 	}
-	return nil, errors.New("sentinel error for mock shard")
+	return nil, errors.New("sentinel error for mock data plane")
 }
 
 func (m *MockRegistryDataPlane) PriorityBandAccessor(priority int) (flowcontrol.PriorityBandAccessor, error) {
 	if m.PriorityBandAccessorFunc != nil {
 		return m.PriorityBandAccessorFunc(priority)
 	}
-	return nil, errors.New("sentinel error for mock shard")
+	return nil, errors.New("sentinel error for mock data plane")
 }
 
 func (m *MockRegistryDataPlane) AllOrderedPriorityLevels() []int {
@@ -199,7 +199,7 @@ var _ contracts.SafeQueue = &MockSafeQueue{}
 // --- ManagedQueue Mock ---
 
 // MockManagedQueue is a high-fidelity, thread-safe mock of the `contracts.ManagedQueue` interface, designed
-// specifically for testing the concurrent `controller/internal.ShardProcessor`.
+// specifically for testing the concurrent `controller/internal.Processor`.
 //
 // This mock is essential for creating deterministic and focused unit tests. It allows for precise control over queue
 // behavior and enables the testing of critical edge cases (e.g., empty queues, dispatch failures) in complete

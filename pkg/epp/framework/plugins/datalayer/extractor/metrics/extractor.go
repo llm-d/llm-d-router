@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -86,19 +85,10 @@ func (ext *Extractor) TypedName() fwkplugin.TypedName {
 	return ext.typedName
 }
 
-// ExpectedType defines the type expected by the metrics.Extractor - a
-// parsed output from a Prometheus metrics endpoint.
-func (ext *Extractor) ExpectedInputType() reflect.Type {
-	return sourcemetrics.PrometheusMetricType
-}
-
-// Extract transforms the data source output into a concrete attribute that
-// is stored on the given endpoint.
-func (ext *Extractor) Extract(ctx context.Context, data any, ep fwkdl.Endpoint) error {
-	families, ok := data.(sourcemetrics.PrometheusMetricMap)
-	if !ok {
-		return fmt.Errorf("unexpected input in Extract: %T", data)
-	}
+// Extract transforms the typed metrics payload into endpoint attributes.
+func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]) error {
+	families := in.Payload
+	ep := in.Endpoint
 
 	engineType := getEngineTypeFromEndpoint(ep, ext.engineLabelKey)
 	mapping, ok := ext.registry.Get(engineType)

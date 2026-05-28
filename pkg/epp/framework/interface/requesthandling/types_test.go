@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLLMRequestBody_PromptText(t *testing.T) {
@@ -370,4 +371,71 @@ func TestPrompt_MarshalJSON(t *testing.T) {
 
 	empty, _ := Prompt{}.MarshalJSON()
 	assert.Equal(t, `""`, string(empty))
+}
+
+func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		want        []uint32
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:  "valid token ids",
+			input: `{"token_ids":[1,2,3]}`,
+			want:  []uint32{1, 2, 3},
+		},
+		{
+			name:  "max uint32 boundary accepted",
+			input: `{"token_ids":[4294967295]}`,
+			want:  []uint32{4294967295},
+		},
+		{
+			name:        "negative token id rejected",
+			input:       `{"token_ids":[1,2,-1]}`,
+			wantErr:     true,
+			errContains: "token_ids[2]: invalid value",
+		},
+		{
+			name:        "non-integer token id rejected",
+			input:       `{"token_ids":[1,2.5,3]}`,
+			wantErr:     true,
+			errContains: "token_ids[1]: invalid value",
+		},
+		{
+			name:        "value above MaxUint32 rejected",
+			input:       `{"token_ids":[4294967296]}`,
+			wantErr:     true,
+			errContains: "token_ids[0]: invalid value",
+		},
+		{
+			name:        "NaN token id rejected",
+			input:       `{"token_ids":[1,NaN]}`,
+			wantErr:     true,
+			errContains: "invalid character",
+		},
+		{
+			name:        "malformed json rejected",
+			input:       `{"token_ids":[`,
+			wantErr:     true,
+			errContains: "unexpected end of JSON",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var g GenerateRequest
+			err := g.UnmarshalJSON([]byte(tt.input))
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, g.TokenIDs)
+		})
+	}
 }

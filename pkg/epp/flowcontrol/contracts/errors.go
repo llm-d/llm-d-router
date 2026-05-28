@@ -31,13 +31,6 @@ var (
 	// ErrPolicyQueueIncompatible indicates that a selected policy is not compatible with the capabilities of the queue.
 	ErrPolicyQueueIncompatible = errors.New("policy is not compatible with queue capabilities")
 
-	// ErrInvalidShardCount indicates that an invalid shard count was provided (e.g., zero or negative).
-	ErrInvalidShardCount = errors.New("invalid shard count")
-
-	// ErrShardDraining indicates that an operation could not be completed because the target shard is in the process of
-	// being gracefully drained. The caller should retry the operation on a different, Active shard.
-	ErrShardDraining = errors.New("shard is draining")
-
 	// ErrInvalidQueueItemHandle indicates that a QueueItemHandle provided to a SafeQueue operation (e.g.,
 	// SafeQueue.Remove()) is not valid for that queue, has been invalidated, or does not correspond to an actual item in
 	// the queue.

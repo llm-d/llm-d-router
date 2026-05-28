@@ -3,8 +3,6 @@ package models
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"reflect"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -15,18 +13,13 @@ import (
 // asynchronously and not tied to incoming requests
 var _ fwkplugin.ProducerPlugin = &ModelExtractor{}
 
-var _ fwkdl.Extractor = &ModelExtractor{}
+var _ fwkdl.PollingExtractor[*ModelResponse] = &ModelExtractor{}
 
-// ModelResponse is the response from /v1/models API
+// ModelResponse is the response from /v1/models API.
 type ModelResponse struct {
 	Object string                 `json:"object"`
 	Data   []attrmodels.ModelData `json:"data"`
 }
-
-// ModelsResponseType is the type of models response
-var (
-	ModelsResponseType = reflect.TypeOf(ModelResponse{})
-)
 
 // ModelExtractor implements the models extraction.
 type ModelExtractor struct {
@@ -50,11 +43,6 @@ func (me *ModelExtractor) TypedName() fwkplugin.TypedName {
 	return me.typedName
 }
 
-// ExpectedInputType defines the type expected by ModelExtractor.
-func (me *ModelExtractor) ExpectedInputType() reflect.Type {
-	return ModelsResponseType
-}
-
 // ModelServerExtractorFactory is a factory function used to instantiate data layer's
 // models extractor plugins specified in a configuration.
 func ModelServerExtractorFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -63,21 +51,13 @@ func ModelServerExtractorFactory(name string, _ *json.Decoder, _ fwkplugin.Handl
 	return extractor, nil
 }
 
-// Extract transforms the data source output into a concrete attribute that
-// is stored on the given endpoint.
-func (me *ModelExtractor) Extract(_ context.Context, data any, ep fwkdl.Endpoint) error {
-	models, ok := data.(*ModelResponse)
-	if !ok {
-		return fmt.Errorf("unexpected input in Extract: %T", data)
-	}
-
-	ep.GetAttributes().Put(me.dk.String(), attrmodels.ModelDataCollection(models.Data))
+// Extract stores the model list as an endpoint attribute.
+func (me *ModelExtractor) Extract(_ context.Context, in fwkdl.PollInput[*ModelResponse]) error {
+	in.Endpoint.GetAttributes().Put(me.dk.String(), attrmodels.ModelDataCollection(in.Payload.Data))
 	return nil
 }
 
 // Produces returns data produced by the producer.
-// This is a map from data key (string) produced to
-// the data type of the key (represented as data with default value casted as any field).
 func (me *ModelExtractor) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{me.dk: attrmodels.ModelDataCollection{}}
 }

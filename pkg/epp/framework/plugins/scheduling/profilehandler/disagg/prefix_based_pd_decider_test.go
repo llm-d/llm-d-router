@@ -128,6 +128,17 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 			}),
 			want: 3,
 		},
+		{
+			name: "generate request returns exact token count",
+			req: &scheduling.InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					Generate: &fwkrh.GenerateRequest{
+						TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7},
+					},
+				},
+			},
+			want: 7,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

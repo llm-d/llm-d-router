@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	extmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
@@ -43,7 +44,7 @@ func TestNewEndpointDispatchesEventWithNoPollers(t *testing.T) {
 		Sources: []DataSourceConfig{
 			{
 				Plugin:     epSrc,
-				Extractors: []fwkdl.ExtractorBase{extractor},
+				Extractors: []fwkplugin.Plugin{extractor},
 			},
 		},
 	}

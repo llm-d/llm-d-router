@@ -31,6 +31,8 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+
+	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 )
 
 func TestFactory(t *testing.T) {
@@ -61,6 +63,37 @@ func TestExtractMMItemsFromTokenizedPrompt(t *testing.T) {
 	})
 
 	assert.ElementsMatch(t, []attrmm.MatchItem{{Hash: "image-a", Size: 1}, {Hash: "image-b", Size: 1}}, items)
+}
+
+func TestExtractMMItemsFromGenerateFeatures(t *testing.T) {
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Generate: &fwkrh.GenerateRequest{
+				TokenIDs: []uint32{1, 2, 3},
+				Features: &tokenization.MultiModalFeatures{
+					MMHashes: map[string][]string{
+						"image": {"image-a", "image-b", "image-a"},
+						"audio": {"audio-x", ""},
+					},
+				},
+			},
+		},
+	})
+
+	assert.ElementsMatch(t, []attrmm.MatchItem{
+		{Hash: "image-a", Size: 1},
+		{Hash: "image-b", Size: 1},
+		{Hash: "audio-x", Size: 1},
+	}, items)
+}
+
+func TestExtractMMItemsGenerateWithoutFeaturesReturnsNil(t *testing.T) {
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Generate: &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3}},
+		},
+	})
+	assert.Nil(t, items)
 }
 
 func TestExtractMMItemsFromStructuredChat(t *testing.T) {
@@ -245,8 +278,6 @@ func TestStalePodCleanup(t *testing.T) {
 
 func TestProducerEndpointExtractorInterfaceContract(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
-
-	assert.Equal(t, fwkdl.EndpointEventReflectType, producer.ExpectedInputType())
 	var _ fwkdl.EndpointExtractor = producer
 	assert.True(t, reflect.TypeOf(producer).Implements(reflect.TypeFor[fwkdl.EndpointExtractor]()))
 }
@@ -257,7 +288,7 @@ func TestExtractEndpointRemovesDeletedPod(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
 	producer.putCacheEntry("hash-a", podA, podB)
 
-	err := producer.ExtractEndpoint(context.Background(), fwkdl.EndpointEvent{
+	err := producer.Extract(context.Background(), fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
 		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: podB}, nil),
 	})
