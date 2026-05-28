@@ -120,9 +120,9 @@ func (p *ProbabilisticAdmitter) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-// AdmitRequest implements requestcontrol.Admitter.
+// Admit implements requestcontrol.Admitter.
 // Returns nil to admit, or a ResourceExhausted error to reject.
-func (p *ProbabilisticAdmitter) AdmitRequest(_ context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
+func (p *ProbabilisticAdmitter) Admit(_ context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
 	if request == nil {
 		return nil
 	}

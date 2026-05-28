@@ -309,3 +309,62 @@ func TestConsumes_DeclaresTokenizedPrompt(t *testing.T) {
 	_, ok := p.Consumes()[expected]
 	require.True(t, ok)
 }
+
+// New() must resolve blockSize via tokenProcessor.BlockSize(). Both the
+// canonical blockSizeTokens field and the deprecated blockSize field flow
+// to the per-endpoint MatchInfo; the latter via kvblock's promotion rule.
+func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *kvblock.TokenProcessorConfig
+		want int
+	}{
+		//nolint:staticcheck // SA1019: exercising backward-compat path on purpose.
+		{name: "blockSize only (deprecated)", cfg: &kvblock.TokenProcessorConfig{BlockSize: 64}, want: 64},
+		{name: "blockSizeTokens only", cfg: &kvblock.TokenProcessorConfig{BlockSizeTokens: 64}, want: 64},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Cancel on test exit so the indexer.Run + kvevents pool workers
+			// New() launches don't outlive the subtest.
+			ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+			t.Cleanup(cancel)
+
+			idxCfg, err := kvcache.NewDefaultConfig()
+			require.NoError(t, err)
+			cfg := PluginConfig{
+				TokenProcessorConfig: tc.cfg,
+				IndexerConfig:        idxCfg,
+				KVEventsConfig:       kvevents.DefaultConfig(),
+			}
+			name := "t-" + tc.name
+			p, err := New(ctx, name, cfg)
+			require.NoError(t, err)
+
+			tokens := make([]uint32, 64)
+			for i := range tokens {
+				tokens[i] = uint32(i + 1)
+			}
+			endpoint := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+				NamespacedName: k8stypes.NamespacedName{Name: "pod-x"},
+				Address:        "10.0.0.9",
+				Port:           "8080",
+			}, nil, nil)
+			req := &scheduling.InferenceRequest{
+				RequestID:   "r",
+				TargetModel: "m",
+				Body: &fwkrh.InferenceRequestBody{
+					TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: tokens},
+				},
+			}
+			require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{endpoint}))
+
+			raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name).String())
+			require.True(t, ok)
+			info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+			require.True(t, ok, "expected *PrefixCacheMatchInfo, got %T", raw)
+			assert.Equal(t, tc.want, info.BlockSizeTokens())
+			assert.Equal(t, 1, info.TotalBlocks())
+		})
+	}
+}

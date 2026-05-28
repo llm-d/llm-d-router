@@ -84,7 +84,7 @@ func (s *TokenLoadScorer) Consumes() map[fwkplugin.DataKey]any {
 	}
 }
 
-func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.CycleState, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	logger := log.FromContext(ctx)
 
@@ -92,9 +92,12 @@ func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.CycleState, _ *
 		endpointID := endpoint.GetMetadata().NamespacedName.String()
 		tokenLoad := 0.0
 
+		// Single read: accumulated in-flight load plus the projected impact
+		// of the request being scored, both carried on the same InFlightLoad
+		// struct populated by InFlightLoadProducer.Produce.
 		if val, ok := endpoint.Get(s.inFlightLoadDataKey.String()); ok {
-			if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
-				tokenLoad = float64(load.Tokens)
+			if load, ok := val.(*attrconcurrency.InFlightLoad); ok && load != nil {
+				tokenLoad = float64(load.Tokens + load.UncachedRequestTokens)
 			}
 		}
 

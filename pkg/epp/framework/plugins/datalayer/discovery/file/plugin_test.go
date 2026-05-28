@@ -73,7 +73,12 @@ func writeTemp(t *testing.T, content string) string {
 }
 
 func newFD(path string, watch bool) *FileDiscovery {
-	return &FileDiscovery{path: path, watchFile: watch, endpoints: make(map[types.NamespacedName]struct{})}
+	return &FileDiscovery{
+		path:      path,
+		watchFile: watch,
+		endpoints: make(map[types.NamespacedName]struct{}),
+		ready:     make(chan struct{}),
+	}
 }
 
 const validYAML = `
@@ -118,10 +123,32 @@ func TestStart_LoadsEndpoints(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	require.NoError(t, newFD(path, false).Start(ctx, notifier))
+	fd := newFD(path, false)
+	require.NoError(t, fd.Start(ctx, notifier))
 
 	assert.ElementsMatch(t, []string{"ns1/ep1", "default/ep2"}, notifier.upsertedNames())
 	assert.Empty(t, notifier.deleted)
+
+	select {
+	case <-fd.Ready():
+	default:
+		t.Fatal("Ready() channel should be closed after a successful initial load")
+	}
+}
+
+func TestReady_StaysOpenWhenInitialLoadFails(t *testing.T) {
+	fd := newFD("/nonexistent/endpoints.yaml", false)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := fd.Start(ctx, &recordingNotifier{})
+	require.Error(t, err)
+
+	select {
+	case <-fd.Ready():
+		t.Fatal("Ready() must not be closed when initial load fails")
+	default:
+	}
 }
 
 func TestStart_DefaultNamespace(t *testing.T) {

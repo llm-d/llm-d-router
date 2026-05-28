@@ -41,10 +41,9 @@ func TestNewConfig(t *testing.T) {
 			opts:      nil,
 			expectErr: false,
 			expectedCfg: Config{
-				DefaultRequestTTL:               0,
-				ExpiryCleanupInterval:           defaultExpiryCleanupInterval,
-				ProcessorReconciliationInterval: defaultProcessorReconciliationInterval,
-				EnqueueChannelBufferSize:        defaultEnqueueChannelBufferSize,
+				DefaultRequestTTL:        0,
+				ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
+				EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
 			},
 		},
 		{
@@ -54,10 +53,9 @@ func TestNewConfig(t *testing.T) {
 			},
 			expectErr: false,
 			expectedCfg: Config{
-				DefaultRequestTTL:               10 * time.Second,
-				ExpiryCleanupInterval:           defaultExpiryCleanupInterval,
-				ProcessorReconciliationInterval: defaultProcessorReconciliationInterval,
-				EnqueueChannelBufferSize:        defaultEnqueueChannelBufferSize,
+				DefaultRequestTTL:        10 * time.Second,
+				ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
+				EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
 			},
 		},
 		{
@@ -65,15 +63,13 @@ func TestNewConfig(t *testing.T) {
 			opts: []ConfigOption{
 				WithDefaultRequestTTL(10 * time.Second),
 				WithExpiryCleanupInterval(2 * time.Second),
-				WithProcessorReconciliationInterval(10 * time.Second),
 				WithEnqueueChannelBufferSize(50),
 			},
 			expectErr: false,
 			expectedCfg: Config{
-				DefaultRequestTTL:               10 * time.Second,
-				ExpiryCleanupInterval:           2 * time.Second,
-				ProcessorReconciliationInterval: 10 * time.Second,
-				EnqueueChannelBufferSize:        50,
+				DefaultRequestTTL:        10 * time.Second,
+				ExpiryCleanupInterval:    2 * time.Second,
+				EnqueueChannelBufferSize: 50,
 			},
 		},
 		{
@@ -94,13 +90,6 @@ func TestNewConfig(t *testing.T) {
 			name: "ZeroExpiryCleanupInterval_ShouldError",
 			opts: []ConfigOption{
 				WithExpiryCleanupInterval(0),
-			},
-			expectErr: true,
-		},
-		{
-			name: "InvalidProcessorReconciliationInterval_ShouldError",
-			opts: []ConfigOption{
-				WithProcessorReconciliationInterval(-1 * time.Second),
 			},
 			expectErr: true,
 		},
@@ -145,8 +134,6 @@ func TestNewConfigFromAPI(t *testing.T) {
 			assertion: func(t *testing.T, cfg *Config) {
 				assert.Equal(t, defaultExpiryCleanupInterval, cfg.ExpiryCleanupInterval,
 					"ExpiryCleanupInterval should be defaulted")
-				assert.Equal(t, defaultProcessorReconciliationInterval, cfg.ProcessorReconciliationInterval,
-					"ProcessorReconciliationInterval should be defaulted")
 				assert.Equal(t, defaultEnqueueChannelBufferSize, cfg.EnqueueChannelBufferSize,
 					"EnqueueChannelBufferSize should be defaulted")
 				assert.Equal(t, time.Duration(0), cfg.DefaultRequestTTL, "DefaultRequestTTL should default to 0 (disabled)")
@@ -170,8 +157,6 @@ func TestNewConfigFromAPI(t *testing.T) {
 			},
 			assertion: func(t *testing.T, cfg *Config) {
 				assert.Equal(t, 1*time.Minute, cfg.DefaultRequestTTL)
-				// ProcessorReconciliationInterval is not exposed, so it should stay default.
-				assert.Equal(t, defaultProcessorReconciliationInterval, cfg.ProcessorReconciliationInterval)
 			},
 		},
 		{

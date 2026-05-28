@@ -25,6 +25,7 @@ import (
 )
 
 const (
+	PreAdmissionExtensionPoint      = "PreAdmission"
 	PreRequestExtensionPoint        = "PreRequest"
 	ResponseReceivedExtensionPoint  = "ResponseReceived"
 	ResponseStreamingExtensionPoint = "ResponseStreaming"
@@ -76,7 +77,14 @@ type DataProducer interface {
 // the request is admitted only if all plugins say that the request should be admitted.
 type Admitter interface {
 	plugin.Plugin
-	// AdmitRequest returns the denial reason, wrapped as error if the request is denied.
+	// Admit returns the denial reason, wrapped as error if the request is denied.
 	// If the request is allowed, it returns nil.
-	AdmitRequest(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
+	Admit(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
+}
+
+// PreAdmitter runs after InferenceRequest creation but before admission control.
+// It can mutate InferenceRequest fields such as FairnessID and Headers.
+type PreAdmitter interface {
+	plugin.Plugin
+	PreAdmit(ctx context.Context, request *fwksched.InferenceRequest) error
 }

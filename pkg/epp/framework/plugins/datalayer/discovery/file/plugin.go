@@ -27,6 +27,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/fsnotify/fsnotify"
 	"k8s.io/apimachinery/pkg/types"
@@ -75,6 +76,9 @@ type FileDiscovery struct {
 	// zero-byte structs. Compared against the entries parsed during a
 	// reload to compute which endpoints to delete from the datastore.
 	endpoints map[types.NamespacedName]struct{}
+
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 var _ fwkdl.EndpointDiscovery = (*FileDiscovery)(nil)
@@ -98,10 +102,15 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 		path:      p.Path,
 		watchFile: p.WatchFile,
 		endpoints: make(map[types.NamespacedName]struct{}),
+		ready:     make(chan struct{}),
 	}, nil
 }
 
 func (f *FileDiscovery) TypedName() fwkplugin.TypedName { return f.typedName }
+
+// Ready returns a channel closed after the first successful load of the
+// endpoints file. See EndpointDiscovery.Ready for the contract.
+func (f *FileDiscovery) Ready() <-chan struct{} { return f.ready }
 
 // Start loads the endpoints file, notifies the datastore, then optionally watches
 // for changes. Blocks until ctx is cancelled or a fatal error occurs.
@@ -111,6 +120,7 @@ func (f *FileDiscovery) Start(ctx context.Context, notifier fwkdl.DiscoveryNotif
 	if err := f.load(notifier); err != nil {
 		return fmt.Errorf("file-discovery: initial load failed: %w", err)
 	}
+	f.readyOnce.Do(func() { close(f.ready) })
 
 	if !f.watchFile {
 		<-ctx.Done()

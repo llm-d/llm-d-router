@@ -46,8 +46,9 @@ schedulingProfiles:
 featureGates:
 - dataLayer
 - flowControl
-saturationDetector:
-  pluginRef: utilization-detector
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
 `
 
 // successConfigText represents a fully populated, valid configuration.
@@ -77,8 +78,9 @@ schedulingProfiles:
 featureGates:
 - dataLayer
 - flowControl
-saturationDetector:
-  pluginRef: utilization-detector
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
 `
 
 // successNoProfilesText represents a valid config with plugins but no profiles.
@@ -241,8 +243,9 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-parser:
-  pluginRef: openai-parser
+requestHandler:
+  parser:
+    pluginRef: openai-parser
 `
 
 // successWithNoParserConfigText tests that a default openaiParser is injected when no parser is configured.
@@ -271,8 +274,9 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-parser:
-  pluginRef: openaiParser
+requestHandler:
+  parser:
+    pluginRef: openaiParser
 `
 
 // --- Invalid Configurations (Syntax/Structure) ---
@@ -679,8 +683,9 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-parser:
-  pluginRef: maxScore # Wrong name
+requestHandler:
+  parser:
+    pluginRef: maxScore # Wrong name
 `
 
 // errorParserWrongPluginTypeName references a plugin of the wrong name.
@@ -696,8 +701,9 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-parser:
-  pluginRef: wrongParser # Wrong names
+requestHandler:
+  parser:
+    pluginRef: wrongParser # Wrong names
 `
 
 // successFilterOrderConfigText defines filters and scorers in a specific order.
@@ -732,4 +738,39 @@ schedulingProfiles:
   - pluginRef: scorer-Y
     weight: 20
   - pluginRef: maxScorePicker
+`
+
+// successDeprecatedTopLevelSaturationDetectorText tests that top-level saturationDetector is correctly loaded,
+// copied to nested location, and handled.
+const successDeprecatedTopLevelSaturationDetectorText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+featureGates:
+- flowControl
+saturationDetector:
+  pluginRef: utilization-detector
+`
+
+// successDeprecatedTopLevelParserText tests that top-level parser is correctly loaded,
+// copied to nested location, and handled.
+const successDeprecatedTopLevelParserText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- type: openai-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+parser:
+  pluginRef: openai-parser
 `

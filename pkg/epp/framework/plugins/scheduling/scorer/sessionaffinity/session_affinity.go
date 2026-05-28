@@ -62,7 +62,7 @@ func (s *SessionAffinity) Category() scheduling.ScorerCategory {
 }
 
 // Score assign a high score to the pod used in previous requests and zero to others
-func (s *SessionAffinity) Score(ctx context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
 	sessionToken := request.Headers[sessionTokenHeader]
 	podName := ""

@@ -250,7 +250,7 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 // Pick implements scheduling.ProfileHandler.
 // Stages run in order: decode → encode (optional) → prefill (optional).
 // Returns the next profile to execute, or an empty map when all stages are done.
-func (h *Handler) Pick(ctx context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
+func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
 	tracer := telemetry.Tracer()
 	ctx, span := tracer.Start(ctx, "llm_d.epp.disagg.profile_handler.pick",
@@ -329,7 +329,6 @@ func (h *Handler) Pick(ctx context.Context, _ *scheduling.CycleState, request *s
 // Builds the final SchedulingResult from whichever stages ran successfully.
 func (h *Handler) ProcessResults(
 	_ context.Context,
-	_ *scheduling.CycleState,
 	request *scheduling.InferenceRequest,
 	profileResults map[string]*scheduling.ProfileRunResult,
 ) (*scheduling.SchedulingResult, error) {

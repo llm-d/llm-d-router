@@ -109,13 +109,13 @@ func (p *ContextLengthAware) WithName(name string) *ContextLengthAware {
 
 // Filter filters out endpoints that don't have a context length range matching the request.
 // This is only active when enableFiltering is true.
-func (p *ContextLengthAware) Filter(ctx context.Context, cycleState *scheduling.CycleState, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	if !p.enableFiltering {
 		return endpoints // pass through if not in filter mode
 	}
 
 	logger := log.FromContext(ctx).V(logging.DEBUG).WithName("ContextLengthAware.Filter")
-	contextLength, usedTokenizer := p.getContextLength(ctx, cycleState, request)
+	contextLength, usedTokenizer := p.getContextLength(ctx, request)
 	logger.V(logging.TRACE).Info("Filtering endpoints by context length", "contextLength", contextLength, "usedTokenizer", usedTokenizer)
 
 	filteredEndpoints := []scheduling.Endpoint{}
@@ -153,9 +153,9 @@ func (p *ContextLengthAware) Filter(ctx context.Context, cycleState *scheduling.
 
 // Score scores endpoints based on how well their context length ranges match the request.
 // Endpoints with tighter/more specific ranges matching the request get higher scores.
-func (p *ContextLengthAware) Score(ctx context.Context, cycleState *scheduling.CycleState, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (p *ContextLengthAware) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	logger := log.FromContext(ctx).V(logging.DEBUG).WithName("ContextLengthAware.Score")
-	contextLength, usedTokenizer := p.getContextLength(ctx, cycleState, request)
+	contextLength, usedTokenizer := p.getContextLength(ctx, request)
 	logger.V(logging.TRACE).Info("Scoring endpoints by context length", "contextLength", contextLength, "usedTokenizer", usedTokenizer)
 
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
@@ -199,7 +199,7 @@ func (p *ContextLengthAware) Category() scheduling.ScorerCategory {
 // tokenizer DataProducer plugin, falling back to character-based estimation
 // when tokens are not available.
 // Returns the token count and a boolean indicating whether precise tokenization was used.
-func (p *ContextLengthAware) getContextLength(ctx context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest) (int, bool) {
+func (p *ContextLengthAware) getContextLength(ctx context.Context, request *scheduling.InferenceRequest) (int, bool) {
 	if request == nil || request.Body == nil {
 		return 0, false
 	}
@@ -220,7 +220,9 @@ func estimateContextLength(request *scheduling.InferenceRequest) int {
 	if request == nil || request.Body == nil {
 		return 0
 	}
-
+	if request.Body.Generate != nil {
+		return len(request.Body.Generate.TokenIDs)
+	}
 	totalChars := 0
 
 	// Handle chat completions

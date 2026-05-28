@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -116,8 +115,10 @@ func TestLoadRawConfiguration(t *testing.T) {
 					datalayer.ExperimentalDatalayerFeatureGate,
 					flowcontrol.FeatureGate,
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "utilization-detector",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "utilization-detector",
+					},
 				},
 			},
 			wantErr:    false,
@@ -151,8 +152,10 @@ func TestLoadRawConfiguration(t *testing.T) {
 					datalayer.ExperimentalDatalayerFeatureGate,
 					flowcontrol.FeatureGate,
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "utilization-detector",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "utilization-detector",
+					},
 				},
 			},
 			wantErr:    false,
@@ -237,6 +240,73 @@ func TestLoadRawConfiguration(t *testing.T) {
 			},
 			wantErr:    false,
 			deprecated: false,
+		},
+		{
+			name:       "Success - Deprecated Top-level SaturationDetector",
+			configText: successDeprecatedTopLevelSaturationDetectorText,
+			want: &configapi.EndpointPickerConfig{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "EndpointPickerConfig",
+					APIVersion: "llm-d.ai/v1alpha1",
+				},
+				Plugins: []configapi.PluginSpec{
+					{Name: "maxScore", Type: "max-score-picker"},
+				},
+				SchedulingProfiles: []configapi.SchedulingProfile{
+					{
+						Name: "default",
+						Plugins: []configapi.SchedulingPlugin{
+							{PluginRef: "maxScore"},
+						},
+					},
+				},
+				FeatureGates: configapi.FeatureGates{
+					flowcontrol.FeatureGate,
+				},
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "utilization-detector",
+					},
+				},
+				SaturationDetector: &configapi.SaturationDetectorConfig{
+					PluginRef: "utilization-detector",
+				},
+			},
+			wantErr:    false,
+			deprecated: true,
+		},
+		{
+			name:       "Success - Deprecated Top-level Parser",
+			configText: successDeprecatedTopLevelParserText,
+			want: &configapi.EndpointPickerConfig{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "EndpointPickerConfig",
+					APIVersion: "llm-d.ai/v1alpha1",
+				},
+				Plugins: []configapi.PluginSpec{
+					{Name: "maxScore", Type: "max-score-picker"},
+					{Name: "openai-parser", Type: "openai-parser"},
+				},
+				SchedulingProfiles: []configapi.SchedulingProfile{
+					{
+						Name: "default",
+						Plugins: []configapi.SchedulingPlugin{
+							{PluginRef: "maxScore"},
+						},
+					},
+				},
+				FeatureGates: configapi.FeatureGates{},
+				RequestHandler: &configapi.RequestHandlerConfig{
+					Parser: &configapi.ParserConfig{
+						PluginRef: "openai-parser",
+					},
+				},
+				Parser: &configapi.ParserConfig{
+					PluginRef: "openai-parser",
+				},
+			},
+			wantErr:    false,
+			deprecated: true,
 		},
 		{
 			name:       "Error - Invalid YAML",
@@ -458,6 +528,25 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.NotNil(t, cfg.ParserConfig, "Parser config should be loaded")
 				require.Equal(t, "openaiParser", cfg.ParserConfig.Parser.TypedName().Name, "Should have openai parser name")
 				require.Equal(t, openai.OpenAIParserType, cfg.ParserConfig.Parser.TypedName().Type, "Should contain openai parser type")
+			},
+		},
+
+		{
+			name:       "Success - Deprecated Top-level SaturationDetector",
+			configText: successDeprecatedTopLevelSaturationDetectorText,
+			wantErr:    false,
+			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, cfg.SaturationDetector, "SaturationDetector should be loaded")
+				require.Equal(t, "utilization-detector", cfg.SaturationDetector.TypedName().Name)
+			},
+		},
+		{
+			name:       "Success - Deprecated Top-level Parser",
+			configText: successDeprecatedTopLevelParserText,
+			wantErr:    false,
+			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, cfg.ParserConfig, "ParserConfig should be loaded")
+				require.Equal(t, "openai-parser", cfg.ParserConfig.Parser.TypedName().Name)
 			},
 		},
 
@@ -700,7 +789,7 @@ func (m *mockScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-func (m *mockScorer) Score(context.Context, *fwksched.CycleState, *fwksched.InferenceRequest, []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+func (m *mockScorer) Score(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	return nil
 }
 
@@ -710,7 +799,7 @@ type mockPicker struct{ mockPlugin }
 // compile-time type assertion
 var _ fwksched.Picker = &mockPicker{}
 
-func (m *mockPicker) Pick(context.Context, *fwksched.CycleState, []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
+func (m *mockPicker) Pick(context.Context, []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
 	return nil
 }
 
@@ -720,11 +809,11 @@ type mockHandler struct{ mockPlugin }
 // compile-time type assertion
 var _ fwksched.ProfileHandler = &mockHandler{}
 
-func (m *mockHandler) Pick(context.Context, *fwksched.CycleState, *fwksched.InferenceRequest, map[string]fwksched.SchedulerProfile,
+func (m *mockHandler) Pick(context.Context, *fwksched.InferenceRequest, map[string]fwksched.SchedulerProfile,
 	map[string]*fwksched.ProfileRunResult) map[string]fwksched.SchedulerProfile {
 	return nil
 }
-func (m *mockHandler) ProcessResults(context.Context, *fwksched.CycleState, *fwksched.InferenceRequest,
+func (m *mockHandler) ProcessResults(context.Context, *fwksched.InferenceRequest,
 	map[string]*fwksched.ProfileRunResult) (*fwksched.SchedulingResult, error) {
 	return nil, errors.New("sentinel error for mock handler")
 }
@@ -742,11 +831,7 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, endpoints []fwk
 	return 0.5
 }
 
-func (m *mockSource) AddExtractor(_ fwkdl.Extractor) error {
-	return nil
-}
-
-func (m *mockSource) Collect(ctx context.Context, ep fwkdl.Endpoint) error {
+func (m *mockSource) Collect(_ context.Context, _ fwkdl.Endpoint) error {
 	return nil
 }
 
@@ -754,22 +839,10 @@ func (m *mockSource) Extractors() []string {
 	return []string{}
 }
 
-func (m *mockSource) OutputType() reflect.Type {
-	return fwkdl.NotificationEventType
-}
-
-func (m *mockSource) ExtractorType() reflect.Type {
-	return fwkdl.ExtractorType
-}
-
-// Mock Extractor
+// Mock Extractor: satisfies Extractor[NotificationEvent] for loader tests.
 type mockExtractor struct{ mockPlugin }
 
-func (m *mockExtractor) ExpectedInputType() reflect.Type {
-	return reflect.TypeFor[string]()
-}
-
-func (m *mockExtractor) Extract(ctx context.Context, data any, ep fwkdl.Endpoint) error {
+func (m *mockExtractor) Extract(_ context.Context, _ fwkdl.NotificationEvent) error {
 	return nil
 }
 
@@ -862,15 +935,19 @@ func TestValidateSaturationDetector(t *testing.T) {
 		{
 			name: "Nil SaturationDetector",
 			cfg: &configapi.EndpointPickerConfig{
-				SaturationDetector: nil,
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: nil,
+				},
 			},
 			wantErr: false,
 		},
 		{
 			name: "Empty PluginRef",
 			cfg: &configapi.EndpointPickerConfig{
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "",
+					},
 				},
 			},
 			wantErr: true,
@@ -881,8 +958,10 @@ func TestValidateSaturationDetector(t *testing.T) {
 				Plugins: []configapi.PluginSpec{
 					{Name: "valid-plugin", Type: "valid-type"},
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "valid-plugin",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "valid-plugin",
+					},
 				},
 			},
 			wantErr: false,
@@ -893,8 +972,10 @@ func TestValidateSaturationDetector(t *testing.T) {
 				Plugins: []configapi.PluginSpec{
 					{Name: "other-plugin", Type: "valid-type"},
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "valid-plugin",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "valid-plugin",
+					},
 				},
 			},
 			wantErr: true,
@@ -919,8 +1000,10 @@ func TestEnsureSaturationDetector(t *testing.T) {
 
 	t.Run("Plugin in allPlugins", func(t *testing.T) {
 		cfg := &configapi.EndpointPickerConfig{
-			SaturationDetector: &configapi.SaturationDetectorConfig{
-				PluginRef: "existing-plugin",
+			FlowControl: &configapi.FlowControlConfig{
+				SaturationDetector: &configapi.SaturationDetectorConfig{
+					PluginRef: "existing-plugin",
+				},
 			},
 		}
 		handle := igwtestutils.NewTestHandle(context.Background())
@@ -930,13 +1013,15 @@ func TestEnsureSaturationDetector(t *testing.T) {
 
 		err := ensureSaturationDetector(cfg, handle, allPlugins)
 		require.NoError(t, err)
-		require.Equal(t, "existing-plugin", cfg.SaturationDetector.PluginRef)
+		require.Equal(t, "existing-plugin", cfg.FlowControl.SaturationDetector.PluginRef)
 	})
 
 	t.Run("Empty PluginRef in allPlugins", func(t *testing.T) {
 		cfg := &configapi.EndpointPickerConfig{
-			SaturationDetector: &configapi.SaturationDetectorConfig{
-				PluginRef: "",
+			FlowControl: &configapi.FlowControlConfig{
+				SaturationDetector: &configapi.SaturationDetectorConfig{
+					PluginRef: "",
+				},
 			},
 		}
 		handle := igwtestutils.NewTestHandle(context.Background())
@@ -946,7 +1031,7 @@ func TestEnsureSaturationDetector(t *testing.T) {
 
 		err := ensureSaturationDetector(cfg, handle, allPlugins)
 		require.NoError(t, err)
-		require.Equal(t, "utilization-detector", cfg.SaturationDetector.PluginRef)
+		require.Equal(t, "utilization-detector", cfg.FlowControl.SaturationDetector.PluginRef)
 	})
 }
 

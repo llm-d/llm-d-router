@@ -169,8 +169,9 @@ schedulingProfiles:
     plugins:
       - pluginRef: queue-scorer
       - pluginRef: kv-cache-utilization-scorer
-parser:
-  pluginRef: passthrough-parser
+requestHandler:
+  parser:
+    pluginRef: passthrough-parser
 featureGates:
   - enableLegacyMetrics
 `,

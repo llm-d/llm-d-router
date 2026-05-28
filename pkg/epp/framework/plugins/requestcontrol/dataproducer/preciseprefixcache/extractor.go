@@ -19,7 +19,6 @@ package preciseprefixcache
 import (
 	"context"
 	"fmt"
-	"reflect"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -29,16 +28,11 @@ import (
 
 var _ fwkdl.EndpointExtractor = &Producer{}
 
-// ExpectedInputType reports the data-layer event type this extractor consumes.
-func (p *Producer) ExpectedInputType() reflect.Type {
-	return fwkdl.EndpointEventReflectType
-}
-
-// ExtractEndpoint processes endpoint lifecycle events emitted by the
+// Extract processes endpoint lifecycle events emitted by the
 // endpoint-notification-source: add/update installs a per-pod ZMQ KV-events
 // subscriber, delete tears one down. No-op unless per-pod discovery is
 // enabled.
-func (p *Producer) ExtractEndpoint(ctx context.Context, event fwkdl.EndpointEvent) error {
+func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
 		return nil
 	}

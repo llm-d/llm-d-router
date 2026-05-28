@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +24,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
@@ -252,7 +252,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Scorer, error)
 		pluginState:        plugin.NewPluginState(ctx),
 		speculativeCache:   speculativeCache,
 		speculativeTTL:     speculativeTTL,
-		blockSizeTokens:    config.TokenProcessorConfig.BlockSize,
+		blockSizeTokens:    tokenProcessor.BlockSize(),
 		speculativeEnabled: config.SpeculativeIndexing,
 		subscriberCtx:      ctx,
 		prefixMatchDataKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
@@ -406,7 +406,7 @@ func (s *Scorer) Produce(ctx context.Context,
 
 // Score returns score/totalBlocks per endpoint, clipped to [0, 1]. Reuses
 // Produce's cached blockKeys/scores when present; otherwise calls getScores.
-func (s *Scorer) Score(ctx context.Context, cycleState *scheduling.CycleState, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *Scorer) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	// Start tracing span for scoring operation
 	tracer := telemetry.Tracer()
 	ctx, span := tracer.Start(ctx, "llm_d.epp.scorer.prefix_cache",
@@ -459,7 +459,7 @@ func (s *Scorer) Score(ctx context.Context, cycleState *scheduling.CycleState, r
 	} else {
 		// Fallback: compute scores directly (backward compatible path).
 		var scoreErr error
-		scores, totalBlocks, scoreErr = s.getScores(ctx, cycleState, request)
+		scores, totalBlocks, scoreErr = s.getScores(ctx, request)
 		if scoreErr != nil {
 			logger.Error(scoreErr, "Failed to get endpoint scores")
 			span.SetStatus(codes.Error, scoreErr.Error())
@@ -602,13 +602,7 @@ func (s *Scorer) PreRequest(ctx context.Context,
 
 // --- EndpointExtractor implementation ---
 
-// ExpectedInputType declares the data type this extractor consumes.
-// Required by the data layer's source/extractor type-compatibility check.
-func (s *Scorer) ExpectedInputType() reflect.Type {
-	return fwkdl.EndpointEventReflectType
-}
-
-// ExtractEndpoint reacts to endpoint lifecycle events from the data layer's
+// Extract reacts to endpoint lifecycle events from the data layer's
 // endpoint-notification-source: an add/update installs a per-pod ZMQ
 // subscriber so KV-cache events flow into the index; a delete tears it down.
 // No-op when DiscoverPods is disabled or the namespaced name is unavailable.
@@ -616,7 +610,7 @@ func (s *Scorer) ExpectedInputType() reflect.Type {
 // Being called at all is also the signal that the data layer is wired for
 // this scorer; the legacy in-Score discovery path turns itself off from
 // here on.
-func (s *Scorer) ExtractEndpoint(ctx context.Context, event fwkdl.EndpointEvent) error {
+func (s *Scorer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 	s.extractorActive.Store(true)
 	if !s.kvEventsConfig.DiscoverPods || s.kvEventsConfig.PodDiscoveryConfig == nil {
 		return nil
@@ -698,24 +692,18 @@ func (s *Scorer) ensureSubscribersForEndpoints(ctx context.Context, endpoints []
 
 // --- Internal helper methods ---
 
-// computeBlockKeys extracts block keys from an LLM request. Prefers the
-// tokens written by the token-producer DataProducer plugin; falls back to
-// the deprecated prompt-string path on the indexer when no tokens are
-// attached. Returns nil keys (no error) when neither path can produce them.
+// computeBlockKeys extracts block keys from an LLM request. Prefers pre-tokenized
+// input (TokenizedPrompt or Body.Generate); falls back to the deprecated
+// prompt-string path on the indexer. Returns nil keys (no error) when no path
+// can produce them.
 func (s *Scorer) computeBlockKeys(ctx context.Context,
 	request *scheduling.InferenceRequest) ([]kvblock.BlockHash, error) {
 	if request.Body == nil {
 		return nil, nil
 	}
 
-	if tp := request.Body.TokenizedPrompt; tp != nil && len(tp.TokenIDs) > 0 {
-		var extraFeatures []*kvblock.BlockExtraFeatures
-		if len(tp.MultiModalFeatures) > 0 {
-			mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(tp.MultiModalFeatures)
-			extraFeatures = kvblock.ComputeBlockExtraFeatures(
-				mmHashes, mmPlaceholders, s.blockSizeTokens, len(tp.TokenIDs))
-		}
-		return s.kvCacheIndexer.ComputeBlockKeysFromTokens(ctx, tp.TokenIDs, request.TargetModel, extraFeatures)
+	if tokens, extra, ok := s.extractTokensAndFeatures(request.Body); ok {
+		return s.kvCacheIndexer.ComputeBlockKeysFromTokens(ctx, tokens, request.TargetModel, extra)
 	}
 
 	var (
@@ -737,6 +725,38 @@ func (s *Scorer) computeBlockKeys(ctx context.Context,
 		return nil, nil
 	}
 	return keys, err
+}
+
+// generateExtraFeatures derives KV-block extra features from a GenerateRequest's
+// pre-tokenized multimodal hashes. Returns nil when no Features are present, so
+// the scorer's text-only path is unaffected.
+func generateExtraFeatures(g *fwkrh.GenerateRequest, blockSize int) []*kvblock.BlockExtraFeatures {
+	if g == nil || g.Features == nil || len(g.Features.MMHashes) == 0 {
+		return nil
+	}
+	return kvblock.ComputeBlockExtraFeatures(
+		g.Features.MMHashes, g.Features.MMPlaceholders, blockSize, len(g.TokenIDs))
+}
+
+// extractTokensAndFeatures returns pre-tokenized inputs from the request body
+// when available — preferring TokenizedPrompt (populated by the tokenizer
+// DataProducer plugin), then falling back to a Generate body. Returns ok=false
+// when neither path can supply tokens; the caller then falls back to the
+// prompt/chat tokenization paths.
+func (s *Scorer) extractTokensAndFeatures(body *fwkrh.InferenceRequestBody) ([]uint32, []*kvblock.BlockExtraFeatures, bool) {
+	if tp := body.TokenizedPrompt; tp != nil && len(tp.TokenIDs) > 0 {
+		var extraFeatures []*kvblock.BlockExtraFeatures
+		if len(tp.MultiModalFeatures) > 0 {
+			mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(tp.MultiModalFeatures)
+			extraFeatures = kvblock.ComputeBlockExtraFeatures(
+				mmHashes, mmPlaceholders, s.blockSizeTokens, len(tp.TokenIDs))
+		}
+		return tp.TokenIDs, extraFeatures, true
+	}
+	if g := body.Generate; g != nil && len(g.TokenIDs) > 0 {
+		return g.TokenIDs, generateExtraFeatures(g, s.blockSizeTokens), true
+	}
+	return nil, nil, false
 }
 
 // extractPodSet builds a set of pod identifiers from endpoints for filtered index lookups.
@@ -772,42 +792,40 @@ func (s *Scorer) scoreBlockKeys(ctx context.Context, blockKeys []kvblock.BlockHa
 // getScores returns (scores, totalBlocks). Tokens path uses ScoreTokens;
 // prompt/chat fallback uses ComputeBlockKeys + scoreBlockKeys (single
 // tokenization).
-func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest) (map[string]float64, int, error) {
+func (s *Scorer) getScores(ctx context.Context, request *scheduling.InferenceRequest) (map[string]float64, int, error) {
+	if request.Body == nil {
+		return nil, 0, errors.New("invalid request: body is nil")
+	}
+
 	logger := log.FromContext(ctx).WithName(s.typedName.String())
 	traceLogger := logger.V(logging.TRACE)
 
 	traceLogger.Info("Getting scores",
-		"isChatCompletions", request.Body != nil && request.Body.ChatCompletions != nil,
-		"isCompletions", request.Body != nil && request.Body.Completions != nil)
+		"isChatCompletions", request.Body.ChatCompletions != nil,
+		"isCompletions", request.Body.Completions != nil,
+		"isGenerate", request.Body.Generate != nil,
+		"hasTokenizedPrompt", request.Body.TokenizedPrompt != nil)
 
-	// Prefer pre-tokenized input from the tokenizer DataProducer plugin.
-	if request.Body != nil {
-		if tp := request.Body.TokenizedPrompt; tp != nil && len(tp.TokenIDs) > 0 {
-			traceLogger.Info("tokens found on request, skipping tokenization")
+	// Prefer pre-tokenized input (TokenizedPrompt from the tokenizer plugin or
+	// a Body.Generate carrying token IDs directly).
+	if tokens, extraFeatures, ok := s.extractTokensAndFeatures(request.Body); ok {
+		traceLogger.Info("Scoring with pre-tokenized input", "tokenCount", len(tokens))
 
-			var extraFeatures []*kvblock.BlockExtraFeatures
-			if len(tp.MultiModalFeatures) > 0 {
-				mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(tp.MultiModalFeatures)
-				extraFeatures = kvblock.ComputeBlockExtraFeatures(
-					mmHashes, mmPlaceholders, s.blockSizeTokens, len(tp.TokenIDs))
-			}
-
-			scores, err := s.kvCacheIndexer.ScoreTokens(ctx, tp.TokenIDs, request.TargetModel, nil, extraFeatures)
-			if err != nil {
-				return nil, 0, fmt.Errorf("failed to get endpoint scores for tokens: %w", err)
-			}
-			// floor(tokens/blockSize) — trailing partial block is dropped.
-			totalBlocks := 0
-			if s.blockSizeTokens > 0 {
-				totalBlocks = len(tp.TokenIDs) / s.blockSizeTokens
-			}
-			return scores, totalBlocks, nil
+		scores, err := s.kvCacheIndexer.ScoreTokens(ctx, tokens, request.TargetModel, nil, extraFeatures)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to get endpoint scores for tokens: %w", err)
 		}
+		// floor(tokens/blockSize) — trailing partial block is dropped.
+		totalBlocks := 0
+		if s.blockSizeTokens > 0 {
+			totalBlocks = len(tokens) / s.blockSizeTokens
+		}
+		return scores, totalBlocks, nil
 	}
 
 	// The upstream parser guarantees exactly one body is populated, but we defensively prioritize chat completions.
 	// If an unexpected dual payload slips through (parser regression/new client), log it and use chat semantics.
-	if request.Body != nil && request.Body.ChatCompletions != nil {
+	if request.Body.ChatCompletions != nil {
 		if request.Body.Completions != nil {
 			traceLogger.Info("Both chat/completions and completions present; defaulting to chat/completions")
 		}
@@ -835,7 +853,7 @@ func (s *Scorer) getScores(ctx context.Context, _ *scheduling.CycleState, reques
 	}
 
 	// For regular completions, use the prompt directly.
-	if request.Body != nil && request.Body.Completions != nil {
+	if request.Body.Completions != nil {
 		prompt := request.Body.Completions.Prompt.Raw
 		traceLogger.Info("Using completion prompt directly", "promptLength", len(prompt))
 

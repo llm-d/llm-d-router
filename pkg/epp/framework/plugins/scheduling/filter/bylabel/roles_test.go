@@ -36,7 +36,7 @@ func TestRoleFilterDecodeRole(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	rf := NewDecodeRole()
 
-	filtered := rf.Filter(ctx, nil, nil, endpoints)
+	filtered := rf.Filter(ctx, nil, endpoints)
 
 	names := make([]string, len(filtered))
 	for i, ep := range filtered {
@@ -72,7 +72,7 @@ func TestRoleFilterPrefillRole(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	rf := NewPrefillRole()
 
-	filtered := rf.Filter(ctx, nil, nil, endpoints)
+	filtered := rf.Filter(ctx, nil, endpoints)
 
 	names := make([]string, len(filtered))
 	for i, ep := range filtered {
@@ -103,7 +103,7 @@ func TestRoleFilterEncodeRole(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	rf := NewEncodeRole()
 
-	filtered := rf.Filter(ctx, nil, nil, endpoints)
+	filtered := rf.Filter(ctx, nil, endpoints)
 
 	names := make([]string, len(filtered))
 	for i, ep := range filtered {
@@ -182,9 +182,9 @@ func TestRoleFilterEmptyEndpoints(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	rf := NewDecodeRole()
 
-	result := rf.Filter(ctx, nil, nil, []scheduling.Endpoint{})
+	result := rf.Filter(ctx, nil, []scheduling.Endpoint{})
 	assert.Empty(t, result)
 
-	result = rf.Filter(ctx, nil, nil, nil)
+	result = rf.Filter(ctx, nil, nil)
 	assert.Empty(t, result)
 }

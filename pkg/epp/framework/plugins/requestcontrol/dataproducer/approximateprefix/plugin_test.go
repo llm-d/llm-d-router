@@ -809,6 +809,91 @@ func TestFactory_DeprecatedBlockSizeMapped(t *testing.T) {
 		"deprecated 'blockSize' should be cleared after mapping")
 }
 
+func TestPrefixPluginGenerateRequest(t *testing.T) {
+	// BlockSizeTokens=1 means each block covers 1 token (4 bytes in the serialized key).
+	cfg := config{
+		BlockSizeTokens:        1,
+		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
+	)
+	endpoints := []fwksched.Endpoint{endpoint}
+
+	// 4 token IDs → 4 blocks at blockSize 1.
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Generate: &fwkrh.GenerateRequest{
+				TokenIDs: []uint32{10, 20, 30, 40},
+			},
+		},
+	}
+
+	err = p.Produce(context.Background(), req, endpoints)
+	assert.NoError(t, err)
+
+	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
+	assert.NoError(t, err)
+	assert.NotNil(t, state)
+	// 4 token IDs at blockSize 1 token → 4 blocks.
+	assert.Equal(t, 4, len(state.PrefixHashes))
+
+	// Verify match info was set on the endpoint (0 match since indexer is empty).
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
+	info, ok := endpoint.Get(key)
+	assert.True(t, ok)
+	prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
+	assert.Equal(t, 0, prefixInfo.MatchBlocks())
+	assert.Equal(t, 4, prefixInfo.TotalBlocks())
+}
+
+func TestPrefixPluginGenerateMatchesSameTokens(t *testing.T) {
+	// Two generate requests with identical token IDs should produce the same hashes.
+	cfg := config{
+		BlockSizeTokens:      1,
+		LRUCapacityPerServer: defaultLRUCapacityPerServer,
+	}
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}},
+		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
+	)
+	endpoints := []fwksched.Endpoint{endpoint}
+
+	tokenIDs := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
+
+	req1 := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Generate: &fwkrh.GenerateRequest{TokenIDs: tokenIDs},
+		},
+	}
+	req2 := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Generate: &fwkrh.GenerateRequest{TokenIDs: tokenIDs},
+		},
+	}
+
+	_ = p.Produce(context.Background(), req1, endpoints)
+	state1, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req1.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
+
+	_ = p.Produce(context.Background(), req2, endpoints)
+	state2, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req2.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
+
+	assert.Equal(t, state1.PrefixHashes, state2.PrefixHashes, "identical token IDs must produce identical hashes")
+}
+
 func randomPrompt(n int) string {
 	runes := []rune("abcdefghijklmnopqrstuvwxyz")
 	var sb strings.Builder

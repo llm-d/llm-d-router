@@ -301,7 +301,7 @@ func TestLabelSelectorFilterFiltering(t *testing.T) {
 
 			ctx := utils.NewTestContext(t)
 
-			filteredEndpoints := blf.Filter(ctx, nil, nil, endpoints)
+			filteredEndpoints := blf.Filter(ctx, nil, endpoints)
 
 			actualEndpointNames := make([]string, len(filteredEndpoints))
 			for idx, endpoint := range filteredEndpoints {
@@ -327,24 +327,24 @@ func TestLabelSelectorFilterEdgeCases(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	t.Run("empty endpoints slice", func(t *testing.T) {
-		result := blf.Filter(ctx, nil, nil, []scheduling.Endpoint{})
+		result := blf.Filter(ctx, nil, []scheduling.Endpoint{})
 		assert.Empty(t, result)
 	})
 
 	t.Run("nil endpoints slice", func(t *testing.T) {
-		result := blf.Filter(ctx, nil, nil, nil)
+		result := blf.Filter(ctx, nil, nil)
 		assert.Empty(t, result)
 	})
 
 	t.Run("endpoints with nil labels", func(t *testing.T) {
 		endpoints := []scheduling.Endpoint{createEndpoint(k8stypes.NamespacedName{Name: "pod-1"}, "10.0.0.1", nil)}
-		result := blf.Filter(ctx, nil, nil, endpoints)
+		result := blf.Filter(ctx, nil, endpoints)
 		assert.Empty(t, result, "endpoint with nil labels should not match")
 	})
 
 	t.Run("endpoints with empty labels", func(t *testing.T) {
 		endpoints := []scheduling.Endpoint{createEndpoint(k8stypes.NamespacedName{Name: "pod-1"}, "10.0.0.1", map[string]string{})}
-		result := blf.Filter(ctx, nil, nil, endpoints)
+		result := blf.Filter(ctx, nil, endpoints)
 		assert.Empty(t, result, "endpoint with empty labels should not match")
 	})
 }
@@ -408,7 +408,7 @@ func createEndpoint(nsn k8stypes.NamespacedName, ipaddr string, labels map[strin
 }
 
 func PrefillDecodeRolesInLWS(blf *bylabel.Selector, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
-	return blf.Filter(context.Background(), nil, nil, endpoints)
+	return blf.Filter(context.Background(), nil, endpoints)
 }
 
 // TestDeprecatedSelectorFactoryBackwardCompat verifies that the deprecated DeprecatedSelectorFactory
@@ -431,7 +431,7 @@ func TestDeprecatedSelectorFactoryBackwardCompat(t *testing.T) {
 		createEndpoint(k8stypes.NamespacedName{Name: "redis-1"}, "10.0.0.2", map[string]string{"app": "redis"}),
 	}
 
-	filtered := blf.Filter(ctx, nil, nil, endpoints)
+	filtered := blf.Filter(ctx, nil, endpoints)
 	require.Len(t, filtered, 1)
 	assert.Equal(t, "nginx-1", filtered[0].GetMetadata().NamespacedName.Name)
 }

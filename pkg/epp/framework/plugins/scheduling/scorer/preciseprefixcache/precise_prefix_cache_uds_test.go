@@ -537,7 +537,7 @@ func TestPrefixCacheTracking_Score_UDS(t *testing.T) {
 				}
 			}
 
-			got := prefixCacheScorer.Score(ctx, scheduling.NewCycleState(), tt.request, tt.endpoints)
+			got := prefixCacheScorer.Score(ctx, tt.request, tt.endpoints)
 
 			gotByAddress := make(map[string]float64)
 			for endpoint, score := range got {
@@ -627,7 +627,7 @@ func TestRenderChat_MultimodalContent_UDS(t *testing.T) {
 	}())
 
 	// Compute BlockExtraFeatures from MM features.
-	blockSize := kvblock.DefaultTokenProcessorConfig().BlockSize
+	blockSize := kvblock.DefaultTokenProcessorConfig().BlockSizeTokens
 	extraFeatures := kvblock.ComputeBlockExtraFeatures(
 		mmFeatures.MMHashes, mmFeatures.MMPlaceholders,
 		blockSize, len(tokens))
@@ -737,7 +737,7 @@ func TestMMPipeline_ScoreTokensWithExtraFeatures_UDS(t *testing.T) {
 	tpConfig := kvblock.DefaultTokenProcessorConfig()
 	extraFeatures := kvblock.ComputeBlockExtraFeatures(
 		mmFeatures.MMHashes, mmFeatures.MMPlaceholders,
-		tpConfig.BlockSize, len(tokens))
+		tpConfig.BlockSizeTokens, len(tokens))
 	require.NotNil(t, extraFeatures)
 
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(tpConfig)
@@ -831,7 +831,7 @@ func TestMMPipeline_ScoreTokensWithExtraFeatures_UDS(t *testing.T) {
 		},
 	}
 
-	scores := prefixCacheScorer.Score(ctx, scheduling.NewCycleState(), request, endpoints)
+	scores := prefixCacheScorer.Score(ctx, request, endpoints)
 
 	gotByAddress := make(map[string]float64)
 	for endpoint, score := range scores {

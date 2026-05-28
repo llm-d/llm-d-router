@@ -191,7 +191,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		speculativeCache:   speculativeCache,
 		speculativeTTL:     speculativeTTL,
 		speculativeEnabled: config.SpeculativeIndexing,
-		blockSizeTokens:    config.TokenProcessorConfig.BlockSize,
+		blockSizeTokens:    tokenProcessor.BlockSize(),
 		subscriberCtx:      ctx,
 	}, nil
 }

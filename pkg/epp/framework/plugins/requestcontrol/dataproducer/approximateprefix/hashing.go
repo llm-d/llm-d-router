@@ -150,6 +150,9 @@ func getKVCacheBlocksFromRawPrompt(ctx context.Context, request *scheduling.Infe
 		rawBytes := []byte(request.Body.Completions.Prompt.PlainText())
 		return getKVCacheBlocksFromRawBytes(rawBytes, blockSizeTokens), nil
 
+	case request.Body.Generate != nil:
+		return getKVCacheBlocksFromTokens(request.Body.Generate.TokenIDs, blockSizeTokens), nil
+
 	case request.Body.Embeddings != nil:
 		rawBytes, err := json.Marshal(request.Body.Embeddings.Input)
 		if err != nil {
@@ -159,6 +162,23 @@ func getKVCacheBlocksFromRawPrompt(ctx context.Context, request *scheduling.Infe
 
 	default:
 		return nil, errors.New("invalid request body: no recognized API format found")
+	}
+}
+
+func getKVCacheBlocksFromTokens(ids []uint32, blockSizeTokens int) iter.Seq[HashBlock] {
+	return func(yield func(HashBlock) bool) {
+		if len(ids) == 0 || blockSizeTokens <= 0 {
+			return
+		}
+		for i := 0; i < len(ids); i += blockSizeTokens {
+			end := i + blockSizeTokens
+			if end > len(ids) {
+				end = len(ids)
+			}
+			if !yield(HashBlock{Tokens: ids[i:end]}) {
+				return
+			}
+		}
 	}
 }
 

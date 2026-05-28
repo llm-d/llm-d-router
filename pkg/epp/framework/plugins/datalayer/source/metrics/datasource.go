@@ -53,9 +53,9 @@ type metricsDatasourceParams struct {
 // NewHTTPMetricsDataSource constructs a MetricsDataSource with the given scheme and path.
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
-func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource, error) {
+func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
 	return http.NewHTTPDataSource(scheme, path, defaultMetricsInsecureSkipVerify,
-		MetricsDataSourceType, name, parseMetrics, PrometheusMetricType)
+		MetricsDataSourceType, name, parseMetrics)
 }
 
 // MetricsDataSourceFactory is a factory function used to instantiate data layer's
@@ -72,8 +72,8 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		}
 	}
 
-	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify, MetricsDataSourceType,
-		name, parseMetrics, PrometheusMetricType)
+	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify,
+		MetricsDataSourceType, name, parseMetrics)
 }
 
 // These flags are registered in options.go (server package) and marked as deprecated there.
@@ -147,7 +147,7 @@ func fromBoolFlag(name string) (bool, bool, error) {
 	return b, true, nil
 }
 
-func parseMetrics(data io.Reader) (any, error) {
+func parseMetrics(data io.Reader) (PrometheusMetricMap, error) {
 	parser := expfmt.NewTextParser(model.LegacyValidation)
 	return parser.TextToMetricFamilies(data)
 }

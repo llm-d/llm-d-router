@@ -91,7 +91,7 @@ func (s *Scorer) Consumes() map[plugin.DataKey]any {
 
 // Score scores endpoints by matched multimodal encoder-cache item size divided
 // by total multimodal request item size.
-func (s *Scorer) Score(ctx context.Context, _ *scheduling.CycleState, req *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *Scorer) Score(ctx context.Context, req *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	traceLogger := log.FromContext(ctx).V(logging.TRACE)
 	requestID := ""
 	if req != nil {

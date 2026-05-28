@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${IMAGE_REGISTRY:=ghcr.io/llm-d}"
 
 # Set a default VLLM_SIMULATOR_TAG if not provided
-export VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v0.8.2}"
+export VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v0.9.0}"
 
 # VLLM_IMAGE: the vLLM container image to deploy. Can be a simulator or real vLLM image
 # (e.g., vllm/vllm-openai:v0.16.0 for production). Defaults to the simulator image.
@@ -62,16 +62,9 @@ export SIDECAR_TAG="${SIDECAR_TAG:-dev}"
 SIDECAR_IMAGE="${SIDECAR_IMAGE:-${IMAGE_REGISTRY}/llm-d-router-disagg-sidecar:${SIDECAR_TAG}}"
 export SIDECAR_IMAGE
 
-# Set the default UDS tokenizer image tag
-export UDS_TOKENIZER_TAG="${UDS_TOKENIZER_TAG:-dev}"
-
-# Set a default UDS_TOKENIZER_IMAGE if not provided
-UDS_TOKENIZER_IMAGE="${UDS_TOKENIZER_IMAGE:-${IMAGE_REGISTRY}/llm-d-uds-tokenizer:${UDS_TOKENIZER_TAG}}"
-export UDS_TOKENIZER_IMAGE
-
 # Set a default VLLM_RENDER_IMAGE if not provided (CPU-only vLLM image that
 # runs `vllm launch render` for the token-producer plugin's HTTP backend).
-export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.19.1}"
+export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.21.0}"
 
 # Set the inference pool name for the deployment
 export POOL_NAME="${POOL_NAME:-${MODEL_NAME_SAFE}-inference-pool}"
@@ -330,7 +323,7 @@ load_image() {
     fi
 }
 
-for IMAGE in "${VLLM_IMAGE}" "${EPP_IMAGE}" "${SIDECAR_IMAGE}" "${UDS_TOKENIZER_IMAGE}"; do
+for IMAGE in "${VLLM_IMAGE}" "${EPP_IMAGE}" "${SIDECAR_IMAGE}" "${VLLM_RENDER_IMAGE}"; do
     pull_image "${IMAGE}"
     load_image "${IMAGE}"
 done
@@ -392,14 +385,14 @@ kubectl --context ${KUBE_CONTEXT} create configmap epp-config --from-file=epp-co
 # Deploy Istio base (shared infrastructure)
 kubectl kustomize --enable-helm deploy/environments/dev/base-kind-istio \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
-  ${SIDECAR_IMAGE} ${UDS_TOKENIZER_IMAGE} ${VLLM_RENDER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
+  ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
 ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE}' \
   | kubectl --context ${KUBE_CONTEXT} apply -f -
 
 # Deploy scenario-specific vLLM components
 kubectl kustomize --enable-helm ${KUSTOMIZE_DIR} \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
-  ${SIDECAR_IMAGE} ${UDS_TOKENIZER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} \
+  ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} \
   ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE} \
   ${KV_CONNECTOR_TYPE} ${EC_CONNECTOR_TYPE} ${CONNECTOR_TYPE} ${KV_CACHE_ENABLED} ${HF_TOKEN} ${VLLM_SIM_MODE} \
   ${DECODE_ROLE} ${VLLM_EXTRA_ARGS_E} ${VLLM_EXTRA_ARGS_P} ${VLLM_EXTRA_ARGS_D}' \

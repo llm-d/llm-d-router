@@ -66,14 +66,14 @@ func TestFilter_AffinityThresholdDisabled(t *testing.T) {
 		makeEndpoint("a", 0, 10, 0),
 		makeEndpoint("b", 90, 20, 0),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "affinityThreshold=0 should return all")
 }
 
 func TestFilter_SingleEndpoint(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80})
 	endpoints := []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0)}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result), "single endpoint should always pass")
 }
 
@@ -84,7 +84,7 @@ func TestFilter_NoStickyEndpoints(t *testing.T) {
 		makeEndpoint("b", 20, 20, 0),
 		makeEndpoint("c", 50, 30, 0),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 3, len(result), "no sticky endpoints should return all")
 }
 
@@ -95,7 +95,7 @@ func TestFilter_NarrowToSticky(t *testing.T) {
 		makeEndpoint("b", 85, 120, 0),
 		makeEndpoint("c", 10, 50, 0),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "should narrow to sticky endpoints")
 }
 
@@ -105,7 +105,7 @@ func TestFilter_TTFTPenaltyBreaksStickiness(t *testing.T) {
 		makeEndpoint("a", 90, 500, 0),
 		makeEndpoint("b", 10, 50, 0),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "TTFT penalty should break stickiness")
 }
 
@@ -115,7 +115,7 @@ func TestFilter_InFlightTokenPenaltyBreaksStickiness(t *testing.T) {
 		makeEndpoint("a", 90, 10, 500),
 		makeEndpoint("b", 10, 10, 50),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "In-flight token penalty should break stickiness")
 }
 
@@ -125,7 +125,7 @@ func TestFilter_InFlightTokenPenaltyWithinThreshold(t *testing.T) {
 		makeEndpoint("a", 90, 10, 500),
 		makeEndpoint("b", 10, 10, 50),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result), "In-flight token penalty within threshold should NOT break stickiness")
 	assert.Equal(t, "a", result[0].GetMetadata().NamespacedName.Name)
 }
@@ -136,7 +136,7 @@ func TestFilter_InFlightTokenPenaltyDisabled(t *testing.T) {
 		makeEndpoint("a", 90, 10, 5000), // Huge penalty
 		makeEndpoint("b", 10, 10, 50),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result), "In-flight token penalty=0 should NOT break stickiness")
 	assert.Equal(t, "a", result[0].GetMetadata().NamespacedName.Name)
 }
@@ -147,7 +147,7 @@ func TestFilter_ExplorationProbability(t *testing.T) {
 		makeEndpoint("a", 90, 100, 0),
 		makeEndpoint("b", 10, 50, 0),
 	}
-	result := p.Filter(context.Background(), nil, nil, endpoints)
+	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "epsilon=1.0 should always skip gate")
 }
 

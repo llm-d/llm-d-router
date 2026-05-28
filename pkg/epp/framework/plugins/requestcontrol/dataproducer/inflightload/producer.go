@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"sync"
 	"sync/atomic"
 
@@ -176,13 +175,8 @@ func (p *InFlightLoadProducer) RegisterDependencies(r datalayer.Registrar) error
 	})
 }
 
-// ExpectedInputType defines the type expected by the extractor.
-func (p *InFlightLoadProducer) ExpectedInputType() reflect.Type {
-	return datalayer.EndpointEventReflectType
-}
-
-// ExtractEndpoint handles endpoint deletion events to prune stateful trackers.
-func (p *InFlightLoadProducer) ExtractEndpoint(ctx context.Context, event datalayer.EndpointEvent) error {
+// Extract handles endpoint deletion events to prune stateful trackers.
+func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.EndpointEvent) error {
 	if event.Type != datalayer.EventDelete || event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
 		return nil
 	}
@@ -194,16 +188,30 @@ func (p *InFlightLoadProducer) ExtractEndpoint(ctx context.Context, event datala
 	return nil
 }
 
-func (p *InFlightLoadProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	var inputTokens int64
+	if request != nil {
+		inputTokens = p.tokenEstimator.EstimateInput(request)
+	}
+
 	for _, e := range endpoints {
 		if e == nil || e.GetMetadata() == nil {
 			continue
 		}
 		endpointID := e.GetMetadata().NamespacedName.String()
-		e.Put(p.dk.String(), &attrconcurrency.InFlightLoad{
+
+		load := &attrconcurrency.InFlightLoad{
 			Tokens:   p.tokenTracker.get(endpointID),
 			Requests: p.requestTracker.get(endpointID),
-		})
+		}
+		if request != nil {
+			// Project this request's additional work onto the endpoint: uncached
+			// input tokens (per its prefix-cache state) plus estimated output
+			// when the producer is configured to include it. Per-cycle, not
+			// persisted in the tracker — that happens only on PreRequest.
+			load.UncachedRequestTokens = p.estimateRequestTokens(e, inputTokens)
+		}
+		e.Put(p.dk.String(), load)
 	}
 	return nil
 }
@@ -246,12 +254,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		// Prefer the prefix producer's view (real tokens) when available so the
 		// match-length and the input length are in the same units; fall back to
 		// the (estimated) input tokens otherwise.
-		adjustedInput := uncachedInputTokens(endpoint, inputTokens)
-		tokens := adjustedInput
-		if p.addEstimatedOutputTokens {
-			// Output tokens are based on the full input, not the cached portion.
-			tokens += p.tokenEstimator.EstimateOutput(inputTokens)
-		}
+		tokens := p.estimateRequestTokens(endpoint, inputTokens)
 
 		p.tokenTracker.add(eid, tokens)
 
@@ -268,6 +271,16 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			entry,
 		)
 	}
+}
+
+func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, inputTokens int64) int64 {
+	adjustedInput := uncachedInputTokens(endpoint, inputTokens)
+	tokens := adjustedInput
+	if p.addEstimatedOutputTokens {
+		// Output tokens are based on the full input, not the cached portion.
+		tokens += p.tokenEstimator.EstimateOutput(inputTokens)
+	}
+	return tokens
 }
 
 func (p *InFlightLoadProducer) ResponseBody(

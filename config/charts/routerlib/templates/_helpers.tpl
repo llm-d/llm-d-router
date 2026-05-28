@@ -218,7 +218,7 @@ Standalone uses proxy presets merged with explicit proxy overrides.
 {{- define "llm-d-router.proxy" -}}
 {{- $proxy := deepCopy (.Values.router.proxy | default dict) -}}
 {{- $resolved := $proxy -}}
-{{- if eq .Chart.Name "llm-d-router-standalone" -}}
+{{- if hasPrefix "llm-d-router-standalone" .Chart.Name -}}
   {{- $proxyType := include "llm-d-router.proxyType" . -}}
   {{- $presets := index $proxy "presets" | default dict -}}
   {{- $preset := deepCopy ((index $presets $proxyType) | default dict) -}}
@@ -246,7 +246,7 @@ Return the rendered proxy ConfigMap data.
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
 {{- $configMap := index $proxy "configMap" | default dict -}}
 {{- $data := deepCopy ((index $configMap "data") | default dict) -}}
-{{- if and (eq .Chart.Name "llm-d-router-standalone") (eq (include "llm-d-router.proxyType" .) "agentgateway") -}}
+{{- if and (hasPrefix "llm-d-router-standalone" .Chart.Name) (eq (include "llm-d-router.proxyType" .) "agentgateway") -}}
   {{- $generated := dict "config.yaml" (include "llm-d-router.proxy.agentgatewayConfig" .) -}}
   {{- $data = mergeOverwrite $data $generated -}}
 {{- end -}}
@@ -330,6 +330,7 @@ EPP resource validations
 EPP generic validations
 */}}
 {{- define "llm-d-router.validations.epp" -}}
+{{- include "llm-d-router.validations.deprecations" . }}
 {{- include "llm-d-router.validations.epp.resources" . }}
 {{- include "llm-d-router.validations.epp.inferenceObjectives" . }}
 {{- end -}}
@@ -340,5 +341,27 @@ EPP inferenceObjectives validations
 {{- define "llm-d-router.validations.epp.inferenceObjectives" -}}
 {{- if and (eq .Values.router.inferencePool.create false) .Values.router.inferenceObjectives }}
 {{- fail ".Values.router.inferenceObjectives can only be configured when .Values.router.inferencePool.create is true." }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Deprecation validations
+*/}}
+{{- define "llm-d-router.validations.deprecations" -}}
+{{- if .Values.inferenceExtension }}
+{{- fail "Top-level 'inferenceExtension' is deprecated. Please migrate your values to 'router.epp' and other 'router.*' fields." }}
+{{- end }}
+{{- if .Values.inferencePool }}
+{{- fail "Top-level 'inferencePool' is deprecated. Please migrate your values to 'router.modelServers' and 'router.inferencePool'." }}
+{{- end }}
+{{- if .Values.experimentalHttpRoute }}
+  {{- if hasPrefix "llm-d-router-gateway" .Chart.Name }}
+    {{- fail "Top-level 'experimentalHttpRoute' is deprecated. Please migrate your values to 'httpRoute'." }}
+  {{- else }}
+    {{- fail "Top-level 'experimentalHttpRoute' is deprecated and not supported in this chart." }}
+  {{- end }}
+{{- end }}
+{{- if .Values.inferenceObjectives }}
+{{- fail "Top-level 'inferenceObjectives' is deprecated. Please migrate your values to 'router.inferenceObjectives'." }}
 {{- end }}
 {{- end -}}

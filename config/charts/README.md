@@ -63,6 +63,27 @@ helm install vllm-qwen3-32b ./config/charts/llm-d-router-gateway \
 ```
 ---
 
+## Migrating from gateway-api-inference-extension
+
+If you previously used the `gateway-api-inference-extension` Helm charts (either `inferencepool` or `standalone`), please note that the `llm-d-router` charts have been restructured.
+
+To prevent accidental misconfiguration, the new charts include strict validation checks that will **fail the installation** if they detect legacy top-level keys in your values file or command-line flags.
+
+You must migrate your values according to the following mapping:
+
+### Value Mapping Guide
+
+| Legacy Key (Top-level) | New Key (Nested/Renamed) | Description |
+| :--- | :--- | :--- |
+| `inferenceExtension.*` | `router.epp.*` <br> `router.monitoring.*` <br> `router.tracing.*` <br> `router.latencyPredictor.*` | EPP configuration has been restructured and nested under the `router` block. |
+| `inferencePool.*` | `router.modelServers.*` <br> `router.inferencePool.*` | Model server configuration and pool control flags have moved under `router`. |
+| `inferenceObjectives` | `router.inferenceObjectives` | Objectives list has moved under `router`. |
+| `experimentalHttpRoute` | `httpRoute` | Gateway HTTPRoute configuration has been renamed (Gateway chart only). |
+
+For a detailed list of all new configuration options, refer to the [Configuration & Customization](#configuration--customization) section below.
+
+---
+
 ## Configuration & Customization
 
 Since both charts use `routerlib` under the hood, all configurations and customizations are shared under the `router` values block. EPP and the llm-d Router can be customized by grouping configuration blocks in your `values.yaml` file. Below is the complete documentation and reference for each component.
@@ -84,7 +105,7 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.epp.parser` | Request parser type for EPP. Options: `[openai-parser, vllmgrpc-parser, passthrough-parser]`. Empty for auto-selection. | `""` |
+| `router.epp.parser` | Request parser type for EPP. Options: `[openai-parser, vllmgrpc-parser, vllmhttp-parser, passthrough-parser]`. Empty for auto-selection. | `""` |
 | `router.epp.replicas` | Number of EPP replicas. Set > 1 to enable multi-replica EPP. | `1` |
 | `router.epp.extProcPort` | Port EPP uses for external processing gRPC communication. | `9002` |
 | `router.epp.image.registry` | EPP container image registry. | `ghcr.io/llm-d` |

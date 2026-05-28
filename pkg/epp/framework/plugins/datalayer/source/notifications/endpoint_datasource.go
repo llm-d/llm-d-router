@@ -18,7 +18,6 @@ package notifications
 
 import (
 	"context"
-	"reflect"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -48,16 +47,6 @@ func NewEndpointDataSource(pluginType, pluginName string) *EndpointDataSource {
 // TypedName returns the plugin type and name.
 func (s *EndpointDataSource) TypedName() fwkplugin.TypedName {
 	return s.typedName
-}
-
-// OutputType returns the type of data this DataSource produces (EndpointEvent).
-func (s *EndpointDataSource) OutputType() reflect.Type {
-	return fwkdl.EndpointEventReflectType
-}
-
-// ExtractorType returns the type of Extractor this DataSource expects (EndpointExtractor).
-func (s *EndpointDataSource) ExtractorType() reflect.Type {
-	return fwkdl.EndpointExtractorType
 }
 
 // NotifyEndpoint passes the event through unchanged for the Runtime to dispatch to extractors.

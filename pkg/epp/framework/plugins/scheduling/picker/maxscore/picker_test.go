@@ -112,7 +112,7 @@ func TestPickMaxScorePicker(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result := test.picker.Pick(context.Background(), fwksched.NewCycleState(), test.input)
+			result := test.picker.Pick(context.Background(), test.input)
 			got := result.TargetEndpoints
 
 			if test.tieBreakCandidates > 0 {

@@ -19,7 +19,6 @@ package datalayer
 import (
 	"context"
 	"errors"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -50,36 +49,62 @@ func defaultEndpoint() fwkdl.Endpoint {
 
 var (
 	endpoint = defaultEndpoint()
-	sources  = []fwkdl.PollingDataSource{&datasourcemocks.MetricsDataSource{}}
+	sources  = []fwkdl.PollingDispatcher{&datasourcemocks.MetricsDataSource{}}
 )
 
+// Mock PollingDispatchers for collector tests. Each tracks its own
+// invocation count and (for dataSource) runs bound extractors with metric
+// instrumentation. Same behavior the framework collector did before the
+// dispatcher pattern moved extractor handling into each dispatcher.
+
 type errSource struct {
-	datasourcemocks.MetricsDataSource
-	kind string
-	err  error
+	kind      string
+	err       error
+	CallCount int64
 }
 
 func (e *errSource) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: e.kind, Name: e.kind}
 }
-
-func (e *errSource) Poll(_ context.Context, _ fwkdl.Endpoint) (any, error) {
+func (e *errSource) Dispatch(_ context.Context, _ fwkdl.Endpoint) error {
 	atomic.AddInt64(&e.CallCount, 1)
-	return nil, e.err
+	return e.err
 }
+func (e *errSource) AppendExtractor(_ fwkplugin.Plugin) error { return nil }
 
 type dataSource struct {
-	datasourcemocks.MetricsDataSource
-	kind string
+	kind      string
+	CallCount int64
+	mu        sync.Mutex
+	exts      []*stubExtractor
 }
 
 func (d *dataSource) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: d.kind, Name: d.kind}
 }
-
-func (d *dataSource) Poll(_ context.Context, _ fwkdl.Endpoint) (any, error) {
+func (d *dataSource) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 	atomic.AddInt64(&d.CallCount, 1)
-	return struct{}{}, nil
+	d.mu.Lock()
+	exts := append([]*stubExtractor(nil), d.exts...)
+	d.mu.Unlock()
+	for _, ext := range exts {
+		if err := ext.Extract(ctx, fwkdl.PollInput[any]{Payload: struct{}{}, Endpoint: ep}); err != nil {
+			//nolint:staticcheck // SA1019: mock mirrors production's dual-record during deprecation window.
+			metrics.DataLayerExtractErrorsTotal.WithLabelValues(d.kind, ext.kind).Inc()
+			metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(d.kind, ext.kind).Inc()
+		}
+	}
+	return nil
+}
+func (d *dataSource) AppendExtractor(p fwkplugin.Plugin) error {
+	s, ok := p.(*stubExtractor)
+	if !ok {
+		return nil
+	}
+	d.mu.Lock()
+	d.exts = append(d.exts, s)
+	d.mu.Unlock()
+	return nil
 }
 
 type stubExtractor struct {
@@ -90,20 +115,19 @@ type stubExtractor struct {
 func (s *stubExtractor) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: s.kind, Name: s.kind}
 }
-func (s *stubExtractor) ExpectedInputType() reflect.Type                          { return reflect.TypeFor[any]() }
-func (s *stubExtractor) Extract(_ context.Context, _ any, _ fwkdl.Endpoint) error { return s.err }
+func (s *stubExtractor) Extract(_ context.Context, _ fwkdl.PollInput[any]) error { return s.err }
 
 func TestCollectorStartInputs(t *testing.T) {
 	tests := []struct {
 		name        string
 		ctxCanceled bool
-		sources     []fwkdl.PollingDataSource
+		sources     []fwkdl.PollingDispatcher
 		wantErr     bool
 		wantErrIs   error
 	}{
 		{name: "valid sources, live ctx", sources: sources},
-		{name: "empty sources", sources: []fwkdl.PollingDataSource{}, wantErr: true},
-		{name: "nil source", sources: []fwkdl.PollingDataSource{nil}, wantErr: true},
+		{name: "empty sources", sources: []fwkdl.PollingDispatcher{}, wantErr: true},
+		{name: "nil source", sources: []fwkdl.PollingDispatcher{nil}, wantErr: true},
 		{name: "cancelled parent ctx", ctxCanceled: true, sources: sources, wantErr: true, wantErrIs: context.Canceled},
 	}
 
@@ -117,13 +141,13 @@ func TestCollectorStartInputs(t *testing.T) {
 
 			c := NewCollector()
 			ticker := mocks.NewTicker()
-			err := c.Start(ctx, ticker, endpoint, tt.sources, newExtractorMap())
+			err := c.Start(ctx, ticker, endpoint, tt.sources)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.wantErrIs != nil {
 					assert.ErrorIs(t, err, tt.wantErrIs)
 				}
-				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, newExtractorMap()),
+				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources),
 					"retry after failed Start should succeed")
 			} else {
 				require.NoError(t, err)
@@ -138,8 +162,8 @@ func TestCollectorCanStartOnlyOnce(t *testing.T) {
 	ticker := mocks.NewTicker()
 	ctx := context.Background()
 
-	require.NoError(t, c.Start(ctx, ticker, endpoint, sources, newExtractorMap()))
-	assert.Error(t, c.Start(ctx, ticker, endpoint, sources, newExtractorMap()),
+	require.NoError(t, c.Start(ctx, ticker, endpoint, sources))
+	assert.Error(t, c.Start(ctx, ticker, endpoint, sources),
 		"second Start after success should error")
 	c.Stop()
 }
@@ -158,7 +182,7 @@ func TestCollectorStop(t *testing.T) {
 			setup: func(t *testing.T) *Collector {
 				c := NewCollector()
 				ticker := mocks.NewTicker()
-				_ = c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{}, newExtractorMap())
+				_ = c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{})
 				return c
 			},
 		},
@@ -167,7 +191,7 @@ func TestCollectorStop(t *testing.T) {
 			setup: func(t *testing.T) *Collector {
 				c := NewCollector()
 				ticker := mocks.NewTicker()
-				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, newExtractorMap()))
+				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources))
 				return c
 			},
 		},
@@ -189,7 +213,7 @@ func TestCollectorCollectsOnTicks(t *testing.T) {
 	c := NewCollector()
 	ticker := mocks.NewTicker()
 
-	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{source}, newExtractorMap()))
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{source}))
 	defer c.Stop()
 
 	ticker.Tick()
@@ -241,30 +265,27 @@ func TestCollectorErrorMetrics(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var src fwkdl.PollingDataSource
+			var src fwkdl.PollingDispatcher
 			if tt.srcErr != nil {
 				src = &errSource{kind: tt.srcType, err: tt.srcErr}
 			} else {
 				src = &dataSource{kind: tt.srcType}
 			}
 
-			extractors := newExtractorMap()
 			if tt.extType != "" {
 				ext := &stubExtractor{kind: tt.extType, err: tt.extErr}
-				extractors.Append(src.TypedName().Name, ext)
+				require.NoError(t, src.AppendExtractor(ext))
 			}
 
-			//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
-			pollBefore := testutil.ToFloat64(metrics.DataLayerPollErrorsTotal.WithLabelValues(tt.srcType))
+			pollBefore := testutil.ToFloat64(metrics.LlmdDataLayerPollErrorsTotal.WithLabelValues(tt.srcType))
 			var extBefore float64
 			if tt.extType != "" {
-				//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
-				extBefore = testutil.ToFloat64(metrics.DataLayerExtractErrorsTotal.WithLabelValues(tt.srcType, tt.extType))
+				extBefore = testutil.ToFloat64(metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(tt.srcType, tt.extType))
 			}
 
 			c := NewCollector()
 			ticker := mocks.NewTicker()
-			require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{src}, extractors))
+			require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{src}))
 			defer c.Stop()
 
 			for i := 0; i < tt.ticks; i++ {
@@ -272,14 +293,12 @@ func TestCollectorErrorMetrics(t *testing.T) {
 			}
 
 			require.Eventually(t, func() bool {
-				//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
-				gotPoll := testutil.ToFloat64(metrics.DataLayerPollErrorsTotal.WithLabelValues(tt.srcType)) - pollBefore
+				gotPoll := testutil.ToFloat64(metrics.LlmdDataLayerPollErrorsTotal.WithLabelValues(tt.srcType)) - pollBefore
 				if gotPoll != tt.wantPollDelta {
 					return false
 				}
 				if tt.extType != "" {
-					//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
-					gotExt := testutil.ToFloat64(metrics.DataLayerExtractErrorsTotal.WithLabelValues(tt.srcType, tt.extType)) - extBefore
+					gotExt := testutil.ToFloat64(metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(tt.srcType, tt.extType)) - extBefore
 					if gotExt != tt.wantExtDelta {
 						return false
 					}
@@ -305,7 +324,7 @@ func TestCollectorRapidStartStopRaceFree(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		c := NewCollector()
 		ticker := mocks.NewTicker()
-		require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDataSource{src}, newExtractorMap()))
+		require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{src}))
 		ticker.Tick()
 		c.Stop()
 	}
@@ -316,7 +335,7 @@ func TestCollectorRapidStartStopRaceFree(t *testing.T) {
 func TestCollectorConcurrentStopRaceFree(t *testing.T) {
 	c := NewCollector()
 	ticker := mocks.NewTicker()
-	require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, newExtractorMap()))
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources))
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {

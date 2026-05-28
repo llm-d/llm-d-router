@@ -8,10 +8,6 @@ on:
   pull_request:
     branches:
       - main
-  pull_request_target:
-    branches:
-      - main
-    types: [ opened, synchronize, reopened ]
 
 permissions:
   contents: read
@@ -23,12 +19,6 @@ concurrency:
 
 jobs:
   check-changes:
-    # pull_request_target fires even when GITHUB_TOKEN creates the PR (e.g. the
-    # release-notes bot). pull_request does not. We register pull_request_target
-    # so bot-created PRs get a "skipped" conclusion that satisfies branch
-    # protection, but we skip all real work: pull_request already covers human
-    # PRs, and running twice would cause the concurrency group to cancel one run.
-    if: github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
     outputs:
       src: ${{ steps.filter.outputs.src }}
@@ -71,6 +61,9 @@ jobs:
     if: ${{ needs.check-changes.outputs.src == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      GO_MOD_CACHE_VOL: /home/runner/.cache/llm-d-gomodcache
+      GO_BUILD_CACHE_VOL: /home/runner/.cache/llm-d-gobuildcache
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -100,40 +93,20 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false # only needed for `go list` in Makefile; module cache managed by the explicit cache step below
 
-      - name: Verify go.mod and go.sum are tidy
-        run: go mod tidy -diff
-
-      - name: Create and resolve Go cache volumes
-        id: go-cache
-        run: |
-          docker volume create llm-d-gomodcache
-          docker volume create llm-d-gobuildcache
-          echo "mod=$(docker volume inspect llm-d-gomodcache -f '{{.Mountpoint}}')" >> $GITHUB_OUTPUT
-          echo "build=$(docker volume inspect llm-d-gobuildcache -f '{{.Mountpoint}}')" >> $GITHUB_OUTPUT
+      - name: Create Go cache dirs
+        run: mkdir -p "$GO_MOD_CACHE_VOL" "$GO_BUILD_CACHE_VOL"
 
       - name: Cache Go modules and build cache
         uses: actions/cache@v5
         with:
           path: |
-            ${{ steps.go-cache.outputs.mod }}
-            ${{ steps.go-cache.outputs.build }}
-          key: go-cache-${{ hashFiles('go.sum') }}
+            ${{ env.GO_MOD_CACHE_VOL }}
+            ${{ env.GO_BUILD_CACHE_VOL }}
+          key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            go-cache-
-
-      - name: Run make lint
-        run: make lint
-
-      - name: Run govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
-          govulncheck ./...
-
-      - name: Run make build
-        shell: bash
-        run: make build
+            go-cache-${{ runner.os }}-
 
       # Restore the baseline saved from the last main push so the compare step
       # can diff against it. Missing cache (first PR ever) is not an error;

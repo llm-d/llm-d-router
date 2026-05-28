@@ -244,13 +244,16 @@ func ensureParser(
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
 ) error {
-	parserConfig := cfg.Parser
+	if cfg.RequestHandler == nil {
+		cfg.RequestHandler = &configapi.RequestHandlerConfig{}
+	}
+	parserConfig := cfg.RequestHandler.Parser
 	if parserConfig == nil {
 		parserConfig = &configapi.ParserConfig{
 			// Set default parser to openAI parser if the parser is not set in the config.
 			PluginRef: openai.OpenAIParserType,
 		}
-		cfg.Parser = parserConfig
+		cfg.RequestHandler.Parser = parserConfig
 	}
 	if _, ok := allPlugins[parserConfig.PluginRef]; !ok {
 		if err := registerDefaultPlugin(cfg, handle, openai.OpenAIParserType); err != nil {
@@ -267,12 +270,15 @@ func ensureSaturationDetector(
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
 ) error {
-	sdConfig := cfg.SaturationDetector
+	if cfg.FlowControl == nil {
+		cfg.FlowControl = &configapi.FlowControlConfig{}
+	}
+	sdConfig := cfg.FlowControl.SaturationDetector
 	if sdConfig == nil {
 		sdConfig = &configapi.SaturationDetectorConfig{
 			PluginRef: utilization.UtilizationDetectorType,
 		}
-		cfg.SaturationDetector = sdConfig
+		cfg.FlowControl.SaturationDetector = sdConfig
 	}
 	if sdConfig.PluginRef == "" {
 		sdConfig.PluginRef = utilization.UtilizationDetectorType

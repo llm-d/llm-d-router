@@ -248,7 +248,7 @@ func TestByLabelFiltering(t *testing.T) {
 
 			ctx := utils.NewTestContext(t)
 
-			filteredEndpoints := blf.Filter(ctx, nil, nil, endpoints)
+			filteredEndpoints := blf.Filter(ctx, nil, endpoints)
 
 			actualEndpointNames := make([]string, len(filteredEndpoints))
 			for idx, endpoint := range filteredEndpoints {

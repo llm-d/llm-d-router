@@ -62,12 +62,11 @@ var (
 	// Set E2E_KEEP_CLUSTER_ON_FAILURE=true to enable.
 	keepClusterOnFailure = env.GetEnvBool("E2E_KEEP_CLUSTER_ON_FAILURE", false, ginkgo.GinkgoLogr)
 
-	containerRuntime  = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
-	eppImage          = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
-	vllmSimImage      = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.8.2", ginkgo.GinkgoLogr)
-	sideCarImage      = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
-	udsTokenizerImage = env.GetEnvString("UDS_TOKENIZER_IMAGE", "ghcr.io/llm-d/llm-d-uds-tokenizer:dev", ginkgo.GinkgoLogr)
-	vllmRenderImage   = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.19.1", ginkgo.GinkgoLogr)
+	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
+	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
+	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.0", ginkgo.GinkgoLogr)
+	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
+	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
 	// nsName is the namespace in which the K8S objects will be created
 	nsName = env.GetEnvString("NAMESPACE", "default", ginkgo.GinkgoLogr)
 
@@ -199,7 +198,6 @@ func setupK8sCluster() {
 	kindLoadImage(vllmSimImage)
 	kindLoadImage(eppImage)
 	kindLoadImage(sideCarImage)
-	kindLoadImage(udsTokenizerImage)
 	kindLoadImage(vllmRenderImage)
 }
 

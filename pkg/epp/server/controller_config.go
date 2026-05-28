@@ -20,7 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
-	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
@@ -68,7 +67,6 @@ func (cc *ControllerConfig) populateWithDiscovery(dc discovery.DiscoveryInterfac
 func gvkExists(dc discovery.DiscoveryInterface, gvk schema.GroupVersionKind) bool {
 	apiResourceList, err := dc.ServerResourcesForGroupVersion(gvk.GroupVersion().String())
 	if err != nil {
-		ctrl.Log.WithName("controllerConfig").Error(err, "Checking server resources error.")
 		return false
 	}
 	for _, r := range apiResourceList.APIResources {

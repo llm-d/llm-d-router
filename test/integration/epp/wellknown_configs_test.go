@@ -270,9 +270,9 @@ schedulingProfiles:
     weight: 2
   - pluginRef: prefix-cache-scorer
     weight: 3
-saturationDetector:
-  pluginRef: concurrency-detector
 flowControl:
+  saturationDetector:
+    pluginRef: concurrency-detector
   maxBytes: "10Gi"
   maxRequests: "1k"
   defaultRequestTTL: "60s"

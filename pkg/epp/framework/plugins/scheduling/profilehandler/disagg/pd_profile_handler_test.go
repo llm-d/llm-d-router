@@ -209,7 +209,7 @@ func newMockSchedulerProfile() scheduling.SchedulerProfile {
 
 type mockSchedulerProfile struct{}
 
-func (p *mockSchedulerProfile) Run(_ context.Context, _ *scheduling.InferenceRequest, _ *scheduling.CycleState, _ []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
+func (p *mockSchedulerProfile) Run(_ context.Context, _ *scheduling.InferenceRequest, _ []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
 	return &scheduling.ProfileRunResult{}, nil
 }
 
@@ -338,7 +338,7 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 					}
 				}
 			}
-			result := handler.Pick(ctx, nil, request, profiles, tt.profileResults)
+			result := handler.Pick(ctx, request, profiles, tt.profileResults)
 			assert.ElementsMatch(t, tt.expectedProfiles, getProfilesFromResult(result))
 		})
 	}
@@ -429,8 +429,6 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 
 			// run sequences of request
 			for _, innerTest := range tt.tests {
-				cs := &scheduling.CycleState{}
-
 				// set prefix to the given cached tokens number for pod "pod1" in decode profile results
 				inputTokens := len(innerTest.request.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
 
@@ -443,7 +441,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 					}
 				}
 
-				result := handler.Pick(ctx, cs, innerTest.request, profiles, profileResults)
+				result := handler.Pick(ctx, innerTest.request, profiles, profileResults)
 				assert.ElementsMatch(t, innerTest.expectedProfiles, getProfilesFromResult(result))
 			}
 		})
@@ -532,7 +530,7 @@ func TestPdProfileHandler_ProcessResults(t *testing.T) {
 			req := &scheduling.InferenceRequest{
 				Headers: headers,
 			}
-			result, err := handler.ProcessResults(context.Background(), &scheduling.CycleState{}, req, tt.profileResults)
+			result, err := handler.ProcessResults(context.Background(), req, tt.profileResults)
 
 			if tt.expectError {
 				assert.Error(t, err)
