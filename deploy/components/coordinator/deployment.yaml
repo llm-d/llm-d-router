@@ -18,7 +18,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
       - name: coordinator
-        image: ghcr.io/revit13/llm-d-coordinator:dev
+        image: ${COORDINATOR_IMAGE}
         imagePullPolicy: IfNotPresent
         args:
         - --config

@@ -3,7 +3,7 @@
 # Deploys a kind cluster for the coordinator-driven E/P/D-with-Pools topology:
 # coordinator + vllm-render sidecar + mock downloaders + three phase-specific
 # InferencePools (encode/prefill/decode), each backed by its own EPP.
-# Use `make pools-env-dev-kind` to invoke this script.
+# Use `make coordinator-epd-pools-env-dev-kind` to invoke this script.
 
 set -eo pipefail
 
@@ -75,12 +75,12 @@ kubectl kustomize --enable-helm "deploy/environments/dev/base-kind-istio/epd-poo
 ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE}' \
   | kubectl --context ${KUBE_CONTEXT} apply -f -
 
-kubectl kustomize --enable-helm "deploy/environments/dev/e-p-d-pools" \
+kubectl kustomize --enable-helm "deploy/environments/dev/coordinator-e-p-d-pools" \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
   ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
   ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE} \
   ${KV_CONNECTOR_TYPE} ${EC_CONNECTOR_TYPE} ${CONNECTOR_TYPE} ${KV_CACHE_ENABLED} ${HF_TOKEN} ${VLLM_SIM_MODE} \
-  ${DECODE_ROLE} ${VLLM_EXTRA_ARGS_E} ${VLLM_EXTRA_ARGS_P} ${VLLM_EXTRA_ARGS_D}' \
+  ${DECODE_ROLE} ${VLLM_EXTRA_ARGS_E} ${VLLM_EXTRA_ARGS_P} ${VLLM_EXTRA_ARGS_D} ${COORDINATOR_IMAGE}' \
   | awk '
     /^[[:space:]]*-[[:space:]]+"--[^"]*"[[:space:]]*$/ {
       match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
@@ -116,7 +116,7 @@ Deployment completed!
 * Kind Cluster Name: ${CLUSTER_NAME}
 * Kubectl Context: ${KUBE_CONTEXT}
 
-Status (pools-env-dev-kind):
+Status (coordinator-epd-pools-env-dev-kind):
 
 * Coordinator drives the multimodal pipeline (replace-media-urls →
   render → encode → prefill → decode) and exposes :8080 via the

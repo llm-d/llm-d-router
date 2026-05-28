@@ -1,4 +1,4 @@
-# EPP config for the encode-only EPP in the e-p-d-pools env.
+# EPP config for the encode-only EPP in the coordinator-e-p-d-pools env.
 # The pool selector already restricts to pods labelled llm-d.ai/role: encode;
 # this config provides a single profile that filters/scores encode endpoints.
 apiVersion: llm-d.ai/v1alpha1

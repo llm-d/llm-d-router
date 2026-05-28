@@ -19,8 +19,8 @@ env-dev-kind: image-build image-pull ## Run under kind ($(KIND_CLUSTER_NAME))
 		./scripts/kind-dev-env.sh; \
 	fi
 
-.PHONY: pools-env-dev-kind
-pools-env-dev-kind: image-build image-pull ## Run e-p-d-pools (coordinator) topology under kind ($(KIND_CLUSTER_NAME))
+.PHONY: coordinator-epd-pools-env-dev-kind
+coordinator-epd-pools-env-dev-kind: image-build image-pull ## Run coordinator-e-p-d-pools topology under kind ($(KIND_CLUSTER_NAME))
 	CLUSTER_NAME=$(KIND_CLUSTER_NAME) \
 	GATEWAY_HOST_PORT=$(KIND_GATEWAY_HOST_PORT) \
 	IMAGE_REGISTRY=$(IMAGE_REGISTRY) \

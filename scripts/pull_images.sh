@@ -16,8 +16,8 @@ export VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:${VLLM_SIMULA
 export SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar:${SIDECAR_TAG}}"
 export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.19.1}"
 
-# Images consumed only by the e-p-d-pools env (coordinator + mock downloaders).
-export COORDINATOR_IMAGE="${COORDINATOR_IMAGE:-ghcr.io/revit13/llm-d-coordinator:dev}"
+# Images consumed only by the coordinator-e-p-d-pools env (coordinator + mock downloaders).
+export COORDINATOR_IMAGE="${COORDINATOR_IMAGE:-ghcr.io/llm-d/llm-d-coordinator:dev}"
 export MOCK_DOWNLOADER_HTTP_IMAGE="${MOCK_DOWNLOADER_HTTP_IMAGE:-python:3.10-slim}"
 export MOCK_DOWNLOADER_INIT_IMAGE="${MOCK_DOWNLOADER_INIT_IMAGE:-busybox:1.36}"
 

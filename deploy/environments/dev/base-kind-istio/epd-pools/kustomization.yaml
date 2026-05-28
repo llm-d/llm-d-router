@@ -1,7 +1,7 @@
 # ------------------------------------------------------------------------------
 # KIND base-kind-istio — encode/prefill/decode pools topology
 #
-# Used by `make pools-env-dev-kind` (scripts/kind-dev-env-pools.sh).
+# Used by `make coordinator-epd-pools-env-dev-kind` (scripts/kind-dev-env-pools.sh).
 # Shared base + per-phase InferencePools/EPPs and header-based HTTPRoutes.
 # Deliberately omits the single-pool EPP, its catch-all HTTPRoute, and the
 # `${EPP_NAME}-insecure-tls` DestinationRule — none of those exist in this

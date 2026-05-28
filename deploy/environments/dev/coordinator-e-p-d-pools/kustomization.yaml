@@ -4,7 +4,7 @@
 # Brings up the full coordinator-driven topology: encode/prefill/decode
 # deployments with one InferencePool per phase, the coordinator (which
 # carries a vllm-render sidecar over loopback), and two mock media
-# downloaders. Used by `make pools-env-dev-kind` (scripts/kind-dev-env-pools.sh).
+# downloaders. Used by `make coordinator-epd-pools-env-dev-kind` (scripts/kind-dev-env-pools.sh).
 # ------------------------------------------------------------------------------
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

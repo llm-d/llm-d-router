@@ -19,8 +19,8 @@ Documentation for developing the llm-d Router.
       - [2. Prefill/Decode (P/D) Disaggregation](#2-prefilldecode-pd-disaggregation)
       - [3. Encode/Prefill-Decode (E/PD) Disaggregation](#3-encodeprefill-decode-epd-disaggregation)
       - [4. Encode/Prefill/Decode (E/P/D) Disaggregation](#4-encodeprefilldecode-epd-disaggregation)
-      - [5. Coordinator-driven E/P/D with Pools (`e-p-d-pools`)](#5-coordinator-driven-epd-with-pools-e-p-d-pools)
-      - [6. Disaggregated Setup Verification](#6-disaggregated-setup-verification)
+      - [5. Disaggregated Setup Verification](#5-disaggregated-setup-verification)
+    - [Coordinator-driven multi-pool Encode/Prefill/Decode (E/P/D) topology setup](#coordinator-driven-multi-pool-encodeprefilldecode-epd-topology-setup)
     - [Combining Scenarios with Data Parallel and KV Cache](#combining-scenarios-with-data-parallel-and-kv-cache)
     - [Simulator vs Real vLLM](#simulator-vs-real-vllm)
       - [Deploying with Simulator (default)](#deploying-with-simulator-default)
@@ -393,22 +393,7 @@ curl -s http://localhost:30080/v1/chat/completions \
   }' | jq
 ```
 
-#### 5. Coordinator-driven E/P/D with Pools (`e-p-d-pools`)
-
-
-Defines a standalone topology where traffic is managed by three discrete HTTPRoutes, each routing to an isolated InferencePool configured for encoder, prefill, or decoder deployments.
-
-The environment provisions:
-- Individual worker nodes for the encoder, prefill, and decoder tiers.
-- A centralized cluster coordinator.
-- A CPU-only vllm launch render sidecar bound to the coordinator over a loopback interface.
-- Two mock multimedia downloaders to simulate real-world public media URL resolution.
-
-```bash
-make pools-env-dev-kind
-```
-
-#### 6. Disaggregated Setup Verification
+#### 5. Disaggregated Setup Verification
 
 After deploying any disaggregation mode, verify with a basic request:
 
@@ -434,6 +419,20 @@ curl http://localhost:8080/v1/chat/completions \
     ],
     "max_tokens": 100
   }'
+```
+
+### Coordinator-driven multi-pool Encode/Prefill/Decode (E/P/D) topology setup
+
+This provisions a cluster with a coordinator-driven Encode/Prefill/Decode (E/P/D) pools topology — three independent InferencePools (one per phase), each with its own dedicated EPP, fronted by header-routed HTTPRoutes, with a coordinator pod.
+
+The environment provisions:
+- Individual worker nodes for the encoder, prefill, and decoder tiers.
+- A centralized cluster coordinator.
+- A CPU-only vllm launch render sidecar bound to the coordinator over a loopback interface.
+- Two mock multimedia downloaders to simulate real-world public media URL resolution.
+
+```bash
+make coordinator-epd-pools-env-dev-kind
 ```
 
 ### Combining Scenarios with Data Parallel and KV Cache
