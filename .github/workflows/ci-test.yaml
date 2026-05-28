@@ -1,4 +1,4 @@
-name: CI - PR Checks
+name: CI - Test
 
 on:
   push:
@@ -35,11 +35,19 @@ jobs:
               - Dockerfile.*
               - Makefile*
               - go.mod
+              - go.sum
               - scripts/**
-              - .github/workflows/ci-pr-checks.yaml
+              - hack/**
+              - test/**
+              - .github/actions/docker-build-and-push/action.yml
+              - .github/actions/e2e-build/action.yml
+              - .github/actions/e2e-runner-setup/action.yml
+              - .github/workflows/ci-test.yaml
             helm:
               - 'config/charts/**'
               - 'hack/verify-helm.sh'
+              - '.github/workflows/ci-test.yaml'
+
   verify-helm-charts:
     needs: check-changes
     if: ${{ needs.check-changes.outputs.helm == 'true' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
@@ -56,61 +64,34 @@ jobs:
       - name: Run make verify-helm-charts
         run: make verify-helm-charts
 
-  lint-and-test:
+  unit-and-integration:
     needs: check-changes
     if: ${{ needs.check-changes.outputs.src == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      GO_MOD_CACHE_VOL: /home/runner/.cache/llm-d-gomodcache
-      GO_BUILD_CACHE_VOL: /home/runner/.cache/llm-d-gobuildcache
+    timeout-minutes: 60
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
 
-      # Custom profile with directory-only removals (run in parallel, no apt).
-      # The cleanup-profile: max is much more aggressive, it cleanups around 41GB,
-      # but runs 3.5 mins
-      - name: Free disk space
-        uses: justinthelaw/maximize-github-runner-space@v0.9.0
-        with:
-          cleanup-profile: custom
-          remove-android: 'true'
-          remove-dotnet: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-cached-tools: 'true'
-          remove-swift: 'true'
-          remove-julia: 'true'
-          remove-rust: 'true'
-          remove-miniconda: 'true'
-          swapfile-size: 0
-
-      - name: Sanity check repo contents
-        run: ls -la
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: false # only needed for `go list` in Makefile; module cache managed by the explicit cache step below
-
       - name: Create Go cache dirs
-        run: mkdir -p "$GO_MOD_CACHE_VOL" "$GO_BUILD_CACHE_VOL"
+        id: go-cache
+        run: |
+          mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
+          echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
+          echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
 
       - name: Cache Go modules and build cache
         uses: actions/cache@v5
         with:
           path: |
-            ${{ env.GO_MOD_CACHE_VOL }}
-            ${{ env.GO_BUILD_CACHE_VOL }}
+            ${{ steps.go-cache.outputs.mod }}
+            ${{ steps.go-cache.outputs.build }}
           key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: |
             go-cache-${{ runner.os }}-
 
-      # Restore the baseline saved from the last main push so the compare step
-      # can diff against it. Missing cache (first PR ever) is not an error;
-      # compare-coverage.sh reports all components as "new" and exits 0.
+      # Missing cache is not an error; compare-coverage.sh reports all
+      # components as new and exits 0.
       - name: Restore main branch coverage baseline
         if: github.event_name == 'pull_request'
         uses: actions/cache/restore@v5
@@ -120,10 +101,16 @@ jobs:
 
       - name: Run unit tests
         shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make test-unit
 
       - name: Run hermetic integration tests
         shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make test-integration-hermetic
 
       - name: Compare coverage against main baseline
@@ -132,8 +119,6 @@ jobs:
         shell: bash
         run: make coverage-compare BASELINE_DIR=coverage/baseline
 
-      # Find the latest release-* branch (by SemVer) and download its coverage
-      # artifact so the PR can compare against the most recent release.
       - name: Find latest release branch
         if: github.event_name == 'pull_request'
         id: find-releases
@@ -162,11 +147,21 @@ jobs:
             run_id=$(gh run list \
               --repo "${{ github.repository }}" \
               --branch "$branch" \
-              --workflow "CI - PR Checks" \
+              --workflow "CI - Test" \
               --status success \
               --limit 1 \
               --json databaseId \
               --jq '.[0].databaseId // empty')
+            if [[ -z "$run_id" ]]; then
+              run_id=$(gh run list \
+                --repo "${{ github.repository }}" \
+                --branch "$branch" \
+                --workflow "CI - PR Checks" \
+                --status success \
+                --limit 1 \
+                --json databaseId \
+                --jq '.[0].databaseId // empty')
+            fi
             if [[ -z "$run_id" ]]; then
               echo "No successful run found for $branch, skipping."
               continue
@@ -185,8 +180,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      # Copy the freshly generated profiles into coverage/baseline so that
-      # the saved path matches the restored path on future PR runs.
       - name: Stage coverage baseline for caching
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         shell: bash
@@ -201,8 +194,6 @@ jobs:
           path: coverage/baseline
           key: coverage-main
 
-      # Upload coverage profiles as a named artifact for release branches.
-      # Retrieved by PRs to compare against the most recent release.
       - name: Upload coverage artifact (release branches)
         if: >-
           github.event_name == 'push' &&
@@ -214,10 +205,116 @@ jobs:
           retention-days: 400
           overwrite: true
 
-      - name: Clean Docker system
-        shell: bash
-        run: docker system prune -af
+  e2e-build:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.src == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
 
-      - name: Run make test-e2e
+      - name: Build E2E images
+        uses: ./.github/actions/e2e-build
+        with:
+          commit-sha: ${{ github.sha }}
+
+  e2e-gaie:
+    needs: [check-changes, e2e-build]
+    if: ${{ needs.check-changes.outputs.src == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up e2e runner
+        id: e2e-setup
+        uses: ./.github/actions/e2e-runner-setup
+
+      - name: Build E2E images
+        uses: ./.github/actions/e2e-build
+        with:
+          commit-sha: ${{ github.sha }}
+
+      - name: Restore e2e image cache
+        id: image-cache
+        uses: actions/cache@v5
+        with:
+          path: /tmp/e2e-images.tar
+          key: e2e-images-${{ runner.os }}-${{ hashFiles('scripts/pull_images.sh', 'Makefile') }}
+
+      - name: Load e2e images from cache
+        if: steps.image-cache.outputs.cache-hit == 'true'
+        run: docker load < /tmp/e2e-images.tar
+
+      - name: Run make test-e2e-gaie
         shell: bash
-        run: make test-e2e
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-mod-cache }}
+          GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
+        run: make test-e2e-gaie-run
+
+      - name: Save pinned e2e images to cache
+        if: steps.image-cache.outputs.cache-hit != 'true'
+        run: |
+          docker save \
+            ghcr.io/llm-d/llm-d-inference-sim:v0.9.0 \
+            vllm/vllm-openai-cpu:v0.21.0 \
+            -o /tmp/e2e-images.tar
+
+  e2e-router:
+    needs: [check-changes, e2e-build]
+    if: ${{ needs.check-changes.outputs.src == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: pd
+            label-filter: "!Disruptive && !Extended"
+          - name: extended
+            label-filter: "Extended"
+          - name: disruption
+            label-filter: "Disruptive"
+    name: e2e-router (${{ matrix.suite.name }})
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up e2e runner
+        id: e2e-setup
+        uses: ./.github/actions/e2e-runner-setup
+
+      - name: Build E2E images
+        uses: ./.github/actions/e2e-build
+        with:
+          commit-sha: ${{ github.sha }}
+
+      - name: Restore e2e image cache
+        id: image-cache
+        uses: actions/cache@v5
+        with:
+          path: /tmp/e2e-images.tar
+          key: e2e-images-${{ runner.os }}-${{ hashFiles('scripts/pull_images.sh', 'Makefile') }}
+
+      - name: Load e2e images from cache
+        if: steps.image-cache.outputs.cache-hit == 'true'
+        run: docker load < /tmp/e2e-images.tar
+
+      - name: Run e2e-router (${{ matrix.suite.name }})
+        shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-mod-cache }}
+          GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
+          E2E_LABEL_FILTER: ${{ matrix.suite.label-filter }}
+        run: make test-e2e-scheduler-run
+
+      - name: Save pinned e2e images to cache
+        if: steps.image-cache.outputs.cache-hit != 'true'
+        run: |
+          docker save \
+            ghcr.io/llm-d/llm-d-inference-sim:v0.9.0 \
+            vllm/vllm-openai-cpu:v0.21.0 \
+            -o /tmp/e2e-images.tar

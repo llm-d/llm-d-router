@@ -1,0 +1,38 @@
+name: Build E2E images
+description: Build and load the images required for e2e tests into the local Docker daemon.
+inputs:
+  commit-sha:
+    required: false
+    description: Git commit SHA to embed in EPP and sidecar images via COMMIT_SHA build arg
+    default: ''
+runs:
+  using: "composite"
+  steps:
+    - name: Build builder image
+      uses: ./.github/actions/docker-build-and-push
+      with:
+        docker-file: Dockerfile.builder
+        image-name: llm-d-builder
+        tag: dev
+        registry: ghcr.io/llm-d
+        load: 'true'
+
+    - name: Build EPP image
+      uses: ./.github/actions/docker-build-and-push
+      with:
+        docker-file: Dockerfile.epp
+        image-name: llm-d-router-endpoint-picker
+        tag: dev
+        registry: ghcr.io/llm-d
+        load: 'true'
+        commit-sha: ${{ inputs.commit-sha }}
+
+    - name: Build sidecar image
+      uses: ./.github/actions/docker-build-and-push
+      with:
+        docker-file: Dockerfile.sidecar
+        image-name: llm-d-router-disagg-sidecar
+        tag: dev
+        registry: ghcr.io/llm-d
+        load: 'true'
+        commit-sha: ${{ inputs.commit-sha }}
