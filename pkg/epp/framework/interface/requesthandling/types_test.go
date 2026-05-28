@@ -150,6 +150,84 @@ func TestLLMRequestBody_PromptText(t *testing.T) {
 			},
 			expected: "hello world",
 		},
+		{
+			name: "unified prompt with single text block",
+			body: &InferenceRequestBody{
+				Prompt: &UnifiedPrompt{
+					Items: []PromptItem{
+						{
+							Role: "user",
+							Blocks: []PromptBlock{
+								{Type: BlockTypeText, Text: "hello"},
+							},
+						},
+					},
+				},
+			},
+			expected: "hello",
+		},
+		{
+			name: "unified prompt with multiple text blocks and empty role",
+			body: &InferenceRequestBody{
+				Prompt: &UnifiedPrompt{
+					Items: []PromptItem{
+						{
+							Role: "system",
+							Blocks: []PromptBlock{
+								{Type: BlockTypeText, Text: "instructions"},
+							},
+						},
+						{
+							Role: "",
+							Blocks: []PromptBlock{
+								{Type: BlockTypeText, Text: "user input"},
+								{Type: BlockTypeImage, AssetURI: "http://image"}, // ignored in text
+							},
+						},
+					},
+				},
+			},
+			expected: "instructions user input",
+		},
+		{
+			name: "unified prompt with documents",
+			body: &InferenceRequestBody{
+				Prompt: &UnifiedPrompt{
+					Items: []PromptItem{
+						{
+							Role: "user",
+							Blocks: []PromptBlock{
+								{Type: BlockTypeText, Text: "query"},
+							},
+						},
+					},
+					Documents: []any{
+						"doc1 text",
+						map[string]any{"content": "doc2 text"},
+					},
+				},
+			},
+			expected: `query doc1 text {"content":"doc2 text"}`,
+		},
+		{
+			name: "unified prompt prioritized over legacy completions",
+			body: &InferenceRequestBody{
+				Prompt: &UnifiedPrompt{
+					Items: []PromptItem{
+						{
+							Role: "user",
+							Blocks: []PromptBlock{
+								{Type: BlockTypeText, Text: "unified"},
+							},
+						},
+					},
+				},
+				Completions: &CompletionsRequest{
+					Prompt: Prompt{Raw: "legacy"},
+				},
+			},
+			expected: "unified",
+		},
 	}
 
 	for _, tt := range tests {
@@ -327,6 +405,38 @@ func TestInferenceRequestBody_InputTokenCountHint(t *testing.T) {
 			body:     &InferenceRequestBody{},
 			wantHint: -1,
 		},
+		{
+			name: "unified tokens returns count",
+			body: &InferenceRequestBody{
+				Tokens: &TokenizedInput{
+					TokenIDs: []uint32{10, 20, 30},
+				},
+			},
+			wantHint: 3,
+		},
+		{
+			name: "unified prompt with nil tokens returns -1",
+			body: &InferenceRequestBody{
+				Prompt: &UnifiedPrompt{
+					Items: []PromptItem{
+						{Blocks: []PromptBlock{{Type: BlockTypeText, Text: "hello"}}},
+					},
+				},
+			},
+			wantHint: -1,
+		},
+		{
+			name: "unified tokens prioritized over legacy completions",
+			body: &InferenceRequestBody{
+				Tokens: &TokenizedInput{
+					TokenIDs: []uint32{10, 20, 30},
+				},
+				Completions: &CompletionsRequest{
+					Prompt: Prompt{TokenIDs: []uint32{1, 2}},
+				},
+			},
+			wantHint: 3,
+		},
 	}
 
 	for _, tt := range tests {
@@ -436,6 +546,88 @@ func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, g.TokenIDs)
+		})
+	}
+}
+
+func TestInferenceRequestBody_CacheSalt(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     *InferenceRequestBody
+		expected string
+	}{
+		{
+			name: "extracted cache salt returned directly",
+			body: &InferenceRequestBody{
+				ExtractedCacheSalt: "salt-123",
+			},
+			expected: "salt-123",
+		},
+		{
+			name: "fallback to conversations cache salt",
+			body: &InferenceRequestBody{
+				Conversations: &ConversationsRequest{
+					CacheSalt: "conv-salt",
+				},
+			},
+			expected: "conv-salt",
+		},
+		{
+			name: "fallback to responses cache salt",
+			body: &InferenceRequestBody{
+				Responses: &ResponsesRequest{
+					CacheSalt: "resp-salt",
+				},
+			},
+			expected: "resp-salt",
+		},
+		{
+			name: "fallback to chat completions cache salt",
+			body: &InferenceRequestBody{
+				ChatCompletions: &ChatCompletionsRequest{
+					CacheSalt: "chat-salt",
+				},
+			},
+			expected: "chat-salt",
+		},
+		{
+			name: "prioritizes extracted cache salt over legacy",
+			body: &InferenceRequestBody{
+				ExtractedCacheSalt: "extracted",
+				Conversations: &ConversationsRequest{
+					CacheSalt: "conv",
+				},
+				Responses: &ResponsesRequest{
+					CacheSalt: "resp",
+				},
+				ChatCompletions: &ChatCompletionsRequest{
+					CacheSalt: "chat",
+				},
+			},
+			expected: "extracted",
+		},
+		{
+			name: "prioritizes conversations over responses in fallback",
+			body: &InferenceRequestBody{
+				Conversations: &ConversationsRequest{
+					CacheSalt: "conv",
+				},
+				Responses: &ResponsesRequest{
+					CacheSalt: "resp",
+				},
+			},
+			expected: "conv",
+		},
+		{
+			name:     "empty body returns empty string",
+			body:     &InferenceRequestBody{},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.body.CacheSalt())
 		})
 	}
 }

@@ -65,8 +65,14 @@ func (RawPayload) IsParsed() bool    { return false }
 
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
-// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest, or MessagesRequest.
 type InferenceRequestBody struct {
+	// Prompt is the unified representation of the user input.
+	Prompt *UnifiedPrompt
+	// Tokens is the pre-tokenized input provided by the client.
+	Tokens *TokenizedInput
+	// ExtractedCacheSalt is an optional request parameter to isolate prefix caches for security reasons.
+	ExtractedCacheSalt string
+
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
 	// ChatCompletionsRequest is the representation of the OpenAI /v1/chat/completions request body.
@@ -94,6 +100,53 @@ type InferenceRequestBody struct {
 	Stream bool `json:"-"`
 }
 
+// TokenizedInput represents pre-tokenized input provided by the client,
+// including multimodal features if present.
+type TokenizedInput struct {
+	// TokenIDs are the pre-tokenized input token IDs.
+	TokenIDs []uint32
+	// MultiModalFeatures holds one entry per multimodal item in prompt order.
+	MultiModalFeatures []MultiModalFeature
+}
+
+// UnifiedPrompt is a unified representation of the user input (prompt) for all request types.
+type UnifiedPrompt struct {
+	// Items represents structured chat history or conversation items.
+	Items []PromptItem
+	// Tools field for function calling capabilities.
+	Tools []any
+	// Documents field for HuggingFace RAG documents.
+	Documents []any
+}
+
+// PromptItem represents a single turn or message in a conversation.
+type PromptItem struct {
+	// Role specifies the role (e.g., 'user', 'assistant', 'system').
+	Role string
+	// Blocks contains the content blocks for this item.
+	Blocks []PromptBlock
+}
+
+// BlockType identifies the type of content block in a prompt.
+type BlockType string
+
+const (
+	BlockTypeText  BlockType = "text"
+	BlockTypeImage BlockType = "image"
+	BlockTypeAudio BlockType = "audio"
+	BlockTypeVideo BlockType = "video"
+)
+
+// PromptBlock represents a content block (text or asset) within a prompt item.
+type PromptBlock struct {
+	// Type specifies the block type (e.g., 'text', 'image').
+	Type BlockType
+	// Text contains raw text content.
+	Text string
+	// AssetURI refers to a multimodal asset (e.g., image URL, audio data hash).
+	AssetURI string
+}
+
 // TokenizedPrompt contains the result of tokenizing the request prompt.
 // It is consumed by scheduling and request-control plugins that benefit from
 // actual token data such as prefix-cache awareness.
@@ -119,9 +172,35 @@ type MultiModalFeature struct {
 	Length int
 }
 
-// PromptText returns a plain-text representation of the prompt from whichever
-// API type is populated, analogous to CacheSalt().
+// PromptText returns a plain-text representation of the prompt.
 func (r *InferenceRequestBody) PromptText() string {
+	if r.Prompt != nil {
+		var sb strings.Builder
+		for _, item := range r.Prompt.Items {
+			for _, block := range item.Blocks {
+				if block.Type == BlockTypeText && block.Text != "" {
+					sb.WriteString(block.Text)
+					sb.WriteString(" ")
+				}
+			}
+		}
+		if len(r.Prompt.Documents) > 0 {
+			for _, doc := range r.Prompt.Documents {
+				if str, ok := doc.(string); ok {
+					sb.WriteString(str)
+					sb.WriteString(" ")
+				} else {
+					if bytes, err := json.Marshal(doc); err == nil {
+						sb.Write(bytes)
+						sb.WriteString(" ")
+					}
+				}
+			}
+		}
+		return strings.TrimSpace(sb.String())
+	}
+
+	// Fallback to old fields
 	switch {
 	case r.Completions != nil:
 		return r.Completions.Prompt.PlainText()
@@ -172,6 +251,14 @@ func (r *InferenceRequestBody) PromptText() string {
 // caller knows it exactly (token-ID inputs), or -1 when the count has
 // to be estimated from text.
 func (r *InferenceRequestBody) InputTokenCountHint() int {
+	if r.Prompt != nil || r.Tokens != nil {
+		if r.Tokens != nil && len(r.Tokens.TokenIDs) > 0 {
+			return len(r.Tokens.TokenIDs)
+		}
+		return -1
+	}
+
+	// Fallback to old fields
 	if r.Completions != nil {
 		return r.Completions.Prompt.TokenCountHint()
 	}
@@ -184,7 +271,13 @@ func (r *InferenceRequestBody) InputTokenCountHint() int {
 	return -1
 }
 
+// CacheSalt returns the cache salt if populated.
 func (r *InferenceRequestBody) CacheSalt() string {
+	if r.ExtractedCacheSalt != "" {
+		return r.ExtractedCacheSalt
+	}
+
+	// Fallback to old fields
 	if r.Conversations != nil {
 		return r.Conversations.CacheSalt
 	}
