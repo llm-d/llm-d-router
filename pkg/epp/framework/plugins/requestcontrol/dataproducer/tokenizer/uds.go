@@ -48,7 +48,10 @@ func (a *udsTokenizerAdapter) Render(_ context.Context, payload fwkrh.RequestPay
 	if !ok {
 		return nil, nil, errors.New("UDS tokenizer requires a parsed PayloadMap")
 	}
-	prompt, _ := pm["prompt"].(string)
+	prompt, ok := pm["prompt"].(string)
+	if !ok {
+		return nil, nil, errors.New("UDS tokenizer requires string prompt")
+	}
 	return a.t.Render(prompt)
 }
 
