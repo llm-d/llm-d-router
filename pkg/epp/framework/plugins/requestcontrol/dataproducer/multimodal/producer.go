@@ -111,6 +111,8 @@ func New(ctx context.Context, name string, params *Parameters, podList func() []
 		return nil, fmt.Errorf("failed to create multimodal encoder-cache LRU with size %d: %w", cacheSize, err)
 	}
 
+	registerEncoderCacheMetrics()
+
 	p := &Producer{
 		typedName:   plugin.TypedName{Type: ProducerType, Name: name},
 		dk:          attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(name),
@@ -160,6 +162,8 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		logger.Info("No multimodal content found, skipping encoder-cache match data")
 		return nil
 	}
+
+	p.recordItemLookups(requestItems)
 
 	if request != nil && request.RequestID != "" {
 		p.pluginState.Write(request.RequestID, plugin.StateKey(ProducerType), &requestState{items: requestItems})
@@ -265,6 +269,20 @@ func itemSlice(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
 		items = append(items, item)
 	}
 	return items
+}
+
+// recordItemLookups increments the queries counter for each item and the hits
+// counter for each item whose hash is already tracked in the LRU.
+// Contains is used instead of Get to avoid altering recency during a read-only path.
+func (p *Producer) recordItemLookups(items []attrmm.MatchItem) {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	for _, item := range items {
+		encoderCacheQueriesTotal.Inc()
+		if p.cache.Contains(item.Hash) {
+			encoderCacheHitsTotal.Inc()
+		}
+	}
 }
 
 func (p *Producer) matchedItemsForPod(pod string, requestItems []attrmm.MatchItem) []attrmm.MatchItem {
