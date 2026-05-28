@@ -136,64 +136,10 @@ func (p *VertexAIParser) ParseRequest(ctx context.Context, body []byte, headers 
 		return &fwkrh.ParseResult{Body: inferenceRequestBody, Skip: parseResult.Skip}, nil
 
 	case strings.HasSuffix(path, streamRawPredictServiceMethod):
-		parsedPayload, err := grpcutil.ParseGrpcPayload(body)
-		if err != nil {
-			return nil, fmt.Errorf("invalid or unsupported gRPC payload: %w", err)
-		}
-
-		req := &aiplatformpb.StreamRawPredictRequest{}
-		if err := proto.Unmarshal(parsedPayload, req); err != nil {
-			return nil, fmt.Errorf("unmarshaling StreamRawPredictRequest: %w", err)
-		}
-
-		httpBody := req.GetHttpBody()
-		if httpBody == nil {
-			return nil, errors.New("StreamRawPredictRequest has no HttpBody")
-		}
-		jsonBytes := httpBody.GetData()
-
-		// Use OpenAI parser to parse the JSON payload
-		// Clone headers and set path to /responses to make OpenAI parser recognize it
-		headersCopy := maps.Clone(headers)
-		headersCopy[parsers.MethodPathKey] = openAIResponsesPath
-		parseResult, err := p.openAIParser.ParseRequest(ctx, jsonBytes, headersCopy)
-		if err != nil {
-			return nil, fmt.Errorf("parsing StreamRawPredictRequest: %w", err)
-		}
-
-		inferenceRequestBody := parseResult.Body
-		inferenceRequestBody.Payload = fwkrh.PayloadProto{Message: req}
-		return &fwkrh.ParseResult{Body: inferenceRequestBody, Skip: parseResult.Skip}, nil
+		return p.parseRawPredict(ctx, body, headers, &aiplatformpb.StreamRawPredictRequest{}, "StreamRawPredictRequest")
 
 	case strings.HasSuffix(path, rawPredictServiceMethod):
-		parsedPayload, err := grpcutil.ParseGrpcPayload(body)
-		if err != nil {
-			return nil, fmt.Errorf("invalid or unsupported gRPC payloa: %w", err)
-		}
-
-		req := &aiplatformpb.RawPredictRequest{}
-		if err := proto.Unmarshal(parsedPayload, req); err != nil {
-			return nil, fmt.Errorf("unmarshaling RawPredictRequest: %w", err)
-		}
-
-		httpBody := req.GetHttpBody()
-		if httpBody == nil {
-			return nil, errors.New("RawPredictRequest has no HttpBody")
-		}
-		jsonBytes := httpBody.GetData()
-
-		// Use OpenAI parser to parse the JSON payload
-		// Clone headers and set path to /responses to make OpenAI parser recognize it
-		headersCopy := maps.Clone(headers)
-		headersCopy[parsers.MethodPathKey] = openAIResponsesPath
-		parseResult, err := p.openAIParser.ParseRequest(ctx, jsonBytes, headersCopy)
-		if err != nil {
-			return nil, fmt.Errorf("parsing RawPredictRequest: %w", err)
-		}
-
-		inferenceRequestBody := parseResult.Body
-		inferenceRequestBody.Payload = fwkrh.PayloadProto{Message: req}
-		return &fwkrh.ParseResult{Body: inferenceRequestBody, Skip: parseResult.Skip}, nil
+		return p.parseRawPredict(ctx, body, headers, &aiplatformpb.RawPredictRequest{}, "RawPredictRequest")
 
 	default:
 		return &fwkrh.ParseResult{Skip: true}, nil
@@ -219,4 +165,39 @@ func (p *VertexAIParser) ParseResponse(ctx context.Context, body []byte, headers
 	jsonBytes := respMsg.GetData()
 
 	return p.openAIParser.ParseResponse(ctx, jsonBytes, headers, false)
+}
+
+type rawRequest interface {
+	proto.Message
+	GetHttpBody() *httpbody.HttpBody
+}
+
+func (p *VertexAIParser) parseRawPredict(ctx context.Context, body []byte, headers map[string]string, req rawRequest, typeName string) (*fwkrh.ParseResult, error) {
+	parsedPayload, err := grpcutil.ParseGrpcPayload(body)
+	if err != nil {
+		return nil, fmt.Errorf("invalid or unsupported gRPC payload: %w", err)
+	}
+
+	if err := proto.Unmarshal(parsedPayload, req); err != nil {
+		return nil, fmt.Errorf("unmarshaling %s: %w", typeName, err)
+	}
+
+	httpBody := req.GetHttpBody()
+	if httpBody == nil {
+		return nil, fmt.Errorf("%s has no HttpBody", typeName)
+	}
+	jsonBytes := httpBody.GetData()
+
+	// Use OpenAI parser to parse the JSON payload
+	// Clone headers and set path to /responses to make OpenAI parser recognize it
+	headersCopy := maps.Clone(headers)
+	headersCopy[parsers.MethodPathKey] = openAIResponsesPath
+	parseResult, err := p.openAIParser.ParseRequest(ctx, jsonBytes, headersCopy)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", typeName, err)
+	}
+
+	inferenceRequestBody := parseResult.Body
+	inferenceRequestBody.Payload = fwkrh.PayloadProto{Message: req}
+	return &fwkrh.ParseResult{Body: inferenceRequestBody, Skip: parseResult.Skip}, nil
 }
