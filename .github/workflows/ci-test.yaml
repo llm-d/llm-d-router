@@ -235,8 +235,16 @@ jobs:
           image-name: ${{ matrix.image.image-name }}
           tag: dev
           registry: ghcr.io/llm-d
-          load: 'true'
+          outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image.image-name }}.tar
           commit-sha: ${{ github.sha }}
+
+      - name: Upload ${{ matrix.image.name }} image
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-image-${{ matrix.image.name }}
+          path: ${{ runner.temp }}/${{ matrix.image.image-name }}.tar
+          retention-days: 1
+          compression-level: 0
 
   e2e-gaie:
     needs:
@@ -262,10 +270,18 @@ jobs:
         id: e2e-setup
         uses: ./.github/actions/e2e-runner-setup
 
-      - name: Build E2E images
-        uses: ./.github/actions/e2e-build
+      - name: Download built e2e images
+        uses: actions/download-artifact@v7
         with:
-          commit-sha: ${{ github.sha }}
+          pattern: e2e-image-*
+          path: ${{ runner.temp }}/e2e-built-images
+          merge-multiple: true
+
+      - name: Load built e2e images
+        run: |
+          for image in "${RUNNER_TEMP}"/e2e-built-images/*.tar; do
+            docker load --input "$image"
+          done
 
       - name: Restore e2e image cache
         id: image-cache
@@ -326,10 +342,18 @@ jobs:
         id: e2e-setup
         uses: ./.github/actions/e2e-runner-setup
 
-      - name: Build E2E images
-        uses: ./.github/actions/e2e-build
+      - name: Download built e2e images
+        uses: actions/download-artifact@v7
         with:
-          commit-sha: ${{ github.sha }}
+          pattern: e2e-image-*
+          path: ${{ runner.temp }}/e2e-built-images
+          merge-multiple: true
+
+      - name: Load built e2e images
+        run: |
+          for image in "${RUNNER_TEMP}"/e2e-built-images/*.tar; do
+            docker load --input "$image"
+          done
 
       - name: Restore e2e image cache
         id: image-cache
