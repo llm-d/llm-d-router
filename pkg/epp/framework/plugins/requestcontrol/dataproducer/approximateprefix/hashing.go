@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,14 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+)
+
+const (
+	blockTypeTextLegacy       = "text"
+	blockTypeImageURLLegacy   = "image_url"
+	blockTypeVideoURLLegacy   = "video_url"
+	blockTypeInputAudioLegacy = "input_audio"
+	blockTypeAudioURLLegacy   = "audio_url"
 )
 
 // HashBlock wraps prompt or tokenized prompt which is later used for calculating prefix hashes.
@@ -121,6 +129,18 @@ func toBytes(i blockHash) []byte {
 }
 
 func getKVCacheBlocksFromRawPrompt(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, tokenEstimator TokenEstimator) (iter.Seq[HashBlock], error) {
+	if len(request.Body.TokenInputs) > 0 && len(request.Body.TokenInputs[0].TokenIDs) > 0 {
+		return getKVCacheBlocksFromTokens(request.Body.TokenInputs[0].TokenIDs, blockSizeTokens), nil
+	}
+
+	if request.Body.TokenizedPrompt != nil && len(request.Body.TokenizedPrompt.TokenIDs) > 0 {
+		return getKVCacheBlocksFromTokens(request.Body.TokenizedPrompt.TokenIDs, blockSizeTokens), nil
+	}
+
+	if len(request.Body.Prompts) > 0 {
+		return getKVCacheBlocksFromPrompt(ctx, &request.Body.Prompts[0], blockSizeTokens, tokenEstimator), nil
+	}
+
 	switch {
 	case request.Body.Conversations != nil:
 		rawBytes, err := json.Marshal(request.Body.Conversations.Items)
@@ -220,15 +240,16 @@ func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *schedulin
 		} else if len(msg.Content.Structured) > 0 {
 			for _, block := range msg.Content.Structured {
 				switch block.Type {
-				case "text":
+				case blockTypeTextLegacy:
 					allPseudoBytes = append(allPseudoBytes, []byte(block.Text)...)
-				case "image_url":
+				case blockTypeImageURLLegacy:
 					// multimodal content can't be in the same pseudo token of text.
-					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
+					allPseudoBytes = padToAlignment(allPseudoBytes)
 					url := block.ImageURL.URL
-					numPlaceHolders := tokenEstimator.Estimate(fwkrh.ContentBlock{
-						Type:     "image_url",
-						ImageURL: fwkrh.ImageBlock{URL: url},
+					// Natively instantiate PromptBlock instead of ContentBlock!
+					numPlaceHolders := tokenEstimator.Estimate(fwkrh.PromptBlock{
+						Type:     fwkrh.BlockTypeImage,
+						AssetURI: url,
 					})
 
 					imgHashVal := xxhash.Sum64([]byte(url))
@@ -237,15 +258,15 @@ func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *schedulin
 					for i := 0; i < numPlaceHolders; i++ {
 						allPseudoBytes = append(allPseudoBytes, imgHashBytes...)
 					}
-				case "video_url":
+				case blockTypeVideoURLLegacy:
 					// Add video support later
 					// multimodal content can't be in the same pseudo token of text.
-					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
+					allPseudoBytes = padToAlignment(allPseudoBytes)
 					allPseudoBytes = append(allPseudoBytes, []byte(block.VideoURL.URL)...)
-				case "input_audio", "audio_url":
+				case blockTypeInputAudioLegacy, blockTypeAudioURLLegacy:
 					// Add audio support later
 					// multimodal content can't be in the same pseudo token of text.
-					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
+					allPseudoBytes = padToAlignment(allPseudoBytes)
 					allPseudoBytes = append(allPseudoBytes, []byte(block.InputAudio.Data)...)
 					allPseudoBytes = append(allPseudoBytes, []byte(block.InputAudio.Format)...)
 				default:
@@ -259,14 +280,63 @@ func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *schedulin
 	return getKVCacheBlocksFromRawBytes(allPseudoBytes, blockSizeTokens)
 }
 
-func padToAlignment(b []byte, alignment int) []byte {
-	remainder := len(b) % alignment
+func padToAlignment(b []byte) []byte {
+	remainder := len(b) % averageCharactersPerToken
 	if remainder == 0 {
 		return b
 	}
-	padding := alignment - remainder
+	padding := averageCharactersPerToken - remainder
 	for i := 0; i < padding; i++ {
 		b = append(b, 0)
 	}
 	return b
+}
+
+func getKVCacheBlocksFromPrompt(ctx context.Context, prompt *fwkrh.UnifiedPrompt, blockSizeTokens int, tokenEstimator TokenEstimator) iter.Seq[HashBlock] {
+	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	var allPseudoBytes []byte
+
+	// Process conversation messages (turns)
+	for _, msg := range prompt.Messages {
+		if msg.Role != "" {
+			allPseudoBytes = append(allPseudoBytes, []byte(msg.Role)...)
+		}
+		for _, block := range msg.Blocks {
+			switch block.Type {
+			case fwkrh.BlockTypeText:
+				if block.Text != "" {
+					allPseudoBytes = append(allPseudoBytes, []byte(block.Text)...)
+				}
+			case fwkrh.BlockTypeImage:
+				allPseudoBytes = padToAlignment(allPseudoBytes)
+				numPlaceholders := tokenEstimator.Estimate(block)
+
+				imgHashVal := xxhash.Sum64([]byte(block.AssetURI))
+				imgHashBytes := make([]byte, 4)
+				binary.LittleEndian.PutUint32(imgHashBytes, uint32(imgHashVal))
+				for i := 0; i < numPlaceholders; i++ {
+					allPseudoBytes = append(allPseudoBytes, imgHashBytes...)
+				}
+			case fwkrh.BlockTypeVideo:
+				allPseudoBytes = padToAlignment(allPseudoBytes)
+				allPseudoBytes = append(allPseudoBytes, []byte(block.AssetURI)...)
+			case fwkrh.BlockTypeAudio:
+				allPseudoBytes = padToAlignment(allPseudoBytes)
+				allPseudoBytes = append(allPseudoBytes, []byte(block.AssetURI)...)
+			case fwkrh.BlockTypeDocument, fwkrh.BlockTypeTool:
+				if block.Text != "" {
+					allPseudoBytes = append(allPseudoBytes, []byte(block.Text)...)
+				}
+				if block.Data != nil {
+					if bytes, err := json.Marshal(block.Data); err == nil {
+						allPseudoBytes = append(allPseudoBytes, bytes...)
+					}
+				}
+			default:
+				loggerDebug.Info("Unsupported block type: " + string(block.Type))
+			}
+		}
+	}
+
+	return getKVCacheBlocksFromRawBytes(allPseudoBytes, blockSizeTokens)
 }

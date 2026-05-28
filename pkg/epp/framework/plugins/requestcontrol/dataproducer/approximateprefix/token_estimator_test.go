@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package approximateprefix
 
 import (
@@ -13,25 +29,25 @@ func TestApproximatePrefixCacheTokenEstimator(t *testing.T) {
 	tests := []struct {
 		name          string
 		multimodalCfg *multiModalTokenEstimatorConfig
-		block         fwkrh.ContentBlock
+		block         fwkrh.PromptBlock
 		expected      int
 	}{
 		{
 			name:          "EmptyText",
 			multimodalCfg: nil,
-			block:         fwkrh.ContentBlock{Type: "text", Text: ""},
+			block:         fwkrh.PromptBlock{Type: fwkrh.BlockTypeText, Text: ""},
 			expected:      0,
 		},
 		{
 			name:          "Text_4Chars",
 			multimodalCfg: nil,
-			block:         fwkrh.ContentBlock{Type: "text", Text: "aaaa"},
+			block:         fwkrh.PromptBlock{Type: fwkrh.BlockTypeText, Text: "aaaa"},
 			expected:      1,
 		},
 		{
 			name:          "Text_5Chars",
 			multimodalCfg: nil,
-			block:         fwkrh.ContentBlock{Type: "text", Text: "aaaaa"},
+			block:         fwkrh.PromptBlock{Type: fwkrh.BlockTypeText, Text: "aaaaa"},
 			expected:      1,
 		},
 		{
@@ -44,9 +60,9 @@ func TestApproximatePrefixCacheTokenEstimator(t *testing.T) {
 					},
 				},
 			},
-			block: fwkrh.ContentBlock{
-				Type:     "image_url",
-				ImageURL: fwkrh.ImageBlock{URL: "https://example.com/image.jpg"},
+			block: fwkrh.PromptBlock{
+				Type:     fwkrh.BlockTypeImage,
+				AssetURI: "https://example.com/image.jpg",
 			},
 			expected: 10,
 		},
@@ -64,9 +80,9 @@ func TestApproximatePrefixCacheTokenEstimator(t *testing.T) {
 					},
 				},
 			},
-			block: fwkrh.ContentBlock{
-				Type:     "image_url",
-				ImageURL: fwkrh.ImageBlock{URL: base64Image180p1},
+			block: fwkrh.PromptBlock{
+				Type:     fwkrh.BlockTypeImage,
+				AssetURI: base64Image180p1,
 			},
 			expected: 56,
 		},

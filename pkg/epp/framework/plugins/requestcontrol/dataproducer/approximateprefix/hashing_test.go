@@ -3,10 +3,14 @@ package approximateprefix
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"iter"
 	"testing"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -30,8 +34,16 @@ func TestGetContentBlocks(t *testing.T) {
 			name: "Completions",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "aaaabbbb"},
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Blocks: []fwkrh.PromptBlock{
+										{Type: fwkrh.BlockTypeText, Text: "aaaabbbb"},
+									},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -46,9 +58,16 @@ func TestGetContentBlocks(t *testing.T) {
 			name: "ChatCompletions_Text",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					ChatCompletions: &fwkrh.ChatCompletionsRequest{
-						Messages: []fwkrh.Message{
-							{Role: "user", Content: fwkrh.Content{Raw: "Hello"}},
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Role: "user",
+									Blocks: []fwkrh.PromptBlock{
+										{Type: fwkrh.BlockTypeText, Text: "Hello"},
+									},
+								},
+							},
 						},
 					},
 				},
@@ -64,10 +83,22 @@ func TestGetContentBlocks(t *testing.T) {
 			name: "ChatCompletions_Roles",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					ChatCompletions: &fwkrh.ChatCompletionsRequest{
-						Messages: []fwkrh.Message{
-							{Role: "user", Content: fwkrh.Content{Raw: "Hello"}},
-							{Role: "assistant", Content: fwkrh.Content{Raw: "cici"}},
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Role: "user",
+									Blocks: []fwkrh.PromptBlock{
+										{Type: fwkrh.BlockTypeText, Text: "Hello"},
+									},
+								},
+								{
+									Role: "assistant",
+									Blocks: []fwkrh.PromptBlock{
+										{Type: fwkrh.BlockTypeText, Text: "cici"},
+									},
+								},
+							},
 						},
 					},
 				},
@@ -83,13 +114,16 @@ func TestGetContentBlocks(t *testing.T) {
 			name: "ChatCompletions_ImageURL_Fixed",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					ChatCompletions: &fwkrh.ChatCompletionsRequest{
-						Messages: []fwkrh.Message{
-							{
-								Role: "user",
-								Content: fwkrh.Content{
-									Structured: []fwkrh.ContentBlock{
-										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/image.jpg"}},
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Role: "user",
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type:     fwkrh.BlockTypeImage,
+											AssetURI: "https://example.com/image.jpg",
+										},
 									},
 								},
 							},
@@ -132,13 +166,16 @@ func TestGetContentBlocks(t *testing.T) {
 			name: "ChatCompletions_ImageURL_Dynamic_Fallback",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					ChatCompletions: &fwkrh.ChatCompletionsRequest{
-						Messages: []fwkrh.Message{
-							{
-								Role: "system",
-								Content: fwkrh.Content{
-									Structured: []fwkrh.ContentBlock{
-										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "data:image/jpeg;base64,bm90IGFuIGltYWdl"}},
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Role: "system",
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type:     fwkrh.BlockTypeImage,
+											AssetURI: "data:image/jpeg;base64,bm90IGFuIGltYWdl",
+										},
 									},
 								},
 							},
@@ -168,13 +205,16 @@ func TestGetContentBlocks(t *testing.T) {
 			name: "ChatCompletions_ImageContent_Fixed",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					ChatCompletions: &fwkrh.ChatCompletionsRequest{
-						Messages: []fwkrh.Message{
-							{
-								Role: "user",
-								Content: fwkrh.Content{
-									Structured: []fwkrh.ContentBlock{
-										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p1}},
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Role: "user",
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type:     fwkrh.BlockTypeImage,
+											AssetURI: base64Image180p1,
+										},
 									},
 								},
 							},
@@ -200,13 +240,16 @@ func TestGetContentBlocks(t *testing.T) {
 			name: "ChatCompletions_ImageContent_Dynamic_Success",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					ChatCompletions: &fwkrh.ChatCompletionsRequest{
-						Messages: []fwkrh.Message{
-							{
-								Role: "user",
-								Content: fwkrh.Content{
-									Structured: []fwkrh.ContentBlock{
-										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p1}},
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Role: "user",
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type:     fwkrh.BlockTypeImage,
+											AssetURI: base64Image180p1,
+										},
 									},
 								},
 							},
@@ -239,15 +282,24 @@ func TestGetContentBlocks(t *testing.T) {
 			name: "ChatCompletions_TEXT_imageContent_Dynamic_Success",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					ChatCompletions: &fwkrh.ChatCompletionsRequest{
-						Messages: []fwkrh.Message{
-							{
-								Role: "user",
-								Content: fwkrh.Content{
-									Structured: []fwkrh.ContentBlock{
-										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p1}},
-										{Type: "text", Text: "aaaaaa"},
-										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p2}},
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Role: "user",
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type:     fwkrh.BlockTypeImage,
+											AssetURI: base64Image180p1,
+										},
+										{
+											Type: fwkrh.BlockTypeText,
+											Text: "aaaaaa",
+										},
+										{
+											Type:     fwkrh.BlockTypeImage,
+											AssetURI: base64Image180p2,
+										},
 									},
 								},
 							},
@@ -316,7 +368,7 @@ func TestGetContentBlocks(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 				blocks := make([]HashBlock, 0, len(tt.expectedContentBlocks))
 				for block := range seq {
 					blocks = append(blocks, block)
@@ -400,4 +452,306 @@ func imageHashBytes(url string) []byte {
 	buf := make([]byte, 4)
 	binary.LittleEndian.PutUint32(buf, uint32(h))
 	return buf
+}
+
+func TestPrefixHashing_PathComparison(t *testing.T) {
+	multimodalCfg := &multiModalTokenEstimatorConfig{
+		Image: &imageTokenEstimatorConfig{
+			Mode: ModeDynamic,
+			DefaultResolution: resolution{
+				Width:  1920,
+				Height: 1080,
+			},
+			DynamicCfg: &dynamicTokenEstimatorConfig{
+				Factor: 1024,
+			},
+		},
+	}
+	tokenEstimator := NewApproximatePrefixCacheTokenEstimator(context.Background(), multimodalCfg)
+
+	tests := []struct {
+		name       string
+		legacyReq  *fwksched.InferenceRequest
+		unifiedReq *fwksched.InferenceRequest
+	}{
+		{
+			name: "Completions Text comparison",
+			legacyReq: &fwksched.InferenceRequest{
+				TargetModel: "test-model",
+				Body: &fwkrh.InferenceRequestBody{
+					Completions: &fwkrh.CompletionsRequest{
+						Prompt: fwkrh.Prompt{Raw: "completions-text-payload"},
+					},
+				},
+			},
+			unifiedReq: &fwksched.InferenceRequest{
+				TargetModel: "test-model",
+				Body: &fwkrh.InferenceRequestBody{
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type: fwkrh.BlockTypeText,
+											Text: "completions-text-payload",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Chat Completions Text comparison",
+			legacyReq: &fwksched.InferenceRequest{
+				TargetModel: "test-model",
+				Body: &fwkrh.InferenceRequestBody{
+					ChatCompletions: &fwkrh.ChatCompletionsRequest{
+						Messages: []fwkrh.Message{
+							{Role: "system", Content: fwkrh.Content{Raw: "sys-prompt"}},
+							{Role: "user", Content: fwkrh.Content{Raw: "user-prompt"}},
+						},
+					},
+				},
+			},
+			unifiedReq: &fwksched.InferenceRequest{
+				TargetModel: "test-model",
+				Body: &fwkrh.InferenceRequestBody{
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Role: "system",
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type: fwkrh.BlockTypeText,
+											Text: "sys-prompt",
+										},
+									},
+								},
+								{
+									Role: "user",
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type: fwkrh.BlockTypeText,
+											Text: "user-prompt",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Chat Completions Multimodal comparison",
+			legacyReq: &fwksched.InferenceRequest{
+				TargetModel: "test-model",
+				Body: &fwkrh.InferenceRequestBody{
+					ChatCompletions: &fwkrh.ChatCompletionsRequest{
+						Messages: []fwkrh.Message{
+							{
+								Role: "user",
+								Content: fwkrh.Content{
+									Structured: []fwkrh.ContentBlock{
+										{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: base64Image180p1}},
+										{Type: "text", Text: "describe image"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			unifiedReq: &fwksched.InferenceRequest{
+				TargetModel: "test-model",
+				Body: &fwkrh.InferenceRequestBody{
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Role: "user",
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type:     fwkrh.BlockTypeImage,
+											AssetURI: base64Image180p1,
+										},
+										{
+											Type: fwkrh.BlockTypeText,
+											Text: "describe image",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// 1. Generate blocks from legacy request (using the test-only legacy path)
+			legacySeq, err := getKVCacheBlocksFromRawPromptLegacy(tt.legacyReq, 16, &tokenEstimatorLegacyWrapper{tokenEstimator})
+			require.NoError(t, err)
+			legacyBlocks := seqToSlice(legacySeq)
+
+			// 2. Generate blocks from unified request (using the production Prompt path)
+			unifiedSeq, err := getKVCacheBlocksFromRawPrompt(context.Background(), tt.unifiedReq, 16, tokenEstimator)
+			require.NoError(t, err)
+			unifiedBlocks := seqToSlice(unifiedSeq)
+
+			// 3. Deeply assert they are 100% identical
+			assert.Equal(t, legacyBlocks, unifiedBlocks)
+
+			// 4. Compute and compare final prefix block hashes
+			legacyHashes := computeBlockHashes(slicesToSeq(legacyBlocks), tt.legacyReq, 5)
+			unifiedHashes := computeBlockHashes(slicesToSeq(unifiedBlocks), tt.unifiedReq, 5)
+			assert.Equal(t, legacyHashes, unifiedHashes)
+		})
+	}
+}
+
+func seqToSlice(seq iter.Seq[HashBlock]) []HashBlock {
+	var res []HashBlock
+	if seq == nil {
+		return nil
+	}
+	for item := range seq {
+		res = append(res, item)
+	}
+	return res
+}
+
+func slicesToSeq(slice []HashBlock) iter.Seq[HashBlock] {
+	return func(yield func(HashBlock) bool) {
+		for _, item := range slice {
+			if !yield(item) {
+				return
+			}
+		}
+	}
+}
+
+// --- Test-Only Legacy Fallback Helpers for Equivalence Verification ---
+
+func getKVCacheBlocksFromRawPromptLegacy(request *fwksched.InferenceRequest, blockSizeTokens int, tokenEstimator TokenEstimatorLegacy) (iter.Seq[HashBlock], error) {
+	switch {
+	case request.Body.Conversations != nil:
+		rawBytes, err := json.Marshal(request.Body.Conversations.Items)
+		if err != nil {
+			return nil, errors.New("failed to marshal conversations")
+		}
+		return getKVCacheBlocksFromRawBytes(rawBytes, blockSizeTokens), nil
+	case request.Body.Responses != nil:
+		var combined []map[string]interface{}
+		if request.Body.Responses.Instructions != nil {
+			combined = append(combined, map[string]interface{}{"instructions": request.Body.Responses.Instructions})
+		}
+		if request.Body.Responses.Tools != nil {
+			combined = append(combined, map[string]interface{}{"tools": request.Body.Responses.Tools})
+		}
+		combined = append(combined, map[string]interface{}{"input": request.Body.Responses.Input})
+		rawBytes, err := json.Marshal(combined)
+		if err != nil {
+			return nil, errors.New("failed to marshal responses")
+		}
+		return getKVCacheBlocksFromRawBytes(rawBytes, blockSizeTokens), nil
+
+	case request.Body.ChatCompletions != nil:
+		return getKVCacheBlocksFromChatCompletionsLegacy(request, blockSizeTokens, tokenEstimator), nil
+
+	case request.Body.Completions != nil:
+		rawBytes := []byte(request.Body.Completions.Prompt.PlainText())
+		return getKVCacheBlocksFromRawBytes(rawBytes, blockSizeTokens), nil
+
+	case request.Body.Embeddings != nil:
+		rawBytes, err := json.Marshal(request.Body.Embeddings.Input)
+		if err != nil {
+			return nil, errors.New("failed to marshal embeddings")
+		}
+		return getKVCacheBlocksFromRawBytes(rawBytes, blockSizeTokens), nil
+
+	default:
+		return nil, errors.New("invalid request body: no recognized API format found")
+	}
+}
+
+type TokenEstimatorLegacy interface {
+	EstimateLegacy(block fwkrh.ContentBlock) int
+}
+
+type tokenEstimatorLegacyWrapper struct {
+	tokenEstimator TokenEstimator
+}
+
+func (w *tokenEstimatorLegacyWrapper) EstimateLegacy(block fwkrh.ContentBlock) int {
+	var blockType fwkrh.BlockType
+	switch block.Type {
+	case "text":
+		blockType = fwkrh.BlockTypeText
+	case "image_url":
+		blockType = fwkrh.BlockTypeImage
+	case "input_audio", "audio_url":
+		blockType = fwkrh.BlockTypeAudio
+	case "video_url":
+		blockType = fwkrh.BlockTypeVideo
+	default:
+		blockType = fwkrh.BlockType(block.Type)
+	}
+
+	return w.tokenEstimator.Estimate(fwkrh.PromptBlock{
+		Type:     blockType,
+		Text:     block.Text,
+		AssetURI: block.ImageURL.URL,
+	})
+}
+
+func getKVCacheBlocksFromChatCompletionsLegacy(request *fwksched.InferenceRequest, blockSizeTokens int, tokenEstimator TokenEstimatorLegacy) iter.Seq[HashBlock] {
+	messages := request.Body.ChatCompletions.Messages
+	var allPseudoBytes []byte
+
+	for _, msg := range messages {
+		if msg.Role != "" {
+			allPseudoBytes = append(allPseudoBytes, []byte(msg.Role)...)
+		}
+		if msg.Content.Raw != "" {
+			allPseudoBytes = append(allPseudoBytes, []byte(msg.Content.Raw)...)
+		} else if len(msg.Content.Structured) > 0 {
+			for _, block := range msg.Content.Structured {
+				switch block.Type {
+				case blockTypeTextLegacy:
+					allPseudoBytes = append(allPseudoBytes, []byte(block.Text)...)
+				case blockTypeImageURLLegacy:
+					allPseudoBytes = padToAlignment(allPseudoBytes)
+					url := block.ImageURL.URL
+					numPlaceHolders := tokenEstimator.EstimateLegacy(fwkrh.ContentBlock{
+						Type:     blockTypeImageURLLegacy,
+						ImageURL: fwkrh.ImageBlock{URL: url},
+					})
+
+					imgHashVal := xxhash.Sum64([]byte(url))
+					imgHashBytes := make([]byte, 4)
+					binary.LittleEndian.PutUint32(imgHashBytes, uint32(imgHashVal))
+					for i := 0; i < numPlaceHolders; i++ {
+						allPseudoBytes = append(allPseudoBytes, imgHashBytes...)
+					}
+				case blockTypeVideoURLLegacy:
+					allPseudoBytes = padToAlignment(allPseudoBytes)
+					allPseudoBytes = append(allPseudoBytes, []byte(block.VideoURL.URL)...)
+				case blockTypeInputAudioLegacy, blockTypeAudioURLLegacy:
+					allPseudoBytes = padToAlignment(allPseudoBytes)
+					allPseudoBytes = append(allPseudoBytes, []byte(block.InputAudio.Data)...)
+					allPseudoBytes = append(allPseudoBytes, []byte(block.InputAudio.Format)...)
+				}
+			}
+		}
+	}
+
+	return getKVCacheBlocksFromRawBytes(allPseudoBytes, blockSizeTokens)
 }

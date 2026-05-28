@@ -37,7 +37,7 @@ import (
 
 // TokenEstimator estimates the number of tokens for different content types.
 type TokenEstimator interface {
-	Estimate(block fwkrh.ContentBlock) int
+	Estimate(block fwkrh.PromptBlock) int
 }
 
 type approximatePrefixCacheTokenEstimator struct {
@@ -53,16 +53,16 @@ func NewApproximatePrefixCacheTokenEstimator(ctx context.Context, multimodalConf
 	}
 }
 
-func (e *approximatePrefixCacheTokenEstimator) Estimate(block fwkrh.ContentBlock) int {
+func (e *approximatePrefixCacheTokenEstimator) Estimate(block fwkrh.PromptBlock) int {
 	switch block.Type {
-	case "text":
+	case fwkrh.BlockTypeText:
 		return len(block.Text) / averageCharactersPerToken
-	case "image_url":
-		return getImagePlaceholders(e.ctx, block.ImageURL.URL, e.multimodalConfig)
-	case "video_url":
+	case fwkrh.BlockTypeImage:
+		return getImagePlaceholders(e.ctx, block.AssetURI, e.multimodalConfig)
+	case fwkrh.BlockTypeVideo:
 		// Add video support later
 		return 0
-	case "input_audio", "audio_url":
+	case fwkrh.BlockTypeAudio:
 		// Add audio support later
 		return 0
 	default:
