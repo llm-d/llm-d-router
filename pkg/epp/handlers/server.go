@@ -162,10 +162,10 @@ const (
 	// RequestEvicted indicates the request was evicted by flow control.
 	// The state machine sends an ImmediateResponse(429) to the proxy.
 	RequestEvicted StreamRequestState = 8
-	// RequestSkipped indicates the request parsing was skipped.
+	// RequestResponseProcessingSkipped indicates that EPP response-phase stream interception was skipped for this request.
 	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
 	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
-	RequestSkipped StreamRequestState = 9
+	RequestResponseProcessingSkipped StreamRequestState = 9
 )
 
 // recvResult holds the result of a srv.Recv() call from the reader goroutine.
@@ -350,7 +350,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					break
 				}
 
-				if parseResult != nil && parseResult.Skip {
+				if parseResult != nil && parseResult.SkipResponseProcessing {
 					parseResult.Body = &fwkrh.InferenceRequestBody{
 						Payload: fwkrh.RawPayload(reqCtx.Request.RawBody),
 					}
@@ -379,8 +379,8 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.Priority)
 				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestSize)
 
-				if parseResult.Skip {
-					reqCtx.RequestState = RequestSkipped
+				if parseResult.SkipResponseProcessing {
+					reqCtx.RequestState = RequestResponseProcessingSkipped
 				}
 			}
 		case *extProcPb.ProcessingRequest_RequestTrailers:
@@ -453,7 +453,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		if err := reqCtx.updateStateAndSendIfNeeded(srv, logger); err != nil {
 			return err
 		}
-		if reqCtx.RequestState == RequestSkipped {
+		if reqCtx.RequestState == RequestResponseProcessingSkipped {
 			logger.V(logutil.DEFAULT).Info("EPP skipped response interception, routed request",
 				"targetEndpoint", reqCtx.TargetEndpoint,
 				"targetModel", reqCtx.TargetModelName)
@@ -539,7 +539,7 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 	}
 
 	// Handle skip — send response with the director's routing decision to the proxy.
-	if r.RequestState == RequestSkipped {
+	if r.RequestState == RequestResponseProcessingSkipped {
 		if r.reqHeaderResp != nil {
 			if err := srv.Send(r.reqHeaderResp); err != nil {
 				logger.Error(err, "error sending response")

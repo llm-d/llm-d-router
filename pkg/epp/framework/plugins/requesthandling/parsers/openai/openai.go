@@ -110,7 +110,7 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		extractedBody.Stream = true
 	}
-	return &fwkrh.ParseResult{Body: extractedBody, Skip: false}, nil
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 }
 
 // ParseResponse extracts usage metadata from the provider's response.

@@ -98,7 +98,7 @@ func TestParseRequest(t *testing.T) {
 					Stream:  true,
 					Payload: fwkrh.PayloadProto{Message: reqMsg},
 				},
-				Skip: false,
+				SkipResponseProcessing: false,
 			},
 		},
 		{
@@ -115,7 +115,7 @@ func TestParseRequest(t *testing.T) {
 					},
 					Payload: fwkrh.PayloadProto{Message: streamRawPredictReqMsg},
 				},
-				Skip: false,
+				SkipResponseProcessing: false,
 			},
 		},
 		{
@@ -132,7 +132,7 @@ func TestParseRequest(t *testing.T) {
 					},
 					Payload: fwkrh.PayloadProto{Message: rawPredictReqMsg},
 				},
-				Skip: false,
+				SkipResponseProcessing: false,
 			},
 		},
 		{
@@ -140,7 +140,7 @@ func TestParseRequest(t *testing.T) {
 			body:    []byte{},
 			headers: map[string]string{":path": "/unsupported/path", "content-type": "application/grpc"},
 			wantResult: &fwkrh.ParseResult{
-				Skip: true,
+				SkipResponseProcessing: true,
 			},
 		},
 		{

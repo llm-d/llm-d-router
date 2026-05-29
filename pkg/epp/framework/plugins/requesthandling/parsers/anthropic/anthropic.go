@@ -101,7 +101,7 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		result.Stream = true
 	}
 
-	return &fwkrh.ParseResult{Body: result, Skip: false}, nil
+	return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: false}, nil
 }
 
 func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {

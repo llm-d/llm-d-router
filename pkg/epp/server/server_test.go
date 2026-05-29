@@ -402,9 +402,9 @@ type mockParser struct {
 
 func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	if m.skip {
-		return &fwkrh.ParseResult{Skip: true, Body: nil}, nil
+		return &fwkrh.ParseResult{SkipResponseProcessing: true, Body: nil}, nil
 	}
-	return &fwkrh.ParseResult{Skip: false, Body: &fwkrh.InferenceRequestBody{}}, nil
+	return &fwkrh.ParseResult{SkipResponseProcessing: false, Body: &fwkrh.InferenceRequestBody{}}, nil
 }
 
 func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {

@@ -72,7 +72,7 @@ func (p *PassthroughParser) ParseRequest(ctx context.Context, body []byte, heade
 		Body: &fwkrh.InferenceRequestBody{
 			Payload: fwkrh.RawPayload(body),
 		},
-		Skip: false,
+		SkipResponseProcessing: false,
 	}, nil
 }
 

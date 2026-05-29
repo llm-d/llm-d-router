@@ -30,10 +30,10 @@ type Parser interface {
 	// ParseRequest parses the request body and headers and returns the parsed result.
 	// There are three outcomes based on the return values:
 	// 1. err != nil: The request is invalid or cannot be parsed. The framework will fail the request early.
-	// 2. err == nil and result.Skip == true: The request is valid but EPP should stop intercepting the stream
+	// 2. err == nil and result.SkipResponseProcessing == true: The request is valid but EPP should stop intercepting the stream
 	//    after the request phase. The scheduling director will still route the request, but subsequent
 	//    response interception phases will be skipped.
-	// 3. err == nil and result.Skip == false: The request is valid and will be processed by the scheduling framework.
+	// 3. err == nil and result.SkipResponseProcessing == false: The request is valid and will be processed by the scheduling framework.
 	ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*ParseResult, error)
 
 	// ParseResponse parses the response payload.
@@ -52,7 +52,7 @@ type Parser interface {
 type ParseResult struct {
 	// Body contains the parsed inference request body.
 	Body *InferenceRequestBody
-	// Skip indicates whether to skip EPP stream interception for this request.
+	// SkipResponseProcessing indicates whether to skip EPP stream interception for this request.
 	// When set to true, the request will still go through the scheduling director
 	// (allowing routing decisions, profiles, and admission control to run),
 	// but the EPP will stop intercepting the stream after the request phase completes
@@ -60,7 +60,7 @@ type ParseResult struct {
 	//
 	// This allows fallback or non-standard requests to be routed using the configured
 	// policies without paying the overhead of response-phase interception.
-	Skip bool
+	SkipResponseProcessing bool
 }
 
 type ParsedResponse struct {

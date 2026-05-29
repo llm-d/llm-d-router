@@ -59,8 +59,8 @@ func TestPassthroughParser_ParseRequest(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if got.Skip != false {
-				t.Errorf("got.Skip = %v, want false", got.Skip)
+			if got.SkipResponseProcessing != false {
+				t.Errorf("got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
 			}
 			if diff := cmp.Diff(tt.wantBody, got.Body); diff != "" {
 				t.Errorf("Unexpected body (-want +got):\n%s", diff)
