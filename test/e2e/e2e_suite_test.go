@@ -35,7 +35,7 @@ const (
 	// crdKustomizePath is the kustomize path for all CRDs (upstream GIE + local llm-d.ai).
 	crdKustomizePath = "../../config/crd"
 	// inferExtManifest is the manifest for the inference extension test resources.
-	inferExtManifest = "../../deploy/components/inference-gateway/single-pool/inference-pools.yaml"
+	inferExtManifest = "../../deploy/components/inference-gateway/single-pool/inference-pool.yaml"
 	// simModelName is the test model name.
 	simModelName = "food-review"
 	// kvModelName is the model name used in KV tests.
@@ -311,9 +311,9 @@ func createInferencePool(numTargetPorts int, toDelete bool) []string {
 	}
 
 	infPoolYaml := testutils.ReadYaml(inferExtManifest)
-	// targetPorts is substituted into `targetPorts: ${TARGET_PORTS}` in inference-pools.yaml.
+	// targetPorts is substituted into `targetPorts: ${TARGET_PORTS}` in inference-pool.yaml.
 	// Each item must use 2-space indentation to match that field's level in the YAML.
-	// If the field is ever reindented in inference-pools.yaml, update the format string here too.
+	// If the field is ever reindented in inference-pool.yaml, update the format string here too.
 	var targetPortsBuilder strings.Builder
 	for idx := range numTargetPorts {
 		fmt.Fprintf(&targetPortsBuilder, "\n  - number: %d", 8000+idx)

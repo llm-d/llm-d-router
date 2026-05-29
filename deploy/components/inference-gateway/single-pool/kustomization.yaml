@@ -10,7 +10,7 @@ kind: Kustomization
 resources:
 - service-accounts.yaml
 - rbac.yaml
-- inference-pools.yaml
+- inference-pool.yaml
 - services.yaml
 - deployment.yaml
 - httproutes.yaml
