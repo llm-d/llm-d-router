@@ -40,6 +40,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -159,6 +160,13 @@ type Director struct {
 	// streaming response path. The request context key avoids coupling independent streams that reuse the same
 	// x-request-id header.
 	responseBodyQueues sync.Map
+
+	requestEvictor *eviction.RequestEvictor
+}
+
+// SetRequestEvictor sets the RequestEvictor for tracking and evicting in-flight requests.
+func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
+	d.requestEvictor = re
 }
 
 // getInferenceObjective fetches the inferenceObjective from the datastore otherwise creates a new one based on reqCtx.
@@ -380,6 +388,10 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 
 	d.runPreRequestPlugins(ctx, reqCtx.SchedulingRequest, result)
 
+	if d.requestEvictor != nil {
+		d.requestEvictor.PreRequest(ctx, reqCtx.SchedulingRequest, result)
+	}
+
 	return reqCtx, nil
 }
 
@@ -419,6 +431,15 @@ func (d *Director) HandleResponseHeader(ctx context.Context, reqCtx *handlers.Re
 func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.RequestContext, endOfStream bool) *handlers.RequestContext {
 	logger := log.FromContext(ctx).WithValues("stage", "bodyChunk")
 	logger.V(logutil.TRACE).Info("Entering HandleResponseBodyChunk")
+
+	if endOfStream && d.requestEvictor != nil {
+		evictResponse := &fwkrc.Response{
+			RequestID:   reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+			EndOfStream: true,
+		}
+		d.requestEvictor.ResponseBody(ctx, reqCtx.SchedulingRequest, evictResponse, reqCtx.TargetPod)
+	}
+
 	if len(d.requestControlPlugins.responseStreamingPlugins) == 0 {
 		logger.V(logutil.TRACE).Info("Exiting HandleResponseBodyChunk")
 		return reqCtx

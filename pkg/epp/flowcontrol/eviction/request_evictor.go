@@ -176,6 +176,16 @@ func (p *RequestEvictor) Stats() (inFlight int, evictable int) {
 	return p.queue.InFlightLen(), p.queue.EvictableLen()
 }
 
+// PeekNextEvictable returns the priority of the next request that would be evicted,
+// or false if no evictable requests exist. Does not modify the queue.
+func (p *RequestEvictor) PeekNextEvictable() (priority int, ok bool) {
+	item := p.queue.Peek()
+	if item == nil {
+		return 0, false
+	}
+	return item.Priority, true
+}
+
 // cleanupRequest removes a request from all tracking structures.
 // If the evictor supports cleanup (e.g., ImmediateResponseEvictor), it also
 // cleans up evictor-internal state to prevent unbounded map growth.

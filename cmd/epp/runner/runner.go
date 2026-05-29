@@ -57,8 +57,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fccontroller "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
 	fcregistry "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
@@ -72,6 +74,8 @@ import (
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	evictfiltering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/filtering"
+	evictordering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/ordering"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
@@ -383,22 +387,45 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	// --- Admission Control Initialization ---
 	var admissionController requestcontrol.AdmissionController
+	var requestEvictor *eviction.RequestEvictor
 	var endpointCandidates contracts.EndpointCandidates
 	endpointCandidates = requestcontrol.NewDatastoreEndpointCandidates(ds, requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter))
 	if r.featureGates[flowcontrol.FeatureGate] {
 		endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, time.Millisecond*50)
 		setupLog.Info("Initializing experimental Flow Control layer")
 		registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
+
+		fcDeps := fccontroller.Deps{
+			Registry:           registry,
+			SaturationDetector: eppConfig.SaturationDetector,
+			EndpointCandidates: endpointCandidates,
+			UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
+		}
+
+		if eppConfig.FlowControlConfig.Controller.EnableEviction {
+			immediateEvictor := eviction.NewImmediateResponseEvictor()
+			orderingPolicy, evictErr := evictordering.PriorityThenTimeOrderingFactory(evictordering.PriorityThenTimeOrderingType, nil, nil)
+			if evictErr != nil {
+				return nil, nil, fmt.Errorf("failed to create eviction ordering policy: %w", evictErr)
+			}
+			filterPlugin, evictErr := evictfiltering.SheddableFilterFactory(evictfiltering.SheddableFilterType, nil, nil)
+			if evictErr != nil {
+				return nil, nil, fmt.Errorf("failed to create eviction filter policy: %w", evictErr)
+			}
+			requestEvictor = eviction.NewRequestEvictor(
+				orderingPolicy.(fwkfc.EvictionOrderingPolicy),
+				filterPlugin.(fwkfc.EvictionFilterPolicy),
+				immediateEvictor,
+			)
+			fcDeps.EvictionHandler = eviction.NewDemandDrivenEvictionHandler(requestEvictor)
+			setupLog.Info("Demand-driven in-flight eviction enabled with ImmediateResponseEvictor and SheddableFilter")
+		}
+
 		fc := fccontroller.NewFlowController(
 			ctx,
 			opts.PoolName,
 			eppConfig.FlowControlConfig.Controller,
-			fccontroller.Deps{
-				Registry:           registry,
-				SaturationDetector: eppConfig.SaturationDetector,
-				EndpointCandidates: endpointCandidates,
-				UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
-			},
+			fcDeps,
 		)
 		go registry.Run(ctx)
 		admissionController = requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
@@ -408,6 +435,9 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	}
 
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	if requestEvictor != nil {
+		director.SetRequestEvictor(requestEvictor)
+	}
 
 	serverRunner := &runserver.ExtProcServerRunner{
 		GrpcPort:                         opts.GRPCPort,
@@ -426,6 +456,9 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		UseExperimentalDatalayerV2:       r.featureGates[datalayer.ExperimentalDatalayerFeatureGate] || !r.featureGates[datalayer.EnableLegacyMetricsFeatureGate],
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
+	}
+	if requestEvictor != nil {
+		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
 
 	if err := serverRunner.SetupWithManager(mgr); err != nil {

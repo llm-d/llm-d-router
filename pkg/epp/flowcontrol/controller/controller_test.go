@@ -272,6 +272,7 @@ func (f *mockProcessorFactory) new(
 	_ time.Duration,
 	_ int,
 	_ logr.Logger,
+	_ internal.ProcessorOptions,
 ) processor {
 	if f.processor != nil {
 		return f.processor
