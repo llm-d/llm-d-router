@@ -19,6 +19,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -170,14 +171,8 @@ func NewFlowRegistry(config *Config, logger logr.Logger, opts ...RegistryOption)
 	return fr
 }
 
-// Run blocks until the provided context is cancelled.
-// Registry maintenance (priority band sync and GC) runs in the ShardProcessor loop.
-func (fr *FlowRegistry) Run(ctx context.Context) {
-	<-ctx.Done()
-}
-
 // RunMaintenanceLoop applies priority band updates and runs registry GC until ctx is cancelled.
-// Production uses the ShardProcessor loop; this helper supports tests that run without a FlowController.
+// Production uses the Processor loop; this helper supports tests that run without a FlowController.
 func (fr *FlowRegistry) RunMaintenanceLoop(ctx context.Context) {
 	gcTicker := fr.clock.NewTicker(fr.config.FlowGCTimeout)
 	defer gcTicker.Stop()
@@ -195,7 +190,7 @@ func (fr *FlowRegistry) RunMaintenanceLoop(ctx context.Context) {
 }
 
 // SubmitDesiredPriorities queues a priority band topology update for the processor loop.
-// The call never blocks: stale pending updates are dropped and the latest desired state is retained.
+// Stale pending updates are dropped so only the latest desired state is retained.
 func (fr *FlowRegistry) SubmitDesiredPriorities(desired map[int]struct{}) {
 	if desired == nil {
 		desired = map[int]struct{}{}
@@ -205,16 +200,14 @@ func (fr *FlowRegistry) SubmitDesiredPriorities(desired map[int]struct{}) {
 		copy[priority] = struct{}{}
 	}
 
+	// Drain any stale pending update so only the latest state is queued.
 	select {
 	case <-fr.priorityBandUpdateCh:
 	default:
 	}
 
-	select {
-	case fr.priorityBandUpdateCh <- copy:
-	default:
-		fr.ApplyDesiredPriorities(copy)
-	}
+	// After draining, the channel always has capacity; this send never blocks.
+	fr.priorityBandUpdateCh <- copy
 }
 
 // PriorityBandUpdateChannel returns the channel carrying desired priority topology updates.
@@ -228,20 +221,21 @@ func (fr *FlowRegistry) FlowGCTimeout() time.Duration {
 }
 
 // ApplyDesiredPriorities provisions missing priority bands and removes idle bands no longer desired.
-// It is invoked by the ShardProcessor maintenance loop.
+// It is invoked by the Processor maintenance loop.
 func (fr *FlowRegistry) ApplyDesiredPriorities(desired map[int]struct{}) {
 	if desired == nil {
 		desired = map[int]struct{}{}
 	}
 
 	fr.mu.Lock()
+	defer fr.mu.Unlock()
+
 	for priority := range desired {
 		if _, ok := fr.config.PriorityBands[priority]; !ok {
 			fr.provisionPriorityBandLocked(priority)
 		}
 	}
 
-	var toRemove []int
 	for priority := range fr.config.PriorityBands {
 		if _, static := fr.initialPriorities[priority]; static {
 			continue
@@ -249,20 +243,26 @@ func (fr *FlowRegistry) ApplyDesiredPriorities(desired map[int]struct{}) {
 		if _, wanted := desired[priority]; wanted {
 			continue
 		}
-		if fr.isPriorityBandIdle(priority) {
-			toRemove = append(toRemove, priority)
+		if !fr.isPriorityBandIdle(priority) {
+			continue
 		}
-	}
-	fr.mu.Unlock()
-
-	for _, priority := range toRemove {
-		fr.deletePriorityBand(priority)
+		// Re-verify under the lock: a concurrent request may have pinned the band
+		// in the window between isPriorityBandIdle and this check.
+		if val, ok := fr.priorityBandStates.Load(priority); ok {
+			if val.(*priorityBandState).isActive() {
+				continue
+			}
+		}
+		fr.priorityBandStates.Delete(priority)
+		fr.cleanupPriorityBandResourcesLocked(priority)
 	}
 }
 
 // ExecuteGCCycle runs a single registry garbage collection cycle.
 func (fr *FlowRegistry) ExecuteGCCycle() {
-	fr.executeGCCycle()
+	fr.logger.V(logging.DEBUG).Info("Starting periodic GC scan")
+	fr.gcFlows()
+	fr.gcPriorityBands()
 }
 
 // --- `contracts.FlowRegistryDataPlane` Implementation ---
@@ -396,12 +396,6 @@ func (fr *FlowRegistry) isPriorityBandIdle(priority int) bool {
 	return !val.(*priorityBandState).isActive()
 }
 
-// deletePriorityBand removes a priority band from the registry and all shards.
-func (fr *FlowRegistry) deletePriorityBand(priority int) {
-	fr.priorityBandStates.Delete(priority)           // Logical delete
-	fr.cleanupPriorityBandResources([]int{priority}) // Physical cleanup
-}
-
 // --- `contracts.FlowRegistryObserver` Implementation ---
 
 // Stats returns globally aggregated statistics for the entire `FlowRegistry`.
@@ -439,13 +433,6 @@ func (fr *FlowRegistry) Stats() contracts.AggregateStats {
 }
 
 // --- Garbage Collection ---
-
-// executeGCCycle orchestrates the periodic GC of Idle flows, idle priority bands, and Drained shards.
-func (fr *FlowRegistry) executeGCCycle() {
-	fr.logger.V(logging.DEBUG).Info("Starting periodic GC scan")
-	fr.gcFlows()
-	fr.gcPriorityBands()
-}
 
 // gcFlows removes idle flows.
 func (fr *FlowRegistry) gcFlows() {
@@ -507,35 +494,26 @@ func (fr *FlowRegistry) gcPriorityBands() {
 func (fr *FlowRegistry) cleanupPriorityBandResources(priorities []int) {
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
-
 	for _, priority := range priorities {
-		// Zombie protection: verify band was actually deleted from map
-		if _, exists := fr.priorityBandStates.Load(priority); exists {
-			continue
-		}
-
-		// Delete from registry config
-		delete(fr.config.PriorityBands, priority)
-
-		// Delete from stats tracking
-		fr.perPriorityBandStats.Delete(priority)
-
-		// Remove from sync.Map
-		fr.priorityBands.Delete(priority)
-
-		// Remove from ordered list
-		for i, p := range fr.orderedPriorityLevels {
-			if p == priority {
-				fr.orderedPriorityLevels = append(
-					fr.orderedPriorityLevels[:i],
-					fr.orderedPriorityLevels[i+1:]...,
-				)
-				break
-			}
-		}
-
-		fr.logger.V(logging.DEFAULT).Info("Successfully deleted priority band", "priority", priority)
+		fr.cleanupPriorityBandResourcesLocked(priority)
 	}
+}
+
+// cleanupPriorityBandResourcesLocked performs the physical cleanup of a priority band.
+// The caller must hold fr.mu exclusively.
+func (fr *FlowRegistry) cleanupPriorityBandResourcesLocked(priority int) {
+	// Zombie protection: verify band was actually deleted from the state map.
+	if _, exists := fr.priorityBandStates.Load(priority); exists {
+		return
+	}
+
+	delete(fr.config.PriorityBands, priority)
+	fr.perPriorityBandStats.Delete(priority)
+	fr.priorityBands.Delete(priority)
+
+	fr.orderedPriorityLevels = slices.DeleteFunc(fr.orderedPriorityLevels, func(p int) bool { return p == priority })
+
+	fr.logger.V(logging.DEFAULT).Info("Successfully deleted priority band", "priority", priority)
 }
 
 // --- Internal Helpers ---

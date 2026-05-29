@@ -55,7 +55,7 @@ type PriorityBandControlPlane interface {
 	SubmitDesiredPriorities(desired map[int]struct{})
 }
 
-// FlowRegistryBackground exposes hooks consumed by the ShardProcessor maintenance loop.
+// FlowRegistryBackground exposes hooks consumed by the Processor maintenance loop.
 type FlowRegistryBackground interface {
 	PriorityBandUpdateChannel() <-chan map[int]struct{}
 	FlowGCTimeout() time.Duration

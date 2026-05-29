@@ -83,17 +83,17 @@ var _ processor = &internal.Processor{}
 type FlowController struct {
 	// --- Immutable dependencies (set at construction) ---
 
-	config                *Config
-	registry              registryClient
-	flowRegistry          contracts.FlowRegistry
-	registryBackground    contracts.FlowRegistryBackground
-	saturationDetector    flowcontrol.SaturationDetector
-	endpointCandidates    contracts.EndpointCandidates
-	usageLimitPolicy      flowcontrol.UsageLimitPolicy
-	clock                 clock.WithTicker
-	logger                logr.Logger
-	processorFactory      processorFactory
-	processor             processor
+	config             *Config
+	registry           registryClient
+	flowRegistry       contracts.FlowRegistry
+	registryBackground contracts.FlowRegistryBackground
+	saturationDetector flowcontrol.SaturationDetector
+	endpointCandidates contracts.EndpointCandidates
+	usageLimitPolicy   flowcontrol.UsageLimitPolicy
+	clock              clock.WithTicker
+	logger             logr.Logger
+	processorFactory   processorFactory
+	processor          processor
 
 	// --- Lifecycle state ---
 

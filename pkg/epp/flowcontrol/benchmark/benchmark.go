@@ -214,7 +214,7 @@ func setupRegistry(
 	}
 
 	reg := registry.NewFlowRegistry(regCfg, logr.Discard())
-	// Registry maintenance (GC, priority band sync) runs in the ShardProcessor loop started by FlowController.
+	// Registry maintenance (GC, priority band sync) runs in the Processor loop started by FlowController.
 	return reg
 }
 
