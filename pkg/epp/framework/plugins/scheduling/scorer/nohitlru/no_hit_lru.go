@@ -128,6 +128,9 @@ func (s *NoHitLRU) Consumes() map[plugin.DataKey]any {
 	}
 }
 
+// OptionalConsumes returns nil as this plugin has no optional data dependencies.
+func (s *NoHitLRU) OptionalConsumes() map[plugin.DataKey]any { return nil }
+
 // isColdRequest determines if a request is cold by checking endpoint prefix-cache attributes.
 // Returns true when no endpoint reports any cache-hit blocks, or when no attribute is present.
 func (s *NoHitLRU) isColdRequest(ctx context.Context, endpoints []scheduling.Endpoint) bool {

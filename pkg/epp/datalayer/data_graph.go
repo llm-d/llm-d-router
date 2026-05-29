@@ -81,10 +81,10 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 		}
 	}
 
-	// Warn about optional keys (MayConsume) with no producer — no error, just a warning.
+	// Warn about optional keys with no producer — no error, just a warning.
 	for _, p := range handle.GetAllPlugins() {
-		if mayConsumer, ok := p.(plugin.MayConsumePlugin); ok {
-			for key := range mayConsumer.MayConsume() {
+		if consumer, ok := p.(plugin.ConsumerPlugin); ok {
+			for key := range consumer.OptionalConsumes() {
 				if !producedKeys[key.String()] {
 					logger.Info("Warning: optional data key has no producer, plugin will use fallback",
 						"plugin", p.TypedName().Name, "dataKey", key.String())

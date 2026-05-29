@@ -62,6 +62,8 @@ func (m *mockDataProducerP) Consumes() map[fwkplugin.DataKey]any {
 	return m.consumes
 }
 
+func (m *mockDataProducerP) OptionalConsumes() map[fwkplugin.DataKey]any { return nil }
+
 func (m *mockDataProducerP) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	endpoints[0].Put(mockProducedDataKey, &mockProducedDataType{value: 42})
 	return nil
@@ -92,6 +94,8 @@ func (m *MockConsumerFairnessPolicy) Consumes() map[fwkplugin.DataKey]any {
 	return m.consumes
 }
 
+func (m *MockConsumerFairnessPolicy) OptionalConsumes() map[fwkplugin.DataKey]any { return nil }
+
 type MockSchedulingPlugin struct {
 	fwksched.Scorer
 	consumes map[fwkplugin.DataKey]any
@@ -104,6 +108,8 @@ func (m *MockSchedulingPlugin) TypedName() fwkplugin.TypedName {
 func (m *MockSchedulingPlugin) Consumes() map[fwkplugin.DataKey]any {
 	return m.consumes
 }
+
+func (m *MockSchedulingPlugin) OptionalConsumes() map[fwkplugin.DataKey]any { return nil }
 
 func TestValidatePluginExecutionOrder(t *testing.T) {
 	dkA := fwkplugin.NewDataKey("keyA", "mock")
@@ -429,27 +435,29 @@ func TestCreateMissingDataProducers(t *testing.T) {
 	}
 }
 
-// mockMayConsumerPlugin is a plugin that optionally consumes certain data keys.
+// mockMayConsumerPlugin is a plugin that only optionally consumes certain data keys.
 type mockMayConsumerPlugin struct {
-	name       string
-	mayConsume map[fwkplugin.DataKey]any
+	name            string
+	optionalConsumes map[fwkplugin.DataKey]any
 }
 
 func (m *mockMayConsumerPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
 }
 
-func (m *mockMayConsumerPlugin) MayConsume() map[fwkplugin.DataKey]any {
-	return m.mayConsume
+func (m *mockMayConsumerPlugin) Consumes() map[fwkplugin.DataKey]any { return nil }
+
+func (m *mockMayConsumerPlugin) OptionalConsumes() map[fwkplugin.DataKey]any {
+	return m.optionalConsumes
 }
 
-// mockMixedConsumerPlugin is a plugin that has both required Consumes and optional MayConsume.
+// mockMixedConsumerPlugin is a plugin that has both required Consumes and optional OptionalConsumes.
 // This models a real plugin like prefix cache scorer — requires prefix-match data,
 // but optionally uses tokenized input and falls back to raw text if unavailable.
 type mockMixedConsumerPlugin struct {
-	name       string
-	consumes   map[fwkplugin.DataKey]any
-	mayConsume map[fwkplugin.DataKey]any
+	name            string
+	consumes        map[fwkplugin.DataKey]any
+	optionalConsumes map[fwkplugin.DataKey]any
 }
 
 func (m *mockMixedConsumerPlugin) TypedName() fwkplugin.TypedName {
@@ -460,15 +468,15 @@ func (m *mockMixedConsumerPlugin) Consumes() map[fwkplugin.DataKey]any {
 	return m.consumes
 }
 
-func (m *mockMixedConsumerPlugin) MayConsume() map[fwkplugin.DataKey]any {
-	return m.mayConsume
+func (m *mockMixedConsumerPlugin) OptionalConsumes() map[fwkplugin.DataKey]any {
+	return m.optionalConsumes
 }
 
 func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 	producerTypeA := "producer-a"
 	keyA := fwkplugin.NewDataKey("keyA", producerTypeA)
 
-	producerAFactory := fwkplugin.FactoryFunc(func(name string, _ json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	producerAFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockDataProducerP{name: name, produces: map[fwkplugin.DataKey]any{keyA: nil}}, nil
 	})
 
@@ -479,23 +487,23 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 		wantErr         bool
 	}{
 		{
-			name: "MayConsume key with no producer — warning only, no error",
+			name: "OptionalConsumes key with no producer — warning only, no error",
 			existingPlugins: []fwkplugin.Plugin{
 				&mockMayConsumerPlugin{
-					name:       "optional-consumer",
-					mayConsume: map[fwkplugin.DataKey]any{keyA: nil},
+					name:            "optional-consumer",
+					optionalConsumes: map[fwkplugin.DataKey]any{keyA: nil},
 				},
 			},
 			factoryRegistry: map[string]fwkplugin.FactoryFunc{},
 			wantErr:         false, // must NOT error
 		},
 		{
-			name: "MayConsume key with a producer present — no warning, no error",
+			name: "OptionalConsumes key with a producer present — no warning, no error",
 			existingPlugins: []fwkplugin.Plugin{
 				&mockDataProducerP{name: "producer", produces: map[fwkplugin.DataKey]any{keyA: nil}},
 				&mockMayConsumerPlugin{
-					name:       "optional-consumer",
-					mayConsume: map[fwkplugin.DataKey]any{keyA: nil},
+					name:            "optional-consumer",
+					optionalConsumes: map[fwkplugin.DataKey]any{keyA: nil},
 				},
 			},
 			factoryRegistry: map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
@@ -503,16 +511,16 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 		},
 		{
 			// Models the real prefix cache scorer — it requires prefix-match data (Consumes)
-			// but optionally uses tokenized input (MayConsume), falling back to raw text.
+			// but optionally uses tokenized input (OptionalConsumes), falling back to raw text.
 			// The required key has a producer. The optional key does not.
 			// Result: no error. Warning logged for the missing optional key.
-			name: "plugin with both Consumes and MayConsume — required key has producer, optional does not",
+			name: "plugin with both Consumes and OptionalConsumes — required key has producer, optional does not",
 			existingPlugins: []fwkplugin.Plugin{
 				&mockDataProducerP{name: "required-producer", produces: map[fwkplugin.DataKey]any{keyA: nil}},
 				&mockMixedConsumerPlugin{
-					name:       "prefix-cache-scorer",
-					consumes:   map[fwkplugin.DataKey]any{keyA: nil},
-					mayConsume: map[fwkplugin.DataKey]any{fwkplugin.NewDataKey("tokenized-input", "tokenizer"): nil},
+					name:            "prefix-cache-scorer",
+					consumes:        map[fwkplugin.DataKey]any{keyA: nil},
+					optionalConsumes: map[fwkplugin.DataKey]any{fwkplugin.NewDataKey("tokenized-input", "tokenizer"): nil},
 				},
 			},
 			factoryRegistry: map[string]fwkplugin.FactoryFunc{},

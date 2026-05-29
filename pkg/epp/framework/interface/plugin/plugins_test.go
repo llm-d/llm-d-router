@@ -33,7 +33,8 @@ type consumerImpl struct {
 	consumes map[DataKey]any
 }
 
-func (c *consumerImpl) Consumes() map[DataKey]any { return c.consumes }
+func (c *consumerImpl) Consumes() map[DataKey]any         { return c.consumes }
+func (c *consumerImpl) OptionalConsumes() map[DataKey]any { return nil }
 
 type producerImpl struct {
 	basePlugin

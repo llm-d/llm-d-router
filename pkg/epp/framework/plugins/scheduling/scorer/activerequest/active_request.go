@@ -149,6 +149,9 @@ func (s *ActiveRequest) Consumes() map[plugin.DataKey]any {
 	}
 }
 
+// OptionalConsumes returns nil as this plugin has no optional data dependencies.
+func (s *ActiveRequest) OptionalConsumes() map[plugin.DataKey]any { return nil }
+
 // Score scores the given endpoints based on the number of active requests
 // being served by each endpoint. The score is normalized to a range of 0-1.
 func (s *ActiveRequest) Score(ctx context.Context, _ *scheduling.InferenceRequest,

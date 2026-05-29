@@ -30,16 +30,11 @@ type ConsumerPlugin interface {
 	// This is a map from DataKey produced to
 	// the data type of the key (represented as data with default value casted as any field).
 	Consumes() map[DataKey]any
-}
-
-// MayConsumePlugin defines the interface for a plugin that optionally consumes data.
-// Unlike ConsumerPlugin, the framework will NOT error if no producer exists for these keys.
-// Instead it logs a warning at init time. The plugin must handle the case where this data is absent.
-type MayConsumePlugin interface {
-	Plugin
-	// MayConsume returns data keys the plugin can optionally consume.
-	// The plugin must handle the case where this data is absent.
-	MayConsume() map[DataKey]any
+	// OptionalConsumes returns data keys the plugin can optionally consume.
+	// Unlike Consumes(), the framework will NOT error if no producer exists for these keys.
+	// Instead it logs a warning at init time. The plugin must handle the case where this data is absent.
+	// Return nil if there are no optional keys.
+	OptionalConsumes() map[DataKey]any
 }
 
 // ProducerPlugin defines the interface for a producer.
