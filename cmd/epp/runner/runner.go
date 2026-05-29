@@ -383,10 +383,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
-	endpointCandidates, admissionController, err := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
-	if err != nil {
-		return nil, nil, err
-	}
+	endpointCandidates, admissionController := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
@@ -838,12 +835,11 @@ func (r *Runner) initAdmissionControl(
 	opts *runserver.Options,
 	eppConfig *config.Config,
 	endpointCandidates contracts.EndpointCandidates,
-) (contracts.EndpointCandidates, requestcontrol.AdmissionController, error) {
+) (contracts.EndpointCandidates, requestcontrol.AdmissionController) {
 	if !r.featureGates[flowcontrol.FeatureGate] {
 		setupLog.Info("Experimental Flow Control layer is disabled, using legacy admission control")
 		return endpointCandidates,
-			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates),
-			nil
+			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
 	}
 	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
 	setupLog.Info("Initializing experimental Flow Control layer")
@@ -860,7 +856,7 @@ func (r *Runner) initAdmissionControl(
 		},
 	)
 	go registry.Run(ctx)
-	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName), nil
+	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
@@ -958,10 +954,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// EndpointPickerConfig.flowControl still apply.
 	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
-	endpointCandidates, admissionController, err := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
-	if err != nil {
-		return err
-	}
+	endpointCandidates, admissionController := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
 	gknn := common.GKNN{
