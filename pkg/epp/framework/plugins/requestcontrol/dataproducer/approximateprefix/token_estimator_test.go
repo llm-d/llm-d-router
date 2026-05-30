@@ -70,6 +70,37 @@ func TestApproximatePrefixCacheTokenEstimator(t *testing.T) {
 			},
 			expected: 56,
 		},
+		{
+			name: "Audio_Fixed",
+			multimodalCfg: &multiModalTokenEstimatorConfig{
+				Audio: &fixedTokenEstimatorConfig{FixedToken: 512},
+			},
+			block: fwkrh.ContentBlock{
+				Type:       "input_audio",
+				InputAudio: fwkrh.AudioBlock{Data: "abc", Format: "wav"},
+			},
+			expected: 512,
+		},
+		{
+			name: "Video_Fixed",
+			multimodalCfg: &multiModalTokenEstimatorConfig{
+				Video: &fixedTokenEstimatorConfig{FixedToken: 2000},
+			},
+			block: fwkrh.ContentBlock{
+				Type:     "video_url",
+				VideoURL: fwkrh.VideoBlock{URL: "https://example.com/video.mp4"},
+			},
+			expected: 2000,
+		},
+		{
+			name:          "Audio_Default",
+			multimodalCfg: nil,
+			block: fwkrh.ContentBlock{
+				Type:       "input_audio",
+				InputAudio: fwkrh.AudioBlock{Data: "abc", Format: "mp3"},
+			},
+			expected: 256,
+		},
 	}
 
 	for _, tt := range tests {

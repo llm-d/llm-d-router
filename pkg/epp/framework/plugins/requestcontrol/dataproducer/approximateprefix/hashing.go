@@ -238,16 +238,29 @@ func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *schedulin
 						allPseudoBytes = append(allPseudoBytes, imgHashBytes...)
 					}
 				case "video_url":
-					// Add video support later
-					// multimodal content can't be in the same pseudo token of text.
 					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
-					allPseudoBytes = append(allPseudoBytes, []byte(block.VideoURL.URL)...)
+					numPlaceHolders := tokenEstimator.Estimate(fwkrh.ContentBlock{
+						Type:     "video_url",
+						VideoURL: fwkrh.VideoBlock{URL: block.VideoURL.URL},
+					})
+					videoHashVal := xxhash.Sum64([]byte(block.VideoURL.URL))
+					videoHashBytes := make([]byte, 4)
+					binary.LittleEndian.PutUint32(videoHashBytes, uint32(videoHashVal))
+					for i := 0; i < numPlaceHolders; i++ {
+						allPseudoBytes = append(allPseudoBytes, videoHashBytes...)
+					}
 				case "input_audio", "audio_url":
-					// Add audio support later
-					// multimodal content can't be in the same pseudo token of text.
 					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
-					allPseudoBytes = append(allPseudoBytes, []byte(block.InputAudio.Data)...)
-					allPseudoBytes = append(allPseudoBytes, []byte(block.InputAudio.Format)...)
+					numPlaceHolders := tokenEstimator.Estimate(fwkrh.ContentBlock{
+						Type:       "input_audio",
+						InputAudio: fwkrh.AudioBlock{Data: block.InputAudio.Data, Format: block.InputAudio.Format},
+					})
+					audioHashVal := xxhash.Sum64([]byte(block.InputAudio.Data + block.InputAudio.Format))
+					audioHashBytes := make([]byte, 4)
+					binary.LittleEndian.PutUint32(audioHashBytes, uint32(audioHashVal))
+					for i := 0; i < numPlaceHolders; i++ {
+						allPseudoBytes = append(allPseudoBytes, audioHashBytes...)
+					}
 				default:
 					loggerDebug.Info("Unsupported block type: " + block.Type)
 
