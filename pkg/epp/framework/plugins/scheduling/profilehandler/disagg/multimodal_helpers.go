@@ -12,7 +12,8 @@ func hasMultimodalContent(request *scheduling.InferenceRequest) bool {
 	for _, msg := range request.Body.ChatCompletions.Messages {
 		// See https://github.com/vllm-project/vllm/blob/main/docs/features/multimodal_inputs.md#online-serving
 		for _, block := range msg.Content.Structured {
-			if block.Type == "image_url" || block.Type == "video_url" || block.Type == "input_audio" {
+			if block.Type == "image_url" || block.Type == "video_url" ||
+				block.Type == "input_audio" || block.Type == "audio_url" {
 				return true
 			}
 		}
