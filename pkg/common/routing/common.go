@@ -18,8 +18,6 @@ const (
 
 	// InferencePoolAPIGroup is the default InferencePool API group
 	InferencePoolAPIGroup = "inference.networking.k8s.io"
-
-	LegacyK8SGroup = "inference.networking.x-k8s.io" // TODO: deprecated should be clean up
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.
