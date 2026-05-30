@@ -516,8 +516,9 @@ Scores are normalized to a range of 0-1, where pods with fewer active requests g
 Scores the candidate pods by giving a higher score to the pods that were previously used for the same session.
 
 - **Type**: `session-affinity-scorer`
-- **Parameters**: 
+- **Parameters**:
   - `maxAge`: the cookie expiration time, in seconds. The default value is 0, which denotes a session cookie (expires when the browser is closed).
+  - `sessionIDProducerName`: name of the `session-id-producer` instance to read session data from. Must match the `name` of a configured `session-id-producer` plugin. Defaults to the built-in default producer name when omitted.
 
 Example configuration with the above parameter set:
 
@@ -784,9 +785,9 @@ The **vLLM sidecar** handles orchestration between Encode, Prefill and Decode st
 - Local memory management
 - Experimental protocol compatibility
 
-> [!NOTE] 
-The detailed E/P/D design is available in this document:
->[Disaggregated Inference Serving in llm-d](./disaggregation.md)
+> [!NOTE]
+> The detailed E/P/D design is available in this document:
+> [Disaggregated Inference Serving in llm-d](./disaggregation.md)
 
 ---
 
