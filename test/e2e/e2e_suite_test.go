@@ -67,6 +67,7 @@ var (
 	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.0", ginkgo.GinkgoLogr)
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
+	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
 	// nsName is the namespace in which the K8S objects will be created
 	nsName = env.GetEnvString("NAMESPACE", "default", ginkgo.GinkgoLogr)
 
@@ -198,7 +199,9 @@ func setupK8sCluster() {
 	kindLoadImage(vllmSimImage)
 	kindLoadImage(eppImage)
 	kindLoadImage(sideCarImage)
-	kindLoadImage(vllmRenderImage)
+	if loadRenderImage {
+		kindLoadImage(vllmRenderImage)
+	}
 }
 
 func kindLoadImage(image string) {
