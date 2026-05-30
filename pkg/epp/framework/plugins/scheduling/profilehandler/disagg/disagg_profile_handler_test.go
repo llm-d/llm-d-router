@@ -789,6 +789,18 @@ func TestHandler_ProcessResults_EPD(t *testing.T) {
 				assert.NotContains(t, res.ProfileResults, defaultEncodeProfile)
 			},
 		},
+		{
+			name: "encode ran but returned 0 endpoints → included in results",
+			results: map[string]*scheduling.ProfileRunResult{
+				defaultDecodeProfile: makeProfileRunResult("pod1"),
+				defaultEncodeProfile: {TargetEndpoints: []scheduling.Endpoint{}},
+			},
+			check: func(t *testing.T, res *scheduling.SchedulingResult) {
+				assert.Contains(t, res.ProfileResults, defaultDecodeProfile)
+				assert.Contains(t, res.ProfileResults, defaultEncodeProfile)
+				assert.Empty(t, res.ProfileResults[defaultEncodeProfile].TargetEndpoints)
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1332,4 +1344,26 @@ func TestBothProfileAndHeadersHandlerPreRequest(t *testing.T) {
 	expected := net.JoinHostPort(podAddr, podPort)
 	assert.Equal(t, expected, request.Headers[routing.PrefillEndpointHeader],
 		"both handlers set the same prefill header — redundant but no conflict")
+}
+
+func TestHandler_PreRequest_EncodeMultipleEndpoints(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	h := NewDisaggProfileHandler("decode", "", "encode", nil, nil)
+
+	eps := []scheduling.Endpoint{
+		scheduling.NewEndpoint(&fwkdl.EndpointMetadata{Address: "10.0.0.1", Port: "8000"}, nil, nil),
+		scheduling.NewEndpoint(&fwkdl.EndpointMetadata{Address: "10.0.0.2", Port: "8000"}, nil, nil),
+	}
+	request := &scheduling.InferenceRequest{Headers: map[string]string{}}
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"encode": {TargetEndpoints: eps},
+		},
+	}
+
+	h.PreRequest(ctx, request, result)
+
+	want := net.JoinHostPort("10.0.0.1", "8000") + "," + net.JoinHostPort("10.0.0.2", "8000")
+	assert.Equal(t, want, request.Headers[routing.EncoderEndpointsHeader])
 }
