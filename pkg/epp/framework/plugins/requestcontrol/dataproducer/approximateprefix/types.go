@@ -121,6 +121,60 @@ const (
 	defaultLRUCapacityPerServer = 31250
 )
 
+const (
+	ModeFixed   mode = "fixed"
+	ModeDynamic mode = "dynamic"
+)
+
+// mode defines the mode for image processing.
+type mode string
+
+// resolution defines the Width and height of an image.
+type resolution struct {
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+type fixedTokenEstimatorConfig struct {
+	FixedToken int `json:"fixedToken"`
+}
+
+type dynamicTokenEstimatorConfig struct {
+	Factor int `json:"factor"`
+}
+
+// imageTokenEstimatorConfig defines the configuration for image modality.
+type imageTokenEstimatorConfig struct {
+	Mode              mode                         `json:"mode"`
+	DefaultResolution resolution                   `json:"defaultResolution"`
+	DynamicCfg        *dynamicTokenEstimatorConfig `json:"dynamic,omitempty"`
+	FixedCfg          *fixedTokenEstimatorConfig   `json:"fixed,omitempty"`
+}
+
+// multiModalTokenEstimatorConfig defines the configuration for multimodal inputs.
+type multiModalTokenEstimatorConfig struct {
+	Image *imageTokenEstimatorConfig `json:"image,omitempty"`
+	Audio *fixedTokenEstimatorConfig `json:"audio,omitempty"`
+	Video *fixedTokenEstimatorConfig `json:"video,omitempty"`
+}
+
+// defaultMultimodalConfig provides default configuration for multimodal inputs.
+var defaultMultimodalConfig = multiModalTokenEstimatorConfig{
+	Image: &imageTokenEstimatorConfig{
+		Mode: ModeDynamic,
+		//  Default is 360p image
+		DefaultResolution: resolution{
+			Width:  640,
+			Height: 360,
+		},
+		DynamicCfg: &dynamicTokenEstimatorConfig{
+			Factor: 1024,
+		},
+	},
+	Audio: &fixedTokenEstimatorConfig{FixedToken: 256},
+	Video: &fixedTokenEstimatorConfig{FixedToken: 1000},
+}
+
 // config defines the configuration for the prefix cache plugins.
 type config struct {
 	// If set to true, the plugin will automatically adjust the configuration based on various

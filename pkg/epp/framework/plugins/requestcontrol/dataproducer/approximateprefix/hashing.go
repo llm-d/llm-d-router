@@ -132,3 +132,105 @@ func getKVCacheBlocksFromTokens(ids []uint32, blockSizeTokens int) iter.Seq[Hash
 		}
 	}
 }
+
+func getKVCacheBlocksFromRawBytes(rawBytes []byte, blockSizeTokens int) iter.Seq[HashBlock] {
+	return func(yield func(HashBlock) bool) {
+		if len(rawBytes) == 0 {
+			return
+		}
+
+		blockSizeBytes := blockSizeTokens * averageCharactersPerToken
+
+		for i := 0; i < len(rawBytes); i += blockSizeBytes {
+			blockEnd := i + blockSizeBytes
+			if blockEnd > len(rawBytes) {
+				blockEnd = len(rawBytes)
+			}
+
+			block := HashBlock{
+				PseudoTokens: rawBytes[i:blockEnd],
+			}
+			if !yield(block) {
+				return
+			}
+		}
+	}
+}
+
+func getKVCacheBlocksFromChatCompletions(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, tokenEstimator TokenEstimator) iter.Seq[HashBlock] {
+	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	messages := request.Body.ChatCompletions.Messages
+	var allPseudoBytes []byte
+
+	for _, msg := range messages {
+		if msg.Role != "" {
+			allPseudoBytes = append(allPseudoBytes, []byte(msg.Role)...)
+		}
+		if msg.Content.Raw != "" {
+			allPseudoBytes = append(allPseudoBytes, []byte(msg.Content.Raw)...)
+		} else if len(msg.Content.Structured) > 0 {
+			for _, block := range msg.Content.Structured {
+				switch block.Type {
+				case "text":
+					allPseudoBytes = append(allPseudoBytes, []byte(block.Text)...)
+				case "image_url":
+					// multimodal content can't be in the same pseudo token of text.
+					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
+					url := block.ImageURL.URL
+					numPlaceHolders := tokenEstimator.Estimate(fwkrh.ContentBlock{
+						Type:     "image_url",
+						ImageURL: fwkrh.ImageBlock{URL: url},
+					})
+
+					imgHashVal := xxhash.Sum64([]byte(url))
+					imgHashBytes := make([]byte, 4)
+					binary.LittleEndian.PutUint32(imgHashBytes, uint32(imgHashVal))
+					for i := 0; i < numPlaceHolders; i++ {
+						allPseudoBytes = append(allPseudoBytes, imgHashBytes...)
+					}
+				case "video_url":
+					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
+					numPlaceHolders := tokenEstimator.Estimate(fwkrh.ContentBlock{
+						Type:     "video_url",
+						VideoURL: fwkrh.VideoBlock{URL: block.VideoURL.URL},
+					})
+					videoHashVal := xxhash.Sum64([]byte(block.VideoURL.URL))
+					videoHashBytes := make([]byte, 4)
+					binary.LittleEndian.PutUint32(videoHashBytes, uint32(videoHashVal))
+					for i := 0; i < numPlaceHolders; i++ {
+						allPseudoBytes = append(allPseudoBytes, videoHashBytes...)
+					}
+				case "input_audio", "audio_url":
+					allPseudoBytes = padToAlignment(allPseudoBytes, averageCharactersPerToken)
+					numPlaceHolders := tokenEstimator.Estimate(fwkrh.ContentBlock{
+						Type:       "input_audio",
+						InputAudio: fwkrh.AudioBlock{Data: block.InputAudio.Data, Format: block.InputAudio.Format},
+					})
+					audioHashVal := xxhash.Sum64([]byte(block.InputAudio.Data + block.InputAudio.Format))
+					audioHashBytes := make([]byte, 4)
+					binary.LittleEndian.PutUint32(audioHashBytes, uint32(audioHashVal))
+					for i := 0; i < numPlaceHolders; i++ {
+						allPseudoBytes = append(allPseudoBytes, audioHashBytes...)
+					}
+				default:
+					loggerDebug.Info("Unsupported block type: " + block.Type)
+
+				}
+			}
+		}
+	}
+
+	return getKVCacheBlocksFromRawBytes(allPseudoBytes, blockSizeTokens)
+}
+
+func padToAlignment(b []byte, alignment int) []byte {
+	remainder := len(b) % alignment
+	if remainder == 0 {
+		return b
+	}
+	padding := alignment - remainder
+	for i := 0; i < padding; i++ {
+		b = append(b, 0)
+	}
+	return b
+}
