@@ -12,7 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -86,17 +86,17 @@ func createModelServersPDWithConnector(prefillReplicas, decodeReplicas int, conn
 }
 
 func createModelServersPDNixlV2(prefillReplicas, decodeReplicas int) []string {
-	return createModelServersPDWithConnector(prefillReplicas, decodeReplicas, routing.KVConnectorNIXLV2)
+	return createModelServersPDWithConnector(prefillReplicas, decodeReplicas, proxy.KVConnectorNIXLV2)
 }
 
 func createModelServersPDSharedStorage(decodeReplicas int) []string {
-	return createModelServersPDWithConnector(1, decodeReplicas, routing.KVConnectorSharedStorage)
+	return createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorSharedStorage)
 }
 
 // createModelServersEpDDisagg creates model server resources for E/PD (encode + prefill/decode) testing.
 func createModelServersEpDDisagg(encodeReplicas, decodeReplicas int) []string {
 	return createModelServersFromKustomize(ePdDisaggDir, map[string]string{
-		"${EC_CONNECTOR_TYPE}":    routing.ECExampleConnector,
+		"${EC_CONNECTOR_TYPE}":    proxy.ECExampleConnector,
 		"${VLLM_REPLICA_COUNT_E}": strconv.Itoa(encodeReplicas),
 		"${VLLM_REPLICA_COUNT_D}": strconv.Itoa(decodeReplicas),
 	})
@@ -105,8 +105,8 @@ func createModelServersEpDDisagg(encodeReplicas, decodeReplicas int) []string {
 // createModelServersEPDDisagg creates model server resources for E/P/D (encode/prefill/decode) testing.
 func createModelServersEPDDisagg(encodeReplicas, prefillReplicas, decodeReplicas int) []string {
 	return createModelServersFromKustomize(ePDDisaggDir, map[string]string{
-		"${KV_CONNECTOR_TYPE}":    routing.KVConnectorSharedStorage,
-		"${EC_CONNECTOR_TYPE}":    routing.ECExampleConnector,
+		"${KV_CONNECTOR_TYPE}":    proxy.KVConnectorSharedStorage,
+		"${EC_CONNECTOR_TYPE}":    proxy.ECExampleConnector,
 		"${VLLM_REPLICA_COUNT_E}": strconv.Itoa(encodeReplicas),
 		"${VLLM_REPLICA_COUNT_P}": strconv.Itoa(prefillReplicas),
 		"${VLLM_REPLICA_COUNT_D}": strconv.Itoa(decodeReplicas),

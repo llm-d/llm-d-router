@@ -31,7 +31,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
@@ -91,7 +90,7 @@ func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.R
 	)
 	prefillSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.prefill_target", prefillHost),
-		attribute.String("llm_d.pd_proxy.connector", routing.KVConnectorSGLang),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
 		attribute.Bool("llm_d.pd_proxy.prefill.async", true),
 	)
 	prefillStart := time.Now()
@@ -140,7 +139,7 @@ func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.R
 	defer decodeSpan.End()
 
 	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.connector", routing.KVConnectorSGLang),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
 		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", true),
 	)
 	decodeStart := time.Now()

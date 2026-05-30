@@ -117,7 +117,7 @@ type Options struct {
 func NewOptions() *Options {
 	return &Options{ // "zero" values are no explicitly set
 		GRPCPort:                         DefaultGrpcPort,
-		PoolGroup:                        routing.DefaultPoolGroup,
+		PoolGroup:                        routing.InferencePoolAPIGroup,
 		EndpointTargetPorts:              []int{},
 		DisableEndpointSubsetFilter:      false,
 		ModelServerMetricsScheme:         "http",

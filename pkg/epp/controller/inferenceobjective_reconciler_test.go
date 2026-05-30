@@ -49,25 +49,25 @@ var (
 			Priority(int32(1)).
 			CreationTimestamp(metav1.Unix(1000, 0)).
 			PoolName(inferencePool.Name).
-			PoolGroup(routing.DefaultPoolGroup).ObjRef()
+			PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 	infObjective1Pool2 = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				Priority(*infObjective1.Spec.Priority).
 				CreationTimestamp(metav1.Unix(1001, 0)).
 				PoolName("test-pool2").
-				PoolGroup(routing.DefaultPoolGroup).ObjRef()
+				PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 	infObjective1Critical = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				Priority(int32(2)).
 				CreationTimestamp(metav1.Unix(1003, 0)).
 				PoolName(inferencePool.Name).
-				PoolGroup(routing.DefaultPoolGroup).ObjRef()
+				PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 	infObjective1Deleted = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				CreationTimestamp(metav1.Unix(1004, 0)).
 				DeletionTimestamp().
 				PoolName(inferencePool.Name).
-				PoolGroup(routing.DefaultPoolGroup).ObjRef()
+				PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 	infObjective1DiffGroup = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(inferencePool.Namespace).
 				Priority(int32(1)).
@@ -78,7 +78,7 @@ var (
 			Namespace(inferencePool.Namespace).
 			CreationTimestamp(metav1.Unix(1000, 0)).
 			PoolName(inferencePool.Name).
-			PoolGroup(routing.DefaultPoolGroup).ObjRef()
+			PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 )
 
 func TestInferenceObjectiveReconciler(t *testing.T) {

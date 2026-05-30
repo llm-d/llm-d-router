@@ -142,14 +142,14 @@ type Options struct {
 var (
 	// supportedKVConnectors defines all valid P/D KV connector types
 	supportedKVConnectors = map[string]struct{}{
-		routing.KVConnectorNIXLV2:        {},
-		routing.KVConnectorSharedStorage: {},
-		routing.KVConnectorSGLang:        {},
+		KVConnectorNIXLV2:        {},
+		KVConnectorSharedStorage: {},
+		KVConnectorSGLang:        {},
 	}
 
 	// supportedECConnectors defines all valid E/P EC connector types
 	supportedECConnectors = map[string]struct{}{
-		routing.ECExampleConnector: {},
+		ECExampleConnector: {},
 	}
 
 	// supportedTLSStages defines all valid stages for TLS configuration
@@ -159,8 +159,8 @@ var (
 		encodeStage:  {},
 	}
 
-	supportedKVConnectorNamesStr = strings.Join([]string{routing.KVConnectorNIXLV2, routing.KVConnectorSharedStorage, routing.KVConnectorSGLang}, ", ")
-	supportedECConnectorNamesStr = strings.Join([]string{routing.ECExampleConnector}, ", ")
+	supportedKVConnectorNamesStr = strings.Join([]string{KVConnectorNIXLV2, KVConnectorSharedStorage, KVConnectorSGLang}, ", ")
+	supportedECConnectorNamesStr = strings.Join([]string{ECExampleConnector}, ", ")
 	supportedTLSStageNamesStr    = strings.Join([]string{prefillStage, decodeStage, encodeStage}, ", ")
 )
 
@@ -178,14 +178,14 @@ func NewOptions() *Options {
 			SecureServing:           true,
 			EnablePrefillerSampling: enablePrefillerSampling,
 			MaxIdleConnsPerHost:     defaultMaxIdleConnsPerHost,
-			PoolGroup:               routing.DefaultPoolGroup,
+			PoolGroup:               routing.InferencePoolAPIGroup,
 			InferencePoolNamespace:  os.Getenv(envInferencePoolNamespace),
 			InferencePoolName:       os.Getenv(envInferencePoolName),
 			DecodeChunkSize:         0,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
-		connector:     routing.KVConnectorNIXLV2,
+		connector:     KVConnectorNIXLV2,
 	}
 }
 

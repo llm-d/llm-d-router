@@ -31,9 +31,10 @@ import (
 
 	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 const (
@@ -68,6 +69,11 @@ const (
 	requestFieldBootstrapHost = "bootstrap_host"
 	requestFieldBootstrapPort = "bootstrap_port"
 	requestFieldBootstrapRoom = "bootstrap_room"
+
+	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
+	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
+	KVConnectorSGLang        = constants.KVConnectorSGLang
+	ECExampleConnector       = constants.ECExampleConnector
 )
 
 // APIType represents the type of OpenAI API being used.
@@ -340,15 +346,15 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) *http
 func (s *Server) setKVConnector() {
 
 	switch s.config.KVConnector {
-	case routing.KVConnectorSharedStorage:
+	case KVConnectorSharedStorage:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
 			s.handleSharedStorage(w, r, host)
 		}
-	case routing.KVConnectorSGLang:
+	case KVConnectorSGLang:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
 			s.handleSGLang(w, r, host)
 		}
-	case routing.KVConnectorNIXLV2:
+	case KVConnectorNIXLV2:
 		fallthrough
 	default:
 		s.handlePDConnector = s.handleNIXLV2
@@ -364,7 +370,7 @@ func (s *Server) setECConnector() {
 	}
 
 	switch ecConnector {
-	case routing.ECExampleConnector:
+	case ECExampleConnector:
 		s.handleEPDConnector = s.handleEPD
 	default:
 		// Unknown EC connector value, skip encoder stage

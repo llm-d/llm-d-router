@@ -45,7 +45,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 	var testInfo *sidecarTestInfo
 
 	BeforeEach(func() {
-		testInfo = sidecarConnectionTestSetup(routing.KVConnectorNIXLV2)
+		testInfo = sidecarConnectionTestSetup(KVConnectorNIXLV2)
 	})
 
 	startProxy := func() string {

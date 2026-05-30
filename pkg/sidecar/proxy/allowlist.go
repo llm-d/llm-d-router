@@ -44,8 +44,8 @@ const (
 
 // InferencePool API group to version mapping
 var inferencePoolGroupToVersion = map[string]string{
-	routing.DefaultPoolGroup: "v1",
-	routing.LegacyK8SGroup:   "v1alpha2",
+	routing.InferencePoolAPIGroup: "v1",
+	routing.LegacyK8SGroup:        "v1alpha2",
 }
 
 // AllowlistValidator manages allowed prefill targets based on InferencePool resources

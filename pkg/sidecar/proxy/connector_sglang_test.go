@@ -37,7 +37,7 @@ var _ = Describe("SGLang Connector", func() {
 
 	BeforeEach(func() {
 		// Mock testing setup using the SGLang connector mode
-		testInfo = sidecarConnectionTestSetup(routing.KVConnectorSGLang)
+		testInfo = sidecarConnectionTestSetup(KVConnectorSGLang)
 	})
 
 	It("should successfully send concurrent requests to prefill and decode with bootstrap info", func() {
@@ -140,7 +140,7 @@ var _ = Describe("SGLang Connector", func() {
 		cfg := Config{
 			Port:        "0",
 			DecoderURL:  testInfo.decodeURL,
-			KVConnector: routing.KVConnectorSGLang,
+			KVConnector: KVConnectorSGLang,
 		}
 		testInfo.proxy = NewProxy(cfg)
 

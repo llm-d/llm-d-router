@@ -178,7 +178,7 @@ func MakeInferencePool(name string) *InferencePoolWrapper {
 				Name: name,
 			},
 			TypeMeta: metav1.TypeMeta{
-				APIVersion: routing.DefaultPoolGroup + "/v1",
+				APIVersion: routing.InferencePoolAPIGroup + "/v1",
 				Kind:       "InferencePool",
 			},
 			Spec: v1.InferencePoolSpec{

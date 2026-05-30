@@ -29,8 +29,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
-
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // chunkedTestInfo holds a running proxy backed by a controlled decode backend.
@@ -67,7 +65,7 @@ func newChunkedTestSetupWithHandler(chunkSize int, handler http.Handler) *chunke
 	cfg := Config{
 		Port:            "0",
 		DecoderURL:      decoderURL,
-		KVConnector:     routing.KVConnectorNIXLV2,
+		KVConnector:     KVConnectorNIXLV2,
 		DecodeChunkSize: chunkSize,
 	}
 	proxy := NewProxy(cfg)

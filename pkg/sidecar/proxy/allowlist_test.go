@@ -30,7 +30,7 @@ var _ = Describe("AllowlistValidator", func() {
 
 		BeforeEach(func() {
 			var err error
-			validator, err = NewAllowlistValidator(false, routing.DefaultPoolGroup, "test-namespace", "test-pool")
+			validator, err = NewAllowlistValidator(false, routing.InferencePoolAPIGroup, "test-namespace", "test-pool")
 			Expect(err).ToNot(HaveOccurred())
 		})
 

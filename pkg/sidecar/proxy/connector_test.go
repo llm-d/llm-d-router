@@ -44,7 +44,7 @@ type sidecarTestInfo struct {
 	proxy          *Server
 }
 
-var connectors = []string{routing.KVConnectorSharedStorage, routing.KVConnectorNIXLV2}
+var connectors = []string{KVConnectorSharedStorage, KVConnectorNIXLV2}
 
 var _ = Describe("Common Connector tests", func() {
 
