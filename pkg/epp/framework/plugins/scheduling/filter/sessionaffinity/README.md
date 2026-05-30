@@ -1,138 +1,70 @@
-# Session Affinity Filter (`session-affinity-filter`)
+# Session Affinity Filter
 
 **Type:** `session-affinity-filter`
+**Interfaces:** `scheduling.Filter`
+**Category:** Hard affinity
 
-## When to use this filter
+Enforces strict session stickiness by removing all candidates except the one that owns the current session. When no session is present, all candidates pass through unchanged.
 
-Enable this filter when you need **hard session affinity** — guaranteeing that requests with a session identifier are routed exclusively to the endpoint running that session. This is useful for:
+## What it does
 
-- Stateful workloads where session state is maintained on specific endpoints
-- Applications requiring strict session stickiness for correctness
-- Scenarios where routing to a different endpoint would cause session loss or errors
+For each request the filter reads the `SessionID` attribute published by a `session-id-producer`:
 
-If you only need **soft affinity** (preference but not requirement), use the `session-affinity-scorer` instead.
-
-## Difference from `session-affinity-scorer`
-
-| Feature | `session-affinity-filter` (this plugin) | `session-affinity-scorer` |
-|---------|----------------------------------------|---------------------------|
-| **Affinity type** | Hard (enforced) | Soft (weighted preference) |
-| **Behavior with session** | Returns ONLY the session endpoint | Gives high score to session endpoint |
-| **Behavior without session** | Returns all endpoints | Scores all endpoints equally (0.0) |
-| **Fallback if session endpoint unavailable** | Returns all endpoints for scoring | Other scorers determine selection |
-| **Use case** | Stateful apps requiring strict stickiness | Load balancing with session preference |
-
-Both plugins work together with the `session-id-producer` to read session identifiers from requests.
-
-## Overview
-
-This filter enforces hard session affinity by narrowing the candidate endpoint list to only the endpoint identified by the session. When a session identifier is present in the request (extracted by `session-id-producer`), the filter:
-
-1. Decodes the session ID to get the target endpoint name
-2. If the target endpoint is in the candidate list, returns only that endpoint
-3. If the target endpoint is not in the candidate list (e.g., pod scaled down), returns all endpoints
-4. If no session ID is present, returns all endpoints (no-op)
-
-This ensures that requests with sessions are routed exclusively to their session endpoint, while new requests (without sessions) can be routed to any endpoint.
-
-## Behavior
-
-- **With session ID matching a candidate**: Returns only that endpoint
-- **With session ID not matching any candidate**: Returns all endpoints (allows scoring/selection)
-- **Without session ID**: Returns all endpoints (no-op)
-- **Single endpoint in list**: Always returns that endpoint (no filtering needed)
-- **Invalid/malformed session ID**: Returns all endpoints (treats as no session)
-
-## Config
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `sessionIDProducerName` | `string` | No | `""` (uses default producer) | Name of the session-id-producer to consume session data from |
-
-## Dependencies
-
-- **Requires**: `session-id-producer` to extract and publish session identifiers
-- **Reads**: `SessionID` attribute from the request attribute store
-- **Works with**: `session-affinity-scorer` for cookie management (scorer sets cookies, filter reads them via producer)
-
-## Configuration Example
-
-### Basic Configuration
-
-```yaml
-plugins:
-  # Session ID producer extracts session from cookie
-  - type: session-id-producer
-    name: my-session-producer
-    parameters:
-      cookieName: llm-d-session
-
-  # Filter enforces hard affinity
-  - type: session-affinity-filter
-    name: session-filter
-    parameters:
-      sessionIDProducerName: my-session-producer
-
-  # Scorer sets cookies and provides soft affinity fallback
-  - type: session-affinity-scorer
-    name: session-scorer
-    parameters:
-      sessionIDProducerName: my-session-producer
-      maxAge: 3600
-
-schedulingProfiles:
-  - name: default
-    plugins:
-      filters:
-        - pluginRef: session-filter
-      scorers:
-        - pluginRef: session-scorer
-          weight: 1.0
-```
-
-### With Header-Based Sessions
-
-```yaml
-plugins:
-  - type: session-id-producer
-    name: header-session-producer
-    parameters:
-      headerName: x-session-id
-
-  - type: session-affinity-filter
-    name: session-filter
-    parameters:
-      sessionIDProducerName: header-session-producer
-
-schedulingProfiles:
-  - name: default
-    plugins:
-      filters:
-        - pluginRef: session-filter
-```
+- **Session present, endpoint in candidates** — returns only that endpoint; all others are removed.
+- **Session present, endpoint not in candidates** (e.g. pod was scaled down) — returns all candidates unchanged so other plugins can select a replacement.
+- **Session absent** — returns all candidates unchanged (no-op).
+- **Single candidate in list** — always returns it unchanged, skipping the lookup.
 
 ## How It Works
 
-1. **Session Establishment** (first request):
-   - Request has no session ID
-   - Filter passes all endpoints through
-   - Scorers and picker select an endpoint
-   - `session-affinity-scorer` sets a cookie with the selected endpoint's identity
+The session ID is a base64-encoded `<namespace>/<name>` string. The filter decodes it, looks for a matching candidate by `NamespacedName`, and either narrows the list to that one endpoint or falls back to the full set.
 
-2. **Subsequent Requests** (with session):
-   - `session-id-producer` extracts session ID from cookie/header
-   - Filter decodes session ID to get endpoint name
-   - Filter returns only that endpoint (hard affinity)
-   - Request is routed to the session endpoint
+## Inputs consumed
 
-3. **Session Endpoint Unavailable**:
-   - Filter cannot find session endpoint in candidate list
-   - Filter returns all endpoints
-   - Scorers and picker select a new endpoint
-   - `session-affinity-scorer` updates the cookie
+- `SessionID` attribute — published by `session-id-producer` onto the `InferenceRequest` attribute store.
+
+## Configuration
+
+### Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `sessionIDProducerName` | `string` | No | `""` (uses default producer) | Name of the `session-id-producer` instance to consume. Must match the `name` field of a configured `session-id-producer` plugin. |
+
+### Example
+
+```yaml
+plugins:
+  - type: session-id-producer
+    name: session-producer
+    parameters:
+      cookieName: llm-d-session
+
+  - type: session-affinity-filter
+    name: session-filter
+    parameters:
+      sessionIDProducerName: session-producer
+
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: session-filter
+```
+
+## Difference from session-affinity-scorer
+
+Both plugins provide session stickiness but with different guarantees:
+
+| | `session-affinity-filter` | `session-affinity-scorer` |
+|---|---|---|
+| **Guarantee** | Hard — only the session endpoint is returned | Soft — session endpoint gets a high score but others remain |
+| **On pod unavailability** | Falls back to full candidate set | Other scorers determine the winner |
+| **Cookie management** | None — read-only | Sets `llm-d-session` cookie on the response |
+
+Use the filter when strict stickiness is required for correctness. Use the scorer alone when a best-effort preference is sufficient, or combine both for hard routing with automatic cookie issuance.
 
 ## Related Documentation
 
-- [Session Attributes](../../../datalayer/attribute/session/README.md)
-- [Session ID Producer](../../../requestcontrol/dataproducer/sessionid/README.md)
 - [Session Affinity Scorer](../../scorer/sessionaffinity/README.md)
+- [Session ID Producer](../../../requestcontrol/dataproducer/sessionid/README.md)
+- [Session Attributes](../../../datalayer/attribute/session/README.md)
