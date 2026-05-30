@@ -44,7 +44,7 @@ This plugin does not define any plugin-specific parameters.
 plugins:
   - type: mm-embeddings-cache-producer
     parameters:
-      cacheSize: 10000
+      cacheSizeInMB: 2048
   - type: mm-embeddings-cache-scorer
   - type: max-score-picker
 schedulingProfiles:

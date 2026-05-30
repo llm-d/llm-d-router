@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 )
@@ -30,8 +31,11 @@ import (
 func TestRecordItemLookupsMetrics(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
 
+	pod := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
+	podKey := pod.String()
+
 	initialQueries := testutil.ToFloat64(encoderCacheQueriesTotal)
-	initialHits := testutil.ToFloat64(encoderCacheHitsTotal)
+	initialHits := testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(podKey))
 
 	// Case 1: Cache Misses
 	items := []attrmm.MatchItem{
@@ -41,10 +45,10 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 	producer.recordItemLookups(items)
 
 	assert.Equal(t, initialQueries+2, testutil.ToFloat64(encoderCacheQueriesTotal))
-	assert.Equal(t, initialHits, testutil.ToFloat64(encoderCacheHitsTotal))
+	assert.Equal(t, initialHits, testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(podKey)))
 
 	// Case 2: Cache Hits (add one to cache first)
-	producer.cache.Add("hash-1", map[string]struct{}{"pod-a": {}})
+	producer.putCacheEntry("hash-1", pod)
 
 	items = []attrmm.MatchItem{
 		{Hash: "hash-1", Size: 1}, // Hit
@@ -53,7 +57,7 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 	producer.recordItemLookups(items)
 
 	assert.Equal(t, initialQueries+4, testutil.ToFloat64(encoderCacheQueriesTotal))
-	assert.Equal(t, initialHits+1, testutil.ToFloat64(encoderCacheHitsTotal))
+	assert.Equal(t, initialHits+1, testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(podKey)))
 }
 
 func TestRegisterEncoderCacheMetrics(t *testing.T) {

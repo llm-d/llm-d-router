@@ -39,13 +39,15 @@ var (
 	)
 
 	// encoderCacheHitsTotal counts the subset of encoder_cache_queries_total where
-	// the item hash was already present in the LRU. Divide by queries_total for hit rate.
-	encoderCacheHitsTotal = prometheus.NewCounter(
+	// the item hash was already present in the endpoint's LRU, labelled by pod.
+	// Divide by queries_total for hit rate.
+	encoderCacheHitsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: llmdSubsystem,
 			Name:      "encoder_cache_hits_total",
-			Help:      metricsutil.HelpMsgWithStability("Total number of multimodal item hash lookups that found a match in the encoder-cache affinity LRU.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Total number of multimodal item hash lookups that found a match in the encoder-cache affinity LRU, by endpoint.", compbasemetrics.ALPHA),
 		},
+		[]string{"pod"},
 	)
 
 	registerOnce sync.Once
