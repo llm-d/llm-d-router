@@ -437,7 +437,7 @@ func TestCreateMissingDataProducers(t *testing.T) {
 
 // mockMayConsumerPlugin is a plugin that only optionally consumes certain data keys.
 type mockMayConsumerPlugin struct {
-	name            string
+	name             string
 	optionalConsumes map[fwkplugin.DataKey]any
 }
 
@@ -455,8 +455,8 @@ func (m *mockMayConsumerPlugin) OptionalConsumes() map[fwkplugin.DataKey]any {
 // This models a real plugin like prefix cache scorer — requires prefix-match data,
 // but optionally uses tokenized input and falls back to raw text if unavailable.
 type mockMixedConsumerPlugin struct {
-	name            string
-	consumes        map[fwkplugin.DataKey]any
+	name             string
+	consumes         map[fwkplugin.DataKey]any
 	optionalConsumes map[fwkplugin.DataKey]any
 }
 
@@ -490,7 +490,7 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 			name: "OptionalConsumes key with no producer — warning only, no error",
 			existingPlugins: []fwkplugin.Plugin{
 				&mockMayConsumerPlugin{
-					name:            "optional-consumer",
+					name:             "optional-consumer",
 					optionalConsumes: map[fwkplugin.DataKey]any{keyA: nil},
 				},
 			},
@@ -502,7 +502,7 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 			existingPlugins: []fwkplugin.Plugin{
 				&mockDataProducerP{name: "producer", produces: map[fwkplugin.DataKey]any{keyA: nil}},
 				&mockMayConsumerPlugin{
-					name:            "optional-consumer",
+					name:             "optional-consumer",
 					optionalConsumes: map[fwkplugin.DataKey]any{keyA: nil},
 				},
 			},
@@ -518,8 +518,8 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 			existingPlugins: []fwkplugin.Plugin{
 				&mockDataProducerP{name: "required-producer", produces: map[fwkplugin.DataKey]any{keyA: nil}},
 				&mockMixedConsumerPlugin{
-					name:            "prefix-cache-scorer",
-					consumes:        map[fwkplugin.DataKey]any{keyA: nil},
+					name:             "prefix-cache-scorer",
+					consumes:         map[fwkplugin.DataKey]any{keyA: nil},
 					optionalConsumes: map[fwkplugin.DataKey]any{fwkplugin.NewDataKey("tokenized-input", "tokenizer"): nil},
 				},
 			},
