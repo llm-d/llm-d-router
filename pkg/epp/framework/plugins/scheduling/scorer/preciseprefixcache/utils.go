@@ -5,11 +5,35 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 type endpointToKeyFunc func(endpoint scheduling.Endpoint) (string, bool)
+
+// matchedBlockCount returns the number of contiguous cached prefix blocks held
+// by podID, counting from the first block until the first block the pod does
+// not hold. This is the unweighted counterpart of the device-tier-weighted
+// kvblock scorer: every cached block counts as one regardless of device tier,
+// so a pod present at keys[0..n-1] yields n.
+func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) int {
+	count := 0
+	for _, key := range keys {
+		held := false
+		for _, entry := range keyToPods[key] {
+			if entry.PodIdentifier == podID {
+				held = true
+				break
+			}
+		}
+		if !held {
+			break
+		}
+		count++
+	}
+	return count
+}
 
 // absoluteScoredPods returns score/totalBlocks per endpoint, clipped to [0, 1].
 // totalBlocks <= 0 → all zeros.

@@ -387,7 +387,9 @@ func (s *Scorer) Produce(ctx context.Context,
 		}
 		addr := fmt.Sprintf("%s:%s", md.Address, md.Port)
 		matchLen := int(scores[addr])
-		ep.Put(s.prefixMatchDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, len(blockKeys), blockSize))
+		cachedBlocks := matchedBlockCount(blockKeys, keyToPods, addr)
+		ep.Put(s.prefixMatchDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, len(blockKeys), blockSize).
+			WithCachedBlockCount(cachedBlocks))
 	}
 
 	// 6. Save to PluginState for Score() and PreRequest()
