@@ -1,0 +1,15 @@
+# Strategic-merge patch that adds the ZMQ KV-cache event subscriber port (5557)
+# to the single-pool EPP Service. Applied by single-pool/kustomization.yaml.
+# The epd-pools topology applies the equivalent patch only to the prefill phase
+# via epd-pools/phase/prefill-zmq-patch.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${EPP_NAME}${EPP_SUFFIX}
+spec:
+  ports:
+  - name: zmq
+    protocol: TCP
+    port: 5557
+    targetPort: 5557
+    appProtocol: tcp

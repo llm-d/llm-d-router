@@ -75,6 +75,35 @@ kubectl kustomize --enable-helm "deploy/environments/dev/base-kind-istio/epd-poo
 ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE}' \
   | kubectl --context ${KUBE_CONTEXT} apply -f -
 
+# Render the per-phase EPP (SA, RBAC, Service) and InferencePool once per phase.
+# SA, RBAC, and base Service are shared with the single-pool topology; the
+# EPP_SUFFIX variable appends "-${phase}" to all resource names so each phase
+# gets its own named objects. The Deployment and InferencePool remain in the
+# epd-pools phase/ directory since their structure differs from single-pool.
+# After applying the prefill phase, add the ZMQ KV-cache subscriber port via
+# a strategic-merge patch — only prefill receives KV-cache events from decode.
+SINGLE_POOL_DIR="deploy/components/inference-gateway/single-pool"
+PHASE_TEMPLATE_DIR="deploy/components/inference-gateway/epd-pools/phase"
+for phase in encode prefill decode; do
+  export PHASE="${phase}"
+  export EPP_SUFFIX="-${phase}"
+  for tpl in \
+    "${SINGLE_POOL_DIR}/service-accounts.yaml" \
+    "${SINGLE_POOL_DIR}/rbac.yaml" \
+    "${SINGLE_POOL_DIR}/services.yaml" \
+    "${PHASE_TEMPLATE_DIR}/inference-pool.yaml" \
+    "${PHASE_TEMPLATE_DIR}/deployment.yaml"; do
+    envsubst '${POOL_NAME} ${PHASE} ${EPP_NAME} ${EPP_SUFFIX} ${EPP_IMAGE} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH}' \
+      < "${tpl}" \
+      | kubectl --context ${KUBE_CONTEXT} apply -f -
+  done
+  if [ "${phase}" = "prefill" ]; then
+    envsubst '${EPP_NAME}' < "${PHASE_TEMPLATE_DIR}/prefill-zmq-patch.yaml" \
+      | kubectl --context ${KUBE_CONTEXT} apply --server-side --force-conflicts -f -
+  fi
+done
+unset PHASE EPP_SUFFIX
+
 kubectl kustomize --enable-helm "deploy/environments/dev/coordinator-e-p-d-pools" \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
   ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \

@@ -105,7 +105,8 @@ var _ = ginkgo.BeforeSuite(func() {
 	createCRDs()
 	createEnvoy()
 	infraSubs := map[string]string{
-		"${EPP_NAME}": "e2e-epp",
+		"${EPP_NAME}":   "e2e-epp",
+		"${EPP_SUFFIX}": "", // single-pool uses no suffix
 	}
 	rbacYamls := substituteMany(testutils.ReadYaml(rbacManifest), infraSubs)
 	rbacObjects = testutils.CreateObjsFromYaml(testConfig, rbacYamls)

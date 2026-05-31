@@ -1,9 +1,10 @@
-# Inference Gateway — encode/prefill/decode pools topology
+# Inference Gateway — encode/prefill/decode pools topology.
+# Per-phase EPPs and InferencePools are rendered from phase/ by the
+# script (scripts/kind-dev-env-pools.sh) once per phase via envsubst with
+# PHASE=encode|prefill|decode; only the routing layer is composed through
+# kustomize.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-- encode/
-- prefill/
-- decode/
 - routing/

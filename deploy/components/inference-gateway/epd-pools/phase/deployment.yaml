@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${EPP_NAME}-${PHASE}
+  labels:
+    app: ${EPP_NAME}-${PHASE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${EPP_NAME}-${PHASE}
+  template:
+    metadata:
+      labels:
+        app: ${EPP_NAME}-${PHASE}
+    spec:
+      serviceAccountName: ${EPP_NAME}-${PHASE}
+      terminationGracePeriodSeconds: 130
+      containers:
+      - name: epp
+        image: ${EPP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - --pool-name
+        - "${POOL_NAME}-${PHASE}"
+        - --pool-namespace
+        - "${NAMESPACE}"
+        - --v
+        - "4"
+        - --zap-encoder
+        - "json"
+        - --grpc-port
+        - "9002"
+        - --grpc-health-port
+        - "9003"
+        - --config-file
+        - "/etc/epp/epp-config.yaml"
+        - --metrics-endpoint-auth=${METRICS_ENDPOINT_AUTH}
+        ports:
+        - containerPort: 9002
+        - containerPort: 9003
+        - name: metrics
+          containerPort: 9090
+        livenessProbe:
+          grpc:
+            port: 9003
+            service: envoy.service.ext_proc.v3.ExternalProcessor
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          grpc:
+            port: 9003
+            service: envoy.service.ext_proc.v3.ExternalProcessor
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: epp-config
+          mountPath: /etc/epp
+      volumes:
+      - name: epp-config
+        configMap:
+          name: epp-config-${PHASE}

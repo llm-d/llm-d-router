@@ -1,0 +1,28 @@
+# Strategic-merge patches that add the ZMQ KV-cache event subscriber port
+# (5557) to the prefill EPP's Service and Deployment. Applied by
+# scripts/kind-dev-env-pools.sh only when rendering the prefill phase.
+# The default phase template stays ZMQ-free; this overlay is the single
+# point of difference between prefill and the other phases.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${EPP_NAME}-prefill
+spec:
+  ports:
+  - name: zmq
+    protocol: TCP
+    port: 5557
+    targetPort: 5557
+    appProtocol: tcp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${EPP_NAME}-prefill
+spec:
+  template:
+    spec:
+      containers:
+      - name: epp
+        ports:
+        - containerPort: 5557
