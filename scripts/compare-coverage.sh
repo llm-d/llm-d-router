@@ -113,6 +113,4 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     printf '%s\n' "$output" >> "$GITHUB_STEP_SUMMARY"
 fi
 
-# Exit non-zero only if we ever want hard-failure (threshold > 0 + regression)
-# Currently always 0 per project policy (report only).
-exit 0
+exit $any_regression

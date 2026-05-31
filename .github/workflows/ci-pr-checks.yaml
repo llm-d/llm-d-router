@@ -127,6 +127,7 @@ jobs:
         run: make test-integration-hermetic
 
       - name: Compare coverage against main baseline
+        id: coverage-gate
         if: github.event_name == 'pull_request'
         continue-on-error: true
         shell: bash
@@ -221,3 +222,9 @@ jobs:
       - name: Run make test-e2e
         shell: bash
         run: make test-e2e
+
+      - name: Enforce coverage gate
+        if: github.event_name == 'pull_request' && steps.coverage-gate.outcome == 'failure'
+        run: |
+          echo "::error::Coverage regression detected -- see the coverage report in the job summary above."
+          exit 1
