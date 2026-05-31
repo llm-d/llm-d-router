@@ -151,7 +151,7 @@ func (c *Config) String() string {
 	if c == nil {
 		return "<nil>"
 	}
-	// Define a local type alias to prevent infinite recursion when calling Sprintf("%+v").
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
 	// A new type definition inherits the struct fields but does not copy its methods,
 	// bypassing the Stringer check and allowing a safe reflection-based field dump.
 	type temp Config
@@ -198,13 +198,12 @@ func (p *PriorityBandConfig) String() string {
 	if p == nil {
 		return "<nil>"
 	}
-	// Define a local type alias to prevent infinite recursion when calling Sprintf("%+v").
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
 	// A new type definition inherits the struct fields but does not copy its methods,
 	// bypassing the Stringer check and allowing a safe reflection-based field dump.
 	type temp PriorityBandConfig
 	return fmt.Sprintf("%+v", temp(*p))
 }
-
 
 // --- Config Functional Options ---
 
