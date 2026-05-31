@@ -147,9 +147,20 @@ type Config struct {
 	PriorityBandGCTimeout time.Duration
 }
 
+func (c *Config) String() string {
+	if c == nil {
+		return "<nil>"
+	}
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
+	// A new type definition inherits the struct fields but does not copy its methods,
+	// bypassing the Stringer check and allowing a safe reflection-based field dump.
+	type temp Config
+	return fmt.Sprintf("%+v", temp(*c))
+}
+
 // PriorityBandConfig defines the configuration template for a single priority band.
 // A "Band" is defined as the collection (or range) of all flows having the same priority level.
-// It establishes the default behaviors (such as queueing and dispatch policies) and total capacity limits for all flows
+// It establishes the default behaviors (such as queueing and dispatch behaviors) and total capacity limits for all flows
 // that operate at this priority level.
 type PriorityBandConfig struct {
 	// Priority is the unique numerical priority level for this band.
@@ -181,6 +192,17 @@ type PriorityBandConfig struct {
 	// A value of 0 signifies no request-count limit is enforced.
 	// Optional: Defaults to defaultPriorityBandMaxRequests (5000).
 	MaxRequests uint64
+}
+
+func (p *PriorityBandConfig) String() string {
+	if p == nil {
+		return "<nil>"
+	}
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
+	// A new type definition inherits the struct fields but does not copy its methods,
+	// bypassing the Stringer check and allowing a safe reflection-based field dump.
+	type temp PriorityBandConfig
+	return fmt.Sprintf("%+v", temp(*p))
 }
 
 // --- Config Functional Options ---

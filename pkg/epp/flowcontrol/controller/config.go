@@ -48,6 +48,17 @@ type Config struct {
 	EnqueueChannelBufferSize int
 }
 
+func (c *Config) String() string {
+	if c == nil {
+		return "<nil>"
+	}
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
+	// A new type definition inherits the struct fields but does not copy its methods,
+	// bypassing the Stringer check and allowing a safe reflection-based field dump.
+	type temp Config
+	return fmt.Sprintf("%+v", temp(*c))
+}
+
 // ConfigOption is a functional option for configuring the FlowController.
 type ConfigOption func(*Config)
 

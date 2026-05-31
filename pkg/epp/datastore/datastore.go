@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"maps"
 	"net"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -390,7 +389,7 @@ func (ds *datastore) EndpointDelete(id types.NamespacedName) {
 func (ds *datastore) upsertEndpoint(ctx context.Context, meta *fwkdl.EndpointMetadata) bool {
 	existing, ok := ds.pods.Load(meta.NamespacedName)
 	if !ok {
-		ep := ds.epf.NewEndpoint(ds.parentCtx, meta, ds)
+		ep := ds.epf.NewEndpoint(ds.parentCtx, meta)
 		if ep == nil {
 			// NewEndpoint returns nil when a collector is already running for this
 			// endpoint (duplicate reconcile race). The existing entry in ds.pods
@@ -401,9 +400,6 @@ func (ds *datastore) upsertEndpoint(ctx context.Context, meta *fwkdl.EndpointMet
 		return true
 	}
 	ep := existing.(fwkdl.Endpoint)
-	if reflect.DeepEqual(ep.GetMetadata(), meta) {
-		return false
-	}
 	ep.UpdateMetadata(meta)
 	ds.epf.UpdateEndpoint(ctx, ep)
 	return false

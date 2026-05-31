@@ -2,6 +2,7 @@ apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
+  - type: mock-metrics-source
   - name: total-tokens-cost-reporter
     type: request-attribute-reporter
     parameters:
@@ -20,5 +21,6 @@ schedulingProfiles:
 requestHandler:
   parser:
     pluginRef: openai-parser
-featureGates:
-  - enableLegacyMetrics
+dataLayer:
+  sources:
+  - pluginRef: mock-metrics-source

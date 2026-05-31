@@ -48,14 +48,14 @@ func TestNewEndpointDispatchesEventWithNoPollers(t *testing.T) {
 			},
 		},
 	}
-	assert.NoError(t, r.Configure(cfg, false, "", logger))
+	assert.NoError(t, r.Configure(cfg, logger))
 
 	pod := &fwkdl.EndpointMetadata{
 		NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
 		Address:        "1.2.3.4:5678",
 	}
 
-	endpoint := r.NewEndpoint(context.Background(), pod, nil)
+	endpoint := r.NewEndpoint(context.Background(), pod)
 	assert.NotNil(t, endpoint, "NewEndpoint should return a valid endpoint")
 
 	events := extractor.GetEvents()
@@ -83,7 +83,7 @@ func TestUpdateEndpointDispatchesEvent(t *testing.T) {
 			},
 		},
 	}
-	require.NoError(t, r.Configure(cfg, false, "", logger))
+	require.NoError(t, r.Configure(cfg, logger))
 
 	endpoint := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 		NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},

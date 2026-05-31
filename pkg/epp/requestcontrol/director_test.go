@@ -43,7 +43,6 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -738,7 +737,6 @@ func TestDirector_HandleRequest(t *testing.T) {
 
 	period := time.Second
 	factories := []datalayer.EndpointFactory{
-		backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 		datalayer.NewTestRuntime(t, period),
 	}
 	for _, epf := range factories {
@@ -923,7 +921,6 @@ func TestGetRandomEndpoint(t *testing.T) {
 	for _, test := range tests {
 		period := time.Millisecond
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {

@@ -34,7 +34,6 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
@@ -89,7 +88,6 @@ func TestInferencePoolReconciler(t *testing.T) {
 
 	period := time.Second
 	factories := []datalayer.EndpointFactory{
-		backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 		datalayer.NewTestRuntime(t, period),
 	}
 	for _, epf := range factories {

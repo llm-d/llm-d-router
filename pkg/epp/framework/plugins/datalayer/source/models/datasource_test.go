@@ -38,7 +38,7 @@ func TestDatasource(t *testing.T) {
 	pollingInterval := 50 * time.Millisecond
 	runtime := datalayer.NewRuntime(pollingInterval)
 
-	err = runtime.Configure(cfg, true, "", logr.Logger{})
+	err = runtime.Configure(cfg, logr.Logger{})
 	assert.Nil(t, err, "failed to configure runtime")
 
 	ctx := context.Background()
@@ -50,7 +50,7 @@ func TestDatasource(t *testing.T) {
 		Address: "1.2.3.4:5678",
 	}
 
-	endpoint := runtime.NewEndpoint(ctx, pod, nil)
+	endpoint := runtime.NewEndpoint(ctx, pod)
 	assert.NotNil(t, endpoint, "failed to create endpoint")
 
 	err = source.Dispatch(ctx, endpoint)

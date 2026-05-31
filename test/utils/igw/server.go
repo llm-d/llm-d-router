@@ -35,7 +35,7 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
-	"github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
@@ -45,13 +45,12 @@ const bufSize = 1024 * 1024
 
 var testListener *bufconn.Listener
 
-func PrepareForTestStreamingServer(objectives []*v1alpha2.InferenceObjective, pods []*corev1.Pod, poolName string, namespace string,
-	poolPort int32) (context.Context, context.CancelFunc, datastore.Datastore, *metrics.FakePodMetricsClient) {
+func PrepareForTestStreamingServer(t *testing.T, objectives []*v1alpha2.InferenceObjective, pods []*corev1.Pod, poolName string, namespace string,
+	poolPort int32) (context.Context, context.CancelFunc, datastore.Datastore) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	pmc := &metrics.FakePodMetricsClient{}
-	pmf := metrics.NewPodMetricsFactory(pmc, time.Second)
-	ds := datastore.NewDatastore(ctx, pmf, 0)
+	epf := datalayer.NewTestRuntime(t, time.Second)
+	ds := datastore.NewDatastore(ctx, epf, 0)
 
 	initObjs := make([]client.Object, 0, len(objectives)+len(pods))
 	for _, objective := range objectives {
@@ -75,7 +74,7 @@ func PrepareForTestStreamingServer(objectives []*v1alpha2.InferenceObjective, po
 	pool.Spec.TargetPorts = []v1.Port{{Number: v1.PortNumber(poolPort)}}
 	_ = ds.PoolSet(context.Background(), fakeClient, poolutil.InferencePoolToEndpointPool(pool))
 
-	return ctx, cancel, ds, pmc
+	return ctx, cancel, ds
 }
 
 func SetupTestStreamingServer(ctx context.Context, t *testing.T, streamingServer pb.ExternalProcessorServer) (*bufconn.Listener, chan error) {
