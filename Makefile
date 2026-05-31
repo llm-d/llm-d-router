@@ -33,7 +33,7 @@ SIDECAR_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(SIDECAR_IMAGE_NAME)
 SIDECAR_TAG ?= dev
 export SIDECAR_IMAGE ?= $(SIDECAR_IMAGE_TAG_BASE):$(SIDECAR_TAG)
 
-VLLM_SIMULATOR_TAG ?= v0.9.0
+VLLM_SIMULATOR_TAG ?= v0.9.1
 VLLM_SIMULATOR_TAG_BASE ?= $(IMAGE_REGISTRY)/$(VLLM_SIMULATOR_IMAGE_NAME)
 export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 
@@ -294,6 +294,11 @@ test-e2e: image-build-builder image-build image-pull ## Run end-to-end tests aga
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		$(BUILDER_IMAGE) ./test/scripts/run_e2e.sh
 
+.PHONY: test-e2e-pools
+test-e2e-pools: image-build-builder image-build image-pull ## Run e2e tests for the e-p-d-pools topology against a new kind cluster
+	@printf "\033[33;1m==== Running Coordinator E2E (separate Encode, Prefill, and Decode pools) Tests ====\033[0m\n"
+	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
+		$(BUILDER_IMAGE) ./test/scripts/run_e2e_epd_pools.sh
 
 .PHONY: bench-tokenizer
 bench-tokenizer: image-build-builder ## Run external tokenizer + scorer benchmark (requires kind cluster with EPP deployed)
