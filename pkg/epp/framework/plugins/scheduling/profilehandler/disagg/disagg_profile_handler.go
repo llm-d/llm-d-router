@@ -288,16 +288,6 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
-	// Conditional-decode short-circuit: when the coordinator marks the request
-	// with "Prefer: if-available", the cache-availability gate in the director
-	// will already have rejected it with 412 if no decode worker has the prompt
-	// cached. By the time we reach this point the request is going through.
-	if request != nil && routing.IsConditionalDecode(request.Headers) {
-		span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "skip_encode_prefill_conditional_decode"))
-		metrics.RecordDisaggDecision(request.TargetModel, metrics.DisaggDecisionType(false, false))
-		return map[string]scheduling.SchedulerProfile{}
-	}
-
 	// ── Stage 2: Encode (optional) ─────────────────────────────────────────
 	if _, hasEncodeProfile := profiles[h.encodeProfile]; hasEncodeProfile {
 		if _, executed := profileResults[h.encodeProfile]; !executed {

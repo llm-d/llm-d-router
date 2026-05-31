@@ -51,6 +51,7 @@ type dataProducer struct {
 	pluginState    *plugin.PluginState
 	tokenEstimator TokenEstimator
 	wg             sync.WaitGroup // Used for waiting on async cache updates in tests.
+	dk             plugin.DataKey
 }
 
 // TypedName returns the type and name of the plugin.
@@ -60,7 +61,7 @@ func (p *dataProducer) TypedName() plugin.TypedName {
 
 // Produces returns the data produced by the plugin.
 func (p *dataProducer) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{}}
+	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
 // newDataProducer returns a new DataProducer plugin.
@@ -94,6 +95,7 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 		indexerInst:    indexer,
 		pluginState:    plugin.NewPluginState(ctx),
 		tokenEstimator: NewApproximatePrefixCacheTokenEstimator(ctx, config.MultimodalTokenEstimator),
+		dk:             attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
 	if handle != nil {
@@ -152,7 +154,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 
 	for _, pod := range pods {
 		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().NamespacedName)]
-		pod.Put(attrprefix.PrefixCacheMatchInfoKey, attrprefix.NewPrefixCacheMatchInfo(matchLen, total, blockSize))
+		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, total, blockSize))
 	}
 
 	state := &SchedulingContextState{
