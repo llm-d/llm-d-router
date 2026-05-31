@@ -46,7 +46,7 @@ func StripScheme(endpoint string) string {
 // IsConditionalDecode reports whether the request headers carry the standard
 // HTTP "Prefer: if-available" preference (RFC 7240). It is the marker the
 // coordinator uses to flag a speculative early-decode attempt: route to a
-// decode worker only if its KV cache already covers the prompt(at least partially);
+// decode worker only if its KV cache already covers the prompt (at least partially);
 // otherwise EPP surfaces 412 Precondition Failed so the coordinator restarts the
 // pipeline.
 //
