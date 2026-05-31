@@ -54,9 +54,6 @@ func StripScheme(endpoint string) string {
 // tokens, each with optional ";"-delimited parameters. This function matches
 // the bare "if-available" token case-insensitively, ignoring surrounding
 // whitespace, parameters, and any other tokens that may appear alongside it.
-//
-// Headers are expected to be lowercased keys (EPP receives them that way from
-// ext-proc; see pkg/epp/handlers/request.go).
 func IsConditionalDecode(headers map[string]string) bool {
 	for _, pref := range strings.Split(headers[PreferHeader], ",") {
 		token, _, _ := strings.Cut(pref, ";")
