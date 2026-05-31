@@ -1672,7 +1672,7 @@ func newConditionalDecodeDirector(t *testing.T, scheduleResult *fwksched.Schedul
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 
 	period := time.Second
-	epf := backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period)
+	epf := datalayer.NewTestRuntime(t, period)
 	ds := datastore.NewDatastore(t.Context(), epf, 0)
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
