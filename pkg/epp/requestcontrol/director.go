@@ -358,16 +358,14 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 }
 
 func (d *Director) mutateModel(ctx context.Context, reqCtx *handlers.RequestContext, bodyMap map[string]any) (*handlers.RequestContext, error) {
-	var ok bool
-	reqCtx.IncomingModelName, ok = bodyMap["model"].(string)
-	if !ok {
-		return reqCtx, errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
-	}
+	reqCtx.IncomingModelName, _ = bodyMap["model"].(string)
 	if reqCtx.TargetModelName == "" {
-		// Default to incoming model name
 		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
 	d.applyWeightedModelRewrite(ctx, reqCtx)
+	if reqCtx.TargetModelName == "" {
+		return reqCtx, errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
+	}
 	bodyMap["model"] = reqCtx.TargetModelName
 	return reqCtx, nil
 }
