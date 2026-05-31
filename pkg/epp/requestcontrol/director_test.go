@@ -1597,6 +1597,12 @@ func newResponseBodyTestRequestContext(requestID string, completionTokens int) *
 
 // ── Conditional-decode gate (Prefer: if-available) ─────────────────────────
 
+// wrongTypeAttr is a Cloneable that is NOT *attrprefix.PrefixCacheMatchInfo,
+// used to exercise the type-assertion failure branch.
+type wrongTypeAttr struct{}
+
+func (w wrongTypeAttr) Clone() fwkdl.Cloneable { return w }
+
 func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
 	endpointWith := func(matched, total int) fwksched.Endpoint {
 		attrs := fwkdl.NewAttributes()
@@ -1611,6 +1617,14 @@ func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
 		return fwksched.NewEndpoint(
 			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
 			nil, fwkdl.NewAttributes(),
+		)
+	}
+	endpointWithWrongType := func() fwksched.Endpoint {
+		attrs := fwkdl.NewAttributes()
+		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), wrongTypeAttr{})
+		return fwksched.NewEndpoint(
+			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
+			nil, attrs,
 		)
 	}
 	resultWith := func(eps ...fwksched.Endpoint) *fwksched.SchedulingResult {
@@ -1639,6 +1653,7 @@ func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
 		}, false},
 		{"primary has no endpoints", resultWith(), false},
 		{"endpoint has no match info", resultWith(endpointBare()), false},
+		{"wrong type in attribute", resultWith(endpointWithWrongType()), false},
 		{"zero match blocks", resultWith(endpointWith(0, 4)), false},
 		{"some match blocks", resultWith(endpointWith(2, 4)), true},
 		{"full match", resultWith(endpointWith(4, 4)), true},
