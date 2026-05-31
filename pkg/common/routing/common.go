@@ -43,12 +43,8 @@ func StripScheme(endpoint string) string {
 	return u.Host
 }
 
-// IsConditionalDecode reports whether the request headers carry the standard
-// HTTP "Prefer: if-available" preference (RFC 7240). It is the marker the
-// coordinator uses to flag a speculative early-decode attempt: route to a
-// decode worker only if its KV cache already covers the prompt (at least partially);
-// otherwise EPP surfaces 412 Precondition Failed so the coordinator restarts the
-// pipeline.
+// IsConditionalDecode reports whether the request headers carry the
+// "Prefer: if-available" preference (see PreferIfAvailable for semantics).
 //
 // Per RFC 7240 the Prefer header value is a comma-separated list of preference
 // tokens, each with optional ";"-delimited parameters. This function matches
