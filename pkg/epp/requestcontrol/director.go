@@ -187,7 +187,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	logger := log.FromContext(ctx)
 
-	err := d.modelRewriteIfNeeded(reqCtx, inferenceRequestBody)
+	err := d.modelRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody)
 	if err != nil {
 		return reqCtx, err
 	}
@@ -272,10 +272,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	return reqCtx, nil
 }
 
-func (d *Director) modelRewriteIfNeeded(reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
 	if v, ok := inferenceRequestBody.Payload.(fwkrh.PayloadMap); ok {
 		// Mutate the model name inside the map, this is currently only supported if the payload is a PayloadMap.
-		_, err := d.mutateModel(reqCtx, v)
+		_, err := d.mutateModel(ctx, reqCtx, v)
 		if err != nil {
 			return err
 		}
@@ -283,7 +283,7 @@ func (d *Director) modelRewriteIfNeeded(reqCtx *handlers.RequestContext, inferen
 	return nil
 }
 
-func (d *Director) mutateModel(reqCtx *handlers.RequestContext, bodyMap map[string]any) (*handlers.RequestContext, error) {
+func (d *Director) mutateModel(ctx context.Context, reqCtx *handlers.RequestContext, bodyMap map[string]any) (*handlers.RequestContext, error) {
 	var ok bool
 	reqCtx.IncomingModelName, ok = bodyMap["model"].(string)
 	if !ok {
@@ -293,7 +293,7 @@ func (d *Director) mutateModel(reqCtx *handlers.RequestContext, bodyMap map[stri
 		// Default to incoming model name
 		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
-	d.applyWeightedModelRewrite(reqCtx)
+	d.applyWeightedModelRewrite(ctx, reqCtx)
 	bodyMap["model"] = reqCtx.TargetModelName
 	return reqCtx, nil
 }
@@ -317,23 +317,33 @@ func (d *Director) repackage(ctx context.Context, reqCtx *handlers.RequestContex
 	return nil
 }
 
-func (d *Director) applyWeightedModelRewrite(reqCtx *handlers.RequestContext) {
+func (d *Director) applyWeightedModelRewrite(ctx context.Context, reqCtx *handlers.RequestContext) {
 	rewriteRule, modelRewriteName := d.datastore.ModelRewriteGet(reqCtx.IncomingModelName)
 	if rewriteRule == nil {
 		return
 	}
-	reqCtx.TargetModelName = d.selectWeightedModel(rewriteRule.Targets)
+	reqCtx.TargetModelName = d.selectWeightedModel(ctx, rewriteRule.Targets)
 	metrics.RecordInferenceModelRewriteDecision(modelRewriteName, reqCtx.IncomingModelName, reqCtx.TargetModelName)
 }
 
-func (d *Director) selectWeightedModel(models []v1alpha2.TargetModel) string {
+func (d *Director) selectWeightedModel(ctx context.Context, models []v1alpha2.TargetModel) string {
 	if len(models) == 0 {
 		return ""
 	}
 
 	var totalWeight int32
+	var weightedTargets int
 	for _, model := range models {
-		totalWeight += model.Weight
+		if model.Weight != nil {
+			weightedTargets++
+			totalWeight += *model.Weight
+		}
+	}
+	if weightedTargets > 0 && weightedTargets < len(models) {
+		log.FromContext(ctx).Info("Warning: model rewrite target weights are mixed; targets without weights will not be selected",
+			"weightedTargets", weightedTargets,
+			"unweightedTargets", len(models)-weightedTargets,
+		)
 	}
 
 	if totalWeight == 0 {
@@ -344,7 +354,9 @@ func (d *Director) selectWeightedModel(models []v1alpha2.TargetModel) string {
 	randomNum := rand.Intn(int(totalWeight))
 	var currentWeight int32
 	for _, model := range models {
-		currentWeight += model.Weight
+		if model.Weight != nil {
+			currentWeight += *model.Weight
+		}
 		if randomNum < int(currentWeight) {
 			return model.ModelRewrite
 		}
