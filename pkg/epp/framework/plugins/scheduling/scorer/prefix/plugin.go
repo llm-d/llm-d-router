@@ -94,8 +94,8 @@ func (p *Plugin) Produces() map[plugin.DataKey]any {
 }
 
 // Consumes returns the data consumed by the plugin.
-func (p *Plugin) Consumes() plugin.ConsumesResult {
-	return plugin.ConsumesResult{
+func (p *Plugin) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}},
 	}
 }

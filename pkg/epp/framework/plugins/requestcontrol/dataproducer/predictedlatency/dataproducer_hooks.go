@@ -112,8 +112,8 @@ func (pl *PredictedLatency) Produces() map[plugin.DataKey]any {
 	}
 }
 
-func (pl *PredictedLatency) Consumes() plugin.ConsumesResult {
-	return plugin.ConsumesResult{
+func (pl *PredictedLatency) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{pl.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}},
 	}
 }

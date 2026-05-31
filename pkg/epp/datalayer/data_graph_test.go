@@ -58,8 +58,8 @@ func (m *mockDataProducerP) Produces() map[fwkplugin.DataKey]any {
 	return m.produces
 }
 
-func (m *mockDataProducerP) Consumes() fwkplugin.ConsumesResult {
-	return fwkplugin.ConsumesResult{Required: m.consumes}
+func (m *mockDataProducerP) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: m.consumes}
 }
 
 func (m *mockDataProducerP) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
@@ -88,8 +88,8 @@ type MockConsumerFairnessPolicy struct {
 	consumes map[fwkplugin.DataKey]any
 }
 
-func (m *MockConsumerFairnessPolicy) Consumes() fwkplugin.ConsumesResult {
-	return fwkplugin.ConsumesResult{Required: m.consumes}
+func (m *MockConsumerFairnessPolicy) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: m.consumes}
 }
 
 type MockSchedulingPlugin struct {
@@ -101,8 +101,8 @@ func (m *MockSchedulingPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: "MockSchedulingPlugin", Type: "mock"}
 }
 
-func (m *MockSchedulingPlugin) Consumes() fwkplugin.ConsumesResult {
-	return fwkplugin.ConsumesResult{Required: m.consumes}
+func (m *MockSchedulingPlugin) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: m.consumes}
 }
 
 func TestValidatePluginExecutionOrder(t *testing.T) {
@@ -439,8 +439,8 @@ func (m *mockMayConsumerPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
 }
 
-func (m *mockMayConsumerPlugin) Consumes() fwkplugin.ConsumesResult {
-	return fwkplugin.ConsumesResult{Optional: m.optionalConsumes}
+func (m *mockMayConsumerPlugin) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Optional: m.optionalConsumes}
 }
 
 // mockMixedConsumerPlugin is a plugin that has both required Consumes and optional OptionalConsumes.
@@ -456,8 +456,8 @@ func (m *mockMixedConsumerPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
 }
 
-func (m *mockMixedConsumerPlugin) Consumes() fwkplugin.ConsumesResult {
-	return fwkplugin.ConsumesResult{Required: m.consumes, Optional: m.optionalConsumes}
+func (m *mockMixedConsumerPlugin) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: m.consumes, Optional: m.optionalConsumes}
 }
 
 func TestCreateMissingDataProducers_MayConsume(t *testing.T) {

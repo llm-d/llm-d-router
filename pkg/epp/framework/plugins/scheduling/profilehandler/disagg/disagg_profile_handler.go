@@ -232,8 +232,8 @@ func (h *Handler) WithName(name string) *Handler {
 }
 
 // Consumes defines data types consumed by this plugin (through the PD decider).
-func (*Handler) Consumes() plugin.ConsumesResult {
-	return plugin.ConsumesResult{
+func (*Handler) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{}},
 	}
 }

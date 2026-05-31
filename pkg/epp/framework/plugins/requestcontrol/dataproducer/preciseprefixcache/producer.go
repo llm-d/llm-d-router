@@ -209,8 +209,8 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 
 // Consumes declares the TokenizedPrompt dependency from token-producer so
 // the data-layer DAG orders tokenization before this producer runs.
-func (p *Producer) Consumes() plugin.ConsumesResult {
-	return plugin.ConsumesResult{
+func (p *Producer) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
 	}
 }

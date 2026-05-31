@@ -78,8 +78,8 @@ func (s *TokenLoadScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-func (s *TokenLoadScorer) Consumes() fwkplugin.ConsumesResult {
-	return fwkplugin.ConsumesResult{
+func (s *TokenLoadScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{s.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
 	}
 }

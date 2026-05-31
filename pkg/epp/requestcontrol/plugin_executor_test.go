@@ -234,8 +234,8 @@ func (p *dagTestPlugin) Produces() map[fwkplugin.DataKey]any {
 	return p.produces
 }
 
-func (p *dagTestPlugin) Consumes() fwkplugin.ConsumesResult {
-	return fwkplugin.ConsumesResult{Required: p.consumes}
+func (p *dagTestPlugin) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: p.consumes}
 }
 
 func TestExecutePluginsAsDAG(t *testing.T) {

@@ -89,8 +89,8 @@ func (p *LatencyAdmission) TypedName() fwkplugin.TypedName {
 }
 
 // Consumes declares that this plugin reads latency prediction data from endpoints.
-func (p *LatencyAdmission) Consumes() fwkplugin.ConsumesResult {
-	return fwkplugin.ConsumesResult{
+func (p *LatencyAdmission) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{}},
 	}
 }

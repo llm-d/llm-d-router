@@ -23,10 +23,10 @@ type Plugin interface {
 	TypedName() TypedName
 }
 
-// ConsumesResult holds the data keys a plugin consumes, split by whether they
+// DataDependencies holds the data keys a plugin consumes, split by whether they
 // are required (framework errors if no producer exists) or optional (framework
 // logs a warning but continues if no producer exists).
-type ConsumesResult struct {
+type DataDependencies struct {
 	// Required keys — the framework will error at init time if no producer exists for any of these.
 	Required map[DataKey]any
 	// Optional keys — the framework logs a warning at init time but does NOT error if no producer exists.
@@ -40,7 +40,7 @@ type ConsumerPlugin interface {
 	// Consumes returns the data keys consumed by this plugin, split into Required and Optional.
 	// Required keys: the framework errors at init time if no producer exists.
 	// Optional keys: the framework logs a warning but does not error; the plugin must handle absence.
-	Consumes() ConsumesResult
+	Consumes() DataDependencies
 }
 
 // ProducerPlugin defines the interface for a producer.
