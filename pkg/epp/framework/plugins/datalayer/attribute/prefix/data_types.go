@@ -22,15 +22,7 @@ import (
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 )
 
-var (
-	PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
-
-	// PrefixCacheMatchInfoKey is the pre-computed serialized form of
-	// PrefixCacheMatchInfoDataKey. Both the approximate-prefix DataProducer
-	// (writer) and any consumers that need to read the default-producer entry
-	// off an endpoint should reference this constant.
-	PrefixCacheMatchInfoKey = PrefixCacheMatchInfoDataKey.String()
-)
+var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
 
 type PrefixCacheMatchInfo struct {
 	// matched prefix length in blocks

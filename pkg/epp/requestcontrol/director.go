@@ -78,7 +78,7 @@ func primaryEndpointHasCachedPrefix(result *fwksched.SchedulingResult) bool {
 	if endpoint == nil {
 		return false
 	}
-	raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoKey)
+	raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String())
 	if !ok || raw == nil {
 		return false
 	}
