@@ -103,9 +103,9 @@ func (d *detector) TypedName() fwkplugin.TypedName {
 	return d.typedName
 }
 
-func (d *detector) Consumes() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{
-		d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{},
+func (d *detector) Consumes() fwkplugin.ConsumesResult {
+	return fwkplugin.ConsumesResult{
+		Required: map[fwkplugin.DataKey]any{d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
 	}
 }
 

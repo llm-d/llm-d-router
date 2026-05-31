@@ -35,7 +35,7 @@ func TestProducesConsumes(t *testing.T) {
 	assert.Contains(t, produces, expectedProduceKey)
 
 	consumes := pl.Consumes()
-	assert.Contains(t, consumes, attrprefix.PrefixCacheMatchInfoDataKey)
+	assert.Contains(t, consumes.Required, attrprefix.PrefixCacheMatchInfoDataKey)
 }
 
 // TestProduce_CancelledContextDoesNotPublish verifies that when the

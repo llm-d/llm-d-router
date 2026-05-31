@@ -78,9 +78,9 @@ func (s *TokenLoadScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-func (s *TokenLoadScorer) Consumes() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{
-		s.inFlightLoadDataKey: attrconcurrency.InFlightLoad{},
+func (s *TokenLoadScorer) Consumes() fwkplugin.ConsumesResult {
+	return fwkplugin.ConsumesResult{
+		Required: map[fwkplugin.DataKey]any{s.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
 	}
 }
 

@@ -122,14 +122,11 @@ func (s *NoHitLRU) Category() scheduling.ScorerCategory {
 	return scheduling.Distribution
 }
 
-func (s *NoHitLRU) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{
-		s.dk: attrprefix.PrefixCacheMatchInfo{},
+func (s *NoHitLRU) Consumes() plugin.ConsumesResult {
+	return plugin.ConsumesResult{
+		Required: map[plugin.DataKey]any{s.dk: attrprefix.PrefixCacheMatchInfo{}},
 	}
 }
-
-// OptionalConsumes returns nil as this plugin has no optional data dependencies.
-func (s *NoHitLRU) OptionalConsumes() map[plugin.DataKey]any { return nil }
 
 // isColdRequest determines if a request is cold by checking endpoint prefix-cache attributes.
 // Returns true when no endpoint reports any cache-hit blocks, or when no attribute is present.

@@ -124,8 +124,8 @@ func (m *mockDataProducerPlugin) Produces() map[fwkplugin.DataKey]any {
 	return m.produces
 }
 
-func (m *mockDataProducerPlugin) Consumes() map[fwkplugin.DataKey]any {
-	return m.consumes
+func (m *mockDataProducerPlugin) Consumes() fwkplugin.ConsumesResult {
+	return fwkplugin.ConsumesResult{Required: m.consumes}
 }
 
 func (m *mockDataProducerPlugin) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {

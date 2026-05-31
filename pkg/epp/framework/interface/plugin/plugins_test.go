@@ -33,8 +33,7 @@ type consumerImpl struct {
 	consumes map[DataKey]any
 }
 
-func (c *consumerImpl) Consumes() map[DataKey]any         { return c.consumes }
-func (c *consumerImpl) OptionalConsumes() map[DataKey]any { return nil }
+func (c *consumerImpl) Consumes() ConsumesResult { return ConsumesResult{Required: c.consumes} }
 
 type producerImpl struct {
 	basePlugin
@@ -59,8 +58,8 @@ func TestConsumerPlugin_Contract(t *testing.T) {
 	var cp ConsumerPlugin = c
 
 	got := cp.Consumes()
-	assert.Len(t, got, 1)
-	_, ok := got[key]
+	assert.Len(t, got.Required, 1)
+	_, ok := got.Required[key]
 	assert.True(t, ok)
 	assert.Equal(t, "queue-filter/filter", cp.TypedName().String())
 }
@@ -87,7 +86,7 @@ func TestConsumerPlugin_EmptyConsumes(t *testing.T) {
 		basePlugin: basePlugin{name: TypedName{Type: "filter", Name: "noop"}},
 		consumes:   nil,
 	}
-	assert.Nil(t, c.Consumes())
+	assert.Nil(t, c.Consumes().Required)
 }
 
 func TestProducerPlugin_EmptyProduces(t *testing.T) {

@@ -42,7 +42,7 @@ func TestScorerConsumesMatchInfo(t *testing.T) {
 	scorer := New(testName, "")
 
 	consumes := scorer.Consumes()
-	assert.Contains(t, consumes, attrmm.EncoderCacheMatchInfoKey)
+	assert.Contains(t, consumes.Required, attrmm.EncoderCacheMatchInfoKey)
 	assert.Equal(t, scheduling.Affinity, scorer.Category())
 	assert.Equal(t, Type, scorer.TypedName().Type)
 }

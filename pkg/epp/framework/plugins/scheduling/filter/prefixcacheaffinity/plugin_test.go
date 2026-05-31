@@ -155,33 +155,33 @@ func TestConsumes_ConditionalAttributes(t *testing.T) {
 	// Everything disabled
 	p := newTestPlugin(Config{MaxTTFTPenaltyMs: 0, MaxTokensInFlightPenalty: 0})
 	consumed := p.Consumes()
-	_, ok := consumed[p.inFlightLoadDataKey]
+	_, ok := consumed.Required[p.inFlightLoadDataKey]
 	assert.False(t, ok, "InFlightLoadDataKey should not be consumed when penalty is 0")
-	_, ok = consumed[p.latencyPredictionInfoDataKey]
+	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
 	assert.False(t, ok, "LatencyPredictionInfoDataKey should not be consumed when penalty is 0")
 
 	// Only TTFT enabled
 	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, MaxTokensInFlightPenalty: 0})
 	consumed = p.Consumes()
-	_, ok = consumed[p.inFlightLoadDataKey]
+	_, ok = consumed.Required[p.inFlightLoadDataKey]
 	assert.False(t, ok)
-	_, ok = consumed[p.latencyPredictionInfoDataKey]
+	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
 	assert.True(t, ok)
 
 	// Only In-flight enabled
 	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 0, MaxTokensInFlightPenalty: 100})
 	consumed = p.Consumes()
-	_, ok = consumed[p.inFlightLoadDataKey]
+	_, ok = consumed.Required[p.inFlightLoadDataKey]
 	assert.True(t, ok)
-	_, ok = consumed[p.latencyPredictionInfoDataKey]
+	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
 	assert.False(t, ok)
 
 	// Both enabled
 	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, MaxTokensInFlightPenalty: 100})
 	consumed = p.Consumes()
-	_, ok = consumed[p.inFlightLoadDataKey]
+	_, ok = consumed.Required[p.inFlightLoadDataKey]
 	assert.True(t, ok)
-	_, ok = consumed[p.latencyPredictionInfoDataKey]
+	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
 	assert.True(t, ok)
 }
 

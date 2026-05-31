@@ -58,11 +58,9 @@ func (m *mockDataProducerP) Produces() map[fwkplugin.DataKey]any {
 	return m.produces
 }
 
-func (m *mockDataProducerP) Consumes() map[fwkplugin.DataKey]any {
-	return m.consumes
+func (m *mockDataProducerP) Consumes() fwkplugin.ConsumesResult {
+	return fwkplugin.ConsumesResult{Required: m.consumes}
 }
-
-func (m *mockDataProducerP) OptionalConsumes() map[fwkplugin.DataKey]any { return nil }
 
 func (m *mockDataProducerP) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	endpoints[0].Put(mockProducedDataKey, &mockProducedDataType{value: 42})
@@ -90,11 +88,9 @@ type MockConsumerFairnessPolicy struct {
 	consumes map[fwkplugin.DataKey]any
 }
 
-func (m *MockConsumerFairnessPolicy) Consumes() map[fwkplugin.DataKey]any {
-	return m.consumes
+func (m *MockConsumerFairnessPolicy) Consumes() fwkplugin.ConsumesResult {
+	return fwkplugin.ConsumesResult{Required: m.consumes}
 }
-
-func (m *MockConsumerFairnessPolicy) OptionalConsumes() map[fwkplugin.DataKey]any { return nil }
 
 type MockSchedulingPlugin struct {
 	fwksched.Scorer
@@ -105,11 +101,9 @@ func (m *MockSchedulingPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: "MockSchedulingPlugin", Type: "mock"}
 }
 
-func (m *MockSchedulingPlugin) Consumes() map[fwkplugin.DataKey]any {
-	return m.consumes
+func (m *MockSchedulingPlugin) Consumes() fwkplugin.ConsumesResult {
+	return fwkplugin.ConsumesResult{Required: m.consumes}
 }
-
-func (m *MockSchedulingPlugin) OptionalConsumes() map[fwkplugin.DataKey]any { return nil }
 
 func TestValidatePluginExecutionOrder(t *testing.T) {
 	dkA := fwkplugin.NewDataKey("keyA", "mock")
@@ -445,10 +439,8 @@ func (m *mockMayConsumerPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
 }
 
-func (m *mockMayConsumerPlugin) Consumes() map[fwkplugin.DataKey]any { return nil }
-
-func (m *mockMayConsumerPlugin) OptionalConsumes() map[fwkplugin.DataKey]any {
-	return m.optionalConsumes
+func (m *mockMayConsumerPlugin) Consumes() fwkplugin.ConsumesResult {
+	return fwkplugin.ConsumesResult{Optional: m.optionalConsumes}
 }
 
 // mockMixedConsumerPlugin is a plugin that has both required Consumes and optional OptionalConsumes.
@@ -464,12 +456,8 @@ func (m *mockMixedConsumerPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
 }
 
-func (m *mockMixedConsumerPlugin) Consumes() map[fwkplugin.DataKey]any {
-	return m.consumes
-}
-
-func (m *mockMixedConsumerPlugin) OptionalConsumes() map[fwkplugin.DataKey]any {
-	return m.optionalConsumes
+func (m *mockMixedConsumerPlugin) Consumes() fwkplugin.ConsumesResult {
+	return fwkplugin.ConsumesResult{Required: m.consumes, Optional: m.optionalConsumes}
 }
 
 func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
