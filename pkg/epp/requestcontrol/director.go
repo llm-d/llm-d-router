@@ -21,6 +21,7 @@ package requestcontrol
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -286,9 +287,12 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	result, err := d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if err != nil {
 		// Preserve typed errcommon.Error from the scheduler so its status code
-		// (e.g. PreconditionFailed) reaches Envoy intact. Other errors fall
-		// through to ResourceExhausted, the legacy "no endpoint" status.
-		if e, ok := err.(errcommon.Error); ok {
+		// (e.g. PreconditionFailed) reaches Envoy intact, even if the error
+		// has been wrapped (fmt.Errorf("...: %w", err)) on its way up. Other
+		// errors fall through to ResourceExhausted, the legacy "no endpoint"
+		// status.
+		var e errcommon.Error
+		if errors.As(err, &e) {
 			return reqCtx, e
 		}
 		return reqCtx, errcommon.Error{Code: errcommon.ResourceExhausted, Msg: fmt.Errorf("failed to find target endpoint: %w", err).Error()}
