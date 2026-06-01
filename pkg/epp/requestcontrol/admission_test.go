@@ -26,7 +26,6 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	fctypes "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -75,7 +74,7 @@ func TestLegacyAdmissionController_Admit(t *testing.T) {
 		},
 	}
 
-	mockPods := []fwkdl.Endpoint{&backendmetrics.FakePodMetrics{}}
+	mockPods := []fwkdl.Endpoint{fwkdl.NewEndpoint(nil, nil)}
 
 	testCases := []struct {
 		name            string
