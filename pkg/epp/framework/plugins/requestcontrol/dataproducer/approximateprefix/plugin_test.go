@@ -89,49 +89,103 @@ func TestProduce(t *testing.T) {
 }
 
 func TestPreRequest(t *testing.T) {
-	config := config{
-		BlockSizeTokens:        1,
-		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
-		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
-	}
-	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
+	t.Run("Basic cache update", func(t *testing.T) {
+		config := config{
+			BlockSizeTokens:        1,
+			MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+			LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+		}
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
-	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
-	req1 := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model1",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: "aaaabbbb"},
+		endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+		req1 := &fwksched.InferenceRequest{
+			RequestID:   uuid.NewString(),
+			TargetModel: "test-model1",
+			Body: &fwkrh.InferenceRequestBody{
+				Completions: &fwkrh.CompletionsRequest{
+					Prompt: fwkrh.Prompt{Raw: "aaaabbbb"},
+				},
 			},
-		},
-	}
+		}
 
-	// 1. Produce data (this saves state)
-	_ = p.Produce(context.Background(), req1, []fwksched.Endpoint{endpoint1})
+		// 1. Produce data (this saves state)
+		_ = p.Produce(context.Background(), req1, []fwksched.Endpoint{endpoint1})
 
-	// 2. Simulate scheduling result
-	res := &fwksched.SchedulingResult{
-		PrimaryProfileName: "default",
-		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			"default": {
-				TargetEndpoints: []fwksched.Endpoint{endpoint1},
+		// 2. Simulate scheduling result
+		res := &fwksched.SchedulingResult{
+			PrimaryProfileName: "default",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {
+					TargetEndpoints: []fwksched.Endpoint{endpoint1},
+				},
 			},
-		},
-	}
+		}
 
-	// 3. Call PreRequest
-	p.PreRequest(context.Background(), req1, res)
+		// 3. Call PreRequest
+		p.PreRequest(context.Background(), req1, res)
 
-	// Wait for async update
-	p.wg.Wait()
+		// Wait for async update
+		p.wg.Wait()
 
-	// 4. Verify indexer was updated
-	hashes := getBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks, NewApproximatePrefixCacheTokenEstimator(context.Background(), &defaultMultimodalConfig))
-	for _, hash := range hashes {
-		pods := p.indexer().Get(hash)
-		assert.Contains(t, pods, ServerID(endpoint1.GetMetadata().NamespacedName))
-	}
+		// 4. Verify indexer was updated
+		hashes := getBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks, NewApproximatePrefixCacheTokenEstimator(context.Background(), &defaultMultimodalConfig))
+		for _, hash := range hashes {
+			pods := p.indexer().Get(hash)
+			assert.Contains(t, pods, ServerID(endpoint1.GetMetadata().NamespacedName))
+		}
+	})
+
+	t.Run("Respects LRUCapacityPerServer config", func(t *testing.T) {
+		config := config{
+			AutoTune:               false,
+			BlockSizeTokens:        1,
+			MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+			LRUCapacityPerServer:   2,
+		}
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
+
+		endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+
+		// We will send three requests with different prompts to generate distinct hashes.
+		// Since BlockSizeTokens is 1, each request should generate hashes.
+		// We want each request to have exactly 1 block of characters to easily control capacity.
+		// averageCharactersPerToken is 4. So 4 characters = 1 block.
+		prompts := []string{"aaaa", "bbbb", "cccc"}
+		allHashes := make([][]blockHash, 0, len(prompts))
+
+		for _, prompt := range prompts {
+			req := &fwksched.InferenceRequest{
+				RequestID:   uuid.NewString(),
+				TargetModel: "test-model1",
+				Body: &fwkrh.InferenceRequestBody{
+					Completions: &fwkrh.CompletionsRequest{
+						Prompt: fwkrh.Prompt{Raw: prompt},
+					},
+				},
+			}
+			_ = p.Produce(context.Background(), req, []fwksched.Endpoint{endpoint1})
+
+			res := &fwksched.SchedulingResult{
+				PrimaryProfileName: "default",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"default": {
+						TargetEndpoints: []fwksched.Endpoint{endpoint1},
+					},
+				},
+			}
+			p.PreRequest(context.Background(), req, res)
+			p.wg.Wait()
+
+			hashes := getBlockHashes(context.Background(), req, config.BlockSizeTokens, defaultMaxPrefixBlocks, NewApproximatePrefixCacheTokenEstimator(context.Background(), &defaultMultimodalConfig))
+			allHashes = append(allHashes, hashes)
+		}
+
+		// Since capacity is 2, the first prompt's hash ("aaaa") should have been evicted.
+		// "bbbb" and "cccc" should still be present.
+		assert.Empty(t, p.indexer().Get(allHashes[0][0]))
+		assert.NotEmpty(t, p.indexer().Get(allHashes[1][0]))
+		assert.NotEmpty(t, p.indexer().Get(allHashes[2][0]))
+	})
 }
 
 func TestDataProducerValidation(t *testing.T) {

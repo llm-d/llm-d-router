@@ -9,7 +9,7 @@ epp:
     pullPolicy: Always
   extProcPort: 9002
   
-  parser: "" # openai-parser, vllmgrpc-parser, vllmhttp-parser, passthrough-parser, or empty for auto-selection
+  parser: "" # openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, passthrough-parser, or empty for auto-selection
 
   # Metrics DataSource Configuration
   # These values configure how the EPP scrapes metrics from model server pods.
