@@ -62,6 +62,21 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Hello, Claude",
+									},
+								},
+							},
+						},
+					},
+				},
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello, Claude"}},
@@ -92,6 +107,21 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Describe this image",
+									},
+								},
+							},
+						},
+					},
+				},
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{
@@ -127,6 +157,30 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "system",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "You are a helpful assistant.",
+									},
+								},
+							},
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Hello",
+									},
+								},
+							},
+						},
+					},
+				},
 				Messages: &fwkrh.MessagesRequest{
 					System: fwkrh.AnthropicContent{Raw: "You are a helpful assistant."},
 					Messages: []fwkrh.AnthropicMessage{
@@ -157,6 +211,30 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "system",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "You are a helpful assistant.",
+									},
+								},
+							},
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Hello",
+									},
+								},
+							},
+						},
+					},
+				},
 				Messages: &fwkrh.MessagesRequest{
 					System: fwkrh.AnthropicContent{
 						Structured: []fwkrh.AnthropicContentBlock{
@@ -203,6 +281,25 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type:     fwkrh.BlockTypeImage,
+										AssetURI: "iVBORw0KGgo=",
+									},
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "What is in this image?",
+									},
+								},
+							},
+						},
+					},
+				},
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{
@@ -259,6 +356,27 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "What's the weather?",
+									},
+								},
+							},
+						},
+						Tools: []any{
+							map[string]any{
+								"name":        "get_weather",
+								"description": "Get the weather",
+							},
+						},
+					},
+				},
 				Messages: &fwkrh.MessagesRequest{
 					Tools: []any{
 						map[string]any{
@@ -297,6 +415,21 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Hello",
+									},
+								},
+							},
+						},
+					},
+				},
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}},
@@ -325,6 +458,22 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Hello",
+									},
+								},
+							},
+						},
+					},
+				},
+				ExtractedCacheSalt: "test-salt-123",
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}},
@@ -352,6 +501,21 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Hello",
+									},
+								},
+							},
+						},
+					},
+				},
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}},

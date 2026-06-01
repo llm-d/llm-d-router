@@ -93,10 +93,9 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		return nil, errors.New("invalid messages request: must have at least one message")
 	}
 
-	result := &fwkrh.InferenceRequestBody{
-		Messages: &messagesReq,
-		Payload:  fwkrh.PayloadMap(bodyMap),
-	}
+	result := convertAnthropicMessages(&messagesReq)
+	result.Messages = &messagesReq
+	result.Payload = fwkrh.PayloadMap(bodyMap)
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		result.Stream = true
 	}
@@ -237,4 +236,69 @@ func extractUsageStreaming(responseText string) *fwkrh.Usage {
 	}
 
 	return result
+}
+
+func convertAnthropicMessages(req *fwkrh.MessagesRequest) *fwkrh.InferenceRequestBody {
+	var messages []fwkrh.PromptMessage
+
+	hasSystem := req.System.Raw != "" || req.System.Structured != nil
+
+	if hasSystem {
+		messages = append(messages, fwkrh.PromptMessage{
+			Role:   "system",
+			Blocks: convertAnthropicContentToBlocks(req.System),
+		})
+	}
+
+	for _, msg := range req.Messages {
+		messages = append(messages, fwkrh.PromptMessage{
+			Role:   msg.Role,
+			Blocks: convertAnthropicContentToBlocks(msg.Content),
+		})
+	}
+
+	unifiedPrompt := fwkrh.UnifiedPrompt{
+		Messages: messages,
+		Tools:    req.Tools,
+	}
+	return &fwkrh.InferenceRequestBody{
+		Prompts:            []fwkrh.UnifiedPrompt{unifiedPrompt},
+		ExtractedCacheSalt: req.CacheSalt,
+	}
+}
+
+func convertAnthropicContentToBlocks(content fwkrh.AnthropicContent) []fwkrh.PromptBlock {
+	if content.Raw != "" {
+		return []fwkrh.PromptBlock{
+			{
+				Type: fwkrh.BlockTypeText,
+				Text: content.Raw,
+			},
+		}
+	}
+
+	var blocks []fwkrh.PromptBlock
+	for _, block := range content.Structured {
+		switch block.Type {
+		case "text":
+			blocks = append(blocks, fwkrh.PromptBlock{
+				Type: fwkrh.BlockTypeText,
+				Text: block.Text,
+			})
+		case "image":
+			assetURI := ""
+			if block.Source != nil {
+				if block.Source.URL != "" {
+					assetURI = block.Source.URL
+				} else if block.Source.Data != "" {
+					assetURI = block.Source.Data
+				}
+			}
+			blocks = append(blocks, fwkrh.PromptBlock{
+				Type:     fwkrh.BlockTypeImage,
+				AssetURI: assetURI,
+			})
+		}
+	}
+	return blocks
 }
