@@ -17,7 +17,7 @@ resources:
 - destination-rules.yaml
 - services.yaml
 - ../../../components/istio-control-plane/
-- ../../../components/inference-gateway/
+- ../../../components/inference-gateway/single-pool/
 
 patches:
 - path: patch-deployments.yaml

@@ -1,4 +1,4 @@
-package e2e
+package singlepool
 
 import (
 	"fmt"
@@ -15,6 +15,7 @@ import (
 	configloader "github.com/llm-d/llm-d-router/pkg/epp/config/loader"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
+	"github.com/llm-d/llm-d-router/test/e2e/internal/e2eutil"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -40,11 +41,11 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		subs[k] = v
 	}
 
-	manifests := runKustomize(kustomizeDir)
-	manifests = substituteMany(manifests, subs)
+	manifests := e2eutil.RunKustomize(kustomizeDir)
+	manifests = e2eutil.SubstituteMany(manifests, subs)
 	// Remove labels with empty values (produced when ${DECODE_ROLE} is empty)
-	manifests = removeEmptyLabels(manifests)
-	manifests = removeEmptyArgs(manifests)
+	manifests = e2eutil.RemoveEmptyLabels(manifests)
+	manifests = e2eutil.RemoveEmptyArgs(manifests)
 	// remove render sidecar if model is simulated
 	if !isModelReal(subs["${MODEL_NAME}"]) {
 		manifests = removeRenderSidecar(manifests)
@@ -70,7 +71,7 @@ func createModelServersDecodeKV(replicas int) []string {
 }
 
 func createModelServersDecodeDP(replicas int) []string {
-	return createModelServersFromKustomize("../../deploy/components/vllm-decode", map[string]string{
+	return createModelServersFromKustomize("../../../deploy/components/vllm-decode", map[string]string{
 		"${VLLM_REPLICA_COUNT_D}":    strconv.Itoa(replicas),
 		"${VLLM_DATA_PARALLEL_SIZE}": "2",
 		"${DECODE_ROLE}":             "decode",
@@ -142,7 +143,7 @@ func createEndPointPicker(eppConfig string) []string {
 	objects[0] = "ConfigMap/epp-config"
 
 	eppYamls := testutils.ReadYaml(eppManifest)
-	eppYamls = substituteMany(eppYamls,
+	eppYamls = e2eutil.SubstituteMany(eppYamls,
 		map[string]string{
 			"${EPP_NAME}":          "e2e-epp",
 			"${EPP_IMAGE}":         eppImage,

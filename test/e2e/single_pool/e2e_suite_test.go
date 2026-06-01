@@ -1,4 +1,4 @@
-package e2e
+package singlepool
 
 import (
 	"fmt"
@@ -22,6 +22,7 @@ import (
 
 	infextv1a2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
+	"github.com/llm-d/llm-d-router/test/e2e/internal/e2eutil"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -33,23 +34,25 @@ const (
 	// defaultInterval is the default interval to check if a resource exists or ready conditions.
 	defaultInterval = time.Millisecond * 250
 	// crdKustomizePath is the kustomize path for all CRDs (upstream GIE + local llm-d.ai).
-	crdKustomizePath = "../../config/crd"
+	crdKustomizePath = "../../../config/crd"
 	// inferExtManifest is the manifest for the inference extension test resources.
-	inferExtManifest = "../../deploy/components/inference-gateway/inference-pools.yaml"
+	inferExtManifest = "../../../deploy/components/inference-gateway/single-pool/inference-pools.yaml"
+	// baseRbacManifest is the shared Role/epp-reader pulled in from base/.
+	baseRbacManifest = "../../../deploy/components/inference-gateway/base/rbac.yaml"
 	// simModelName is the test model name.
 	simModelName = "food-review"
 	// kvModelName is the model name used in KV tests.
 	kvModelName = "Qwen/Qwen2.5-1.5B-Instruct"
 	// envoyManifest is the manifest for the envoy proxy test resources.
-	envoyManifest = "../../deploy/environments/dev/e2e-infra/envoy.yaml"
+	envoyManifest = "../../../deploy/environments/dev/e2e-infra/envoy.yaml"
 	// eppManifest is the manifest for the deployment of the EPP
-	eppManifest = "../../deploy/components/inference-gateway/deployment.yaml"
+	eppManifest = "../../../deploy/components/inference-gateway/single-pool/deployment.yaml"
 	// rbacManifest is the manifest for the EPP's RBAC resources.
-	rbacManifest = "../../deploy/components/inference-gateway/rbac.yaml"
+	rbacManifest = "../../../deploy/components/inference-gateway/single-pool/rbac.yaml"
 	// serviceAccountManifest is the manifest for the EPP's service account resources.
-	serviceAccountManifest = "../../deploy/components/inference-gateway/service-accounts.yaml"
+	serviceAccountManifest = "../../../deploy/components/inference-gateway/single-pool/service-accounts.yaml"
 	// servicesManifest is the manifest for the EPP's service resources.
-	servicesManifest = "../../deploy/environments/dev/e2e-infra/services.yaml"
+	servicesManifest = "../../../deploy/environments/dev/e2e-infra/services.yaml"
 
 	// CI shards scheduler e2e specs with label filters.
 	extendedTestLabel      = "Extended"
@@ -72,7 +75,7 @@ var (
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
-	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.0", ginkgo.GinkgoLogr)
+	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.1", ginkgo.GinkgoLogr)
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
@@ -87,6 +90,7 @@ var (
 
 	crdObjects            []string
 	envoyObjects          []string
+	baseRbacObjects       []string
 	rbacObjects           []string
 	serviceAccountObjects []string
 	serviceObjects        []string
@@ -116,9 +120,10 @@ var _ = ginkgo.BeforeSuite(func() {
 	infraSubs := map[string]string{
 		"${EPP_NAME}": "e2e-epp",
 	}
-	rbacYamls := substituteMany(testutils.ReadYaml(rbacManifest), infraSubs)
+	baseRbacObjects = testutils.CreateObjsFromYaml(testConfig, testutils.ReadYaml(baseRbacManifest))
+	rbacYamls := e2eutil.SubstituteMany(testutils.ReadYaml(rbacManifest), infraSubs)
 	rbacObjects = testutils.CreateObjsFromYaml(testConfig, rbacYamls)
-	saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
+	saYamls := e2eutil.SubstituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
 	serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls)
 	serviceObjects = testutils.ApplyYAMLFile(testConfig, servicesManifest)
 
@@ -173,6 +178,7 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 			testutils.DeleteObjects(testConfig, serviceObjects)
 			testutils.DeleteObjects(testConfig, serviceAccountObjects)
 			testutils.DeleteObjects(testConfig, rbacObjects)
+			testutils.DeleteObjects(testConfig, baseRbacObjects)
 			testutils.DeleteObjects(testConfig, envoyObjects)
 			testutils.DeleteObjects(testConfig, crdObjects)
 
@@ -285,13 +291,13 @@ func setupNameSpace() {
 
 // createCRDs creates the Inference Extension CRDs used for testing.
 func createCRDs() {
-	crds := runKustomize(crdKustomizePath)
+	crds := e2eutil.RunKustomize(crdKustomizePath)
 	crdObjects = testutils.CreateObjsFromYaml(testConfig, crds)
 }
 
 func createEnvoy() {
 	manifests := testutils.ReadYaml(envoyManifest)
-	manifests = substituteMany(manifests, map[string]string{"${NAMESPACE}": nsName})
+	manifests = e2eutil.SubstituteMany(manifests, map[string]string{"${NAMESPACE}": nsName})
 	ginkgo.By("Creating envoy proxy resources from manifest: " + envoyManifest)
 	envoyObjects = testutils.CreateObjsFromYaml(testConfig, manifests)
 
@@ -330,7 +336,7 @@ func createInferencePool(numTargetPorts int, toDelete bool) []string {
 		fmt.Fprintf(&targetPortsBuilder, "\n  - number: %d", 8000+idx)
 	}
 	targetPorts := targetPortsBuilder.String()
-	infPoolYaml = substituteMany(infPoolYaml,
+	infPoolYaml = e2eutil.SubstituteMany(infPoolYaml,
 		map[string]string{
 			"${POOL_NAME}":    poolName,
 			"${EPP_NAME}":     "e2e-epp",

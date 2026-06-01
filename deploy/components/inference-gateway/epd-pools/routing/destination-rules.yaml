@@ -1,0 +1,33 @@
+# **WARNING** Only use in testing scenarios
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: ${EPP_NAME}-encode-insecure-tls
+spec:
+  host: ${EPP_NAME}-encode
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: ${EPP_NAME}-prefill-insecure-tls
+spec:
+  host: ${EPP_NAME}-prefill
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: ${EPP_NAME}-decode-insecure-tls
+spec:
+  host: ${EPP_NAME}-decode
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true

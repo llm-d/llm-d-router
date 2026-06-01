@@ -1,4 +1,4 @@
-package e2e
+package singlepool
 
 import (
 	"fmt"
@@ -14,16 +14,16 @@ import (
 const (
 	// epdDeploymentDir references the Kustomize directory for the non-disaggregated
 	// EPD scenario — single deployment, no routing sidecar, vLLM on port 8000
-	epdDeploymentDir = "../../deploy/environments/dev/epd"
+	epdDeploymentDir = "../../../deploy/environments/dev/epd"
 	// pdDisaggDir references the Kustomize directory for the deployment
 	// running vLLM with P/D (connector type is configurable via ${CONNECTOR_TYPE})
-	pdDisaggDir = "../../deploy/environments/dev/p-d"
+	pdDisaggDir = "../../../deploy/environments/dev/p-d"
 	// ePdDisaggDir references the Kustomize directory for the deployment
 	// running vLLM with E/PD (Encode/Prefill-Decode)
-	ePdDisaggDir = "../../deploy/environments/dev/e-pd"
+	ePdDisaggDir = "../../../deploy/environments/dev/e-pd"
 	// ePDDisaggDir references the Kustomize directory for the deployment
 	// running vLLM with E/P/D (Encode/Prefill/Decode)
-	ePDDisaggDir = "../../deploy/environments/dev/e-p-d"
+	ePDDisaggDir = "../../../deploy/environments/dev/e-p-d"
 
 	simplePrompt = "Hello my name is Andrew, I have a doctorate in Rocket Science, and I like interplanetary space exploration"
 	extraPrompt  = "Why is the sky sometimes blue and sometimes red close to sunset?"

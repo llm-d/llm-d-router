@@ -1,4 +1,4 @@
-package e2e
+package singlepool
 
 import (
 	"bytes"
@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/onsi/gomega/gexec"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -137,61 +135,6 @@ func podsInDeploymentsReady(objects []string) {
 	}
 }
 
-func runKustomize(kustomizeDir string) []string {
-	// Use "kubectl kustomize" rather than the standalone "kustomize" binary.
-	// CI/dev environments guarantee kubectl but may not have kustomize installed
-	// (see Makefile.tools.mk check-kustomize target).
-	command := exec.Command("kubectl", "kustomize", kustomizeDir)
-	session, err := gexec.Start(command, nil, ginkgo.GinkgoWriter)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
-	return strings.Split(string(session.Out.Contents()), "\n---")
-}
-
-// removeEmptyArgs strips YAML list items that are empty strings after variable
-// substitution (e.g. '- ""' produced when VLLM_EXTRA_ARGS_* is unset).
-func removeEmptyArgs(inputs []string) []string {
-	outputs := make([]string, len(inputs))
-	for idx, input := range inputs {
-		lines := strings.Split(input, "\n")
-		filtered := make([]string, 0, len(lines))
-		for _, line := range lines {
-			if strings.TrimSpace(line) == `- ""` {
-				continue
-			}
-			if strings.TrimSpace(line) == `-` {
-				continue
-			}
-			filtered = append(filtered, line)
-		}
-		outputs[idx] = strings.Join(filtered, "\n")
-	}
-	return outputs
-}
-
-// removeEmptyLabels strips YAML lines like "llm-d.ai/role: " where the value
-// is empty after variable substitution. Kubernetes accepts empty-value labels,
-// but the test pod-selector logic treats the key's presence as meaningful.
-func removeEmptyLabels(inputs []string) []string {
-	outputs := make([]string, len(inputs))
-	for idx, input := range inputs {
-		lines := strings.Split(input, "\n")
-		filtered := make([]string, 0, len(lines))
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			// Skip lines like "llm-d.ai/role:" (key with empty value after TrimSpace)
-			if strings.HasSuffix(trimmed, ":") {
-				if strings.Contains(trimmed, "llm-d.ai/role") {
-					continue
-				}
-			}
-			filtered = append(filtered, line)
-		}
-		outputs[idx] = strings.Join(filtered, "\n")
-	}
-	return outputs
-}
-
 func isModelReal(modelName string) bool {
 	url := "https://huggingface.co/api/models/" + modelName
 
@@ -259,18 +202,6 @@ func removePodSpecListItem(obj *unstructured.Unstructured, fieldName, itemName s
 	}
 	err = unstructured.SetNestedSlice(obj.Object, filtered, path...)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-}
-
-func substituteMany(inputs []string, substitutions map[string]string) []string {
-	outputs := make([]string, len(inputs))
-	for idx, input := range inputs {
-		output := input
-		for key, value := range substitutions {
-			output = strings.ReplaceAll(output, key, value)
-		}
-		outputs[idx] = output
-	}
-	return outputs
 }
 
 // getCounterMetric fetches the current value of a Prometheus counter metric from the given metrics URL.

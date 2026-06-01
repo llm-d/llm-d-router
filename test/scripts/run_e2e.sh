@@ -23,7 +23,7 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 if [ -n "${E2E_LABEL_FILTER:-}" ]; then
   echo "Label filter: ${E2E_LABEL_FILTER}"
-  go test -v -timeout 45m "${DIR}/../e2e/" -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
+  go test -v -timeout 45m "${DIR}/../e2e/single_pool/" -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
 else
-  go test -v -timeout 45m "${DIR}/../e2e/" -ginkgo.v -ginkgo.fail-fast
+  go test -v -timeout 45m "${DIR}/../e2e/single_pool/" -ginkgo.v -ginkgo.fail-fast
 fi

@@ -31,6 +31,7 @@ Documentation for developing the llm-d Router.
     - [Integration Tests](#integration-tests)
     - [Filtered Tests](#filtered-tests)
     - [End-to-End Tests](#end-to-end-tests)
+    - [End-to-End Tests — Encode, Prefill and Decode Inference Pools](#end-to-end-tests--encode-prefill-and-decode-inference-pools)
     - [Coverage](#coverage)
   - [Tokenization Architecture](#tokenization-architecture)
   - [Kubernetes Development Environment](#kubernetes-development-environment)
@@ -82,7 +83,7 @@ Creates a new `kind` cluster (or reuses an existing one) in the `default` namesp
 > [!NOTE]
 > You can pre-pull external images to avoid slow downloads:
 > ```
-> docker pull ghcr.io/llm-d/llm-d-inference-sim:v0.9.0
+> docker pull ghcr.io/llm-d/llm-d-inference-sim:v0.9.1
 > docker pull vllm/vllm-openai-cpu:v0.21.0
 > ```
 
@@ -524,7 +525,7 @@ a shared PVC (`ec-cache-pvc`) for encoder embeddings transfer.
 
 | Variable | Default | Description |
 |---|---|---|
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.9.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`). Defaults to the simulator image. |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.9.1` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`). Defaults to the simulator image. |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. `echo` returns the input prompt as the response (useful for routing validation). `random` returns random sentences from a pre-defined bank. Only applies when using the simulator overlay. |
 
 ### Cleanup
@@ -618,10 +619,29 @@ kubectl --context kind-e2e-tests get pods
 | `VLLM_EXTRA_ARGS_E` | _(empty)_ | Additional flags for the Encoder vLLM container (e.g. `--mm-processor-kwargs={}`) |
 | `VLLM_EXTRA_ARGS_P` | _(empty)_ | Additional flags for the Prefill vLLM container (e.g. `--gpu-memory-utilization=0.9`) |
 | `VLLM_EXTRA_ARGS_D` | _(empty)_ | Additional flags for the Decode vLLM container (e.g. `--tensor-parallel-size=2`) |
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.9.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.9.1` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. Supported values: `echo` (returns the input prompt as the response), `random` (returns a random sentence from a pre-defined bank) |
 | `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` | Routing sidecar image loaded into the Kind cluster |
 | `VLLM_RENDER_IMAGE` | `vllm/vllm-openai-cpu:v0.21.0` | vLLM renderer image loaded into the Kind cluster |
+
+### End-to-End Tests — Encode, Prefill and Decode Inference Pools
+
+```bash
+make test-e2e-epd-pools
+```
+
+Runs the Ginkgo suite under `test/e2e/epd_pools/` against the
+e-p-d-pools topology (one InferencePool per phase: encode, prefill,
+decode). Brings up a separate Kind cluster named `e2e-epd-pools-tests` so
+it does not collide with the `e2e-tests` cluster used by
+`make test-e2e`. Tests stand in for the coordinator, POSTing per-stage
+payloads directly to a hand-rolled standalone Envoy in front of the three EPPs —
+no Istio, no Gateway/HTTPRoute CRDs.
+
+Honors `E2E_KEEP_CLUSTER_ON_FAILURE=true` (keep on failure); export the
+kubeconfig with `kind export kubeconfig --name e2e-epd-pools-tests` after a
+preserved failure. Re-run the suite against an existing cluster without
+re-deploying via `K8S_CONTEXT=kind-e2e-epd-pools-tests go test -v ./test/e2e/epd_pools/`.
 
 ### Coverage
 

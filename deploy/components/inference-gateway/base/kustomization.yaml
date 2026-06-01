@@ -1,0 +1,11 @@
+# ------------------------------------------------------------------------------
+# Inference Gateway base
+#
+# Resources shared by every gateway topology (single-pool and epd-pools).
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- gateways.yaml
+- rbac.yaml

@@ -1,0 +1,92 @@
+name: CI - E2E tests for separate Encode, Prefill, and Decode inference pools
+
+on:
+  push:
+    branches:
+      - main
+      - 'release-*'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      src: ${{ steps.filter.outputs.src }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            src:
+              - '**/*.go'
+              - Dockerfile.*
+              - Makefile*
+              - go.mod
+              - scripts/**
+              - .github/workflows/ci-pr-checks-epd-pools.yaml
+
+  epd-pools-e2e:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.src == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GO_MOD_CACHE_VOL: /home/runner/.cache/llm-d-gomodcache
+      GO_BUILD_CACHE_VOL: /home/runner/.cache/llm-d-gobuildcache
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        uses: justinthelaw/maximize-github-runner-space@v0.9.0
+        with:
+          cleanup-profile: custom
+          remove-android: 'true'
+          remove-dotnet: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-cached-tools: 'true'
+          remove-swift: 'true'
+          remove-julia: 'true'
+          remove-rust: 'true'
+          remove-miniconda: 'true'
+          swapfile-size: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Create Go cache dirs
+        run: mkdir -p "$GO_MOD_CACHE_VOL" "$GO_BUILD_CACHE_VOL"
+
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ env.GO_MOD_CACHE_VOL }}
+            ${{ env.GO_BUILD_CACHE_VOL }}
+          key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-cache-${{ runner.os }}-
+
+      - name: Clean Docker system
+        shell: bash
+        run: docker system prune -af
+
+      - name: Run make test-e2e-epd-pools
+        shell: bash
+        run: make test-e2e-epd-pools

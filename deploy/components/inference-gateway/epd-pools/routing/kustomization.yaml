@@ -1,0 +1,7 @@
+# Phase-based HTTPRoutes
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- httproutes.yaml
+- destination-rules.yaml

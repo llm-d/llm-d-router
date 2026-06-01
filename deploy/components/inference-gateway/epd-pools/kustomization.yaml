@@ -1,0 +1,11 @@
+# Inference Gateway — encode/prefill/decode pools topology.
+# Per-phase EPPs, InferencePools, and header-based HTTPRoutes.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../base/
+- encode/
+- prefill/
+- decode/
+- routing/

@@ -1,4 +1,4 @@
-package e2e
+package singlepool
 
 // Simple EPP configuration for running without P/D
 const simpleConfig = `apiVersion: llm-d.ai/v1alpha1
