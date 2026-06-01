@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"reflect"
 	"runtime/debug"
@@ -65,16 +66,22 @@ func NewHTTPDataSource[T any](scheme, path string, skipCertVerification bool,
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
 	}
+	cl := &client{
+		Client: http.Client{
+			Timeout:   timeout,
+			Transport: baseTransport,
+		},
+	}
 	if scheme == "https" {
 		httpsTransport := baseTransport.Clone()
 		httpsTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: skipCertVerification}
-		defaultClient.Transport = httpsTransport
+		cl.Transport = httpsTransport
 	}
 	return &HTTPDataSource[T]{
 		typedName: fwkplugin.TypedName{Type: pluginType, Name: pluginName},
 		scheme:    scheme,
 		path:      path,
-		client:    defaultClient,
+		client:    cl,
 		parser:    parser,
 	}, nil
 }

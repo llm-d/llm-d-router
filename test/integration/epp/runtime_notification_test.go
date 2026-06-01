@@ -49,7 +49,7 @@ func setupRuntimeWithExtractor(r *datalayer.Runtime, extractorName string) (*moc
 			{Plugin: src, Extractors: []fwkplugin.Plugin{ext}},
 		},
 	}
-	return ext, r.Configure(cfg, false, "", logger)
+	return ext, r.Configure(cfg, logger)
 }
 
 func TestRuntimeNotificationDispatch(t *testing.T) {
@@ -157,7 +157,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 						{Plugin: src, Extractors: []fwkplugin.Plugin{ext1, ext2}},
 					},
 				}
-				return ext1, r.Configure(cfg, false, "", logger)
+				return ext1, r.Configure(cfg, logger)
 			},
 			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-multi", s.namespace)
@@ -180,7 +180,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 						{Plugin: src, Extractors: []fwkplugin.Plugin{errExtractor, workingExtractor}},
 					},
 				}
-				return workingExtractor, r.Configure(cfg, false, "", logger)
+				return workingExtractor, r.Configure(cfg, logger)
 			},
 			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-error", s.namespace)
@@ -232,7 +232,7 @@ func TestRuntimeNotificationWithRuntime(t *testing.T) {
 			{Plugin: src, Extractors: []fwkplugin.Plugin{extractor}},
 		},
 	}
-	require.NoError(t, r.Configure(cfg, false, "", logger))
+	require.NoError(t, r.Configure(cfg, logger))
 
 	require.NoError(t, r.Start(setup.ctx, setup.mgr))
 
@@ -261,7 +261,7 @@ func TestRuntimeNotificationDifferentGVKs(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, false, "", logger))
+	require.NoError(t, r.Configure(cfg, logger))
 	require.NoError(t, r.Start(setup.ctx, setup.mgr))
 
 	pod := newTestPod("test-pod-gvk", setup.namespace)

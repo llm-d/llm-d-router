@@ -74,8 +74,6 @@ const (
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
 	KVConnectorSGLang        = constants.KVConnectorSGLang
 	ECExampleConnector       = constants.ECExampleConnector
-	DefaultPoolGroup         = constants.DefaultPoolGroup
-	LegacyPoolGroup          = constants.LegacyPoolGroup
 )
 
 // APIType represents the type of OpenAI API being used.

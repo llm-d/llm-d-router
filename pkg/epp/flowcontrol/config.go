@@ -37,6 +37,17 @@ type Config struct {
 	UsageLimitPolicy flowcontrol.UsageLimitPolicy
 }
 
+func (c *Config) String() string {
+	if c == nil {
+		return "<nil>"
+	}
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
+	// A new type definition inherits the struct fields but does not copy its methods,
+	// bypassing the Stringer check and allowing a safe reflection-based field dump.
+	type temp Config
+	return fmt.Sprintf("%+v", temp(*c))
+}
+
 // NewConfigFromAPI creates a new Config by translating the top-level API configuration.
 func NewConfigFromAPI(apiConfig *configapi.FlowControlConfig, handle plugin.Handle) (*Config, error) {
 	registryConfig, err := registry.NewConfigFromAPI(apiConfig, handle)

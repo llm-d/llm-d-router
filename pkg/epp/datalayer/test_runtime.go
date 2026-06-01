@@ -45,7 +45,7 @@ func NewTestRuntime(t *testing.T, refreshInterval time.Duration) EndpointFactory
 func NewTestRuntimeWithConfig(t *testing.T, refreshInterval time.Duration, cfg *Config) EndpointFactory {
 	r := NewRuntime(refreshInterval)
 	logger := newTestLogger(t)
-	_ = r.Configure(cfg, false, "", logger)
+	_ = r.Configure(cfg, logger)
 	return r
 }
 

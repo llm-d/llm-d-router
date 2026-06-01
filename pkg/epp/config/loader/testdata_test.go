@@ -513,21 +513,6 @@ schedulingProfiles:
   - pluginRef: maxScore
 `
 
-// successDataLayerDisabledText opts out of the datalayer via the enableLegacyMetrics gate.
-const successDataLayerDisabledText = `
-apiVersion: llm-d.ai/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- name: maxScore
-  type: max-score-picker
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: maxScore
-featureGates:
-- enableLegacyMetrics
-`
-
 // successDataLayerNoSourcesText has an explicit empty dataLayer section with no sources.
 // The loader should additively inject the default metrics source because InjectDefaults is unset (default: true).
 const successDataLayerNoSourcesText = `

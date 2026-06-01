@@ -120,8 +120,8 @@ func chatResponse(content, finishReason string, promptTokens, completionTokens i
 }
 
 // doPost sends a POST request to the proxy and returns the response.
-func doPost(addr, path, body string) *http.Response {
-	req, err := http.NewRequest(http.MethodPost, addr+path, strings.NewReader(body))
+func doPost(addr, body string) *http.Response {
+	req, err := http.NewRequest(http.MethodPost, addr+ChatCompletionsPath, strings.NewReader(body))
 	Expect(err).ToNot(HaveOccurred())
 	resp, err := http.DefaultClient.Do(req)
 	Expect(err).ToNot(HaveOccurred())
@@ -139,7 +139,7 @@ var _ = Describe("Chunked Decode", func() {
 			})
 			defer ti.stop()
 
-			resp := doPost(ti.addr, ChatCompletionsPath,
+			resp := doPost(ti.addr,
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
@@ -157,7 +157,7 @@ var _ = Describe("Chunked Decode", func() {
 			})
 			defer ti.stop()
 
-			resp := doPost(ti.addr, ChatCompletionsPath,
+			resp := doPost(ti.addr,
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
@@ -183,7 +183,7 @@ var _ = Describe("Chunked Decode", func() {
 			})
 			defer ti.stop()
 
-			resp := doPost(ti.addr, ChatCompletionsPath,
+			resp := doPost(ti.addr,
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":20}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
@@ -212,7 +212,7 @@ var _ = Describe("Chunked Decode", func() {
 			}))
 			defer ti.stop()
 
-			resp := doPost(ti.addr, ChatCompletionsPath,
+			resp := doPost(ti.addr,
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
@@ -231,7 +231,7 @@ var _ = Describe("Chunked Decode", func() {
 			}))
 			defer ti.stop()
 
-			resp := doPost(ti.addr, ChatCompletionsPath,
+			resp := doPost(ti.addr,
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusBadGateway))
 		})
@@ -246,7 +246,7 @@ var _ = Describe("Chunked Decode", func() {
 			})
 			defer ti.stop()
 
-			resp := doPost(ti.addr, ChatCompletionsPath,
+			resp := doPost(ti.addr,
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10,"stream":true}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 			Expect(resp.Header.Get("Content-Type")).To(Equal("text/event-stream"))

@@ -306,7 +306,7 @@ func TestProduces_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 func TestConsumes_DeclaresTokenizedPrompt(t *testing.T) {
 	p := &Producer{typedName: plugin.TypedName{Type: PluginType, Name: "x"}}
 	expected := plugin.NewDataKey("TokenizedPrompt", "token-producer")
-	_, ok := p.Consumes()[expected]
+	_, ok := p.Consumes().Required[expected]
 	require.True(t, ok)
 }
 

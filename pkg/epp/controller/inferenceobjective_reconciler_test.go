@@ -34,7 +34,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/common"
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
@@ -48,36 +48,36 @@ var (
 			Priority(int32(1)).
 			CreationTimestamp(metav1.Unix(1000, 0)).
 			PoolName(inferencePool.Name).
-			PoolGroup("inference.networking.k8s.io").ObjRef()
+			PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 	infObjective1Pool2 = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				Priority(*infObjective1.Spec.Priority).
 				CreationTimestamp(metav1.Unix(1001, 0)).
 				PoolName("test-pool2").
-				PoolGroup("inference.networking.k8s.io").ObjRef()
+				PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 	infObjective1Critical = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				Priority(int32(2)).
 				CreationTimestamp(metav1.Unix(1003, 0)).
 				PoolName(inferencePool.Name).
-				PoolGroup("inference.networking.k8s.io").ObjRef()
+				PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 	infObjective1Deleted = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				CreationTimestamp(metav1.Unix(1004, 0)).
 				DeletionTimestamp().
 				PoolName(inferencePool.Name).
-				PoolGroup("inference.networking.k8s.io").ObjRef()
+				PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 	infObjective1DiffGroup = testutil.MakeInferenceObjective(infObjective1.Name).
 				Namespace(inferencePool.Namespace).
 				Priority(int32(1)).
 				CreationTimestamp(metav1.Unix(1005, 0)).
 				PoolName(inferencePool.Name).
-				PoolGroup("llm-d.ai").ObjRef()
+				PoolGroup(v1alpha2.GroupName).ObjRef()
 	infObjective2 = testutil.MakeInferenceObjective("model2").
 			Namespace(inferencePool.Namespace).
 			CreationTimestamp(metav1.Unix(1000, 0)).
 			PoolName(inferencePool.Name).
-			PoolGroup("inference.networking.k8s.io").ObjRef()
+			PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 )
 
 func TestInferenceObjectiveReconciler(t *testing.T) {
@@ -146,7 +146,6 @@ func TestInferenceObjectiveReconciler(t *testing.T) {
 	for _, test := range tests {
 		period := time.Second
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {
