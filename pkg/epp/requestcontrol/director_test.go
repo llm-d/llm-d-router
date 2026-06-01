@@ -292,7 +292,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: genericRewriteTarget,
-							Weight:       100,
+							Weight:       ptr.To[int32](100),
 						},
 					},
 				},
@@ -363,6 +363,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		wantMutatedBody         map[string]any
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
+		rewrites                []*v1alpha2.InferenceModelRewrite
 	}{
 		{
 			name: "successful completions request",
@@ -484,6 +485,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"prompt": "some prompt",
 			},
 			inferenceObjectiveName: model,
+			rewrites:               []*v1alpha2.InferenceModelRewrite{rewrite},
 		}, {
 			name: "successful chat completions request",
 			reqBodyMap: map[string]any{
@@ -749,6 +751,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"model":  genericRewriteTarget,
 				"prompt": "p",
 			},
+			rewrites: []*v1alpha2.InferenceModelRewrite{genericRewrite},
 		},
 		{
 			name:        "prompt or messages not found, expect err",
@@ -846,18 +849,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 
 				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
-				if test.name == "successful request with model rewrite" {
+				if len(test.rewrites) > 0 {
 					mockDs := &mockDatastore{
 						pods:     ds.PodList(datastore.AllPodsPredicate),
-						rewrites: []*v1alpha2.InferenceModelRewrite{rewrite},
-					}
-					director.datastore = mockDs
-					director.endpointCandidates = NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(mockDs), time.Minute)
-				}
-				if test.name == "missing model field resolved by generic rewrite" {
-					mockDs := &mockDatastore{
-						pods:     ds.PodList(datastore.AllPodsPredicate),
-						rewrites: []*v1alpha2.InferenceModelRewrite{genericRewrite},
+						rewrites: test.rewrites,
 					}
 					director.datastore = mockDs
 					director.endpointCandidates = NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(mockDs), time.Minute)

@@ -110,7 +110,9 @@ type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
 	ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective
 	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
-	// ModelRewriteGet returns the rewrite rule for a given model name and the name of the InferenceModelRewrite object.
+	// ModelRewriteGet returns the highest-precedence rewrite rule for a given
+	// model name (prioritizing exact matches over generic wildcard rules) and
+	// the name of the InferenceModelRewrite object.
 	ModelRewriteGet(modelName string) (*v1alpha2.InferenceModelRewriteRule, string)
 }
 
