@@ -12,6 +12,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	configloader "github.com/llm-d/llm-d-router/pkg/epp/config/loader"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -152,6 +154,9 @@ func createEndPointPicker(eppConfig string) []string {
 			"${POOL_NAME}":             simModelName + "-inference-pool",
 			"${METRICS_ENDPOINT_AUTH}": "false",
 		})
+	if !usesTokenProducer(eppConfig) {
+		eppYamls = removeRenderSidecar(eppYamls)
+	}
 
 	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls)...)
 	podsInDeploymentsReady(objects)
@@ -171,4 +176,15 @@ func createEndPointPicker(eppConfig string) []string {
 	}, readyTimeout, 2*time.Second).Should(gomega.BeTrue(), "gateway should be ready within the ready timeout")
 
 	return objects
+}
+
+func usesTokenProducer(eppConfig string) bool {
+	cfg, _, err := configloader.LoadRawConfig([]byte(eppConfig), ginkgo.GinkgoLogr)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	for _, plugin := range cfg.Plugins {
+		if plugin.Type == tokenizer.PluginType {
+			return true
+		}
+	}
+	return false
 }

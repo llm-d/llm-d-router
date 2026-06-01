@@ -211,8 +211,10 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 	gpuBlocks := defaultLRUCapacityPerServer
-	if p.config.AutoTune && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
+	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
 		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
+	} else if p.config.LRUCapacityPerServer > 0 {
+		gpuBlocks = p.config.LRUCapacityPerServer
 	}
 	return server{
 		ServerID:       ServerID(targetEndpoint.GetMetadata().NamespacedName),
