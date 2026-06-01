@@ -148,7 +148,16 @@ func TestHasMultimodalContent(t *testing.T) {
 		{"text only", chatRequest(false, false, false), false},
 		{"image", chatRequest(true, false, false), true},
 		{"video", chatRequest(false, true, false), true},
-		{"audio", chatRequest(false, false, true), true},
+		{"audio input_audio", chatRequest(false, false, true), true},
+		{"audio audio_url", &scheduling.InferenceRequest{
+			Body: &fwkrh.InferenceRequestBody{
+				ChatCompletions: &fwkrh.ChatCompletionsRequest{
+					Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{
+						Structured: []fwkrh.ContentBlock{{Type: "audio_url"}},
+					}}},
+				},
+			},
+		}, true},
 		{"all types", chatRequest(true, true, true), true},
 	}
 	for _, tt := range tests {

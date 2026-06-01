@@ -15,6 +15,9 @@ const (
 
 	// DataParallelEndpointHeader is the header name used to indicate the worker <ip:port> for Data Parallel
 	DataParallelEndpointHeader = "x-data-parallel-host-port"
+
+	// InferencePoolAPIGroup is the default InferencePool API group
+	InferencePoolAPIGroup = "inference.networking.k8s.io"
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.

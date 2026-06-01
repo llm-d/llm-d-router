@@ -60,7 +60,7 @@ var _ = Describe("Data Parallel support", func() {
 				DataParallelSize: testDataParallelSize,
 			}
 			theProxy := NewProxy(cfg)
-			theProxy.allowlistValidator, err = NewAllowlistValidator(false, DefaultPoolGroup, "", "")
+			theProxy.allowlistValidator, err = NewAllowlistValidator(false, routing.InferencePoolAPIGroup, "", "")
 			Expect(err).ToNot(HaveOccurred())
 
 			err = theProxy.startDataParallel(ctx, grp)

@@ -85,8 +85,10 @@ func (s *Scorer) Category() scheduling.ScorerCategory {
 }
 
 // Consumes returns the endpoint data consumed by this scorer.
-func (s *Scorer) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{s.mmMatchDataKey: attrmm.EncoderCacheMatchInfo{}}
+func (s *Scorer) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{s.mmMatchDataKey: attrmm.EncoderCacheMatchInfo{}},
+	}
 }
 
 // Score scores endpoints by matched multimodal encoder-cache item size divided

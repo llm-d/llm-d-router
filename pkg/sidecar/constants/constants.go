@@ -28,10 +28,4 @@ const (
 
 	// ECExampleConnector enables the Encoder disaggregation protocol (E/PD, E/P/D)
 	ECExampleConnector = "ec-example"
-
-	// DefaultPoolGroup is the default pool group name
-	DefaultPoolGroup = "inference.networking.k8s.io"
-
-	// LegacyPoolGroup is the legacy pool group name
-	LegacyPoolGroup = "inference.networking.x-k8s.io"
 )

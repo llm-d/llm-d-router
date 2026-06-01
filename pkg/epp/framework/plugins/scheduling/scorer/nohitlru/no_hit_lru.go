@@ -122,9 +122,9 @@ func (s *NoHitLRU) Category() scheduling.ScorerCategory {
 	return scheduling.Distribution
 }
 
-func (s *NoHitLRU) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{
-		s.dk: attrprefix.PrefixCacheMatchInfo{},
+func (s *NoHitLRU) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{s.dk: attrprefix.PrefixCacheMatchInfo{}},
 	}
 }
 
