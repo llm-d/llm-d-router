@@ -25,6 +25,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testMetricModelName = "test-model"
+	testPluginName      = "test-plugin"
+	testPluginType      = "test-type"
+)
+
 func TestRegisterMetrics(t *testing.T) {
 	registry := prometheus.NewRegistry()
 
@@ -36,11 +42,11 @@ func TestSchedulerPDDecisionCount(t *testing.T) {
 	SchedulerPDDecisionCount.Reset()
 	LlmdPDDecisionCount.Reset()
 
-	model := "test-model"
+	model := testMetricModelName
 
-	RecordPDDecision("test-plugin", "test-type", model, DecisionTypePrefillDecode)
-	RecordPDDecision("test-plugin", "test-type", model, DecisionTypeDecodeOnly)
-	RecordPDDecision("test-plugin", "test-type", model, DecisionTypePrefillDecode)
+	RecordPDDecision(testPluginName, testPluginType, model, DecisionTypePrefillDecode)
+	RecordPDDecision(testPluginName, testPluginType, model, DecisionTypeDecodeOnly)
+	RecordPDDecision(testPluginName, testPluginType, model, DecisionTypePrefillDecode)
 
 	expected := `
 		# HELP llm_d_inference_scheduler_pd_decision_total [ALPHA] [Deprecated: Use llm_d_epp_pd_decision_total] Total number of P/D disaggregation decisions made
@@ -72,14 +78,14 @@ func TestRecordDisaggDecision(t *testing.T) {
 	SchedulerDisaggDecisionCount.Reset()
 	LlmdDisaggDecisionCount.Reset()
 
-	model := "test-model"
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeDecodeOnly)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypePrefillDecode)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypePrefillDecode)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodeDecode)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodePrefillDecode)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodePrefillDecode)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodePrefillDecode)
+	model := testMetricModelName
+	RecordDisaggDecision(testPluginName, testPluginType, model, DecisionTypeDecodeOnly)
+	RecordDisaggDecision(testPluginName, testPluginType, model, DecisionTypePrefillDecode)
+	RecordDisaggDecision(testPluginName, testPluginType, model, DecisionTypePrefillDecode)
+	RecordDisaggDecision(testPluginName, testPluginType, model, DecisionTypeEncodeDecode)
+	RecordDisaggDecision(testPluginName, testPluginType, model, DecisionTypeEncodePrefillDecode)
+	RecordDisaggDecision(testPluginName, testPluginType, model, DecisionTypeEncodePrefillDecode)
+	RecordDisaggDecision(testPluginName, testPluginType, model, DecisionTypeEncodePrefillDecode)
 
 	expected := `
 		# HELP llm_d_inference_scheduler_disagg_decision_total [ALPHA] [Deprecated: Use llm_d_epp_disagg_decision_total] Total number of disaggregation routing decisions made
@@ -114,7 +120,7 @@ func TestRecordDisaggDecisionEmptyModel(t *testing.T) {
 	SchedulerDisaggDecisionCount.Reset()
 	LlmdDisaggDecisionCount.Reset()
 
-	RecordDisaggDecision("test-plugin", "test-type", "", DecisionTypeDecodeOnly)
+	RecordDisaggDecision(testPluginName, testPluginType, "", DecisionTypeDecodeOnly)
 
 	expected := `
 		# HELP llm_d_inference_scheduler_disagg_decision_total [ALPHA] [Deprecated: Use llm_d_epp_disagg_decision_total] Total number of disaggregation routing decisions made
@@ -161,7 +167,7 @@ func TestDisaggDecisionType(t *testing.T) {
 func TestRecordDeciderEvaluation(t *testing.T) {
 	llmdDeciderEvaluationCount.Reset()
 
-	model := "test-model"
+	model := testMetricModelName
 	decider := "prefix-based-pd-decider"
 
 	recordDeciderEvaluation(model, decider, deciderReasonDisabled)
