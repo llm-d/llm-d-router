@@ -41,7 +41,7 @@ jobs:
               - 'deploy/config/sim-epp-decode-config.yaml'
               - 'deploy/environments/dev/e-p-d/**'
               - 'test/e2e/epd_pools/**'
-              - 'test/scripts/run_e2e_pools.sh'
+              - 'test/scripts/run_e2e_epd_pools.sh'
               - .github/workflows/ci-pr-checks-epd-pools.yaml
 
   epd-pools-e2e:
