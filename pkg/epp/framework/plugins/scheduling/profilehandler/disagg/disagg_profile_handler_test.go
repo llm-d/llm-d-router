@@ -7,6 +7,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
@@ -116,7 +117,7 @@ func injectPrefixCache(profileResults map[string]*scheduling.ProfileRunResult, c
 
 // handleWithDeciders creates a plugin handle pre-loaded with all decider types.
 func handleWithDeciders(ctx context.Context) plugin.Handle {
-	h := plugin.NewEppHandle(ctx, nil)
+	h := plugin.NewEppHandle(ctx, nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
 	p1, _ := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 4})
 	h.AddPlugin(PrefixBasedPDDeciderPluginType, p1)
 	h.AddPlugin(AlwaysDisaggPDDeciderPluginType, newAlwaysDisaggPDDecider())

@@ -17,7 +17,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-router/pkg/metrics"
 	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
@@ -48,6 +47,12 @@ var _ scheduling.ProfileHandler = &PdProfileHandler{}
 //
 // Deprecated: Use HandlerFactory instead.
 func PdProfileHandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
+	if handle == nil {
+		return nil, errors.New("plugin handle is required")
+	}
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
+	}
 	log.FromContext(handle.Context()).Info("Deprecated: pd-profile-handler is deprecated, use disagg-profile-handler instead")
 	parameters := pdProfileHandlerParameters{
 		DecodeProfile:     defaultDecodeProfile,
@@ -194,7 +199,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 	}
 
 	if h.decider != nil && h.decider.disaggregate(ctx, request, profileResults[h.decodeProfile].TargetEndpoints[0]) {
-		metrics.RecordPDDecision(request.TargetModel, metrics.DecisionTypePrefillDecode) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
+		RecordPDDecision(request.TargetModel, DecisionTypePrefillDecode) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
 		// run the prefill profile
 		span.SetAttributes(
 			attribute.String("llm_d.profile_handler.decision", "prefill_decode"),
@@ -205,7 +210,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 		}
 	}
 
-	metrics.RecordPDDecision(request.TargetModel, metrics.DecisionTypeDecodeOnly) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
+	RecordPDDecision(request.TargetModel, DecisionTypeDecodeOnly) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
 	span.SetAttributes(
 		attribute.String("llm_d.profile_handler.decision", "decode_only"),
 	)
