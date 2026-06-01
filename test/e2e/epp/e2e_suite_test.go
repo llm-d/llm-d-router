@@ -80,6 +80,11 @@ const (
 
 const e2eLeaderElectionEnabledEnvVar = "E2E_LEADER_ELECTION_ENABLED"
 
+const (
+	gaieMetricsTestLabel        = "GAIEMetrics"
+	gaieLeaderElectionTestLabel = "GAIELeaderElection"
+)
+
 var (
 	testConfig *igwtestutils.TestConfig
 	// Required for exec'ing in curl pod

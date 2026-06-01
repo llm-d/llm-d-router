@@ -94,8 +94,10 @@ func (p *Plugin) Produces() map[plugin.DataKey]any {
 }
 
 // Consumes returns the data consumed by the plugin.
-func (p *Plugin) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}}
+func (p *Plugin) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}},
+	}
 }
 
 // Score returns the scoring result for the given list of pods based on prefix cache match info.
