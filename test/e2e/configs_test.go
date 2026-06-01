@@ -121,6 +121,46 @@ schedulingProfiles:
     weight: 2
 `
 
+// generateEncodeConfig is the encode-only EPP config for /inference/v1/generate.
+// Uses single-profile-handler so the EPP routes directly to encode pods without
+// requiring a decode stage.
+const generateEncodeConfig = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: vllmhttp-parser
+- type: encode-filter
+- type: max-score-picker
+- type: single-profile-handler
+requestHandler:
+  parser:
+    pluginRef: vllmhttp-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: encode-filter
+  - pluginRef: max-score-picker
+`
+
+// generatePrefillConfig is the prefill-only EPP config for /inference/v1/generate.
+// Uses single-profile-handler so the EPP routes directly to prefill pods without
+// requiring a decode stage.
+const generatePrefillConfig = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: vllmhttp-parser
+- type: prefill-filter
+- type: max-score-picker
+- type: single-profile-handler
+requestHandler:
+  parser:
+    pluginRef: vllmhttp-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: prefill-filter
+  - pluginRef: max-score-picker
+`
+
 // EPP configuration for running with P/D using the unified disagg-profile-handler
 const pdConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
