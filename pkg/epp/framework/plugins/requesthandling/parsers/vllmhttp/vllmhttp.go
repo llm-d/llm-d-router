@@ -27,8 +27,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -119,11 +121,49 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 	}
 
 	body := &fwkrh.InferenceRequestBody{
-		Generate: &generate,
-		Payload:  fwkrh.PayloadMap(bodyMap),
+		TokenInputs: []fwkrh.TokenizedInput{
+			{
+				TokenIDs:           generate.TokenIDs,
+				MultiModalFeatures: convertMMFeaturesToUpstream(generate.Features),
+			},
+		},
+		ExtractedCacheSalt: generate.CacheSalt,
+		Generate:           &generate,
+		Payload:            fwkrh.PayloadMap(bodyMap),
 	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		body.Stream = true
 	}
 	return &fwkrh.ParseResult{Body: body, Skip: false}, nil
+}
+
+func convertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) []fwkrh.MultiModalFeature {
+	if src == nil || len(src.MMHashes) == 0 {
+		return nil
+	}
+
+	var items []fwkrh.MultiModalFeature
+	for modality, hashes := range src.MMHashes {
+		ranges, ok := src.MMPlaceholders[modality]
+		if !ok {
+			continue
+		}
+		n := len(hashes)
+		if len(ranges) < n {
+			n = len(ranges)
+		}
+		for i := 0; i < n; i++ {
+			items = append(items, fwkrh.MultiModalFeature{
+				Modality: fwkrh.Modality(modality),
+				Hash:     hashes[i],
+				Offset:   ranges[i].Offset,
+				Length:   ranges[i].Length,
+			})
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Offset < items[j].Offset })
+	return items
 }

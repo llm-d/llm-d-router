@@ -55,6 +55,11 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 				"token_ids": []any{1, 2, 3},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{1, 2, 3},
+					},
+				},
 				Generate: &fwkrh.GenerateRequest{
 					TokenIDs: []uint32{1, 2, 3},
 				},
@@ -71,6 +76,12 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 				"cache_salt": "abc123",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{10, 20, 30},
+					},
+				},
+				ExtractedCacheSalt: "abc123",
 				Generate: &fwkrh.GenerateRequest{
 					TokenIDs:  []uint32{10, 20, 30},
 					CacheSalt: "abc123",
@@ -93,6 +104,11 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 				"stream": true,
 			},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{1, 2, 3},
+					},
+				},
 				Generate: &fwkrh.GenerateRequest{
 					TokenIDs: []uint32{1, 2, 3},
 				},
@@ -130,6 +146,11 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 				"token_ids": []any{5, 6, 7},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{5, 6, 7},
+					},
+				},
 				Generate: &fwkrh.GenerateRequest{
 					TokenIDs: []uint32{5, 6, 7},
 				},
@@ -156,6 +177,15 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{151644, 872, 198, 3838, 374, 279, 6722, 315, 9625, 30, 151645, 198, 151644, 77091, 198},
+						MultiModalFeatures: []fwkrh.MultiModalFeature{
+							{Modality: fwkrh.ModalityImage, Hash: "abc123hash", Offset: 1, Length: 3},
+							{Modality: fwkrh.ModalityImage, Hash: "def456hash", Offset: 4, Length: 3},
+						},
+					},
+				},
 				Generate: &fwkrh.GenerateRequest{
 					TokenIDs: []uint32{151644, 872, 198, 3838, 374, 279, 6722, 315, 9625, 30, 151645, 198, 151644, 77091, 198},
 					Features: &tokenization.MultiModalFeatures{
