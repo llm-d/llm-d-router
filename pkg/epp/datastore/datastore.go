@@ -400,6 +400,9 @@ func (ds *datastore) upsertEndpoint(ctx context.Context, meta *fwkdl.EndpointMet
 		return true
 	}
 	ep := existing.(fwkdl.Endpoint)
+	if ep.GetMetadata().Equal(meta) {
+		return false
+	}
 	ep.UpdateMetadata(meta)
 	ds.epf.UpdateEndpoint(ctx, ep)
 	return false

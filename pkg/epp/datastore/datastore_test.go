@@ -1395,7 +1395,20 @@ func TestEndpointUpsert_UpdateExistingNotifiesEndpointFactory(t *testing.T) {
 	assert.Equal(t, addr2, updates[0].GetMetadata().Address)
 
 	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr2})
-	assert.Len(t, factory.updateEvents(), 2)
+	assert.Len(t, factory.updateEvents(), 1)
+}
+
+func TestEndpointUpsert_SemanticallyEqualMetadataDoesNotNotify(t *testing.T) {
+	const addr = "10.0.0.1"
+	ctx := context.Background()
+	factory := &mockEndpointFactory{}
+	ds := NewDatastore(ctx, factory, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Labels: nil})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Labels: map[string]string{}})
+
+	assert.Empty(t, factory.updateEvents())
 }
 
 func TestEndpointUpsert_NewEndpointFactoryReturnsNil(t *testing.T) {
