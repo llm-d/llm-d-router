@@ -31,7 +31,7 @@ Documentation for developing the llm-d Router.
     - [Integration Tests](#integration-tests)
     - [Filtered Tests](#filtered-tests)
     - [End-to-End Tests](#end-to-end-tests)
-    - [End-to-End Tests — E/P/D Pools](#end-to-end-tests--epd-pools)
+    - [End-to-End Tests — Encode, Prefill and Decode Inference Pools](#end-to-end-tests--encode-prefill-and-decode-inference-pools)
     - [Coverage](#coverage)
   - [Tokenization Architecture](#tokenization-architecture)
   - [Kubernetes Development Environment](#kubernetes-development-environment)
@@ -624,7 +624,7 @@ kubectl --context kind-e2e-tests get pods
 | `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` | Routing sidecar image loaded into the Kind cluster |
 | `VLLM_RENDER_IMAGE` | `vllm/vllm-openai-cpu:v0.21.0` | vLLM renderer image loaded into the Kind cluster |
 
-### End-to-End Tests — E/P/D Pools
+### End-to-End Tests — Encode, Prefill and Decode Inference Pools
 
 ```bash
 make test-e2e-epd-pools

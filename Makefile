@@ -292,6 +292,7 @@ test-e2e: image-build-builder image-build image-pull ## Run end-to-end tests aga
 		$(BUILDER_IMAGE) ./hack/test-e2e.sh
 	@printf "\033[33;1m==== Running End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
+		-e VLLM_IMAGE=$(VLLM_SIMULATOR_TAG_BASE):v0.9.0 \
 		$(BUILDER_IMAGE) ./test/scripts/run_e2e.sh
 
 .PHONY: test-e2e-epd-pools
