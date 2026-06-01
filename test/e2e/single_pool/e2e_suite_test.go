@@ -33,23 +33,23 @@ const (
 	// defaultInterval is the default interval to check if a resource exists or ready conditions.
 	defaultInterval = time.Millisecond * 250
 	// crdKustomizePath is the kustomize path for all CRDs (upstream GIE + local llm-d.ai).
-	crdKustomizePath = "../../config/crd"
+	crdKustomizePath = "../../../config/crd"
 	// inferExtManifest is the manifest for the inference extension test resources.
-	inferExtManifest = "../../deploy/components/inference-gateway/inference-pools.yaml"
+	inferExtManifest = "../../../deploy/components/inference-gateway/single-pool/inference-pools.yaml"
 	// simModelName is the test model name.
 	simModelName = "food-review"
 	// kvModelName is the model name used in KV tests.
 	kvModelName = "Qwen/Qwen2.5-1.5B-Instruct"
 	// envoyManifest is the manifest for the envoy proxy test resources.
-	envoyManifest = "../../deploy/environments/dev/e2e-infra/envoy.yaml"
+	envoyManifest = "../../../deploy/environments/dev/e2e-infra/envoy.yaml"
 	// eppManifest is the manifest for the deployment of the EPP
-	eppManifest = "../../deploy/components/inference-gateway/deployment.yaml"
+	eppManifest = "../../../deploy/components/inference-gateway/single-pool/deployment.yaml"
 	// rbacManifest is the manifest for the EPP's RBAC resources.
-	rbacManifest = "../../deploy/components/inference-gateway/rbac.yaml"
+	rbacManifest = "../../../deploy/components/inference-gateway/single-pool/rbac.yaml"
 	// serviceAccountManifest is the manifest for the EPP's service account resources.
-	serviceAccountManifest = "../../deploy/components/inference-gateway/service-accounts.yaml"
+	serviceAccountManifest = "../../../deploy/components/inference-gateway/single-pool/service-accounts.yaml"
 	// servicesManifest is the manifest for the EPP's service resources.
-	servicesManifest = "../../deploy/environments/dev/e2e-infra/services.yaml"
+	servicesManifest = "../../../deploy/environments/dev/e2e-infra/services.yaml"
 )
 
 var (
@@ -64,7 +64,7 @@ var (
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
-	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.0", ginkgo.GinkgoLogr)
+	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.1", ginkgo.GinkgoLogr)
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
 	// nsName is the namespace in which the K8S objects will be created

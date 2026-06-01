@@ -212,9 +212,9 @@ if [ "${PROM_ENABLED}" == "true" ]; then
 fi
 
 # TARGET_PORTS is substituted directly into the `targetPorts: ${TARGET_PORTS}` field
-# in deploy/components/inference-gateway/inference-pools.yaml. Each item must be
-# indented with exactly 2 spaces to match the indentation of that field. If the
-# field is ever reindented in inference-pools.yaml, update the indentation here too.
+# in deploy/components/inference-gateway/single-pool/inference-pools.yaml. Each item
+# must be indented with exactly 2 spaces to match the indentation of that field. If
+# the field is ever reindented in inference-pools.yaml, update the indentation here too.
 NEW_LINE=$'\n'
 TARGET_PORTS="${NEW_LINE}  - number: 8000"
 for ((i = 1; i < VLLM_DATA_PARALLEL_SIZE; ++i)); do
