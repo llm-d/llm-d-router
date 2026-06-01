@@ -16,8 +16,8 @@ limitations under the License.
 
 // Note on Time-Based Lifecycle Tests:
 // Tests validating the controller's handling of request TTLs (e.g., OnReqCtxTimeout*) rely on real-time timers
-// (context.WithDeadline). The injected testclock.FakeClock is used to control the timing of internal loops (like
-// reconciliation), but it cannot manipulate the timers used by the standard context package. Therefore, these specific
+// (context.WithDeadline). The injected testclock.FakeClock is used to control the timing of internal loops,
+// but it cannot manipulate the timers used by the standard context package. Therefore, these specific
 // tests use time.Sleep or assertions on real-time durations.
 
 package controller
@@ -27,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,14 +36,14 @@ import (
 	"k8s.io/utils/clock"
 	testclock "k8s.io/utils/clock/testing"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts/mocks"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/controller/internal"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/types"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	frameworkmocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller/internal"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 )
 
 // --- Test Harness & Fixtures ---
@@ -67,7 +66,7 @@ type testHarness struct {
 	// mockClock provides access to FakeClock methods (Step, HasWaiters) if and only if the underlying clock is a
 	// FakeClock.
 	mockClock            *testclock.FakeClock
-	mockProcessorFactory *mockShardProcessorFactory
+	mockProcessorFactory *mockProcessorFactory
 }
 
 // unitHarnessOption allows configuring the test harness.
@@ -90,6 +89,7 @@ func newUnitHarness(
 	t *testing.T,
 	cfg *Config,
 	registry *mockRegistryClient,
+	processor *mockProcessor,
 	opts ...unitHarnessOption,
 ) *testHarness {
 	t.Helper()
@@ -104,27 +104,23 @@ func newUnitHarness(
 	mockDetector := &mockSaturationDetector{}
 	mockEndpointCandidates := &mocks.MockEndpointCandidates{}
 
-	mockProcessorFactory := &mockShardProcessorFactory{
-		processors: make(map[string]*mockShardProcessor),
-	}
+	mockProcessorFactory := &mockProcessorFactory{processor: processor}
 
 	usageLimitPolicy := usagelimits.DefaultPolicy()
 
 	// Default the registry if nil, simplifying tests that don't focus on registry interaction.
 	if registry == nil {
-		registry = &mockRegistryClient{}
+		registry = &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
 	}
 
-	fc, err := NewFlowController(ctx, "test-pool", cfg, Deps{
+	fc := NewFlowController(ctx, "test-pool", cfg, Deps{
 		Registry:           registry,
 		SaturationDetector: mockDetector,
 		EndpointCandidates: mockEndpointCandidates,
 		UsageLimitPolicy:   usageLimitPolicy,
 		Clock:              harnessOpts.clock,
+		ProcessorFactory:   mockProcessorFactory.new,
 	})
-	require.NoError(t, err, "failed to create FlowController for unit test harness")
-	fc.shardProcessorFactory = mockProcessorFactory.new
-
 	h := &testHarness{
 		fc:                   fc,
 		cfg:                  cfg,
@@ -140,7 +136,7 @@ func newUnitHarness(
 	return h
 }
 
-// newIntegrationHarness creates a test environment that uses real `ShardProcessor`s, suitable for integration tests
+// newIntegrationHarness creates a test environment that uses real `Processor`s, suitable for integration tests
 // validating the controller-processor interaction.
 func newIntegrationHarness(ctx context.Context, t *testing.T, cfg *Config, registry *mockRegistryClient) *testHarness {
 	t.Helper()
@@ -151,17 +147,18 @@ func newIntegrationHarness(ctx context.Context, t *testing.T, cfg *Config, regis
 	// Align FakeClock with system time. See explanation in newUnitHarness.
 	mockClock := testclock.NewFakeClock(time.Now())
 	if registry == nil {
-		registry = &mockRegistryClient{}
+		registry = &mockRegistryClient{
+			FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{},
+		}
 	}
 
-	fc, err := NewFlowController(ctx, "test-pool", cfg, Deps{
+	fc := NewFlowController(ctx, "test-pool", cfg, Deps{
 		Registry:           registry,
 		SaturationDetector: mockDetector,
 		EndpointCandidates: mockEndpointCandidates,
 		UsageLimitPolicy:   usageLimitPolicy,
 		Clock:              mockClock,
 	})
-	require.NoError(t, err, "failed to create FlowController for integration test harness")
 
 	h := &testHarness{
 		fc:           fc,
@@ -175,16 +172,16 @@ func newIntegrationHarness(ctx context.Context, t *testing.T, cfg *Config, regis
 
 // mockActiveFlowConnection is a local mock for the `contracts.ActiveFlowConnection` interface.
 type mockActiveFlowConnection struct {
-	ActiveShardsV    []contracts.RegistryShard
-	ActiveShardsFunc func() []contracts.RegistryShard
-	FlowKeyV         flowcontrol.FlowKey
+	RegistryV    contracts.FlowRegistry
+	RegistryFunc func() contracts.FlowRegistry
+	FlowKeyV     flowcontrol.FlowKey
 }
 
-func (m *mockActiveFlowConnection) ActiveShards() []contracts.RegistryShard {
-	if m.ActiveShardsFunc != nil {
-		return m.ActiveShardsFunc()
+func (m *mockActiveFlowConnection) GetDataPlane() contracts.FlowRegistryDataPlane {
+	if m.RegistryFunc != nil {
+		return m.RegistryFunc()
 	}
-	return m.ActiveShardsV
+	return m.RegistryV
 }
 
 func (m *mockActiveFlowConnection) FlowKey() flowcontrol.FlowKey {
@@ -196,7 +193,7 @@ type mockRegistryClient struct {
 	contracts.FlowRegistryObserver
 	contracts.FlowRegistryDataPlane
 	WithConnectionFunc func(key flowcontrol.FlowKey, fn func(conn contracts.ActiveFlowConnection) error) error
-	ShardStatsFunc     func() []contracts.ShardStats
+	StatsFunc          func() contracts.AggregateStats
 }
 
 func (m *mockRegistryClient) WithConnection(
@@ -206,18 +203,18 @@ func (m *mockRegistryClient) WithConnection(
 	if m.WithConnectionFunc != nil {
 		return m.WithConnectionFunc(key, fn)
 	}
-	return fn(&mockActiveFlowConnection{})
+	return fn(&mockActiveFlowConnection{RegistryV: m})
 }
 
-func (m *mockRegistryClient) ShardStats() []contracts.ShardStats {
-	if m.ShardStatsFunc != nil {
-		return m.ShardStatsFunc()
+func (m *mockRegistryClient) Stats() contracts.AggregateStats {
+	if m.StatsFunc != nil {
+		return m.StatsFunc()
 	}
-	return nil
+	return contracts.AggregateStats{}
 }
 
-// mockShardProcessor is a mock for the internal `shardProcessor` interface.
-type mockShardProcessor struct {
+// mockProcessor is a mock for the internal `Processor` interface.
+type mockProcessor struct {
 	SubmitFunc        func(item *internal.FlowItem) error
 	SubmitOrBlockFunc func(ctx context.Context, item *internal.FlowItem) error
 	// runCtx captures the context provided to the Run method for lifecycle assertions.
@@ -227,21 +224,21 @@ type mockShardProcessor struct {
 	runStarted chan struct{}
 }
 
-func (m *mockShardProcessor) Submit(item *internal.FlowItem) error {
+func (m *mockProcessor) Submit(item *internal.FlowItem) error {
 	if m.SubmitFunc != nil {
 		return m.SubmitFunc(item)
 	}
 	return nil
 }
 
-func (m *mockShardProcessor) SubmitOrBlock(ctx context.Context, item *internal.FlowItem) error {
+func (m *mockProcessor) SubmitOrBlock(ctx context.Context, item *internal.FlowItem) error {
 	if m.SubmitOrBlockFunc != nil {
 		return m.SubmitOrBlockFunc(ctx, item)
 	}
 	return nil
 }
 
-func (m *mockShardProcessor) Run(ctx context.Context) {
+func (m *mockProcessor) Run(ctx context.Context) {
 	m.runCtxMu.Lock()
 	m.runCtx = ctx
 	m.runCtxMu.Unlock()
@@ -253,22 +250,21 @@ func (m *mockShardProcessor) Run(ctx context.Context) {
 }
 
 // Context returns the context captured during the Run method call.
-func (m *mockShardProcessor) Context() context.Context {
+func (m *mockProcessor) Context() context.Context {
 	m.runCtxMu.RLock()
 	defer m.runCtxMu.RUnlock()
 	return m.runCtx
 }
 
-// mockShardProcessorFactory allows tests to inject specific `mockShardProcessor` instances.
-type mockShardProcessorFactory struct {
-	mu         sync.Mutex
-	processors map[string]*mockShardProcessor
+// mockProcessorFactory allows tests to inject specific `mockProcessor` instances.
+type mockProcessorFactory struct {
+	processor *mockProcessor
 }
 
-// new is the factory function conforming to the `shardProcessorFactory` signature.
-func (f *mockShardProcessorFactory) new(
+// new is the factory function conforming to the `ProcessorFactory` signature.
+func (f *mockProcessorFactory) new(
 	_ context.Context, // The factory does not use the lifecycle context; it's passed to the processor's Run method later.
-	shard contracts.RegistryShard,
+	_ contracts.FlowRegistry,
 	_ flowcontrol.SaturationDetector,
 	_ contracts.EndpointCandidates,
 	_ flowcontrol.UsageLimitPolicy,
@@ -276,56 +272,18 @@ func (f *mockShardProcessorFactory) new(
 	_ time.Duration,
 	_ int,
 	_ logr.Logger,
-) shardProcessor {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if proc, ok := f.processors[shard.ID()]; ok {
-		return proc
+) processor {
+	if f.processor != nil {
+		return f.processor
 	}
 	// Return a default mock processor if one is not explicitly registered by the test.
-	return &mockShardProcessor{}
-}
-
-// stubManagedQueue is a simple stub for the `contracts.ManagedQueue`  interface.
-type stubManagedQueue struct {
-	contracts.ManagedQueue
-	byteSizeV uint64
-}
-
-func (s *stubManagedQueue) ByteSize() uint64 { return s.byteSizeV }
-
-func (s *stubManagedQueue) FlowQueueAccessor() flowcontrol.FlowQueueAccessor {
-	return &frameworkmocks.MockFlowQueueAccessor{ByteSizeV: s.byteSizeV}
-}
-
-// mockShardBuilder is a fixture to declaratively build mock `contracts.RegistryShard` for tests.
-type mockShardBuilder struct {
-	id       string
-	byteSize uint64
-}
-
-func newMockShard(id string) *mockShardBuilder {
-	return &mockShardBuilder{id: id}
-}
-
-func (b *mockShardBuilder) withByteSize(size uint64) *mockShardBuilder {
-	b.byteSize = size
-	return b
-}
-
-func (b *mockShardBuilder) build() contracts.RegistryShard {
-	return &mocks.MockRegistryShard{
-		IDFunc: func() string { return b.id },
-		ManagedQueueFunc: func(_ flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
-			return &stubManagedQueue{byteSizeV: b.byteSize}, nil
-		},
-	}
+	return &mockProcessor{}
 }
 
 var defaultFlowKey = flowcontrol.FlowKey{ID: "test-flow", Priority: 100}
 
-func newTestRequest(key flowcontrol.FlowKey) *frameworkmocks.MockFlowControlRequest {
-	return &frameworkmocks.MockFlowControlRequest{
+func newTestRequest(key flowcontrol.FlowKey) *fwkfcmocks.MockFlowControlRequest {
+	return &fwkfcmocks.MockFlowControlRequest{
 		FlowKeyV:  key,
 		ByteSizeV: 100,
 		IDV:       "req-" + key.ID,
@@ -345,24 +303,24 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 		t.Run("OnReqCtxExpiredBeforeDistribution", func(t *testing.T) {
 			t.Parallel()
 			// Test that if the request context provided to EnqueueAndWait is already expired, it returns immediately.
-			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: 1 * time.Minute}, nil)
 
-			// Configure registry to return a shard.
-			shardA := newMockShard("shard-A").build()
-			h.mockRegistry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(_ contracts.ActiveFlowConnection) error) error {
-				return fn(&mockActiveFlowConnection{
-					ActiveShardsV: []contracts.RegistryShard{shardA},
-					FlowKeyV:      key,
-				})
-			}
 			// Configure processor to block until context expiry.
-			h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
+			processor := &mockProcessor{
 				SubmitFunc: func(_ *internal.FlowItem) error { return internal.ErrProcessorBusy },
 				SubmitOrBlockFunc: func(ctx context.Context, _ *internal.FlowItem) error {
 					<-ctx.Done()              // Wait for the context to be done.
 					return context.Cause(ctx) // Return the cause.
 				},
 			}
+			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: 1 * time.Minute}, nil, processor)
+
+			h.mockRegistry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(_ contracts.ActiveFlowConnection) error) error {
+				return fn(&mockActiveFlowConnection{
+					RegistryV: h.mockRegistry,
+					FlowKeyV:  key,
+				})
+			}
+			h.mockRegistry.FlowRegistryDataPlane = &mocks.MockRegistryDataPlane{}
 
 			req := newTestRequest(defaultFlowKey)
 			// Use a context with a deadline in the past.
@@ -382,12 +340,8 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			t.Parallel()
 			// Create a context specifically for the controller's lifecycle.
 			ctx, cancel := context.WithCancel(t.Context())
-			h := newUnitHarness(ctx, t, &Config{}, nil)
+			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
 			cancel() // Immediately stop the controller.
-
-			// Wait for the controller's run loop and all workers (none in this case) to exit.
-			// We need to wait because the shutdown process is asynchronous.
-			h.fc.wg.Wait()
 
 			req := newTestRequest(defaultFlowKey)
 			// The request context is valid, but the controller itself is stopped.
@@ -399,23 +353,10 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				"outcome should be QueueOutcomeRejectedOther on shutdown")
 		})
 
-		t.Run("OnNoShardsAvailable", func(t *testing.T) {
-			t.Parallel()
-			// The default mockRegistryClient returns an empty list of ActiveShards.
-			h := newUnitHarness(t.Context(), t, &Config{}, nil)
-
-			req := newTestRequest(defaultFlowKey)
-			outcome, err := h.fc.EnqueueAndWait(context.Background(), req)
-			require.Error(t, err, "EnqueueAndWait must reject requests if no shards are available")
-			assert.ErrorIs(t, err, types.ErrRejected, "error should wrap ErrRejected")
-			assert.Equal(t, types.QueueOutcomeRejectedCapacity, outcome,
-				"outcome should be QueueOutcomeRejectedCapacity when no shards exist for the flow")
-		})
-
 		t.Run("OnRegistryConnectionError", func(t *testing.T) {
 			t.Parallel()
-			mockRegistry := &mockRegistryClient{}
-			h := newUnitHarness(t.Context(), t, &Config{}, mockRegistry)
+			mockRegistry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
+			h := newUnitHarness(t.Context(), t, &Config{}, mockRegistry, nil)
 
 			expectedErr := errors.New("simulated connection failure")
 			// Configure the registry to fail when attempting to retrieve ActiveFlowConnection.
@@ -437,13 +378,12 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 
 		t.Run("OnManagedQueueError", func(t *testing.T) {
 			t.Parallel()
-			mockRegistry := &mockRegistryClient{}
-			h := newUnitHarness(t.Context(), t, &Config{}, mockRegistry)
+			mockRegistry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
+			h := newUnitHarness(t.Context(), t, &Config{}, mockRegistry, nil)
 
-			// Create a faulty shard that successfully leases the flow but fails to return the
-			// ManagedQueue. This shard should be considered as unavailable.
-			faultyShard := &mocks.MockRegistryShard{
-				IDFunc: func() string { return "faulty-shard" },
+			// Create a faulty setup that successfully leases the flow but fails to return the
+			// ManagedQueue. This setup should be considered as unavailable.
+			faultyRegistry := &mocks.MockRegistryDataPlane{
 				ManagedQueueFunc: func(_ flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
 					return nil, errors.New("invariant violation: queue retrieval failed")
 				},
@@ -453,17 +393,17 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				fn func(conn contracts.ActiveFlowConnection) error,
 			) error {
 				return fn(&mockActiveFlowConnection{
-					ActiveShardsV: []contracts.RegistryShard{faultyShard},
-					FlowKeyV:      key,
+					RegistryV: faultyRegistry,
+					FlowKeyV:  key,
 				})
 			}
 
 			req := newTestRequest(defaultFlowKey)
 			outcome, err := h.fc.EnqueueAndWait(context.Background(), req)
-			require.Error(t, err, "EnqueueAndWait must reject requests if no shards are available")
+			require.Error(t, err, "EnqueueAndWait must reject requests if queue doesn't exist for flow")
 			assert.ErrorIs(t, err, types.ErrRejected, "error should wrap ErrRejected")
 			assert.Equal(t, types.QueueOutcomeRejectedCapacity, outcome,
-				"outcome should be QueueOutcomeRejectedCapacity when no shards exist for the flow")
+				"outcome should be QueueOutcomeRejectedCapacity when queue doesn't exist for the flow")
 		})
 	})
 
@@ -476,9 +416,8 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 		const defaultTestTTL = 5 * time.Second
 
 		testCases := []struct {
-			name            string
-			shards          []contracts.RegistryShard
-			setupProcessors func(t *testing.T, h *testHarness)
+			name           string
+			setupProcessor func(t *testing.T) *mockProcessor
 			// requestTTL overrides the default TTL for time-sensitive tests.
 			requestTTL      time.Duration
 			expectedOutcome types.QueueOutcome
@@ -486,58 +425,11 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			expectErrIs     error
 		}{
 			{
-				name:   "SubmitSucceeds_NonBlocking_WithSingleActiveShard",
-				shards: []contracts.RegistryShard{newMockShard("shard-A").build()},
-				setupProcessors: func(t *testing.T, h *testHarness) {
-					h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
+				name: "SubmitSucceeds_NonBlocking",
+				setupProcessor: func(t *testing.T) *mockProcessor {
+					return &mockProcessor{
 						SubmitFunc: func(item *internal.FlowItem) error {
 							// Simulate asynchronous processing and successful dispatch.
-							go item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
-							return nil
-						},
-					}
-				},
-				expectedOutcome: types.QueueOutcomeDispatched,
-			},
-			{
-				name: "DistributesToLeastLoadedShard_WithMultipleActiveShards",
-				shards: []contracts.RegistryShard{
-					newMockShard("shard-A").withByteSize(1000).build(), // More loaded
-					newMockShard("shard-B").withByteSize(100).build(),  // Least loaded
-				},
-				setupProcessors: func(t *testing.T, h *testHarness) {
-					h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
-						SubmitFunc: func(_ *internal.FlowItem) error {
-							t.Error("Submit was called on the more loaded shard (shard-A); JSQ-Bytes algorithm failed")
-							return internal.ErrProcessorBusy
-						},
-					}
-					h.mockProcessorFactory.processors["shard-B"] = &mockShardProcessor{
-						SubmitFunc: func(item *internal.FlowItem) error {
-							item.SetHandle(&frameworkmocks.MockQueueItemHandle{})
-							go item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
-							return nil
-						},
-					}
-				},
-				expectedOutcome: types.QueueOutcomeDispatched,
-			},
-			{
-				name: "SubmitSucceeds_AfterBlocking_WithAllProcessorsBusy",
-				shards: []contracts.RegistryShard{
-					newMockShard("shard-A").withByteSize(1000).build(),
-					newMockShard("shard-B").withByteSize(100).build(),
-				},
-				setupProcessors: func(t *testing.T, h *testHarness) {
-					// Both processors reject the initial non-blocking Submit.
-					h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
-						SubmitFunc: func(_ *internal.FlowItem) error { return internal.ErrProcessorBusy },
-					}
-					// Shard-B is the least loaded, so it should receive the blocking fallback (SubmitOrBlock).
-					h.mockProcessorFactory.processors["shard-B"] = &mockShardProcessor{
-						SubmitFunc: func(_ *internal.FlowItem) error { return internal.ErrProcessorBusy },
-						SubmitOrBlockFunc: func(_ context.Context, item *internal.FlowItem) error {
-							// The blocking call succeeds.
 							go item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
 							return nil
 						},
@@ -549,10 +441,9 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				// Validates the scenario where the request's TTL expires while the controller is blocked waiting for capacity.
 				// NOTE: This relies on real time passing, as context.WithDeadline timers cannot be controlled by FakeClock.
 				name:       "Rejects_AfterBlocking_WhenTTL_Expires",
-				shards:     []contracts.RegistryShard{newMockShard("shard-A").build()},
 				requestTTL: 50 * time.Millisecond, // Short TTL to keep the test fast.
-				setupProcessors: func(t *testing.T, h *testHarness) {
-					h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
+				setupProcessor: func(t *testing.T) *mockProcessor {
+					return &mockProcessor{
 						// Reject the non-blocking attempt.
 						SubmitFunc: func(_ *internal.FlowItem) error { return internal.ErrProcessorBusy },
 						// Block the fallback attempt until the context (carrying the TTL deadline) expires.
@@ -570,10 +461,9 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				expectErrIs: types.ErrTTLExpired,
 			},
 			{
-				name:   "Rejects_OnProcessorShutdownDuringSubmit",
-				shards: []contracts.RegistryShard{newMockShard("shard-A").build()},
-				setupProcessors: func(t *testing.T, h *testHarness) {
-					h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
+				name: "Rejects_OnProcessorShutdownDuringSubmit",
+				setupProcessor: func(t *testing.T) *mockProcessor {
+					return &mockProcessor{
 						// Simulate the processor shutting down during the non-blocking handoff.
 						SubmitFunc: func(_ *internal.FlowItem) error { return types.ErrFlowControllerNotRunning },
 						SubmitOrBlockFunc: func(_ context.Context, _ *internal.FlowItem) error {
@@ -586,10 +476,9 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				expectErrIs:     types.ErrFlowControllerNotRunning,
 			},
 			{
-				name:   "Rejects_OnProcessorShutdownDuringSubmitOrBlock",
-				shards: []contracts.RegistryShard{newMockShard("shard-A").build()},
-				setupProcessors: func(t *testing.T, h *testHarness) {
-					h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
+				name: "Rejects_OnProcessorShutdownDuringSubmitOrBlock",
+				setupProcessor: func(t *testing.T) *mockProcessor {
+					return &mockProcessor{
 						SubmitFunc: func(_ *internal.FlowItem) error { return internal.ErrProcessorBusy },
 						// Simulate the processor shutting down during the blocking handoff.
 						SubmitOrBlockFunc: func(_ context.Context, _ *internal.FlowItem) error {
@@ -608,26 +497,25 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				t.Parallel()
 
 				// Arrange
-				mockRegistry := &mockRegistryClient{}
+				mockRegistry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
 
 				// Configure the harness with the appropriate TTL.
 				harnessConfig := &Config{DefaultRequestTTL: defaultTestTTL}
 				if tc.requestTTL > 0 {
 					harnessConfig.DefaultRequestTTL = tc.requestTTL
 				}
-				h := newUnitHarness(t.Context(), t, harnessConfig, mockRegistry)
+				h := newUnitHarness(t.Context(), t, harnessConfig, mockRegistry, tc.setupProcessor(t))
 
-				// Configure the registry to return the specified shards.
+				// Configure the registry to return the specified setup.
 				mockRegistry.WithConnectionFunc = func(
 					key flowcontrol.FlowKey,
 					fn func(conn contracts.ActiveFlowConnection) error,
 				) error {
 					return fn(&mockActiveFlowConnection{
-						ActiveShardsV: tc.shards,
-						FlowKeyV:      key,
+						RegistryV: h.mockRegistry,
+						FlowKeyV:  key,
 					})
 				}
-				tc.setupProcessors(t, h)
 
 				// Act
 				var outcome types.QueueOutcome
@@ -668,20 +556,18 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 		// controller is blocked in the SubmitOrBlock phase.
 		t.Run("Rejects_OnRequestContextCancelledWhileBlocking", func(t *testing.T) {
 			t.Parallel()
-			mockRegistry := &mockRegistryClient{
-				WithConnectionFunc: func(
-					key flowcontrol.FlowKey,
-					fn func(conn contracts.ActiveFlowConnection,
-					) error) error {
-					return fn(&mockActiveFlowConnection{
-						ActiveShardsV: []contracts.RegistryShard{newMockShard("shard-A").build()},
-						FlowKeyV:      key,
-					})
-				},
+			mockRegistry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
+			mockRegistry.WithConnectionFunc = func(
+				key flowcontrol.FlowKey,
+				fn func(conn contracts.ActiveFlowConnection,
+				) error) error {
+				return fn(&mockActiveFlowConnection{
+					RegistryV: mockRegistry,
+					FlowKeyV:  key,
+				})
 			}
 			// Use a long TTL to ensure the failure is due to cancellation, not timeout.
-			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: 10 * time.Second}, mockRegistry)
-			h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
+			processor := &mockProcessor{
 				// Reject non-blocking attempt.
 				SubmitFunc: func(_ *internal.FlowItem) error { return internal.ErrProcessorBusy },
 				// Block the fallback attempt until the context is cancelled.
@@ -690,6 +576,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 					return ctx.Err()
 				},
 			}
+			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: 10 * time.Second}, mockRegistry, processor)
 
 			// Create a cancellable context for the request.
 			reqCtx, cancelReq := context.WithCancel(context.Background())
@@ -705,63 +592,6 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			assert.Equal(t, types.QueueOutcomeRejectedOther, outcome,
 				"outcome should be QueueOutcomeRejectedOther when cancelled during distribution")
 		})
-
-		// This test validates the retry mechanism when a processor reports that its shard is draining.
-		t.Run("RetriesAndSucceeds_OnProcessorReportsShardDraining", func(t *testing.T) {
-			t.Parallel()
-			var callCount atomic.Int32
-			mockRegistry := &mockRegistryClient{
-				WithConnectionFunc: func(
-					key flowcontrol.FlowKey,
-					fn func(conn contracts.ActiveFlowConnection) error,
-				) error {
-					shardA := newMockShard("shard-A").withByteSize(100).build()
-					shardB := newMockShard("shard-B").withByteSize(1000).build()
-
-					// We construct the connection once, using a hook for dynamic topology.
-					conn := &mockActiveFlowConnection{
-						FlowKeyV: key,
-						ActiveShardsFunc: func() []contracts.RegistryShard {
-							attempt := callCount.Add(1)
-							if attempt == 1 {
-								// Attempt 1: Shard A is present and will be selected (least loaded).
-								return []contracts.RegistryShard{shardA, shardB}
-							}
-							// Attempt 2 (Retry): Assume Shard A is now draining and removed from the active set by the registry.
-							return []contracts.RegistryShard{shardB}
-						},
-					}
-					return fn(conn)
-				},
-			}
-			// Use a long TTL to ensure retries don't time out.
-			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: 10 * time.Second}, mockRegistry)
-
-			// Configure Shard A's processor to reject the request due to draining.
-			h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
-				SubmitFunc: func(item *internal.FlowItem) error {
-					// The processor accepts the item but then asynchronously finalizes it with ErrShardDraining.
-					item.SetHandle(&frameworkmocks.MockQueueItemHandle{})
-					go item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, contracts.ErrShardDraining)
-					return nil
-				},
-			}
-			// Configure Shard B's processor to successfully dispatch the request on the retry.
-			h.mockProcessorFactory.processors["shard-B"] = &mockShardProcessor{
-				SubmitFunc: func(item *internal.FlowItem) error {
-					go item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
-					return nil
-				},
-			}
-
-			// Act
-			outcome, err := h.fc.EnqueueAndWait(context.Background(), newTestRequest(defaultFlowKey))
-
-			// Assert
-			require.NoError(t, err, "EnqueueAndWait must succeed after retrying on a healthy shard")
-			assert.Equal(t, types.QueueOutcomeDispatched, outcome, "outcome should be QueueOutcomeDispatched")
-			assert.Equal(t, int32(2), callCount.Load(), "registry must be consulted for Active shards on each retry attempt")
-		})
 	})
 
 	// Lifecycle covers the post-distribution phase, focusing on how the controller handles context cancellation and TTL
@@ -774,27 +604,27 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 		t.Run("OnReqCtxCancelledAfterDistribution", func(t *testing.T) {
 			t.Parallel()
 			// Use a long TTL to ensure the failure is due to cancellation.
-			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: 10 * time.Second}, nil)
-
-			shardA := newMockShard("shard-A").build()
-			h.mockRegistry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(_ contracts.ActiveFlowConnection) error) error {
-				return fn(&mockActiveFlowConnection{
-					ActiveShardsV: []contracts.RegistryShard{shardA},
-					FlowKeyV:      key,
-				})
-			}
 
 			// Channel for synchronization.
 			itemSubmitted := make(chan *internal.FlowItem, 1)
 
 			// Configure the processor to accept the item but never finalize it, simulating a queued request.
-			h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
+			processor := &mockProcessor{
 				SubmitFunc: func(item *internal.FlowItem) error {
-					item.SetHandle(&frameworkmocks.MockQueueItemHandle{})
+					item.SetHandle(&fwkfcmocks.MockQueueItemHandle{})
 					itemSubmitted <- item
 					return nil
 				},
 			}
+			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: 10 * time.Second}, nil, processor)
+
+			h.mockRegistry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(_ contracts.ActiveFlowConnection) error) error {
+				return fn(&mockActiveFlowConnection{
+					RegistryV: h.mockRegistry,
+					FlowKeyV:  key,
+				})
+			}
+			h.mockRegistry.FlowRegistryDataPlane = &mocks.MockRegistryDataPlane{}
 
 			reqCtx, cancelReq := context.WithCancel(context.Background())
 			req := newTestRequest(defaultFlowKey)
@@ -847,30 +677,29 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 		t.Run("OnReqCtxTimeoutAfterDistribution", func(t *testing.T) {
 			t.Parallel()
 			// Configure a short TTL to keep the test reasonably fast.
-			const requestTTL = 50 * time.Millisecond
-			h := newUnitHarness(t.Context(), t, &Config{
-				DefaultRequestTTL:               requestTTL,
-				ProcessorReconciliationInterval: time.Minute,
-				ExpiryCleanupInterval:           time.Minute,
-			}, nil, withHarnessClock(clock.RealClock{}))
-
-			shardA := newMockShard("shard-A").build()
-			h.mockRegistry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(_ contracts.ActiveFlowConnection) error) error {
-				return fn(&mockActiveFlowConnection{
-					ActiveShardsV: []contracts.RegistryShard{shardA},
-					FlowKeyV:      key,
-				})
-			}
 
 			itemSubmitted := make(chan *internal.FlowItem, 1)
 
 			// Configure the processor to accept the item but never finalize it.
-			h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
+			processor := &mockProcessor{
 				SubmitFunc: func(item *internal.FlowItem) error {
-					item.SetHandle(&frameworkmocks.MockQueueItemHandle{})
+					item.SetHandle(&fwkfcmocks.MockQueueItemHandle{})
 					itemSubmitted <- item
 					return nil
 				},
+			}
+
+			const requestTTL = 50 * time.Millisecond
+			h := newUnitHarness(t.Context(), t, &Config{
+				DefaultRequestTTL:     requestTTL,
+				ExpiryCleanupInterval: time.Minute,
+			}, nil, processor, withHarnessClock(clock.RealClock{}))
+
+			h.mockRegistry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(_ contracts.ActiveFlowConnection) error) error {
+				return fn(&mockActiveFlowConnection{
+					RegistryV: h.mockRegistry,
+					FlowKeyV:  key,
+				})
 			}
 
 			req := newTestRequest(defaultFlowKey)
@@ -933,26 +762,23 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			unblockProcessor := make(chan struct{})
 
 			// 1. Setup Registry: Trace when the lease is released.
-			mockRegistry := &mockRegistryClient{
-				WithConnectionFunc: func(
-					key flowcontrol.FlowKey,
-					fn func(conn contracts.ActiveFlowConnection) error,
-				) error {
-					// Execute the controller's logic.
-					err := fn(&mockActiveFlowConnection{
-						ActiveShardsV: []contracts.RegistryShard{newMockShard("shard-A").build()},
-						FlowKeyV:      key,
-					})
-					// Signal that the closure has finished and the lease is about to be released.
-					close(leaseReleased)
-					return err
-				},
+			mockRegistry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
+			mockRegistry.WithConnectionFunc = func(
+				key flowcontrol.FlowKey,
+				fn func(conn contracts.ActiveFlowConnection) error,
+			) error {
+				// Execute the controller's logic.
+				err := fn(&mockActiveFlowConnection{
+					RegistryV: mockRegistry,
+					FlowKeyV:  key,
+				})
+				// Signal that the closure has finished and the lease is about to be released.
+				close(leaseReleased)
+				return err
 			}
 
-			h := newUnitHarness(t.Context(), t, &Config{}, mockRegistry)
-
 			// 2. Setup Processor: Simulate a long wait in the queue.
-			h.mockProcessorFactory.processors["shard-A"] = &mockShardProcessor{
+			processor := &mockProcessor{
 				SubmitFunc: func(_ *internal.FlowItem) error { return internal.ErrProcessorBusy },
 				SubmitOrBlockFunc: func(ctx context.Context, item *internal.FlowItem) error {
 					close(processorEntered) // Signal that we are now "queued"
@@ -967,6 +793,8 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 					}
 				},
 			}
+
+			h := newUnitHarness(t.Context(), t, &Config{}, mockRegistry, processor)
 
 			// 3. Run EnqueueAndWait in the background.
 			go func() {
@@ -1005,317 +833,113 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 	})
 }
 
-// TestFlowController_WorkerManagement covers the lifecycle of the shard processors (workers), including startup,
-// reconciliation (garbage collection), and shutdown.
+// TestFlowController_WorkerManagement covers the lifecycle of the processor (worker), including startup
 func TestFlowController_WorkerManagement(t *testing.T) {
 	t.Parallel()
 
-	// Reconciliation validates that the controller correctly identifies and shuts down workers whose shards no longer
-	// exist in the registry.
-	t.Run("Reconciliation", func(t *testing.T) {
+	// Startup validates that the worker starts
+	t.Run("Startup", func(t *testing.T) {
 		t.Parallel()
 
-		// Setup: A registry that initially knows about "shard-A" and "stale-shard", but later only reports "shard-A".
 		mockRegistry := &mockRegistryClient{
-			ShardStatsFunc: func() []contracts.ShardStats {
+			FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{},
+			StatsFunc: func() contracts.AggregateStats {
 				// The current state of the world according to the registry.
-				return []contracts.ShardStats{{ID: "shard-A"}}
+				return contracts.AggregateStats{}
 			}}
-		h := newUnitHarness(t.Context(), t, &Config{}, mockRegistry)
 
-		// Pre-populate the controller with initial workers, simulating a previous state.
-		initialShards := []string{"shard-A", "stale-shard"}
-		for _, shardID := range initialShards {
-			currentShardID := shardID
-			// Initialize the processor mocks with the channel needed to synchronize startup.
-			h.mockProcessorFactory.processors[currentShardID] = &mockShardProcessor{runStarted: make(chan struct{})}
-			shard := &mocks.MockRegistryShard{IDFunc: func() string { return currentShardID }}
-			// Start the worker using the internal mechanism.
-			h.fc.getOrStartWorker(shard)
-		}
-		require.Len(t, h.mockProcessorFactory.processors, 2, "pre-condition: initial workers not set up correctly")
+		// Initialize the processor mock with the channel needed to synchronize startup.
+		processor := &mockProcessor{runStarted: make(chan struct{})}
 
-		// Wait for all worker goroutines to have started and captured their contexts.
-		for id, p := range h.mockProcessorFactory.processors {
-			proc := p
-			select {
-			case <-proc.runStarted:
-				// Worker is running.
-			case <-time.After(2 * time.Second):
-				t.Fatalf("timed out waiting for worker %s to start", id)
-			}
-		}
+		h := newUnitHarness(t.Context(), t, &Config{}, mockRegistry, processor)
 
-		// Act: Manually trigger the reconciliation logic.
-		h.fc.reconcileProcessors()
-
-		t.Run("StaleWorkerIsCancelled", func(t *testing.T) {
-			staleProc := h.mockProcessorFactory.processors["stale-shard"]
-			require.NotNil(t, staleProc.Context(), "precondition: stale processor context should have been captured")
-			// The context of the removed worker must be cancelled to signal shutdown.
-			select {
-			case <-staleProc.Context().Done():
-				// Success: Context was cancelled.
-			case <-time.After(100 * time.Millisecond):
-				t.Error("context of the stale worker was not cancelled during reconciliation")
-			}
-		})
-
-		t.Run("ActiveWorkerIsNotCancelled", func(t *testing.T) {
-			activeProc := h.mockProcessorFactory.processors["shard-A"]
-			require.NotNil(t, activeProc.Context(), "precondition: active processor context should have been captured")
-			// The context of an active worker must remain open.
-			select {
-			case <-activeProc.Context().Done():
-				t.Error("context of the active worker was incorrectly cancelled during reconciliation")
-			default:
-				// Success: Context is still active.
-			}
-		})
-
-		t.Run("WorkerMapIsUpdated", func(t *testing.T) {
-			// The stale worker must be removed from the controller's concurrent map.
-			_, ok := h.fc.workers.Load("stale-shard")
-			assert.False(t, ok, "stale worker must be deleted from the controller's map")
-			_, ok = h.fc.workers.Load("shard-A")
-			assert.True(t, ok, "active worker must remain in the controller's map")
-		})
-	})
-
-	// Validates that the reconciliation loop runs periodically based on the configured interval.
-	t.Run("Reconciliation_IsTriggeredByTicker", func(t *testing.T) {
-		t.Parallel()
-		const reconciliationInterval = 10 * time.Second
-		mockRegistry := &mockRegistryClient{}
-
-		// Count the number of times the reconciliation logic (which calls ShardStats) runs.
-		var reconcileCount atomic.Int32
-		mockRegistry.ShardStatsFunc = func() []contracts.ShardStats {
-			reconcileCount.Add(1)
-			return nil
-		}
-
-		h := newUnitHarness(t.Context(), t, &Config{ProcessorReconciliationInterval: reconciliationInterval}, mockRegistry)
-		// Ensure we are using the FakeClock specifically for this test, as we need Step/HasWaiters.
-		require.NotNil(t, h.mockClock, "This test requires the harness to be using FakeClock")
-
-		// Wait for the reconciliation loop to start and create the ticker.
-		// This prevents a race where the clock is stepped before the ticker is registered with the FakeClock.
-		require.Eventually(t, h.mockClock.HasWaiters, time.Second, 10*time.Millisecond,
-			"reconciliation ticker was not created")
-
-		// Advance the clock to trigger the first reconciliation.
-		h.mockClock.Step(reconciliationInterval)
-
-		assert.Eventually(t, func() bool {
-			return reconcileCount.Load() == 1
-		}, time.Second, 10*time.Millisecond, "reconciliation was not triggered by the first ticker event")
-
-		// Advance the clock again to ensure it continues to fire.
-		h.mockClock.Step(reconciliationInterval)
-		assert.Eventually(t, func() bool {
-			return reconcileCount.Load() == 2
-		}, time.Second, 10*time.Millisecond, "reconciliation did not fire on the second ticker event")
-	})
-
-	// Validates the atomicity of worker creation and ensures resource cleanup for the loser of the race.
-	t.Run("WorkerCreationRace", func(t *testing.T) {
-		t.Parallel()
-
-		// This test orchestrates a deterministic race condition.
-		factoryEntered := make(chan *mockShardProcessor, 2)
-		continueFactory := make(chan struct{})
-		// Map to store the construction context for each processor instance, allowing us to verify cleanup.
-		constructionContexts := sync.Map{}
-
-		h := newUnitHarness(t.Context(), t, &Config{}, nil)
-
-		// Inject a custom factory to control the timing of worker creation.
-		h.fc.shardProcessorFactory = func(
-			ctx context.Context, // The context created by getOrStartWorker for the potential new processor.
-			shard contracts.RegistryShard,
-			_ flowcontrol.SaturationDetector,
-			_ contracts.EndpointCandidates,
-			_ flowcontrol.UsageLimitPolicy,
-			_ clock.WithTicker,
-			_ time.Duration,
-			_ int,
-			_ logr.Logger,
-		) shardProcessor {
-			// This function is called by getOrStartWorker before the LoadOrStore check.
-			proc := &mockShardProcessor{runStarted: make(chan struct{})}
-			constructionContexts.Store(proc, ctx) // Capture the construction context.
-
-			// Signal entry and then block, allowing another goroutine to enter.
-			factoryEntered <- proc
-			<-continueFactory
-			return proc
-		}
-
-		shard := newMockShard("race-shard").build()
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		// Start two goroutines that will race to create the same worker.
-		go func() {
-			defer wg.Done()
-			h.fc.getOrStartWorker(shard)
-		}()
-		go func() {
-			defer wg.Done()
-			h.fc.getOrStartWorker(shard)
-		}()
-
-		// 1. Wait for both goroutines to enter the factory and create their respective processor instances.
-		proc1 := <-factoryEntered
-		proc2 := <-factoryEntered
-
-		// 2. Unblock both goroutines, allowing them to race to workers.LoadOrStore.
-		close(continueFactory)
-		wg.Wait()
-
-		// 3. Identify the winner and the loser.
-		actual, ok := h.fc.workers.Load("race-shard")
-		require.True(t, ok, "a worker must have been successfully stored in the map")
-
-		storedWorker := actual.(*managedWorker)
-		winnerProc := storedWorker.processor.(*mockShardProcessor)
-
-		var loserProc *mockShardProcessor
-		if winnerProc == proc1 {
-			loserProc = proc2
-		} else {
-			loserProc = proc1
-		}
-
-		// 4. Validate the state of the winning processor.
-		// Wait for the Run method to be called on the winner (only the winner should start).
+		// Wait for the worker goroutine to have started and captured its context.
 		select {
-		case <-winnerProc.runStarted:
-			// Success.
-		case <-time.After(1 * time.Second):
-			t.Fatal("timed out waiting for the winning worker's Run method to be called")
-		}
-
-		// The winning processor's context must remain active.
-		require.NotNil(t, winnerProc.Context(), "winner's context should not be nil (Run was called)")
-		select {
-		case <-winnerProc.Context().Done():
-			t.Error("context of the winning worker should not be cancelled")
-		default:
-			// Success
-		}
-
-		// 5. Validate the state of the losing processor and resource cleanup.
-		// The losing processor's Run method must NOT be called.
-		select {
-		case <-loserProc.runStarted:
-			t.Error("Run was incorrectly called on the losing worker")
-		default:
-			// Success
-		}
-
-		// Verify the context created for the loser during construction was cancelled by getOrStartWorker.
-		loserCtxRaw, ok := constructionContexts.Load(loserProc)
-		require.True(t, ok, "loser processor construction context should have been captured")
-		loserCtx := loserCtxRaw.(context.Context)
-
-		select {
-		case <-loserCtx.Done():
-			// Success: Context was cancelled, preventing resource leaks.
-		case <-time.After(100 * time.Millisecond):
-			t.Error("context of the losing worker was not cancelled, this will leak resources")
+		case <-h.mockProcessorFactory.processor.runStarted:
+			// Worker is running.
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for worker to start")
 		}
 	})
 }
 
 // Helper function to create a realistic mock registry environment for integration/concurrency tests.
-func setupRegistryForConcurrency(t *testing.T, numShards int, flowKey flowcontrol.FlowKey) *mockRegistryClient {
+func setupRegistryForConcurrency(t *testing.T, flowKey flowcontrol.FlowKey) *mockRegistryClient {
 	t.Helper()
 	mockRegistry := &mockRegistryClient{}
-	shards := make([]contracts.RegistryShard, numShards)
 
-	// Configure the shards and their dependencies required by the real ShardProcessor implementation.
-	for i := range numShards {
-		// Capture loop variables for closures.
-		shardID := fmt.Sprintf("shard-%d", i)
-		// Use high-fidelity mock queues (MockManagedQueue) that implement the necessary interfaces and synchronization.
-		currentQueue := &mocks.MockManagedQueue{FlowKeyV: flowKey}
+	// Configure the registry and its dependencies required by the real Processor implementation.
 
-		shards[i] = &mocks.MockRegistryShard{
-			IDFunc: func() string { return shardID },
-			ManagedQueueFunc: func(_ flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
-				return currentQueue, nil
-			},
-			// Configuration required for ShardProcessor initialization and dispatch logic.
-			AllOrderedPriorityLevelsFunc: func() []int { return []int{flowKey.Priority} },
-			PriorityBandAccessorFunc: func(priority int) (flowcontrol.PriorityBandAccessor, error) {
-				if priority == flowKey.Priority {
-					return &frameworkmocks.MockPriorityBandAccessor{
-						PriorityV: priority,
-						IterateQueuesFunc: func(f func(flowcontrol.FlowQueueAccessor) bool) {
-							f(currentQueue.FlowQueueAccessor())
-						},
-					}, nil
-				}
-				return nil, fmt.Errorf("unexpected priority %d", priority)
-			},
-			FairnessPolicyFunc: func(_ int) (flowcontrol.FairnessPolicy, error) {
-				return &frameworkmocks.MockFairnessPolicy{
-					PickFunc: func(_ context.Context, _ flowcontrol.PriorityBandAccessor) (flowcontrol.FlowQueueAccessor, error) {
-						return currentQueue.FlowQueueAccessor(), nil
+	// Use high-fidelity mock queues (MockManagedQueue) that implement the necessary interfaces and synchronization.
+	currentQueue := &mocks.MockManagedQueue{FlowKeyV: flowKey}
+
+	dataplane := &mocks.MockRegistryDataPlane{
+		ManagedQueueFunc: func(_ flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
+			return currentQueue, nil
+		},
+		// Configuration required for Processor initialization and dispatch logic.
+		AllOrderedPriorityLevelsFunc: func() []int { return []int{flowKey.Priority} },
+		PriorityBandAccessorFunc: func(priority int) (flowcontrol.PriorityBandAccessor, error) {
+			if priority == flowKey.Priority {
+				return &fwkfcmocks.MockPriorityBandAccessor{
+					PriorityV: priority,
+					IterateQueuesFunc: func(f func(flowcontrol.FlowQueueAccessor) bool) {
+						f(currentQueue.FlowQueueAccessor())
 					},
 				}, nil
-			},
-			// Configure stats reporting based on the live state of the mock queues.
-			StatsFunc: func() contracts.ShardStats {
-				return contracts.ShardStats{
-					ID:            shardID,
-					TotalLen:      uint64(currentQueue.Len()),
-					TotalByteSize: currentQueue.ByteSize(),
-					PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-						flowKey.Priority: {
-							Len:           uint64(currentQueue.Len()),
-							ByteSize:      currentQueue.ByteSize(),
-							CapacityBytes: 1e9, // Effectively unlimited capacity to ensure dispatch success.
-						},
+			}
+			return nil, fmt.Errorf("unexpected priority %d", priority)
+		},
+		FairnessPolicyFunc: func(_ int) (flowcontrol.FairnessPolicy, error) {
+			return &fwkfcmocks.MockFairnessPolicy{
+				PickFunc: func(_ context.Context, _ flowcontrol.PriorityBandAccessor) (flowcontrol.FlowQueueAccessor, error) {
+					return currentQueue.FlowQueueAccessor(), nil
+				},
+			}, nil
+		},
+		// Configure stats reporting based on the live state of the mock queues.
+		StatsFunc: func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalLen:      uint64(currentQueue.Len()),
+				TotalByteSize: currentQueue.ByteSize(),
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					flowKey.Priority: {
+						Len:           uint64(currentQueue.Len()),
+						ByteSize:      currentQueue.ByteSize(),
+						CapacityBytes: 1e9, // Effectively unlimited capacity to ensure dispatch success.
 					},
-				}
-			},
-		}
+				},
+			}
+		},
 	}
 
 	// Configure the registry connection.
 	mockRegistry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(conn contracts.ActiveFlowConnection) error) error {
 		return fn(&mockActiveFlowConnection{
-			ActiveShardsV: shards,
-			FlowKeyV:      key,
+			RegistryV: dataplane,
+			FlowKeyV:  key,
 		})
 	}
-	mockRegistry.ShardStatsFunc = func() []contracts.ShardStats {
-		stats := make([]contracts.ShardStats, len(shards))
-		for i, shard := range shards {
-			stats[i] = shard.Stats()
-		}
-		return stats
+	mockRegistry.StatsFunc = func() contracts.AggregateStats {
+		return dataplane.Stats()
 	}
+	mockRegistry.FlowRegistryDataPlane = dataplane
 	return mockRegistry
 }
 
-// TestFlowController_Concurrency_Distribution performs an integration test under high contention, using real
-// ShardProcessors.
+// TestFlowController_Concurrency_Distribution performs an integration test under high contention, using a real
+// Processor.
 // It validates the thread-safety of the distribution logic and the overall system throughput.
 func TestFlowController_Concurrency_Distribution(t *testing.T) {
 	const (
-		numShards     = 4
 		numGoroutines = 50
 		numRequests   = 200
 	)
 
 	// Arrange
-	mockRegistry := setupRegistryForConcurrency(t, numShards, defaultFlowKey)
+	mockRegistry := setupRegistryForConcurrency(t, defaultFlowKey)
 
-	// Initialize the integration harness with real ShardProcessors.
+	// Initialize the integration harness with a real Processor.
 	h := newIntegrationHarness(t.Context(), t, &Config{
 		// Use a generous buffer to focus the test on distribution logic rather than backpressure.
 		EnqueueChannelBufferSize: numRequests,
@@ -1375,14 +999,13 @@ func TestFlowController_Concurrency_Backpressure(t *testing.T) {
 	t.Parallel()
 
 	const (
-		numShards     = 2
 		numGoroutines = 20
 		// Fewer requests than the distribution test, as the blocking path is inherently slower.
 		numRequests = 40
 	)
 
 	// Arrange: Set up the registry environment.
-	mockRegistry := setupRegistryForConcurrency(t, numShards, defaultFlowKey)
+	mockRegistry := setupRegistryForConcurrency(t, defaultFlowKey)
 
 	// Use the integration harness with a configuration designed to induce backpressure.
 	h := newIntegrationHarness(t.Context(), t, &Config{

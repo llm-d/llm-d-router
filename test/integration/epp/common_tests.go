@@ -26,8 +26,8 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	integration "github.com/llm-d/llm-d-inference-scheduler/test/integration"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
 // Model name constants shared across test suites.
@@ -357,7 +357,7 @@ func labelsToString(labels []label) string {
 
 func metricReqTotal(model, target string, priority int) string {
 	return fmt.Sprintf(`
-    # HELP inference_objective_request_total [ALPHA] Counter of inference objective requests broken out for each model and target model.
+    # HELP inference_objective_request_total [ALPHA] [Deprecated: Use llm_d_router_epp_request_total] Counter of inference objective requests broken out for each model and target model.
     # TYPE inference_objective_request_total counter
     inference_objective_request_total{%s} 1
     `, labelsToString([]label{{"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
@@ -365,7 +365,7 @@ func metricReqTotal(model, target string, priority int) string {
 
 func metricReadyPods(count int) string {
 	return fmt.Sprintf(`
-    # HELP inference_pool_ready_pods [ALPHA] The number of ready pods in the inference server pool.
+    # HELP inference_pool_ready_pods [ALPHA] [Deprecated: Use llm_d_router_epp_ready_endpoints] The number of ready pods in the inference server pool.
     # TYPE inference_pool_ready_pods gauge
     inference_pool_ready_pods{%s} %d
     `, labelsToString([]label{{"name", testPoolName}}), count)

@@ -9,14 +9,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	approxprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/scorer/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
+	"github.com/llm-d/llm-d-router/test/utils"
 )
 
 func TestPdProfileHandlerFactory(t *testing.T) {
@@ -122,7 +122,7 @@ func TestPdProfileHandlerFactory(t *testing.T) {
 				assert.NoError(t, err)
 				rawParams = json.RawMessage(bytes)
 			}
-			plugin, err := PdProfileHandlerFactory(tt.pluginName, rawParams, handle)
+			plugin, err := PdProfileHandlerFactory(tt.pluginName, plugin.StrictDecoder(rawParams), handle)
 
 			if tt.expectErr {
 				assert.Error(t, err)
@@ -162,7 +162,7 @@ func TestPdProfileHandlerFactoryInvalidJSON(t *testing.T) {
 	for _, tt := range invalidTests {
 		t.Run(tt.name, func(t *testing.T) {
 			rawParams := json.RawMessage(tt.jsonParams)
-			plugin, err := PdProfileHandlerFactory("test", rawParams, handle)
+			plugin, err := PdProfileHandlerFactory("test", plugin.StrictDecoder(rawParams), handle)
 
 			assert.Error(t, err)
 			assert.Nil(t, plugin)
@@ -209,7 +209,7 @@ func newMockSchedulerProfile() scheduling.SchedulerProfile {
 
 type mockSchedulerProfile struct{}
 
-func (p *mockSchedulerProfile) Run(_ context.Context, _ *scheduling.InferenceRequest, _ *scheduling.CycleState, _ []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
+func (p *mockSchedulerProfile) Run(_ context.Context, _ *scheduling.InferenceRequest, _ []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
 	return &scheduling.ProfileRunResult{}, nil
 }
 
@@ -318,11 +318,11 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			handler, err := NewPdProfileHandler(
-				defaultPrefillProfile,
-				defaultDecodeProfile,
-				tt.prefixPluginType,
-				tt.prefixPluginName,
-				0,
+				"test-handler",
+				pdProfileHandlerParameters{
+					PrefillProfile: defaultPrefillProfile,
+					DecodeProfile:  defaultDecodeProfile,
+				},
 				deciderPlugin,
 			)
 			assert.NoError(t, err)
@@ -333,12 +333,12 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 			for profileName, profileRes := range tt.profileResults {
 				if profileName == defaultDecodeProfile && profileRes != nil {
 					for _, pod := range profileRes.TargetEndpoints {
-						pod.Put(approxprefix.PrefixCacheMatchInfoKey,
-							approxprefix.NewPrefixCacheMatchInfo(tt.cachedTokens, inputTokens, 1))
+						pod.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+							attrprefix.NewPrefixCacheMatchInfo(tt.cachedTokens, inputTokens, 1))
 					}
 				}
 			}
-			result := handler.Pick(ctx, nil, request, profiles, tt.profileResults)
+			result := handler.Pick(ctx, request, profiles, tt.profileResults)
 			assert.ElementsMatch(t, tt.expectedProfiles, getProfilesFromResult(result))
 		})
 	}
@@ -418,32 +418,30 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 			assert.NoError(t, err)
 
 			handler, err := NewPdProfileHandler(
-				defaultPrefillProfile,
-				defaultDecodeProfile,
-				prefix.PrefixCacheScorerPluginType,
-				prefix.PrefixCacheScorerPluginType,
-				0,
+				"test-handler",
+				pdProfileHandlerParameters{
+					PrefillProfile: defaultPrefillProfile,
+					DecodeProfile:  defaultDecodeProfile,
+				},
 				deciderPlugin,
 			)
 			assert.NoError(t, err)
 
 			// run sequences of request
 			for _, innerTest := range tt.tests {
-				cs := &scheduling.CycleState{}
-
 				// set prefix to the given cached tokens number for pod "pod1" in decode profile results
 				inputTokens := len(innerTest.request.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
 
 				for profileName, profileRes := range profileResults {
 					if profileName == defaultDecodeProfile && profileRes != nil {
 						for _, endpoint := range profileRes.TargetEndpoints {
-							endpoint.Put(approxprefix.PrefixCacheMatchInfoKey,
-								approxprefix.NewPrefixCacheMatchInfo(innerTest.cachedTokens, inputTokens, 1))
+							endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+								attrprefix.NewPrefixCacheMatchInfo(innerTest.cachedTokens, inputTokens, 1))
 						}
 					}
 				}
 
-				result := handler.Pick(ctx, cs, innerTest.request, profiles, profileResults)
+				result := handler.Pick(ctx, innerTest.request, profiles, profileResults)
 				assert.ElementsMatch(t, innerTest.expectedProfiles, getProfilesFromResult(result))
 			}
 		})
@@ -518,11 +516,12 @@ func TestPdProfileHandler_ProcessResults(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			handler, err := NewPdProfileHandler(
-				defaultPrefillProfile,
-				defaultDecodeProfile,
-				prefix.PrefixCacheScorerPluginType,
-				prefix.PrefixCacheScorerPluginType,
-				tt.primaryPort,
+				"test-handler",
+				pdProfileHandlerParameters{
+					PrefillProfile: defaultPrefillProfile,
+					DecodeProfile:  defaultDecodeProfile,
+					PrimaryPort:    tt.primaryPort,
+				},
 				deciderPlugin,
 			)
 			assert.NoError(t, err)
@@ -531,7 +530,7 @@ func TestPdProfileHandler_ProcessResults(t *testing.T) {
 			req := &scheduling.InferenceRequest{
 				Headers: headers,
 			}
-			result, err := handler.ProcessResults(context.Background(), &scheduling.CycleState{}, req, tt.profileResults)
+			result, err := handler.ProcessResults(context.Background(), req, tt.profileResults)
 
 			if tt.expectError {
 				assert.Error(t, err)

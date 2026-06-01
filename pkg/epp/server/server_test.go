@@ -19,6 +19,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
@@ -28,17 +29,17 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	extv1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/openai"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/handlers"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
-	testutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/testing"
-	utils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 const (
@@ -118,8 +119,13 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	expectedMutatedBodyBytes, _ := json.Marshal(expectedMutatedBodyMap)
 	contentLength := strconv.Itoa(len(expectedMutatedBodyBytes))
 	expectedBody := string(expectedMutatedBodyBytes)
-	expectedRequestHeaders := map[string]string{metadata.DestinationEndpointKey: fmt.Sprintf("%s:%d", podAddress, poolPort),
-		"Content-Length": contentLength, ":method": "POST", "x-test": "body", "x-request-id": "test-request-id"}
+	expectedRequestHeaders := map[string]string{
+		metadata.DestinationEndpointKey: fmt.Sprintf("%s:%d", podAddress, poolPort),
+		"Content-Length":                contentLength,
+		":method":                       "POST",
+		"x-test":                        "body",
+		"x-request-id":                  "test-request-id",
+	}
 	expectedResponseHeaders := map[string]string{"x-went-into-resp-headers": "true", ":method": "POST", "x-test": "body"}
 	expectedSchedulerHeaders := map[string]string{":method": "POST", "x-test": "body", "x-request-id": "test-request-id"}
 
@@ -127,16 +133,16 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	director := &testDirector{}
-	ctx, cancel, ds, _ := utils.PrepareForTestStreamingServer([]*v1alpha2.InferenceObjective{model},
+	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser())
+	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser(), 0)
 
-	testListener, errChan := utils.SetupTestStreamingServer(ctx, t, streamingServer)
-	process, conn := utils.GetStreamingServerClient(ctx, t)
+	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
+	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
 	defer conn.Close()
 
 	// Send request headers - no response expected
-	headers := utils.BuildEnvoyGRPCHeaders(map[string]string{
+	headers := igwtestutils.BuildEnvoyGRPCHeaders(map[string]string{
 		"x-test":                   "body",
 		":method":                  "POST",
 		metadata.FlowFairnessIDKey: "a-very-interesting-fairness-id",
@@ -180,7 +186,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 			responseReqHeaders.GetRequestHeaders().Response.HeaderMutation == nil ||
 			responseReqHeaders.GetRequestHeaders().Response.HeaderMutation.SetHeaders == nil {
 			t.Error("Invalid request headers response")
-		} else if !utils.CheckEnvoyGRPCHeaders(t, responseReqHeaders.GetRequestHeaders().Response, expectedRequestHeaders) {
+		} else if !igwtestutils.CheckEnvoyGRPCHeaders(t, responseReqHeaders.GetRequestHeaders().Response, expectedRequestHeaders) {
 			t.Error("Incorrect request headers")
 		}
 	}
@@ -216,10 +222,10 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	// Send response headers
 	if streamingResponse {
 		// If response is streaming, the header should have text/event-stream.
-		headers = utils.BuildEnvoyGRPCHeaders(map[string]string{"x-test": "body", ":method": "POST", "content-type": "text/event-stream"}, true)
+		headers = igwtestutils.BuildEnvoyGRPCHeaders(map[string]string{"x-test": "body", ":method": "POST", "content-type": "text/event-stream"}, true)
 		expectedResponseHeaders = map[string]string{"x-went-into-resp-headers": "true", ":method": "POST", "x-test": "body", "content-type": "text/event-stream"}
 	} else {
-		headers = utils.BuildEnvoyGRPCHeaders(map[string]string{"x-test": "body", ":method": "POST"}, false)
+		headers = igwtestutils.BuildEnvoyGRPCHeaders(map[string]string{"x-test": "body", ":method": "POST"}, false)
 	}
 
 	request = &pb.ProcessingRequest{
@@ -241,7 +247,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 			response.GetResponseHeaders().Response.HeaderMutation == nil ||
 			response.GetResponseHeaders().Response.HeaderMutation.SetHeaders == nil {
 			t.Error("Invalid response")
-		} else if !utils.CheckEnvoyGRPCHeaders(t, response.GetResponseHeaders().Response, expectedResponseHeaders) {
+		} else if !igwtestutils.CheckEnvoyGRPCHeaders(t, response.GetResponseHeaders().Response, expectedResponseHeaders) {
 			t.Error("Incorrect response headers")
 		}
 	}
@@ -397,7 +403,7 @@ func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[
 }
 
 func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
-	return nil, nil
+	return nil, errors.New("sentinel error for mock parser")
 }
 
 func (m *mockParser) SupportedAppProtocols() []extv1.AppProtocol {
@@ -417,16 +423,16 @@ func TestServer_Skip(t *testing.T) {
 	model := testutil.MakeInferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
-	ctx, cancel, ds, _ := utils.PrepareForTestStreamingServer([]*v1alpha2.InferenceObjective{model},
+	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, mockPar)
+	streamingServer := handlers.NewStreamingServer(ds, director, mockPar, 0)
 
-	testListener, errChan := utils.SetupTestStreamingServer(ctx, t, streamingServer)
-	process, conn := utils.GetStreamingServerClient(ctx, t)
+	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
+	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
 	defer conn.Close()
 
 	// Send request headers
-	headers := utils.BuildEnvoyGRPCHeaders(map[string]string{
+	headers := igwtestutils.BuildEnvoyGRPCHeaders(map[string]string{
 		"x-request-id": "test-request-id",
 	}, false)
 	request := &pb.ProcessingRequest{
@@ -468,6 +474,76 @@ func TestServer_Skip(t *testing.T) {
 	// Verify that the stream is closed by checking if Recv returns EOF or error
 	_, err = process.Recv()
 	require.Error(t, err, "Expected error or EOF when receiving after skip")
+
+	cancel()
+	<-errChan
+	testListener.Close()
+}
+
+func TestServer_GRPCReceiveLimit(t *testing.T) {
+	// We will send a request body that is larger than 4MB (e.g., 5MB).
+	// Since the test gRPC server defaults to 4MB receive limit, EPP should reject it.
+
+	model := testutil.MakeInferenceObjective("v1").
+		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
+
+	director := &testDirector{}
+	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
+		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
+
+	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser(), 0)
+
+	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
+	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
+	defer conn.Close()
+
+	// 1. Send request headers - no response expected yet
+	headers := igwtestutils.BuildEnvoyGRPCHeaders(map[string]string{
+		"x-test":                   "body",
+		":method":                  "POST",
+		metadata.FlowFairnessIDKey: "test-fairness",
+		"x-request-id":             "test-request-id",
+	}, true)
+	request := &pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_RequestHeaders{
+			RequestHeaders: headers,
+		},
+	}
+	err := process.Send(request)
+	require.NoError(t, err)
+
+	// 2. Send a large request body (5MB of dummy text to exceed the 4MB default limit)
+	// 5MB = 5 * 1024 * 1024 bytes
+	largeBodySize := 5 * 1024 * 1024
+	largeBodyBytes := make([]byte, largeBodySize)
+	for i := range largeBodyBytes {
+		largeBodyBytes[i] = 'a'
+	}
+
+	// Wrap in valid JSON
+	largeBodyJSON, err := json.Marshal(map[string]any{
+		"model":  "food-review",
+		"prompt": string(largeBodyBytes),
+	})
+	require.NoError(t, err)
+
+	request = &pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_RequestBody{
+			RequestBody: &pb.HttpBody{
+				Body:        largeBodyJSON,
+				EndOfStream: true,
+			},
+		},
+	}
+
+	// Send should trigger EPP's gRPC server error.
+	// Note: Send is asynchronous and might succeed locally, but EPP's server will abort.
+	_ = process.Send(request)
+
+	// 3. Receive must fail with a ResourceExhausted or stream closed error.
+	_, err = process.Recv()
+	require.Error(t, err, "Expected gRPC stream to abort due to 5MB message exceeding 4MB limit")
+	t.Logf("Successfully reproduced gRPC stream limit error: %v", err)
 
 	cancel()
 	<-errChan

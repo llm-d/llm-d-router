@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -41,12 +42,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
 
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
-	integration "github.com/llm-d/llm-d-inference-scheduler/test/integration"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
 const (
@@ -58,28 +59,33 @@ const (
 	inferenceObjectiveWithPriority4 = "inference-objective-with-priority-4"
 )
 
-// gaieModulePath is the on-disk path to the gateway-api-inference-extension
-// upstream module in the local mod cache. CRDs and shared testdata fixtures
-// live there because api/v1, apix/v1alpha2 are upstream types and the test
-// manifests depend on those CRD shapes.
-var gaieModulePath string
+// repoRootPath is the on-disk path to this repository. Hermetic tests use local
+// llm-d CRDs and fixtures so API group migrations are exercised before CI.
+var repoRootPath string
 
 func TestMain(m *testing.M) {
 	ctrl.SetLogger(logger)
 
-	// Discover the GAIE module path so CRDs and testdata stay version-pinned to
-	// whatever this repo's go.mod resolves to.
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("failed to locate hermetic test source file")
+	}
+	repoRootPath = filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+
 	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}",
 		"sigs.k8s.io/gateway-api-inference-extension").Output()
 	if err != nil {
 		panic(fmt.Sprintf("failed to locate gateway-api-inference-extension module: %v", err))
 	}
-	gaieModulePath = strings.TrimSpace(string(out))
-	crdPath := filepath.Join(gaieModulePath, "config", "crd", "bases")
+	gaieModulePath := strings.TrimSpace(string(out))
+	crdPaths := []string{
+		filepath.Join(gaieModulePath, "config", "crd", "bases"),
+		filepath.Join(repoRootPath, "config", "crd", "bases"),
+	}
 
 	// 1. EnvTest Setup (API Server + Etcd)
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{crdPath},
+		CRDDirectoryPaths:     crdPaths,
 		ErrorIfCRDPathMissing: true,
 	}
 	cfg, err := testEnv.Start()
@@ -158,15 +164,18 @@ plugins:
   - type: queue-scorer
   - type: kv-cache-utilization-scorer
   - type: passthrough-parser
+  - type: mock-metrics-source
 schedulingProfiles:
   - name: default
     plugins:
       - pluginRef: queue-scorer
       - pluginRef: kv-cache-utilization-scorer
-parser:
-  pluginRef: passthrough-parser
-featureGates:
-  - enableLegacyMetrics
+requestHandler:
+  parser:
+    pluginRef: passthrough-parser
+dataLayer:
+  sources:
+  - pluginRef: mock-metrics-source
 `,
 					requests: integration.ReqRaw(
 						map[string]string{
@@ -385,7 +394,7 @@ featureGates:
 					// Labels are empty because we skipped the Request phase.
 					wantMetrics: map[string]string{
 						"inference_objective_input_tokens": cleanMetric(`
-              # HELP inference_objective_input_tokens [ALPHA] Inference objective input token count distribution for requests in each model.
+              # HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_router_epp_input_tokens] Inference objective input token count distribution for requests in each model.
               # TYPE inference_objective_input_tokens histogram
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8"} 1
@@ -500,7 +509,7 @@ featureGates:
 
 // loadBaseResources parses the YAML manifest once at startup.
 func loadBaseResources() []*unstructured.Unstructured {
-	path := filepath.Join(gaieModulePath, "test", "testdata", "inferencepool-with-model-hermetic.yaml")
+	path := filepath.Join(repoRootPath, "test", "testdata", "inferencepool-with-model-hermetic.yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		panic(fmt.Sprintf("failed to read manifest %s: %v", path, err))

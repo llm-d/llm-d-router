@@ -1,32 +1,31 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  labels:
-    app: istiod
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.0
-    helm.sh/chart: istiod-1.27.1
-    install.operator.istio.io/owning-resource: unknown
-    istio.io/rev: llm-d-gateway
-    operator.istio.io/component: Pilot
-    release: istio
   name: istiod-llm-d-gateway
   namespace: llm-d-istio-system
+  labels:
+    app: istiod
+    release: istiod
+    istio.io/rev: llm-d-gateway
+    install.operator.istio.io/owning-resource: unknown
+    operator.istio.io/component: "Pilot"
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
 spec:
   maxReplicas: 5
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 80
-        type: Utilization
-    type: Resource
   minReplicas: 1
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
     name: istiod-llm-d-gateway
-
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80

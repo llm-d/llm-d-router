@@ -28,15 +28,15 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // RoundRobinFairnessPolicyType is the registration type for the round-robin fairness policy.
 const RoundRobinFairnessPolicyType = "round-robin-fairness-policy"
 
 // RoundRobinFairnessPolicyFactory is the factory function for the round-robin fairness policy.
-func RoundRobinFairnessPolicyFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func RoundRobinFairnessPolicyFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return newRoundRobin(name), nil
 }
 
@@ -80,7 +80,8 @@ func (p *roundRobin) Pick(
 	flowGroup flowcontrol.PriorityBandAccessor,
 ) (flowcontrol.FlowQueueAccessor, error) {
 	if flowGroup == nil {
-		return nil, nil
+		// Nothing to pick
+		return nil, nil //nolint:nilnil
 	}
 
 	v := flowGroup.PolicyState()
@@ -95,7 +96,7 @@ func (p *roundRobin) Pick(
 	keys := flowGroup.FlowKeys()
 	if len(keys) == 0 {
 		c.lastSelected = nil // Reset cursor if no flows are present.
-		return nil, nil
+		return nil, nil      //nolint:nilnil
 	}
 
 	// Sort for deterministic ordering.
@@ -123,5 +124,5 @@ func (p *roundRobin) Pick(
 
 	// No non-empty queue was found.
 	c.lastSelected = nil
-	return nil, nil
+	return nil, nil //nolint:nilnil
 }

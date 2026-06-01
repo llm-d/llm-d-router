@@ -26,13 +26,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	schedulingtypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrconcurrency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 )
 
 // localRegistry is a thread-safe storage for simulated endpoint load.
@@ -82,7 +82,7 @@ func TestConcurrencyDetectorFactory(t *testing.T) {
 	}{
 		{
 			name:       "valid configuration",
-			configJSON: []byte(`{"mode": "requests", "maxConcurrency": 50, "headroom": 0.2}`),
+			configJSON: []byte(`{"maxConcurrency": 50, "headroom": 0.2}`),
 			wantError:  false,
 		},
 		{
@@ -127,7 +127,7 @@ func TestConcurrencyDetectorFactory(t *testing.T) {
 			t.Parallel()
 
 			plugin, err := ConcurrencyDetectorFactory("test-concurrency-detector",
-				tc.configJSON, fwkplugin.NewEppHandle(t.Context(), func() []types.NamespacedName { return nil }))
+				fwkplugin.StrictDecoder(tc.configJSON), fwkplugin.NewEppHandle(t.Context(), func() []types.NamespacedName { return nil }))
 			if tc.wantError {
 				require.Error(t, err, "Expected initialization to fail on invalid configuration")
 				require.Nil(t, plugin, "Plugin must be nil when initialization fails")
@@ -182,14 +182,14 @@ func TestDetector_Configuration(t *testing.T) {
 		endpointName := "test-endpoint"
 
 		driveLoad(ctx, reg, detector, endpointName, int(tc.effectiveHeadroomBurst-1))
-		kept := detector.Filter(ctx, nil, nil, []schedulingtypes.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
+		kept := detector.Filter(ctx, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
 		require.Len(t, kept, 1, "Endpoint should be retained when operating below burst capacity")
 
 		driveLoad(ctx, reg, detector, endpointName, 1)
 
 		t.Run("fallback to clean endpoint", func(t *testing.T) {
 			cleanEndpoint := "clean-endpoint"
-			kept = detector.Filter(ctx, nil, nil, []schedulingtypes.Endpoint{
+			kept = detector.Filter(ctx, nil, []fwksched.Endpoint{
 				newStubSchedulingEndpoint(reg, endpointName),
 				newStubSchedulingEndpoint(reg, cleanEndpoint),
 			})
@@ -202,7 +202,7 @@ func TestDetector_Configuration(t *testing.T) {
 // TestDetector_TypedName verifies that the runtime type identification of the plugin is populated
 func TestDetector_TypedName(t *testing.T) {
 	t.Parallel()
-	plugin, err := ConcurrencyDetectorFactory("test-plugin", []byte(`{}`), fwkplugin.NewEppHandle(
+	plugin, err := ConcurrencyDetectorFactory("test-plugin", fwkplugin.StrictDecoder([]byte(`{}`)), fwkplugin.NewEppHandle(
 		t.Context(), func() []types.NamespacedName { return nil }))
 	require.NoError(t, err, "Plugin initialization should succeed")
 	require.Equal(t, "test-plugin", plugin.TypedName().Name)
@@ -336,7 +336,7 @@ func TestDetector_TokenSaturation(t *testing.T) {
 
 	tests := []struct {
 		name               string
-		requests           []*schedulingtypes.InferenceRequest
+		requests           []*fwksched.InferenceRequest
 		candidateEndpoints []string
 		wantSaturation     float64
 	}{
@@ -348,7 +348,7 @@ func TestDetector_TokenSaturation(t *testing.T) {
 		},
 		{
 			name: "single_endpoint_partial_tokens",
-			requests: []*schedulingtypes.InferenceRequest{
+			requests: []*fwksched.InferenceRequest{
 				makeTokenRequest("r1", "1234"), // 3 tokens with default estimator
 			},
 			candidateEndpoints: []string{"endpoint-a"},
@@ -356,10 +356,10 @@ func TestDetector_TokenSaturation(t *testing.T) {
 		},
 		{
 			name: "single_endpoint_half_full",
-			requests: func() []*schedulingtypes.InferenceRequest {
+			requests: func() []*fwksched.InferenceRequest {
 				// "1234567890123456" (16 chars) = 10 tokens. 5 requests = 50 tokens.
 				prompt := "1234567890123456"
-				reqs := make([]*schedulingtypes.InferenceRequest, 0, 5)
+				reqs := make([]*fwksched.InferenceRequest, 0, 5)
 				for i := range 5 {
 					reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), prompt))
 				}
@@ -370,10 +370,10 @@ func TestDetector_TokenSaturation(t *testing.T) {
 		},
 		{
 			name: "single_endpoint_full",
-			requests: func() []*schedulingtypes.InferenceRequest {
+			requests: func() []*fwksched.InferenceRequest {
 				// 10 tokens per request * 10 requests = 100 tokens.
 				prompt := "1234567890123456"
-				reqs := make([]*schedulingtypes.InferenceRequest, 0, 10)
+				reqs := make([]*fwksched.InferenceRequest, 0, 10)
 				for i := range 10 {
 					reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), prompt))
 				}
@@ -384,10 +384,10 @@ func TestDetector_TokenSaturation(t *testing.T) {
 		},
 		{
 			name: "multiple_endpoints_mixed_token_load",
-			requests: func() []*schedulingtypes.InferenceRequest {
+			requests: func() []*fwksched.InferenceRequest {
 				// endpoint-a: 50 tokens, endpoint-b: 0 (driveTokenLoad targets endpoint-a only)
 				prompt := "1234567890123456"
-				reqs := make([]*schedulingtypes.InferenceRequest, 0, 5)
+				reqs := make([]*fwksched.InferenceRequest, 0, 5)
 				for i := range 5 {
 					reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), prompt))
 				}
@@ -432,25 +432,25 @@ func TestDetector_TokenFilter(t *testing.T) {
 	reg := newLocalRegistry()
 	detector := newDetector("test-detector", config, logr.Discard())
 	endpointName := "token-filter-endpoint"
-	endpoints := []schedulingtypes.Endpoint{newStubSchedulingEndpoint(reg, endpointName)}
+	endpoints := []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)}
 
 	// Drive 110 tokens (just below 120 burst limit) -> endpoint should pass filter
 	// "1234567890123456" = 10 tokens. 11 requests = 110 tokens.
 	prompt := "1234567890123456"
-	reqs := make([]*schedulingtypes.InferenceRequest, 0, 11)
+	reqs := make([]*fwksched.InferenceRequest, 0, 11)
 	for i := range 11 {
 		reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), prompt))
 	}
 	driveTokenLoad(ctx, reg, detector, endpointName, reqs)
 
-	kept := detector.Filter(ctx, nil, nil, endpoints)
+	kept := detector.Filter(ctx, nil, endpoints)
 	require.Len(t, kept, 1, "endpoint should pass filter below burst limit")
 
 	// Add one more request to reach 120 tokens -> filtered out
-	driveTokenLoad(ctx, reg, detector, endpointName, []*schedulingtypes.InferenceRequest{
+	driveTokenLoad(ctx, reg, detector, endpointName, []*fwksched.InferenceRequest{
 		makeTokenRequest("r12", prompt),
 	})
-	kept = detector.Filter(ctx, nil, nil, endpoints)
+	kept = detector.Filter(ctx, nil, endpoints)
 	require.Len(t, kept, 0, "endpoint should be filtered at burst limit")
 }
 
@@ -540,7 +540,7 @@ func TestDetector_ConcurrencyStress(t *testing.T) {
 
 // --- Test Helpers & Mocks ---
 
-func simulatePreRequest(_ context.Context, reg *localRegistry, req *schedulingtypes.InferenceRequest, result *schedulingtypes.SchedulingResult) {
+func simulatePreRequest(_ context.Context, reg *localRegistry, req *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
 	endpointName := result.ProfileResults[result.PrimaryProfileName].TargetEndpoints[0].GetMetadata().NamespacedName.Name
 	id := fullEndpointName(endpointName)
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
@@ -551,7 +551,7 @@ func simulatePreRequest(_ context.Context, reg *localRegistry, req *schedulingty
 	})
 }
 
-func simulateResponseBody(_ context.Context, reg *localRegistry, req *schedulingtypes.InferenceRequest, resp *requestcontrol.Response, metadata *datalayer.EndpointMetadata) {
+func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.InferenceRequest, resp *requestcontrol.Response, metadata *datalayer.EndpointMetadata) {
 	if metadata == nil || resp == nil || !resp.EndOfStream {
 		return
 	}
@@ -575,7 +575,7 @@ func driveLoad(_ context.Context, reg *localRegistry, _ *detector, endpointName 
 	})
 }
 
-func driveTokenLoad(_ context.Context, reg *localRegistry, _ *detector, endpointName string, requests []*schedulingtypes.InferenceRequest) {
+func driveTokenLoad(_ context.Context, reg *localRegistry, _ *detector, endpointName string, requests []*fwksched.InferenceRequest) {
 	id := fullEndpointName(endpointName)
 	var total int64
 	estimator := inflightload.NewSimpleTokenEstimator()
@@ -592,12 +592,12 @@ func fullEndpointName(name string) string {
 	return types.NamespacedName{Name: name, Namespace: "default"}.String()
 }
 
-func makeSchedulingResult(reg *localRegistry, endpointName string) *schedulingtypes.SchedulingResult {
-	return &schedulingtypes.SchedulingResult{
+func makeSchedulingResult(reg *localRegistry, endpointName string) *fwksched.SchedulingResult {
+	return &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
-		ProfileResults: map[string]*schedulingtypes.ProfileRunResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"default": {
-				TargetEndpoints: []schedulingtypes.Endpoint{newStubSchedulingEndpoint(reg, endpointName)},
+				TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)},
 			},
 		},
 	}
@@ -619,13 +619,13 @@ func (e *liveEndpoint) String() string                               { return e.
 
 // liveEndpoint also implements AttributeMap.
 func (e *liveEndpoint) Get(key string) (datalayer.Cloneable, bool) {
-	if key == attrconcurrency.InFlightLoadKey {
+	if key == attrconcurrency.InFlightLoadDataKey.String() {
 		return e.reg.get(e.id), true
 	}
 	return nil, false
 }
 func (e *liveEndpoint) Put(string, datalayer.Cloneable) {}
-func (e *liveEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadKey} }
+func (e *liveEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadDataKey.String()} }
 func (e *liveEndpoint) Clone() datalayer.AttributeMap   { return e }
 
 func newFakeEndpoint(reg *localRegistry, name string) datalayer.Endpoint {
@@ -639,7 +639,7 @@ func newFakeEndpoint(reg *localRegistry, name string) datalayer.Endpoint {
 
 // liveSchedulingEndpoint is a "live" mock for scheduling.Endpoint.
 type liveSchedulingEndpoint struct {
-	schedulingtypes.Endpoint
+	fwksched.Endpoint
 	metadata *datalayer.EndpointMetadata
 	reg      *localRegistry
 	id       string
@@ -655,18 +655,20 @@ func newStubSchedulingEndpoint(reg *localRegistry, name string) *liveSchedulingE
 
 func (f *liveSchedulingEndpoint) GetMetadata() *datalayer.EndpointMetadata { return f.metadata }
 func (f *liveSchedulingEndpoint) Get(key string) (datalayer.Cloneable, bool) {
-	if key == attrconcurrency.InFlightLoadKey {
+	if key == attrconcurrency.InFlightLoadDataKey.String() {
 		return f.reg.get(f.id), true
 	}
 	return nil, false
 }
 func (f *liveSchedulingEndpoint) Put(string, datalayer.Cloneable) {}
-func (f *liveSchedulingEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadKey} }
-func (f *liveSchedulingEndpoint) String() string                  { return f.id }
-func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap   { return f }
+func (f *liveSchedulingEndpoint) Keys() []string {
+	return []string{attrconcurrency.InFlightLoadDataKey.String()}
+}
+func (f *liveSchedulingEndpoint) String() string                { return f.id }
+func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
 
-func makeTokenRequest(requestID, prompt string) *schedulingtypes.InferenceRequest {
-	return &schedulingtypes.InferenceRequest{
+func makeTokenRequest(requestID, prompt string) *fwksched.InferenceRequest {
+	return &fwksched.InferenceRequest{
 		RequestID: requestID,
 		Body: &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},

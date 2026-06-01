@@ -18,6 +18,8 @@ package logging
 
 import (
 	"context"
+	"io"
+	"os"
 
 	"github.com/go-logr/logr"
 	uberzap "go.uber.org/zap"
@@ -90,4 +92,15 @@ func NewTestLogger() logr.Logger {
 // NewTestLoggerIntoContext creates a new Zap logger using the dev mode and inserts it into the given context.
 func NewTestLoggerIntoContext(ctx context.Context) context.Context {
 	return log.IntoContext(ctx, NewTestLogger())
+}
+
+// NewTestLoggerWithWriter creates a new Zap logger using the dev mode.
+func NewTestLoggerWithWriter(w io.Writer) logr.Logger {
+	logWriter := io.MultiWriter(w, os.Stderr)
+	return zap.New(
+		zap.WriteTo(logWriter),
+		zap.UseDevMode(true),
+		zap.Level(uberzap.NewAtomicLevelAt(zapcore.Level(-1*TRACE))),
+		zap.RawZapOpts(uberzap.AddCaller()),
+	)
 }

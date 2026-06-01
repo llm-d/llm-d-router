@@ -27,10 +27,10 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/picker"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
 )
 
 const (
@@ -39,13 +39,13 @@ const (
 )
 
 // compile-time type validation
-var _ framework.Picker = &RandomPicker{}
+var _ fwksched.Picker = &RandomPicker{}
 
 // RandomPickerFactory defines the factory function for RandomPicker.
-func RandomPickerFactory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func RandomPickerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	parameters := picker.PickerParameters{MaxNumOfEndpoints: picker.DefaultMaxNumOfEndpoints}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' picker - %w", RandomPickerType, err)
 		}
 	}
@@ -83,7 +83,7 @@ func (p *RandomPicker) TypedName() fwkplugin.TypedName {
 }
 
 // Pick selects random endpoint(s) from the list of candidates.
-func (p *RandomPicker) Pick(ctx context.Context, _ *framework.CycleState, scoredEndpoints []*framework.ScoredEndpoint) *framework.ProfileRunResult {
+func (p *RandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
 	log.FromContext(ctx).V(logutil.DEBUG).Info("Selecting endpoints from candidates randomly", "max-num-of-endpoints", p.maxNumOfEndpoints,
 		"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
 
@@ -95,10 +95,10 @@ func (p *RandomPicker) Pick(ctx context.Context, _ *framework.CycleState, scored
 		scoredEndpoints = scoredEndpoints[:p.maxNumOfEndpoints]
 	}
 
-	targetEndpoints := make([]framework.Endpoint, len(scoredEndpoints))
+	targetEndpoints := make([]fwksched.Endpoint, len(scoredEndpoints))
 	for i, scoredEndpoint := range scoredEndpoints {
 		targetEndpoints[i] = scoredEndpoint
 	}
 
-	return &framework.ProfileRunResult{TargetEndpoints: targetEndpoints}
+	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}
 }

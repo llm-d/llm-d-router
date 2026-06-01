@@ -24,7 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const (
@@ -71,12 +71,12 @@ type (
 		// Can be any engine name from EngineConfigs. Defaults to "vllm".
 		DefaultEngine string `json:"defaultEngine"`
 		// EngineConfigs defines metric specifications for specific engine types.
-		// Built-in configs (vLLM, SGLang, trtllm-serve, triton-tensorrt-llm) are automatically appended if not explicitly defined.
+		// Built-in configs (vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, triton) are automatically appended if not explicitly defined.
 		EngineConfigs []engineConfigParams `json:"engineConfigs"`
 	}
 )
 
-// Default engine configurations for vLLM, SGLang, trtllm-serve, and triton-tensorrt-llm.
+// Default engine configurations for vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
 	{
 		Name:                "vllm",
@@ -116,6 +116,24 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheBlockSizeSpec:  "nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=tokens_per}",
 		CacheNumBlocksSpec:  "nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}",
 	},
+	// "triton" defines standard Triton Inference Server metrics configuration for non-LLM workloads
+	// (e.g. classic ML/DL models serving KServe v2 protocols).
+	//
+	// In contrast:
+	// - "triton-tensorrt-llm" is for Triton deployments specifically using the TensorRT-LLM backend for LLMs,
+	//   which exposes LLM-specific metrics like KV Cache and token metrics.
+	// - "trtllm-serve" is for TensorRT-LLM's standalone C++ server orchestrator, which exposes similar
+	//   LLM-specific metrics under different names.
+	{
+		Name:                "triton",
+		QueuedRequestsSpec:  "nv_inference_pending_request_count",
+		RunningRequestsSpec: "nv_inference_exec_count",
+		KVUsageSpec:         "",
+		LoRASpec:            "",
+		CacheInfoSpec:       "",
+		CacheBlockSizeSpec:  "",
+		CacheNumBlocksSpec:  "",
+	},
 }
 
 // defaultEngineName is the default engine used when defaultEngine is not specified.
@@ -123,11 +141,11 @@ const defaultEngineName = "vllm"
 
 // CoreMetricsExtractorFactory is a factory function used to instantiate data layer's metrics
 // Extractor plugins specified in a configuration.
-func CoreMetricsExtractorFactory(name string, parameters json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func CoreMetricsExtractorFactory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	params := defaultExtractorParams()
 
 	if parameters != nil { // overlay the defaults with configured values
-		if err := json.Unmarshal(parameters, params); err != nil {
+		if err := parameters.Decode(params); err != nil {
 			return nil, err
 		}
 	}

@@ -22,6 +22,7 @@ package tokenizer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -30,16 +31,16 @@ import (
 	tokenizerTypes "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 type tokenizer interface {
-	Render(prompt string) ([]uint32, []tokenizerTypes.Offset, error)
-	RenderChat(req *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error)
+	Render(ctx context.Context, prompt string) ([]uint32, []tokenizerTypes.Offset, error)
+	RenderChat(ctx context.Context, req *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
 const (
@@ -52,25 +53,34 @@ const (
 	// Deprecated: use PluginType ("token-producer") instead.
 	LegacyPluginType = "tokenizer"
 
-	// TokenizedPromptKey is the data key advertised by this plugin to indicate
-	// that it produces tokenized prompt data on InferenceRequestBody.TokenizedPrompt.
-	TokenizedPromptKey = "TokenizedPrompt"
+	tokenizedPromptKeyID = "TokenizedPrompt"
 )
 
+var TokenizedPromptDataKey = plugin.NewDataKey(tokenizedPromptKeyID, PluginType)
+
 // tokenizerPluginConfig holds the configuration for the tokenizer plugin.
+//
+// The default backend is `vllm` (HTTP /render). `udsTokenizerConfig` is the
+// deprecated gRPC-over-UDS backend, selected only when explicitly enabled. An
+// empty configuration falls back to `vllm` with its default endpoint.
 type tokenizerPluginConfig struct {
-	// TokenizerConfig is the UDS tokenizer config. Optional; defaults apply.
+	// TokenizerConfig configures the deprecated gRPC-over-UDS backend.
+	//
+	// Deprecated: the UDS tokenizer backend is deprecated and will be removed
+	// in a future release. Migrate to the `vllm` HTTP /render backend.
 	TokenizerConfig tokenization.UdsTokenizerConfig `json:"udsTokenizerConfig,omitempty"`
+	// VLLM configures the vLLM /render backend.
+	VLLM *vllmConfig `json:"vllm,omitempty"`
 	// ModelName is the name of the model whose tokenizer should be loaded.
 	ModelName string `json:"modelName"`
 }
 
 // PluginFactory is the factory function for the tokenizer plugin.
-func PluginFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	config := tokenizerPluginConfig{}
 
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &config); err != nil {
+		if err := rawParameters.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' plugin - %w", PluginType, err)
 		}
 	}
@@ -78,13 +88,16 @@ func PluginFactory(name string, rawParameters json.RawMessage, handle plugin.Han
 	if config.ModelName == "" {
 		return nil, fmt.Errorf("invalid configuration for '%s' plugin: 'modelName' must be specified", PluginType)
 	}
+	if config.VLLM != nil && config.TokenizerConfig.IsEnabled() {
+		return nil, fmt.Errorf("invalid configuration for '%s' plugin: only one of 'udsTokenizerConfig' or 'vllm' may be set", PluginType)
+	}
 
-	p, err := NewPlugin(handle.Context(), &config)
+	p, err := NewPlugin(handle.Context(), name, &config)
 	if err != nil {
 		return nil, err
 	}
 
-	return p.WithName(name), nil
+	return p, nil
 }
 
 // LegacyPluginFactory wraps PluginFactory for the deprecated `tokenizer` type
@@ -92,7 +105,7 @@ func PluginFactory(name string, rawParameters json.RawMessage, handle plugin.Han
 // to PluginFactory. Will be removed when LegacyPluginType is removed.
 //
 // Deprecated: register PluginType ("token-producer") instead.
-func LegacyPluginFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func LegacyPluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	log.FromContext(handle.Context()).Info(
 		"DEPRECATION: plugin type '"+LegacyPluginType+"' is deprecated; use '"+PluginType+"' instead",
 		"pluginName", name,
@@ -100,16 +113,38 @@ func LegacyPluginFactory(name string, rawParameters json.RawMessage, handle plug
 	return PluginFactory(name, rawParameters, handle)
 }
 
-// NewPlugin creates a new tokenizer plugin instance and initializes the UDS tokenizer.
-func NewPlugin(ctx context.Context, config *tokenizerPluginConfig) (*Plugin, error) {
-	tokenizer, err := tokenization.NewUdsTokenizer(ctx, &config.TokenizerConfig, config.ModelName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize UDS tokenizer for '%s' plugin - %w", PluginType, err)
+// NewPlugin creates a new tokenizer plugin instance and constructs the
+// configured backend. vllm is the default; udsTokenizerConfig is selected
+// only when explicitly enabled (its socketFile is set) and is deprecated.
+func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) (*Plugin, error) {
+	var tk tokenizer
+	switch {
+	case config.TokenizerConfig.IsEnabled():
+		log.FromContext(ctx).Info(
+			"DEPRECATION: the 'udsTokenizerConfig' parameter is deprecated and will be removed in a future release; set the 'vllm' parameter instead (see plugin README)",
+			"pluginType", PluginType,
+		)
+		uds, err := newUDSTokenizer(ctx, &config.TokenizerConfig, config.ModelName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize UDS tokenizer for '%s' plugin - %w", PluginType, err)
+		}
+		tk = uds
+	default:
+		cfg := config.VLLM
+		if cfg == nil {
+			cfg = &vllmConfig{}
+		}
+		renderer, err := newVLLMHTTPRenderer(cfg, config.ModelName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize vLLM HTTP renderer for '%s' plugin - %w", PluginType, err)
+		}
+		tk = renderer
 	}
 
 	return &Plugin{
-		typedName: plugin.TypedName{Type: PluginType},
-		tokenizer: tokenizer,
+		typedName: plugin.TypedName{Type: PluginType, Name: name},
+		tokenizer: tk,
+		dk:        TokenizedPromptDataKey.WithNonEmptyProducerName(name),
 	}, nil
 }
 
@@ -118,6 +153,7 @@ func NewPlugin(ctx context.Context, config *tokenizerPluginConfig) (*Plugin, err
 type Plugin struct {
 	typedName plugin.TypedName
 	tokenizer tokenizer
+	dk        plugin.DataKey
 }
 
 // compile-time assertion.
@@ -128,57 +164,47 @@ func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-// WithName sets the name of the plugin.
-func (p *Plugin) WithName(name string) *Plugin {
-	p.typedName.Name = name
-	return p
-}
-
 // Produces returns the data keys this plugin produces.
-func (p *Plugin) Produces() map[string]any {
-	return map[string]any{TokenizedPromptKey: fwkrh.TokenizedPrompt{}}
+func (p *Plugin) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedPrompt{}}
 }
 
-// Consumes returns the data keys this plugin requires.
-func (p *Plugin) Consumes() map[string]any {
-	return nil
-}
-
-// PrepareRequestData tokenizes the request prompt and stores the result on
+// Produce tokenizes the request prompt and stores the result on
 // InferenceRequestBody.TokenizedPrompt (TokenIDs + MultiModalFeatures in flat shape).
-// Fail-open: errors are logged; TokenizedPrompt is left nil. If the request
-// already carries a TokenizedPrompt, tokenization is skipped.
-func (p *Plugin) PrepareRequestData(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
-	if request == nil || request.Body == nil || request.Body.TokenizedPrompt != nil {
-		return nil
+// Returns an error when tokenization fails; the caller (Director) decides the
+// policy (currently: log and continue). If the request already carries a
+// TokenizedPrompt, tokenization is skipped.
+func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
+	tp, err := p.tokenize(ctx, request)
+	if err != nil {
+		return err
 	}
 
-	tokenIDs, mmFeatures := p.tokenize(ctx, request)
-	if tokenIDs == nil {
-		return nil
-	}
-
-	request.Body.TokenizedPrompt = &fwkrh.TokenizedPrompt{
-		TokenIDs:           tokenIDs,
-		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
-	}
+	request.Body.TokenizedPrompt = tp
 	return nil
 }
 
 // tokenize extracts token IDs and optional multimodal features from the request.
-// Returns (nil, nil) on error or unsupported type.
-func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequest) ([]uint32, *tokenization.MultiModalFeatures) {
+// Returns the existing TokenizedPrompt unchanged if one is already set.
+// Returns a non-nil error if the request body is nil, has an unsupported type,
+// or if the tokenizer fails.
+func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequest) (*fwkrh.TokenizedPrompt, error) {
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	traceLogger := logger.V(logging.TRACE)
 
 	if request.Body == nil {
-		traceLogger.Info("Request body is nil, skipping tokenization")
-		return nil, nil
+		return nil, errors.New("request body is nil")
+	}
+
+	if request.Body.TokenizedPrompt != nil {
+		traceLogger.Info("TokenizedPrompt already present, skipping")
+		return request.Body.TokenizedPrompt, nil
 	}
 
 	traceLogger.Info("Request body present",
 		"hasCompletions", request.Body.Completions != nil,
-		"hasChatCompletions", request.Body.ChatCompletions != nil)
+		"hasChatCompletions", request.Body.ChatCompletions != nil,
+		"hasGenerate", request.Body.Generate != nil)
 
 	var tokenIDs []uint32
 	var mmFeatures *tokenization.MultiModalFeatures
@@ -187,23 +213,30 @@ func (p *Plugin) tokenize(ctx context.Context, request *scheduling.InferenceRequ
 	switch {
 	case request.Body.Completions != nil:
 		traceLogger.Info("Calling Render for completions", "prompt", request.Body.Completions.Prompt)
-		tokenIDs, _, err = p.tokenizer.Render(request.Body.Completions.Prompt.Raw)
+		tokenIDs, _, err = p.tokenizer.Render(ctx, request.Body.Completions.Prompt.Raw)
 	case request.Body.ChatCompletions != nil:
 		renderReq := ChatCompletionsToRenderChatRequest(request.Body.ChatCompletions)
 		traceLogger.Info("Calling RenderChat for chat completions", "messageCount", len(request.Body.ChatCompletions.Messages))
-		tokenIDs, mmFeatures, err = p.tokenizer.RenderChat(renderReq)
+		tokenIDs, mmFeatures, err = p.tokenizer.RenderChat(ctx, renderReq)
+	case request.Body.Generate != nil:
+		traceLogger.Info("Using pre-tokenized token IDs from generate request", "tokenCount", len(request.Body.Generate.TokenIDs))
+		return &fwkrh.TokenizedPrompt{
+			TokenIDs:           request.Body.Generate.TokenIDs,
+			MultiModalFeatures: convertMMFeaturesToUpstream(request.Body.Generate.Features),
+		}, nil
 	default:
-		traceLogger.Info("Unsupported request type, skipping tokenization")
-		return nil, nil
+		return nil, errors.New("unsupported request body type, skipping tokenization")
 	}
 
 	if err != nil {
-		logger.Error(err, "Tokenization failed, skipping")
-		return nil, nil
+		return nil, fmt.Errorf("tokenization failed: %w", err)
 	}
 
 	traceLogger.Info("Tokenization succeeded", "tokenCount", len(tokenIDs))
-	return tokenIDs, mmFeatures
+	return &fwkrh.TokenizedPrompt{
+		TokenIDs:           tokenIDs,
+		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
+	}, nil
 }
 
 // ChatCompletionsToRenderChatRequest converts a ChatCompletionsRequest to a

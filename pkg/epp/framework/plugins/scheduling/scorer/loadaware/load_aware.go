@@ -7,9 +7,9 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -28,10 +28,10 @@ type loadAwareParameters struct {
 var _ scheduling.Scorer = &LoadAware{}
 
 // Factory defines the factory function for the LoadAware
-func Factory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	parameters := loadAwareParameters{Threshold: QueueThresholdDefault}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", LoadAwareType, err)
 		}
 	}
@@ -81,7 +81,7 @@ func (s *LoadAware) Category() scheduling.ScorerCategory {
 // Pod with requests in the queue will get score between 0.5 and 0.
 // Score 0 will get pod with number of requests in the queue equal to the threshold used in load-based filter
 // In the future, pods with additional capacity will get score higher than 0.5
-func (s *LoadAware) Score(_ context.Context, _ *scheduling.CycleState, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *LoadAware) Score(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
 
 	for _, endpoint := range endpoints {

@@ -22,13 +22,13 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	schedulingtypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/test"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
@@ -51,18 +51,18 @@ type DestinationEndpointServedVerifier struct {
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
-func (f *DestinationEndpointServedVerifier) TypedName() fwkplugin.TypedName {
-	return f.typedName
+func (desv *DestinationEndpointServedVerifier) TypedName() fwkplugin.TypedName {
+	return desv.typedName
 }
 
 // WithName sets the name of the filter.
-func (f *DestinationEndpointServedVerifier) WithName(name string) *DestinationEndpointServedVerifier {
-	f.typedName.Name = name
-	return f
+func (desv *DestinationEndpointServedVerifier) WithName(name string) *DestinationEndpointServedVerifier {
+	desv.typedName.Name = name
+	return desv
 }
 
 // DestinationEndpointServedVerifierFactory defines the factory function for DestinationEndpointServedVerifier.
-func DestinationEndpointServedVerifierFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func DestinationEndpointServedVerifierFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewDestinationEndpointServedVerifier().WithName(name), nil
 }
 
@@ -71,8 +71,8 @@ func NewDestinationEndpointServedVerifier() *DestinationEndpointServedVerifier {
 }
 
 // ResponseHeader is the handler for the ResponseHeader extension point.
-func (p *DestinationEndpointServedVerifier) ResponseHeader(ctx context.Context, request *schedulingtypes.InferenceRequest, response *requestcontrol.Response, _ *fwkdl.EndpointMetadata) {
-	logger := log.FromContext(ctx).WithName(p.TypedName().String())
+func (desv *DestinationEndpointServedVerifier) ResponseHeader(ctx context.Context, request *fwksched.InferenceRequest, response *requestcontrol.Response, _ *fwkdl.EndpointMetadata) {
+	logger := log.FromContext(ctx).WithName(desv.TypedName().String())
 	logger.V(logging.DEBUG).Info("Verifying destination endpoint served")
 
 	reqMetadata := response.ReqMetadata

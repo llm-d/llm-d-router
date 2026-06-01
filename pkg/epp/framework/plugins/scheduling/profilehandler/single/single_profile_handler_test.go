@@ -22,14 +22,14 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 type fakeSchedulerProfile struct{}
 
-func (f *fakeSchedulerProfile) Run(_ context.Context, _ *framework.InferenceRequest, _ *framework.CycleState, _ []framework.Endpoint) (*framework.ProfileRunResult, error) {
-	return &framework.ProfileRunResult{}, nil
+func (f *fakeSchedulerProfile) Run(_ context.Context, _ *fwksched.InferenceRequest, _ []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+	return &fwksched.ProfileRunResult{}, nil
 }
 
 func TestNewSingleProfileHandler(t *testing.T) {
@@ -80,28 +80,28 @@ func TestPick(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		profiles       map[string]framework.SchedulerProfile
-		profileResults map[string]*framework.ProfileRunResult
+		profiles       map[string]fwksched.SchedulerProfile
+		profileResults map[string]*fwksched.ProfileRunResult
 		wantCount      int
 	}{
 		{
 			name:           "no profiles executed yet, returns all",
-			profiles:       map[string]framework.SchedulerProfile{"default": fakeProfile},
-			profileResults: map[string]*framework.ProfileRunResult{},
+			profiles:       map[string]fwksched.SchedulerProfile{"default": fakeProfile},
+			profileResults: map[string]*fwksched.ProfileRunResult{},
 			wantCount:      1,
 		},
 		{
 			name:     "all profiles already executed, returns empty",
-			profiles: map[string]framework.SchedulerProfile{"default": fakeProfile},
-			profileResults: map[string]*framework.ProfileRunResult{
+			profiles: map[string]fwksched.SchedulerProfile{"default": fakeProfile},
+			profileResults: map[string]*fwksched.ProfileRunResult{
 				"default": {TargetEndpoints: nil},
 			},
 			wantCount: 0,
 		},
 		{
 			name:           "no profiles configured, returns empty",
-			profiles:       map[string]framework.SchedulerProfile{},
-			profileResults: map[string]*framework.ProfileRunResult{},
+			profiles:       map[string]fwksched.SchedulerProfile{},
+			profileResults: map[string]*fwksched.ProfileRunResult{},
 			wantCount:      0,
 		},
 	}
@@ -109,7 +109,7 @@ func TestPick(t *testing.T) {
 	handler := NewSingleProfileHandler()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := handler.Pick(context.Background(), framework.NewCycleState(), nil, tt.profiles, tt.profileResults)
+			got := handler.Pick(context.Background(), nil, tt.profiles, tt.profileResults)
 			if len(got) != tt.wantCount {
 				t.Errorf("Pick() returned %d profiles, want %d", len(got), tt.wantCount)
 			}
@@ -118,23 +118,23 @@ func TestPick(t *testing.T) {
 }
 
 func TestProcessResults(t *testing.T) {
-	successResult := &framework.ProfileRunResult{
+	successResult := &fwksched.ProfileRunResult{
 		TargetEndpoints: nil,
 	}
 
 	tests := []struct {
 		name           string
-		profileResults map[string]*framework.ProfileRunResult
-		wantResult     *framework.SchedulingResult
+		profileResults map[string]*fwksched.ProfileRunResult
+		wantResult     *fwksched.SchedulingResult
 		wantErr        bool
 	}{
 		{
 			name: "single successful profile",
-			profileResults: map[string]*framework.ProfileRunResult{
+			profileResults: map[string]*fwksched.ProfileRunResult{
 				"default": successResult,
 			},
-			wantResult: &framework.SchedulingResult{
-				ProfileResults: map[string]*framework.ProfileRunResult{
+			wantResult: &fwksched.SchedulingResult{
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
 					"default": successResult,
 				},
 				PrimaryProfileName: "default",
@@ -142,12 +142,12 @@ func TestProcessResults(t *testing.T) {
 		},
 		{
 			name:           "no profiles returns error",
-			profileResults: map[string]*framework.ProfileRunResult{},
+			profileResults: map[string]*fwksched.ProfileRunResult{},
 			wantErr:        true,
 		},
 		{
 			name: "multiple profiles returns error",
-			profileResults: map[string]*framework.ProfileRunResult{
+			profileResults: map[string]*fwksched.ProfileRunResult{
 				"profile-a": successResult,
 				"profile-b": successResult,
 			},
@@ -155,7 +155,7 @@ func TestProcessResults(t *testing.T) {
 		},
 		{
 			name: "nil result (profile execution failure) returns error",
-			profileResults: map[string]*framework.ProfileRunResult{
+			profileResults: map[string]*fwksched.ProfileRunResult{
 				"default": nil,
 			},
 			wantErr: true,
@@ -165,7 +165,7 @@ func TestProcessResults(t *testing.T) {
 	handler := NewSingleProfileHandler()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := handler.ProcessResults(context.Background(), framework.NewCycleState(), nil, tt.profileResults)
+			got, err := handler.ProcessResults(context.Background(), nil, tt.profileResults)
 
 			if tt.wantErr {
 				if err == nil {

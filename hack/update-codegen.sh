@@ -18,13 +18,14 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-#echo "Generating CRDs"
-#go run ./pkg/generator
+SCRIPT_ROOT=$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+CODEGEN_PKG=${1:-"${SCRIPT_ROOT}/bin"}
+THIS_PKG="github.com/llm-d/llm-d-router"
 
-SCRIPT_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
-CODEGEN_PKG=${1:-bin}
+echo "Generating CRDs"
+(cd "${SCRIPT_ROOT}" && go run ./pkg/generator)
+
 source "${CODEGEN_PKG}/kube_codegen.sh"
-THIS_PKG="github.com/llm-d/llm-d-inference-scheduler"
 
 
 kube::codegen::gen_helpers \

@@ -1,16 +1,15 @@
 # Sample EPP configuration for tunning with P/D
 # Use with small hash block size for simulation purposes
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
-featureGates:
-- prepareDataPlugins
 plugins:
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
     autoTune: false
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 31250
+- type: prefix-cache-scorer
 - type: queue-scorer
 - type: prefill-filter
 - type: decode-filter

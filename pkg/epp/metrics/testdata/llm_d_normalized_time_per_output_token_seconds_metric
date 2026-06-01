@@ -1,0 +1,50 @@
+# HELP llm_d_router_epp_normalized_time_per_output_token_seconds [ALPHA] Inference objective latency divided by number of output tokens in seconds for each model and target model.
+# TYPE llm_d_router_epp_normalized_time_per_output_token_seconds histogram
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.001"} 0
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.002"} 0
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.005"} 0
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.01"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.02"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.05"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.1"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.2"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.5"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="1.0"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="2.0"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="5.0"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="10.0"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="+Inf"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_sum{model_name="m10", target_model_name="t10"} 0.03
+llm_d_router_epp_normalized_time_per_output_token_seconds_count{model_name="m10", target_model_name="t10"} 2
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="0.001"} 0
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="0.002"} 0
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="0.005"} 0
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="0.01"} 0
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="0.02"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="0.05"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="0.1"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="0.2"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="0.5"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="1.0"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="2.0"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="5.0"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="10.0"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t11", le="+Inf"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_sum{model_name="m10", target_model_name="t11"} 0.02
+llm_d_router_epp_normalized_time_per_output_token_seconds_count{model_name="m10", target_model_name="t11"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="0.001"} 0
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="0.002"} 0
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="0.005"} 0
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="0.01"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="0.02"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="0.05"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="0.1"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="0.2"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="0.5"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="1.0"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="2.0"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="5.0"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="10.0"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_bucket{model_name="m20", target_model_name="t20", le="+Inf"} 1
+llm_d_router_epp_normalized_time_per_output_token_seconds_sum{model_name="m20", target_model_name="t20"} 0.006
+llm_d_router_epp_normalized_time_per_output_token_seconds_count{model_name="m20", target_model_name="t20"} 1

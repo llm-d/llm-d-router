@@ -20,8 +20,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -61,18 +65,22 @@ func (RawPayload) IsParsed() bool    { return false }
 
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
-// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, or EmbeddingsRequest.
+// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest, or MessagesRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
 	// ChatCompletionsRequest is the representation of the OpenAI /v1/chat/completions request body.
 	ChatCompletions *ChatCompletionsRequest `json:"chat_completions,omitempty"`
+	// MessagesRequest is the representation of the Claude /v1/messages request body.
+	Messages *MessagesRequest `json:"messages,omitempty"`
 	// ResponsesRequest is the representation of the OpenAI /v1/responses request body.
 	Responses *ResponsesRequest `json:"responses,omitempty"`
 	// ConversationsRequest is the representation of the OpenAI /v1/conversations request body.
 	Conversations *ConversationsRequest `json:"conversations,omitempty"`
 	// EmbeddingsRequest is the representation of the OpenAI /v1/embeddings request body.
 	Embeddings *EmbeddingsRequest `json:"embeddings,omitempty"`
+	// GenerateRequest is the representation of the vLLM /inference/v1/generate request body.
+	Generate *GenerateRequest `json:"generate,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
@@ -127,6 +135,21 @@ func (r *InferenceRequestBody) PromptText() string {
 			}
 		}
 		return sb.String()
+	case r.Messages != nil:
+		var sb strings.Builder
+		sysText := r.Messages.System.PlainText()
+		if sysText != "" {
+			sb.WriteString(sysText)
+			sb.WriteString(" ")
+		}
+		for _, msg := range r.Messages.Messages {
+			text := msg.Content.PlainText()
+			if text != "" {
+				sb.WriteString(text)
+				sb.WriteString(" ")
+			}
+		}
+		return sb.String()
 	case r.Responses != nil:
 		if s, ok := r.Responses.Input.(string); ok {
 			return s
@@ -138,6 +161,8 @@ func (r *InferenceRequestBody) PromptText() string {
 		return string(b)
 	case r.Embeddings != nil:
 		return r.Embeddings.Input.PlainText()
+	case r.Generate != nil:
+		return ""
 	default:
 		return ""
 	}
@@ -153,6 +178,9 @@ func (r *InferenceRequestBody) InputTokenCountHint() int {
 	if r.Embeddings != nil {
 		return r.Embeddings.Input.TokenCountHint()
 	}
+	if r.Generate != nil {
+		return len(r.Generate.TokenIDs)
+	}
 	return -1
 }
 
@@ -166,11 +194,17 @@ func (r *InferenceRequestBody) CacheSalt() string {
 	if r.ChatCompletions != nil {
 		return r.ChatCompletions.CacheSalt
 	}
+	if r.Messages != nil {
+		return r.Messages.CacheSalt
+	}
 	if r.Completions != nil {
 		return r.Completions.CacheSalt
 	}
 	if r.Embeddings != nil {
 		return r.Embeddings.CacheSalt
+	}
+	if r.Generate != nil {
+		return r.Generate.CacheSalt
 	}
 	return ""
 }
@@ -424,6 +458,87 @@ func (e *EmbeddingsRequest) String() string {
 	return fmt.Sprintf("{InputType: %T}", e.Input)
 }
 
+// GenerateRequest is a structured representation of the fields we parse out of the vLLM
+// request at /inference/v1/generate.
+// Unlike the OpenAI-compatible endpoints, this API accepts pre-tokenized input (token IDs).
+// This struct includes fields usable for plugins and scheduling decisions.
+type GenerateRequest struct {
+	// TokenIDs are the pre-tokenized input token IDs.
+	TokenIDs []uint32 `json:"token_ids"`
+	// Features carries multimodal metadata (per-modality content hashes and
+	// placeholder ranges) parsed out of the wire `features` block. Populated
+	// by UnmarshalJSON; not itself a JSON-tagged field.
+	Features *tokenization.MultiModalFeatures `json:"-"`
+	// CacheSalt is an optional request parameter to isolate prefix caches for security reasons.
+	CacheSalt string `json:"cache_salt,omitempty"`
+}
+
+func (r *GenerateRequest) String() string {
+	if r == nil {
+		return nilStr
+	}
+	mmHashes := "{}"
+	if r.Features != nil && len(r.Features.MMHashes) > 0 {
+		keys := make([]string, 0, len(r.Features.MMHashes))
+		for k := range r.Features.MMHashes {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var sb strings.Builder
+		sb.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			fmt.Fprintf(&sb, "%s:%d", k, len(r.Features.MMHashes[k]))
+		}
+		sb.WriteByte('}')
+		mmHashes = sb.String()
+	}
+	return fmt.Sprintf("{TokenIDsCount: %d, MMHashes: %s}", len(r.TokenIDs), mmHashes)
+}
+
+func (r *GenerateRequest) UnmarshalJSON(data []byte) error {
+	type wirePlaceholder struct {
+		Offset int `json:"offset"`
+		Length int `json:"length"`
+	}
+	var raw struct {
+		TokenIDs  []float64 `json:"token_ids"`
+		CacheSalt string    `json:"cache_salt,omitempty"`
+		Features  *struct {
+			MMHashes       map[string][]string          `json:"mm_hashes"`
+			MMPlaceholders map[string][]wirePlaceholder `json:"mm_placeholders"`
+		} `json:"features,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	r.CacheSalt = raw.CacheSalt
+	r.TokenIDs = make([]uint32, len(raw.TokenIDs))
+	for i, v := range raw.TokenIDs {
+		if v < 0 || v > math.MaxUint32 || v != math.Trunc(v) {
+			return fmt.Errorf("token_ids[%d]: invalid value %v", i, v)
+		}
+		r.TokenIDs[i] = uint32(v)
+	}
+	if raw.Features != nil {
+		ranges := make(map[string][]kvblock.PlaceholderRange, len(raw.Features.MMPlaceholders))
+		for modality, ws := range raw.Features.MMPlaceholders {
+			out := make([]kvblock.PlaceholderRange, len(ws))
+			for i, w := range ws {
+				out[i] = kvblock.PlaceholderRange{Offset: w.Offset, Length: w.Length}
+			}
+			ranges[modality] = out
+		}
+		r.Features = &tokenization.MultiModalFeatures{
+			MMHashes:       raw.Features.MMHashes,
+			MMPlaceholders: ranges,
+		}
+	}
+	return nil
+}
+
 // ConversationItem represents a single item in a conversation
 type ConversationItem struct {
 	// Type specifies the item type (message, file, etc.)
@@ -516,9 +631,102 @@ type Usage struct {
 	PromptTokens       int                 `json:"prompt_tokens"`
 	CompletionTokens   int                 `json:"completion_tokens"`
 	TotalTokens        int                 `json:"total_tokens"`
-	PromptTokenDetails *PromptTokenDetails `json:"prompt_token_details,omitempty"`
+	PromptTokenDetails *PromptTokenDetails `json:"prompt_tokens_details,omitempty"`
 }
 
 type PromptTokenDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+// MessagesRequest is a structured representation of the fields we parse out of the /v1/messages
+// request body. For detailed body fields, please refer to https://docs.anthropic.com/en/api/messages.
+// This struct includes fields usable for plugins and scheduling decisions - and not the entire
+// API spec.
+type MessagesRequest struct {
+	// Messages is the array of conversation messages with alternating user/assistant roles.
+	Messages []AnthropicMessage `json:"messages,omitempty"`
+	// System is the system prompt. In the Anthropic API this is a top-level field,
+	// not a message with role "system".
+	System AnthropicContent `json:"system,omitempty"`
+	// Tools field for tool use capabilities.
+	Tools []any `json:"tools,omitempty"`
+	// CacheSalt isolates prefix caches for security.
+	CacheSalt string `json:"cache_salt,omitempty"`
+}
+
+func (r *MessagesRequest) String() string {
+	if r == nil {
+		return nilStr
+	}
+	messagesLen := 0
+	for _, msg := range r.Messages {
+		messagesLen += len(msg.Content.PlainText())
+	}
+	return fmt.Sprintf("{MessagesLength: %d}", messagesLen)
+}
+
+type AnthropicMessage struct {
+	Role    string           `json:"role"`
+	Content AnthropicContent `json:"content"`
+}
+
+// AnthropicContent handles the Anthropic content format which can be either
+// a plain string or an array of content blocks.
+type AnthropicContent struct {
+	Raw        string
+	Structured []AnthropicContentBlock
+}
+
+func (ac *AnthropicContent) UnmarshalJSON(data []byte) error {
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		ac.Raw = str
+		return nil
+	}
+
+	var blocks []AnthropicContentBlock
+	if err := json.Unmarshal(data, &blocks); err == nil {
+		ac.Structured = blocks
+		return nil
+	}
+
+	return errors.New("anthropic content: must be a string or an array of content blocks")
+}
+
+func (ac AnthropicContent) MarshalJSON() ([]byte, error) {
+	if ac.Raw != "" {
+		return json.Marshal(ac.Raw)
+	}
+	if ac.Structured != nil {
+		return json.Marshal(ac.Structured)
+	}
+	return json.Marshal("")
+}
+
+func (ac AnthropicContent) PlainText() string {
+	if ac.Raw != "" {
+		return ac.Raw
+	}
+	var sb strings.Builder
+	for _, block := range ac.Structured {
+		if block.Type == "text" {
+			sb.WriteString(block.Text)
+			sb.WriteString(" ")
+		}
+	}
+	return sb.String()
+}
+
+type AnthropicContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+	// image source fields (base64 or URL)
+	Source *AnthropicImageSource `json:"source,omitempty"`
+}
+
+type AnthropicImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }

@@ -28,35 +28,39 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
-	latencypredictor "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	latencyproducerconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/constants"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
 	// LatencyDataProviderPluginType is the plugin type for the latency predictor.
 	// It trains XGBoost models via the sidecar and generates predictions for scoring.
-	LatencyDataProviderPluginType = "predicted-latency-producer"
+	LatencyDataProviderPluginType = latencyproducerconstants.LatencyDataProviderPluginType
 
 	// TTFTSLOHeaderKey is the header key for the TTFT SLO.
-	TTFTSLOHeaderKey = "x-slo-ttft-ms"
+	TTFTSLOHeaderKey = metadata.TTFTSLOHeaderKey
 	// TPOTSLOHeaderKey is the header key for the TPOT SLO.
-	TPOTSLOHeaderKey = "x-slo-tpot-ms"
+	TPOTSLOHeaderKey = metadata.TPOTSLOHeaderKey
 
 	// ExperimentalDefaultPrefillProfile is the default profile name for prefill endpoints in disaggregated serving.
 	ExperimentalDefaultPrefillProfile = "prefill"
 )
 
 // PredictedLatency is the latency data provider plugin. It handles:
-//   - PrepareRequestData: bulk predictions via the latency predictor sidecar
+//   - Produce: bulk predictions via the latency predictor sidecar
 //   - PreRequest: dispatch-time bookkeeping (token counters, request queues)
 //   - ResponseHeader/ResponseBody: training data collection (TTFT/TPOT)
 //   - Produces/Consumes: endpoint attribute declarations
@@ -64,16 +68,18 @@ const (
 // Scoring, picking, and admission are handled by separate sub-plugins:
 // LatencyScorer, AffinityWeightedPicker, and LatencyAdmission.
 type PredictedLatency struct {
-	typedName             plugin.TypedName
-	latencypredictor      latencypredictor.PredictorInterface
-	runningRequestLists   sync.Map                                      // Key: types.NamespacedName, Value: *requestPriorityQueue
-	sloContextStore       *ttlcache.Cache[string, *predictedLatencyCtx] // TTL cache for request contexts
-	config                Config
-	prefillTokensInFlight sync.Map // Key: endpoint NamespacedName.String(), Value: *atomic.Int64
+	typedName                    plugin.TypedName
+	latencypredictor             latencypredictor.PredictorInterface
+	runningRequestLists          sync.Map                                      // Key: types.NamespacedName, Value: *requestPriorityQueue
+	sloContextStore              *ttlcache.Cache[string, *predictedLatencyCtx] // TTL cache for request contexts
+	config                       Config
+	prefillTokensInFlight        sync.Map // Key: endpoint NamespacedName.String(), Value: *atomic.Int64
+	prefixMatchDataKey           plugin.DataKey
+	latencyPredictionInfoDataKey plugin.DataKey
 }
 
 // endpointCounter returns the atomic counter for the given endpoint key, creating it if necessary.
-func (t *PredictedLatency) endpointCounter(m *sync.Map, key string) *atomic.Int64 {
+func (pl *PredictedLatency) endpointCounter(m *sync.Map, key string) *atomic.Int64 {
 	v, _ := m.LoadOrStore(key, new(atomic.Int64))
 	return v.(*atomic.Int64)
 }
@@ -82,11 +88,11 @@ func (t *PredictedLatency) endpointCounter(m *sync.Map, key string) *atomic.Int6
 // floor at zero, and removes the entry from the map once the counter reaches
 // zero. This is the only sanctioned way to decrement prefillTokensInFlight
 // (or any counter with the same shape): a naive Add(-delta) can drift the
-// counter negative if callers race (e.g. PrepareData publishing an SLO
-// context after PreRequest already skipped the increment), which used to
+// counter negative if callers race (e.g. Produce publishing an SLO
+// context after PreRequest already skipped the increment)
 // break prediction requests with `greater_than_equal: 0` validation errors.
 // Decrementing a missing key is a no-op and does not create a zero entry.
-func (t *PredictedLatency) decrementEndpointCounter(m *sync.Map, key string, delta int64) {
+func (pl *PredictedLatency) decrementEndpointCounter(m *sync.Map, key string, delta int64) {
 	v, ok := m.Load(key)
 	if !ok {
 		return
@@ -118,11 +124,12 @@ type Config struct {
 	ContextTTL                         time.Duration `json:"contextTTL,omitempty"`
 	StreamingMode                      bool          `json:"streamingMode,omitempty"`
 	EndpointRoleLabel                  string        `json:"endpointRoleLabel,omitempty"`
-	// PredictInPrepareData controls whether bulk predictions are generated during
-	// PrepareRequestData. Set to false to disable predictions (training-only mode).
+	// PredictInProduce controls whether bulk predictions are generated during
+	// Produce. Set to false to disable predictions (training-only mode).
 	// When false, the predictor still collects training data but does not call the
 	// sidecar for predictions. Default: true.
-	PredictInPrepareData bool `json:"predictInPrepareData,omitempty"`
+	PredictInProduce            bool   `json:"predictInProduce,omitempty"`
+	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -131,13 +138,13 @@ var DefaultConfig = Config{
 	SLOBufferFactor:                    1,
 	ContextTTL:                         5 * time.Minute,
 	StreamingMode:                      false,
-	PredictInPrepareData:               true,
+	PredictInProduce:                   true,
 }
 
-func PredictedLatencyFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func PredictedLatencyFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	parameters := DefaultConfig
-	if len(rawParameters) > 0 {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal config for PredictedLatency: %w", err)
 		}
 	}
@@ -146,12 +153,19 @@ func PredictedLatencyFactory(name string, rawParameters json.RawMessage, handle 
 		return nil, fmt.Errorf("invalid PredictedLatency config: %w", err)
 	}
 
+	if handle == nil {
+		return nil, errors.New("plugin handle is required")
+	}
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
+	}
+
 	predictor, err := startPredictor(handle)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start latency predictor: %w", err)
 	}
 
-	return NewPredictedLatency(parameters, predictor).WithName(name), nil
+	return NewPredictedLatency(name, parameters, predictor), nil
 }
 
 func (c *Config) validate() error {
@@ -175,11 +189,13 @@ func (c *Config) validate() error {
 	return nil
 }
 
-func NewPredictedLatency(config Config, predictor latencypredictor.PredictorInterface) *PredictedLatency {
+func NewPredictedLatency(name string, config Config, predictor latencypredictor.PredictorInterface) *PredictedLatency {
 	predictedLatency := &PredictedLatency{
-		typedName:        plugin.TypedName{Type: LatencyDataProviderPluginType, Name: LatencyDataProviderPluginType},
-		latencypredictor: predictor,
-		config:           config,
+		typedName:                    plugin.TypedName{Type: LatencyDataProviderPluginType, Name: name},
+		latencypredictor:             predictor,
+		config:                       config,
+		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
+		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
 	predictedLatency.sloContextStore = ttlcache.New(
@@ -221,17 +237,12 @@ func startPredictor(handle plugin.Handle) (latencypredictor.PredictorInterface, 
 	return predictor, nil
 }
 
-func (s *PredictedLatency) TypedName() plugin.TypedName {
-	return s.typedName
+func (pl *PredictedLatency) TypedName() plugin.TypedName {
+	return pl.typedName
 }
 
-func (s *PredictedLatency) WithName(name string) *PredictedLatency {
-	s.typedName.Name = name
-	return s
-}
-
-func (t *PredictedLatency) getOrMakePredictedLatencyContextForRequest(request *framework.InferenceRequest) *predictedLatencyCtx {
-	sloCtx, err := t.getPredictedLatencyContextForRequest(request)
+func (pl *PredictedLatency) getOrMakePredictedLatencyContextForRequest(request *fwksched.InferenceRequest) *predictedLatencyCtx {
+	sloCtx, err := pl.getPredictedLatencyContextForRequest(request)
 	if err != nil {
 		sloCtx = newPredictedLatencyContext(request)
 	}
@@ -242,10 +253,10 @@ func (t *PredictedLatency) getOrMakePredictedLatencyContextForRequest(request *f
 
 // predictedLatencyCtx holds per-request state for latency prediction and training.
 type predictedLatencyCtx struct {
-	schedulingRequest         framework.InferenceRequest
+	schedulingRequest         fwksched.InferenceRequest
 	targetMetadata            *fwkdl.EndpointMetadata
 	prefillTargetMetadata     *fwkdl.EndpointMetadata
-	schedulingResult          *framework.SchedulingResult
+	schedulingResult          *fwksched.SchedulingResult
 	lastSeenMetrics           map[string]*fwkdl.Metrics
 	lastTokenTimestamp        time.Time
 	requestReceivedTimestamp  time.Time
@@ -274,45 +285,51 @@ type predictedLatencyCtx struct {
 	decodeTokensAtDispatch           int64
 }
 
-func newPredictedLatencyContext(request *framework.InferenceRequest) *predictedLatencyCtx {
+func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
 	var promptText string
+	inputTokenCount := 0
 	if request.Body != nil {
 		promptText = request.Body.PromptText()
+		if hint := request.Body.InputTokenCountHint(); hint >= 0 {
+			inputTokenCount = hint
+		} else {
+			inputTokenCount = len(strings.Fields(promptText))
+		}
 	}
 	return &predictedLatencyCtx{
 		schedulingRequest:             *request,
 		promptText:                    promptText,
-		inputTokenCount:               len(strings.Fields(promptText)),
+		inputTokenCount:               inputTokenCount,
 		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints: make(map[string]float64),
 		predictionsForScheduling:      make(map[string]endpointPredictionResult),
 	}
 }
 
-func (s *PredictedLatency) getPredictedLatencyContextForRequest(request *framework.InferenceRequest) (*predictedLatencyCtx, error) {
+func (pl *PredictedLatency) getPredictedLatencyContextForRequest(request *fwksched.InferenceRequest) (*predictedLatencyCtx, error) {
 	id := request.Headers[reqcommon.RequestIDHeaderKey]
-	if item := s.sloContextStore.Get(id); item != nil {
+	if item := pl.sloContextStore.Get(id); item != nil {
 		return item.Value(), nil
 	}
 	return nil, fmt.Errorf("SLO context not found for request ID: %s", id)
 }
 
-func (s *PredictedLatency) setPredictedLatencyContextForRequest(request *framework.InferenceRequest, ctx *predictedLatencyCtx) {
+func (pl *PredictedLatency) setPredictedLatencyContextForRequest(request *fwksched.InferenceRequest, ctx *predictedLatencyCtx) {
 	id := request.Headers[reqcommon.RequestIDHeaderKey]
-	s.sloContextStore.Set(id, ctx, ttlcache.DefaultTTL)
+	pl.sloContextStore.Set(id, ctx, ttlcache.DefaultTTL)
 }
 
-func (s *PredictedLatency) deletePredictedLatencyContextForRequest(request *framework.InferenceRequest) {
+func (pl *PredictedLatency) deletePredictedLatencyContextForRequest(request *fwksched.InferenceRequest) {
 	id := request.Headers[reqcommon.RequestIDHeaderKey]
-	s.sloContextStore.Delete(id)
+	pl.sloContextStore.Delete(id)
 }
 
 // --- Header parsing ---
 
 // parseFloatHeader retrieves a header by name, parses it as a float64,
 // and returns the value or an error if the header is missing or invalid.
-func parseFloatHeader(request framework.InferenceRequest, headerName string) (float64, error) {
-	headerValue, ok := request.Headers[headerName]
+func parseFloatHeader(request fwksched.InferenceRequest, headerName string) (float64, error) {
+	headerValue, ok := metadata.GetLowerCaseHeaderValue(request.Headers, headerName)
 	if !ok {
 		return 0, nil
 	}
@@ -326,7 +343,7 @@ func parseFloatHeader(request framework.InferenceRequest, headerName string) (fl
 	return parsedFloat, nil
 }
 
-func (s *PredictedLatency) parseSLOHeaders(ctx context.Context, request *framework.InferenceRequest, predictedLatencyCtx *predictedLatencyCtx) {
+func (pl *PredictedLatency) parseSLOHeaders(ctx context.Context, request *fwksched.InferenceRequest, predictedLatencyCtx *predictedLatencyCtx) {
 	logger := log.FromContext(ctx)
 	var err error
 
@@ -343,9 +360,9 @@ func (s *PredictedLatency) parseSLOHeaders(ctx context.Context, request *framewo
 
 // --- Running request queue helpers ---
 
-func (s *PredictedLatency) getEndpointMinTPOTSLO(endpoint framework.Endpoint) float64 {
+func (pl *PredictedLatency) getEndpointMinTPOTSLO(endpoint fwksched.Endpoint) float64 {
 	endpointName := endpoint.GetMetadata().NamespacedName
-	if runningReqs := s.getRunningRequestList(endpointName); runningReqs != nil && runningReqs.GetSize() > 0 {
+	if runningReqs := pl.getRunningRequestList(endpointName); runningReqs != nil && runningReqs.GetSize() > 0 {
 		if min := runningReqs.Peek(); min != nil {
 			return min.tpot
 		}
@@ -353,31 +370,31 @@ func (s *PredictedLatency) getEndpointMinTPOTSLO(endpoint framework.Endpoint) fl
 	return 0
 }
 
-func (s *PredictedLatency) getEndpointRunningRequestCount(endpoint framework.Endpoint) int {
+func (pl *PredictedLatency) getEndpointRunningRequestCount(endpoint fwksched.Endpoint) int {
 	endpointName := endpoint.GetMetadata().NamespacedName
-	if runningReqs := s.getRunningRequestList(endpointName); runningReqs != nil {
+	if runningReqs := pl.getRunningRequestList(endpointName); runningReqs != nil {
 		return runningReqs.GetSize()
 	}
 	return 0
 }
 
-func (s *PredictedLatency) getRunningRequestList(endpointName types.NamespacedName) *requestPriorityQueue {
-	if value, ok := s.runningRequestLists.Load(endpointName); ok {
+func (pl *PredictedLatency) getRunningRequestList(endpointName types.NamespacedName) *requestPriorityQueue {
+	if value, ok := pl.runningRequestLists.Load(endpointName); ok {
 		return value.(*requestPriorityQueue)
 	}
 	return nil
 }
 
-func (s *PredictedLatency) removeRequestFromEndpoint(endpointName types.NamespacedName, requestID string) {
-	if queue := s.getRunningRequestList(endpointName); queue != nil {
+func (pl *PredictedLatency) removeRequestFromEndpoint(endpointName types.NamespacedName, requestID string) {
+	if queue := pl.getRunningRequestList(endpointName); queue != nil {
 		queue.Remove(requestID)
 		if queue.GetSize() == 0 {
-			s.runningRequestLists.Delete(endpointName)
+			pl.runningRequestLists.Delete(endpointName)
 		}
 	}
 }
 
-func (s *PredictedLatency) removeRequestFromQueue(requestID string, ctx *predictedLatencyCtx) {
+func (pl *PredictedLatency) removeRequestFromQueue(requestID string, ctx *predictedLatencyCtx) {
 	if ctx == nil || ctx.targetMetadata == nil {
 		return
 	}
@@ -385,5 +402,5 @@ func (s *PredictedLatency) removeRequestFromQueue(requestID string, ctx *predict
 		Name:      ctx.targetMetadata.NamespacedName.Name,
 		Namespace: ctx.targetMetadata.NamespacedName.Namespace,
 	}
-	s.removeRequestFromEndpoint(endpointName, requestID)
+	pl.removeRequestFromEndpoint(endpointName, requestID)
 }

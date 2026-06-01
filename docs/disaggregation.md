@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the architecture and request lifecycle for enabling **disaggregated inference execution** in the llm-d router. llm-d supports multiple disaggregation topologies:
+This document describes the architecture and request lifecycle for enabling **disaggregated inference execution** in the llm-d Router. llm-d supports multiple disaggregation topologies:
 
 - **EPD** (no disaggregation) – a single node handles all three functions (encode, prefill, and decode). This is the default mode when no disaggregation is configured.
 - **P/D** (Prefill/Decode) – separates the prefill and decode stages onto different workers. This is functionally equivalent to EP/D, since prefill workers also handle encoding (multimodal processing) as part of the prefill stage.
@@ -13,7 +13,7 @@ This document describes the architecture and request lifecycle for enabling **di
 > The Encode (E) stage is only relevant for requests with multimodal content (images, video, or audio). For text-only requests, the encode stage is skipped regardless of the configured topology.
 
 > [!WARNING]
-> Encode disaggregation (E/PD and E/P/D) is under active development in both vLLM and llm-d-inference-scheduler. 
+> Encode disaggregation (E/PD and E/P/D) is under active development in both vLLM and llm-d-router.
 > The implementation described here is a proof of concept (PoC) and is subject to change.
 
 All topologies are driven by the unified `disagg-profile-handler` plugin, which selects active stages based on configuration, the user request (e.g., presence of multimodal content), and the system status (e.g., KV-cache hit ratio on the selected decode pod). The architecture aims to improve flexibility, scalability, and performance by enabling separation of inference stages onto different workers.
@@ -215,7 +215,7 @@ sequenceDiagram
 
 ## Future Considerations
 
-- Cache coordinate (we can talk about 3 different types of cache: KV-cache, embeddings, and mumtimedia content)
+- Cache coordination (we can talk about 3 different types of cache: KV-cache, embeddings, and multimedia content)
 - Pre-allocation of kv blocks in the decode node, push cache from the prefill to the decode worker during calculation
 - More sophisticated encode worker selection (e.g., load-aware scheduling, cache content, locality-aware placement)
 
@@ -223,7 +223,7 @@ sequenceDiagram
 
 ## Integrating External Prefill/Decode Workloads
 
-The llm-d inference scheduler supports integration with external disaggregated encode/prefill/decode (E/P/D) workloads or other inference frameworks that follow the same E/P/D separation pattern but use **different Kubernetes Pod labeling conventions**.
+The llm-d Router supports integration with external disaggregated encode/prefill/decode (E/P/D) workloads or other inference frameworks that follow the same E/P/D separation pattern but use **different Kubernetes Pod labeling conventions**.
 
 ### Labeling Convention Flexibility
 
@@ -244,7 +244,10 @@ role: prefill
 role: decode
 ```
 
-To accommodate this **without code changes**, you can configure the **EndpointPickerConfig** to use the generic `by-label` filter plugin instead of the hardcoded `encode-filter` / `prefill-filter` / `decode-filter`.
+To accommodate this **without code changes**, you can configure the **EndpointPickerConfig** to use the generic `label-selector-filter` plugin instead of the hardcoded `encode-filter` / `prefill-filter` / `decode-filter`.
+
+> [!NOTE]
+> The previous filter type `by-label` is deprecated. Use `label-selector-filter` with standard Kubernetes label selector syntax instead.
 
 ### Configuration Examples
 
@@ -253,23 +256,25 @@ To accommodate this **without code changes**, you can configure the **EndpointPi
 Below is a minimal `EndpointPickerConfig` for P/D disaggregation using custom labels:
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
-featureGates:
-- prepareDataPlugins
 plugins:
   # Prefill selection: match Pods with label role=prefill
-  - type: by-label
+  - type: label-selector-filter
     name: "prefill-pods"
     parameters:
-      label: "role"
-      validValues: ["prefill"]
+      matchExpressions:
+        - key: "role"
+          operator: In
+          values: ["prefill"]
   # Decode selection: match Pods with label role=decode
-  - type: by-label
+  - type: label-selector-filter
     name: "decode-pods"
     parameters:
-      label: "role"
-      validValues: ["decode"]
+      matchExpressions:
+        - key: "role"
+          operator: In
+          values: ["decode"]
   - type: prefix-cache-scorer
     parameters:
       autoTune: false
@@ -305,29 +310,33 @@ schedulingProfiles:
 Below is an `EndpointPickerConfig` for full E/P/D disaggregation using custom labels:
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
-featureGates:
-- prepareDataPlugins
 plugins:
   # Encoding selection: match Pods with label role=encode
-  - type: by-label
+  - type: label-selector-filter
     name: "encode-pods"
     parameters:
-      label: "role"
-      validValues: ["encode"]
+      matchExpressions:
+        - key: "role"
+          operator: In
+          values: ["encode"]
   # Prefill selection: match Pods with label role=prefill
-  - type: by-label
+  - type: label-selector-filter
     name: "prefill-pods"
     parameters:
-      label: "role"
-      validValues: ["prefill"]
+      matchExpressions:
+        - key: "role"
+          operator: In
+          values: ["prefill"]
   # Decode selection: match Pods with label role=decode
-  - type: by-label
+  - type: label-selector-filter
     name: "decode-pods"
     parameters:
-      label: "role"
-      validValues: ["decode"]
+      matchExpressions:
+        - key: "role"
+          operator: In
+          values: ["decode"]
   - type: prefix-cache-scorer
     parameters:
       autoTune: false
@@ -402,16 +411,7 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 **Parameter:**
 
 - `nonCachedTokens`: Number of non-cached tokens that trigger disaggregation
-  - If set to 0, disaggregation always occurs for all requests
-
-**Feature Gate Requirement**
-To activate this decider, ensure the following feature gate is enabled in your EndpointPickerConfig
-
-```yaml
-featureGates:
-- prepareDataPlugins
-```
-
+  - If set to 0, disaggregation never occurs for any request
 
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.
@@ -445,7 +445,7 @@ The `always-disagg-multimodal-decider` triggers encode disaggregation whenever t
 > [!NOTE]
 > This plugin accepts no parameters.
 
-It checks for the presence of `image_url`, `video_url`, or `input_audio` content blocks in the chat-completions request body. If any multimodal content is found, the encode stage is activated.
+It checks for the presence of `image_url`, `audio_url`, `video_url`, or `input_audio` content blocks in the chat-completions request body. If any multimodal content is found, the encode stage is activated.
 
 ---
 
@@ -516,10 +516,8 @@ Custom profile names (if your scheduling profiles are not named `decode`/`prefil
 ---
 
 ## References
-- vLLM: [Disaggregated Prefill V1](https://docs.vllm.ai/en/stable/examples/offline_inference/disaggregated-prefill-v1/)
-- vLLM: [Disaggregated Prefill](https://docs.vllm.ai/en/stable/examples/offline_inference/disaggregated_prefill/)
+- vLLM: [Disaggregated Prefill](https://docs.vllm.ai/en/latest/features/disagg_prefill/)
 - vLLM: [Encode Prefill Decode Disaggregation Design](https://docs.google.com/document/d/1aed8KtC6XkXtdoV87pWT0a8OJlZ-CpnuLLzmR8l9BAE/edit?tab=t.0#heading=h.9xkkijtnbbje)
 - vLLM: [Disaggregated Encoder](https://docs.vllm.ai/en/latest/features/disagg_encoder/)
-- vLLM: [[RFC]: Prototype Separating Vision Encoder to Its Own Worker](https://github.com/vllm-project/vllm/issues/20799)}
+- vLLM: [[RFC]: Prototype Separating Vision Encoder to Its Own Worker](https://github.com/vllm-project/vllm/issues/20799)
 - vLLM: [Encoder Disaggregation for Scalable Multimodal Model Serving](https://vllm.ai/blog/vllm-epd)
-

@@ -26,9 +26,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // --- DatastoreEndpointCandidates Tests ---
@@ -141,9 +140,9 @@ func TestDatastoreEndpointCandidates_Locate(t *testing.T) {
 			endpointCandidates := NewDatastoreEndpointCandidates(mockDS, tc.opts...)
 			result := endpointCandidates.Locate(context.Background(), tc.metadata)
 
-			var gotIPs []string
-			for _, ep := range result {
-				gotIPs = append(gotIPs, ep.GetMetadata().GetIPAddress())
+			gotIPs := make([]string, len(result))
+			for idx, ep := range result {
+				gotIPs[idx] = ep.GetMetadata().GetIPAddress()
 			}
 			assert.ElementsMatch(t, tc.expectedEndpointIPs, gotIPs, "Locate returned unexpected set of endpoint candidates")
 		})
@@ -304,12 +303,10 @@ func (m *mockEndpointCandidates) callCount() int {
 }
 
 func makeMockEndpoint(name, ip string) fwkdl.Endpoint {
-	return &backendmetrics.FakePodMetrics{
-		Metadata: &fwkdl.EndpointMetadata{
-			NamespacedName: types.NamespacedName{Namespace: "default", Name: name},
-			Address:        ip,
-		},
-	}
+	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: name},
+		Address:        ip,
+	}, nil)
 }
 
 func makeMetadataWithSubset(endpoints []any) map[string]any {

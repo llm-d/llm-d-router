@@ -21,11 +21,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	extractormocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/mocks"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/notifications"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	extractormocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
+	sourcemocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
 // --- Register() validation ---
@@ -71,12 +73,11 @@ func TestConfigure_ExtractorWiredToUserConfiguredSource(t *testing.T) {
 	cfg := &Config{
 		Sources: []DataSourceConfig{{Plugin: src}},
 	}
-	err := r.Configure(cfg, false, "", logger)
+	err := r.Configure(cfg, logger)
 	require.NoError(t, err)
 
-	rawExts, ok := r.sourceExtractors.Load("ep-src")
-	require.True(t, ok, "sourceExtractors should have entry for ep-src")
-	exts := rawExts.([]fwkdl.ExtractorBase)
+	exts, ok := r.extractors.Get("ep-src")
+	require.True(t, ok, "extractors should have entry for ep-src")
 	require.Len(t, exts, 1)
 	assert.Equal(t, "ext-a", exts[0].TypedName().Name)
 }
@@ -97,18 +98,17 @@ func TestConfigure_DefaultSourceAutoRegisteredWhenAbsent(t *testing.T) {
 	}))
 
 	// No user sources; default should be auto-created.
-	err := r.Configure(nil, false, "", logger)
+	err := r.Configure(nil, logger)
 	require.NoError(t, err)
 
-	// Source should be in endpointSources.
-	val, ok := r.endpointSources.Load(notifications.EndpointNotificationSourceType)
-	require.True(t, ok, "auto-registered source should appear in endpointSources")
-	assert.Equal(t, notifications.EndpointNotificationSourceType, val.(fwkdl.EndpointSource).TypedName().Name)
+	// Source should be in the endpoint manager.
+	src, ok := r.endpoint.Get(notifications.EndpointNotificationSourceType)
+	require.True(t, ok, "auto-registered source should appear in endpoint manager")
+	assert.Equal(t, notifications.EndpointNotificationSourceType, src.TypedName().Name)
 
 	// Extractor should be wired.
-	rawExts, ok := r.sourceExtractors.Load(notifications.EndpointNotificationSourceType)
+	exts, ok := r.extractors.Get(notifications.EndpointNotificationSourceType)
 	require.True(t, ok, "extractor should be wired to auto-registered source")
-	exts := rawExts.([]fwkdl.ExtractorBase)
 	require.Len(t, exts, 1)
 }
 
@@ -125,7 +125,7 @@ func TestConfigure_FailPolicyMissingSource(t *testing.T) {
 		IfMissing:  fwkdl.Fail,
 	}))
 
-	err := r.Configure(nil, false, "", logger)
+	err := r.Configure(nil, logger)
 	require.Error(t, err, "Fail policy should return error when source is absent")
 }
 
@@ -142,40 +142,202 @@ func TestConfigure_WarnPolicyMissingSource(t *testing.T) {
 		IfMissing:  fwkdl.Warn,
 	}))
 
-	err := r.Configure(nil, false, "", logger)
+	err := r.Configure(nil, logger)
 	require.NoError(t, err, "Warn policy should not return error when source is absent")
 }
 
-func TestConfigure_DedupByExtractorType(t *testing.T) {
-	// (g) dedup: extractor type already wired via config → code registration is a no-op
+func TestConfigure_PendingRegistrationYieldsToConfigByType(t *testing.T) {
+	cases := []struct {
+		name       string
+		configExt  *extractormocks.EndpointExtractor
+		pendingExt *extractormocks.EndpointExtractor
+		wantNames  []string // expected bound extractor names, in order
+	}{
+		{
+			name:       "same type → pending yields to config",
+			configExt:  extractormocks.NewEndpointExtractor("config-ext"),
+			pendingExt: extractormocks.NewEndpointExtractor("code-ext"),
+			wantNames:  []string{"config-ext"},
+		},
+		{
+			name:       "different type → both bound (no yield)",
+			configExt:  extractormocks.NewEndpointExtractor("config-ext"),
+			pendingExt: extractormocks.NewEndpointExtractor("code-ext").WithType("other-extractor-type"),
+			wantNames:  []string{"config-ext", "code-ext"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRuntime(0)
+			logger := newTestLogger(t)
+			src := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-src")
+
+			cfg := &Config{
+				Sources: []DataSourceConfig{{
+					Plugin:     src,
+					Extractors: []fwkplugin.Plugin{tc.configExt},
+				}},
+			}
+
+			require.NoError(t, r.Register(fwkdl.PendingRegistration{
+				Owner:      fwkplugin.TypedName{Type: "test-plugin", Name: "test"},
+				SourceType: notifications.EndpointNotificationSourceType,
+				Extractor:  tc.pendingExt,
+			}))
+
+			require.NoError(t, r.Configure(cfg, logger))
+
+			exts, ok := r.extractors.Get("ep-src")
+			require.True(t, ok)
+			gotNames := make([]string, len(exts))
+			for i, e := range exts {
+				gotNames[i] = e.TypedName().Name
+			}
+			assert.Equal(t, tc.wantNames, gotNames)
+		})
+	}
+}
+
+func TestConfigure_PendingVsPending_FirstWinsOnSameType(t *testing.T) {
+	r := NewRuntime(0)
+	logger := newTestLogger(t)
+
+	defaultSrc := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, notifications.EndpointNotificationSourceType)
+	first := extractormocks.NewEndpointExtractor("first-pending")
+	second := extractormocks.NewEndpointExtractor("second-pending")
+
+	require.NoError(t, r.Register(fwkdl.PendingRegistration{
+		Owner:         fwkplugin.TypedName{Type: "plugin-a", Name: "a"},
+		SourceType:    notifications.EndpointNotificationSourceType,
+		Extractor:     first,
+		DefaultSource: defaultSrc,
+	}))
+	require.NoError(t, r.Register(fwkdl.PendingRegistration{
+		Owner:      fwkplugin.TypedName{Type: "plugin-b", Name: "b"},
+		SourceType: notifications.EndpointNotificationSourceType,
+		Extractor:  second,
+	}))
+
+	require.NoError(t, r.Configure(nil, logger))
+
+	exts, ok := r.extractors.Get(notifications.EndpointNotificationSourceType)
+	require.True(t, ok)
+	require.Len(t, exts, 1, "second pending must yield to first when Types collide")
+	assert.Equal(t, "first-pending", exts[0].TypedName().Name)
+}
+
+// Pins rejection of duplicate-Type extractors per source. Append dedups silently otherwise.
+func TestConfigure_DuplicateExtractorTypePerSource(t *testing.T) {
 	r := NewRuntime(0)
 	logger := newTestLogger(t)
 
 	src := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-src")
-	extFromConfig := extractormocks.NewEndpointExtractor("config-ext")
-	extFromCode := extractormocks.NewEndpointExtractor("code-ext")
+	ext1 := extractormocks.NewEndpointExtractor("ext-1")
+	ext2 := extractormocks.NewEndpointExtractor("ext-2")
 
-	// User config wires extFromConfig to src.
 	cfg := &Config{
 		Sources: []DataSourceConfig{{
 			Plugin:     src,
-			Extractors: []fwkdl.ExtractorBase{extFromConfig},
+			Extractors: []fwkplugin.Plugin{ext1, ext2},
 		}},
 	}
 
-	// Code registers extFromCode — same type as extFromConfig ("mock-endpoint-extractor").
-	require.NoError(t, r.Register(fwkdl.PendingRegistration{
-		Owner:      fwkplugin.TypedName{Type: "test-plugin", Name: "test"},
-		SourceType: notifications.EndpointNotificationSourceType,
-		Extractor:  extFromCode,
-	}))
+	err := r.Configure(cfg, logger)
+	require.ErrorIs(t, err, ErrDuplicateExtractorType)
+}
 
-	err := r.Configure(cfg, false, "", logger)
-	require.NoError(t, err)
+// TestConfigure_CrossVariantCollisionNoPending pins the behavior added by
+// validateNoCrossVariantCollisions: two sources sharing a SourceType across
+// different variants must fail Configure even when no pending extractor
+// references the colliding type. findSourceByType-driven detection only
+// fires on pending resolution; this fills the gap.
+func TestConfigure_CrossVariantCollisionNoPending(t *testing.T) {
+	const collidingType = "colliding-source-type"
+	gvk := schema.GroupVersionKind{Group: "test.io", Version: "v1", Kind: "Probe"}
 
-	rawExts, ok := r.sourceExtractors.Load("ep-src")
-	require.True(t, ok)
-	exts := rawExts.([]fwkdl.ExtractorBase)
-	require.Len(t, exts, 1, "code registration should be deduped; only config extractor present")
-	assert.Equal(t, "config-ext", exts[0].TypedName().Name)
+	cases := []struct {
+		name    string
+		sources []fwkdl.DataSource
+	}{
+		{
+			name: "polling+notification",
+			sources: []fwkdl.DataSource{
+				sourcemocks.NewDataSource(fwkplugin.TypedName{Type: collidingType, Name: "polling-src"}),
+				sourcemocks.NewNotificationSource(collidingType, "notif-src", gvk),
+			},
+		},
+		{
+			name: "polling+endpoint",
+			sources: []fwkdl.DataSource{
+				sourcemocks.NewDataSource(fwkplugin.TypedName{Type: collidingType, Name: "polling-src"}),
+				notifications.NewEndpointDataSource(collidingType, "endpoint-src"),
+			},
+		},
+		{
+			name: "notification+endpoint",
+			sources: []fwkdl.DataSource{
+				sourcemocks.NewNotificationSource(collidingType, "notif-src", gvk),
+				notifications.NewEndpointDataSource(collidingType, "endpoint-src"),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRuntime(0)
+			srcCfgs := make([]DataSourceConfig, len(tc.sources))
+			for i, s := range tc.sources {
+				srcCfgs[i] = DataSourceConfig{Plugin: s}
+			}
+			err := r.Configure(&Config{Sources: srcCfgs}, newTestLogger(t))
+			require.ErrorIs(t, err, ErrSourceTypeCollision)
+		})
+	}
+}
+
+func TestConfigure_CrossVariantSourceTypeCollisionRejected(t *testing.T) {
+	const collidingType = "colliding-source-type"
+	gvk := schema.GroupVersionKind{Group: "test.io", Version: "v1", Kind: "Probe"}
+
+	polling := func() fwkdl.DataSource {
+		return sourcemocks.NewDataSource(fwkplugin.TypedName{Type: collidingType, Name: "polling-src"})
+	}
+	notification := func() fwkdl.DataSource {
+		return sourcemocks.NewNotificationSource(collidingType, "notif-src", gvk)
+	}
+	endpoint := func() fwkdl.DataSource {
+		return notifications.NewEndpointDataSource(collidingType, "endpoint-src")
+	}
+
+	cases := []struct {
+		name    string
+		sources []fwkdl.DataSource
+	}{
+		{"polling+endpoint", []fwkdl.DataSource{polling(), endpoint()}},
+		{"polling+notification", []fwkdl.DataSource{polling(), notification()}},
+		{"notification+endpoint", []fwkdl.DataSource{notification(), endpoint()}},
+		{"all three variants", []fwkdl.DataSource{polling(), notification(), endpoint()}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRuntime(0)
+			logger := newTestLogger(t)
+
+			require.NoError(t, r.Register(fwkdl.PendingRegistration{
+				Owner:      fwkplugin.TypedName{Type: "test-plugin", Name: "test"},
+				SourceType: collidingType,
+				Extractor:  extractormocks.NewEndpointExtractor("ext"),
+			}))
+
+			srcCfgs := make([]DataSourceConfig, len(tc.sources))
+			for i, s := range tc.sources {
+				srcCfgs[i] = DataSourceConfig{Plugin: s}
+			}
+
+			err := r.Configure(&Config{Sources: srcCfgs}, logger)
+			require.ErrorIs(t, err, ErrSourceTypeCollision)
+		})
+	}
 }

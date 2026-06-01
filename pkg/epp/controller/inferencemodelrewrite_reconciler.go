@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -26,11 +27,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/pkg/common"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 )
 
 type InferenceModelRewriteReconciler struct {
@@ -52,6 +53,12 @@ func (c *InferenceModelRewriteReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{}, fmt.Errorf("unable to get InferenceModelRewrite - %w", err)
 		}
 		notFound = true
+	}
+
+	// Keep compatibility while surfacing migration guidance for legacy group users.
+	if strings.HasPrefix(infModelRewrite.APIVersion, "inference.networking.x-k8s.io/") {
+		logger.Info("DEPRECATION: apiVersion inference.networking.x-k8s.io/v1alpha2/InferenceModelRewrite is deprecated",
+			"replacement", "llm-d.ai/v1alpha2/InferenceModelRewrite")
 	}
 
 	isDeleted := !infModelRewrite.DeletionTimestamp.IsZero()

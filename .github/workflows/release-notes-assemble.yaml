@@ -1,0 +1,108 @@
+name: Assemble Release Notes on Tag
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_NOTES_APP_ID }}
+          private-key: ${{ secrets.RELEASE_NOTES_APP_PRIVATE_KEY }}
+
+      - name: Get App user id
+        id: app-user
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          echo "user-id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tagged commit
+        # Check out the tagged commit (not main HEAD) so a fragment merged
+        # into main between the tag push and this workflow's run is not
+        # accidentally rolled into the wrong release.
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Assemble fragments and open PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          APP_USER_ID: ${{ steps.app-user.outputs.user-id }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          fragments=( release-notes.d/unreleased/*.md )
+          if [[ ${#fragments[@]} -eq 0 ]]; then
+            echo "No fragments to assemble for ${TAG}; exiting."
+            exit 0
+          fi
+
+          tmp=$(mktemp)
+          for f in "${fragments[@]}"; do
+            # Extract frontmatter values: strip "key: " prefix, take first match.
+            # Plain field-split breaks on URLs because they contain colons.
+            pr=$(sed -n 's/^pr: *//p' "$f" | head -1)
+            url=$(sed -n 's/^url: *//p' "$f" | head -1)
+            date=$(sed -n 's/^date: *//p' "$f" | head -1)
+            # Print everything after the second `---` line verbatim — once
+            # we're past the closing frontmatter marker, a body line that
+            # happens to be `---` (Markdown horizontal rule) must be kept,
+            # not counted as a third delimiter.
+            note=$(awk 'p {print; next} /^---$/ {if (++c == 2) p = 1}' "$f" | sed '/^[[:space:]]*$/d' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+            if [[ -z "$pr" || -z "$url" || -z "$date" || -z "$note" ]]; then
+              echo "Malformed fragment: $f" >&2
+              exit 1
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$date" "$pr" "$url" "$note" >> "$tmp"
+          done
+
+          sort -k1,1 -k2,2n "$tmp" -o "$tmp"
+
+          today=$(date -u +%Y-%m-%d)
+          new_section=$(mktemp)
+          printf 'RELEASE %s %s\n' "$TAG" "$today" > "$new_section"
+          while IFS=$'\t' read -r date pr url note; do
+            printf '%s %s %s\n' "$date" "$url" "$note" >> "$new_section"
+          done < "$tmp"
+          printf '\n' >> "$new_section"
+
+          touch RELEASE-NOTES.md
+          cat "$new_section" RELEASE-NOTES.md > RELEASE-NOTES.md.new
+          mv RELEASE-NOTES.md.new RELEASE-NOTES.md
+
+          git rm -- release-notes.d/unreleased/*.md
+
+          BRANCH="release-notes/assemble-${TAG}"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add RELEASE-NOTES.md
+          git commit -s -m "docs: assemble release notes for ${TAG}"
+          # Force-push so a re-run (re-tag, manual workflow re-run) overwrites
+          # the prior branch rather than failing non-fast-forward.
+          git push -f origin "$BRANCH"
+
+          if gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -q .; then
+            echo "Assembly PR already open for $BRANCH; pushed update."
+          else
+            gh pr create \
+              --title "docs: assemble release notes for ${TAG}" \
+              --body "Assembles staged release-note fragments into RELEASE-NOTES.md for ${TAG} and removes the fragments." \
+              --base main \
+              --head "$BRANCH"
+          fi

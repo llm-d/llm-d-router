@@ -27,9 +27,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/testing/protocmp"
 
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	pb "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
-	integration "github.com/llm-d/llm-d-inference-scheduler/test/integration"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
+	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
 const (
@@ -42,6 +42,7 @@ plugins:
   - type: prefix-cache-scorer
   - type: lora-affinity-scorer
   - type: vllmgrpc-parser
+  - type: mock-metrics-source
 schedulingProfiles:
   - name: default
     plugins:
@@ -49,10 +50,12 @@ schedulingProfiles:
       - pluginRef: kv-cache-utilization-scorer
       - pluginRef: prefix-cache-scorer
       - pluginRef: lora-affinity-scorer
-parser:
-  pluginRef: vllmgrpc-parser
-featureGates:
-  - enableLegacyMetrics
+requestHandler:
+  parser:
+    pluginRef: vllmgrpc-parser
+dataLayer:
+  sources:
+  - pluginRef: mock-metrics-source
 `
 )
 
@@ -279,7 +282,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			// Labels are empty because we skipped the Request phase.
 			wantMetrics: map[string]string{
 				"inference_objective_input_tokens": cleanMetric(`
-					# HELP inference_objective_input_tokens [ALPHA] Inference objective input token count distribution for requests in each model.
+					# HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_router_epp_input_tokens] Inference objective input token count distribution for requests in each model.
 					# TYPE inference_objective_input_tokens histogram
 					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
 					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8"} 1
@@ -403,7 +406,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			}(),
 			wantMetrics: map[string]string{
 				"inference_objective_input_tokens": cleanMetric(`
-					# HELP inference_objective_input_tokens [ALPHA] Inference objective input token count distribution for requests in each model.
+					# HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_router_epp_input_tokens] Inference objective input token count distribution for requests in each model.
 					# TYPE inference_objective_input_tokens histogram
 					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
 					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8"} 1
@@ -429,7 +432,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 					inference_objective_input_tokens_count{model_name="",target_model_name=""} 1
 					`),
 				"inference_objective_output_tokens": cleanMetric(`
-					# HELP inference_objective_output_tokens [ALPHA] Inference objective output token count distribution for requests in each model.
+					# HELP inference_objective_output_tokens [ALPHA] [Deprecated: Use llm_d_router_epp_output_tokens] Inference objective output token count distribution for requests in each model.
 					# TYPE inference_objective_output_tokens histogram
 					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="1"} 0
 					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="8"} 0

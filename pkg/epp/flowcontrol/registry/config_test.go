@@ -25,41 +25,41 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 
-	configapi "github.com/llm-d/llm-d-inference-scheduler/apix/config/v1alpha1"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/framework/plugins/queue"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	frameworkmocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
-	utils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
+	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 func newTestPluginsHandle(t *testing.T) plugin.Handle {
 	t.Helper()
-	handle := utils.NewTestHandle(t.Context())
-	handle.AddPlugin(globalstrict.GlobalStrictFairnessPolicyType, &frameworkmocks.MockFairnessPolicy{
+	handle := igwtestutils.NewTestHandle(t.Context())
+	handle.AddPlugin(globalstrict.GlobalStrictFairnessPolicyType, &fwkfcmocks.MockFairnessPolicy{
 		TypedNameV: plugin.TypedName{
 			Type: globalstrict.GlobalStrictFairnessPolicyType,
 			Name: globalstrict.GlobalStrictFairnessPolicyType,
 		},
 	})
-	handle.AddPlugin(roundrobin.RoundRobinFairnessPolicyType, &frameworkmocks.MockFairnessPolicy{
+	handle.AddPlugin(roundrobin.RoundRobinFairnessPolicyType, &fwkfcmocks.MockFairnessPolicy{
 		TypedNameV: plugin.TypedName{
 			Type: roundrobin.RoundRobinFairnessPolicyType,
 			Name: roundrobin.RoundRobinFairnessPolicyType,
 		},
 	})
-	handle.AddPlugin(fcfs.FCFSOrderingPolicyType, &frameworkmocks.MockOrderingPolicy{
+	handle.AddPlugin(fcfs.FCFSOrderingPolicyType, &fwkfcmocks.MockOrderingPolicy{
 		TypedNameV: plugin.TypedName{
 			Type: fcfs.FCFSOrderingPolicyType,
 			Name: fcfs.FCFSOrderingPolicyType,
 		},
 	})
-	handle.AddPlugin(edf.EDFOrderingPolicyType, &frameworkmocks.MockOrderingPolicy{
+	handle.AddPlugin(edf.EDFOrderingPolicyType, &fwkfcmocks.MockOrderingPolicy{
 		TypedNameV: plugin.TypedName{
 			Type: edf.EDFOrderingPolicyType,
 			Name: edf.EDFOrderingPolicyType,
@@ -109,7 +109,6 @@ func TestNewConfig(t *testing.T) {
 			},
 			handle: newTestPluginsHandle(t),
 			assertion: func(t *testing.T, cfg *Config) {
-				assert.Equal(t, defaultInitialShardCount, cfg.InitialShardCount, "InitialShardCount should be defaulted")
 				assert.Equal(t, defaultFlowGCTimeout, cfg.FlowGCTimeout, "FlowGCTimeout should be defaulted")
 				assert.Equal(t, defaultPriorityBandGCTimeout, cfg.PriorityBandGCTimeout, "PriorityBandGCTimeout should be defaulted")
 
@@ -126,7 +125,6 @@ func TestNewConfig(t *testing.T) {
 		{
 			name: "ShouldRespectGlobalOverrides",
 			opts: []ConfigOption{
-				WithInitialShardCount(10),
 				WithMaxBytes(5000),
 				WithFlowGCTimeout(1 * time.Hour),
 				WithPriorityBandGCTimeout(2 * time.Hour),
@@ -134,7 +132,6 @@ func TestNewConfig(t *testing.T) {
 			},
 			handle: newTestPluginsHandle(t),
 			assertion: func(t *testing.T, cfg *Config) {
-				assert.Equal(t, 10, cfg.InitialShardCount)
 				assert.Equal(t, uint64(5000), cfg.MaxBytes)
 				assert.Equal(t, 1*time.Hour, cfg.FlowGCTimeout)
 				assert.Equal(t, 2*time.Hour, cfg.PriorityBandGCTimeout)
@@ -191,12 +188,6 @@ func TestNewConfig(t *testing.T) {
 		},
 
 		// --- Validation Errors (Global) ---
-		{
-			name:      "ShouldError_WhenInitialShardCountIsInvalid",
-			opts:      []ConfigOption{WithInitialShardCount(0)}, // Option itself should return error.
-			handle:    newTestPluginsHandle(t),
-			expectErr: true,
-		},
 		{
 			name:      "ShouldError_WhenFlowGCTimeoutIsInvalid",
 			opts:      []ConfigOption{WithFlowGCTimeout(-1 * time.Second)},
@@ -262,7 +253,7 @@ func TestNewConfig(t *testing.T) {
 		{
 			name:      "ShouldError_WhenDefaultPolicyMissingFromHandle",
 			opts:      []ConfigOption{WithPriorityBand(&PriorityBandConfig{Priority: 1})},
-			handle:    utils.NewTestHandle(t.Context()), // Handle has no plugin.
+			handle:    igwtestutils.NewTestHandle(t.Context()), // Handle has no plugin.
 			expectErr: true,
 		},
 
@@ -397,41 +388,6 @@ func TestConfig_Partition(t *testing.T) {
 	// We need to check what the setup resulted in.
 	expectedBand2Total := defaultPriorityBandMaxBytes
 	assert.Equal(t, expectedBand2Total, cfg.PriorityBands[2].MaxBytes, "Band 2 should have been defaulted")
-
-	t.Run("ShouldDistributeRemainderCorrectly", func(t *testing.T) {
-		t.Parallel()
-		totalShards := 10
-
-		// Global: 103 / 10 = 10 rem 3. First 3 shards get 11.
-		// Band 1: 55 / 10 = 5 rem 5. First 5 shards get 6.
-		// Band 3: 20 / 10 = 2 rem 0. All get 2.
-
-		var sumGlobal, sumBand1, sumBand2, sumBand3 uint64
-
-		for i := range totalShards {
-			shard := cfg.partition(i, totalShards)
-			require.NotNil(t, shard)
-
-			// Accumulate.
-			sumGlobal += shard.MaxBytes
-			sumBand1 += shard.PriorityBands[1].MaxBytes
-			sumBand2 += shard.PriorityBands[2].MaxBytes
-			sumBand3 += shard.PriorityBands[3].MaxBytes
-
-			// Spot check specific shards.
-			if i < 3 {
-				assert.Equal(t, uint64(11), shard.MaxBytes, "Shard %d global bytes mismatch", i)
-			} else {
-				assert.Equal(t, uint64(10), shard.MaxBytes, "Shard %d global bytes mismatch", i)
-			}
-		}
-
-		// Verify totals.
-		assert.Equal(t, cfg.MaxBytes, sumGlobal, "Total global bytes preserved")
-		assert.Equal(t, cfg.PriorityBands[1].MaxBytes, sumBand1, "Total Band 1 bytes preserved")
-		assert.Equal(t, cfg.PriorityBands[2].MaxBytes, sumBand2, "Total Band 2 bytes preserved")
-		assert.Equal(t, cfg.PriorityBands[3].MaxBytes, sumBand3, "Total Band 3 bytes preserved")
-	})
 }
 
 func TestConfig_Clone(t *testing.T) {
@@ -771,6 +727,46 @@ func TestNewConfigFromAPI(t *testing.T) {
 			},
 			expectedErr: "DefaultPriorityBand MaxRequests must be non-negative",
 		},
+
+		// --- DefaultNegativePriorityBand ---
+		{
+			name: "ShouldSucceed_WithDefaultNegativePriorityBand",
+			apiConfig: &configapi.FlowControlConfig{
+				DefaultNegativePriorityBand: &configapi.PriorityBandConfig{
+					MaxBytes: ptr.To(resource.MustParse("100")),
+				},
+			},
+			assertion: func(t *testing.T, cfg *Config) {
+				require.NotNil(t, cfg.DefaultNegativePriorityBand)
+				assert.Equal(t, uint64(100), cfg.DefaultNegativePriorityBand.MaxBytes,
+					"DefaultNegativePriorityBand MaxBytes should be translated")
+				assert.NotNil(t, cfg.DefaultNegativePriorityBand.OrderingPolicy,
+					"DefaultNegativePriorityBand should have defaults applied")
+			},
+		},
+		{
+			name: "ShouldFallBackToDefaultBand_WhenNegativeBandIsNil",
+			apiConfig: &configapi.FlowControlConfig{
+				DefaultPriorityBand: &configapi.PriorityBandConfig{
+					MaxBytes: ptr.To(resource.MustParse("500")),
+				},
+			},
+			assertion: func(t *testing.T, cfg *Config) {
+				assert.Nil(t, cfg.DefaultNegativePriorityBand,
+					"DefaultNegativePriorityBand should remain nil when not configured")
+				require.NotNil(t, cfg.DefaultPriorityBand)
+				assert.Equal(t, uint64(500), cfg.DefaultPriorityBand.MaxBytes)
+			},
+		},
+		{
+			name: "ShouldError_WithNegativeDefaultNegativePriorityBandMaxBytes",
+			apiConfig: &configapi.FlowControlConfig{
+				DefaultNegativePriorityBand: &configapi.PriorityBandConfig{
+					MaxBytes: ptr.To(resource.MustParse("-1")),
+				},
+			},
+			expectedErr: "DefaultPriorityBand MaxBytes must be non-negative",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -791,4 +787,60 @@ func TestNewConfigFromAPI(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewConfig_DefaultNegativePriorityBand(t *testing.T) {
+	t.Parallel()
+	handle := newTestPluginsHandle(t)
+
+	t.Run("ShouldAcceptNegativeBandTemplate", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := NewConfig(handle,
+			WithDefaultNegativePriorityBand(&PriorityBandConfig{
+				MaxBytes: 500,
+			}),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, cfg.DefaultNegativePriorityBand)
+		assert.Equal(t, uint64(500), cfg.DefaultNegativePriorityBand.MaxBytes)
+		assert.NotNil(t, cfg.DefaultNegativePriorityBand.OrderingPolicy,
+			"Defaults should be applied to DefaultNegativePriorityBand")
+	})
+
+	t.Run("ShouldAllowZeroMaxBytes_ForSheddableTraffic", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := NewConfig(handle,
+			WithDefaultNegativePriorityBand(&PriorityBandConfig{}),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, cfg.DefaultNegativePriorityBand)
+		// MaxBytes=0 gets defaulted to 1GB via applyDefaults
+		assert.Equal(t, defaultPriorityBandMaxBytes, cfg.DefaultNegativePriorityBand.MaxBytes)
+	})
+
+	t.Run("ShouldValidateNegativeBandTemplate", func(t *testing.T) {
+		t.Parallel()
+		_, err := NewConfig(handle,
+			WithDefaultNegativePriorityBand(&PriorityBandConfig{
+				Queue: "non-existent-queue",
+			}),
+		)
+		require.Error(t, err, "Should fail validation for invalid queue in negative band template")
+	})
+
+	t.Run("ShouldCloneNegativeBandTemplate", func(t *testing.T) {
+		t.Parallel()
+		original, err := NewConfig(handle,
+			WithDefaultNegativePriorityBand(&PriorityBandConfig{
+				MaxBytes: 200,
+			}),
+		)
+		require.NoError(t, err)
+
+		clone := original.Clone()
+		require.NotNil(t, clone.DefaultNegativePriorityBand)
+		require.NotSame(t, original.DefaultNegativePriorityBand, clone.DefaultNegativePriorityBand,
+			"Clone should have a distinct pointer for DefaultNegativePriorityBand")
+		assert.Equal(t, original.DefaultNegativePriorityBand.MaxBytes, clone.DefaultNegativePriorityBand.MaxBytes)
+	})
 }

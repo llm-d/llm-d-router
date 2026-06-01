@@ -22,14 +22,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 var _ = Describe("SGLang Connector", func() {
@@ -99,7 +98,7 @@ var _ = Describe("SGLang Connector", func() {
 		Expect(prq1).To(HaveKey(requestFieldBootstrapPort))
 		Expect(prq1).To(HaveKey(requestFieldBootstrapRoom))
 
-		expectedHost := strings.Split(prefillHostPort, ":")[0]
+		expectedHost := extractHost(prefillHostPort)
 		Expect(prq1[requestFieldBootstrapHost]).To(Equal(expectedHost))
 		Expect(prq1[requestFieldBootstrapPort]).To(Equal(float64(sglangBootstrapPort)))
 		Expect(prq1[requestFieldBootstrapRoom]).ToNot(BeNil())

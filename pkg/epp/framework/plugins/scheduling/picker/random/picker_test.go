@@ -23,8 +23,8 @@ import (
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 func TestPickRandomPicker(t *testing.T) {
@@ -87,7 +87,7 @@ func TestPickRandomPicker(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			// Verify correct number of endpoints returned
-			result := test.picker.Pick(context.Background(), fwksched.NewCycleState(), test.input)
+			result := test.picker.Pick(context.Background(), test.input)
 			got := result.TargetEndpoints
 			if len(got) != test.numPods {
 				t.Errorf("Expected %d endpoints, got %d", test.numPods, len(got))
@@ -101,7 +101,7 @@ func TestPickRandomPicker(t *testing.T) {
 			}
 
 			for range testIterations {
-				res := test.picker.Pick(context.Background(), fwksched.NewCycleState(), test.input)
+				res := test.picker.Pick(context.Background(), test.input)
 				for _, ep := range res.TargetEndpoints {
 					selectionCounts[ep.GetMetadata().NamespacedName.Name]++
 				}

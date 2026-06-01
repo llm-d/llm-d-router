@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,12 +31,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/mocks"
-	poolutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pool"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 )
 
 var (
@@ -55,7 +55,6 @@ var (
 func TestNoMetricsCollected(t *testing.T) {
 	period := time.Second
 	factories := []datalayer.EndpointFactory{
-		backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 		datalayer.NewTestRuntime(t, period),
 	}
 	for _, epf := range factories {
@@ -79,7 +78,6 @@ func TestMetricsCollected(t *testing.T) {
 	mockDS := &mocks.MetricsDataSource{}
 	mockDS.SetMetrics(metrics)
 	factories := []datalayer.EndpointFactory{
-		backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{Res: metrics}, period),
 		datalayer.NewTestRuntimeWithConfig(t, period, &datalayer.Config{
 			Sources: []datalayer.DataSourceConfig{
 				{Plugin: mockDS},
@@ -117,6 +115,15 @@ func TestMetricsCollected(t *testing.T) {
 `), "inference_pool_per_pod_queue_size")
 		if err != nil {
 			t.Fatal(err)
+		}
+
+		errNew := promtestutil.CollectAndCompare(collector, strings.NewReader(`
+		# HELP llm_d_router_epp_per_endpoint_queue_size [ALPHA] The total number of requests pending in the model server queue for each underlying endpoint.
+		# TYPE llm_d_router_epp_per_endpoint_queue_size gauge
+		llm_d_router_epp_per_endpoint_queue_size{model_server_endpoint="pod1-rank-0",name="test-pool"} 100
+`), "llm_d_router_epp_per_endpoint_queue_size")
+		if errNew != nil {
+			t.Fatal(errNew)
 		}
 	}
 }

@@ -18,9 +18,10 @@ package loader
 
 // --- Valid Configurations ---
 
-// successConfigText represents a fully populated, valid configuration.
+// successDeprecatedText represents a fully populated, valid configuration
+// using the deprecated group name for the Pseudo CRD config structure.
 // It uses a mix of explicit names and type-derived names.
-const successConfigText = `
+const successDeprecatedText = `
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 plugins:
@@ -45,14 +46,47 @@ schedulingProfiles:
 featureGates:
 - dataLayer
 - flowControl
-saturationDetector:
-  pluginRef: utilization-detector
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
+`
+
+// successConfigText represents a fully populated, valid configuration.
+// It uses a mix of explicit names and type-derived names.
+const successConfigText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: test1
+  type: test-plugin
+  parameters:
+    threshold: 10
+- name: profileHandler
+  type: test-profile-handler
+- type: test-scorer
+  parameters:
+    blockSize: 32
+- name: testPicker
+  type: test-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: test1
+  - pluginRef: test-scorer
+    weight: 50
+  - pluginRef: testPicker
+featureGates:
+- dataLayer
+- flowControl
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
 `
 
 // successNoProfilesText represents a valid config with plugins but no profiles.
 // The loader should apply the system default profile automatically.
 const successNoProfilesText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -63,7 +97,7 @@ plugins:
 
 // successSchedulerConfigText represents a complex scheduler setup.
 const successSchedulerConfigText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: testScorer
@@ -96,7 +130,7 @@ featureGates:
 
 // successWithNoWeightText tests that scorers receive the default weight if unspecified.
 const successWithNoWeightText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -113,7 +147,7 @@ schedulingProfiles:
 
 // successWithNoProfileHandlersText tests that a default profile handler is injected.
 const successWithNoProfileHandlersText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -127,7 +161,7 @@ schedulingProfiles:
 // successPickerBeforeScorerText tests the regression case where a Picker appears before a Scorer (without weight) in
 // the plugin list.
 const successPickerBeforeScorerText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: single-profile-handler
@@ -142,7 +176,7 @@ schedulingProfiles:
 
 // successFlowControlConfigText tests that Flow Control configuration is correctly loaded.
 const successFlowControlConfigText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -159,7 +193,7 @@ flowControl:
 `
 
 const successflowControlConfigDisabledText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -175,7 +209,7 @@ flowControl:
 
 // successComplexFlowControlConfigText tests that Flow Control configuration with custom plugins is correctly loaded.
 const successComplexFlowControlConfigText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -199,7 +233,7 @@ flowControl:
 
 // successParserConfigText tests that configuration with parser plugin is correctly loaded.
 const successParserConfigText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -209,13 +243,14 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-parser:
-  pluginRef: openai-parser
+requestHandler:
+  parser:
+    pluginRef: openai-parser
 `
 
 // successWithNoParserConfigText tests that a default openaiParser is injected when no parser is configured.
 const successWithNoParserConfigText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -228,7 +263,7 @@ schedulingProfiles:
 
 // successParserConfigText tests that configuration with parser plugin with custom name is correctly loaded.
 const successParserWithNameConfigText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -239,15 +274,16 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-parser:
-  pluginRef: openaiParser
+requestHandler:
+  parser:
+    pluginRef: openaiParser
 `
 
 // --- Invalid Configurations (Syntax/Structure) ---
 
 // errorBadYamlText contains invalid YAML syntax.
 const errorBadYamlText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - testing 1 2 3
@@ -255,7 +291,7 @@ plugins:
 
 // errorBadPluginReferenceText is missing the required 'type' field.
 const errorBadPluginReferenceText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - parameters:
@@ -264,7 +300,7 @@ plugins:
 
 // errorBadPluginReferencePluginText references a plugin type that does not exist in the registry.
 const errorBadPluginReferencePluginText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: testx
@@ -275,7 +311,7 @@ plugins:
 
 // errorBadPluginJSONText has invalid JSON in parameters (string where int expected).
 const errorBadPluginJSONText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -293,7 +329,7 @@ schedulingProfiles:
 
 // errorUnknownFeatureGateText includes a feature gate not defined in the code.
 const errorUnknownFeatureGateText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -308,7 +344,7 @@ featureGates:
 
 // errorNoProfileNameText is missing the required profile name.
 const errorNoProfileNameText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -324,7 +360,7 @@ schedulingProfiles:
 
 // errorBadProfilePluginText is missing the required pluginRef.
 const errorBadProfilePluginText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -337,7 +373,7 @@ schedulingProfiles:
 
 // errorBadProfilePluginRefText references a plugin name that wasn't defined.
 const errorBadProfilePluginRefText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -348,20 +384,9 @@ schedulingProfiles:
   - pluginRef: non-existent-plugin
 `
 
-// errorUndefinedSaturationDetectorPluginText references a plugin that is not defined.
-const errorUndefinedSaturationDetectorPluginText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- name: test1
-  type: test-plugin
-saturationDetector:
-  pluginRef: unknown-plugin
-`
-
 // errorDuplicatePluginText defines the same plugin name twice.
 const errorDuplicatePluginText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -382,7 +407,7 @@ schedulingProfiles:
 
 // errorDuplicateProfileText defines the same profile name twice.
 const errorDuplicateProfileText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -406,7 +431,7 @@ schedulingProfiles:
 
 // errorTwoPickersText defines multiple pickers in a single profile (invalid).
 const errorTwoPickersText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -424,7 +449,7 @@ schedulingProfiles:
 
 // errorTwoProfileHandlersText defines multiple profile handlers (global singleton).
 const errorTwoProfileHandlersText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -441,7 +466,7 @@ schedulingProfiles:
 
 // errorNoProfileHandlersText fails to define any profile handler.
 const errorNoProfileHandlersText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -457,7 +482,7 @@ schedulingProfiles:
 
 // errorMultiProfilesUseSingleProfileHandlerText uses SingleProfileHandler with multiple profiles.
 const errorMultiProfilesUseSingleProfileHandlerText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -477,7 +502,7 @@ schedulingProfiles:
 // The loader should auto-populate default datalayer plugins.
 // successDataLayerAutoDefaultText has NO featureGates — datalayer is enabled by default.
 const successDataLayerAutoDefaultText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -486,27 +511,12 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-`
-
-// successDataLayerDisabledText opts out of the datalayer via the enableLegacyMetrics gate.
-const successDataLayerDisabledText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- name: maxScore
-  type: max-score-picker
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: maxScore
-featureGates:
-- enableLegacyMetrics
 `
 
 // successDataLayerNoSourcesText has an explicit empty dataLayer section with no sources.
 // The loader should additively inject the default metrics source because InjectDefaults is unset (default: true).
 const successDataLayerNoSourcesText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -536,7 +546,7 @@ dataLayer:
 // successDataLayerExplicitConfigText has the datalayer enabled with an explicit non-metrics source.
 // The loader should inject the default metrics source in addition to the user's source (additive).
 const successDataLayerExplicitConfigText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -560,7 +570,7 @@ featureGates:
 
 // errorBadSourceReferenceText has a bad DataSource plugin reference
 const errorBadSourceReferenceText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -581,7 +591,7 @@ featureGates:
 
 // errorBadExtractorReferenceText has a bad Extractor plugin reference
 const errorBadExtractorReferenceText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -605,7 +615,7 @@ featureGates:
 
 // errorFlowControlMissingPluginText references a policy that does not exist.
 const errorFlowControlMissingPluginText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -624,7 +634,7 @@ flowControl:
 
 // errorFlowControlWrongPluginTypeText references a plugin of the wrong type (Scorer instead of Policy).
 const errorFlowControlWrongPluginTypeText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -647,7 +657,7 @@ flowControl:
 
 // errorParserWrongPluginTypeText references a plugin of the wrong type (Scorer instead of Parser).
 const errorParserWrongPluginTypeText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -658,13 +668,14 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-parser:
-  pluginRef: maxScore # Wrong name
+requestHandler:
+  parser:
+    pluginRef: maxScore # Wrong name
 `
 
 // errorParserWrongPluginTypeName references a plugin of the wrong name.
 const errorParserWrongPluginNameText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -675,15 +686,16 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-parser:
-  pluginRef: wrongParser # Wrong names
+requestHandler:
+  parser:
+    pluginRef: wrongParser # Wrong names
 `
 
 // successFilterOrderConfigText defines filters and scorers in a specific order.
 // Used to verify that the full YAML→config→profile pipeline preserves
 // plugin declaration order.
 const successFilterOrderConfigText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: filter-A
@@ -711,4 +723,39 @@ schedulingProfiles:
   - pluginRef: scorer-Y
     weight: 20
   - pluginRef: maxScorePicker
+`
+
+// successDeprecatedTopLevelSaturationDetectorText tests that top-level saturationDetector is correctly loaded,
+// copied to nested location, and handled.
+const successDeprecatedTopLevelSaturationDetectorText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+featureGates:
+- flowControl
+saturationDetector:
+  pluginRef: utilization-detector
+`
+
+// successDeprecatedTopLevelParserText tests that top-level parser is correctly loaded,
+// copied to nested location, and handled.
+const successDeprecatedTopLevelParserText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- type: openai-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+parser:
+  pluginRef: openai-parser
 `

@@ -1,12 +1,13 @@
 # Sample EPP configuration for running without P/D
 # with small hash block size for simulation purposes
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 31250
+- type: prefix-cache-scorer
 - type: decode-filter
 - type: max-score-picker
 - type: single-profile-handler

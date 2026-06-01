@@ -26,11 +26,11 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -74,9 +74,9 @@ type AttributeKey struct {
 	Name string `json:"name"`
 }
 
-func RequestAttributeReporterPluginFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func RequestAttributeReporterPluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	pluginConfig := Config{}
-	if err := json.Unmarshal(rawParameters, &pluginConfig); err != nil {
+	if err := rawParameters.Decode(&pluginConfig); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
@@ -146,20 +146,20 @@ func (p *Plugin) WithName(name string) *Plugin {
 }
 
 // TypedName returns the typed name of the plugin.
-func (c *Plugin) TypedName() plugin.TypedName {
-	return c.typedName
+func (p *Plugin) TypedName() plugin.TypedName {
+	return p.typedName
 }
 
-func (c *Plugin) ResponseBody(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response,
+func (p *Plugin) ResponseBody(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response,
 	_ *datalayer.EndpointMetadata) {
 	// Convert the request usage Go struct into a protobuf struct so that it can be used as a CEL variable.
-	celData, err := c.getCelData(response)
+	celData, err := p.getCelData(response)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "Failed to convert usage into CEL data")
 		return
 	}
 
-	shouldCalculateValue, err := c.shouldCalculateValue(ctx, celData)
+	shouldCalculateValue, err := p.shouldCalculateValue(ctx, celData)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "Error in shouldCalculateValue")
 		return
@@ -169,7 +169,7 @@ func (c *Plugin) ResponseBody(ctx context.Context, request *scheduling.Inference
 		return
 	}
 
-	intVal, err := c.calculateValue(ctx, celData)
+	intVal, err := p.calculateValue(ctx, celData)
 	if err != nil {
 		return // Error already logged
 	}
@@ -188,7 +188,7 @@ func (c *Plugin) ResponseBody(ctx context.Context, request *scheduling.Inference
 		response.DynamicMetadata.Fields = make(map[string]*structpb.Value)
 	}
 
-	attributeKey := c.config.Attributes[0].Key
+	attributeKey := p.config.Attributes[0].Key
 	attributeValue := &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(intVal)}}
 
 	namespaceMap, ok := response.DynamicMetadata.Fields[attributeKey.Namespace]
@@ -201,7 +201,7 @@ func (c *Plugin) ResponseBody(ctx context.Context, request *scheduling.Inference
 	log.FromContext(ctx).V(logutil.VERBOSE).Info("Wrote dynamic metadata value to dynamic metadata", "value", intVal)
 }
 
-func (c *Plugin) getCelData(response *requestcontrol.Response) (any, error) {
+func (p *Plugin) getCelData(response *requestcontrol.Response) (any, error) {
 	usageBytes, err := json.Marshal(response.Usage)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request.Usage to JSON: %w", err)
@@ -213,22 +213,22 @@ func (c *Plugin) getCelData(response *requestcontrol.Response) (any, error) {
 	return usageStruct, nil
 }
 
-func (c *Plugin) shouldCalculateValue(ctx context.Context, celData any) (bool, error) {
-	if c.conditionProg != nil {
-		val, err := c.maybeExecuteProg(ctx, c.conditionProg, celData, "condition", c.config.Attributes[0].Condition)
+func (p *Plugin) shouldCalculateValue(ctx context.Context, celData any) (bool, error) {
+	if p.conditionProg != nil {
+		val, err := p.maybeExecuteProg(ctx, p.conditionProg, celData, "condition", p.config.Attributes[0].Condition)
 		if err != nil {
 			return false, err // Error already logged in maybeExecuteProg
 		}
 		if bVal, ok := val.(bool); !ok || !bVal {
-			log.FromContext(ctx).V(logutil.VERBOSE).Info("Condition not met", "condition", c.config.Attributes[0].Condition)
+			log.FromContext(ctx).V(logutil.VERBOSE).Info("Condition not met", "condition", p.config.Attributes[0].Condition)
 			return false, nil
 		}
 	}
 	return true, nil
 }
 
-func (c *Plugin) calculateValue(ctx context.Context, celData any) (int64, error) {
-	val, err := c.maybeExecuteProg(ctx, c.expressionProg, celData, "expression", c.config.Attributes[0].Expression)
+func (p *Plugin) calculateValue(ctx context.Context, celData any) (int64, error) {
+	val, err := p.maybeExecuteProg(ctx, p.expressionProg, celData, "expression", p.config.Attributes[0].Expression)
 	if err != nil {
 		return -1, err // Error already logged
 	}
@@ -238,7 +238,7 @@ func (c *Plugin) calculateValue(ctx context.Context, celData any) (int64, error)
 		// Try int64 as well
 		int64Val, ok := val.(int64)
 		if !ok {
-			log.FromContext(ctx).Error(errors.New("type conversion error"), "Expression result could not be converted to float64 or int64", "expression", c.config.Attributes[0].Expression, "result", val)
+			log.FromContext(ctx).Error(errors.New("type conversion error"), "Expression result could not be converted to float64 or int64", "expression", p.config.Attributes[0].Expression, "result", val)
 			return -1, nil
 		}
 		doubleVal = float64(int64Val)
@@ -246,7 +246,7 @@ func (c *Plugin) calculateValue(ctx context.Context, celData any) (int64, error)
 	return int64(doubleVal), nil
 }
 
-func (c *Plugin) maybeExecuteProg(ctx context.Context, prog cel.Program, celData any, exprType string, expression string) (any, error) {
+func (p *Plugin) maybeExecuteProg(ctx context.Context, prog cel.Program, celData any, exprType string, expression string) (any, error) {
 	val, _, err := prog.Eval(map[string]any{"usage": celData})
 	if err != nil {
 		log.FromContext(ctx).Error(err, "Failed to evaluate "+exprType, exprType, expression)

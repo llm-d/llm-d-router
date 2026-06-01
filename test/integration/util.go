@@ -44,10 +44,10 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	pb "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
+	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
@@ -269,7 +269,7 @@ func GenerateStreamedRequestSet(
 func GenerateStreamedGRPCRequestSet(
 	logger logr.Logger,
 	prompt string,
-	inferenceObjective string, // Set to non-empty to set x-gateway-inference-objective value
+	inferenceObjective string, // Set to non-empty to set x-llm-d-inference-objective value
 	filterMetadata []string,
 	methodName string,
 ) []*extProcPb.ProcessingRequest {

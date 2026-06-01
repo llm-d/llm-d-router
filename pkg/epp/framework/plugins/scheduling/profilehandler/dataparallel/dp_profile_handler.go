@@ -11,9 +11,9 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -29,13 +29,13 @@ type dataParallelProfileHandlerParameters struct {
 var _ scheduling.ProfileHandler = &ProfileHandler{}
 
 // ProfileHandlerFactory defines the factory function for the ProfileHandler
-func ProfileHandlerFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func ProfileHandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	log.FromContext(handle.Context()).Info("Deprecated: Use simple-profile-handler with Istio >= 1.28.1")
 	parameters := dataParallelProfileHandlerParameters{
 		PrimaryPort: 8000,
 	}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' profile handler - %w", DataParallelProfileHandlerType, err)
 		}
 	}
@@ -76,7 +76,7 @@ func (h *ProfileHandler) WithName(name string) *ProfileHandler {
 
 // Pick selects the SchedulingProfiles to run from the list of candidate profiles, while taking into consideration the request properties and the
 // previously executed cycles along with their results.
-func (h *ProfileHandler) Pick(ctx context.Context, _ *scheduling.CycleState, _ *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
+func (h *ProfileHandler) Pick(ctx context.Context, _ *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
 	if len(profiles) == len(profileResults) { // all profiles have been executed already in previous call
 		return map[string]scheduling.SchedulerProfile{}
@@ -96,7 +96,7 @@ func (h *ProfileHandler) Pick(ctx context.Context, _ *scheduling.CycleState, _ *
 // It may aggregate results, log test profile outputs, or apply custom logic. It specifies in the SchedulingResult the
 // key of the primary profile that should be used to get the request selected destination.
 // When a profile run fails, its result in the profileResults map is nil.
-func (h *ProfileHandler) ProcessResults(_ context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest,
+func (h *ProfileHandler) ProcessResults(_ context.Context, request *scheduling.InferenceRequest,
 	profileResults map[string]*scheduling.ProfileRunResult) (*scheduling.SchedulingResult, error) {
 	if len(profileResults) != 1 {
 		return nil, errors.New("data parallel profile handler is intended to be used with a single profile, failed to process multiple profiles")

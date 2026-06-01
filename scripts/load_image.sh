@@ -23,6 +23,6 @@ for IMAGE in $@; do
     # KIND's `kind load` uses `ctr import --all-platforms` internally, which
     # fails when only the target architecture's layers are locally cached
     # (e.g. after `docker pull --platform linux/amd64` of a multi-arch image).
-    echo "Loading $IMAGE"
+    echo "Loading $IMAGE to the ${CLUSTER_NAME} kind cluster"
     "${CONTAINER_RUNTIME}" save ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} ${SAVE_ARGS[@]+"${SAVE_ARGS[@]}"} "${IMAGE}" | kind --name "${CLUSTER_NAME}" load image-archive /dev/stdin
 done

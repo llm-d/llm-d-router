@@ -24,8 +24,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // indexer implements the indexerInterface interface.
@@ -151,7 +150,7 @@ func (i *indexer) reportOnce(ctx context.Context) {
 		avg = float64(totalEntries) / float64(numPods)
 	}
 
-	metrics.RecordPrefixCacheSize(int64(totalEntries))
+	recordPrefixCacheSize(int64(totalEntries))
 
 	log.FromContext(ctx).V(logutil.TRACE).Info("Prefix cache state",
 		"total entries", totalEntries,

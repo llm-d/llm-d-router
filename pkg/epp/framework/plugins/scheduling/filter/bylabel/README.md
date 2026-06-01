@@ -1,4 +1,4 @@
-# ByLabel Filter Plugins
+# Label-Based Filter Plugins
 
 **Interfaces**: `scheduling.Filter`
 
@@ -6,9 +6,47 @@ Label-based filters that retain or remove candidate pods based on Kubernetes lab
 
 ---
 
-## ByLabel
+## LabelSelectorFilter
+
+**Type:** `label-selector-filter`
+
+> [!NOTE]
+> The previous type name `by-label-selector` is deprecated but still accepted for backward compatibility.
+
+### What it does
+
+Retains only candidate pods that match a standard Kubernetes label selector. Supports both `matchLabels` (all key-value pairs must match, AND logic) and `matchExpressions` (operators: `In`, `NotIn`, `Exists`, `DoesNotExist`).
+
+### Inputs consumed
+
+- Pod Kubernetes labels (read from the candidate pod's metadata).
+
+### Configuration
+
+#### Parameters
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `matchLabels` | `map[string]string` | No | — | Map of `{key: value}` pairs. All pairs must match (AND logic). |
+| `matchExpressions` | `[]LabelSelectorRequirement` | No | — | List of label selector requirements. Each specifies a `key`, an `operator`, and optionally `values`. |
+
+#### Example
+```yaml
+plugins:
+  - type: label-selector-filter
+    parameters:
+      matchLabels:
+        inference-role: decode
+        hardware-type: H100
+```
+
+---
+
+## ByLabel (Deprecated)
 
 **Type:** `by-label`
+
+> [!WARNING]
+> The `by-label` filter is deprecated. Use `label-selector-filter` for generic label-based filtering, or the role-specific filters (`decode-filter`, `prefill-filter`, `encode-filter`) for role-based filtering.
 
 ### What it does
 
@@ -40,41 +78,6 @@ plugins:
 ### Limitations
 
 - Only exact string equality is checked — no wildcards, prefix matching, or regular expressions.
-
----
-
-## ByLabelSelector
-
-**Type:** `by-label-selector`
-
-### What it does
-
-Retains only candidate pods that match a Kubernetes label selector; all `matchLabels` key-value pairs must match (AND logic).
-
-### Inputs consumed
-
-- Pod Kubernetes labels (read from the candidate pod's metadata).
-
-### Configuration
-
-#### Parameters
-| Name | Type | Required | Default | Description |
-|------|------|----------|---------|-------------|
-| `matchLabels` | `map[string]string` | Yes | — | Map of `{key: value}` pairs. All pairs must match (AND logic). |
-
-#### Example
-```yaml
-plugins:
-  - type: by-label-selector
-    parameters:
-      matchLabels:
-        inference-role: decode
-        hardware-type: H100
-```
-
-### Limitations
-
-- Only `matchLabels` is supported; `matchExpressions` is not.
 
 ---
 

@@ -25,9 +25,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	schedulingtypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 func makePodMetric(name string, queueDepth int, kvUsage float64, updateTime time.Time) fwkdl.Endpoint {
@@ -46,7 +46,7 @@ func makeSchedulingEndpoint(
 	queueDepth int,
 	kvUsage float64,
 	updateTime time.Time,
-) schedulingtypes.Endpoint {
+) fwksched.Endpoint {
 	meta := &fwkdl.EndpointMetadata{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: "ns1"},
 	}
@@ -54,7 +54,7 @@ func makeSchedulingEndpoint(
 	metrics.WaitingQueueSize = queueDepth
 	metrics.KVCacheUsagePercent = kvUsage
 	metrics.UpdateTime = updateTime
-	return schedulingtypes.NewEndpoint(meta, metrics, nil)
+	return fwksched.NewEndpoint(meta, metrics, nil)
 }
 
 // TestUtilizationDetectorFactory evaluates instantiation properties and config parsing constraints.
@@ -118,7 +118,7 @@ func TestUtilizationDetectorFactory(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			plugin, err := UtilizationDetectorFactory("test-util-detector", tc.configJSON, fwkplugin.NewEppHandle(t.Context(), func() []types.NamespacedName { return nil }))
+			plugin, err := UtilizationDetectorFactory("test-util-detector", fwkplugin.StrictDecoder(tc.configJSON), fwkplugin.NewEppHandle(t.Context(), func() []types.NamespacedName { return nil }))
 			if tc.wantError {
 				require.Error(t, err, "Expected initialization to fail on invalid configuration")
 				require.Nil(t, plugin, "Plugin must be nil when initialization fails")
@@ -133,7 +133,7 @@ func TestUtilizationDetectorFactory(t *testing.T) {
 // TestDetector_TypedName provides structural assurance that initialization assigns proper types.
 func TestDetector_TypedName(t *testing.T) {
 	t.Parallel()
-	plugin, err := UtilizationDetectorFactory("test-plugin", []byte(`{}`), fwkplugin.NewEppHandle(
+	plugin, err := UtilizationDetectorFactory("test-plugin", fwkplugin.StrictDecoder([]byte(`{}`)), fwkplugin.NewEppHandle(
 		t.Context(), func() []types.NamespacedName { return nil }))
 	require.NoError(t, err, "Plugin initialization should succeed")
 	require.Equal(t, "test-plugin", plugin.TypedName().Name,
@@ -298,12 +298,12 @@ func TestDetector_Filter(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		endpoints []schedulingtypes.Endpoint
+		endpoints []fwksched.Endpoint
 		wantLen   int
 	}{
 		{
 			name: "All pass - under thresholds",
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeSchedulingEndpoint("pod1", 1, 0.1, baseTime),
 				makeSchedulingEndpoint("pod2", 4, 0.7, baseTime),
 			},
@@ -311,14 +311,14 @@ func TestDetector_Filter(t *testing.T) {
 		},
 		{
 			name: "Pass - at threshold but under burst",
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeSchedulingEndpoint("pod1", 5, 0.8, baseTime),
 			},
 			wantLen: 1,
 		},
 		{
 			name: "Pass - in headroom burst",
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				// Q=5.5 (< 6.0). KV=0.9 (< 0.96).
 				makeSchedulingEndpoint("pod1", 5, 0.9, baseTime),
 			},
@@ -326,7 +326,7 @@ func TestDetector_Filter(t *testing.T) {
 		},
 		{
 			name: "Filtered - exceeds queue burst",
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				// Pod1 (Over): Q=10/5=2.0.
 				makeSchedulingEndpoint("pod1", 7, 0.1, baseTime),
 				// Pod2 (OK): Q=1/5=0.2.
@@ -336,7 +336,7 @@ func TestDetector_Filter(t *testing.T) {
 		},
 		{
 			name: "Filtered - exceeds KV burst",
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				// Pod1 (Over): KV=0.97/0.9=1.07...
 				makeSchedulingEndpoint("pod1", 1, 0.97, baseTime),
 				// Pod2 (OK): KV=0.5/0.9=0.55...
@@ -346,7 +346,7 @@ func TestDetector_Filter(t *testing.T) {
 		},
 		{
 			name: "Pass - all stale (Fail open at pool level)",
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeSchedulingEndpoint("pod1", 1, 0.1, baseTime.Add(-200*time.Millisecond)),
 				makeSchedulingEndpoint("pod2", 1, 0.1, baseTime.Add(-200*time.Millisecond)),
 			},
@@ -354,7 +354,7 @@ func TestDetector_Filter(t *testing.T) {
 		},
 		{
 			name: "Pass - all saturated (Fail open at pool level)",
-			endpoints: []schedulingtypes.Endpoint{
+			endpoints: []fwksched.Endpoint{
 				makeSchedulingEndpoint("pod1", 10, 0.1, baseTime),
 				makeSchedulingEndpoint("pod2", 1, 0.99, baseTime),
 			},
@@ -365,7 +365,7 @@ func TestDetector_Filter(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			detector := NewDetector("test-detector", *config, logr.Discard())
-			got := detector.Filter(context.Background(), nil, nil, tc.endpoints)
+			got := detector.Filter(context.Background(), nil, tc.endpoints)
 			require.Len(t, got, tc.wantLen)
 		})
 	}

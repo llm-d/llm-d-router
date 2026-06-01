@@ -28,8 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 // BindNotificationSource registers a watcher/reconciler for the source's GVK.
@@ -115,7 +115,7 @@ func (rn *notificationReconciler) dispatch(ctx context.Context, log logr.Logger,
 	}
 
 	for _, ext := range rn.extractors {
-		if err := ext.ExtractNotification(ctx, *processed); err != nil {
+		if err := ext.Extract(ctx, *processed); err != nil {
 			log.Error(err, "extractor failed", "extractor", ext.TypedName())
 		}
 	}

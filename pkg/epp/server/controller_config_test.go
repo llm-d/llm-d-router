@@ -22,7 +22,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery/fake"
 	k8stesting "k8s.io/client-go/testing"
-	"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
+
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
 func TestNewControllerConfig(t *testing.T) {

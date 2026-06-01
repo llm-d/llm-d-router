@@ -1,0 +1,17 @@
+{{- define "inference-extension.inferenceobjective-resource" -}}
+{{- range .Values.router.inferenceObjectives }}
+---
+apiVersion: llm-d.ai/v1alpha2
+kind: InferenceObjective
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" $ | nindent 4 }}
+spec:
+  priority: {{ .priority }}
+  poolRef:
+    group: "inference.networking.k8s.io"
+    name: {{ $.Release.Name }}
+{{- end }}
+{{- end }}

@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/test/utils"
 )
 
 const DefaultTestPodPort = "8000"
@@ -55,7 +55,7 @@ func newMockSchedulerProfile() scheduling.SchedulerProfile {
 
 type mockSchedulerProfile struct{}
 
-func (p *mockSchedulerProfile) Run(_ context.Context, _ *scheduling.InferenceRequest, _ *scheduling.CycleState, _ []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
+func (p *mockSchedulerProfile) Run(_ context.Context, _ *scheduling.InferenceRequest, _ []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
 	return &scheduling.ProfileRunResult{}, nil
 }
 
@@ -123,7 +123,7 @@ func TestProfileHandlerFactory(t *testing.T) {
 				rawParams = json.RawMessage(tt.jsonParams)
 			}
 			handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
-			plugin, err := ProfileHandlerFactory(tt.pluginName, rawParams, handle)
+			plugin, err := ProfileHandlerFactory(tt.pluginName, plugin.StrictDecoder(rawParams), handle)
 
 			if tt.expectErr {
 				assert.Error(t, err)
@@ -160,7 +160,7 @@ func TestProfileHandlerFactoryInvalidJSON(t *testing.T) {
 
 			rawParams := json.RawMessage(tt.jsonParams)
 			handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
-			plugin, err := ProfileHandlerFactory("test", rawParams, handle)
+			plugin, err := ProfileHandlerFactory("test", plugin.StrictDecoder(rawParams), handle)
 
 			assert.Error(t, err)
 			assert.Nil(t, plugin)
@@ -225,7 +225,7 @@ func Test_ProfileHandler_Pick(t *testing.T) {
 			handler := NewProfileHandler(8000).WithName("test-handler")
 			ctx := context.Background()
 
-			result := handler.Pick(ctx, &scheduling.CycleState{}, &scheduling.InferenceRequest{}, tt.profiles, tt.profileResults)
+			result := handler.Pick(ctx, &scheduling.InferenceRequest{}, tt.profiles, tt.profileResults)
 
 			if tt.expectEmptyResult {
 				assert.Empty(t, result, tt.description)
@@ -313,7 +313,7 @@ func Test_ProfileHandler_ProcessResults(t *testing.T) {
 			handler := NewProfileHandler(tt.primaryPort).WithName("test-handler")
 			headers := make(map[string]string)
 			req := &scheduling.InferenceRequest{Headers: headers}
-			result, err := handler.ProcessResults(context.Background(), &scheduling.CycleState{}, req, tt.profileResults)
+			result, err := handler.ProcessResults(context.Background(), req, tt.profileResults)
 
 			if tt.expectError {
 				assert.Error(t, err)

@@ -1,0 +1,41 @@
+{{- define "inference-extension.inferencepool" -}}
+apiVersion: "inference.networking.k8s.io/v1"
+kind: InferencePool
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+spec:
+  targetPorts:
+  {{- range .Values.router.modelServers.targetPorts }}
+  - number: {{ .number }}
+  {{- end }}
+  {{- if .Values.router.modelServers.protocol }}
+  {{- if eq .Values.router.modelServers.protocol "grpc" }}
+  appProtocol: "kubernetes.io/h2c"
+  {{- else if eq .Values.router.modelServers.protocol "http" }}
+  appProtocol: "http"
+  {{- end }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- if .Values.router.modelServers.matchLabels }}
+      {{- range $key, $value := .Values.router.modelServers.matchLabels }}
+      {{ $key }}: {{ quote $value }}
+      {{- end }}
+      {{- end }}
+  endpointPickerRef:
+    name: {{ include "llm-d-router.name" . }}
+    port:
+      number: {{ .Values.router.epp.extProcPort | default 9002 }}
+    failureMode: {{ .Values.router.inferencePool.failureMode | default "FailOpen" }}
+{{- end }}
+
+{{- define "inference-extension.inferencepool-resource" -}}
+{{- if ne .Values.router.inferencePool.create false }}
+{{- include "llm-d-router.validations.gateway.common" . }}
+{{- include "inference-extension.inferencepool" . }}
+{{- include "inference-extension.inferenceobjective-resource" . }}
+{{- end }}
+{{- end }}

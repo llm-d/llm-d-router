@@ -19,7 +19,7 @@ package flowcontrol
 import (
 	"time"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // FlowControlRequest is the contract for an incoming request submitted to the `controller.FlowController`. It

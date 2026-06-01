@@ -19,6 +19,8 @@ package proxy
 import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
+
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"k8s.io/utils/set"
 )
 
@@ -28,7 +30,7 @@ var _ = Describe("AllowlistValidator", func() {
 
 		BeforeEach(func() {
 			var err error
-			validator, err = NewAllowlistValidator(false, DefaultPoolGroup, "test-namespace", "test-pool")
+			validator, err = NewAllowlistValidator(false, routing.InferencePoolAPIGroup, "test-namespace", "test-pool")
 			Expect(err).ToNot(HaveOccurred())
 		})
 
@@ -70,23 +72,14 @@ var _ = Describe("AllowlistValidator", func() {
 
 		It("should parse host:port correctly", func() {
 			// Test host:port format parsing
-			normalized := validator.normalizeHostPort("10.244.1.100:8000")
-			Expect(normalized).To(Equal("10.244.1.100"))
-
-			normalized = validator.normalizeHostPort("valid-pod:8000")
-			Expect(normalized).To(Equal("valid-pod"))
-
+			Expect(extractHost("10.244.1.100:8000")).To(Equal("10.244.1.100"))
+			Expect(extractHost("valid-pod:8000")).To(Equal("valid-pod"))
 			// Just hostname (no port)
-			normalized = validator.normalizeHostPort("valid-pod")
-			Expect(normalized).To(Equal("valid-pod"))
-
-			// IPv6 addresses (net.SplitHostPort handles these correctly)
-			normalized = validator.normalizeHostPort("[::1]:8000")
-			Expect(normalized).To(Equal("::1"))
-
+			Expect(extractHost("valid-pod")).To(Equal("valid-pod"))
+			// IPv6 addresses (net.SplitHostPort handles these correctly
+			Expect(extractHost("[::1]:8000")).To(Equal("::1"))
 			// IPv6 without port
-			normalized = validator.normalizeHostPort("::1")
-			Expect(normalized).To(Equal("::1"))
+			Expect(extractHost("::1")).To(Equal("::1"))
 		})
 	})
 })

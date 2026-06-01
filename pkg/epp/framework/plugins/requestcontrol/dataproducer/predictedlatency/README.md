@@ -6,11 +6,11 @@ Trains XGBoost models via a sidecar and generates per-endpoint TTFT/TPOT predict
 
 ## Interfaces
 
-PrepareDataPlugin, PreRequest, ResponseHeader, ResponseBody, Producer, Consumer
+DataProducer, PreRequest, ResponseHeader, ResponseBody, ProducerPlugin, ConsumerPlugin
 
 ## Responsibilities
 
-- Bulk predictions during `PrepareRequestData` (writes `LatencyPredictionInfo` to endpoint attributes)
+- Bulk predictions during `Produce` (writes `LatencyPredictionInfo` to endpoint attributes)
 - SLO headroom calculation per endpoint: `headroom = SLO - predicted_latency` (used by downstream scorer and admission plugins)
 - TTFT training data collection on first token / EOS
 - TPOT training data collection at EOS (streaming mode)
@@ -29,7 +29,7 @@ PrepareDataPlugin, PreRequest, ResponseHeader, ResponseBody, Producer, Consumer
 | `contextTTL` | `5m` | TTL for per-request context in the cache |
 | `streamingMode` | `false` | Record TTFT on first chunk (true) vs EOS (false) |
 | `endpointRoleLabel` | `""` | Label key for disaggregated serving roles |
-| `predictInPrepareData` | `true` | Enable/disable bulk predictions. Set false for training-only mode |
+| `predictInProduce` | `true` | Enable/disable bulk predictions. Set false for training-only mode |
 
 ## Default Behavior (`streamingMode: false`)
 
@@ -57,7 +57,7 @@ ensuring TPOT doesn't affect scoring, admission, or tier classification for pref
 |------|---------|
 | `plugin.go` | Struct, factory, config, per-request context, queue helpers |
 | `requestcontrol_hooks.go` | PreRequest, ResponseHeader, ResponseBody hooks |
-| `preparedata_hooks.go` | PrepareRequestData, Produces, Consumes |
+| `dataproducer_hooks.go` | Produce, Produces, Consumes |
 | `training.go` | buildTrainingEntry, buildPredictionRequest, bulkPredict |
 | `prediction.go` | generatePredictions, validatePrediction, TPOT neutralization |
 | `decode_token_sampler.go` | Poisson-distributed token sampling for TPOT |

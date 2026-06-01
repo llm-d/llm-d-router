@@ -11,11 +11,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 const (
@@ -41,13 +41,13 @@ type disaggHeadersHandlerParameters struct {
 // HeadersHandlerFactory defines the factory function for the HeadersHandler.
 //
 // Deprecated: Use HandlerFactory instead, disagg-profile-handler now implements PreRequest natively.
-func HeadersHandlerFactory(name string, rawParameters json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func HeadersHandlerFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	parameters := disaggHeadersHandlerParameters{
 		PrefillProfile: defaultPrefillProfile,
 		EncodeProfile:  defaultEncodeProfile,
 	}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' pre-request plugin - %w", DisaggHeadersHandlerType, err)
 		}
 	}

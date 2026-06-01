@@ -26,8 +26,8 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/spf13/pflag"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/http"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
 const MetricsDataSourceType = "metrics-data-source"
@@ -53,27 +53,27 @@ type metricsDatasourceParams struct {
 // NewHTTPMetricsDataSource constructs a MetricsDataSource with the given scheme and path.
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
-func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource, error) {
+func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
 	return http.NewHTTPDataSource(scheme, path, defaultMetricsInsecureSkipVerify,
-		MetricsDataSourceType, name, parseMetrics, PrometheusMetricType)
+		MetricsDataSourceType, name, parseMetrics)
 }
 
 // MetricsDataSourceFactory is a factory function used to instantiate data layer's
 // metrics data source plugins specified in a configuration.
-func MetricsDataSourceFactory(name string, parameters json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	cfg, err := defaultDataSourceConfigParams()
 	if err != nil {
 		return nil, err
 	}
 
 	if parameters != nil { // overlay the defaults with configured values
-		if err := json.Unmarshal(parameters, cfg); err != nil {
+		if err := parameters.Decode(cfg); err != nil {
 			return nil, err
 		}
 	}
 
-	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify, MetricsDataSourceType,
-		name, parseMetrics, PrometheusMetricType)
+	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify,
+		MetricsDataSourceType, name, parseMetrics)
 }
 
 // These flags are registered in options.go (server package) and marked as deprecated there.
@@ -147,7 +147,7 @@ func fromBoolFlag(name string) (bool, bool, error) {
 	return b, true, nil
 }
 
-func parseMetrics(data io.Reader) (any, error) {
+func parseMetrics(data io.Reader) (PrometheusMetricMap, error) {
 	parser := expfmt.NewTextParser(model.LegacyValidation)
 	return parser.TextToMetricFamilies(data)
 }

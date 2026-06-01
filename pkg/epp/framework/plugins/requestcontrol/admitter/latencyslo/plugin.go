@@ -25,25 +25,28 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	schedulingtypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
 	LatencyAdmissionPluginType = "latency-slo-admitter"
 
-	ttftSLOHeaderKey = "x-slo-ttft-ms"
-	tpotSLOHeaderKey = "x-slo-tpot-ms"
+	ttftSLOHeaderKey = metadata.TTFTSLOHeaderKey
+	tpotSLOHeaderKey = metadata.TPOTSLOHeaderKey
 )
 
 // compile-time validation
 var _ requestcontrol.Admitter = &LatencyAdmission{}
 
 // LatencyAdmissionConfig holds configuration for the latency admission plugin.
-type LatencyAdmissionConfig struct{}
+type LatencyAdmissionConfig struct {
+	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
+}
 
 var LatencyAdmissionDefaultConfig = LatencyAdmissionConfig{}
 
@@ -51,15 +54,16 @@ var LatencyAdmissionDefaultConfig = LatencyAdmissionConfig{}
 // It reads latency predictions from endpoint attributes (published by the data provider)
 // and makes an independent admission decision.
 type LatencyAdmission struct {
-	typedName fwkplugin.TypedName
-	config    LatencyAdmissionConfig
+	typedName                    fwkplugin.TypedName
+	config                       LatencyAdmissionConfig
+	latencyPredictionInfoDataKey fwkplugin.DataKey
 }
 
 // LatencyAdmissionFactory creates a new LatencyAdmission plugin instance.
-func LatencyAdmissionFactory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func LatencyAdmissionFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	config := LatencyAdmissionDefaultConfig
-	if len(rawParameters) > 0 {
-		if err := json.Unmarshal(rawParameters, &config); err != nil {
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal config for LatencyAdmission: %w", err)
 		}
 	}
@@ -69,8 +73,9 @@ func LatencyAdmissionFactory(name string, rawParameters json.RawMessage, _ fwkpl
 // NewLatencyAdmission creates a new LatencyAdmission plugin.
 func NewLatencyAdmission(config LatencyAdmissionConfig) *LatencyAdmission {
 	return &LatencyAdmission{
-		typedName: fwkplugin.TypedName{Type: LatencyAdmissionPluginType, Name: LatencyAdmissionPluginType},
-		config:    config,
+		typedName:                    fwkplugin.TypedName{Type: LatencyAdmissionPluginType, Name: LatencyAdmissionPluginType},
+		config:                       config,
+		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 	}
 }
 
@@ -84,19 +89,19 @@ func (p *LatencyAdmission) TypedName() fwkplugin.TypedName {
 }
 
 // Consumes declares that this plugin reads latency prediction data from endpoints.
-func (p *LatencyAdmission) Consumes() map[string]any {
-	return map[string]any{
-		attrlatency.LatencyPredictionInfoKey: attrlatency.LatencyPredictionInfo{},
+func (p *LatencyAdmission) Consumes() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{
+		p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
 	}
 }
 
-// AdmitRequest rejects sheddable requests if no endpoint can serve them within SLO.
+// Admit rejects sheddable requests if no endpoint can serve them within SLO.
 //
 // Reject only when ALL of:
 //   - No endpoint has a valid prediction (all violate SLO)
 //   - No endpoint is idle (all have running requests)
 //   - No cold pod exists (predictions are reliable)
-func (p *LatencyAdmission) AdmitRequest(ctx context.Context, request *schedulingtypes.InferenceRequest, endpoints []schedulingtypes.Endpoint) error {
+func (p *LatencyAdmission) Admit(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	logger := log.FromContext(ctx)
 	if request == nil {
 		return nil
@@ -108,8 +113,10 @@ func (p *LatencyAdmission) AdmitRequest(ctx context.Context, request *scheduling
 	}
 
 	// Check if SLOs are set — if not, we can't determine validity, so admit.
-	ttftSLO := parseFloatHeaderValue(request.Headers[ttftSLOHeaderKey])
-	tpotSLO := parseFloatHeaderValue(request.Headers[tpotSLOHeaderKey])
+	ttftSLOHeader, _ := metadata.GetLowerCaseHeaderValue(request.Headers, ttftSLOHeaderKey)
+	tpotSLOHeader, _ := metadata.GetLowerCaseHeaderValue(request.Headers, tpotSLOHeaderKey)
+	ttftSLO := parseFloatHeaderValue(ttftSLOHeader)
+	tpotSLO := parseFloatHeaderValue(tpotSLOHeader)
 	hasSLO := ttftSLO > 0 || tpotSLO > 0
 	if !hasSLO {
 		return nil
@@ -134,7 +141,7 @@ func (p *LatencyAdmission) AdmitRequest(ctx context.Context, request *scheduling
 		}
 
 		// Valid prediction: both TTFT and TPOT within SLO.
-		if latencyInfoRaw, ok := endpoint.Get(attrlatency.LatencyPredictionInfoKey); ok {
+		if latencyInfoRaw, ok := endpoint.Get(p.latencyPredictionInfoDataKey.String()); ok {
 			hasPredictions = true
 			latencyInfo := latencyInfoRaw.(*attrlatency.LatencyPredictionInfo)
 			if latencyInfo.IsValid() {

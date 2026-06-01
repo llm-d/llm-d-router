@@ -19,39 +19,40 @@ package loader
 import (
 	"context"
 	"encoding/json"
-	"reflect"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	configapi "github.com/llm-d/llm-d-inference-scheduler/apix/config/v1alpha1"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/config"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/registry"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkflowcontrol "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	flowcontrolmocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	extractormetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/metrics"
-	sourcemetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/openai"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/picker/maxscore"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/profilehandler/single"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/scorer/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
-	utils "github.com/llm-d/llm-d-inference-scheduler/test/utils/igw"
+	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/config"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 // Define constants for test plugins.
@@ -72,7 +73,6 @@ func TestLoadRawConfiguration(t *testing.T) {
 
 	// Register known feature gates for validation.
 	RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	RegisterFeatureGate(datalayer.EnableLegacyMetricsFeatureGate)
 	RegisterFeatureGate(flowcontrol.FeatureGate)
 
 	queueScorerWeight := 2.0
@@ -84,10 +84,48 @@ func TestLoadRawConfiguration(t *testing.T) {
 		configText string
 		want       *configapi.EndpointPickerConfig
 		wantErr    bool
+		deprecated bool
 	}{
 		{
 			name:       "Success - Full Configuration",
 			configText: successConfigText,
+			want: &configapi.EndpointPickerConfig{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "EndpointPickerConfig",
+					APIVersion: configapi.GroupVersion.String(),
+				},
+				Plugins: []configapi.PluginSpec{
+					{Name: "test1", Type: testPluginType, Parameters: json.RawMessage(`{"threshold":10}`)},
+					{Name: "profileHandler", Type: testProfileHandler},
+					{Name: testScorerType, Type: testScorerType, Parameters: json.RawMessage(`{"blockSize":32}`)},
+					{Name: "testPicker", Type: testPickerType},
+				},
+				SchedulingProfiles: []configapi.SchedulingProfile{
+					{
+						Name: "default",
+						Plugins: []configapi.SchedulingPlugin{
+							{PluginRef: "test1"},
+							{PluginRef: testScorerType, Weight: ptr.To(50.0)},
+							{PluginRef: "testPicker"},
+						},
+					},
+				},
+				FeatureGates: configapi.FeatureGates{
+					datalayer.ExperimentalDatalayerFeatureGate,
+					flowcontrol.FeatureGate,
+				},
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "utilization-detector",
+					},
+				},
+			},
+			wantErr:    false,
+			deprecated: false,
+		},
+		{
+			name:       "Success - using deprecated Groupname",
+			configText: successDeprecatedText,
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "EndpointPickerConfig",
@@ -113,11 +151,14 @@ func TestLoadRawConfiguration(t *testing.T) {
 					datalayer.ExperimentalDatalayerFeatureGate,
 					flowcontrol.FeatureGate,
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "utilization-detector",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "utilization-detector",
+					},
 				},
 			},
-			wantErr: false,
+			wantErr:    false,
+			deprecated: true,
 		},
 		{
 			name:       "Success - No Profiles",
@@ -125,21 +166,22 @@ func TestLoadRawConfiguration(t *testing.T) {
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "EndpointPickerConfig",
-					APIVersion: "inference.networking.x-k8s.io/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 				},
 				Plugins: []configapi.PluginSpec{
 					{Name: "test1", Type: testPluginType, Parameters: json.RawMessage(`{"threshold":10}`)},
 				},
 				FeatureGates: configapi.FeatureGates{},
 			},
-			wantErr: false,
+			wantErr:    false,
+			deprecated: false,
 		},
 		{
 			name:       "Success - Default configuration",
 			configText: "",
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: "inference.networking.x-k8s.io/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 					Kind:       "EndpointPickerConfig",
 				},
 				FeatureGates: configapi.FeatureGates{}, // Empty means datalayer enabled (default behavior)
@@ -195,24 +237,95 @@ func TestLoadRawConfiguration(t *testing.T) {
 					},
 				},
 			},
-			wantErr: false,
+			wantErr:    false,
+			deprecated: false,
+		},
+		{
+			name:       "Success - Deprecated Top-level SaturationDetector",
+			configText: successDeprecatedTopLevelSaturationDetectorText,
+			want: &configapi.EndpointPickerConfig{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "EndpointPickerConfig",
+					APIVersion: configapi.GroupVersion.String(),
+				},
+				Plugins: []configapi.PluginSpec{
+					{Name: "maxScore", Type: "max-score-picker"},
+				},
+				SchedulingProfiles: []configapi.SchedulingProfile{
+					{
+						Name: "default",
+						Plugins: []configapi.SchedulingPlugin{
+							{PluginRef: "maxScore"},
+						},
+					},
+				},
+				FeatureGates: configapi.FeatureGates{
+					flowcontrol.FeatureGate,
+				},
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "utilization-detector",
+					},
+				},
+				SaturationDetector: &configapi.SaturationDetectorConfig{
+					PluginRef: "utilization-detector",
+				},
+			},
+			wantErr:    false,
+			deprecated: true,
+		},
+		{
+			name:       "Success - Deprecated Top-level Parser",
+			configText: successDeprecatedTopLevelParserText,
+			want: &configapi.EndpointPickerConfig{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "EndpointPickerConfig",
+					APIVersion: configapi.GroupVersion.String(),
+				},
+				Plugins: []configapi.PluginSpec{
+					{Name: "maxScore", Type: "max-score-picker"},
+					{Name: "openai-parser", Type: "openai-parser"},
+				},
+				SchedulingProfiles: []configapi.SchedulingProfile{
+					{
+						Name: "default",
+						Plugins: []configapi.SchedulingPlugin{
+							{PluginRef: "maxScore"},
+						},
+					},
+				},
+				FeatureGates: configapi.FeatureGates{},
+				RequestHandler: &configapi.RequestHandlerConfig{
+					Parser: &configapi.ParserConfig{
+						PluginRef: "openai-parser",
+					},
+				},
+				Parser: &configapi.ParserConfig{
+					PluginRef: "openai-parser",
+				},
+			},
+			wantErr:    false,
+			deprecated: true,
 		},
 		{
 			name:       "Error - Invalid YAML",
 			configText: errorBadYamlText,
 			wantErr:    true,
+			deprecated: false,
 		},
 		{
 			name:       "Error - Unknown Feature Gate",
 			configText: errorUnknownFeatureGateText,
 			wantErr:    true,
+			deprecated: false,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			logger := logging.NewTestLogger()
+			writer := &strings.Builder{}
+			logger := logging.NewTestLoggerWithWriter(writer)
 
 			got, _, err := LoadRawConfig([]byte(tc.configText), logger)
 
@@ -221,8 +334,14 @@ func TestLoadRawConfiguration(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "Expected LoadRawConfig to succeed")
-			diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(configapi.EndpointPickerConfig{}, "TypeMeta"))
+			diff := cmp.Diff(tc.want, got)
 			require.Empty(t, diff, "Config mismatch (-want +got):\n%s", diff)
+
+			if strings.Contains(writer.String(), "deprecated") {
+				require.True(t, tc.deprecated, "Deprecated configuration wasn't marked as deprecated")
+			} else {
+				require.False(t, tc.deprecated, "Valid configuration was marked as deprecated")
+			}
 		})
 	}
 }
@@ -234,7 +353,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 	registerTestPlugins(t)
 
 	RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	RegisterFeatureGate(datalayer.EnableLegacyMetricsFeatureGate)
 	RegisterFeatureGate(flowcontrol.FeatureGate)
 
 	tests := []struct {
@@ -411,6 +529,25 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 
+		{
+			name:       "Success - Deprecated Top-level SaturationDetector",
+			configText: successDeprecatedTopLevelSaturationDetectorText,
+			wantErr:    false,
+			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, cfg.SaturationDetector, "SaturationDetector should be loaded")
+				require.Equal(t, "utilization-detector", cfg.SaturationDetector.TypedName().Name)
+			},
+		},
+		{
+			name:       "Success - Deprecated Top-level Parser",
+			configText: successDeprecatedTopLevelParserText,
+			wantErr:    false,
+			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, cfg.ParserConfig, "ParserConfig should be loaded")
+				require.Equal(t, "openai-parser", cfg.ParserConfig.Parser.TypedName().Name)
+			},
+		},
+
 		// --- Instantiation Errors ---
 		{
 			name:       "Error (Instantiation) - Missing Type Field",
@@ -494,16 +631,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 		{
-			name:       "Success (DataLayer) - Legacy metrics via enableLegacyMetrics gate",
-			configText: successDataLayerDisabledText,
-			wantErr:    false,
-			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.Nil(t, rawCfg.DataLayer, "Data section should NOT be injected when datalayer is disabled")
-				require.Nil(t, handle.Plugin(sourcemetrics.MetricsDataSourceType), "MetricsDataSource should not be instantiated")
-				require.Nil(t, handle.Plugin(extractormetrics.MetricsExtractorType), "MetricsExtractor should not be instantiated")
-			},
-		},
-		{
 			name:       "Success (DataLayer) - Empty dataLayer section injects defaults (additive)",
 			configText: successDataLayerNoSourcesText,
 			wantErr:    false,
@@ -576,11 +703,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			configText: errorParserWrongPluginNameText,
 			wantErr:    true,
 		},
-		{
-			name:       "Error - Undefined Saturation Detector Plugin",
-			configText: errorUndefinedSaturationDetectorPluginText,
-			wantErr:    true,
-		},
 	}
 
 	for _, tc := range tests {
@@ -598,7 +720,7 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			}
 
 			// 2. Instantiate & Configure
-			handle := utils.NewTestHandle(context.Background())
+			handle := igwtestutils.NewTestHandle(context.Background())
 			cfg, err := InstantiateAndConfigure(rawConfig, handle, logger)
 
 			if tc.wantErr {
@@ -618,7 +740,7 @@ func TestInstantiateAndConfigure(t *testing.T) {
 // logs a warning but does not return an error.
 func TestBuildDataLayerConfigEmptySourcesWarning(t *testing.T) {
 	t.Parallel()
-	handle := utils.NewTestHandle(context.Background())
+	handle := igwtestutils.NewTestHandle(context.Background())
 	cfg, err := buildDataLayerConfig(
 		&configapi.DataLayerConfig{Sources: []configapi.DataLayerSource{}},
 		handle,
@@ -649,13 +771,13 @@ func (m *mockPlugin) TypedName() fwkplugin.TypedName { return m.t }
 type mockScorer struct{ mockPlugin }
 
 // compile-time type assertion
-var _ framework.Scorer = &mockScorer{}
+var _ fwksched.Scorer = &mockScorer{}
 
-func (m *mockScorer) Category() framework.ScorerCategory {
-	return framework.Distribution
+func (m *mockScorer) Category() fwksched.ScorerCategory {
+	return fwksched.Distribution
 }
 
-func (m *mockScorer) Score(context.Context, *framework.CycleState, *framework.InferenceRequest, []framework.Endpoint) map[framework.Endpoint]float64 {
+func (m *mockScorer) Score(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	return nil
 }
 
@@ -663,9 +785,9 @@ func (m *mockScorer) Score(context.Context, *framework.CycleState, *framework.In
 type mockPicker struct{ mockPlugin }
 
 // compile-time type assertion
-var _ framework.Picker = &mockPicker{}
+var _ fwksched.Picker = &mockPicker{}
 
-func (m *mockPicker) Pick(context.Context, *framework.CycleState, []*framework.ScoredEndpoint) *framework.ProfileRunResult {
+func (m *mockPicker) Pick(context.Context, []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
 	return nil
 }
 
@@ -673,15 +795,15 @@ func (m *mockPicker) Pick(context.Context, *framework.CycleState, []*framework.S
 type mockHandler struct{ mockPlugin }
 
 // compile-time type assertion
-var _ framework.ProfileHandler = &mockHandler{}
+var _ fwksched.ProfileHandler = &mockHandler{}
 
-func (m *mockHandler) Pick(context.Context, *framework.CycleState, *framework.InferenceRequest, map[string]framework.SchedulerProfile,
-	map[string]*framework.ProfileRunResult) map[string]framework.SchedulerProfile {
+func (m *mockHandler) Pick(context.Context, *fwksched.InferenceRequest, map[string]fwksched.SchedulerProfile,
+	map[string]*fwksched.ProfileRunResult) map[string]fwksched.SchedulerProfile {
 	return nil
 }
-func (m *mockHandler) ProcessResults(context.Context, *framework.CycleState, *framework.InferenceRequest,
-	map[string]*framework.ProfileRunResult) (*framework.SchedulingResult, error) {
-	return nil, nil
+func (m *mockHandler) ProcessResults(context.Context, *fwksched.InferenceRequest,
+	map[string]*fwksched.ProfileRunResult) (*fwksched.SchedulingResult, error) {
+	return nil, errors.New("sentinel error for mock handler")
 }
 
 // Mock Source
@@ -691,17 +813,13 @@ type mockSource struct{ mockPlugin }
 type mockSaturationDetector struct{ mockPlugin }
 
 // compile-time type assertion
-var _ fwkflowcontrol.SaturationDetector = &mockSaturationDetector{}
+var _ fwkfc.SaturationDetector = &mockSaturationDetector{}
 
 func (m *mockSaturationDetector) Saturation(ctx context.Context, endpoints []fwkdl.Endpoint) float64 {
 	return 0.5
 }
 
-func (m *mockSource) AddExtractor(_ fwkdl.Extractor) error {
-	return nil
-}
-
-func (m *mockSource) Collect(ctx context.Context, ep fwkdl.Endpoint) error {
+func (m *mockSource) Collect(_ context.Context, _ fwkdl.Endpoint) error {
 	return nil
 }
 
@@ -709,22 +827,10 @@ func (m *mockSource) Extractors() []string {
 	return []string{}
 }
 
-func (m *mockSource) OutputType() reflect.Type {
-	return fwkdl.NotificationEventType
-}
-
-func (m *mockSource) ExtractorType() reflect.Type {
-	return fwkdl.ExtractorType
-}
-
-// Mock Extractor
+// Mock Extractor: satisfies Extractor[NotificationEvent] for loader tests.
 type mockExtractor struct{ mockPlugin }
 
-func (m *mockExtractor) ExpectedInputType() reflect.Type {
-	return reflect.TypeFor[string]()
-}
-
-func (m *mockExtractor) Extract(ctx context.Context, data any, ep fwkdl.Endpoint) error {
+func (m *mockExtractor) Extract(_ context.Context, _ fwkdl.NotificationEvent) error {
 	return nil
 }
 
@@ -737,7 +843,7 @@ func registerTestPlugins(t *testing.T) {
 	}
 
 	mockFactory := func(tType string) fwkplugin.FactoryFunc {
-		return func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 			return &mockPlugin{t: fwkplugin.TypedName{Name: name, Type: tType}}, nil
 		}
 	}
@@ -745,46 +851,46 @@ func registerTestPlugins(t *testing.T) {
 	// Register standard test mocks.
 	register(testPluginType, mockFactory(testPluginType))
 
-	fwkplugin.Register(testScorerType, func(name string, params json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testScorerType, func(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		// Attempt to unmarshal to trigger errors for invalid JSON in tests.
-		if len(params) > 0 {
+		if params != nil {
 			var p struct {
 				BlockSize int `json:"blockSize"`
 			}
-			if err := json.Unmarshal(params, &p); err != nil {
+			if err := params.Decode(&p); err != nil {
 				return nil, err
 			}
 		}
 		return &mockScorer{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testScorerType}}}, nil
 	})
 
-	fwkplugin.Register("utilization-detector", func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register("utilization-detector", func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockSaturationDetector{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: "utilization-detector"}}}, nil
 	})
 
-	fwkplugin.Register(testPickerType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testPickerType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockPicker{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testPickerType}}}, nil
 	})
 
-	fwkplugin.Register(testProfileHandler, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testProfileHandler, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockHandler{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testProfileHandler}}}, nil
 	})
 
-	fwkplugin.Register(testSourceType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testSourceType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockSource{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testSourceType}}}, nil
 	})
 
-	fwkplugin.Register(testExtractorType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testExtractorType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockExtractor{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testExtractorType}}}, nil
 	})
 
-	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-		return &flowcontrolmocks.MockFairnessPolicy{
+	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &fwkfcmocks.MockFairnessPolicy{
 			TypedNameV: fwkplugin.TypedName{Name: name, Type: globalstrict.GlobalStrictFairnessPolicyType},
 		}, nil
 	})
-	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, func(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-		return &flowcontrolmocks.MockOrderingPolicy{
+	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &fwkfcmocks.MockOrderingPolicy{
 			TypedNameV: fwkplugin.TypedName{Name: name, Type: fcfs.FCFSOrderingPolicyType},
 		}, nil
 	})
@@ -794,6 +900,8 @@ func registerTestPlugins(t *testing.T) {
 	fwkplugin.Register(single.SingleProfileHandlerType, single.SingleProfileHandlerFactory)
 	fwkplugin.Register(openai.OpenAIParserType, openai.OpenAIParserPluginFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, usagelimits.StaticPolicyFactory)
+	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, prefix.PrefixCachePluginFactory)
+	fwkplugin.Register(reqdataprodprefix.ApproxPrefixCachePluginType, reqdataprodprefix.ApproxPrefixCacheFactory)
 	// Datalayer plugins are now defaults; register their real factories.
 	fwkplugin.Register(sourcemetrics.MetricsDataSourceType, sourcemetrics.MetricsDataSourceFactory)
 	fwkplugin.Register(extractormetrics.MetricsExtractorType, extractormetrics.CoreMetricsExtractorFactory)
@@ -815,15 +923,19 @@ func TestValidateSaturationDetector(t *testing.T) {
 		{
 			name: "Nil SaturationDetector",
 			cfg: &configapi.EndpointPickerConfig{
-				SaturationDetector: nil,
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: nil,
+				},
 			},
 			wantErr: false,
 		},
 		{
 			name: "Empty PluginRef",
 			cfg: &configapi.EndpointPickerConfig{
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "",
+					},
 				},
 			},
 			wantErr: true,
@@ -834,8 +946,10 @@ func TestValidateSaturationDetector(t *testing.T) {
 				Plugins: []configapi.PluginSpec{
 					{Name: "valid-plugin", Type: "valid-type"},
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "valid-plugin",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "valid-plugin",
+					},
 				},
 			},
 			wantErr: false,
@@ -846,8 +960,10 @@ func TestValidateSaturationDetector(t *testing.T) {
 				Plugins: []configapi.PluginSpec{
 					{Name: "other-plugin", Type: "valid-type"},
 				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "valid-plugin",
+				FlowControl: &configapi.FlowControlConfig{
+					SaturationDetector: &configapi.SaturationDetectorConfig{
+						PluginRef: "valid-plugin",
+					},
 				},
 			},
 			wantErr: true,
@@ -872,34 +988,38 @@ func TestEnsureSaturationDetector(t *testing.T) {
 
 	t.Run("Plugin in allPlugins", func(t *testing.T) {
 		cfg := &configapi.EndpointPickerConfig{
-			SaturationDetector: &configapi.SaturationDetectorConfig{
-				PluginRef: "existing-plugin",
+			FlowControl: &configapi.FlowControlConfig{
+				SaturationDetector: &configapi.SaturationDetectorConfig{
+					PluginRef: "existing-plugin",
+				},
 			},
 		}
-		handle := utils.NewTestHandle(context.Background())
+		handle := igwtestutils.NewTestHandle(context.Background())
 		allPlugins := map[string]fwkplugin.Plugin{
 			"existing-plugin": &mockSaturationDetector{},
 		}
 
 		err := ensureSaturationDetector(cfg, handle, allPlugins)
 		require.NoError(t, err)
-		require.Equal(t, "existing-plugin", cfg.SaturationDetector.PluginRef)
+		require.Equal(t, "existing-plugin", cfg.FlowControl.SaturationDetector.PluginRef)
 	})
 
 	t.Run("Empty PluginRef in allPlugins", func(t *testing.T) {
 		cfg := &configapi.EndpointPickerConfig{
-			SaturationDetector: &configapi.SaturationDetectorConfig{
-				PluginRef: "",
+			FlowControl: &configapi.FlowControlConfig{
+				SaturationDetector: &configapi.SaturationDetectorConfig{
+					PluginRef: "",
+				},
 			},
 		}
-		handle := utils.NewTestHandle(context.Background())
+		handle := igwtestutils.NewTestHandle(context.Background())
 		allPlugins := map[string]fwkplugin.Plugin{
 			"utilization-detector": &mockSaturationDetector{},
 		}
 
 		err := ensureSaturationDetector(cfg, handle, allPlugins)
 		require.NoError(t, err)
-		require.Equal(t, "utilization-detector", cfg.SaturationDetector.PluginRef)
+		require.Equal(t, "utilization-detector", cfg.FlowControl.SaturationDetector.PluginRef)
 	})
 }
 

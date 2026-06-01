@@ -25,15 +25,15 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // GlobalStrictFairnessPolicyType is the registration type for the global strict fairness policy.
 const GlobalStrictFairnessPolicyType = "global-strict-fairness-policy"
 
 // GlobalStrictFairnessPolicyFactory is the factory function for the global strict fairness policy.
-func GlobalStrictFairnessPolicyFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func GlobalStrictFairnessPolicyFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return newGlobalStrict(name), nil
 }
 
@@ -75,7 +75,8 @@ func (p *globalStrict) Pick(
 	flowGroup flowcontrol.PriorityBandAccessor,
 ) (flowcontrol.FlowQueueAccessor, error) {
 	if flowGroup == nil {
-		return nil, nil
+		// Nothing to pick
+		return nil, nil //nolint:nilnil
 	}
 
 	var bestQueue flowcontrol.FlowQueueAccessor

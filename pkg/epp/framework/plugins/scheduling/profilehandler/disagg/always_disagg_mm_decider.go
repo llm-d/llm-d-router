@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -23,7 +23,7 @@ type AlwaysDisaggMultimodalDecider struct {
 
 // AlwaysDisaggMulimodalDeciderPluginFactory defines the factory function for creating
 // a new instance of the AlwaysDisaggEncodeDecider.
-func AlwaysDisaggMulimodalDeciderPluginFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func AlwaysDisaggMulimodalDeciderPluginFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return newAlwaysDisaggEncodeDecider().WithName(name), nil
 }
 

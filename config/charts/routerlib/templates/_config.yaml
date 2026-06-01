@@ -1,0 +1,121 @@
+{{- define "inference-extension.config" -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "llm-d-router.name" . }}
+  namespace: {{ .Release.Namespace }}
+data:
+  default-plugins.yaml: |
+    {{- $modelServerProtocol := .Values.router.modelServers.protocol | default "http" }}
+    {{- $modelServerType := .Values.router.modelServers.type | default "vllm" }}
+    {{- $parserType := "" }}
+    {{- if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
+      {{- $parserType = "vllmgrpc-parser" }}
+    {{- else if .Values.router.epp.parser }}
+      {{- $parserType = .Values.router.epp.parser }}
+    {{- else if eq (lower $modelServerType) "triton" }}
+      {{- $parserType = "passthrough-parser" }}
+    {{- end }}
+    apiVersion: inference.networking.x-k8s.io/v1alpha1
+    kind: EndpointPickerConfig
+    plugins:
+    - type: queue-scorer
+    - type: kv-cache-utilization-scorer
+    - type: prefix-cache-scorer
+    - type: metrics-data-source
+      parameters:
+        scheme: {{ .Values.router.epp.metricsDataSource.scheme | default "http" | quote }}
+        path: {{ .Values.router.epp.metricsDataSource.path | default "/metrics" | quote }}
+        insecureSkipVerify: {{ .Values.router.epp.metricsDataSource.insecureSkipVerify | default true }}
+    - type: core-metrics-extractor
+      {{- $modelServerType := .Values.router.modelServers.type | default "vllm" }}
+      {{- if ne $modelServerType "vllm" }}
+      parameters:
+        defaultEngine: {{ $modelServerType | quote }}
+      {{- end }}
+    {{- if $parserType }}
+    - type: {{ $parserType }}
+    {{- end }}
+    {{- if .Values.router.latencyPredictor.enabled }}
+    - type: predicted-latency-producer
+    # Two-gate prefix cache affinity: strict (0.99) runs before the SLO tier
+    # filter to prefer near-exact cache matches across all endpoints; loose
+    # (0.80) runs after the tier filter to prefer partial matches within the
+    # SLO-qualified tier.
+    - name: strict-affinity-filter
+      type: prefix-cache-affinity-filter
+      parameters:
+        affinityThreshold: 0.99
+    - name: loose-affinity-filter
+      type: prefix-cache-affinity-filter
+      parameters:
+        affinityThreshold: 0.80
+    - type: latency-scorer
+    - type: weighted-random-picker
+    - type: slo-headroom-tier-filter
+    - type: latency-slo-admitter
+    {{- end }}
+    schedulingProfiles:
+    {{- if .Values.router.latencyPredictor.enabled }}
+    - name: default
+      plugins:
+      - pluginRef: predicted-latency-producer
+      - pluginRef: strict-affinity-filter
+      - pluginRef: slo-headroom-tier-filter
+      - pluginRef: loose-affinity-filter
+      - pluginRef: latency-scorer
+      - pluginRef: weighted-random-picker
+    {{- else }}
+    - name: default
+      plugins:
+      - pluginRef: queue-scorer
+        weight: 2
+      - pluginRef: kv-cache-utilization-scorer
+        weight: 2
+      - pluginRef: prefix-cache-scorer
+        weight: 3
+    {{- end }}
+    {{- if $parserType }}
+    requestHandler:
+      parser:
+        pluginRef: {{ $parserType }}
+    {{- end }}
+  {{- if .Values.router.epp.pluginsCustomConfig }}
+  {{- .Values.router.epp.pluginsCustomConfig | toYaml | nindent 2 }}
+  {{- end }}
+  
+---
+{{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict }}
+{{- if and $proxy.enabled $proxy.configMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $proxy.configMap.name }}
+  namespace: {{ .Release.Namespace }}
+data:
+  {{- include "llm-d-router.proxyConfigMapData" . | nindent 2 }}
+{{- end }}
+---
+{{- if .Values.router.latencyPredictor.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "llm-d-router.name" . }}-latency-predictor-training
+  namespace: {{ .Release.Namespace }}
+data:
+  {{- range $key, $value := .Values.router.latencyPredictor.trainingServer.config }}
+  {{ $key }}: {{ $value | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "llm-d-router.name" . }}-latency-predictor-prediction
+  namespace: {{ .Release.Namespace }}
+data:
+  {{- range $key, $value := .Values.router.latencyPredictor.predictionServers.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}
+---
+{{- end -}}

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"time"
 
@@ -28,28 +29,15 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
-func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType APIType) {
+func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType APIType) {
 	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
 	s.logger.V(4).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
 
-	// Read request body
-	defer r.Body.Close() //nolint:errcheck
-	original, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest) // TODO: check FastAPI error code when failing to read body
-		w.Write([]byte(err.Error()))         //nolint:errcheck
-		return
-	}
-
-	// Parse completion request
-	var completionRequest map[string]any
-	if err := json.Unmarshal(original, &completionRequest); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	original, completionRequest, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -73,7 +61,7 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	prefillSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
 		attribute.String("llm_d.pd_proxy.prefill_target", prefillPodHostPort),
-		attribute.String("llm_d.pd_proxy.connector", "nixlv2"),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorNIXLV2),
 	)
 	prefillStart := time.Now()
 
@@ -100,6 +88,10 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 			savedTokenValues[i] = savedField{field: field}
 		}
 	}
+
+	// Snapshot the original request map before prefill mutations so the
+	// fallback-to-decode path can dispatch with the correct original fields.
+	originalRequest := maps.Clone(completionRequest)
 
 	completionRequest[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemoteDecode:  true,
@@ -154,8 +146,8 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 
 		if shouldFallbackToDecode(pw) {
 			s.logger.Info("fallback to decode", "request_id", uuidStr)
-			r.Body = io.NopCloser(bytes.NewReader(original))
-			s.decoderProxy.ServeHTTP(w, r)
+			fallbackReq := cloneRequestWithBody(r.Context(), r, original)
+			s.dispatchDecode(w, fallbackReq, originalRequest)
 		} else {
 			for key, values := range pw.Header() {
 				for _, v := range values {
@@ -187,6 +179,12 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	if !ok {
 		s.logger.Info("warning: missing 'kv_transfer_params' field in prefiller response")
 	}
+	pCachedTokens, hasPCachedTokens := extractCachedTokens(prefillerResponse)
+	if !hasPCachedTokens {
+		// vLLM returns prompt_tokens_details as null when cached_tokens is 0,
+		// so treat a missing prefiller cached_tokens value as zero.
+		pCachedTokens = 0
+	}
 
 	s.logger.V(5).Info("received prefiller response", requestFieldKVTransferParams, pKVTransferParams)
 
@@ -199,7 +197,7 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 
 	decodeSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
-		attribute.String("llm_d.pd_proxy.connector", "nixlv2"),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorNIXLV2),
 	)
 	decodeStart := time.Now()
 
@@ -244,13 +242,19 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	// 2. Forward to local decoder.
 
 	s.logger.V(5).Info("sending request to decoder", "body", string(dbody))
-	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(w, dreq)
+	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens)
+	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
 	decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
 
 	if !dataParallelUsed {
 		s.logger.V(4).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
 		decodeSpan.SetAttributes(attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host))
-		s.decoderProxy.ServeHTTP(w, dreq)
+		s.dispatchDecode(decodeWriter, dreq, completionRequest)
+	}
+	if err := finalizeDecodeWriter(); err != nil {
+		s.logger.Error(err, "failed to flush cached token response writer")
+		decodeSpan.SetStatus(codes.Error, "failed to flush cached token response writer")
+		return
 	}
 
 	decodeDuration := time.Since(decodeStart)

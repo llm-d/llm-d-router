@@ -31,53 +31,66 @@ type EndpointMetadata struct {
 	Port           string
 	MetricsHost    string
 	Labels         map[string]string
+	// RankIndex is this endpoint's position in the pool's TargetPorts,
+	// identifying the pod-local rank in multi-port deployments.
+	RankIndex int
 }
 
 // String returns a string representation of the endpoint.
-func (e *EndpointMetadata) String() string {
-	if e == nil {
+func (epm *EndpointMetadata) String() string {
+	if epm == nil {
 		return ""
 	}
-	return fmt.Sprintf("%+v", *e)
+	return fmt.Sprintf("%+v", *epm)
 }
 
 // Clone returns a full copy of the object.
-func (p *EndpointMetadata) Clone() *EndpointMetadata {
-	if p == nil {
+func (epm *EndpointMetadata) Clone() *EndpointMetadata {
+	if epm == nil {
 		return nil
 	}
 
-	clonedLabels := make(map[string]string, len(p.Labels))
-	maps.Copy(clonedLabels, p.Labels)
+	clonedLabels := make(map[string]string, len(epm.Labels))
+	maps.Copy(clonedLabels, epm.Labels)
 	return &EndpointMetadata{
 		NamespacedName: types.NamespacedName{
-			Name:      p.NamespacedName.Name,
-			Namespace: p.NamespacedName.Namespace,
+			Name:      epm.NamespacedName.Name,
+			Namespace: epm.NamespacedName.Namespace,
 		},
-		PodName:     p.PodName,
-		Address:     p.Address,
-		Port:        p.Port,
-		MetricsHost: p.MetricsHost,
+		PodName:     epm.PodName,
+		Address:     epm.Address,
+		Port:        epm.Port,
+		MetricsHost: epm.MetricsHost,
 		Labels:      clonedLabels,
+		RankIndex:   epm.RankIndex,
 	}
 }
 
+// GetRankIndex returns the rank index of this endpoint within the pool's
+// TargetPorts list.
+func (epm *EndpointMetadata) GetRankIndex() int {
+	if epm == nil {
+		return 0
+	}
+	return epm.RankIndex
+}
+
 // GetNamespacedName gets the namespace name of the Endpoint.
-func (e *EndpointMetadata) GetNamespacedName() types.NamespacedName {
-	return e.NamespacedName
+func (epm *EndpointMetadata) GetNamespacedName() types.NamespacedName {
+	return epm.NamespacedName
 }
 
 // GetIPAddress returns the Endpoint's IP address.
-func (e *EndpointMetadata) GetIPAddress() string {
-	return e.Address
+func (epm *EndpointMetadata) GetIPAddress() string {
+	return epm.Address
 }
 
 // GetPort returns the Endpoint's inference port.
-func (e *EndpointMetadata) GetPort() string {
-	return e.Port
+func (epm *EndpointMetadata) GetPort() string {
+	return epm.Port
 }
 
 // GetMetricsHost returns the Endpoint's metrics host (ip:port)
-func (e *EndpointMetadata) GetMetricsHost() string {
-	return e.MetricsHost
+func (epm *EndpointMetadata) GetMetricsHost() string {
+	return epm.MetricsHost
 }

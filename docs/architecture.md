@@ -1,4 +1,4 @@
-# llm-d Inference Scheduler Architecture
+# llm-d Router Architecture
 
 ## Table of Contents
 
@@ -75,7 +75,7 @@ The design enables:
 
 ## Configuration
 
-The inference scheduler relies on a YAML-based configuration—provided either as a file or an in-line parameter—to determine which lifecycle hooks (plugins) are active.
+The llm-d Endpoint Picker relies on a YAML-based configuration—provided either as a file or an in-line parameter—to determine which lifecycle hooks (plugins) are active.
 
 Specifically, this configuration establishes the following components:
 
@@ -86,7 +86,7 @@ Specifically, this configuration establishes the following components:
 The configuration text has the following form:
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - ....
@@ -145,7 +145,7 @@ The fields in a schedulingProfile entry are:
 A complete configuration might look like this:
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: precise-prefix-cache-scorer
@@ -208,6 +208,50 @@ The **vLLM sidecar** handles orchestration between Encode, Prefill and Decode st
 > [!NOTE]
 > The detailed E/P/D design is available in this document:
 > [Disaggregated Inference Serving in llm-d](./disaggregation.md)
+
+---
+
+## Chunked Decode (Experimental)
+
+Chunked decode is an experimental feature of the pd-sidecar that splits the decode stage into a
+sequence of shorter decode calls, each capped at a configurable token budget.
+It applies at the decode stage regardless of whether P/D disaggregation is in use.
+After each chunk the generated text is appended to the conversation context so the next
+chunk continues seamlessly from where the previous one left off.
+
+### Why to use it
+
+- Improve average Time-To-First-Token among all requests
+- Prevent head-of-line blocking by long requests in run-to-completion
+- Get more predictable execution time
+
+### How it works
+
+1. The sidecar receives a `/v1/chat/completions` request at the decode stage.
+2. Each chunk is dispatched as a separate request to the local decoder with `max_tokens` capped
+   at `decode-chunk-size`.
+3. From the second chunk onward, `continue_final_message=true` and `add_generation_prompt=false` are
+   set so the model continues the existing assistant turn rather than starting a new one. The
+   generated text from the previous chunk is also appended to the request context.
+4. Generation stops when the model returns a terminal `finish_reason` (anything other than `length`),
+   or when the original token budget is exhausted.
+5. For **non-streaming** requests, all chunk outputs are concatenated and returned as a single
+   response. The `usage` field reports the original `prompt_tokens` (from the first chunk) and the
+   total `completion_tokens` across all chunks.
+6. For **streaming** requests, each chunk's tokens are re-emitted as SSE delta events in real time,
+   and a `[DONE]` sentinel closes the stream once all chunks are complete.
+
+### Configuration
+
+Enable chunked decode via the pd-sidecar flag:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--decode-chunk-size` | `0` (disabled) | Token budget per chunk. Set to a positive integer to enable chunked decode. For best performance use a multiple of the KV cache block size. |
+
+> [!NOTE]
+> If the request's `max_tokens` / `max_completion_tokens` is less than or equal to `--decode-chunk-size`,
+> the sidecar falls back to a single regular decode call without chunking.
 
 ---
 

@@ -7,8 +7,8 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/metrics"
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	"github.com/llm-d/llm-d-router/pkg/metrics"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 const (
@@ -83,7 +83,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			prefillReplicas := 1
 			decodeReplicas := 4
-			modelServers := createModelServersPDNixl(prefillReplicas, decodeReplicas)
+			modelServers := createModelServersPDNixlV2(prefillReplicas, decodeReplicas)
 
 			epp := createEndPointPicker(deprecatedPdConfig)
 
@@ -131,12 +131,16 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			// Metrics Validation
 			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypePrefillDecode, simModelName)
 			prefillDecodeCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_pd_decision_total", labelFilter)
+			prefillDecodeCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_pd_decision_total", labelFilter)
 
 			labelFilter2 := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeDecodeOnly, simModelName)
 			decodeOnlyCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_pd_decision_total", labelFilter2)
+			decodeOnlyCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_pd_decision_total", labelFilter2)
 
 			gomega.Expect(prefillDecodeCount).Should(gomega.Equal(4))
+			gomega.Expect(prefillDecodeCountllmDRouterEpp).Should(gomega.Equal(4))
 			gomega.Expect(decodeOnlyCount).Should(gomega.Equal(2))
+			gomega.Expect(decodeOnlyCountllmDRouterEpp).Should(gomega.Equal(2))
 
 			testutils.DeleteObjects(testConfig, epp)
 			testutils.DeleteObjects(testConfig, modelServers)
@@ -376,12 +380,16 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			// Metrics Validation
 			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypePrefillDecode, simModelName)
 			prefillDecodeCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", labelFilter)
+			prefillDecodeCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_disagg_decision_total", labelFilter)
 
 			labelFilter2 := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeDecodeOnly, simModelName)
 			decodeOnlyCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", labelFilter2)
+			decodeOnlyCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_disagg_decision_total", labelFilter2)
 
 			gomega.Expect(prefillDecodeCount).Should(gomega.Equal(4))
+			gomega.Expect(prefillDecodeCountllmDRouterEpp).Should(gomega.Equal(4))
 			gomega.Expect(decodeOnlyCount).Should(gomega.Equal(2))
+			gomega.Expect(decodeOnlyCountllmDRouterEpp).Should(gomega.Equal(2))
 
 			testutils.DeleteObjects(testConfig, epp)
 			testutils.DeleteObjects(testConfig, modelServers)
@@ -470,12 +478,16 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			// Metrics: text + image_embeds requests recorded as decode-only (encode skipped)
 			decodeOnlyFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeDecodeOnly, simModelName)
 			decodeOnlyCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", decodeOnlyFilter)
+			decodeOnlyCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_disagg_decision_total", decodeOnlyFilter)
 			gomega.Expect(decodeOnlyCount).Should(gomega.Equal(2))
+			gomega.Expect(decodeOnlyCountllmDRouterEpp).Should(gomega.Equal(2))
 
 			// Metrics: encode-decode decisions recorded (2 single-image + 1 multi-image + 1 video + 1 audio)
 			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeEncodeDecode, simModelName)
 			encodeDecodeCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", labelFilter)
+			encodeDecodeCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_disagg_decision_total", labelFilter)
 			gomega.Expect(encodeDecodeCount).Should(gomega.Equal(5))
+			gomega.Expect(encodeDecodeCountllmDRouterEpp).Should(gomega.Equal(5))
 
 			testutils.DeleteObjects(testConfig, epp)
 			testutils.DeleteObjects(testConfig, modelServers)
@@ -539,18 +551,26 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			pdLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypePrefillDecode, simModelName)
 			doLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeDecodeOnly, simModelName)
 			pdCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", pdLabelFilter)
+			pdCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_disagg_decision_total", pdLabelFilter)
 			doCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", doLabelFilter)
+			doCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_disagg_decision_total", doLabelFilter)
 			gomega.Expect(pdCount + doCount).Should(gomega.Equal(2))
+			gomega.Expect(pdCountllmDRouterEpp + doCountllmDRouterEpp).Should(gomega.Equal(2))
 
+			// re-enable it after https://github.com/llm-d/llm-d-router/issues/1253 gets fixed
 			// Metrics: 4 multimodal requests each produce either encode-prefill-decode or encode-decode
 			// (encode-decode occurs if the prefix cache hits on the second same-image request).
 			// The 3 requests with unique content (1st image, multi-image, video) always produce encode-prefill-decode.
-			epdLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeEncodePrefillDecode, simModelName)
-			edLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeEncodeDecode, simModelName)
-			epdCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", epdLabelFilter)
-			edCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", edLabelFilter)
-			gomega.Expect(epdCount).Should(gomega.BeNumerically(">=", 3))
-			gomega.Expect(epdCount + edCount).Should(gomega.Equal(4))
+			// epdLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeEncodePrefillDecode, simModelName)
+			// edLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeEncodeDecode, simModelName)
+			// epdCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", epdLabelFilter)
+			// epdCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_disagg_decision_total", epdLabelFilter)
+			// edCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", edLabelFilter)
+			// edCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_disagg_decision_total", edLabelFilter)
+			// gomega.Expect(epdCount).Should(gomega.BeNumerically(">=", 3))
+			// gomega.Expect(epdCountllmDRouterEpp).Should(gomega.BeNumerically(">=", 3))
+			// gomega.Expect(epdCount + edCount).Should(gomega.Equal(4))
+			// gomega.Expect(epdCountllmDRouterEpp + edCountllmDRouterEpp).Should(gomega.Equal(4))
 
 			testutils.DeleteObjects(testConfig, epp)
 			testutils.DeleteObjects(testConfig, modelServers)
@@ -592,8 +612,11 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			pdLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypePrefillDecode, simModelName)
 			doLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metrics.DecisionTypeDecodeOnly, simModelName)
 			pdCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", pdLabelFilter)
+			pdCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_disagg_decision_total", pdLabelFilter)
 			doCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", doLabelFilter)
+			doCountllmDRouterEpp := getCounterMetric(metricsURL, "llm_d_router_epp_disagg_decision_total", doLabelFilter)
 			gomega.Expect(pdCount + doCount).Should(gomega.Equal(2))
+			gomega.Expect(pdCountllmDRouterEpp + doCountllmDRouterEpp).Should(gomega.Equal(2))
 
 			// Multimodal request: encode and decode profiles both resolve to the same single deployment
 			nsHdr, podHdr = runChatCompletionWithImages(testImageURL)
@@ -644,7 +667,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 		})
 	})
 
-	ginkgo.When("Running KV configuration with external tokenizer PrepareData plugin", func() {
+	ginkgo.When("Running KV configuration with external tokenizer DataProducer plugin", func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects = createInferencePool(1, true)
 

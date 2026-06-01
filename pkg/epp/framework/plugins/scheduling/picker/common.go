@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	types "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -73,7 +73,7 @@ func (r *lockedRand) Shuffle(n int, swap func(i, j int)) {
 var PickerRand = newLockedRand()
 
 // ShuffleScoredEndpoints randomizes the order of the given scored candidates in-place.
-func ShuffleScoredEndpoints(scoredEndpoints []*types.ScoredEndpoint) {
+func ShuffleScoredEndpoints(scoredEndpoints []*fwksched.ScoredEndpoint) {
 	// Shuffle in-place
 	PickerRand.Shuffle(len(scoredEndpoints), func(i, j int) {
 		scoredEndpoints[i], scoredEndpoints[j] = scoredEndpoints[j], scoredEndpoints[i]

@@ -2,52 +2,37 @@
 
 **Type:** `prefix-cache-scorer`
 
-This plugin scores candidate endpoints by estimating **prompt prefix cache reuse** on each model server.
-
+Scores candidate endpoints using `PrefixCacheMatchInfo` prepared earlier in the request pipeline.
 
 ## What it does
 
-For each incoming request, the plugin:
+For each candidate endpoint, the scorer reads the `PrefixCacheMatchInfo` attribute and computes:
 
-1. Extracts user input from one of the supported API shapes:
-   - Completions
-   - Chat Completions
-   - Conversations
-   - Responses
-2. Splits input into fixed-size blocks (in tokens, approximated to characters).
-3. Builds a rolling hash chain across blocks (including model name and optional `cache_salt`).
-4. Looks up which pods are likely to already have each prefix block cached.
-5. Computes per-endpoint score
+```text
+score = matchBlocks / totalBlocks
+```
 
-Higher score means more expected prefix-cache hits and lower prefill work.
+This produces a normalized score in the range `[0, 1]`:
 
-## How cache state is learned
+- higher score: more of the request prefix is expected to be reusable from cache
+- lower score: less prefix cache reuse is expected
 
-After scheduling, the plugin records selected endpoint(s) into an in-memory index:
+If the attribute is missing, has the wrong type, or `totalBlocks` is zero, the endpoint receives score `0`.
 
-- Primary selected endpoint is always updated.
-- If a `prefill` profile is present (P/D disaggregation), its endpoint is also updated.
+## Inputs consumed
 
-The index is per-pod LRU plus a reverse map from block hash to pods.
+This scorer consumes:
+
+- `PrefixCacheMatchInfo`
+
+The attribute is typically produced by the approximate prefix cache data producer before scheduling.
 
 ## Configuration
 
-The plugin config supports:
-
-- `autoTune` (default true)
-  - If true, block size and per-pod capacity can be inferred from endpoint metrics.
-- `blockSizeTokens`
-  - Prefix block size in tokens.
-- `maxPrefixBlocksToMatch`
-  - Caps how much of a long prompt is considered.
-- `lruCapacityPerServer`
-  - Default per-pod index capacity when endpoint metrics are unavailable.
-- `blockSize`
-  - Deprecated legacy field (characters). Do not use.
+This plugin does not define any plugin-specific parameters.
 
 ## Operational notes
 
-- Prefix matching is approximate and intentionally lightweight.
-- Matching is model-scoped (same prompt across different models does not collide).
-- Pods no longer active are periodically removed from the index.
-- Hashing uses token-to-character approximation, so it is a heuristic, not exact tokenizer parity.
+- The scorer itself does not hash prompts or maintain cache state.
+- It only converts previously prepared prefix match data into endpoint scores.
+- To be useful, it should be used together with a data producer that populates `PrefixCacheMatchInfo`.

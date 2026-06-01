@@ -21,7 +21,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 
-	sourcemetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics"
+	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
 // LoRASpec extends the standard Spec to allow special case
@@ -38,7 +38,8 @@ func parseStringToLoRASpec(spec string) (*LoRASpec, error) {
 		return nil, err
 	}
 	if baseSpec == nil {
-		return nil, nil // empty string → disabled; preserve nil-means-disabled contract
+		// empty string → disabled; preserve nil-means-disabled contract
+		return nil, nil //nolint:nilnil
 	}
 	return &LoRASpec{Spec: baseSpec}, nil
 }

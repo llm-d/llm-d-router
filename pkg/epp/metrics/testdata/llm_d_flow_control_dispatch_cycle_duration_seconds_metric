@@ -1,0 +1,15 @@
+# HELP llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds [ALPHA] Distribution of time taken for each internal dispatch cycle in the Flow Control layer.
+# TYPE llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds histogram
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="0.0001"} 1
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="0.0002"} 2
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="0.0005"} 3
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="0.001"} 4
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="0.002"} 5
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="0.005"} 6
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="0.01"} 7
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="0.02"} 8
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="0.05"} 9
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="0.1"} 10
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket{le="+Inf"} 11
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_sum 0.3398
+llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_count 11

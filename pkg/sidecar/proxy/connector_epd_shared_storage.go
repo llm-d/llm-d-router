@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 
@@ -31,6 +30,7 @@ import (
 var mmTypes = map[string]bool{
 	"image_url":   true,
 	"audio_url":   true,
+	"video_url":   true,
 	"input_audio": true,
 }
 
@@ -113,6 +113,12 @@ func mmItemURL(item map[string]any) string {
 		}
 	case "audio_url":
 		if m, ok := item["audio_url"].(map[string]any); ok {
+			if u, ok := m["url"].(string); ok {
+				return u
+			}
+		}
+	case "video_url":
+		if m, ok := item["video_url"].(map[string]any); ok {
 			if u, ok := m["url"].(string); ok {
 				return u
 			}
@@ -207,25 +213,12 @@ func (s *Server) fanoutEncoderPrimer(originalRequest map[string]any, encoderHost
 	return nil
 }
 
-// runEPDProtocol implements the Encoder-Prefiller-Decoder disaggregation protocol
-func (s *Server) runEPDProtocol(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
+// handleEPD handles an Encoder-Prefiller-Decoder disaggregation request
+func (s *Server) handleEPD(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
 	s.logger.V(4).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
-	// Read request body
-	defer func() { _ = r.Body.Close() }()
-	original, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(err.Error()))
-		return
-	}
-
-	// Parse completion request
-	var completionRequest map[string]any
-	if err := json.Unmarshal(original, &completionRequest); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	_, completionRequest, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -265,7 +258,7 @@ func (s *Server) runEPDProtocol(w http.ResponseWriter, r *http.Request, prefillE
 	}
 
 	// Clone request with modified body and add request ID header
-	pdRequest := cloneRequestWithBody(r, modifiedBody)
+	pdRequest := cloneRequestWithBody(r.Context(), r, modifiedBody)
 	pdRequest.Header.Add(requestHeaderRequestID, requestID)
 
 	// If prefiller is configured, use P/D protocol; otherwise go directly to decoder
@@ -273,7 +266,7 @@ func (s *Server) runEPDProtocol(w http.ResponseWriter, r *http.Request, prefillE
 		s.logger.V(4).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
 		// Run the configured P/D protocol (prefill + decode)
 		// This will use whichever protocol is configured: shared-storage, nixlv2, or sglang
-		s.runPDConnectorProtocol(w, pdRequest, prefillEndPoint, APITypeChatCompletions)
+		s.handlePDConnector(w, pdRequest, prefillEndPoint, APITypeChatCompletions)
 	} else {
 		s.logger.V(4).Info("no prefiller configured, going directly to decoder after encoder")
 		// No prefiller, go directly to decoder (Encoder-Decoder mode)

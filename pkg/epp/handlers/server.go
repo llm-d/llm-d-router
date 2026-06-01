@@ -21,8 +21,10 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
+	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
@@ -35,16 +37,16 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	envoy "github.com/llm-d/llm-d-inference-scheduler/pkg/common/envoy"
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	schedulingtypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/version"
+	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/version"
 )
 
 // EvictChannelLookup is an optional interface for looking up eviction channels by request ID.
@@ -52,14 +54,21 @@ import (
 // to support eviction of in-flight requests via ext_proc ImmediateResponse.
 type EvictChannelLookup interface {
 	Get(requestID string) chan struct{}
+	GetReason(requestID string) errcommon.RequestDroppedReason
 	Deregister(requestID string)
 }
 
-func NewStreamingServer(datastore Datastore, director Director, parser fwkrh.Parser) *StreamingServer {
+func NewStreamingServer(datastore Datastore, director Director, parser fwkrh.Parser, maxPoolBufferSize int) *StreamingServer {
 	return &StreamingServer{
-		director:  director,
-		datastore: datastore,
-		parser:    parser,
+		director:          director,
+		datastore:         datastore,
+		parser:            parser,
+		maxPoolBufferSize: maxPoolBufferSize,
+		bufferPool: sync.Pool{
+			New: func() any {
+				return new(bytes.Buffer)
+			},
+		},
 	}
 }
 
@@ -82,10 +91,12 @@ type Datastore interface {
 // Server implements the Envoy external processing server.
 // https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ext_proc/v3/external_processor.proto
 type StreamingServer struct {
-	datastore      Datastore
-	director       Director
-	parser         fwkrh.Parser
-	evictionLookup EvictChannelLookup // optional, set for eviction support
+	datastore         Datastore
+	director          Director
+	parser            fwkrh.Parser
+	evictionLookup    EvictChannelLookup // optional, set for eviction support
+	bufferPool        sync.Pool
+	maxPoolBufferSize int
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -98,7 +109,6 @@ type RequestContext struct {
 	TargetEndpoint            string
 	IncomingModelName         string
 	TargetModelName           string
-	FairnessID                string
 	ObjectiveKey              string
 	Priority                  int
 	RequestReceivedTimestamp  time.Time
@@ -112,9 +122,10 @@ type RequestContext struct {
 	RequestRunning            bool
 	Request                   *Request
 
-	SchedulingRequest *schedulingtypes.InferenceRequest
+	SchedulingRequest *fwksched.InferenceRequest
 
 	RequestState         StreamRequestState
+	RequestDroppedReason errcommon.RequestDroppedReason
 	modelServerStreaming bool
 
 	Response *Response
@@ -167,7 +178,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 	// Start tracing span for the request
 	tracer := otel.Tracer(
-		"llm-d-inference-scheduler/epp/extproc",
+		"llm-d-router/epp/extproc",
 		trace.WithInstrumentationVersion(version.BuildRef),
 		trace.WithInstrumentationAttributes(
 			attribute.String("commit-sha", version.CommitSHA),
@@ -193,7 +204,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		},
 	}
 
-	var body []byte
+	buf := s.bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer func() {
+		// Return to pool if capacity is within limits.
+		if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
+			s.bufferPool.Put(buf)
+		}
+	}()
+	var respBody []byte
 	var evictionRequestID string
 
 	// Start a single reader goroutine for the lifetime of the stream.
@@ -272,6 +291,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// Eviction triggered — transition to evicted state and let the state machine send the response.
 			logger.Info("Request evicted by flow control", "requestID", evictionRequestID)
 			reqCtx.RequestState = RequestEvicted
+			if s.evictionLookup != nil {
+				reqCtx.RequestDroppedReason = s.evictionLookup.GetReason(evictionRequestID)
+			}
 			if sendErr := reqCtx.updateStateAndSendIfNeeded(srv, logger); sendErr != nil {
 				return sendErr
 			}
@@ -308,16 +330,17 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		case *extProcPb.ProcessingRequest_RequestBody:
 			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
 			// In the stream case, we can receive multiple request bodies.
-			body = append(body, v.RequestBody.Body...)
+			buf.Write(v.RequestBody.Body)
 
 			// Message is buffered, we can read and decode.
 			if v.RequestBody.EndOfStream {
 				loggerTrace.Info("decoding")
-				reqCtx.Request.RawBody = body
+				reqCtx.Request.RawBody = make([]byte, buf.Len())
+				copy(reqCtx.Request.RawBody, buf.Bytes())
 
 				// Body stream complete. Capture raw size for flow control.
-				reqCtx.RequestSize = len(body)
-				body = []byte{}
+				reqCtx.RequestSize = buf.Len()
+				buf.Reset()
 
 				parseResult, parseErr := s.parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				if parseErr != nil {
@@ -390,16 +413,16 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 			} else {
-				body = append(body, chunk...)
+				respBody = append(respBody, chunk...)
 				if endOfStream {
-					s.finishResponse(ctx, reqCtx, body, reqCtx.modelServerStreaming, true)
+					s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, true)
 				}
 			}
 		case *extProcPb.ProcessingRequest_ResponseTrailers:
 			// For HTTP, the response trailer is not sent. Thus, this case will not be triggered.
 			// For gRPC(over HTTP2), the protocol relies on responseTrailers to determine whether a response is complete.
 			// More info: https://chromium.googlesource.com/external/github.com/grpc/grpc/+/HEAD/doc/PROTOCOL-HTTP2.md#responses
-			s.finishResponse(ctx, reqCtx, body, reqCtx.modelServerStreaming, false)
+			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false)
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
 					ResponseTrailers: &extProcPb.TrailersResponse{},
@@ -486,14 +509,27 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 	// Handle eviction — send ImmediateResponse(429) to Envoy to reset the upstream connection.
 	if r.RequestState == RequestEvicted {
 		loggerTrace.Info("Sending ImmediateResponse for evicted request")
+		ir := &extProcPb.ImmediateResponse{
+			Status: &envoyTypePb.HttpStatus{
+				Code: envoyTypePb.StatusCode_TooManyRequests,
+			},
+			Body: []byte("request evicted by flow control"),
+		}
+		if r.RequestDroppedReason != "" {
+			ir.Headers = &extProcPb.HeaderMutation{
+				SetHeaders: []*configPb.HeaderValueOption{
+					{
+						Header: &configPb.HeaderValue{
+							Key:      errcommon.RequestDroppedReasonHeaderKey,
+							RawValue: []byte(r.RequestDroppedReason),
+						},
+					},
+				},
+			}
+		}
 		return srv.Send(&extProcPb.ProcessingResponse{
 			Response: &extProcPb.ProcessingResponse_ImmediateResponse{
-				ImmediateResponse: &extProcPb.ImmediateResponse{
-					Status: &envoyTypePb.HttpStatus{
-						Code: envoyTypePb.StatusCode_TooManyRequests,
-					},
-					Body: []byte("request evicted by flow control"),
-				},
+				ImmediateResponse: ir,
 			},
 		})
 	}

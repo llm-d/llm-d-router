@@ -1,6 +1,6 @@
 # EPP configuration for E/PD (encode + prefill-decode) using disagg-profile-handler.
 # The encode stage is triggered only for multimodal requests (image_url / video_url / input_audio).
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: encode-filter

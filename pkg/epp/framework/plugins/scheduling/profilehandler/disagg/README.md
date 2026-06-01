@@ -199,8 +199,6 @@ Token count is estimated by dividing raw character length by 4 (a fixed approxim
 
 ##### Example
 ```yaml
-featureGates:
-- prepareDataPlugins
 plugins:
   - type: prefix-based-pd-decider
     parameters:
@@ -216,7 +214,6 @@ plugins:
 - `nonCachedTokens: 0` disables disaggregation entirely (the decider always returns false).
 - Token count is estimated (characters ÷ 4), not exact; behavior may differ for non-ASCII content.
 - Requires `PrefixCacheMatchInfo` on the decode endpoint; if absent, disaggregation is skipped with an error log.
-- Requires the `prepareDataPlugins` feature gate to be enabled.
 
 ---
 

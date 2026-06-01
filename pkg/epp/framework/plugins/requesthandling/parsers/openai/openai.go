@@ -21,13 +21,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 )
 
 const (
@@ -42,17 +43,20 @@ const (
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
 
-	// OpenAI API object types
-	objectTypeResponse            = "response"
-	objectTypeConversation        = "conversation"
-	objectTypeChatCompletion      = "chat.completion"
-	objectTypeChatCompletionChunk = "chat.completion.chunk"
-	objectTypeTextCompletion      = "text_completion"
-
 	contentType = "content-type"
 	// The base media type for Server-Sent Events. We check for this substring
 	// to account for optional parameters like "; charset=utf-8" often appended by proxies.
 	eventStreamType = "text/event-stream"
+
+	usageField               = "usage"
+	promptTokensField        = "prompt_tokens"
+	inputTokensField         = "input_tokens"
+	completionTokensField    = "completion_tokens"
+	outputTokensField        = "output_tokens"
+	promptTokensDetailsField = "prompt_tokens_details"
+	inputTokensDetailsField  = "input_tokens_details"
+	cachedTokensField        = "cached_tokens"
+	totalTokensField         = "total_tokens"
 )
 
 // compile-time type validation
@@ -83,7 +87,7 @@ func (p *OpenAIParser) SupportedAppProtocols() []v1.AppProtocol {
 	return []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP}
 }
 
-func OpenAIParserPluginFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func OpenAIParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewOpenAIParser().WithName(name), nil
 }
 
@@ -115,7 +119,7 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 	if len(body) == 0 {
 		// An empty body can occur during streaming; for instance, Envoy proxies
 		// may emit a trailing empty body with the EndOfStream flag set to true.
-		return nil, nil
+		return nil, nil //nolint:nilnil
 	}
 
 	isStream := false
@@ -143,8 +147,8 @@ func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse,
 	}, nil
 }
 
-// getRequestPath extracts the request path from headers with fallback priority
-func getRequestPath(headers map[string]string) string {
+// GetRequestPath extracts the request path from headers with fallback priority
+func GetRequestPath(headers map[string]string) string {
 	// Try primary path header
 	if path := headers[parsers.MethodPathKey]; path != "" {
 		return path
@@ -192,7 +196,7 @@ func determineAPITypeFromPath(path string) string {
 // extractRequestBody extracts the InferenceRequestBody from the given request body map using path-based detection.
 func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.InferenceRequestBody, error) {
 	// Determine API type from request path
-	path := getRequestPath(headers)
+	path := GetRequestPath(headers)
 	apiType := determineAPITypeFromPath(path)
 
 	switch apiType {
@@ -244,6 +248,25 @@ func validateChatCompletionsMessages(messages []fwkrh.Message) error {
 	return nil
 }
 
+// toInt coerces a JSON-decoded number-ish value into an int. JSON numbers
+// land as float64 after json.Unmarshal into map[string]any; some
+// non-conforming providers emit strings. Anything else is ignored so that
+// usage extraction stays best-effort rather than panicking.
+func toInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	case string:
+		if f, err := strconv.ParseFloat(n, 64); err == nil {
+			return int(f)
+		}
+	}
+	return 0
+}
+
 func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	var responseErr error
 	var responseBody map[string]any
@@ -251,67 +274,46 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	if responseErr != nil {
 		return nil, responseErr
 	}
+	usg, ok := responseBody[usageField].(map[string]any)
+	if !ok {
+		return nil, nil //nolint:nilnil
+	}
 
-	if responseBody["usage"] != nil {
-		usg := responseBody["usage"].(map[string]any)
-		objectType, _ := responseBody["object"].(string)
-		usage := extractUsageByAPIType(usg, objectType)
-		if usg["prompt_token_details"] != nil {
-			detailsMap := usg["prompt_token_details"].(map[string]any)
-			if cachedTokens, ok := detailsMap["cached_tokens"]; ok {
+	usage := fwkrh.Usage{}
+
+	// Chat/Completions APIs use prompt_tokens. Responses/Conversations APIs use input_tokens.
+	for _, inputTokens := range []string{promptTokensField, inputTokensField} {
+		if v, ok := usg[inputTokens]; ok && v != nil {
+			usage.PromptTokens = toInt(v)
+			break
+		}
+	}
+
+	// Chat/Completions APIs use completion_tokens. Responses/Conversations APIs use output_tokens.
+	for _, outputTokens := range []string{completionTokensField, outputTokensField} {
+		if v, ok := usg[outputTokens]; ok && v != nil {
+			usage.CompletionTokens = toInt(v)
+			break
+		}
+	}
+
+	// Chat/Completions APIs use prompt_tokens_details. Responses/Conversations APIs use input_tokens_details.
+	for _, details := range []string{promptTokensDetailsField, inputTokensDetailsField} {
+		if detailsMap, ok := usg[details].(map[string]any); ok {
+			if cachedTokens, ok := detailsMap[cachedTokensField]; ok {
 				usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
-					CachedTokens: int(cachedTokens.(float64)),
+					CachedTokens: toInt(cachedTokens),
 				}
 			}
 		}
-		return &usage, nil
-	}
-	return nil, nil
-}
-
-// extractUsageByAPIType extracts usage statistics using the appropriate field names
-// based on the OpenAI API type identified by the "object" field.
-func extractUsageByAPIType(usg map[string]any, objectType string) fwkrh.Usage {
-	usage := fwkrh.Usage{}
-
-	switch {
-	case strings.HasPrefix(objectType, objectTypeResponse) || strings.HasPrefix(objectType, objectTypeConversation):
-		// Responses/Conversations APIs use input_tokens/output_tokens
-		if usg["input_tokens"] != nil {
-			usage.PromptTokens = int(usg["input_tokens"].(float64))
-		}
-		if usg["output_tokens"] != nil {
-			usage.CompletionTokens = int(usg["output_tokens"].(float64))
-		}
-	case objectType == objectTypeChatCompletion || objectType == objectTypeChatCompletionChunk || objectType == objectTypeTextCompletion:
-		// Traditional APIs use prompt_tokens/completion_tokens
-		if usg["prompt_tokens"] != nil {
-			usage.PromptTokens = int(usg["prompt_tokens"].(float64))
-		}
-		if usg["completion_tokens"] != nil {
-			usage.CompletionTokens = int(usg["completion_tokens"].(float64))
-		}
-	default:
-		// Fallback: try both field naming conventions
-		if usg["input_tokens"] != nil {
-			usage.PromptTokens = int(usg["input_tokens"].(float64))
-		} else if usg["prompt_tokens"] != nil {
-			usage.PromptTokens = int(usg["prompt_tokens"].(float64))
-		}
-
-		if usg["output_tokens"] != nil {
-			usage.CompletionTokens = int(usg["output_tokens"].(float64))
-		} else if usg["completion_tokens"] != nil {
-			usage.CompletionTokens = int(usg["completion_tokens"].(float64))
-		}
 	}
 
-	// total_tokens field name is consistent across all API types
-	if usg["total_tokens"] != nil {
-		usage.TotalTokens = int(usg["total_tokens"].(float64))
+	// total_tokens field name is consistent across all API types.
+	if v, ok := usg[totalTokensField]; ok && v != nil {
+		usage.TotalTokens = toInt(v)
 	}
 
-	return usage
+	return &usage, nil
 }
 
 // Example message if "stream_options": {"include_usage": "true"} is included in the request:

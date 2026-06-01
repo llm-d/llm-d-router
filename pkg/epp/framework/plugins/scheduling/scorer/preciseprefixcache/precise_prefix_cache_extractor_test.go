@@ -12,9 +12,9 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // discardCtx returns a context whose logger drops everything. The kvevents
@@ -58,9 +58,6 @@ func TestScorer_EndpointExtractor_InterfaceContract(t *testing.T) {
 	s := newExtractorScorer(true)
 	defer s.subscribersManager.Shutdown(ctx)
 
-	assert.Equal(t, fwkdl.EndpointEventReflectType, s.ExpectedInputType(),
-		"ExpectedInputType must report EndpointEvent for data-layer compatibility checks")
-
 	var _ fwkdl.EndpointExtractor = s
 	assert.True(t, reflect.TypeOf(s).Implements(reflect.TypeFor[fwkdl.EndpointExtractor]()))
 }
@@ -74,7 +71,7 @@ func TestScorer_ExtractEndpoint_AddAndDelete(t *testing.T) {
 	wantKey := "ns/pod-a"
 	wantEndpoint := "tcp://10.0.0.1:5557"
 
-	require.NoError(t, s.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: ep,
 	}))
@@ -84,14 +81,14 @@ func TestScorer_ExtractEndpoint_AddAndDelete(t *testing.T) {
 	require.Equal(t, []string{wantEndpoint}, endpoints, "ZMQ endpoint must derive from address + SocketPort")
 
 	// Re-add is idempotent (EnsureSubscriber dedups on identical endpoint).
-	require.NoError(t, s.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: ep,
 	}))
 	ids, _ = s.subscribersManager.GetActiveSubscribers()
 	assert.Len(t, ids, 1, "duplicate add must not create a second subscriber")
 
-	require.NoError(t, s.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
 		Endpoint: ep,
 	}))
@@ -106,7 +103,7 @@ func TestScorer_ExtractEndpoint_DiscoverPodsDisabledIsNoOp(t *testing.T) {
 	s := newExtractorScorer(false)
 	defer s.subscribersManager.Shutdown(ctx)
 
-	require.NoError(t, s.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: newEndpoint("pod-a", "10.0.0.1"),
 	}))
@@ -125,7 +122,7 @@ func TestScorer_ExtractEndpoint_IgnoresMissingMetadata(t *testing.T) {
 		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
 	}, nil)
 
-	require.NoError(t, s.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: ep,
 	}))
@@ -157,6 +154,27 @@ func TestScorer_EnsureSubscriber_SurvivesRequestCtxCancel(t *testing.T) {
 	ids, _ := s.subscribersManager.GetActiveSubscribers()
 	assert.ElementsMatch(t, []string{"ns/pod-a"}, ids,
 		"subscriber must outlive the caller's request-scoped context")
+}
+
+func TestScorer_EnsureSubscriber_RejectsPortOutOfRange(t *testing.T) {
+	s := newExtractorScorer(true)
+	defer s.subscribersManager.Shutdown(context.Background())
+
+	s.kvEventsConfig.PodDiscoveryConfig.SocketPort = 65535
+
+	err := s.ensureSubscriber(discardCtx(t), &fwkdl.EndpointMetadata{
+		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-1"},
+		Address:        "10.0.0.1",
+		Port:           "8080",
+		RankIndex:      1,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid KV-events ZMQ port 65536")
+	assert.Contains(t, err.Error(), "socketPort=65535")
+	assert.Contains(t, err.Error(), "rankIndex=1")
+
+	ids, _ := s.subscribersManager.GetActiveSubscribers()
+	assert.Empty(t, ids, "invalid port must not register a subscriber")
 }
 
 // Backwards-compat: configs that don't wire the endpoint-notification-source
@@ -195,7 +213,7 @@ func TestScorer_LegacyInScoreDiscovery_DisabledOnceExtractorObserved(t *testing.
 
 	// Simulate the data layer dispatching even an unrelated event — the call
 	// itself proves the source is wired.
-	require.NoError(t, s.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
 		Endpoint: newEndpoint("pod-x", "10.0.0.99"),
 	}))
@@ -233,6 +251,75 @@ func TestScorer_LegacyInScoreDiscovery_DiscoverPodsDisabled(t *testing.T) {
 	assert.Empty(t, ids)
 }
 
+// In wide-EP / data-parallel deployments vLLM binds one ZMQ PUB socket per
+// DP rank at SocketPort + dp_rank (see offset_endpoint_port in
+// vllm/distributed/kv_events.py). The scorer mirrors that rule so multiple
+// ranks sharing a pod IP land on distinct subscribers instead of colliding
+// on the base SocketPort.
+func TestScorer_ExtractEndpoint_OffsetsZMQPortByRankIndex(t *testing.T) {
+	ctx := discardCtx(t)
+	s := newExtractorScorer(true)
+	defer s.subscribersManager.Shutdown(ctx)
+
+	endpoints := []struct {
+		name    string
+		address string
+		rank    int
+		wantZMQ string
+	}{
+		{name: "pod-a-rank-0", address: "10.0.0.1", rank: 0, wantZMQ: "tcp://10.0.0.1:5557"},
+		{name: "pod-a-rank-1", address: "10.0.0.1", rank: 1, wantZMQ: "tcp://10.0.0.1:5558"},
+		{name: "pod-a-rank-2", address: "10.0.0.1", rank: 2, wantZMQ: "tcp://10.0.0.1:5559"},
+	}
+
+	for _, ep := range endpoints {
+		require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{
+			Type: fwkdl.EventAddOrUpdate,
+			Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+				NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: ep.name},
+				Address:        ep.address,
+				Port:           "8080",
+				RankIndex:      ep.rank,
+			}, nil),
+		}))
+	}
+
+	ids, zmqEndpoints := s.subscribersManager.GetActiveSubscribers()
+	gotByID := make(map[string]string, len(ids))
+	for i, id := range ids {
+		gotByID[id] = zmqEndpoints[i]
+	}
+	for _, ep := range endpoints {
+		key := "ns/" + ep.name
+		assert.Equal(t, ep.wantZMQ, gotByID[key],
+			"rank %d must subscribe at SocketPort + rank", ep.rank)
+	}
+}
+
+// Single-rank pods (the legacy precise-prefix-cache-aware deployment shape)
+// carry RankIndex=0 and must dial the base SocketPort unchanged. This is the
+// backwards-compatibility guard that lets existing one-port-per-pod
+// deployments keep working without any operator-side change.
+func TestScorer_ExtractEndpoint_SingleRankUsesBaseSocketPort(t *testing.T) {
+	ctx := discardCtx(t)
+	s := newExtractorScorer(true)
+	defer s.subscribersManager.Shutdown(ctx)
+
+	require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate,
+		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+			NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
+			Address:        "10.0.0.1",
+			Port:           "8080",
+			// RankIndex stays at its zero value.
+		}, nil),
+	}))
+
+	_, zmqEndpoints := s.subscribersManager.GetActiveSubscribers()
+	assert.Equal(t, []string{"tcp://10.0.0.1:5557"}, zmqEndpoints,
+		"single-rank pod (RankIndex=0) must dial the base SocketPort")
+}
+
 // Delete events from the data layer may omit address fields. The subscriber
 // is keyed by NamespacedName, so delete must succeed regardless of address
 // presence — otherwise stale subscribers leak when pods disappear.
@@ -241,7 +328,7 @@ func TestScorer_ExtractEndpoint_DeleteWithMissingAddressRemovesExistingSubscribe
 	s := newExtractorScorer(true)
 	defer s.subscribersManager.Shutdown(ctx)
 
-	require.NoError(t, s.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: newEndpoint("pod-a", "10.0.0.1"),
 	}))
@@ -253,7 +340,7 @@ func TestScorer_ExtractEndpoint_DeleteWithMissingAddressRemovesExistingSubscribe
 		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
 	}, nil)
 
-	require.NoError(t, s.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, s.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
 		Endpoint: deleteEndpoint,
 	}))

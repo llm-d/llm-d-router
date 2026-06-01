@@ -22,8 +22,8 @@ import (
 	"errors"
 	"fmt"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -31,10 +31,10 @@ const (
 )
 
 // compile-time type assertion
-var _ framework.ProfileHandler = &SingleProfileHandler{}
+var _ fwksched.ProfileHandler = &SingleProfileHandler{}
 
 // SingleProfileHandlerFactory defines the factory function for SingleProfileHandler.
-func SingleProfileHandlerFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func SingleProfileHandlerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewSingleProfileHandler().WithName(name), nil
 }
 
@@ -63,10 +63,10 @@ func (h *SingleProfileHandler) WithName(name string) *SingleProfileHandler {
 
 // Pick selects the SchedulingProfiles to run from the list of candidate profiles, while taking into consideration the request properties and the
 // previously executed cycles along with their results.
-func (h *SingleProfileHandler) Pick(_ context.Context, _ *framework.CycleState, request *framework.InferenceRequest, profiles map[string]framework.SchedulerProfile,
-	profileResults map[string]*framework.ProfileRunResult) map[string]framework.SchedulerProfile {
+func (h *SingleProfileHandler) Pick(_ context.Context, request *fwksched.InferenceRequest, profiles map[string]fwksched.SchedulerProfile,
+	profileResults map[string]*fwksched.ProfileRunResult) map[string]fwksched.SchedulerProfile {
 	if len(profiles) == len(profileResults) { // all profiles have been executed already in previous call
-		return map[string]framework.SchedulerProfile{}
+		return map[string]fwksched.SchedulerProfile{}
 	}
 	// return all profiles
 	return profiles
@@ -76,8 +76,8 @@ func (h *SingleProfileHandler) Pick(_ context.Context, _ *framework.CycleState, 
 // It may aggregate results, log test profile outputs, or apply custom logic. It specifies in the SchedulingResult the
 // key of the primary profile that should be used to get the request selected destination.
 // When a profile run fails, its result in the profileResults map is nil.
-func (h *SingleProfileHandler) ProcessResults(_ context.Context, _ *framework.CycleState, _ *framework.InferenceRequest,
-	profileResults map[string]*framework.ProfileRunResult) (*framework.SchedulingResult, error) {
+func (h *SingleProfileHandler) ProcessResults(_ context.Context, _ *fwksched.InferenceRequest,
+	profileResults map[string]*fwksched.ProfileRunResult) (*fwksched.SchedulingResult, error) {
 	if len(profileResults) != 1 {
 		return nil, errors.New("single profile handler is intended to be used with a single profile, failed to process multiple profiles")
 	}
@@ -92,7 +92,7 @@ func (h *SingleProfileHandler) ProcessResults(_ context.Context, _ *framework.Cy
 		return nil, fmt.Errorf("failed to run scheduler profile '%s'", singleProfileName)
 	}
 
-	return &framework.SchedulingResult{
+	return &fwksched.SchedulingResult{
 		ProfileResults:     profileResults,
 		PrimaryProfileName: singleProfileName,
 	}, nil

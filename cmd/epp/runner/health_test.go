@@ -26,8 +26,8 @@ import (
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 )
 
 // Mock Datastore
@@ -87,6 +87,17 @@ func TestHealthServer_Check(t *testing.T) {
 			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolH2C},
 			supporter:             &mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolHTTP}},
 			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
+			// File-discovery pools and K8s pools without an explicit AppProtocol
+			// must not be constrained to HTTP -- a non-HTTP parser would otherwise
+			// lock the EPP out of SERVING permanently.
+			name:                  "LeaderElectionDisabled_EmptyAppProtocol_NoConstraint",
+			leaderElectionEnabled: false,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{},
+			supporter:             &mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolH2C}},
+			wantStatus:            healthPb.HealthCheckResponse_SERVING,
 		},
 		{
 			name:                  "LeaderElectionEnabled_Liveness_AlwaysServing",

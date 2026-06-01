@@ -28,23 +28,25 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrlatency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 )
 
 const (
 	PluginType = "slo-headroom-tier-filter"
 )
 
-var _ framework.Filter = &Plugin{}
+var _ fwksched.Filter = &Plugin{}
 
 type Config struct {
 	// EpsilonExploreNeg is the probability of selecting the negative tier
 	// when both tiers have endpoints. This ensures overloaded endpoints get
 	// occasional traffic for recovery. Range: [0, 1]. Default: 0.01 (1%).
 	EpsilonExploreNeg float64 `json:"epsilonExploreNeg,omitempty"`
+
+	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -52,14 +54,15 @@ var DefaultConfig = Config{
 }
 
 type Plugin struct {
-	typedName fwkplugin.TypedName
-	config    Config
+	typedName                    fwkplugin.TypedName
+	config                       Config
+	latencyPredictionInfoDataKey fwkplugin.DataKey
 }
 
-func Factory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	config := DefaultConfig
-	if len(rawParameters) > 0 {
-		if err := json.Unmarshal(rawParameters, &config); err != nil {
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 		}
 	}
@@ -67,8 +70,9 @@ func Factory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fw
 		return nil, fmt.Errorf("epsilonExploreNeg must be in [0, 1], got %f", config.EpsilonExploreNeg)
 	}
 	return &Plugin{
-		typedName: fwkplugin.TypedName{Type: PluginType, Name: name},
-		config:    config,
+		typedName:                    fwkplugin.TypedName{Type: PluginType, Name: name},
+		config:                       config,
+		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 	}, nil
 }
 
@@ -81,16 +85,16 @@ func (p *Plugin) TypedName() fwkplugin.TypedName {
 // endpoints are kept. 1% of the time, only negative-tier endpoints are kept
 // (epsilon exploration for recovery). If only one tier has endpoints, that
 // tier is returned. If no endpoints have predictions, all are kept.
-func (p *Plugin) Filter(ctx context.Context, _ *framework.CycleState, _ *framework.InferenceRequest, endpoints []framework.Endpoint) []framework.Endpoint {
+func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	logger := log.FromContext(ctx)
 
 	if len(endpoints) <= 1 {
 		return endpoints
 	}
 
-	var positive, negative, noPrediction []framework.Endpoint
+	var positive, negative, noPrediction []fwksched.Endpoint
 	for _, ep := range endpoints {
-		raw, ok := ep.Get(attrlatency.LatencyPredictionInfoKey)
+		raw, ok := ep.Get(p.latencyPredictionInfoDataKey.String())
 		if !ok {
 			noPrediction = append(noPrediction, ep)
 			continue
@@ -137,8 +141,8 @@ func (p *Plugin) Filter(ctx context.Context, _ *framework.CycleState, _ *framewo
 	}
 }
 
-func (p *Plugin) Consumes() map[string]any {
-	return map[string]any{
-		attrlatency.LatencyPredictionInfoKey: attrlatency.LatencyPredictionInfo{},
+func (p *Plugin) Consumes() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{
+		p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
 	}
 }

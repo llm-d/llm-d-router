@@ -1,0 +1,33 @@
+router:
+  modelServers:
+    # matchLabels: # REQUIRED
+    #   app: vllm-qwen3-32b
+
+# Gateway provider selection.
+# This section configures the gateway implementation only; it is not a generic infrastructure provider setting.
+# Options: ["gke", "istio", "none"]
+provider:
+  name: none
+
+  # Istio-specific configuration.
+  # This block is only used if name is "istio".
+  istio:
+    destinationRule:
+      # Provide a way to override the default calculated host
+      host: ""
+      # Optional: Enables customization of the traffic policy
+      trafficPolicy: {}
+        # connectionPool:
+        #   http:
+        #     maxRequestsPerConnection: 256000
+
+# httpRoute section is used to deploy an HTTPRoute resource as part of the gateway chart.
+httpRoute:
+  create: false # a flag to indicate whether to create the httproute as part of the chart or not.
+  inferenceGatewayName: inference-gateway
+  inferenceGatewayNamespace: ""
+  # HTTPRoute request timeout. Defaults to "300s". Unused when provider.name is gke.
+  requestTimeout: "300s"
+  # Example header matches:
+  # headerMatches:
+  #  x-my-custom-route-header: route-name

@@ -1,6 +1,6 @@
 # Development
 
-Documentation for developing the inference scheduler.
+Documentation for developing the llm-d Router.
 
 ## Table of Contents
 
@@ -20,8 +20,11 @@ Documentation for developing the inference scheduler.
       - [3. Encode/Prefill-Decode (E/PD) Disaggregation](#3-encodeprefill-decode-epd-disaggregation)
       - [4. Encode/Prefill/Decode (E/P/D) Disaggregation](#4-encodeprefilldecode-epd-disaggregation)
       - [5. Disaggregated Setup Verification](#5-disaggregated-setup-verification)
-      - [Combining Scenarios with Data Parallel and KV Cache](#combining-scenarios-with-data-parallel-and-kv-cache)
+    - [Combining Scenarios with Data Parallel and KV Cache](#combining-scenarios-with-data-parallel-and-kv-cache)
     - [Simulator vs Real vLLM](#simulator-vs-real-vllm)
+      - [Deploying with Simulator (default)](#deploying-with-simulator-default)
+      - [Deploying with Real vLLM](#deploying-with-real-vllm)
+      - [Deployment Component Summary](#deployment-component-summary)
     - [Cleanup](#cleanup)
   - [Running Tests](#running-tests)
     - [Unit Tests](#unit-tests)
@@ -38,6 +41,8 @@ Documentation for developing the inference scheduler.
     - [Deploying Changes](#deploying-changes)
     - [Cleanup Environment](#cleanup-environment)
   - [Submitting Changes](#submitting-changes)
+    - [Scope](#scope)
+    - [Presubmit](#presubmit)
 
 ## Overview
 
@@ -52,7 +57,7 @@ A real Kubernetes cluster setup is covered later for shared or production-like t
 ## Requirements
 
 - [Make] `v4`+
-- [Golang] `v1.24`+
+- [Golang] `v1.25`+
 - [Docker] (or [Podman])
 - [Kubernetes in Docker (KIND)]
 - [Kubectl] `v1.25`+
@@ -72,13 +77,13 @@ Deploys the EPP, vLLM simulator, and Gateway API implementation into a local KIN
 make env-dev-kind
 ```
 
-Creates a new `kind` cluster (or reuses an existing one) in the `default` namespace.
+Creates a new `kind` cluster (or reuses an existing one) in the `default` namespace. The cluster name defaults to `KIND_CLUSTER_NAME` in `Makefile.kind.mk` (currently `$(PROJECT_NAME)-dev`), and the kubectl context is `kind-<cluster-name>`.
 
 > [!NOTE]
 > You can pre-pull external images to avoid slow downloads:
 > ```
-> docker pull ghcr.io/llm-d/llm-d-inference-sim:v0.8.2
-> docker pull ghcr.io/llm-d/llm-d-uds-tokenizer:dev
+> docker pull ghcr.io/llm-d/llm-d-inference-sim:v0.9.0
+> docker pull vllm/vllm-openai-cpu:v0.21.0
 > ```
 
 ### Accessing the Gateway
@@ -86,7 +91,7 @@ Creates a new `kind` cluster (or reuses an existing one) in the `default` namesp
 Use port-forward for local development:
 
 ```bash
-kubectl --context kind-llm-d-inference-scheduler-dev \
+kubectl --context kind-llm-d-router-dev \
   port-forward service/inference-gateway-istio 8080:80
 ```
 
@@ -141,7 +146,7 @@ The service is then accessible at `http://localhost:30080`.
 ```bash
 # Install and run cloud-provider-kind:
 go install sigs.k8s.io/cloud-provider-kind@latest && cloud-provider-kind &
-kubectl --context kind-llm-d-inference-scheduler-dev get service inference-gateway-istio
+kubectl --context kind-llm-d-router-dev get service inference-gateway-istio
 # Wait for the LoadBalancer External-IP to become available.
 # The service is accessible over port 80.
 ```
@@ -260,7 +265,7 @@ then attach `dlv` via the ephemeral container:
 ```bash
 # 1. Build and load the debug image
 LDFLAGS="" make image-build-epp
-kind load docker-image $(EPP_IMAGE) --name llm-d-inference-scheduler-dev
+kind load docker-image $(EPP_IMAGE) --name llm-d-router-dev
 
 # 2. Restart the deployment to pick up the new image
 kubectl rollout restart deployment tinyllama-1-1b-chat-v1-0-endpoint-picker
@@ -392,7 +397,7 @@ curl -s http://localhost:30080/v1/chat/completions \
 After deploying any disaggregation mode, verify with a basic request:
 
 ```bash
-kubectl --context kind-llm-d-inference-scheduler-dev port-forward service/inference-gateway-istio 8080:80
+kubectl --context kind-llm-d-router-dev port-forward service/inference-gateway-istio 8080:80
 ```
 
 For multimodal disaggregation (E/PD, E/P/D), test with an image request to verify the encoder stage is working:
@@ -438,7 +443,7 @@ The `deploy/components/` directory contains all reusable Kustomize components:
 - `vllm-decode/` — Decode pod with routing sidecar
 
 **Deployment overlays** — applied on top of the base components:
-- `overlays/simulator/` — adds `--mode=${VLLM_SIM_MODE}`, UDS tokenizer sidecar, KV cache args, and `--zmq-endpoint` on Decode. Included by default in all dev scenario overlays.
+- `overlays/simulator/` — adds `--mode=${VLLM_SIM_MODE}`, vllm renderer sidecar, KV cache args, and `--zmq-endpoint` on Decode. Included by default in all dev scenario overlays.
 - `overlays/real-vllm/` — adds `--kv-events-config` on Decode, `--ec-transfer-config` on Encode, and a shared PVC for encoder embeddings.
 
 **Infrastructure components** — shared cluster infrastructure:
@@ -500,7 +505,7 @@ components:
 Then deploy with:
 
 ```bash
-VLLM_IMAGE=vllm/vllm-openai:v0.16.0 \
+VLLM_IMAGE=vllm/vllm-openai:v0.21.0 \
   kubectl kustomize deploy/environments/prod/p-d \
   | envsubst | kubectl apply -f -
 ```
@@ -514,12 +519,12 @@ a shared PVC (`ec-cache-pvc`) for encoder embeddings transfer.
 
 | Component | What it adds | When to use |
 |---|---|---|
-| `overlays/simulator/` | `--mode=${VLLM_SIM_MODE}`, UDS tokenizer, KV cache args, `--zmq-endpoint` on Decode | Dev/test with simulator image |
+| `overlays/simulator/` | `--mode=${VLLM_SIM_MODE}`, vLLM renderer, KV cache args, `--zmq-endpoint` on Decode | Dev/test with simulator image |
 | `overlays/real-vllm/` | `--kv-events-config` on Decode (per-pod ZMQ publisher), `--ec-transfer-config` on Encode, ec-cache PVC | Production with real vLLM image |
 
 | Variable | Default | Description |
 |---|---|---|
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.8.2` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`). Defaults to the simulator image. |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.9.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`). Defaults to the simulator image. |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. `echo` returns the input prompt as the response (useful for routing validation). `random` returns random sentences from a pre-defined bank. Only applies when using the simulator overlay. |
 
 ### Cleanup
@@ -606,17 +611,17 @@ kubectl --context kind-e2e-tests get pods
 | `NAMESPACE` | `default` | Namespace to deploy test resources into |
 | `CONTAINER_RUNTIME` | `docker` | Container runtime used to load images into Kind (`docker` or `podman`) |
 | `READY_TIMEOUT` | `3m` | How long to wait for resources to become ready |
-| `EPP_IMAGE` | `ghcr.io/llm-d/llm-d-inference-scheduler:dev` | EPP image loaded into the Kind cluster |
+| `EPP_IMAGE` | `ghcr.io/llm-d/llm-d-router-endpoint-picker:dev` | EPP image loaded into the Kind cluster |
 | `DISAGG_E` | `false` | Deploy a separate Encoder pod. See [Inference Disaggregation Modes](#inference-disaggregation-modes) |
 | `DISAGG_P` | `false` | Deploy a separate Prefill pod. See [Inference Disaggregation Modes](#inference-disaggregation-modes) |
 | `VLLM_DATA_PARALLEL_SIZE` | `1` | Number of data-parallel ranks per vLLM pod. Applies to all pod types. Set to `2`+ to enable multi-rank inference. See [Combining Scenarios with Data Parallel and KV Cache](#combining-scenarios-with-data-parallel-and-kv-cache) |
 | `VLLM_EXTRA_ARGS_E` | _(empty)_ | Additional flags for the Encoder vLLM container (e.g. `--mm-processor-kwargs={}`) |
 | `VLLM_EXTRA_ARGS_P` | _(empty)_ | Additional flags for the Prefill vLLM container (e.g. `--gpu-memory-utilization=0.9`) |
 | `VLLM_EXTRA_ARGS_D` | _(empty)_ | Additional flags for the Decode vLLM container (e.g. `--tensor-parallel-size=2`) |
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.8.2` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.9.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. Supported values: `echo` (returns the input prompt as the response), `random` (returns a random sentence from a pre-defined bank) |
-| `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-routing-sidecar:dev` | Routing sidecar image loaded into the Kind cluster |
-| `UDS_TOKENIZER_IMAGE` | `ghcr.io/llm-d/llm-d-uds-tokenizer:dev` | UDS tokenizer image loaded into the Kind cluster |
+| `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` | Routing sidecar image loaded into the Kind cluster |
+| `VLLM_RENDER_IMAGE` | `vllm/vllm-openai-cpu:v0.21.0` | vLLM renderer image loaded into the Kind cluster |
 
 ### Coverage
 
@@ -654,36 +659,6 @@ If a worktree for the target ref already exists locally it is reused and not rem
 > CI runs the same comparison automatically on every PR: one report against `main`
 > and one against the most recent `release-*` branch. Both appear in the GitHub
 > Actions Job Summary for the run.
-
-## Tokenization Architecture
-
-> [!NOTE]
-> **Python is NOT required**. Previous EPP versions (before v0.5.1) used embedded Python
-> tokenizers.
-
-The project uses **UDS (Unix Domain Socket)** tokenization. A separate UDS tokenizer
-sidecar container handles tokenization; the EPP itself does not. Previous approaches
-(daulet/tokenizers, direct Python/vLLM linking) are deprecated and no longer used.
-
-The UDS tokenizer image is built and published by the
-[llm-d-kv-cache](https://github.com/llm-d/llm-d-kv-cache) repository.
-Published images are available at `ghcr.io/llm-d/llm-d-uds-tokenizer:<tag>`
-
-- The `:dev` tag tracks the kv-cache `main` branch.
-- To pin a specific release, set `UDS_TOKENIZER_TAG` (or `UDS_TOKENIZER_IMAGE` for a
-  fully custom reference):
-
-  ```bash
-  UDS_TOKENIZER_TAG=v0.7.0 make env-dev-kind
-  ```
-
-- To use a different registry, set `IMAGE_REGISTRY` (shared with all other images):
-
-  ```bash
-  IMAGE_REGISTRY=quay.io/my-org make env-dev-kind
-  ```
-
-- To build the image from source, run `make image-build-uds` in the `llm-d-kv-cache` repo.
 
 ## Kubernetes Development Environment
 
@@ -808,9 +783,9 @@ export EPP_TAG="<YOUR_TAG>"
 ```
 
 > [!NOTE]
-> The full image reference is `${IMAGE_REGISTRY}/llm-d-inference-scheduler:${EPP_TAG}`.
+> The full image reference is `${IMAGE_REGISTRY}/llm-d-router-endpoint-picker:${EPP_TAG}`.
 > For example, with `IMAGE_REGISTRY=quay.io/<my-id>` and `EPP_TAG=v1.0.0`, the image
-> will be `quay.io/<my-id>/llm-d-inference-scheduler:v1.0.0`.
+> will be `quay.io/<my-id>/llm-d-router-endpoint-picker:v1.0.0`.
 
 **2. vLLM replica count:**
 
@@ -903,6 +878,36 @@ For more details, see the Gateway API Inference Extension
 [getting started guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
 
 ## Submitting Changes
+
+Read the [llm-d organization contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md)
+first — it covers project-wide guidelines, code of conduct, and community resources that apply across
+all llm-d repositories. The sections below describe router-repo-specific expectations on top of that
+baseline.
+
+### Scope
+
+Scoped changes and localized bug fixes can be submitted directly as a PR. 
+For larger changes please [create an issue](https://github.com/llm-d/llm-d-router/issues/new)
+first describing the change so the maintainers can do an assessment, and work on the details
+with you. Getting alignment on the requirements and approach is critical for getting your
+changes merged.
+
+Please call out any user facing changes your change will introduce, including changes to
+documentation, deployment guides, etc. If your changes replace and deprecate an existing feature,
+please be sure to consider that in your design and implementation.
+We follow an "N+2 deprecation" policy: features deprecated in release N must continue to work
+without user impact (e.g., configuration changes) for 2 releases and can be fully removed
+in release N+2. Use of a deprecated feature must produce a clear warning message in releases
+N and N+1, providing users with a two release grace period to adjust before the feature is removed.
+
+Please use the [template](.github/PULL_REQUEST_TEMPLATE.md) provided when creating a PR.
+If using coding agents, please ensure that the agent uses the PR template format as well.
+The template contains a `release-notes` section which must be filled for any change that has
+user facing impact.
+
+For additional information and context, please refer to the [llm-d contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md)
+
+### Presubmit
 
 Before opening a PR, run:
 

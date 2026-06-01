@@ -23,8 +23,8 @@ package fcfs
 import (
 	"encoding/json"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // FCFSOrderingPolicyType is the registration type for the FCFS ordering policy.
@@ -33,7 +33,7 @@ import (
 // For detailed documentation on behavior and queue pairing, see README.md.
 const FCFSOrderingPolicyType = "fcfs-ordering-policy"
 
-func FCFSOrderingPolicyFactory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func FCFSOrderingPolicyFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return newFCFS().withName(name), nil
 }
 

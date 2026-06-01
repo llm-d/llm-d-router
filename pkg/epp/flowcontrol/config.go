@@ -19,11 +19,11 @@ package flowcontrol
 import (
 	"fmt"
 
-	configapi "github.com/llm-d/llm-d-inference-scheduler/apix/config/v1alpha1"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/controller"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/registry"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const FeatureGate = "flowControl"
@@ -35,6 +35,17 @@ type Config struct {
 	Controller       *controller.Config
 	Registry         *registry.Config
 	UsageLimitPolicy flowcontrol.UsageLimitPolicy
+}
+
+func (c *Config) String() string {
+	if c == nil {
+		return "<nil>"
+	}
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
+	// A new type definition inherits the struct fields but does not copy its methods,
+	// bypassing the Stringer check and allowing a safe reflection-based field dump.
+	type temp Config
+	return fmt.Sprintf("%+v", temp(*c))
 }
 
 // NewConfigFromAPI creates a new Config by translating the top-level API configuration.

@@ -1,29 +1,30 @@
 approvers:
 - elevran
-- kfswain
-- nilig
-- nirrozenbaum
-- shmuelk
 - vMaroon
 - ahg-g
+- liu-cong
 
 reviewers:
 - elevran
-- kfswain
 - nilig
 - nirrozenbaum
 - shmuelk
 - vMaroon
 - ahg-g
+- liu-cong
 
 # Auto-assign configuration for global assignment
 # Works in addition to GitHub's built-in CODEOWNERS functionality
 # Implemented via a custom GitHub Action
 auto-assign:
   - elevran
-  - kfswain
   - nilig
   - nirrozenbaum
   - shmuelk
   - vMaroon
   - ahg-g
+  - liu-cong
+
+
+emeritus:
+  - kfswain

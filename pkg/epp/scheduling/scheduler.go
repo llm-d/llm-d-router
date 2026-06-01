@@ -24,9 +24,9 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -46,12 +46,12 @@ func NewSchedulerWithConfig(config *SchedulerConfig) *Scheduler {
 }
 
 type Scheduler struct {
-	profileHandler framework.ProfileHandler
-	profiles       map[string]framework.SchedulerProfile
+	profileHandler fwksched.ProfileHandler
+	profiles       map[string]fwksched.SchedulerProfile
 }
 
 // Schedule finds the target pod based on metrics and the requested lora adapter.
-func (s *Scheduler) Schedule(ctx context.Context, request *framework.InferenceRequest, candidateEndpoints []framework.Endpoint) (result *framework.SchedulingResult, err error) {
+func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (result *fwksched.SchedulingResult, err error) {
 	loggerVerbose := log.FromContext(ctx).V(logutil.VERBOSE)
 
 	scheduleStart := time.Now()
@@ -60,13 +60,12 @@ func (s *Scheduler) Schedule(ctx context.Context, request *framework.InferenceRe
 		metrics.RecordSchedulerAttempt(err, request.TargetModel, result)
 	}()
 
-	profileRunResults := map[string]*framework.ProfileRunResult{}
-	cycleState := framework.NewCycleState()
+	profileRunResults := map[string]*fwksched.ProfileRunResult{}
 
 	for { // get the next set of profiles to run iteratively based on the request and the previous execution results
 		loggerVerbose.Info("Running profile handler, Pick profiles", "plugin", s.profileHandler.TypedName())
 		before := time.Now()
-		profiles := s.profileHandler.Pick(ctx, cycleState, request, s.profiles, profileRunResults)
+		profiles := s.profileHandler.Pick(ctx, request, s.profiles, profileRunResults)
 		metrics.RecordPluginProcessingLatency(profilePickerExtensionPoint, s.profileHandler.TypedName().Type, s.profileHandler.TypedName().Name, time.Since(before))
 		loggerVerbose.Info("Completed running profile handler Pick profiles successfully", "plugin", s.profileHandler.TypedName(), "result", profiles)
 		if len(profiles) == 0 { // profile picker didn't pick any profile to run
@@ -76,7 +75,7 @@ func (s *Scheduler) Schedule(ctx context.Context, request *framework.InferenceRe
 		for name, profile := range profiles {
 			loggerVerbose.Info("Running scheduler profile", "profile", name)
 			// run the selected profiles and collect results (current code runs all profiles)
-			profileRunResult, err := profile.Run(ctx, request, cycleState, candidateEndpoints)
+			profileRunResult, err := profile.Run(ctx, request, candidateEndpoints)
 			if err != nil {
 				loggerVerbose.Info("failed to run scheduler profile", "profile", name, "error", err.Error())
 			} else {
@@ -94,7 +93,7 @@ func (s *Scheduler) Schedule(ctx context.Context, request *framework.InferenceRe
 
 	loggerVerbose.Info("Running profile handler, ProcessResults", "plugin", s.profileHandler.TypedName())
 	before := time.Now()
-	result, err = s.profileHandler.ProcessResults(ctx, cycleState, request, profileRunResults)
+	result, err = s.profileHandler.ProcessResults(ctx, request, profileRunResults)
 	metrics.RecordPluginProcessingLatency(processProfilesResultsExtensionPoint, s.profileHandler.TypedName().Type, s.profileHandler.TypedName().Name, time.Since(before))
 	loggerVerbose.Info("Completed running profile handler ProcessResults successfully", "plugin", s.profileHandler.TypedName())
 

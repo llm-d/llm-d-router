@@ -30,11 +30,11 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/picker"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/picker/random"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/random"
 )
 
 const (
@@ -44,18 +44,18 @@ const (
 
 // weightedScoredEndpoint represents a scored endpoint with its A-Res sampling key
 type weightedScoredEndpoint struct {
-	*framework.ScoredEndpoint
+	*fwksched.ScoredEndpoint
 	key float64
 }
 
 // compile-time type validation
-var _ framework.Picker = &WeightedRandomPicker{}
+var _ fwksched.Picker = &WeightedRandomPicker{}
 
 // WeightedRandomPickerFactory defines the factory function for WeightedRandomPicker.
-func WeightedRandomPickerFactory(name string, rawParameters json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func WeightedRandomPickerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	parameters := picker.PickerParameters{MaxNumOfEndpoints: picker.DefaultMaxNumOfEndpoints}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' picker - %w", WeightedRandomPickerType, err)
 		}
 	}
@@ -108,11 +108,11 @@ func (p *WeightedRandomPicker) TypedName() fwkplugin.TypedName {
 
 // Pick selects the endpoint(s) randomly from the list of candidates, where the probability of the endpoint to get picked is derived
 // from its weighted score.
-func (p *WeightedRandomPicker) Pick(ctx context.Context, cycleState *framework.CycleState, scoredEndpoints []*framework.ScoredEndpoint) *framework.ProfileRunResult {
+func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
 	// Check if there is at least one endpoint with Score > 0, if not let random picker run
-	if slices.IndexFunc(scoredEndpoints, func(scoredEndpoint *framework.ScoredEndpoint) bool { return scoredEndpoint.Score > 0 }) == -1 {
+	if slices.IndexFunc(scoredEndpoints, func(scoredEndpoint *fwksched.ScoredEndpoint) bool { return scoredEndpoint.Score > 0 }) == -1 {
 		log.FromContext(ctx).V(logutil.DEBUG).Info("All scores are zero, delegating to RandomPicker for uniform selection")
-		return p.randomPicker.Pick(ctx, cycleState, scoredEndpoints)
+		return p.randomPicker.Pick(ctx, scoredEndpoints)
 	}
 
 	log.FromContext(ctx).V(logutil.DEBUG).Info("Selecting endpoints from candidates by random weighted picker", "max-num-of-endpoints", p.maxNumOfEndpoints,
@@ -146,10 +146,10 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, cycleState *framework.C
 	// Select top k endpoints
 	selectedCount := min(p.maxNumOfEndpoints, len(weightedEndpoints))
 
-	targetEndpoints := make([]framework.Endpoint, selectedCount)
+	targetEndpoints := make([]fwksched.Endpoint, selectedCount)
 	for i := range selectedCount {
 		targetEndpoints[i] = weightedEndpoints[i].ScoredEndpoint
 	}
 
-	return &framework.ProfileRunResult{TargetEndpoints: targetEndpoints}
+	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}
 }

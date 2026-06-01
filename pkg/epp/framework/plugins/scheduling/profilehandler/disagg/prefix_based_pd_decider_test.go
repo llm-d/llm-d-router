@@ -9,10 +9,12 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	prefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/test/utils"
 )
 
 const (
@@ -44,8 +46,8 @@ func makeTestEndpointBase() scheduling.Endpoint {
 
 func makeTestEndpoint(cachedTokens int) scheduling.Endpoint {
 	ep := makeTestEndpointBase()
-	ep.Put(prefix.PrefixCacheMatchInfoKey,
-		prefix.NewPrefixCacheMatchInfo(cachedTokens, testTotalTokens, testBlockSize))
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+		attrprefix.NewPrefixCacheMatchInfo(cachedTokens, testTotalTokens, testBlockSize))
 	return ep
 }
 
@@ -55,12 +57,33 @@ func makeRequestWithTokens(tokens int) *scheduling.InferenceRequest {
 	return completionsRequest(strings.Repeat("x", tokens*AverageCharactersPerToken))
 }
 
+func completionsRequestWithPrompt(prompt fwkrh.Prompt) *scheduling.InferenceRequest {
+	return &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: prompt,
+			},
+		},
+	}
+}
+
+func embeddingsRequestWithInput(input fwkrh.EmbeddingsInput) *scheduling.InferenceRequest {
+	return &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Embeddings: &fwkrh.EmbeddingsRequest{
+				Input: input,
+			},
+		},
+	}
+}
+
 func TestGetUserInputLenInTokens(t *testing.T) {
 	tests := []struct {
 		name     string
 		req      *scheduling.InferenceRequest
 		wantMin  int // at least this many tokens
 		wantZero bool
+		want     int
 	}{
 		{
 			name:    "completions prompt",
@@ -77,14 +100,56 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 			req:      completionsRequest(""),
 			wantZero: true,
 		},
+		{
+			name: "completions prompt array",
+			req: completionsRequestWithPrompt(fwkrh.Prompt{
+				Strings: []string{"hello", "world"},
+			}),
+			wantMin: 2,
+		},
+		{
+			name: "completions token ids uses exact hint",
+			req: completionsRequestWithPrompt(fwkrh.Prompt{
+				TokenIDs: []uint32{1, 2, 3, 4},
+			}),
+			want: 4,
+		},
+		{
+			name: "embeddings input array",
+			req: embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
+				Strings: []string{"hello", "world"},
+			}),
+			wantMin: 2,
+		},
+		{
+			name: "embeddings token ids uses exact hint",
+			req: embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
+				TokenIDs: []uint32{1, 2, 3},
+			}),
+			want: 3,
+		},
+		{
+			name: "generate request returns exact token count",
+			req: &scheduling.InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					Generate: &fwkrh.GenerateRequest{
+						TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7},
+					},
+				},
+			},
+			want: 7,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tokens, err := getUserInputLenInTokens(tt.req)
 			assert.NoError(t, err)
-			if tt.wantZero {
+			switch {
+			case tt.wantZero:
 				assert.Zero(t, tokens)
-			} else {
+			case tt.want > 0:
+				assert.Equal(t, tt.want, tokens)
+			default:
 				assert.GreaterOrEqual(t, tokens, tt.wantMin)
 			}
 		})
@@ -172,7 +237,7 @@ func TestPrefixBasedPDDeciderFactory(t *testing.T) {
 				raw = json.RawMessage(tt.rawParams)
 			}
 
-			p, err := PrefixBasedPDDeciderPluginFactory(tt.pluginName, raw, nil)
+			p, err := PrefixBasedPDDeciderPluginFactory(tt.pluginName, fwkplugin.StrictDecoder(raw), nil)
 			if tt.expectErr {
 				assert.Error(t, err)
 				assert.Nil(t, p)
@@ -291,7 +356,7 @@ func TestDisaggregateWrongPrefixInfoType(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	ep := makeTestEndpointBase()
-	ep.Put(prefix.PrefixCacheMatchInfoKey, &notPrefixCacheMatchInfo{})
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), &notPrefixCacheMatchInfo{})
 
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 5})
 	require.NoError(t, err)
@@ -303,11 +368,19 @@ func TestConsumes(t *testing.T) {
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 0})
 	require.NoError(t, err)
 
-	handler, err := NewPdProfileHandler("prefill", "decode", PrefixBasedPDDeciderPluginType, "test", 0, decider)
+	handler, err := NewPdProfileHandler(
+		"test-handler",
+		pdProfileHandlerParameters{
+			PrefillProfile:              "prefill",
+			DecodeProfile:               "decode",
+			PrefixMatchInfoProducerName: "test",
+		},
+		decider,
+	)
 	require.NoError(t, err)
 
 	consumed := handler.Consumes()
-	assert.Contains(t, consumed, prefix.PrefixCacheMatchInfoKey)
+	assert.Contains(t, consumed, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 }
 
 func TestWithName(t *testing.T) {

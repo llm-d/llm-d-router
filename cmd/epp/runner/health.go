@@ -28,8 +28,8 @@ import (
 	"google.golang.org/grpc/status"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 )
 
 type appProtocolSupporter interface {
@@ -56,7 +56,7 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 	// If leader election is disabled, use current logic: all checks are based on whether the pool has synced.
 	if !s.leaderElectionEnabled {
 		if !isLive || !protocolMatches {
-			s.logger.V(logutil.DEFAULT).Info("gRPC health check not serving (leader election disabled)", "service", in.Service, "isLive", isLive, "protocolMatches", protocolMatches)
+			s.logger.Error(nil, "gRPC health check not serving (leader election disabled)", "service", in.Service, "isLive", isLive, "protocolMatches", protocolMatches)
 			return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_NOT_SERVING}, nil
 		}
 		s.logger.V(logutil.TRACE).Info("gRPC health check serving (leader election disabled)", "service", in.Service)
@@ -88,12 +88,12 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 		checkName = "ext_proc"
 		isPassing = isLive && s.isLeader.Load() && protocolMatches
 	default:
-		s.logger.V(logutil.DEFAULT).Info("gRPC health check requested unknown service", "available-services", []string{LivenessCheckService, ReadinessCheckService, extProcPb.ExternalProcessor_ServiceDesc.ServiceName}, "requested-service", in.Service)
+		s.logger.Error(nil, "gRPC health check requested unknown service", "available-services", []string{LivenessCheckService, ReadinessCheckService, extProcPb.ExternalProcessor_ServiceDesc.ServiceName}, "requested-service", in.Service)
 		return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_SERVICE_UNKNOWN}, nil
 	}
 
 	if !isPassing {
-		s.logger.V(logutil.DEFAULT).Info(fmt.Sprintf("gRPC %s check not serving", checkName), "service", in.Service, "isLive", isLive, "isLeader", s.isLeader.Load())
+		s.logger.Error(nil, fmt.Sprintf("gRPC %s check not serving", checkName), "service", in.Service, "isLive", isLive, "isLeader", s.isLeader.Load())
 		return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_NOT_SERVING}, nil
 	}
 
@@ -117,12 +117,15 @@ func (s *healthServer) checkProtocolSupport(isLive bool) bool {
 	if len(supported) == 0 {
 		return true
 	}
-	appProtocol := pool.AppProtocol
-	if appProtocol == "" {
-		appProtocol = v1.AppProtocolHTTP
+	// An unset AppProtocol means the operator did not declare a protocol on the
+	// pool. Treat that as "no protocol constraint" rather than silently
+	// defaulting to HTTP, which would lock out file-discovery deployments and
+	// any K8s pool that uses a non-HTTP parser without setting AppProtocol.
+	if pool.AppProtocol == "" {
+		return true
 	}
 	for _, p := range supported {
-		if p == appProtocol {
+		if p == pool.AppProtocol {
 			return true
 		}
 	}

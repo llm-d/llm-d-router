@@ -24,9 +24,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	extmocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/mocks"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/notifications"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	extmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
 // TestNewEndpointDispatchesEventWithNoPollers verifies that endpoint lifecycle
@@ -43,18 +44,18 @@ func TestNewEndpointDispatchesEventWithNoPollers(t *testing.T) {
 		Sources: []DataSourceConfig{
 			{
 				Plugin:     epSrc,
-				Extractors: []fwkdl.ExtractorBase{extractor},
+				Extractors: []fwkplugin.Plugin{extractor},
 			},
 		},
 	}
-	assert.NoError(t, r.Configure(cfg, false, "", logger))
+	assert.NoError(t, r.Configure(cfg, logger))
 
 	pod := &fwkdl.EndpointMetadata{
 		NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
 		Address:        "1.2.3.4:5678",
 	}
 
-	endpoint := r.NewEndpoint(context.Background(), pod, nil)
+	endpoint := r.NewEndpoint(context.Background(), pod)
 	assert.NotNil(t, endpoint, "NewEndpoint should return a valid endpoint")
 
 	events := extractor.GetEvents()

@@ -13,20 +13,12 @@ updates:
       - "dependencies"
       - "release-note-none"
     ignore:
-      # Ignore major and minor updates to Go toolchain (ensure go version is consistent in builds, actions, etc.)
-      - dependency-name: "go"
+      # Major/minor upgrades are handled intentionally via `make upgrade-deps`; dependabot covers patches only
+      - dependency-name: "*"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
-      # Ignore *all* updates to GAIE package - manually update go.mod only
+      # GAIE is updated manually only (all versions)
       - dependency-name: "sigs.k8s.io/gateway-api-inference-extension"
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
-      # Ignore major and minor version updates to k8s packages
-      - dependency-name: "k8s.io/*"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
-      - dependency-name: "sigs.k8s.io/*"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
-      # Ignore major updates for all Go packages
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
     groups:
       go-dependencies:
         patterns:

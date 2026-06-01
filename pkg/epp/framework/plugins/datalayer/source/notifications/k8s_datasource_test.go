@@ -26,8 +26,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 var (
@@ -178,7 +178,7 @@ func TestNotificationSourceFactory(t *testing.T) {
 			t.Parallel()
 
 			rawParams := marshalParams(t, tt.params)
-			plugin, err := NotificationSourceFactory(tt.pluginName, rawParams, nil)
+			plugin, err := NotificationSourceFactory(tt.pluginName, fwkplugin.StrictDecoder(rawParams), nil)
 
 			if tt.expectedError != "" {
 				require.Error(t, err)

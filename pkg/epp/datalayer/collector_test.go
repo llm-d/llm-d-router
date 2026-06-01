@@ -24,37 +24,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer/mocks"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	datasourcemocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer/mocks"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	datasourcemocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	"github.com/llm-d/llm-d-router/pkg/metrics"
 )
-
-// errSource is a test stub that returns a configurable error from Poll.
-// The error is guarded by a mutex so it can safely be changed between ticks.
-type errSource struct {
-	datasourcemocks.MetricsDataSource
-	mu  sync.Mutex
-	err error
-}
-
-func (e *errSource) setErr(err error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.err = err
-}
-
-func (e *errSource) Poll(_ context.Context, _ fwkdl.Endpoint) (any, error) {
-	atomic.AddInt64(&e.CallCount, 1)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return nil, e.err
-}
-
-// --- Test Stubs ---
 
 func defaultEndpoint() fwkdl.Endpoint {
 	meta := &fwkdl.EndpointMetadata{
@@ -64,175 +44,306 @@ func defaultEndpoint() fwkdl.Endpoint {
 		},
 		Address: "1.2.3.4:5678",
 	}
-	ms := fwkdl.NewEndpoint(meta, nil)
-	return ms
+	return fwkdl.NewEndpoint(meta, nil)
 }
-
-// --- Tests ---
 
 var (
 	endpoint = defaultEndpoint()
-	sources  = []fwkdl.PollingDataSource{&datasourcemocks.MetricsDataSource{}}
+	sources  = []fwkdl.PollingDispatcher{&datasourcemocks.MetricsDataSource{}}
 )
+
+// Mock PollingDispatchers for collector tests. Each tracks its own
+// invocation count and (for dataSource) runs bound extractors with metric
+// instrumentation. Same behavior the framework collector did before the
+// dispatcher pattern moved extractor handling into each dispatcher.
+
+type errSource struct {
+	kind      string
+	err       error
+	CallCount int64
+}
+
+func (e *errSource) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: e.kind, Name: e.kind}
+}
+func (e *errSource) Dispatch(_ context.Context, _ fwkdl.Endpoint) error {
+	atomic.AddInt64(&e.CallCount, 1)
+	return e.err
+}
+func (e *errSource) AppendExtractor(_ fwkplugin.Plugin) error { return nil }
+
+type dataSource struct {
+	kind      string
+	CallCount int64
+	mu        sync.Mutex
+	exts      []*stubExtractor
+}
+
+func (d *dataSource) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: d.kind, Name: d.kind}
+}
+func (d *dataSource) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
+	atomic.AddInt64(&d.CallCount, 1)
+	d.mu.Lock()
+	exts := append([]*stubExtractor(nil), d.exts...)
+	d.mu.Unlock()
+	for _, ext := range exts {
+		if err := ext.Extract(ctx, fwkdl.PollInput[any]{Payload: struct{}{}, Endpoint: ep}); err != nil {
+			//nolint:staticcheck // SA1019: mock mirrors production's dual-record during deprecation window.
+			metrics.DataLayerExtractErrorsTotal.WithLabelValues(d.kind, ext.kind).Inc()
+			metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(d.kind, ext.kind).Inc()
+		}
+	}
+	return nil
+}
+func (d *dataSource) AppendExtractor(p fwkplugin.Plugin) error {
+	s, ok := p.(*stubExtractor)
+	if !ok {
+		return nil
+	}
+	d.mu.Lock()
+	d.exts = append(d.exts, s)
+	d.mu.Unlock()
+	return nil
+}
+
+type stubExtractor struct {
+	kind string
+	err  error
+}
+
+func (s *stubExtractor) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: s.kind, Name: s.kind}
+}
+func (s *stubExtractor) Extract(_ context.Context, _ fwkdl.PollInput[any]) error { return s.err }
+
+func TestCollectorStartInputs(t *testing.T) {
+	tests := []struct {
+		name        string
+		ctxCanceled bool
+		sources     []fwkdl.PollingDispatcher
+		wantErr     bool
+		wantErrIs   error
+	}{
+		{name: "valid sources, live ctx", sources: sources},
+		{name: "empty sources", sources: []fwkdl.PollingDispatcher{}, wantErr: true},
+		{name: "nil source", sources: []fwkdl.PollingDispatcher{nil}, wantErr: true},
+		{name: "cancelled parent ctx", ctxCanceled: true, sources: sources, wantErr: true, wantErrIs: context.Canceled},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tt.ctxCanceled {
+				cancel()
+			}
+
+			c := NewCollector()
+			ticker := mocks.NewTicker()
+			err := c.Start(ctx, ticker, endpoint, tt.sources)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.wantErrIs != nil {
+					assert.ErrorIs(t, err, tt.wantErrIs)
+				}
+				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources),
+					"retry after failed Start should succeed")
+			} else {
+				require.NoError(t, err)
+			}
+			c.Stop()
+		})
+	}
+}
 
 func TestCollectorCanStartOnlyOnce(t *testing.T) {
 	c := NewCollector()
-	ctx := context.Background()
-	ticker := mocks.NewTicker()
-
-	err := c.Start(ctx, ticker, endpoint, sources, nil)
-	require.NoError(t, err, "first Start call should succeed")
-
-	err = c.Start(ctx, ticker, endpoint, sources, nil)
-	assert.Error(t, err, "multiple collector start should error")
-}
-
-func TestCollectorStopBeforeStartIsAnError(t *testing.T) {
-	c := NewCollector()
-	err := c.Stop()
-	assert.Error(t, err, "collector stop called before start should error")
-}
-
-func TestCollectorCanStopOnlyOnce(t *testing.T) {
-	c := NewCollector()
-	ctx := context.Background()
-	ticker := mocks.NewTicker()
-
-	require.NoError(t, c.Start(ctx, ticker, endpoint, sources, nil))
-	require.NoError(t, c.Stop(), "first Stop should succeed")
-	assert.Error(t, c.Stop(), "second Stop should fail")
-}
-
-func TestCollectorCollectsOnTicks(t *testing.T) {
-	source := &datasourcemocks.MetricsDataSource{}
-	c := NewCollector()
 	ticker := mocks.NewTicker()
 	ctx := context.Background()
 
-	require.NoError(t, c.Start(ctx, ticker, endpoint, []fwkdl.PollingDataSource{source}, nil))
-	ticker.Tick()
-	ticker.Tick()
-
-	// use Eventually for async processing
-	require.Eventually(t, func() bool {
-		return atomic.LoadInt64(&source.CallCount) == 2
-	}, 1*time.Second, 2*time.Millisecond, "expected 2 collections")
-
-	require.NoError(t, c.Stop())
+	require.NoError(t, c.Start(ctx, ticker, endpoint, sources))
+	assert.Error(t, c.Start(ctx, ticker, endpoint, sources),
+		"second Start after success should error")
+	c.Stop()
 }
 
-func TestCollectorStopCancelsContext(t *testing.T) {
-	source := &datasourcemocks.MetricsDataSource{}
-	c := NewCollector()
-	ticker := mocks.NewTicker()
-	ctx := context.Background()
-
-	require.NoError(t, c.Start(ctx, ticker, endpoint, []fwkdl.PollingDataSource{source}, nil))
-	ticker.Tick() // should be processed
-	time.Sleep(20 * time.Millisecond)
-
-	require.NoError(t, c.Stop())
-	before := atomic.LoadInt64(&source.CallCount)
-
-	ticker.Tick()
-	time.Sleep(20 * time.Millisecond) // let collector run again
-	after := atomic.LoadInt64(&source.CallCount)
-	assert.Equal(t, before, after, "call count changed after stop")
-}
-
-func TestCollectorStartSourceValidation(t *testing.T) {
+func TestCollectorStop(t *testing.T) {
 	tests := []struct {
-		name    string
-		sources []fwkdl.PollingDataSource
-		wantErr bool
+		name  string
+		setup func(t *testing.T) *Collector
 	}{
 		{
-			name:    "empty sources returns error",
-			sources: []fwkdl.PollingDataSource{},
-			wantErr: true,
+			name:  "before any Start",
+			setup: func(t *testing.T) *Collector { return NewCollector() },
 		},
 		{
-			name:    "nil source returns error",
-			sources: []fwkdl.PollingDataSource{nil},
-			wantErr: true,
+			name: "after failed Start",
+			setup: func(t *testing.T) *Collector {
+				c := NewCollector()
+				ticker := mocks.NewTicker()
+				_ = c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{})
+				return c
+			},
 		},
 		{
-			name:    "valid polling source succeeds",
-			sources: []fwkdl.PollingDataSource{&datasourcemocks.MetricsDataSource{}},
+			name: "after successful Start",
+			setup: func(t *testing.T) *Collector {
+				c := NewCollector()
+				ticker := mocks.NewTicker()
+				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources))
+				return c
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := NewCollector()
-			ticker := mocks.NewTicker()
-			ctx := context.Background()
-
-			err := c.Start(ctx, ticker, endpoint, tt.sources, nil)
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				require.NoError(t, c.Stop())
-			}
+			c := tt.setup(t)
+			c.Stop()
+			c.Stop()
+			c.Stop()
 		})
 	}
 }
 
-func TestCollectorLogsFirstPollError(t *testing.T) {
-	pollErr := errors.New("metric family not found")
-	src := &errSource{err: pollErr}
+// TestCollectorCollectsOnTicks confirms ticks drive Poll calls.
+func TestCollectorCollectsOnTicks(t *testing.T) {
+	source := &datasourcemocks.MetricsDataSource{}
 	c := NewCollector()
 	ticker := mocks.NewTicker()
-	ctx := context.Background()
 
-	require.NoError(t, c.Start(ctx, ticker, endpoint, []fwkdl.PollingDataSource{src}, nil))
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{source}))
+	defer c.Stop()
 
-	ticker.Tick()
 	ticker.Tick()
 	ticker.Tick()
 
 	require.Eventually(t, func() bool {
-		return atomic.LoadInt64(&src.CallCount) == 3
-	}, 1*time.Second, 2*time.Millisecond, "expected 3 poll calls")
-
-	require.NoError(t, c.Stop()) // Stop waits for the goroutine to exit
-
-	// Error is recorded exactly once regardless of how many ticks delivered it.
-	key := src.TypedName().String()
-	require.Len(t, c.lastPollErrors, 1, "expected exactly one error state entry")
-	assert.Equal(t, pollErr, c.lastPollErrors[key])
+		return atomic.LoadInt64(&source.CallCount) == 2
+	}, 1*time.Second, 2*time.Millisecond, "expected 2 collections")
 }
 
-func TestCollectorLogsRecoveryAfterError(t *testing.T) {
-	pollErr := errors.New("transient error")
-	src := &errSource{err: pollErr}
+// TestCollectorErrorMetrics confirms Poll/Extract errors increment per-event
+// counters (no transition dedup) and successes do not.
+func TestCollectorErrorMetrics(t *testing.T) {
+	pollErr := errors.New("poll boom")
+	extErr := errors.New("extract boom")
+
+	tests := []struct {
+		name          string
+		srcType       string
+		srcErr        error // if non-nil, source.Poll returns it
+		extType       string
+		extErr        error // if extType set and this non-nil, extractor.Extract returns it
+		ticks         int
+		wantPollDelta float64
+		wantExtDelta  float64
+	}{
+		{
+			name:          "poll errors increment per tick",
+			srcType:       "table-poll-err",
+			srcErr:        pollErr,
+			ticks:         3,
+			wantPollDelta: 3,
+		},
+		{
+			name:         "extract errors increment per tick",
+			srcType:      "table-ext-src",
+			extType:      "table-ext-err",
+			extErr:       extErr,
+			ticks:        2,
+			wantExtDelta: 2,
+		},
+		{
+			name:    "success records nothing",
+			srcType: "table-success-src",
+			extType: "table-success-ext",
+			ticks:   2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var src fwkdl.PollingDispatcher
+			if tt.srcErr != nil {
+				src = &errSource{kind: tt.srcType, err: tt.srcErr}
+			} else {
+				src = &dataSource{kind: tt.srcType}
+			}
+
+			if tt.extType != "" {
+				ext := &stubExtractor{kind: tt.extType, err: tt.extErr}
+				require.NoError(t, src.AppendExtractor(ext))
+			}
+
+			pollBefore := testutil.ToFloat64(metrics.LlmdDataLayerPollErrorsTotal.WithLabelValues(tt.srcType))
+			var extBefore float64
+			if tt.extType != "" {
+				extBefore = testutil.ToFloat64(metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(tt.srcType, tt.extType))
+			}
+
+			c := NewCollector()
+			ticker := mocks.NewTicker()
+			require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{src}))
+			defer c.Stop()
+
+			for i := 0; i < tt.ticks; i++ {
+				ticker.Tick()
+			}
+
+			require.Eventually(t, func() bool {
+				gotPoll := testutil.ToFloat64(metrics.LlmdDataLayerPollErrorsTotal.WithLabelValues(tt.srcType)) - pollBefore
+				if gotPoll != tt.wantPollDelta {
+					return false
+				}
+				if tt.extType != "" {
+					gotExt := testutil.ToFloat64(metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(tt.srcType, tt.extType)) - extBefore
+					if gotExt != tt.wantExtDelta {
+						return false
+					}
+				}
+				// For success case, also verify polls actually happened (otherwise
+				// the deltas being zero is trivially satisfied).
+				if d, ok := src.(*dataSource); ok && atomic.LoadInt64(&d.CallCount) < int64(tt.ticks) {
+					return false
+				}
+				return true
+			}, 1*time.Second, 5*time.Millisecond, "expected counter deltas to settle")
+		})
+	}
+}
+
+// TestCollectorRapidStartStopRaceFree simulates the Runtime's pattern of
+// ReleaseEndpoint immediately followed by NewEndpoint for the same key.
+// Stop returns asynchronously, so a fresh Collector's goroutine may briefly
+// coexist with a prior Collector's goroutine still exiting. -race surfaces
+// any data race in the lifecycle.
+func TestCollectorRapidStartStopRaceFree(t *testing.T) {
+	src := &datasourcemocks.MetricsDataSource{}
+	for i := 0; i < 100; i++ {
+		c := NewCollector()
+		ticker := mocks.NewTicker()
+		require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{src}))
+		ticker.Tick()
+		c.Stop()
+	}
+}
+
+// TestCollectorConcurrentStopRaceFree drives multiple Stop calls in parallel
+// to verify the cancel field's mutex serializes them.
+func TestCollectorConcurrentStopRaceFree(t *testing.T) {
 	c := NewCollector()
 	ticker := mocks.NewTicker()
-	ctx := context.Background()
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources))
 
-	require.NoError(t, c.Start(ctx, ticker, endpoint, []fwkdl.PollingDataSource{src}, nil))
-
-	// Two ticks with an error.
-	ticker.Tick()
-	ticker.Tick()
-	require.Eventually(t, func() bool {
-		return atomic.LoadInt64(&src.CallCount) == 2
-	}, 1*time.Second, 2*time.Millisecond, "expected 2 poll calls with error")
-
-	// Clear the error, then send more ticks.
-	src.setErr(nil)
-	ticker.Tick()
-	ticker.Tick()
-	require.Eventually(t, func() bool {
-		return atomic.LoadInt64(&src.CallCount) == 4
-	}, 1*time.Second, 2*time.Millisecond, "expected 4 total poll calls after recovery")
-
-	require.NoError(t, c.Stop()) // Stop waits for the goroutine to exit
-
-	// After recovery the entry exists but holds nil.
-	key := src.TypedName().String()
-	entry, seen := c.lastPollErrors[key]
-	require.True(t, seen, "recovery should leave a nil entry in lastPollErrors")
-	assert.Nil(t, entry)
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.Stop()
+		}()
+	}
+	wg.Wait()
 }

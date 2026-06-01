@@ -27,7 +27,7 @@ SOURCE_REPO_NAME="gateway-api-inference-extension"
 SOURCE_UPSTREAM_URL="git@github.com:${SOURCE_ORG}/${SOURCE_REPO_NAME}.git"
 
 DEST_ORG="llm-d"
-DEST_REPO_NAME="llm-d-inference-scheduler"
+DEST_REPO_NAME="llm-d-router"
 DEST_UPSTREAM_URL="git@github.com:${DEST_ORG}/${DEST_REPO_NAME}.git"
 
 UPSTREAM_REMOTE="upstream"

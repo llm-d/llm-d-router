@@ -23,8 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 func TestLoraAffinityScorer(t *testing.T) {
@@ -149,7 +149,7 @@ func TestLoraAffinityScorer(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			scorer := &LoraAffinityScorer{}
-			scores := scorer.Score(context.Background(), fwksched.NewCycleState(), test.request, test.endpoints)
+			scores := scorer.Score(context.Background(), test.request, test.endpoints)
 
 			for _, endpoint := range test.endpoints {
 				expectedScore, ok := test.expectedScoresEndpoint[endpoint.GetMetadata().NamespacedName.Name]

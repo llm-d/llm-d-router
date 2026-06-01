@@ -25,10 +25,10 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/utils/clock"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/framework/plugins/queue"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
 // propagateStatsDeltaFunc defines the callback function used to propagate statistics changes (deltas) up the hierarchy
@@ -101,10 +101,19 @@ type FlowRegistry struct {
 	// add new keys safely.
 	perPriorityBandStats sync.Map
 
+	// priorityBands is the primary container for all managed queues.
+	// We use sync.Map to allow lock-free lookups on the hot path (Stats/Propagation) while enabling safe dynamic addition
+	// of new priority bands.
+	// Key: int (priority), Value: *priorityBand
+	priorityBands sync.Map
+
 	// --- Administrative state (protected by `mu`) ---
 
-	mu    sync.RWMutex
-	shard *registryShard
+	mu sync.RWMutex
+
+	// orderedPriorityLevels is a sorted list of active priority levels.
+	// It is updated dynamically when new bands are provisioned.
+	orderedPriorityLevels []int
 }
 
 var _ contracts.FlowRegistry = &FlowRegistry{}
@@ -123,7 +132,7 @@ func withClock(clk clock.WithTickerAndDelayedExecution) RegistryOption {
 }
 
 // NewFlowRegistry creates and initializes a new `FlowRegistry` instance.
-func NewFlowRegistry(config *Config, logger logr.Logger, opts ...RegistryOption) (*FlowRegistry, error) {
+func NewFlowRegistry(config *Config, logger logr.Logger, opts ...RegistryOption) *FlowRegistry {
 	cfg := config.Clone()
 	fr := &FlowRegistry{
 		config: cfg,
@@ -137,15 +146,14 @@ func NewFlowRegistry(config *Config, logger logr.Logger, opts ...RegistryOption)
 		fr.clock = &clock.RealClock{}
 	}
 
-	for prio := range cfg.PriorityBands {
-		fr.perPriorityBandStats.Store(prio, &bandStats{})
+	for prio, bandConfig := range cfg.PriorityBands {
+		fr.perPriorityBandStats.LoadOrStore(prio, &bandStats{})
+		fr.initPriorityBand(bandConfig)
 	}
 
-	if err := fr.createShard(); err != nil {
-		return nil, fmt.Errorf("failed to initialize shard: %w", err)
-	}
-	fr.logger.V(logging.DEFAULT).Info("FlowRegistry initialized successfully")
-	return fr, nil
+	fr.logger.V(logging.DEFAULT).Info("FlowRegistry initialized successfully",
+		"orderedPriorities", fr.orderedPriorityLevels)
+	return fr
 }
 
 // Run starts the registry's background garbage collection loop.
@@ -182,7 +190,6 @@ func (fr *FlowRegistry) WithConnection(key flowcontrol.FlowKey, fn func(conn con
 	if key.ID == "" {
 		return contracts.ErrFlowIDEmpty
 	}
-
 	// 1. Acquire lease: Pin the flow state in memory.
 	state, isNewFlow := pinLeasedResource(
 		&fr.flowStates,
@@ -252,14 +259,17 @@ func (fr *FlowRegistry) ensureFlowInfrastructure(key flowcontrol.FlowKey) error 
 	// 2. Synchronize shards.
 	// Acquire Read Lock to iterate the shard topology safely.
 	fr.mu.RLock()
-	defer fr.mu.RUnlock()
 
-	components, err := fr.buildFlowComponents(key, 1)
+	components, err := fr.buildFlowComponents(key)
+
+	// Free the lock here as synchronizeFlow acquires the mutex for writes
+	fr.mu.RUnlock()
+
 	if err != nil {
 		return err
 	}
 
-	fr.shard.synchronizeFlow(key, components[0].policy, components[0].queue)
+	fr.synchronizeFlow(key, components.policy, components.queue)
 
 	fr.logger.V(logging.DEBUG).Info("JIT provisioned flow infrastructure", "flowKey", key)
 	return nil
@@ -277,7 +287,11 @@ func (fr *FlowRegistry) ensurePriorityBand(priority int) error {
 
 	fr.logger.V(logging.DEFAULT).Info("Dynamically provisioning new priority band", "priority", priority)
 
-	newBand := *fr.config.DefaultPriorityBand
+	template := fr.config.DefaultPriorityBand
+	if priority < 0 && fr.config.DefaultNegativePriorityBand != nil {
+		template = fr.config.DefaultNegativePriorityBand
+	}
+	newBand := *template
 	newBand.Priority = priority
 	fr.config.PriorityBands[priority] = &newBand
 
@@ -287,9 +301,7 @@ func (fr *FlowRegistry) ensurePriorityBand(priority int) error {
 		priority: priority,
 	})
 
-	fr.repartitionShardConfigsLocked()
-
-	fr.shard.addPriorityBand(priority)
+	fr.addPriorityBand(priority)
 
 	return nil
 }
@@ -307,6 +319,9 @@ func (fr *FlowRegistry) deletePriorityBand(priority int) {
 // Statistics are aggregated using high-performance, lock-free atomic updates.
 // The returned stats represent a near-consistent snapshot of the system's state.
 func (fr *FlowRegistry) Stats() contracts.AggregateStats {
+	fr.mu.RLock()
+	defer fr.mu.RUnlock()
+
 	// Casts from `int64` to `uint64` are safe because the non-negativity invariant is strictly enforced at the
 	// `managedQueue` level.
 	stats := contracts.AggregateStats{
@@ -331,13 +346,6 @@ func (fr *FlowRegistry) Stats() contracts.AggregateStats {
 		return true
 	})
 	return stats
-}
-
-// ShardStats returns a slice of statistics, one for each internal shard.
-func (fr *FlowRegistry) ShardStats() []contracts.ShardStats {
-	shardStats := make([]contracts.ShardStats, 1)
-	shardStats[0] = fr.shard.Stats()
-	return shardStats
 }
 
 // --- Garbage Collection ---
@@ -382,7 +390,7 @@ func (fr *FlowRegistry) cleanupFlowResources(keys []flowcontrol.FlowKey) {
 		if _, exists := fr.flowStates.Load(key); exists {
 			continue // 'Zombie' flow
 		}
-		fr.shard.deleteFlow(key)
+		fr.deleteFlow(key)
 	}
 }
 
@@ -422,59 +430,22 @@ func (fr *FlowRegistry) cleanupPriorityBandResources(priorities []int) {
 		// Delete from stats tracking
 		fr.perPriorityBandStats.Delete(priority)
 
-		// Delete from the shard
-		fr.shard.deletePriorityBand(priority)
+		// Remove from sync.Map
+		fr.priorityBands.Delete(priority)
+
+		// Remove from ordered list
+		for i, p := range fr.orderedPriorityLevels {
+			if p == priority {
+				fr.orderedPriorityLevels = append(
+					fr.orderedPriorityLevels[:i],
+					fr.orderedPriorityLevels[i+1:]...,
+				)
+				break
+			}
+		}
 
 		fr.logger.V(logging.DEFAULT).Info("Successfully deleted priority band", "priority", priority)
 	}
-}
-
-// --- Shard Management (Scaling) ---
-
-// createShard creates the shard.
-func (fr *FlowRegistry) createShard() error {
-	// Use a full write lock as this is a major structural change to the shard topology.
-	fr.mu.Lock()
-	defer fr.mu.Unlock()
-
-	// Prepare Shard Object (Infallible)
-	partitionedConfig := fr.config.partition(0, 1)
-	shard := newShard("shard-0", partitionedConfig, fr.logger, fr.propagateStatsDelta)
-
-	// Prepare All Components for All New Shards (Fallible):
-	// Pre-build every component for every existing flow on every new shard.
-	// If any single component fails to build, the entire scale-up operation is aborted, and all prepared data is
-	// discarded, leaving the system state clean.
-	allComponents := make(map[flowcontrol.FlowKey][]flowComponents)
-	var rangeErr error
-	fr.flowStates.Range(func(key, _ any) bool {
-		flowKey := key.(flowcontrol.FlowKey)
-		components, err := fr.buildFlowComponents(flowKey, 1)
-		if err != nil {
-			rangeErr = fmt.Errorf("failed to prepare components for flow %s on new shards: %w", flowKey, err)
-			return false
-		}
-		allComponents[flowKey] = components
-		return true
-	})
-	if rangeErr != nil {
-		return rangeErr
-	}
-
-	// Commit (Infallible):
-	for key, components := range allComponents {
-		shard.synchronizeFlow(key, components[0].policy, components[0].queue)
-	}
-	fr.shard = shard
-	fr.repartitionShardConfigsLocked()
-	return nil
-}
-
-// repartitionShardConfigsLocked updates the configuration for all active shards.
-// Expects the registry's write lock to be held.
-func (fr *FlowRegistry) repartitionShardConfigsLocked() {
-	newPartitionedConfig := fr.config.partition(0, 1)
-	fr.shard.updateConfig(newPartitionedConfig)
 }
 
 // --- Internal Helpers ---
@@ -486,31 +457,33 @@ type flowComponents struct {
 }
 
 // buildFlowComponents instantiates the necessary plugin components for a new flow instance.
-// It creates a distinct instance of each component for each shard to ensure state isolation.
-func (fr *FlowRegistry) buildFlowComponents(key flowcontrol.FlowKey, numInstances int) ([]flowComponents, error) {
+// It creates a distinct instance of each component to ensure state isolation.
+func (fr *FlowRegistry) buildFlowComponents(key flowcontrol.FlowKey) (*flowComponents, error) {
 	bandConfig, ok := fr.config.PriorityBands[key.Priority]
 	if !ok {
 		return nil, fmt.Errorf("priority band %d not found: %w", key.Priority, contracts.ErrPriorityBandNotFound)
 	}
 
-	allComponents := make([]flowComponents, numInstances)
-	for i := range numInstances {
-		q, err := queue.NewQueueFromName(bandConfig.Queue, bandConfig.OrderingPolicy)
-		if err != nil {
-			return nil, fmt.Errorf("failed to instantiate queue %q for flow %s: %w",
-				bandConfig.Queue, key, err)
-		}
-		allComponents[i] = flowComponents{policy: bandConfig.OrderingPolicy, queue: q}
+	q, err := queue.NewQueueFromName(bandConfig.Queue, bandConfig.OrderingPolicy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to instantiate queue %q for flow %s: %w",
+			bandConfig.Queue, key, err)
 	}
-	return allComponents, nil
+	components := &flowComponents{policy: bandConfig.OrderingPolicy, queue: q}
+
+	return components, nil
 }
 
 // propagateStatsDelta is the top-level, lock-free aggregator for all statistics.
 func (fr *FlowRegistry) propagateStatsDelta(priority int, lenDelta, byteSizeDelta int64) {
-	val, _ := fr.perPriorityBandStats.Load(priority)
-	stats := val.(*bandStats)
-	stats.len.Add(lenDelta)
-	stats.byteSize.Add(byteSizeDelta)
-	fr.totalLen.Add(lenDelta)
-	fr.totalByteSize.Add(byteSizeDelta)
+	if _, ok := fr.priorityBands.Load(priority); ok {
+
+		if val, ok := fr.perPriorityBandStats.Load(priority); ok {
+			stats := val.(*bandStats)
+			stats.len.Add(lenDelta)
+			stats.byteSize.Add(byteSizeDelta)
+		}
+		fr.totalLen.Add(lenDelta)
+		fr.totalByteSize.Add(byteSizeDelta)
+	}
 }

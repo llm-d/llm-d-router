@@ -22,9 +22,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/test"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/test"
 )
 
 func TestFilter(t *testing.T) {
@@ -119,7 +119,7 @@ func TestFilter(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := NewHeaderBasedTestingFilter().Filter(context.Background(), fwksched.NewCycleState(), tc.req, tc.input)
+			got := NewHeaderBasedTestingFilter().Filter(context.Background(), tc.req, tc.input)
 			if diff := cmp.Diff(tc.output, got, cmp.Comparer(fwksched.EndpointComparer)); diff != "" {
 				t.Fatalf("Unexpected output (-want +got): %s", diff)
 			}

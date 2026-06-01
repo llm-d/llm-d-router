@@ -26,7 +26,7 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"google.golang.org/genproto/googleapis/api/httpbody"
 	"google.golang.org/protobuf/proto"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -44,6 +44,32 @@ func TestParseRequest(t *testing.T) {
 	}
 
 	validBody, err := createGrpcFrame(reqMsg)
+	if err != nil {
+		t.Fatalf("Failed to create gRPC frame: %v", err)
+	}
+
+	streamRawPredictResponsesPayload := []byte(`{"input":"Hello from stream raw predict"}`)
+
+	streamRawPredictReqMsg := &aiplatformpb.StreamRawPredictRequest{
+		HttpBody: &httpbody.HttpBody{
+			Data: streamRawPredictResponsesPayload,
+		},
+	}
+
+	validStreamRawPredictBody, err := createGrpcFrame(streamRawPredictReqMsg)
+	if err != nil {
+		t.Fatalf("Failed to create gRPC frame: %v", err)
+	}
+
+	rawPredictResponsesPayload := []byte(`{"input":"Hello from raw predict"}`)
+
+	rawPredictReqMsg := &aiplatformpb.RawPredictRequest{
+		HttpBody: &httpbody.HttpBody{
+			Data: rawPredictResponsesPayload,
+		},
+	}
+
+	validRawPredictBody, err := createGrpcFrame(rawPredictReqMsg)
 	if err != nil {
 		t.Fatalf("Failed to create gRPC frame: %v", err)
 	}
@@ -76,6 +102,40 @@ func TestParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name: "Success - StreamRawPredict",
+			body: validStreamRawPredictBody,
+			headers: map[string]string{
+				":path":        "/google.cloud.aiplatform.v1beta1.PredictionService/StreamRawPredict",
+				"content-type": "application/grpc",
+			},
+			wantResult: &fwkrh.ParseResult{
+				Body: &fwkrh.InferenceRequestBody{
+					Responses: &fwkrh.ResponsesRequest{
+						Input: "Hello from stream raw predict",
+					},
+					Payload: fwkrh.PayloadProto{Message: streamRawPredictReqMsg},
+				},
+				Skip: false,
+			},
+		},
+		{
+			name: "Success - RawPredict",
+			body: validRawPredictBody,
+			headers: map[string]string{
+				":path":        "/google.cloud.aiplatform.v1beta1.PredictionService/RawPredict",
+				"content-type": "application/grpc",
+			},
+			wantResult: &fwkrh.ParseResult{
+				Body: &fwkrh.InferenceRequestBody{
+					Responses: &fwkrh.ResponsesRequest{
+						Input: "Hello from raw predict",
+					},
+					Payload: fwkrh.PayloadProto{Message: rawPredictReqMsg},
+				},
+				Skip: false,
+			},
+		},
+		{
 			name:    "Unsupported Path",
 			body:    []byte{},
 			headers: map[string]string{":path": "/unsupported/path", "content-type": "application/grpc"},
@@ -94,6 +154,18 @@ func TestParseRequest(t *testing.T) {
 			body:    []byte{0, 0, 0, 0, 1, 0xFF}, // Valid header, invalid payload
 			headers: map[string]string{":path": "/google.cloud.aiplatform.v1beta1.PredictionService/ChatCompletions", "content-type": "application/grpc"},
 			wantErr: "unmarshaling ChatCompletionsRequest",
+		},
+		{
+			name:    "Invalid proto message - StreamRawPredict",
+			body:    []byte{0, 0, 0, 0, 1, 0xFF}, // Valid header, invalid payload
+			headers: map[string]string{":path": "/google.cloud.aiplatform.v1beta1.PredictionService/StreamRawPredict", "content-type": "application/grpc"},
+			wantErr: "unmarshaling StreamRawPredictRequest",
+		},
+		{
+			name:    "Invalid proto message - RawPredict",
+			body:    []byte{0, 0, 0, 0, 1, 0xFF}, // Valid header, invalid payload
+			headers: map[string]string{":path": "/google.cloud.aiplatform.v1beta1.PredictionService/RawPredict", "content-type": "application/grpc"},
+			wantErr: "unmarshaling RawPredictRequest",
 		},
 	}
 

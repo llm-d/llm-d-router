@@ -22,8 +22,8 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 const (
@@ -57,7 +57,7 @@ func (p *PassthroughParser) SupportedAppProtocols() []v1.AppProtocol {
 	return []v1.AppProtocol{}
 }
 
-func PassthroughParserPluginFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func PassthroughParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewPassthroughParser().WithName(name), nil
 }
 
@@ -78,5 +78,5 @@ func (p *PassthroughParser) ParseRequest(ctx context.Context, body []byte, heade
 
 // ParseResponse does nothing and returns nil.
 func (p *PassthroughParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, isEnd bool) (*fwkrh.ParsedResponse, error) {
-	return nil, nil
+	return nil, nil //nolint:nilnil
 }
