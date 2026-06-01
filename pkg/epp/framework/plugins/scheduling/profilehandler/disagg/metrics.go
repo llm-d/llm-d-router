@@ -46,6 +46,8 @@ const (
 	deciderReasonError = "error"
 	// deciderReasonDisaggregated indicates the decider chose to disaggregate.
 	deciderReasonDisaggregated = "disaggregated"
+
+	unknownModelName = "unknown"
 )
 
 var (
@@ -133,7 +135,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 // Deprecated: Use RecordDisaggDecision instead.
 func RecordPDDecision(pluginName, pluginType, modelName, decisionType string) {
 	if modelName == "" {
-		modelName = "unknown"
+		modelName = unknownModelName
 	}
 	SchedulerPDDecisionCount.WithLabelValues(modelName, decisionType).Inc()
 	LlmdPDDecisionCount.WithLabelValues(pluginName, pluginType, modelName, decisionType).Inc()
@@ -145,7 +147,7 @@ func RecordPDDecision(pluginName, pluginType, modelName, decisionType string) {
 // The model parameter should be the target model name; if empty, "unknown" is used.
 func RecordDisaggDecision(pluginName, pluginType, modelName, decisionType string) {
 	if modelName == "" {
-		modelName = "unknown"
+		modelName = unknownModelName
 	}
 	SchedulerDisaggDecisionCount.WithLabelValues(modelName, decisionType).Inc()
 	LlmdDisaggDecisionCount.WithLabelValues(pluginName, pluginType, modelName, decisionType).Inc()
@@ -168,7 +170,7 @@ func DisaggDecisionType(encodeUsed, prefillUsed bool) string {
 
 func recordDeciderEvaluation(modelName, decider, reason string) {
 	if modelName == "" {
-		modelName = "unknown"
+		modelName = unknownModelName
 	}
 	llmdDeciderEvaluationCount.WithLabelValues(modelName, decider, reason).Inc()
 }
