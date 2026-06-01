@@ -23,7 +23,6 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -33,8 +32,8 @@ import (
 // NewTestRunnerSetup creates a setup runner dedicated for integration tests. When mockDataSource is
 // non-nil, its plugin type is registered as a factory that returns the provided instance, so the
 // YAML config can reference it by type name and the runner wires it into the endpoint factory
-// automatically. Pass nil to fall back to the legacy metrics system with pmc.
-func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, pmc backendmetrics.PodMetricsClient, mockDataSource fwkdl.DataSource) (*Runner, ctrl.Manager, datastore.Datastore, error) {
+// automatically.
+func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, mockDataSource fwkdl.DataSource) (*Runner, ctrl.Manager, datastore.Datastore, error) {
 	runner := NewRunner()
 
 	if mockDataSource != nil {
@@ -54,6 +53,6 @@ func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.O
 		},
 	}
 
-	manager, ds, err := runner.setup(ctx, cfg, opts, pmc, managerOverrides)
+	manager, ds, err := runner.setup(ctx, cfg, opts, managerOverrides)
 	return runner, manager, ds, err
 }

@@ -61,12 +61,6 @@ var (
 		MaxIdleConnsPerHost: maxIdleConnsPerHost,
 		// TODO: set additional timeouts, transport options, etc.
 	}
-	defaultClient = &client{
-		Client: http.Client{
-			Timeout:   timeout,
-			Transport: baseTransport,
-		},
-	}
 )
 
 type client struct {
@@ -79,7 +73,7 @@ func (cl *client) Get(ctx context.Context, target *url.URL, ep Addressable,
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
-	resp, err := defaultClient.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch data from %s: %w", ep.GetNamespacedName(), err)
 	}
