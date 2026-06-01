@@ -117,6 +117,25 @@ func TestExtractMMItems(t *testing.T) {
 			},
 			expected: 1,
 		},
+		{
+			name: "single video item",
+			request: map[string]any{
+				"messages": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type": "video_url",
+								"video_url": map[string]any{
+									"url": "https://example.com/video.mp4",
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -204,6 +223,16 @@ func TestMMItemURL(t *testing.T) {
 			expected: "https://example.com/audio.mp3",
 		},
 		{
+			name: "video_url with url",
+			item: map[string]any{
+				"type": "video_url",
+				"video_url": map[string]any{
+					"url": "https://example.com/video.mp4",
+				},
+			},
+			expected: "https://example.com/video.mp4",
+		},
+		{
 			name: "input_audio has no url",
 			item: map[string]any{
 				"type": "input_audio",
@@ -239,6 +268,11 @@ func TestMMItemURL(t *testing.T) {
 // imageURLItem builds an image_url content item.
 func imageURLItem(url string) map[string]any {
 	return map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}}
+}
+
+// videoURLItem builds a video_url content item.
+func videoURLItem(url string) map[string]any {
+	return map[string]any{"type": "video_url", "video_url": map[string]any{"url": url}}
 }
 
 // inlineAudioItem builds an input_audio content item.
@@ -289,6 +323,11 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 		{
 			name:          "duplicate image URLs — second is skipped",
 			request:       userMessageRequest(imageURLItem("https://example.com/same.jpg"), imageURLItem("https://example.com/same.jpg")),
+			expectedCalls: 1,
+		},
+		{
+			name:          "duplicate video URLs — second is skipped",
+			request:       userMessageRequest(videoURLItem("https://example.com/same.mp4"), videoURLItem("https://example.com/same.mp4")),
 			expectedCalls: 1,
 		},
 		{

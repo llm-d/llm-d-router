@@ -96,7 +96,7 @@ func TestRuntimePollingDispatch(t *testing.T) {
 				},
 			}
 
-			require.NoError(t, r.Configure(cfg, false, "", logger))
+			require.NoError(t, r.Configure(cfg, logger))
 
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
@@ -107,7 +107,7 @@ func TestRuntimePollingDispatch(t *testing.T) {
 				Port:           "8000",
 			}
 
-			ep := r.NewEndpoint(ctx, endpointMeta, nil)
+			ep := r.NewEndpoint(ctx, endpointMeta)
 			require.NotNil(t, ep)
 
 			// Wait for at least the expected number of polling cycles
@@ -148,7 +148,7 @@ func TestRuntimePollingMultipleExtractors(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, false, "", logger))
+	require.NoError(t, r.Configure(cfg, logger))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -159,7 +159,7 @@ func TestRuntimePollingMultipleExtractors(t *testing.T) {
 		Port:           "8000",
 	}
 
-	ep := r.NewEndpoint(ctx, endpointMeta, nil)
+	ep := r.NewEndpoint(ctx, endpointMeta)
 	require.NotNil(t, ep)
 
 	// Wait for at least 2 polling cycles
@@ -197,7 +197,7 @@ func TestRuntimePollingEndpointLifecycle(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, false, "", logger))
+	require.NoError(t, r.Configure(cfg, logger))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -208,7 +208,7 @@ func TestRuntimePollingEndpointLifecycle(t *testing.T) {
 		Port:           "8000",
 	}
 
-	ep := r.NewEndpoint(ctx, endpointMeta, nil)
+	ep := r.NewEndpoint(ctx, endpointMeta)
 	require.NotNil(t, ep)
 
 	// Wait for at least 2 polling cycles
@@ -251,7 +251,7 @@ func TestRuntimePollingWithoutExtractors(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, false, "", logger))
+	require.NoError(t, r.Configure(cfg, logger))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -262,7 +262,7 @@ func TestRuntimePollingWithoutExtractors(t *testing.T) {
 		Port:           "8000",
 	}
 
-	ep := r.NewEndpoint(ctx, endpointMeta, nil)
+	ep := r.NewEndpoint(ctx, endpointMeta)
 	require.NotNil(t, ep)
 }
 
@@ -290,7 +290,7 @@ func TestRuntimePollingHTTPError(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, false, "", logger))
+	require.NoError(t, r.Configure(cfg, logger))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -301,7 +301,7 @@ func TestRuntimePollingHTTPError(t *testing.T) {
 		Port:           "8000",
 	}
 
-	ep := r.NewEndpoint(ctx, endpointMeta, nil)
+	ep := r.NewEndpoint(ctx, endpointMeta)
 	require.NotNil(t, ep)
 
 	// Wait for several polling cycles - polling should continue despite HTTP errors
