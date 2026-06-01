@@ -347,6 +347,8 @@ router:
           secretKeyRef:
             name: my-hf-token-secret
             key: token
+      - name: HF_HOME
+          value: /models
     resources:
       requests:
         cpu: "4"
