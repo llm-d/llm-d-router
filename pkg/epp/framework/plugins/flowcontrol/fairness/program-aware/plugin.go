@@ -9,23 +9,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	requestcontrol "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 )
 
-const (
-	// ProgramAwarePluginType is the registered type name for this plugin.
-	ProgramAwarePluginType = "program-aware-fairness"
-
-	// fairnessIDHeader is the standard header used to identify the program.
-	fairnessIDHeader = "x-gateway-inference-fairness-id"
-
-	// defaultFairnessID is the flow key assigned by the upstream framework when
-	// no x-gateway-inference-fairness-id header is present on the request.
-	// Matches the constant in github.com/llm-d/llm-d-inference-scheduler/pkg/epp/handlers/request.go.
-	defaultFairnessID = "default-flow"
-)
+// ProgramAwarePluginType is the registered type name for this plugin.
+const ProgramAwarePluginType = "program-aware-fairness"
 
 // Config holds the JSON-decoded configuration for the plugin.
 type Config struct {
@@ -98,20 +88,20 @@ type Config struct {
 
 // Compile-time interface assertions.
 var (
-	_ flowcontrol.FairnessPolicy           = &ProgramAwarePlugin{}
-	_ requestcontrol.DataProducer          = &ProgramAwarePlugin{}
-	_ requestcontrol.PreRequest            = &ProgramAwarePlugin{}
-	_ requestcontrol.ResponseBodyProcessor = &ProgramAwarePlugin{}
+	_ flowcontrol.FairnessPolicy  = &ProgramAwarePlugin{}
+	_ fwkrc.DataProducer          = &ProgramAwarePlugin{}
+	_ fwkrc.PreRequest            = &ProgramAwarePlugin{}
+	_ fwkrc.ResponseBodyProcessor = &ProgramAwarePlugin{}
 )
 
 // ProgramAwarePluginFactory creates a new ProgramAwarePlugin from JSON config.
 // Example config: {"strategy": "drr"}
 //
 //nolint:revive
-func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	cfg := Config{Strategy: "las"}
-	if len(rawCfg) > 0 {
-		if err := json.Unmarshal(rawCfg, &cfg); err != nil {
+	if parameters != nil {
+		if err := parameters.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("invalid config for %s plugin %q: %w", ProgramAwarePluginType, name, err)
 		}
 	}
@@ -119,10 +109,20 @@ func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Han
 	if err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
-	return &ProgramAwarePlugin{
+	p := &ProgramAwarePlugin{
 		name:     name,
 		strategy: strategy,
-	}, nil
+	}
+	// Register Prometheus collectors via the framework's recorder.
+	// Both handle and handle.Metrics() may be nil in test paths.
+	if handle != nil {
+		if reg := handle.Metrics(); reg != nil {
+			for _, c := range GetCollectors() {
+				reg.MustRegister(c)
+			}
+		}
+	}
+	return p, nil
 }
 
 // ProgramAwarePlugin implements a FairnessPolicy that selects which program's

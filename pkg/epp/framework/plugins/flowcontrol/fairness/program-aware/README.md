@@ -1,6 +1,6 @@
 # Program-Aware Fairness Plugin
 
-The program-aware fairness plugin introduces program-level scheduling to `llm-d-inference-scheduler`. Rather than treating each inference request independently, this plugin recognizes that requests belong to higher-level **agentic programs** — workflows composed of multiple LLM calls — and makes scheduling decisions based on aggregated program-level metrics.
+The program-aware fairness plugin introduces program-level scheduling to `llm-d-router`. Rather than treating each inference request independently, this plugin recognizes that requests belong to higher-level **agentic programs** — workflows composed of multiple LLM calls — and makes scheduling decisions based on aggregated program-level metrics.
 
 ## Overview
 

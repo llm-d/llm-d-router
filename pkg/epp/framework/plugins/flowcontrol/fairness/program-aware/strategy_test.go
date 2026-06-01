@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fcmocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
-	requestcontrol "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	requesthandling "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	scheduling "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	requesthandling "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,8 +25,8 @@ func testDRR() *DRRStrategy {
 }
 
 // testRequest returns an InferenceRequest for OnPreRequest tests.
-func testRequest() *scheduling.InferenceRequest {
-	return &scheduling.InferenceRequest{}
+func testRequest() *fwksched.InferenceRequest {
+	return &fwksched.InferenceRequest{}
 }
 
 func TestNewStrategy_Valid(t *testing.T) {
@@ -49,21 +50,21 @@ func TestNewStrategy_Invalid(t *testing.T) {
 }
 
 func TestFactory_StrategyConfig(t *testing.T) {
-	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"drr"}`), nil)
+	p, err := ProgramAwarePluginFactory("test", plugin.StrictDecoder([]byte(`{"strategy":"drr"}`)), nil)
 	require.NoError(t, err)
-	plugin := p.(*ProgramAwarePlugin)
-	assert.Equal(t, "drr", plugin.strategy.Name())
+	pap := p.(*ProgramAwarePlugin)
+	assert.Equal(t, "drr", pap.strategy.Name())
 }
 
 func TestFactory_DefaultStrategy(t *testing.T) {
 	p, err := ProgramAwarePluginFactory("test", nil, nil)
 	require.NoError(t, err)
-	plugin := p.(*ProgramAwarePlugin)
-	assert.Equal(t, "las", plugin.strategy.Name())
+	pap := p.(*ProgramAwarePlugin)
+	assert.Equal(t, "las", pap.strategy.Name())
 }
 
 func TestFactory_InvalidStrategy(t *testing.T) {
-	_, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"wfq"}`), nil)
+	_, err := ProgramAwarePluginFactory("test", plugin.StrictDecoder([]byte(`{"strategy":"wfq"}`)), nil)
 	assert.Error(t, err)
 }
 
@@ -74,12 +75,12 @@ func TestFactory_InvalidStrategy(t *testing.T) {
 // makeQueueInfo builds a QueueInfo with a mock queue for testing.
 func makeQueueInfo(id string, queueLen int, metrics *ProgramMetrics, enqueueTime time.Time) QueueInfo {
 	return QueueInfo{
-		Queue: &fcmocks.MockFlowQueueAccessor{
+		Queue: &fwkfcmocks.MockFlowQueueAccessor{
 			LenV:     queueLen,
 			FlowKeyV: flowcontrol.FlowKey{ID: id},
-			PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			PeekHeadV: &fwkfcmocks.MockQueueItemAccessor{
 				EnqueueTimeV:     enqueueTime,
-				OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: id + "-req"},
+				OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{IDV: id + "-req"},
 			},
 		},
 		Metrics: metrics,
@@ -90,7 +91,7 @@ func makeQueueInfo(id string, queueLen int, metrics *ProgramMetrics, enqueueTime
 // makeEmptyQueueInfo builds a QueueInfo for an empty queue.
 func makeEmptyQueueInfo(id string, metrics *ProgramMetrics) QueueInfo {
 	return QueueInfo{
-		Queue: &fcmocks.MockFlowQueueAccessor{
+		Queue: &fwkfcmocks.MockFlowQueueAccessor{
 			LenV:     0,
 			FlowKeyV: flowcontrol.FlowKey{ID: id},
 		},
@@ -147,7 +148,7 @@ func TestDRRStrategy_OnCompleted_DeductsTokens(t *testing.T) {
 	m := &ProgramMetrics{}
 	m.AddDeficit(defaultDRRQuantumTokens) // one round of quantum
 
-	resp := &requestcontrol.Response{Usage: requesthandling.Usage{PromptTokens: 700, CompletionTokens: 300}}
+	resp := &fwkrc.Response{Usage: requesthandling.Usage{PromptTokens: 700, CompletionTokens: 300}}
 	s.OnCompleted(m, nil, resp) // weighted cost: 700*1 + 300*2 = 1300
 	assert.Equal(t, int64(-300), m.Deficit(), "weighted 1300-token cost against 1000 quantum")
 }
@@ -157,7 +158,7 @@ func TestDRRStrategy_OnCompleted_GoesNegativeOnOveruse(t *testing.T) {
 	m := &ProgramMetrics{}
 	m.AddDeficit(defaultDRRQuantumTokens) // 1000 tokens
 
-	resp := &requestcontrol.Response{Usage: requesthandling.Usage{PromptTokens: 1500, CompletionTokens: 500}}
+	resp := &fwkrc.Response{Usage: requesthandling.Usage{PromptTokens: 1500, CompletionTokens: 500}}
 	s.OnCompleted(m, nil, resp) // weighted cost: 1500*1 + 500*2 = 2500
 	assert.Equal(t, int64(-1500), m.Deficit(), "deficit should be negative after overuse")
 }
@@ -334,18 +335,18 @@ func TestDRRStrategy_Pick_NoDecayWhenDisabled(t *testing.T) {
 }
 
 func TestFactory_DeficitHalfLifeSeconds(t *testing.T) {
-	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"drr","deficitHalfLifeSeconds":30}`), nil)
+	p, err := ProgramAwarePluginFactory("test", plugin.StrictDecoder([]byte(`{"strategy":"drr","deficitHalfLifeSeconds":30}`)), nil)
 	require.NoError(t, err)
-	plugin := p.(*ProgramAwarePlugin)
-	drr := plugin.strategy.(*DRRStrategy)
+	pap := p.(*ProgramAwarePlugin)
+	drr := pap.strategy.(*DRRStrategy)
 	assert.Equal(t, 30.0, drr.deficitHalfLifeSeconds)
 }
 
 func TestFactory_DeficitHalfLifeSecondsDefault(t *testing.T) {
-	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"drr"}`), nil)
+	p, err := ProgramAwarePluginFactory("test", plugin.StrictDecoder([]byte(`{"strategy":"drr"}`)), nil)
 	require.NoError(t, err)
-	plugin := p.(*ProgramAwarePlugin)
-	drr := plugin.strategy.(*DRRStrategy)
+	pap := p.(*ProgramAwarePlugin)
+	drr := pap.strategy.(*DRRStrategy)
 	assert.Equal(t, defaultDRRDeficitHalfLifeSeconds, drr.deficitHalfLifeSeconds)
 }
 
@@ -367,24 +368,24 @@ func TestDRR_Pick_TokenHeavyProgramDeprioritized(t *testing.T) {
 	mLight.DeductTokens(defaultDRRQuantumTokens * 1)
 
 	now := time.Now()
-	queueHeavy := &fcmocks.MockFlowQueueAccessor{
+	queueHeavy := &fwkfcmocks.MockFlowQueueAccessor{
 		LenV:     5,
 		FlowKeyV: flowcontrol.FlowKey{ID: "heavy"},
-		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+		PeekHeadV: &fwkfcmocks.MockQueueItemAccessor{
 			EnqueueTimeV:     now,
-			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "heavy-req-1"},
+			OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{IDV: "heavy-req-1"},
 		},
 	}
-	queueLight := &fcmocks.MockFlowQueueAccessor{
+	queueLight := &fwkfcmocks.MockFlowQueueAccessor{
 		LenV:     1,
 		FlowKeyV: flowcontrol.FlowKey{ID: "light"},
-		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+		PeekHeadV: &fwkfcmocks.MockQueueItemAccessor{
 			EnqueueTimeV:     now,
-			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "light-req-1"},
+			OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{IDV: "light-req-1"},
 		},
 	}
 
-	band := &fcmocks.MockPriorityBandAccessor{
+	band := &fwkfcmocks.MockPriorityBandAccessor{
 		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
 			cb(queueHeavy)
 			cb(queueLight)
@@ -433,7 +434,7 @@ func TestLASStrategy_OnCompleted_AddsService(t *testing.T) {
 	m := &ProgramMetrics{}
 
 	// 100 input + 50 output → weighted: 100*1 + 50*2 = 200
-	resp := &requestcontrol.Response{Usage: requesthandling.Usage{PromptTokens: 100, CompletionTokens: 50}}
+	resp := &fwkrc.Response{Usage: requesthandling.Usage{PromptTokens: 100, CompletionTokens: 50}}
 	s.OnCompleted(m, nil, resp)
 	assert.InDelta(t, 200.0, m.AttainedService(), 0.01,
 		"OnCompleted should add weighted token cost to attained service")
@@ -502,10 +503,10 @@ func TestNewStrategy_LAS(t *testing.T) {
 }
 
 func TestFactory_LASStrategy(t *testing.T) {
-	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"las"}`), nil)
+	p, err := ProgramAwarePluginFactory("test", plugin.StrictDecoder([]byte(`{"strategy":"las"}`)), nil)
 	require.NoError(t, err)
-	plugin := p.(*ProgramAwarePlugin)
-	assert.Equal(t, "las", plugin.strategy.Name())
+	pap := p.(*ProgramAwarePlugin)
+	assert.Equal(t, "las", pap.strategy.Name())
 }
 
 func testServiceTimed(halfLife float64) *LASStrategy {
@@ -573,10 +574,10 @@ func TestLASStrategy_Pick_UsesTimedDecay(t *testing.T) {
 }
 
 func TestFactory_ServiceHalfLifeSeconds(t *testing.T) {
-	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"las","serviceHalfLifeSeconds":30}`), nil)
+	p, err := ProgramAwarePluginFactory("test", plugin.StrictDecoder([]byte(`{"strategy":"las","serviceHalfLifeSeconds":30}`)), nil)
 	require.NoError(t, err)
-	plugin := p.(*ProgramAwarePlugin)
-	svc := plugin.strategy.(*LASStrategy)
+	pap := p.(*ProgramAwarePlugin)
+	svc := pap.strategy.(*LASStrategy)
 	assert.Equal(t, 30.0, svc.halfLifeSeconds)
 }
 
@@ -591,10 +592,10 @@ func TestNewStrategy_RR(t *testing.T) {
 }
 
 func TestFactory_RRStrategy(t *testing.T) {
-	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"rr"}`), nil)
+	p, err := ProgramAwarePluginFactory("test", plugin.StrictDecoder([]byte(`{"strategy":"rr"}`)), nil)
 	require.NoError(t, err)
-	plugin := p.(*ProgramAwarePlugin)
-	assert.Equal(t, "rr", plugin.strategy.Name())
+	pap := p.(*ProgramAwarePlugin)
+	assert.Equal(t, "rr", pap.strategy.Name())
 }
 
 // simulateRRCycle runs one Pick() cycle on the RRStrategy directly.
@@ -714,10 +715,10 @@ func TestRRStrategy_NoQueues(t *testing.T) {
 }
 
 func TestFactory_RRDeferCursor(t *testing.T) {
-	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"rr","deferRRCursor":true}`), nil)
+	p, err := ProgramAwarePluginFactory("test", plugin.StrictDecoder([]byte(`{"strategy":"rr","deferRRCursor":true}`)), nil)
 	require.NoError(t, err)
-	plugin := p.(*ProgramAwarePlugin)
-	rr := plugin.strategy.(*RRStrategy)
+	pap := p.(*ProgramAwarePlugin)
+	rr := pap.strategy.(*RRStrategy)
 	assert.True(t, rr.deferCursor)
 }
 
@@ -790,18 +791,18 @@ func TestRR_Pick_CyclesThroughPrograms(t *testing.T) {
 	p := &ProgramAwarePlugin{strategy: &RRStrategy{}}
 
 	now := time.Now()
-	makeQueue := func(id string) *fcmocks.MockFlowQueueAccessor {
-		return &fcmocks.MockFlowQueueAccessor{
+	makeQueue := func(id string) *fwkfcmocks.MockFlowQueueAccessor {
+		return &fwkfcmocks.MockFlowQueueAccessor{
 			LenV:     1,
 			FlowKeyV: flowcontrol.FlowKey{ID: id},
-			PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			PeekHeadV: &fwkfcmocks.MockQueueItemAccessor{
 				EnqueueTimeV:     now,
-				OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: id + "-req"},
+				OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{IDV: id + "-req"},
 			},
 		}
 	}
 
-	band := &fcmocks.MockPriorityBandAccessor{
+	band := &fwkfcmocks.MockPriorityBandAccessor{
 		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
 			cb(makeQueue("alpha"))
 			cb(makeQueue("beta"))
@@ -832,18 +833,18 @@ func TestDRR_Pick_QuantumAllocatedDuringPick(t *testing.T) {
 	_ = p.getOrCreateMetrics("beta")
 
 	now := time.Now()
-	makeQueue := func(id string) *fcmocks.MockFlowQueueAccessor {
-		return &fcmocks.MockFlowQueueAccessor{
+	makeQueue := func(id string) *fwkfcmocks.MockFlowQueueAccessor {
+		return &fwkfcmocks.MockFlowQueueAccessor{
 			LenV:     1,
 			FlowKeyV: flowcontrol.FlowKey{ID: id},
-			PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			PeekHeadV: &fwkfcmocks.MockQueueItemAccessor{
 				EnqueueTimeV:     now,
-				OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: id + "-req"},
+				OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{IDV: id + "-req"},
 			},
 		}
 	}
 
-	band := &fcmocks.MockPriorityBandAccessor{
+	band := &fwkfcmocks.MockPriorityBandAccessor{
 		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
 			cb(makeQueue("alpha"))
 			cb(makeQueue("beta"))

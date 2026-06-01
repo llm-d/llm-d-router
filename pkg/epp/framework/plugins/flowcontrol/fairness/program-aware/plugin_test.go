@@ -5,12 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fcmocks "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
-	requestcontrol "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	requesthandling "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	scheduling "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	requesthandling "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -72,10 +72,10 @@ func TestPick_NilBand(t *testing.T) {
 func TestPick_AllQueuesEmpty(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
-	band := &fcmocks.MockPriorityBandAccessor{
+	band := &fwkfcmocks.MockPriorityBandAccessor{
 		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
-			cb(&fcmocks.MockFlowQueueAccessor{LenV: 0, FlowKeyV: flowcontrol.FlowKey{ID: "prog-a"}})
-			cb(&fcmocks.MockFlowQueueAccessor{LenV: 0, FlowKeyV: flowcontrol.FlowKey{ID: "prog-b"}})
+			cb(&fwkfcmocks.MockFlowQueueAccessor{LenV: 0, FlowKeyV: flowcontrol.FlowKey{ID: "prog-a"}})
+			cb(&fwkfcmocks.MockFlowQueueAccessor{LenV: 0, FlowKeyV: flowcontrol.FlowKey{ID: "prog-b"}})
 		},
 	}
 
@@ -87,18 +87,18 @@ func TestPick_AllQueuesEmpty(t *testing.T) {
 func TestPick_SingleNonEmptyQueue(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
-	queueA := &fcmocks.MockFlowQueueAccessor{
+	queueA := &fwkfcmocks.MockFlowQueueAccessor{
 		LenV:     3,
 		FlowKeyV: flowcontrol.FlowKey{ID: "prog-a"},
-		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+		PeekHeadV: &fwkfcmocks.MockQueueItemAccessor{
 			EnqueueTimeV: time.Now().Add(-2 * time.Second),
 		},
 	}
 
-	band := &fcmocks.MockPriorityBandAccessor{
+	band := &fwkfcmocks.MockPriorityBandAccessor{
 		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
 			cb(queueA)
-			cb(&fcmocks.MockFlowQueueAccessor{LenV: 0, FlowKeyV: flowcontrol.FlowKey{ID: "prog-b"}})
+			cb(&fwkfcmocks.MockFlowQueueAccessor{LenV: 0, FlowKeyV: flowcontrol.FlowKey{ID: "prog-b"}})
 		},
 	}
 
@@ -111,18 +111,18 @@ func TestPick_RecordsEnqueueTime(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
 	enqueueTime := time.Now().Add(-500 * time.Millisecond)
-	queueA := &fcmocks.MockFlowQueueAccessor{
+	queueA := &fwkfcmocks.MockFlowQueueAccessor{
 		LenV:     1,
 		FlowKeyV: flowcontrol.FlowKey{ID: "prog-a"},
-		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+		PeekHeadV: &fwkfcmocks.MockQueueItemAccessor{
 			EnqueueTimeV: enqueueTime,
-			OriginalRequestV: &fcmocks.MockFlowControlRequest{
+			OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{
 				IDV: "req-123",
 			},
 		},
 	}
 
-	band := &fcmocks.MockPriorityBandAccessor{
+	band := &fwkfcmocks.MockPriorityBandAccessor{
 		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
 			cb(queueA)
 		},
@@ -139,17 +139,17 @@ func TestPick_RecordsEnqueueTime(t *testing.T) {
 	assert.Equal(t, enqueueTime, storedTime, "stored time should be the item's enqueue time")
 }
 
-// --- PrepareRequestData tests ---
+// --- Produce tests ---
 
-func TestPrepareRequestData_UpdatesMetrics(t *testing.T) {
+func TestProduce_UpdatesMetrics(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
-	request := &scheduling.InferenceRequest{
-		RequestID: "req-1",
-		Headers:   map[string]string{fairnessIDHeader: "prog-a"},
+	request := &fwksched.InferenceRequest{
+		RequestID:  "req-1",
+		FairnessID: "prog-a",
 	}
 
-	err := p.PrepareRequestData(context.Background(), request, nil)
+	err := p.Produce(context.Background(), request, nil)
 	assert.NoError(t, err)
 
 	// Check metrics were created and incremented.
@@ -163,15 +163,14 @@ func TestPrepareRequestData_UpdatesMetrics(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestPrepareRequestData_NoFairnessHeader(t *testing.T) {
+func TestProduce_NoFairnessID(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
-	request := &scheduling.InferenceRequest{
+	request := &fwksched.InferenceRequest{
 		RequestID: "req-1",
-		Headers:   map[string]string{},
 	}
 
-	err := p.PrepareRequestData(context.Background(), request, nil)
+	err := p.Produce(context.Background(), request, nil)
 	assert.NoError(t, err)
 
 	// No metrics should be created.
@@ -192,9 +191,9 @@ func TestPreRequest_RecordsWaitTime(t *testing.T) {
 	p.requestTimestamps.Store("req-1", time.Now().Add(-50*time.Millisecond))
 	p.programMetrics.Store("prog-a", &ProgramMetrics{})
 
-	request := &scheduling.InferenceRequest{
-		RequestID: "req-1",
-		Headers:   map[string]string{fairnessIDHeader: "prog-a"},
+	request := &fwksched.InferenceRequest{
+		RequestID:  "req-1",
+		FairnessID: "prog-a",
 	}
 
 	p.PreRequest(context.Background(), request, nil)
@@ -212,11 +211,11 @@ func TestResponseComplete_RecordsTokensAndCleanup(t *testing.T) {
 	p.programMetrics.Store("prog-a", &ProgramMetrics{})
 	p.requestTimestamps.Store("req-1", time.Now().Add(-100*time.Millisecond))
 
-	request := &scheduling.InferenceRequest{
-		RequestID: "req-1",
-		Headers:   map[string]string{fairnessIDHeader: "prog-a"},
+	request := &fwksched.InferenceRequest{
+		RequestID:  "req-1",
+		FairnessID: "prog-a",
 	}
-	response := &requestcontrol.Response{
+	response := &fwkrc.Response{
 		Usage: requesthandling.Usage{
 			PromptTokens:     100,
 			CompletionTokens: 50,
@@ -238,13 +237,12 @@ func TestResponseComplete_RecordsTokensAndCleanup(t *testing.T) {
 	assert.Greater(t, metrics.AverageTokens(), 0.0, "token usage should be recorded")
 }
 
-func TestResponseComplete_NoFairnessHeader_StillCleansTimestamp(t *testing.T) {
+func TestResponseComplete_NoFairnessID_StillCleansTimestamp(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 	p.requestTimestamps.Store("req-1", time.Now())
 
-	request := &scheduling.InferenceRequest{
+	request := &fwksched.InferenceRequest{
 		RequestID: "req-1",
-		Headers:   map[string]string{},
 	}
 
 	p.ResponseBody(context.Background(), request, nil, nil)
@@ -279,9 +277,9 @@ func TestFullLifecycle(t *testing.T) {
 	p := &ProgramAwarePlugin{name: "test"}
 
 	programID := "prog-integration"
-	request := &scheduling.InferenceRequest{
-		RequestID: "req-lifecycle",
-		Headers:   map[string]string{fairnessIDHeader: programID},
+	request := &fwksched.InferenceRequest{
+		RequestID:  "req-lifecycle",
+		FairnessID: programID,
 	}
 
 	// 0. Simulate Pick() recording the enqueue time (flow control layer).
@@ -290,7 +288,7 @@ func TestFullLifecycle(t *testing.T) {
 	p.requestTimestamps.Store(request.RequestID, enqueueTime)
 
 	// 1. PrepareData (runs after flow control dispatch)
-	err := p.PrepareRequestData(context.Background(), request, nil)
+	err := p.Produce(context.Background(), request, nil)
 	require.NoError(t, err)
 
 	// Verify metrics created.
@@ -306,7 +304,7 @@ func TestFullLifecycle(t *testing.T) {
 	assert.Greater(t, metrics.AverageWaitTime(), 0.0, "wait time should reflect queue residence time")
 
 	// 3. ResponseComplete
-	response := &requestcontrol.Response{Headers: map[string]string{}}
+	response := &fwkrc.Response{Headers: map[string]string{}}
 	response.Usage = requesthandling.Usage{PromptTokens: 42, CompletionTokens: 17}
 	p.ResponseBody(context.Background(), request, response, &datalayer.EndpointMetadata{})
 	assert.Equal(t, int64(42), metrics.TotalInputTokens())
@@ -385,24 +383,24 @@ func TestPick_AllIdenticalMetrics(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
 	now := time.Now()
-	queueA := &fcmocks.MockFlowQueueAccessor{
+	queueA := &fwkfcmocks.MockFlowQueueAccessor{
 		LenV:     1,
 		FlowKeyV: flowcontrol.FlowKey{ID: "prog-a"},
-		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+		PeekHeadV: &fwkfcmocks.MockQueueItemAccessor{
 			EnqueueTimeV:     now,
-			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "a-req"},
+			OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{IDV: "a-req"},
 		},
 	}
-	queueB := &fcmocks.MockFlowQueueAccessor{
+	queueB := &fwkfcmocks.MockFlowQueueAccessor{
 		LenV:     1,
 		FlowKeyV: flowcontrol.FlowKey{ID: "prog-b"},
-		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+		PeekHeadV: &fwkfcmocks.MockQueueItemAccessor{
 			EnqueueTimeV:     now,
-			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "b-req"},
+			OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{IDV: "b-req"},
 		},
 	}
 
-	band := &fcmocks.MockPriorityBandAccessor{
+	band := &fwkfcmocks.MockPriorityBandAccessor{
 		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
 			cb(queueA)
 			cb(queueB)
