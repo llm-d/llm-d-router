@@ -141,8 +141,8 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 	}
 }
 
-func (p *Plugin) Consumes() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{
-		p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
+func (p *Plugin) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{}},
 	}
 }

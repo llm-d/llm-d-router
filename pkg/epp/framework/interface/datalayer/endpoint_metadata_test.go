@@ -66,6 +66,85 @@ func TestEndpointMetadataClone(t *testing.T) {
 	assert.Equal(t, "prod", expected.Labels["env"], "mutating clone should not affect original")
 }
 
+func TestEndpointMetadataEqual(t *testing.T) {
+	base := &EndpointMetadata{
+		NamespacedName: types.NamespacedName{Name: "pod-a-rank-0", Namespace: "default"},
+		PodName:        "pod-a",
+		Address:        "10.0.0.1",
+		Port:           "8000",
+		MetricsHost:    "10.0.0.1:9000",
+		Labels:         map[string]string{"app": "vllm"},
+		RankIndex:      1,
+	}
+
+	assert.True(t, base.Equal(base.Clone()))
+
+	var nilMetadata *EndpointMetadata
+	assert.True(t, nilMetadata.Equal(nil))
+	assert.False(t, nilMetadata.Equal(base))
+	assert.False(t, base.Equal(nil))
+
+	assert.True(t,
+		(&EndpointMetadata{Labels: nil}).Equal(&EndpointMetadata{Labels: map[string]string{}}),
+		"nil and empty labels should be treated as equivalent")
+
+	tests := []struct {
+		name   string
+		mutate func(*EndpointMetadata)
+	}{
+		{
+			name: "namespaced name",
+			mutate: func(meta *EndpointMetadata) {
+				meta.NamespacedName.Name = "pod-b-rank-0"
+			},
+		},
+		{
+			name: "pod name",
+			mutate: func(meta *EndpointMetadata) {
+				meta.PodName = "pod-b"
+			},
+		},
+		{
+			name: "address",
+			mutate: func(meta *EndpointMetadata) {
+				meta.Address = "10.0.0.2"
+			},
+		},
+		{
+			name: "port",
+			mutate: func(meta *EndpointMetadata) {
+				meta.Port = "8001"
+			},
+		},
+		{
+			name: "metrics host",
+			mutate: func(meta *EndpointMetadata) {
+				meta.MetricsHost = "10.0.0.1:9001"
+			},
+		},
+		{
+			name: "labels",
+			mutate: func(meta *EndpointMetadata) {
+				meta.Labels["app"] = "sglang"
+			},
+		},
+		{
+			name: "rank index",
+			mutate: func(meta *EndpointMetadata) {
+				meta.RankIndex = 2
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			changed := base.Clone()
+			tt.mutate(changed)
+			assert.False(t, base.Equal(changed))
+		})
+	}
+}
+
 func TestEndpointMetadataString(t *testing.T) {
 	endpointMetadata := EndpointMetadata{
 		NamespacedName: types.NamespacedName{

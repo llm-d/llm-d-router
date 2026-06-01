@@ -375,10 +375,12 @@ func (s *Plugin) compositeScores(ctx context.Context, endpoints []fwksched.Endpo
 	return scores
 }
 
-func (s *Plugin) Consumes() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{
-		s.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
-		s.prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfo{},
+func (s *Plugin) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			s.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
+			s.prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfo{},
+		},
 	}
 }
 

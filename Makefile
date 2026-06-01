@@ -76,8 +76,8 @@ endif
 
 BUILDER_RUN_FLAGS = --rm $(BUILDER_USER_FLAGS) \
 	-v $$(pwd):/app:Z -w /app \
-	-v $(GO_MOD_CACHE_VOL):/go/pkg/mod \
-	-v $(GO_BUILD_CACHE_VOL):/go/cache
+	-v $(GO_MOD_CACHE_VOL):/go/pkg/mod:z \
+	-v $(GO_BUILD_CACHE_VOL):/go/cache:z
 
 # Respect host KUBECONFIG if set; fall back to ~/.kube/config.
 # Note: if KUBECONFIG is a colon-separated list, only the first file is mounted.

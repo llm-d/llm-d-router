@@ -85,13 +85,10 @@ func NewRuntime(pollingInterval time.Duration) *Runtime {
 
 // Configure is called to transform the configuration information into the Runtime's
 // internal fields.
-func (r *Runtime) Configure(cfg *Config, enableNewMetrics bool, disallowedExtractorType string, logger logr.Logger) error {
+func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 	hasPending := len(r.pendingRegistrations) > 0
 	if (cfg == nil || len(cfg.Sources) == 0) && !hasPending {
-		if enableNewMetrics {
-			return errors.New("data layer enabled but no data sources configured")
-		}
-		return nil
+		return errors.New("data layer enabled but no data sources configured")
 	}
 
 	r.logger = logger
@@ -119,7 +116,7 @@ func (r *Runtime) Configure(cfg *Config, enableNewMetrics bool, disallowedExtrac
 			srcName := src.TypedName().Name
 
 			logger.V(logging.DEFAULT).Info("Processing source", "source", srcName, "numExtractors", len(srcCfg.Extractors))
-			if err := r.validateSourceExtractors(src, srcCfg.Extractors, disallowedExtractorType); err != nil {
+			if err := r.validateSourceExtractors(src, srcCfg.Extractors); err != nil {
 				return err
 			}
 
@@ -184,7 +181,7 @@ func (r *Runtime) Configure(cfg *Config, enableNewMetrics bool, disallowedExtrac
 			matchedSrc = pending.DefaultSource
 		}
 
-		if err := r.validateSourceExtractors(matchedSrc, []fwkplugin.Plugin{pending.Extractor}, disallowedExtractorType); err != nil {
+		if err := r.validateSourceExtractors(matchedSrc, []fwkplugin.Plugin{pending.Extractor}); err != nil {
 			return fmt.Errorf("code-registered extractor %s incompatible with source %s: %w",
 				pending.Extractor.TypedName(), srcName, err)
 		}
@@ -370,7 +367,7 @@ func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
 }
 
 // NewEndpoint sets up data polling on the provided endpoint.
-func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.EndpointMetadata, _ PoolInfo) fwkdl.Endpoint {
+func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.EndpointMetadata) fwkdl.Endpoint {
 	logger, _ := logr.FromContext(ctx)
 	logger = logger.WithValues("endpoint", endpointMetadata.GetNamespacedName())
 
@@ -415,6 +412,13 @@ func (r *Runtime) ReleaseEndpoint(ep fwkdl.Endpoint) {
 	}
 }
 
+// UpdateEndpoint dispatches an add/update lifecycle event for an existing endpoint.
+func (r *Runtime) UpdateEndpoint(ctx context.Context, ep fwkdl.Endpoint) {
+	logger, _ := logr.FromContext(ctx)
+	logger = logger.WithValues("endpoint", ep.GetMetadata().GetNamespacedName())
+	r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep})
+}
+
 // dispatchEndpointEvent routes an endpoint lifecycle event to all registered
 // EndpointSources and their extractors.
 func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger, event fwkdl.EndpointEvent) {
@@ -454,7 +458,7 @@ func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger,
 //
 // src is plugin.Plugin to accommodate PollingDispatcher (not a DataSource);
 // dispatcher.AppendExtractor enforces its own typed contract.
-func (r *Runtime) validateSourceExtractors(src fwkplugin.Plugin, extractors []fwkplugin.Plugin, disallowedExtractorType string) error {
+func (r *Runtime) validateSourceExtractors(src fwkplugin.Plugin, extractors []fwkplugin.Plugin) error {
 	seenTypes := make(map[string]struct{}, len(extractors))
 	for _, ext := range extractors {
 		extType := ext.TypedName().Type
@@ -466,11 +470,6 @@ func (r *Runtime) validateSourceExtractors(src fwkplugin.Plugin, extractors []fw
 	}
 
 	for _, ext := range extractors {
-		if disallowedExtractorType != "" && ext.TypedName().Type == disallowedExtractorType {
-			return fmt.Errorf("disallowed Extractor %s is configured for source %s",
-				ext.TypedName().String(), src.TypedName().String())
-		}
-
 		if notifySrc, ok := src.(fwkdl.NotificationSource); ok {
 			notifyExt, ok := ext.(fwkdl.NotificationExtractor)
 			if !ok {

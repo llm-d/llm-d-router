@@ -24,7 +24,6 @@ import (
 	"k8s.io/utils/ptr"
 
 	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
-	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
@@ -120,15 +119,4 @@ func TestEnsureDataLayer(t *testing.T) {
 		require.Empty(t, cfg.DataLayer.Sources)
 	})
 
-	t.Run("enableLegacyMetrics feature gate suppresses injection", func(t *testing.T) {
-		cfg := &configapi.EndpointPickerConfig{
-			FeatureGates: configapi.FeatureGates{datalayer.EnableLegacyMetricsFeatureGate},
-		}
-		handle := igwtestutils.NewTestHandle(context.Background())
-
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
-
-		require.NoError(t, err)
-		require.Nil(t, cfg.DataLayer)
-	})
 }

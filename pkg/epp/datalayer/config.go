@@ -17,6 +17,8 @@ limitations under the License.
 package datalayer
 
 import (
+	"fmt"
+
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -28,6 +30,17 @@ type Config struct {
 	Sources []DataSourceConfig // the data sources configured in the data layer
 }
 
+func (c *Config) String() string {
+	if c == nil {
+		return "<nil>"
+	}
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
+	// A new type definition inherits the struct fields but does not copy its methods,
+	// bypassing the Stringer check and allowing a safe reflection-based field dump.
+	type temp Config
+	return fmt.Sprintf("%+v", temp(*c))
+}
+
 // DataSourceConfig defines the configuration of a specific DataSource.
 // Plugin may be a DataSource (notification, endpoint) or a PollingDispatcher;
 // the framework type-asserts to the right variant at Configure time.
@@ -36,4 +49,12 @@ type Config struct {
 type DataSourceConfig struct {
 	Plugin     plugin.Plugin   // the source plugin instance (DataSource or PollingDispatcher)
 	Extractors []plugin.Plugin // extractors defined for the data source
+}
+
+func (dsc DataSourceConfig) String() string {
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
+	// A new type definition inherits the struct fields but does not copy its methods,
+	// bypassing the Stringer check and allowing a safe reflection-based field dump.
+	type temp DataSourceConfig
+	return fmt.Sprintf("%+v", temp(dsc))
 }

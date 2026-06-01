@@ -63,7 +63,7 @@ jobs:
       - name: Run make verify-helm-charts
         run: make verify-helm-charts
 
-  unit-and-integration:
+  test:
     needs: check-changes
     if: ${{ needs.check-changes.outputs.src == 'true' }}
     runs-on: ubuntu-latest

@@ -30,6 +30,7 @@ import (
 var mmTypes = map[string]bool{
 	"image_url":   true,
 	"audio_url":   true,
+	"video_url":   true,
 	"input_audio": true,
 }
 
@@ -112,6 +113,12 @@ func mmItemURL(item map[string]any) string {
 		}
 	case "audio_url":
 		if m, ok := item["audio_url"].(map[string]any); ok {
+			if u, ok := m["url"].(string); ok {
+				return u
+			}
+		}
+	case "video_url":
+		if m, ok := item["video_url"].(map[string]any); ok {
 			if u, ok := m["url"].(string); ok {
 				return u
 			}

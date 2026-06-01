@@ -22,6 +22,7 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // DefaultTestPort is the standard port used for mock model servers in tests.
@@ -177,7 +178,7 @@ func MakeInferencePool(name string) *InferencePoolWrapper {
 				Name: name,
 			},
 			TypeMeta: metav1.TypeMeta{
-				APIVersion: "inference.networking.k8s.io/v1",
+				APIVersion: routing.InferencePoolAPIGroup + "/v1",
 				Kind:       "InferencePool",
 			},
 			Spec: v1.InferencePoolSpec{
