@@ -73,7 +73,6 @@ func TestLoadRawConfiguration(t *testing.T) {
 
 	// Register known feature gates for validation.
 	RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	RegisterFeatureGate(datalayer.EnableLegacyMetricsFeatureGate)
 	RegisterFeatureGate(flowcontrol.FeatureGate)
 
 	queueScorerWeight := 2.0
@@ -354,7 +353,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 	registerTestPlugins(t)
 
 	RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	RegisterFeatureGate(datalayer.EnableLegacyMetricsFeatureGate)
 	RegisterFeatureGate(flowcontrol.FeatureGate)
 
 	tests := []struct {
@@ -630,16 +628,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.NotNil(t, cfg.DataConfig, "DataConfig should be built")
 				require.NotNil(t, handle.Plugin(sourcemetrics.MetricsDataSourceType), "MetricsDataSource plugin should be instantiated")
 				require.NotNil(t, handle.Plugin(extractormetrics.MetricsExtractorType), "MetricsExtractor plugin should be instantiated")
-			},
-		},
-		{
-			name:       "Success (DataLayer) - Legacy metrics via enableLegacyMetrics gate",
-			configText: successDataLayerDisabledText,
-			wantErr:    false,
-			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.Nil(t, rawCfg.DataLayer, "Data section should NOT be injected when datalayer is disabled")
-				require.Nil(t, handle.Plugin(sourcemetrics.MetricsDataSourceType), "MetricsDataSource should not be instantiated")
-				require.Nil(t, handle.Plugin(extractormetrics.MetricsExtractorType), "MetricsExtractor should not be instantiated")
 			},
 		},
 		{

@@ -44,7 +44,7 @@ func TestRuntimeConfigureWithNilExtractor(t *testing.T) {
 		},
 	}
 
-	err := r.Configure(cfg, false, "", logger)
+	err := r.Configure(cfg, logger)
 	assert.NoError(t, err, "Configure should succeed with nil extractors")
 }
 
@@ -64,7 +64,7 @@ func TestRuntimeConfigureDuplicateGVKFails(t *testing.T) {
 		},
 	}
 
-	err := r.Configure(cfg, false, "", logger)
+	err := r.Configure(cfg, logger)
 	assert.Error(t, err, "Configure should fail with duplicate GVK")
 	assert.Contains(t, err.Error(), "duplicate", "Error should mention duplicate GVK")
 }
@@ -87,7 +87,7 @@ func TestRuntimeConfigure_NotificationSource_RequiresNotificationExtractor(t *te
 		},
 	}
 
-	err := r.Configure(cfg, false, "", logger)
+	err := r.Configure(cfg, logger)
 	require.Error(t, err, "Configure must reject a non-NotificationExtractor for a notification source")
 	assert.Contains(t, err.Error(), "NotificationExtractor")
 }
@@ -105,7 +105,7 @@ func TestRuntimeConfigure_EndpointSource_RequiresEndpointExtractor(t *testing.T)
 		},
 	}
 
-	err := r.Configure(cfg, false, "", logger)
+	err := r.Configure(cfg, logger)
 	require.Error(t, err, "Configure must reject a non-EndpointExtractor for an endpoint source")
 	assert.Contains(t, err.Error(), "EndpointExtractor")
 }
@@ -142,7 +142,7 @@ func TestRuntimeConfigure_SourceImplementingMultipleVariants_Rejected(t *testing
 		Sources: []DataSourceConfig{{Plugin: src}},
 	}
 
-	err := r.Configure(cfg, false, "", logger)
+	err := r.Configure(cfg, logger)
 	require.Error(t, err, "a source that implements multiple variant interfaces must be rejected")
 	assert.Contains(t, err.Error(), "multiple variant")
 }

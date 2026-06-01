@@ -31,7 +31,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -56,7 +55,6 @@ var (
 func TestNoMetricsCollected(t *testing.T) {
 	period := time.Second
 	factories := []datalayer.EndpointFactory{
-		backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 		datalayer.NewTestRuntime(t, period),
 	}
 	for _, epf := range factories {
@@ -80,7 +78,6 @@ func TestMetricsCollected(t *testing.T) {
 	mockDS := &mocks.MetricsDataSource{}
 	mockDS.SetMetrics(metrics)
 	factories := []datalayer.EndpointFactory{
-		backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{Res: metrics}, period),
 		datalayer.NewTestRuntimeWithConfig(t, period, &datalayer.Config{
 			Sources: []datalayer.DataSourceConfig{
 				{Plugin: mockDS},

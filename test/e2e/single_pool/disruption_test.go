@@ -83,7 +83,7 @@ func eppPodReady(oldPodName string) func() bool {
 	}
 }
 
-var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label("Disruptive"), func() {
+var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disruptiveTestLabel), func() {
 	ginkgo.When("A decode pod is killed mid-request", func() {
 		ginkgo.It("should recover and route to surviving pods", func() {
 			infPoolObjects = createInferencePool(1, true)

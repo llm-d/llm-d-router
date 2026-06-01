@@ -91,5 +91,11 @@ else
 fi
 
 echo "Running Go e2e tests in ./test/e2e/epp/..."
-MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
-  go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast
+if [ -n "${E2E_LABEL_FILTER:-}" ]; then
+  echo "Label filter: ${E2E_LABEL_FILTER}"
+  MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
+    go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
+else
+  MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
+    go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast
+fi

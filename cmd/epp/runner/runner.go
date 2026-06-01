@@ -50,7 +50,6 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/profiling"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
 	"github.com/llm-d/llm-d-router/pkg/epp/config/loader"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -243,22 +242,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	pmc, err := backendmetrics.NewPodMetricsClientImpl(setupLog, backendmetrics.Config{
-		ModelServerMetricsScheme:        opts.ModelServerMetricsScheme,
-		ModelServerMetricsHTTPSInsecure: opts.ModelServerMetricsHTTPSInsecure,
-		ModelServerMetricsPath:          opts.ModelServerMetricsPath,
-
-		TotalQueuedRequestsMetric:    opts.TotalQueuedRequestsMetric,
-		TotalRunningRequestsMetric:   opts.TotalRunningRequestsMetric,
-		KVCacheUsagePercentageMetric: opts.KVCacheUsagePercentageMetric,
-		LoRAInfoMetric:               opts.LoRAInfoMetric,
-		CacheInfoMetric:              opts.CacheInfoMetric,
-	})
-	if err != nil {
-		return err
-	}
-
-	mgr, _, err := r.setup(ctx, cfg, opts, pmc, nil)
+	mgr, _, err := r.setup(ctx, cfg, opts, nil)
 	if err != nil {
 		return err
 	}
@@ -280,7 +264,7 @@ func (r *Runner) Run(ctx context.Context) error {
 //
 // The returned Datastore is **only** meant to be used in the integration test.
 // Optional managerOverrides are applied to the controller manager options before creation.
-func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, pmc backendmetrics.PodMetricsClient, managerOverrides []func(*ctrl.Options)) (ctrl.Manager, datastore.Datastore, error) {
+func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, managerOverrides []func(*ctrl.Options)) (ctrl.Manager, datastore.Datastore, error) {
 	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
@@ -288,8 +272,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	}
 	setupLog.Info("Raw config after phase one", "config", toRawMap(rawConfig))
 
-	useNewMetrics := !r.featureGates[datalayer.EnableLegacyMetricsFeatureGate]
-	epf := r.setupMetricsCollection(useNewMetrics, opts, pmc)
+	epf := r.setupMetricsCollection(opts)
 	gknn, err := extractGKNN(opts.PoolName, opts.PoolGroup, opts.PoolNamespace, opts.EndpointSelector)
 	if err != nil {
 		setupLog.Error(err, "Failed to extract GKNN")
@@ -376,9 +359,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
 
-	// Data layer is enabled by default; use the 'enableLegacyMetrics' feature gate to fall back to legacy polling.
-	datalayerMetricsEnabled := !r.featureGates[datalayer.EnableLegacyMetricsFeatureGate]
-	if err := r.configureAndStartDatalayer(ctx, datalayerMetricsEnabled, eppConfig.DataConfig, mgr); err != nil {
+	if err := r.configureAndStartDatalayer(ctx, eppConfig.DataConfig, mgr); err != nil {
 		setupLog.Error(err, "failed to initialize data layer")
 		return nil, nil, err
 	}
@@ -403,7 +384,6 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		Director:                         director,
 		Parser:                           r.parser,
 		SaturationDetector:               eppConfig.SaturationDetector,
-		UseExperimentalDatalayerV2:       r.featureGates[datalayer.ExperimentalDatalayerFeatureGate] || !r.featureGates[datalayer.EnableLegacyMetricsFeatureGate],
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 	}
@@ -599,7 +579,6 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 	}
 
 	loader.RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	loader.RegisterFeatureGate(datalayer.EnableLegacyMetricsFeatureGate)
 	loader.RegisterFeatureGate(flowcontrol.FeatureGate)
 
 	r.registerInTreePlugins()
@@ -613,15 +592,10 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 
 	if r.featureGates[datalayer.ExperimentalDatalayerFeatureGate] {
 		setupLog.Info("The data layer is now enabled by default. " +
-			"Please remove the 'dataLayer' feature gate from your config. " +
-			"To fall back to legacy metrics polling, use the 'enableLegacyMetrics' feature gate.")
+			"Please remove the 'dataLayer' feature gate from your config.")
 	}
 
-	if r.featureGates[datalayer.EnableLegacyMetricsFeatureGate] {
-		setupLog.Info("Data layer: using legacy metrics polling (opt-in via 'enableLegacyMetrics' feature gate)")
-	} else {
-		setupLog.Info("Data layer: ENABLED (default)")
-	}
+	setupLog.Info("Data layer: ENABLED")
 
 	r.rawConfig = rawConfig
 	return rawConfig, nil
@@ -701,25 +675,17 @@ func applyDeprecatedEnvFeatureGate(envVar, featureName, featureGate string, rawC
 	}
 }
 
-func (r *Runner) configureAndStartDatalayer(ctx context.Context, enableNewMetrics bool, cfg *datalayer.Config, mgr ctrl.Manager) error {
-	disallowedExtractorType := ""
-	if !enableNewMetrics {
-		disallowedExtractorType = extractormetrics.MetricsExtractorType
-	}
-
-	if err := r.dlRuntime.Configure(cfg, enableNewMetrics, disallowedExtractorType, setupLog); err != nil {
+func (r *Runner) configureAndStartDatalayer(ctx context.Context, cfg *datalayer.Config, mgr ctrl.Manager) error {
+	if err := r.dlRuntime.Configure(cfg, setupLog); err != nil {
 		return err
 	}
 
 	return r.dlRuntime.Start(ctx, mgr)
 }
 
-func (r *Runner) setupMetricsCollection(enableNewMetrics bool, opts *runserver.Options, pmc backendmetrics.PodMetricsClient) datalayer.EndpointFactory {
+func (r *Runner) setupMetricsCollection(opts *runserver.Options) datalayer.EndpointFactory {
 	r.dlRuntime = datalayer.NewRuntime(opts.RefreshMetricsInterval)
-	if enableNewMetrics {
-		return r.dlRuntime
-	}
-	return backendmetrics.NewPodMetricsFactory(pmc, opts.RefreshMetricsInterval)
+	return r.dlRuntime
 }
 
 // registerExtProcServer adds the ExtProcServerRunner as a Runnable to the manager.
@@ -865,26 +831,7 @@ func (r *Runner) initAdmissionControl(
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
 // It builds the EPP server stack without a Kubernetes cluster or controller manager.
 func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapi.EndpointPickerConfig) error {
-	useNewMetrics := !r.featureGates[datalayer.EnableLegacyMetricsFeatureGate]
-
-	var pmc backendmetrics.PodMetricsClient
-	if !useNewMetrics {
-		var err error
-		pmc, err = backendmetrics.NewPodMetricsClientImpl(setupLog, backendmetrics.Config{
-			ModelServerMetricsScheme:        opts.ModelServerMetricsScheme,
-			ModelServerMetricsHTTPSInsecure: opts.ModelServerMetricsHTTPSInsecure,
-			ModelServerMetricsPath:          opts.ModelServerMetricsPath,
-			TotalQueuedRequestsMetric:       opts.TotalQueuedRequestsMetric,
-			TotalRunningRequestsMetric:      opts.TotalRunningRequestsMetric,
-			KVCacheUsagePercentageMetric:    opts.KVCacheUsagePercentageMetric,
-			LoRAInfoMetric:                  opts.LoRAInfoMetric,
-			CacheInfoMetric:                 opts.CacheInfoMetric,
-		})
-		if err != nil {
-			return err
-		}
-	}
-	epf := r.setupMetricsCollection(useNewMetrics, opts, pmc)
+	epf := r.setupMetricsCollection(opts)
 
 	namespace := resolvePoolNamespace(opts.PoolNamespace)
 	poolName := opts.PoolName
@@ -936,11 +883,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return err
 	}
 
-	disallowedExtractorType := ""
-	if !useNewMetrics {
-		disallowedExtractorType = extractormetrics.MetricsExtractorType
-	}
-	if err := r.dlRuntime.Configure(eppConfig.DataConfig, useNewMetrics, disallowedExtractorType, setupLog); err != nil {
+	if err := r.dlRuntime.Configure(eppConfig.DataConfig, setupLog); err != nil {
 		return fmt.Errorf("failed to configure datalayer: %w", err)
 	}
 
@@ -977,7 +920,6 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		Director:                         director,
 		Parser:                           r.parser,
 		SaturationDetector:               eppConfig.SaturationDetector,
-		UseExperimentalDatalayerV2:       useNewMetrics,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 	}

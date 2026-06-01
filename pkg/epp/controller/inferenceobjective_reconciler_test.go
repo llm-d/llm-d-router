@@ -35,7 +35,6 @@ import (
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
@@ -147,7 +146,6 @@ func TestInferenceObjectiveReconciler(t *testing.T) {
 	for _, test := range tests {
 		period := time.Second
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {

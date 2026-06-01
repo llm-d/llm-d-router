@@ -389,7 +389,7 @@ func (ds *datastore) EndpointDelete(id types.NamespacedName) {
 func (ds *datastore) upsertEndpoint(meta *fwkdl.EndpointMetadata) bool {
 	existing, ok := ds.pods.Load(meta.NamespacedName)
 	if !ok {
-		ep := ds.epf.NewEndpoint(ds.parentCtx, meta, ds)
+		ep := ds.epf.NewEndpoint(ds.parentCtx, meta)
 		if ep == nil {
 			// NewEndpoint returns nil when a collector is already running for this
 			// endpoint (duplicate reconcile race). The existing entry in ds.pods

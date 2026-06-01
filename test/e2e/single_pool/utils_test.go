@@ -149,7 +149,7 @@ func isModelReal(modelName string) bool {
 
 // removeRenderSidecar takes a slice of YAML strings (each may contain multiple
 // objects separated by "---") and returns the same slice with the vllm-render
-// initContainer and the model-cache volume stripped from any Deployment.
+// container and the model-cache volume stripped from any Deployment.
 func removeRenderSidecar(inputs []string) []string {
 	outputs := make([]string, len(inputs))
 	for idx, input := range inputs {
@@ -174,6 +174,7 @@ func filterDocument(doc string) string {
 		return doc
 	}
 	if obj.GetKind() == "Deployment" {
+		removePodSpecListItem(obj, "containers", "vllm-render")
 		removePodSpecListItem(obj, "initContainers", "vllm-render")
 		removePodSpecListItem(obj, "volumes", "model-cache")
 	}
