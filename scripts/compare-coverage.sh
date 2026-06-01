@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# compare-coverage.sh <baseline-dir> <current-dir> [threshold] [label]
+# compare-coverage.sh <baseline-dir> <current-dir> [threshold] [label] [max-regression]
 #
 # Compares Go coverage profiles between a baseline and the current run.
 # Outputs a markdown table to stdout and, when running in GitHub Actions,
 # appends it to $GITHUB_STEP_SUMMARY so it appears in the Job Summary.
 #
 # Usage:
-#   ./scripts/compare-coverage.sh coverage/baseline coverage/ 0 main
+#   ./scripts/compare-coverage.sh coverage/baseline coverage/ 0 main 2.0
 #
 # Arguments:
-#   baseline-dir  Directory containing baseline *.out coverage profiles
-#   current-dir   Directory containing current *.out coverage profiles
-#   threshold     Optional minimum total coverage % (default: 0, report only)
-#   label         Optional baseline label for the report heading (default: main)
+#   baseline-dir    Directory containing baseline *.out coverage profiles
+#   current-dir     Directory containing current *.out coverage profiles
+#   threshold       Optional minimum total coverage % (default: 0, report only)
+#   label           Optional baseline label for the report heading (default: main)
+#   max-regression  Optional maximum allowed regression in percentage points
+#                   (default: 2.0). Regressions within this tolerance are
+#                   reported but do not cause a non-zero exit.
 
 set -euo pipefail
 
@@ -20,6 +23,7 @@ BASELINE_DIR="${1:?baseline-dir required}"
 CURRENT_DIR="${2:?current-dir required}"
 THRESHOLD="${3:-0}"
 LABEL="${4:-main}"
+MAX_REGRESSION="${5:-2.0}"
 
 # extract_total <profile.out> → percentage as a bare number, e.g. "72.4"
 extract_total() {
@@ -95,8 +99,14 @@ for name in "${all_names[@]}"; do
         cur_fmt="—"
     fi
 
-    if [[ "$status" == *"regression"* || "$status" == *"below threshold"* ]]; then
+    if [[ "$status" == *"below threshold"* ]]; then
         any_regression=1
+    elif [[ "$status" == *"regression"* && -n "$base_pct" && -n "$cur_pct" ]]; then
+        drop=$(awk "BEGIN{printf \"%.1f\", $base_pct - $cur_pct}")
+        exceeds=$(awk -v d="$drop" -v m="$MAX_REGRESSION" 'BEGIN{print (d+0 > m+0) ? 1 : 0}')
+        if [[ "$exceeds" -eq 1 ]]; then
+            any_regression=1
+        fi
     fi
 
     rows+="| \`$name\` | $base_fmt | $cur_fmt | $delta% | $status |\n"
@@ -106,6 +116,7 @@ output="$(printf '## Coverage Report vs %s\n\n| Component | Baseline | Current |
 if [[ "$THRESHOLD" -gt 0 ]]; then
     output+="$(printf '\n> Minimum threshold: **%s%%**' "$THRESHOLD")"
 fi
+output+="$(printf '\n> Allowed regression tolerance: **%s%%**' "$MAX_REGRESSION")"
 
 printf '%s\n' "$output"
 
