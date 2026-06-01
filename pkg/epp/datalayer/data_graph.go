@@ -81,11 +81,25 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 		}
 	}
 
+	// Warn about optional keys with no producer — no error, just a warning.
+	for _, p := range handle.GetAllPlugins() {
+		if consumer, ok := p.(plugin.ConsumerPlugin); ok {
+			dependencies := consumer.Consumes()
+			for key := range dependencies.Optional {
+				if !producedKeys[key.String()] {
+					logger.Info("Warning: optional data key has no producer, plugin will use fallback",
+						"plugin", p.TypedName().Name, "dataKey", key.String())
+				}
+			}
+		}
+	}
+
 	// Build the set of keys that are consumed but not yet produced.
 	missingKeys := make(map[string]string)
 	for _, p := range handle.GetAllPlugins() {
 		if consumer, ok := p.(plugin.ConsumerPlugin); ok {
-			for key := range consumer.Consumes() {
+			dependencies := consumer.Consumes()
+			for key := range dependencies.Required {
 				if !producedKeys[key.String()] {
 					missingKeys[key.String()] = consumer.TypedName().Name
 				}
@@ -191,9 +205,10 @@ func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]p
 			if pName == cName {
 				continue
 			}
-			if producer.Produces() != nil && consumer.Consumes() != nil {
+			dependencies := consumer.Consumes()
+			if producer.Produces() != nil && dependencies.Required != nil {
 				for producedKey, producedData := range producer.Produces() {
-					if consumedData, ok := consumer.Consumes()[producedKey]; ok {
+					if consumedData, ok := dependencies.Required[producedKey]; ok {
 						// Check types are same.
 						if reflect.TypeOf(producedData) != reflect.TypeOf(consumedData) {
 							return nil, errors.New("data type mismatch between produced and consumed data for key: " + producedKey.String())
