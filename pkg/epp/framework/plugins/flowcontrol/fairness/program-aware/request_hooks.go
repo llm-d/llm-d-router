@@ -21,8 +21,8 @@ func (p *ProgramAwarePlugin) Produces() map[plugin.DataKey]any {
 }
 
 // Consumes declares what data this plugin requires from other plugins. None.
-func (p *ProgramAwarePlugin) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{}
+func (p *ProgramAwarePlugin) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{}
 }
 
 // Produce reads the program ID from the request and increments the program's
