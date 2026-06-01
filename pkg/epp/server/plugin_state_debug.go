@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"time"
 
@@ -66,11 +65,6 @@ func NewPluginStateDebugHandler(plugins fwkplugin.HandlePlugins) http.Handler {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		if !isLoopbackRequest(r) {
-			http.Error(w, "plugin state debug endpoint is only available from localhost", http.StatusForbidden)
 			return
 		}
 
@@ -131,13 +125,4 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) (pluginStateDebugRespon
 		}
 	}
 	return response, nil
-}
-
-func isLoopbackRequest(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

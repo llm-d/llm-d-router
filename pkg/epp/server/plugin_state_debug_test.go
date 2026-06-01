@@ -72,7 +72,6 @@ func TestPluginStateDebugHandlerIncludesPlugins(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, PluginStateDebugPath, nil)
-	request.RemoteAddr = "127.0.0.1:1234"
 	NewPluginStateDebugHandler(handle).ServeHTTP(recorder, request)
 
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -105,18 +104,6 @@ func TestPluginStateDebugHandlerRejectsNonGet(t *testing.T) {
 	require.Equal(t, http.MethodGet, recorder.Header().Get("Allow"))
 }
 
-func TestPluginStateDebugHandlerRejectsNonLocalRequests(t *testing.T) {
-	handle := fwkplugin.NewEppHandle(context.Background(), nil)
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, PluginStateDebugPath, nil)
-	request.RemoteAddr = "10.0.0.2:1234"
-
-	NewPluginStateDebugHandler(handle).ServeHTTP(recorder, request)
-
-	require.Equal(t, http.StatusForbidden, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "only available from localhost")
-}
-
 func TestPluginStateDebugHandlerReportsEncodingErrors(t *testing.T) {
 	handle := fwkplugin.NewEppHandle(context.Background(), nil)
 	handle.AddPlugin("bad-dumper", &stateDebugTestDumper{
@@ -126,7 +113,6 @@ func TestPluginStateDebugHandlerReportsEncodingErrors(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, PluginStateDebugPath, nil)
-	request.RemoteAddr = "127.0.0.1:1234"
 	NewPluginStateDebugHandler(handle).ServeHTTP(recorder, request)
 
 	require.Equal(t, http.StatusInternalServerError, recorder.Code)

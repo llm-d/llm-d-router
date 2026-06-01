@@ -8,7 +8,7 @@ The router exposes a plugin state debug endpoint on the metrics/admin server:
 
 The endpoint is intended for on-demand operational debugging. It returns a snapshot of configured plugins and any sanitized internal state exposed through the optional `plugin.StateDumper` interface. Plugins that do not implement `StateDumper` are still listed with a message indicating that state collection is unsupported.
 
-The handler only serves loopback clients. Operators can access it through local access to the metrics/admin server, such as a port-forward. When metrics endpoint authentication is enabled, the metrics/admin server authentication and authorization filters still apply.
+The endpoint is registered on the same metrics/admin server as the metrics endpoint and pprof handlers. Operators should use the existing metrics/admin server exposure and authentication controls to restrict access. When metrics endpoint authentication is enabled, the metrics/admin server authentication and authorization filters apply to this endpoint.
 
 ## Response format
 
