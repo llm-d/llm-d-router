@@ -78,8 +78,32 @@ type tokenizerPluginConfig struct {
 	ModelName string `json:"modelName"`
 }
 
-// estimateConfig selects the estimation backend; no parameters yet.
-type estimateConfig struct{}
+// estimateConfig configures the estimation backend. Multimodal image estimation
+// is the only tunable; an empty config uses built-in defaults.
+type estimateConfig struct {
+	// Image tunes multimodal image placeholder-token estimation.
+	Image *imageEstimateConfig `json:"image,omitempty"`
+}
+
+// imageEstimateConfig tunes how an image's placeholder-token count is estimated.
+// Empty fields fall back to built-in defaults (dynamic mode, 640x360, factor 1024).
+type imageEstimateConfig struct {
+	// Mode selects "dynamic" (width*height/factor) or "fixed" (a constant count).
+	Mode string `json:"mode,omitempty"`
+	// DefaultResolution is the dynamic-mode fallback when an image's dimensions
+	// cannot be decoded.
+	DefaultResolution *resolution `json:"defaultResolution,omitempty"`
+	// Factor maps pixels to placeholder tokens in dynamic mode (width*height/factor).
+	Factor int `json:"factor,omitempty"`
+	// FixedTokens is the per-image placeholder count in fixed mode.
+	FixedTokens int `json:"fixedTokens,omitempty"`
+}
+
+// resolution is an image width/height in pixels.
+type resolution struct {
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
 
 // PluginFactory is the factory function for the tokenizer plugin.
 func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
@@ -101,6 +125,11 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	// path selects the estimate backend, which needs none.
 	if (uds || vllm) && config.ModelName == "" {
 		return nil, fmt.Errorf("invalid configuration for '%s' plugin: 'modelName' must be specified", PluginType)
+	}
+	if config.Estimate != nil && config.Estimate.Image != nil {
+		if m := config.Estimate.Image.Mode; m != "" && m != imageModeDynamic && m != imageModeFixed {
+			return nil, fmt.Errorf("invalid configuration for '%s' plugin: estimate.image.mode must be %q or %q", PluginType, imageModeDynamic, imageModeFixed)
+		}
 	}
 
 	p, err := NewPlugin(handle.Context(), name, &config)
@@ -151,7 +180,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		backend = renderBackend{tk: renderer}
 	default:
-		backend = estimateBackend{}
+		backend = estimateBackend{img: newImageEstimator(config.Estimate)}
 	}
 
 	return &Plugin{
@@ -190,6 +219,11 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		return errors.New("request body is nil")
 	}
 	if request.Body.TokenizedPrompt != nil {
+		// A parser (e.g. vLLM gRPC) may pre-populate tokens without a salt;
+		// ensure cache-salt isolation still applies on the skip path.
+		if request.Body.TokenizedPrompt.CacheSalt == "" {
+			request.Body.TokenizedPrompt.CacheSalt = cacheSaltFromBody(request.Body)
+		}
 		return nil
 	}
 

@@ -72,6 +72,46 @@ func TestEstimateBackend_GeneratePassthrough(t *testing.T) {
 	}
 }
 
+// TestEstimateBackend_CompletionsTokenIDsPassthrough asserts token-ID completions
+// input is passed through as real tokens, not byte-estimated.
+func TestEstimateBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
+	in := []uint32{11, 22, 33}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: in}},
+	})
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if len(tp.TokenIDs) != len(in) {
+		t.Fatalf("got %d tokens, want %d (token IDs must pass through, not be byte-estimated)", len(tp.TokenIDs), len(in))
+	}
+	for i := range in {
+		if tp.TokenIDs[i] != in[i] {
+			t.Errorf("token %d: got %d, want %d", i, tp.TokenIDs[i], in[i])
+		}
+	}
+}
+
+// TestEstimateBackend_EmbeddingsTokenIDsPassthrough asserts token-ID embeddings
+// input is passed through as real tokens.
+func TestEstimateBackend_EmbeddingsTokenIDsPassthrough(t *testing.T) {
+	in := []uint32{4, 5}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Embeddings: &fwkrh.EmbeddingsRequest{Input: fwkrh.EmbeddingsInput{TokenIDs: in}},
+	})
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if len(tp.TokenIDs) != len(in) {
+		t.Fatalf("got %d tokens, want %d", len(tp.TokenIDs), len(in))
+	}
+	for i := range in {
+		if tp.TokenIDs[i] != in[i] {
+			t.Errorf("token %d: got %d, want %d", i, tp.TokenIDs[i], in[i])
+		}
+	}
+}
+
 // TestEstimateBackend_CompletionsDeterministic asserts the same prompt produces
 // the same tokens (locality precondition) and that distinct prompts differ.
 func TestEstimateBackend_CompletionsDeterministic(t *testing.T) {
@@ -170,6 +210,60 @@ func TestEstimateBackend_ChatImageWeightingDistinct(t *testing.T) {
 	}
 	if def.MultiModalFeatures[0].Length == small.MultiModalFeatures[0].Length {
 		t.Error("different images yielded identical placeholder counts")
+	}
+}
+
+// chatImageBody builds a chat request carrying a single image_url block.
+func chatImageBody(url string) *fwkrh.InferenceRequestBody {
+	return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+		Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+			{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: url}},
+		}}}},
+	}}
+}
+
+// TestImageEstimator_FixedMode asserts fixed mode emits a constant placeholder
+// count regardless of image dimensions.
+func TestImageEstimator_FixedMode(t *testing.T) {
+	b := estimateBackend{img: newImageEstimator(&estimateConfig{Image: &imageEstimateConfig{Mode: imageModeFixed, FixedTokens: 7}})}
+	tp, err := b.produce(context.Background(), chatImageBody(pngBase64DataURL))
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if len(tp.MultiModalFeatures) != 1 {
+		t.Fatalf("got %d features, want 1", len(tp.MultiModalFeatures))
+	}
+	if got := tp.MultiModalFeatures[0].Length; got != 7 {
+		t.Errorf("fixed image length: got %d, want 7", got)
+	}
+}
+
+// TestImageEstimator_CustomFactor asserts the dynamic factor knob changes the
+// placeholder count for the default resolution.
+func TestImageEstimator_CustomFactor(t *testing.T) {
+	b := estimateBackend{img: newImageEstimator(&estimateConfig{Image: &imageEstimateConfig{Factor: 2048}})}
+	// Non-decodable URL falls back to the default 640x360 resolution.
+	tp, err := b.produce(context.Background(), chatImageBody("https://example.com/a.png"))
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if got, want := tp.MultiModalFeatures[0].Length, (defaultImageWidth*defaultImageHeight)/2048; got != want {
+		t.Errorf("custom-factor image length: got %d, want %d", got, want)
+	}
+}
+
+// TestImageEstimator_CustomDefaultResolution asserts the default-resolution knob
+// is used when an image's dimensions cannot be decoded.
+func TestImageEstimator_CustomDefaultResolution(t *testing.T) {
+	b := estimateBackend{img: newImageEstimator(&estimateConfig{Image: &imageEstimateConfig{
+		DefaultResolution: &resolution{Width: 1024, Height: 1024},
+	}})}
+	tp, err := b.produce(context.Background(), chatImageBody("https://example.com/a.png"))
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if got, want := tp.MultiModalFeatures[0].Length, (1024*1024)/imageTokenFactor; got != want {
+		t.Errorf("custom default-resolution length: got %d, want %d", got, want)
 	}
 }
 

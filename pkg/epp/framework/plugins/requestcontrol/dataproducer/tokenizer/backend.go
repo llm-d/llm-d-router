@@ -39,7 +39,10 @@ type renderBackend struct {
 func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
 	switch {
 	case body.Completions != nil:
-		tokenIDs, _, err := b.tk.Render(ctx, body.Completions.Prompt.Raw)
+		if ids := body.Completions.Prompt.TokenIDs; len(ids) > 0 {
+			return &fwkrh.TokenizedPrompt{TokenIDs: ids}, nil
+		}
+		tokenIDs, _, err := b.tk.Render(ctx, body.Completions.Prompt.PlainText())
 		if err != nil {
 			return nil, fmt.Errorf("tokenization failed: %w", err)
 		}

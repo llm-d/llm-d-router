@@ -35,21 +35,30 @@ const bytesPerToken = 4
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
 // The IDs suit content-locality hashing only; they never match engine KV blocks,
 // so pairing this backend with the engine-correlated scorer yields misses, not bad routes.
-type estimateBackend struct{}
+type estimateBackend struct {
+	img imageEstimator
+}
 
-func (estimateBackend) produce(_ context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
-	// Pre-tokenized input is already real tokens; pass it through unchanged.
-	if body.Generate != nil {
+func (b estimateBackend) produce(_ context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
+	// Pre-tokenized inputs are already real tokens; pass them through unchanged
+	// rather than byte-estimating. Token-ID inputs are valid for generate,
+	// /v1/completions, and /v1/embeddings.
+	switch {
+	case body.Generate != nil:
 		return &fwkrh.TokenizedPrompt{
 			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
 		}, nil
+	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
+		return &fwkrh.TokenizedPrompt{TokenIDs: body.Completions.Prompt.TokenIDs}, nil
+	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
+		return &fwkrh.TokenizedPrompt{TokenIDs: body.Embeddings.Input.TokenIDs}, nil
 	}
 
 	// The chat path folds multimodal placeholders into the stream and reports
 	// them as features; other protocols carry no multimodal content.
 	if body.ChatCompletions != nil {
-		raw, features := chatCompletionsBytes(body.ChatCompletions)
+		raw, features := b.chatCompletionsBytes(body.ChatCompletions)
 		return &fwkrh.TokenizedPrompt{TokenIDs: packBytes(raw), MultiModalFeatures: features}, nil
 	}
 
@@ -90,7 +99,7 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 // multimodal assets in on aligned boundaries. Each asset occupies N placeholder
 // pseudo-tokens (its content hash repeated N times) so it carries weight in the
 // stream, and is reported as a MultiModalFeature with its token offset and span.
-func chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest) ([]byte, []fwkrh.MultiModalFeature) {
+func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest) ([]byte, []fwkrh.MultiModalFeature) {
 	var out []byte
 	var features []fwkrh.MultiModalFeature
 	for _, msg := range chat.Messages {
@@ -106,7 +115,7 @@ func chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest) ([]byte, []fwkrh.M
 			case "text":
 				out = append(out, []byte(block.Text)...)
 			case "image_url":
-				out, features = appendMMAsset(out, features, block.ImageURL.URL, imagePlaceholderCount(block.ImageURL.URL))
+				out, features = appendMMAsset(out, features, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
 			case "video_url":
 				out, features = appendMMAsset(out, features, block.VideoURL.URL, assetPlaceholderCount(len(block.VideoURL.URL)))
 			case "input_audio", "audio_url":

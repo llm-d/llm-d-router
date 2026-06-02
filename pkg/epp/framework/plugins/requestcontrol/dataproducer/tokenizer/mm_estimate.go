@@ -29,6 +29,10 @@ import (
 )
 
 const (
+	// Image estimation modes.
+	imageModeDynamic = "dynamic"
+	imageModeFixed   = "fixed"
+
 	// defaultImageWidth and defaultImageHeight model a 360p image, used when an
 	// image URL is not a decodable base64 payload.
 	defaultImageWidth  = 640
@@ -37,16 +41,56 @@ const (
 	imageTokenFactor = 1024
 )
 
-// imagePlaceholderCount estimates the number of placeholder tokens an image
-// occupies. Decodable base64 payloads use their pixel dimensions; everything
-// else falls back to the default resolution. The result is always >= 1 so an
-// image contributes weight to the pseudo-token stream.
-func imagePlaceholderCount(url string) int {
-	w, h := defaultImageWidth, defaultImageHeight
+// imageEstimator estimates an image's placeholder-token count from configured or
+// default parameters. The zero value is valid and uses all built-in defaults.
+type imageEstimator struct {
+	mode        string
+	defWidth    int
+	defHeight   int
+	factor      int
+	fixedTokens int
+}
+
+// newImageEstimator resolves an estimateConfig into an imageEstimator, leaving
+// unset fields zero so placeholderCount applies built-in defaults.
+func newImageEstimator(cfg *estimateConfig) imageEstimator {
+	if cfg == nil || cfg.Image == nil {
+		return imageEstimator{}
+	}
+	img := cfg.Image
+	est := imageEstimator{mode: img.Mode, factor: img.Factor, fixedTokens: img.FixedTokens}
+	if img.DefaultResolution != nil {
+		est.defWidth, est.defHeight = img.DefaultResolution.Width, img.DefaultResolution.Height
+	}
+	return est
+}
+
+// placeholderCount estimates the number of placeholder tokens an image occupies.
+// Fixed mode returns a constant count; dynamic mode uses decoded pixel dimensions
+// (or the default resolution) divided by the factor. The result is always >= 1 so
+// an image contributes weight to the pseudo-token stream.
+func (e imageEstimator) placeholderCount(url string) int {
+	if e.mode == imageModeFixed {
+		if e.fixedTokens > 0 {
+			return e.fixedTokens
+		}
+		return 1
+	}
+	w, h := e.defWidth, e.defHeight
+	if w <= 0 {
+		w = defaultImageWidth
+	}
+	if h <= 0 {
+		h = defaultImageHeight
+	}
 	if rw, rh, ok := imageDimensionsFromBase64(url); ok {
 		w, h = rw, rh
 	}
-	if n := (w * h) / imageTokenFactor; n > 0 {
+	factor := e.factor
+	if factor <= 0 {
+		factor = imageTokenFactor
+	}
+	if n := (w * h) / factor; n > 0 {
 		return n
 	}
 	return 1

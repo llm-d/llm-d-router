@@ -80,6 +80,17 @@ func TestPluginFactory_Validation(t *testing.T) {
 			errContain: "'modelName' must be specified",
 		},
 		{
+			name:      "estimate image fixed mode parses",
+			params:    `{"estimate":{"image":{"mode":"fixed","fixedTokens":8}}}`,
+			expectErr: false,
+		},
+		{
+			name:       "invalid estimate image mode",
+			params:     `{"estimate":{"image":{"mode":"bogus"}}}`,
+			expectErr:  true,
+			errContain: "estimate.image.mode must be",
+		},
+		{
 			name:       "invalid JSON",
 			params:     `{invalid}`,
 			expectErr:  true,
@@ -148,6 +159,56 @@ func TestProduce_SkipsWhenAlreadyPopulated(t *testing.T) {
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
 	assert.Same(t, existing, req.Body.TokenizedPrompt)
+}
+
+func TestProduce_SetsCacheSaltOnSkipPath(t *testing.T) {
+	tok := &mockTokenizer{
+		renderChatFunc: func(*tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+			t.Fatal("backend must not run on the skip path")
+			return nil, nil, nil
+		},
+	}
+	existing := &fwkrh.TokenizedPrompt{TokenIDs: []uint32{1, 2, 3}}
+	p := newTestPlugin(tok)
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{CacheSalt: "tenant-x"},
+			TokenizedPrompt: existing,
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.Same(t, existing, req.Body.TokenizedPrompt)
+	assert.Equal(t, "tenant-x", req.Body.TokenizedPrompt.CacheSalt)
+	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedPrompt.TokenIDs)
+}
+
+func TestRenderBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
+	tok := &mockTokenizer{
+		renderFunc: func(string) ([]uint32, []tokenizerTypes.Offset, error) {
+			t.Fatal("render must not run when token IDs are provided")
+			return nil, nil, nil
+		},
+	}
+	tp, err := renderBackend{tk: tok}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: []uint32{5, 6, 7}}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []uint32{5, 6, 7}, tp.TokenIDs)
+}
+
+func TestRenderBackend_CompletionsArrayUsesPlainText(t *testing.T) {
+	var got string
+	tok := &mockTokenizer{
+		renderFunc: func(prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
+			got = prompt
+			return []uint32{1}, nil, nil
+		},
+	}
+	_, err := renderBackend{tk: tok}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Strings: []string{"alpha", "beta"}}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "alpha beta", got)
 }
 
 func TestProduce_NilBody(t *testing.T) {
