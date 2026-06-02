@@ -45,6 +45,7 @@ const (
 	requestHeaderRequestID = "x-request-id"
 
 	requestFieldKVTransferParams     = "kv_transfer_params"
+	requestFieldECTransferParams     = "ec_transfer_params"
 	requestFieldMaxTokens            = "max_tokens"
 	requestFieldMaxCompletionTokens  = "max_completion_tokens"
 	requestFieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
@@ -74,6 +75,7 @@ const (
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
 	KVConnectorSGLang        = constants.KVConnectorSGLang
 	ECExampleConnector       = constants.ECExampleConnector
+	ECEPDConnector           = constants.ECEPDConnector
 )
 
 // APIType represents the type of OpenAI API being used.
@@ -376,6 +378,8 @@ func (s *Server) setECConnector() {
 	switch ecConnector {
 	case ECExampleConnector:
 		s.handleEPDConnector = s.handleEPD
+	case ECEPDConnector:
+		s.handleEPDConnector = s.handleECEPD
 	default:
 		// Unknown EC connector value, skip encoder stage
 		return

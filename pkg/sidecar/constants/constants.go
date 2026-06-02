@@ -28,4 +28,11 @@ const (
 
 	// ECExampleConnector enables the Encoder disaggregation protocol (E/PD, E/P/D)
 	ECExampleConnector = "ec-example"
+
+	// ECEPDConnector enables an Encoder disaggregation protocol that, in
+	// addition to fan-out priming, captures each encoder's ec_transfer_params
+	// response and threads them into the prefill request body as a black box.
+	// Mirrors the KV-side NIXLv2 connector's pattern of relaying transfer
+	// metadata across stages without inspecting its internal schema.
+	ECEPDConnector = "ec-epd"
 )
