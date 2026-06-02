@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"strconv"
 
 	"github.com/cespare/xxhash/v2"
 
@@ -45,6 +46,13 @@ func (estimateBackend) produce(_ context.Context, body *fwkrh.InferenceRequestBo
 		}, nil
 	}
 
+	// The chat path folds multimodal placeholders into the stream and reports
+	// them as features; other protocols carry no multimodal content.
+	if body.ChatCompletions != nil {
+		raw, features := chatCompletionsBytes(body.ChatCompletions)
+		return &fwkrh.TokenizedPrompt{TokenIDs: packBytes(raw), MultiModalFeatures: features}, nil
+	}
+
 	raw, err := estimateBytes(body)
 	if err != nil {
 		return nil, err
@@ -52,8 +60,9 @@ func (estimateBackend) produce(_ context.Context, body *fwkrh.InferenceRequestBo
 	return &fwkrh.TokenizedPrompt{TokenIDs: packBytes(raw)}, nil
 }
 
-// estimateBytes serializes the user input of a request body to a byte stream.
-// Coverage matches the protocols the approximate prefix-cache scorer handles.
+// estimateBytes serializes the user input of a non-chat request body to a byte
+// stream. Coverage matches the protocols the approximate prefix-cache scorer
+// handles. The chat path is handled separately to emit multimodal features.
 func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 	switch {
 	case body.Conversations != nil:
@@ -68,8 +77,6 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 		}
 		combined = append(combined, map[string]any{"input": body.Responses.Input})
 		return json.Marshal(combined)
-	case body.ChatCompletions != nil:
-		return chatCompletionsBytes(body.ChatCompletions), nil
 	case body.Completions != nil:
 		return []byte(body.Completions.Prompt.PlainText()), nil
 	case body.Embeddings != nil:
@@ -79,11 +86,13 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 	}
 }
 
-// chatCompletionsBytes flattens roles + text into bytes, folding multimodal
-// assets in on aligned boundaries. Per-asset placeholder weighting (the
-// scorer's TokenEstimator) is not yet ported.
-func chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest) []byte {
+// chatCompletionsBytes flattens roles + text into pseudo-token bytes, folding
+// multimodal assets in on aligned boundaries. Each asset occupies N placeholder
+// pseudo-tokens (its content hash repeated N times) so it carries weight in the
+// stream, and is reported as a MultiModalFeature with its token offset and span.
+func chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest) ([]byte, []fwkrh.MultiModalFeature) {
 	var out []byte
+	var features []fwkrh.MultiModalFeature
 	for _, msg := range chat.Messages {
 		if msg.Role != "" {
 			out = append(out, []byte(msg.Role)...)
@@ -97,21 +106,49 @@ func chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest) []byte {
 			case "text":
 				out = append(out, []byte(block.Text)...)
 			case "image_url":
-				out = align(out)
-				h := make([]byte, bytesPerToken)
-				binary.LittleEndian.PutUint32(h, uint32(xxhash.Sum64([]byte(block.ImageURL.URL))))
-				out = append(out, h...)
+				out, features = appendMMAsset(out, features, block.ImageURL.URL, imagePlaceholderCount(block.ImageURL.URL))
 			case "video_url":
-				out = align(out)
-				out = append(out, []byte(block.VideoURL.URL)...)
+				out, features = appendMMAsset(out, features, block.VideoURL.URL, assetPlaceholderCount(len(block.VideoURL.URL)))
 			case "input_audio", "audio_url":
-				out = align(out)
-				out = append(out, []byte(block.InputAudio.Data)...)
-				out = append(out, []byte(block.InputAudio.Format)...)
+				data := block.InputAudio.Data + block.InputAudio.Format
+				out, features = appendMMAsset(out, features, data, assetPlaceholderCount(len(data)))
 			}
 		}
 	}
-	return out
+	return out, features
+}
+
+// appendMMAsset aligns out to a token boundary, appends count placeholder
+// pseudo-tokens derived from a stable content hash, and records the matching
+// feature. Modality is always ModalityImage: it is the only defined modality
+// const, and detection/scoring need only a non-empty, stably-hashed feature.
+func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, content string, count int) ([]byte, []fwkrh.MultiModalFeature) {
+	out = align(out)
+	offset := len(out) / bytesPerToken
+
+	sum := xxhash.Sum64String(content)
+	token := make([]byte, bytesPerToken)
+	binary.LittleEndian.PutUint32(token, uint32(sum))
+	for i := 0; i < count; i++ {
+		out = append(out, token...)
+	}
+
+	features = append(features, fwkrh.MultiModalFeature{
+		Modality: fwkrh.ModalityImage,
+		Hash:     strconv.FormatUint(sum, 16),
+		Offset:   offset,
+		Length:   count,
+	})
+	return out, features
+}
+
+// assetPlaceholderCount derives a deterministic placeholder count (>= 1) from an
+// asset's byte length for modalities without a dedicated estimator.
+func assetPlaceholderCount(dataLen int) int {
+	if n := (dataLen + bytesPerToken - 1) / bytesPerToken; n > 0 {
+		return n
+	}
+	return 1
 }
 
 // packBytes packs bytes into little-endian uint32 tokens (zero-padded tail).

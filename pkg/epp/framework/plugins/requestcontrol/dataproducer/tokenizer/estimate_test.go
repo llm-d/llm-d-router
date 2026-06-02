@@ -18,6 +18,7 @@ package tokenizer
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"unsafe"
 
@@ -94,5 +95,94 @@ func TestEstimateBackend_CompletionsDeterministic(t *testing.T) {
 	}
 	if hashTokens(a.TokenIDs) == hashTokens(c.TokenIDs) {
 		t.Error("distinct prompts produced identical tokens")
+	}
+}
+
+// pngBase64DataURL is a 64x32 RGBA PNG, yielding 64*32/imageTokenFactor = 2
+// placeholder tokens under the dynamic estimator.
+const pngBase64DataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAARUlEQVR4nOzP0QnAUAzDwBSy/8zlTSECdxj/a2fmu7x9d5mAmoCagJqAmoCagJqAmoCagJqAmoCagJqAmoCagNofAAD//57WAN8yR4QZAAAAAElFTkSuQmCC"
+
+// TestEstimateBackend_ChatImageFeature asserts a chat image emits a multimodal
+// feature with the image modality and the URL content hash, occupies more than
+// one placeholder pseudo-token (weighting), and points within the token stream.
+func TestEstimateBackend_ChatImageFeature(t *testing.T) {
+	body := &fwkrh.InferenceRequestBody{
+		ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{{
+				Role: "user",
+				Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+					{Type: "text", Text: "describe this"},
+					{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: pngBase64DataURL}},
+				}},
+			}},
+		},
+	}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if len(tp.MultiModalFeatures) != 1 {
+		t.Fatalf("got %d features, want 1", len(tp.MultiModalFeatures))
+	}
+	f := tp.MultiModalFeatures[0]
+	if f.Modality != fwkrh.ModalityImage {
+		t.Errorf("modality: got %q, want %q", f.Modality, fwkrh.ModalityImage)
+	}
+	if want := strconv.FormatUint(xxhash.Sum64String(pngBase64DataURL), 16); f.Hash != want {
+		t.Errorf("hash: got %q, want %q", f.Hash, want)
+	}
+	if f.Length <= 1 {
+		t.Errorf("image length: got %d, want > 1 (placeholder weighting)", f.Length)
+	}
+	if f.Offset < 0 || f.Offset+f.Length > len(tp.TokenIDs) {
+		t.Errorf("feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tp.TokenIDs))
+	}
+	// Placeholder tokens are the URL hash repeated; verify the span carries weight.
+	for i := f.Offset; i < f.Offset+f.Length; i++ {
+		if tp.TokenIDs[i] != uint32(xxhash.Sum64String(pngBase64DataURL)) {
+			t.Errorf("token %d: got %d, want image placeholder token", i, tp.TokenIDs[i])
+		}
+	}
+}
+
+// TestEstimateBackend_ChatImageWeightingDistinct asserts two images with
+// different placeholder counts produce different token streams, so image
+// weighting affects locality keys.
+func TestEstimateBackend_ChatImageWeightingDistinct(t *testing.T) {
+	chat := func(url string) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+				{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: url}},
+			}}}},
+		}}
+	}
+	// Non-decodable URL falls back to the default 640x360 resolution.
+	def, err := estimateBackend{}.produce(context.Background(), chat("https://example.com/a.png"))
+	if err != nil {
+		t.Fatalf("produce default: %v", err)
+	}
+	if got, want := def.MultiModalFeatures[0].Length, (defaultImageWidth*defaultImageHeight)/imageTokenFactor; got != want {
+		t.Errorf("default image length: got %d, want %d", got, want)
+	}
+	small, err := estimateBackend{}.produce(context.Background(), chat(pngBase64DataURL))
+	if err != nil {
+		t.Fatalf("produce small: %v", err)
+	}
+	if def.MultiModalFeatures[0].Length == small.MultiModalFeatures[0].Length {
+		t.Error("different images yielded identical placeholder counts")
+	}
+}
+
+// TestEstimateBackend_NonChatNoFeatures asserts non-chat protocols carry no
+// multimodal features.
+func TestEstimateBackend_NonChatNoFeatures(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if tp.MultiModalFeatures != nil {
+		t.Errorf("non-chat features: got %v, want nil", tp.MultiModalFeatures)
 	}
 }
