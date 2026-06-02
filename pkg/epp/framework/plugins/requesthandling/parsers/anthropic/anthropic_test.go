@@ -438,6 +438,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 
 			if tt.want != nil {
 				tt.want.OriginalRequestName = "Messages"
+				tt.want.Provider = "anthropic"
 			}
 
 			if diff := cmp.Diff(tt.want, got.Body); diff != "" {

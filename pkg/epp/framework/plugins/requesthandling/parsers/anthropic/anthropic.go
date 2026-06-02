@@ -97,6 +97,7 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		Messages:            &messagesReq,
 		Payload:             fwkrh.PayloadMap(bodyMap),
 		OriginalRequestName: "Messages",
+		Provider:            "anthropic",
 	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		result.Stream = true

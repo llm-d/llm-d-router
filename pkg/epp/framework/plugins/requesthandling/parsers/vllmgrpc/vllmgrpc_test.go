@@ -345,6 +345,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			}
 
 			if tt.want != nil {
+				tt.want.Provider = "vllm-grpc"
 				if tt.want.Completions != nil {
 					tt.want.OriginalRequestName = "Completions"
 				} else if tt.want.Embeddings != nil {

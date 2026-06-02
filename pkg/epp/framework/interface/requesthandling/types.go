@@ -77,7 +77,9 @@ type InferenceRequestBody struct {
 	// ExtractedCacheSalt is an optional request parameter to isolate prefix caches for security reasons.
 	ExtractedCacheSalt string
 	// OriginalRequestName indicates the name of the original request type (e.g., 'ChatCompletions', 'Messages').
-	OriginalRequestName string
+	OriginalRequestName string `json:"-"`
+	// Provider indicates the API provider or protocol (e.g., 'openai', 'anthropic').
+	Provider string `json:"-"`
 
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`

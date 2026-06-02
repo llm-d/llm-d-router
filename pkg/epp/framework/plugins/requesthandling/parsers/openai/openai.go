@@ -206,6 +206,7 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 			return &fwkrh.InferenceRequestBody{
 				Conversations:       &conversations,
 				OriginalRequestName: "Conversations",
+				Provider:            "openai",
 			}, nil
 		}
 		return nil, errors.New("invalid conversations request: must have items field")
@@ -216,6 +217,7 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 			return &fwkrh.InferenceRequestBody{
 				Responses:           &responses,
 				OriginalRequestName: "Responses",
+				Provider:            "openai",
 			}, nil
 		}
 		return nil, errors.New("invalid responses request: must have input field")
@@ -227,6 +229,7 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 				return &fwkrh.InferenceRequestBody{
 					ChatCompletions:     &chatCompletions,
 					OriginalRequestName: "ChatCompletions",
+					Provider:            "openai",
 				}, nil
 			}
 		}
@@ -238,6 +241,7 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 			return &fwkrh.InferenceRequestBody{
 				Completions:         &completions,
 				OriginalRequestName: "Completions",
+				Provider:            "openai",
 			}, nil
 		}
 		return nil, errors.New("invalid completions request: must have prompt field")
@@ -248,6 +252,7 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 			return &fwkrh.InferenceRequestBody{
 				Embeddings:          &embeddings,
 				OriginalRequestName: "Embeddings",
+				Provider:            "openai",
 			}, nil
 		}
 		return nil, errors.New("invalid embeddings request: must have input field")

@@ -172,5 +172,6 @@ func (p *VertexAIParser) parseVertexRequest(ctx context.Context, body []byte, he
 
 	inferenceRequestBody := parseResult.Body
 	inferenceRequestBody.Payload = fwkrh.PayloadProto{Message: req}
+	inferenceRequestBody.Provider = "vertexai"
 	return &fwkrh.ParseResult{Body: inferenceRequestBody, Skip: parseResult.Skip}, nil
 }

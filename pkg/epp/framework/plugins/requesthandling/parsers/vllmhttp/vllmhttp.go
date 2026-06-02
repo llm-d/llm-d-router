@@ -122,6 +122,7 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 		Generate:            &generate,
 		Payload:             fwkrh.PayloadMap(bodyMap),
 		OriginalRequestName: "Generate",
+		Provider:            "vllm-http",
 	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		body.Stream = true

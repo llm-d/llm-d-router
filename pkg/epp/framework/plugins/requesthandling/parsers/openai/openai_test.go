@@ -814,6 +814,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			}
 
 			if tt.want != nil {
+				tt.want.Provider = "openai"
 				if tt.want.ChatCompletions != nil {
 					tt.want.OriginalRequestName = "ChatCompletions"
 				} else if tt.want.Completions != nil {

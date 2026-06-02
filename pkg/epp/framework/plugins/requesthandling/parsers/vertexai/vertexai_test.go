@@ -186,6 +186,7 @@ func TestParseRequest(t *testing.T) {
 			}
 
 			if tc.wantResult != nil && tc.wantResult.Body != nil {
+				tc.wantResult.Body.Provider = "vertexai"
 				if tc.wantResult.Body.ChatCompletions != nil {
 					tc.wantResult.Body.OriginalRequestName = "ChatCompletions"
 				} else if tc.wantResult.Body.Responses != nil {

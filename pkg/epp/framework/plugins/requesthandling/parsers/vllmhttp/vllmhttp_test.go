@@ -211,6 +211,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 			if tt.want != nil {
 				if tt.want.Generate != nil {
 					tt.want.OriginalRequestName = "Generate"
+					tt.want.Provider = "vllm-http"
 				}
 			}
 
