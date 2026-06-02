@@ -32,8 +32,8 @@ import (
 const bytesPerToken = 4
 
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
-// The IDs suit content-locality hashing only; they don't match engine KV blocks,
-// so a mis-paired engine-correlated consumer misses rather than mis-routes.
+// The IDs suit content-locality hashing only; they never match engine KV blocks,
+// so pairing this backend with the engine-correlated scorer yields misses, not bad routes.
 type estimateBackend struct{}
 
 func (estimateBackend) produce(_ context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
