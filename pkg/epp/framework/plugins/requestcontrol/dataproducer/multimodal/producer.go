@@ -47,8 +47,8 @@ const (
 
 	podCleanupInterval = 2 * time.Minute
 
-	// defaultCacheSizeInMB is 2 GiB (2048 MiB).
-	defaultCacheSizeInMB = 2048
+	// defaultCacheSizeInMB is 4 GiB (4096 MiB).
+	defaultCacheSizeInMB = 4096
 
 	// bytesPerLRUEntry is the assumed memory per tracked hash.
 	bytesPerLRUEntry = 2 * 1024 * 1024
