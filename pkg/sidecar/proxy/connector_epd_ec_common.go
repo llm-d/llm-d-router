@@ -193,7 +193,7 @@ func (s *Server) fanoutEncoder(
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(requestHeaderRequestID, fmt.Sprintf("%s-enc-%d", requestID, itemIdx))
 
-			s.logger.V(4).Info("sending encoder request", "item", itemIdx, "to", hostPort, "requestID", requestID)
+			s.logger.V(logging.DEBUG).Info("sending encoder request", "item", itemIdx, "to", hostPort, "requestID", requestID)
 
 			pw := &bufferedResponseWriter{}
 			encoderHandler.ServeHTTP(pw, req)
