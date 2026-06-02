@@ -67,8 +67,7 @@ func (s *Server) handleEPD(w http.ResponseWriter, r *http.Request, prefillEndPoi
 	}
 
 	// Step 2 & 3: Handle Prefiller and Decoder stages
-	// Set cache_hit_threshold to 0 to skip the decode-first optimization
-	// since we've already processed through the encoder
+	// Skip decode-first; the encoder has run and prefill must execute.
 	completionRequest[requestFieldCacheHitThreshold] = 0
 
 	// Update request body with the modified completion request

@@ -120,7 +120,7 @@ func mmItemURL(item map[string]any) string {
 // mmItemsForFanout extracts the multimodal items from a request body and
 // deduplicates URL-based items (image_url / audio_url / video_url). Non-URL
 // items (e.g. inline input_audio) are kept verbatim. Returns nil when
-// there is no multimodal content — the caller should skip the encoder
+// there is no multimodal content. The caller should skip the encoder
 // stage in that case.
 func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string) []map[string]any {
 	raw := extractMMItems(originalRequest)

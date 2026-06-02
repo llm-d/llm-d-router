@@ -1,19 +1,3 @@
-/*
-Copyright 2026 The llm-d Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package proxy
 
 import (
@@ -119,7 +103,7 @@ func TestFanoutEncoderCollectEncoderError(t *testing.T) {
 // TestHandleECEPDThreadsParamsToPrefill verifies that handleECEPD mutates
 // the prefill request body to carry a flat ec_transfer_params map keyed by
 // the per-image mm_hash, and sets cache_hit_threshold=0. Bypasses the
-// real P/D connector by stubbing s.handlePDConnector — the contract under
+// real P/D connector by stubbing s.handlePDConnector. The contract under
 // test is "what gets handed to the P/D connector", not the P/D connector's
 // downstream behaviour.
 func TestHandleECEPDThreadsParamsToPrefill(t *testing.T) {

@@ -1,19 +1,3 @@
-/*
-Copyright 2026 The llm-d Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package proxy
 
 import (
@@ -25,11 +9,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// truncateLongStrings returns a copy of v with any string longer than
-// maxLen replaced by its prefix + a length suffix. The connector treats
-// ec_transfer_params as opaque, so this walks the structure generically
-// rather than special-casing any field name. The original value is left
-// unmodified.
+// truncateLongStrings recursively shortens long string values for logging.
+// Field-agnostic. The connector treats ec_transfer_params as opaque.
 func truncateLongStrings(v any, maxLen int) any {
 	switch x := v.(type) {
 	case string:
@@ -54,22 +35,14 @@ func truncateLongStrings(v any, maxLen int) any {
 	}
 }
 
-// fanoutEncoderCollect fans out per-image encoder requests like the primer
-// does and merges each encoder's ec_transfer_params response into a single
-// flat map keyed by the per-image mm_hash. Returns the merged map, the
-// count of items whose response actually carried ec_transfer_params
-// (`contributed`), and the total item count.
+// fanoutEncoderCollect fans out per-image encoder requests and merges
+// each response's ec_transfer_params into a flat hash-keyed map. Returns
+// the merged map, the count of items that contributed metadata, and the
+// total item count.
 //
-// An encoder response missing ec_transfer_params (or carrying a non-object
-// value) is warn-and-skipped — it does not fail the request (mirrors
-// NIXLv2's tolerance for missing kv_transfer_params). Encoder transport
-// errors, non-2xx responses, and unparsable JSON are hard-fail — same
-// shape as fanoutEncoderPrimer.
-//
-// The fan-out scaffolding (URL dedup, parallel goroutines, encoder handler
-// setup, request/response plumbing) lives in fanoutEncoder; this function
-// supplies only the per-response perItem callback that does the
-// ec_transfer_params extraction and merge.
+// Missing/non-object/empty ec_transfer_params is warn-and-skip (mirrors
+// NIXLv2 tolerance for missing kv_transfer_params); transport errors,
+// non-2xx, and unparsable JSON are hard-fail.
 func (s *Server) fanoutEncoderCollect(
 	originalRequest map[string]any,
 	encoderHostPorts []string,
@@ -130,9 +103,9 @@ func (s *Server) fanoutEncoderCollect(
 	return params, contributed, len(items), nil
 }
 
-// handleECEPD implements the "ec-epd" connector: fans out per-image encoder
-// requests, captures each encoder's ec_transfer_params response, aggregates
-// them into the prefill request body's ec_transfer_params.
+// handleECEPD fans out per-image encoder requests, aggregates each
+// response's ec_transfer_params into the prefill request body, and hands
+// off to the configured P/D connector.
 func (s *Server) handleECEPD(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
 	s.logger.V(4).Info("running EC-EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
@@ -161,11 +134,8 @@ func (s *Server) handleECEPD(w http.ResponseWriter, r *http.Request, prefillEndP
 			return
 		}
 		if total > 0 {
-			// If every encoder response lacked ec_transfer_params, the
-			// connector silently degrades to primer-mode behaviour
-			// (forward unchanged). Log a single summary warning so the
-			// operator sees the regression even when each per-item
-			// missing-field warning gets lost in the noise.
+			// All-missing degrades silently to primer-mode; warn so the
+			// operator sees the regression.
 			if contributed == 0 {
 				s.logger.Info("warning: no encoder response carried ec_transfer_params; forwarding prefill request without it",
 					"requestID", requestID, "items", total)
@@ -180,8 +150,7 @@ func (s *Server) handleECEPD(w http.ResponseWriter, r *http.Request, prefillEndP
 	}
 
 	// Step 2 & 3: Handle Prefiller and Decoder stages
-	// Set cache_hit_threshold to 0 to skip the decode-first optimization
-	// since we've already processed through the encoder
+	// Skip decode-first; the encoder has run and prefill must execute.
 	completionRequest[requestFieldCacheHitThreshold] = 0
 
 	modifiedBody, err := json.Marshal(completionRequest)
@@ -195,8 +164,7 @@ func (s *Server) handleECEPD(w http.ResponseWriter, r *http.Request, prefillEndP
 	pdRequest := cloneRequestWithBody(r.Context(), r, modifiedBody)
 	pdRequest.Header.Add(requestHeaderRequestID, requestID)
 
-	// Don't log the full body — multimodal requests carry inline base64
-	// image data URIs (~MB per image). Log size + the small ec metadata.
+	// Don't log the full body. Inline base64 images can be MB each.
 	s.logger.V(4).Info("forwarding request to prefiller",
 		"requestID", requestID,
 		"prefiller", prefillEndPoint,
