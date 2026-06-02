@@ -17,6 +17,8 @@ limitations under the License.
 package scheduling
 
 import (
+	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -298,4 +300,125 @@ func TestInferenceRequest_EstimatedTokenLength(t *testing.T) {
 			assert.Equal(t, tt.expectedTokenized, tokenized)
 		})
 	}
+}
+
+func TestCompareTokenEstimationApproaches(t *testing.T) {
+	// Structs for raw JSON marshaling comparison
+	type ChatMessage struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	type ChatRequest struct {
+		Model    string        `json:"model"`
+		Messages []ChatMessage `json:"messages"`
+	}
+	type CompletionRequest struct {
+		Model  string `json:"model"`
+		Prompt string `json:"prompt"`
+	}
+
+	cases := []struct {
+		name             string
+		promptText       string
+		rawRequestStruct any
+	}{
+		{
+			name: "Short Completion Request",
+			promptText: "Hello, how are you?",
+			rawRequestStruct: CompletionRequest{
+				Model:  "meta-llama/Llama-2-7b-chat-hf",
+				Prompt: "Hello, how are you?",
+			},
+		},
+		{
+			name: "Long Completion Request",
+			promptText: `The process of tokenization involves splitting a stream of text into smaller pieces, such as words or subwords. ` +
+				`In the context of Large Language Models (LLMs), tokenization is a crucial preprocessing step because models do not process ` +
+				`raw text directly. Instead, they operate on sequences of token IDs. There are many different algorithms for tokenization, ` +
+				`including Byte-Pair Encoding (BPE), WordPiece, and SentencePiece. Each algorithm has its own trade-offs between vocabulary size ` +
+				`and sequence length. BPE is commonly used in models like GPT and Llama. It starts with a vocabulary of individual bytes and ` +
+				`iteratively merges the most frequent pairs of tokens. This allows the vocabulary to represent common words as single tokens, ` +
+				`while falling back to byte-level representations for rare or unseen words. In EPP, we need a fast and efficient way to ` +
+				`estimate token counts for incoming requests before actually invoking the tokenizer, which can be expensive. This benchmark ` +
+				`compares different estimation approaches.`,
+			rawRequestStruct: CompletionRequest{
+				Model: "meta-llama/Llama-2-7b-chat-hf",
+				Prompt: `The process of tokenization involves splitting a stream of text into smaller pieces, such as words or subwords. ` +
+					`In the context of Large Language Models (LLMs), tokenization is a crucial preprocessing step because models do not process ` +
+					`raw text directly. Instead, they operate on sequences of token IDs. There are many different algorithms for tokenization, ` +
+					`including Byte-Pair Encoding (BPE), WordPiece, and SentencePiece. Each algorithm has its own trade-offs between vocabulary size ` +
+					`and sequence length. BPE is commonly used in models like GPT and Llama. It starts with a vocabulary of individual bytes and ` +
+					`iteratively merges the most frequent pairs of tokens. This allows the vocabulary to represent common words as single tokens, ` +
+					`while falling back to byte-level representations for rare or unseen words. In EPP, we need a fast and efficient way to ` +
+					`estimate token counts for incoming requests before actually invoking the tokenizer, which can be expensive. This benchmark ` +
+					`compares different estimation approaches.`,
+			},
+		},
+		{
+			name: "Short Chat Request (1 message)",
+			promptText: "What is the capital of France?",
+			rawRequestStruct: ChatRequest{
+				Model: "meta-llama/Llama-2-7b-chat-hf",
+				Messages: []ChatMessage{
+					{Role: "user", Content: "What is the capital of France?"},
+				},
+			},
+		},
+		{
+			name: "Medium Chat Request (2 turns)",
+			promptText: "You are a helpful assistant. What is the capital of France?",
+			rawRequestStruct: ChatRequest{
+				Model: "meta-llama/Llama-2-7b-chat-hf",
+				Messages: []ChatMessage{
+					{Role: "system", Content: "You are a helpful assistant."},
+					{Role: "user", Content: "What is the capital of France?"},
+				},
+			},
+		},
+		{
+			name: "Long Multi-turn Chat Request",
+			promptText: `You are a helpful assistant. ` +
+				`Hi, I need help with my research on disaggregated inference for LLMs. ` +
+				`Sure! Disaggregated inference separates the prefill stage from the decode stage. ` +
+				`Why is that beneficial? ` +
+				`Because prefill is compute-bound (parallelizable) while decode is memory-bound (sequential). Separating them improves efficiency and throughput.`,
+			rawRequestStruct: ChatRequest{
+				Model: "meta-llama/Llama-2-7b-chat-hf",
+				Messages: []ChatMessage{
+					{Role: "system", Content: "You are a helpful assistant."},
+					{Role: "user", Content: "Hi, I need help with my research on disaggregated inference for LLMs."},
+					{Role: "assistant", Content: "Sure! Disaggregated inference separates the prefill stage from the decode stage."},
+					{Role: "user", Content: "Why is that beneficial?"},
+					{Role: "assistant", Content: "Because prefill is compute-bound (parallelizable) while decode is memory-bound (sequential). Separating them improves efficiency and throughput."},
+				},
+			},
+		},
+	}
+
+	fmt.Println("\n=============================================================================")
+	fmt.Printf("%-30s | %-10s | %-10s | %-10s | %-8s\n", "Test Case", "Req Size", "Size Est", "Text Est", "Err %")
+	fmt.Println("-----------------------------------------------------------------------------")
+
+	for _, tc := range cases {
+		// Marshal to JSON to simulate real network payload size
+		jsonBytes, err := json.Marshal(tc.rawRequestStruct)
+		assert.NoError(t, err)
+
+		reqSize := len(jsonBytes)
+
+		// Approach A: Estimate from RequestSizeBytes / 4 (assuming 4 bytes per token fallback)
+		sizeEstimate := max(int64(reqSize)/4, 1)
+
+		// Approach B: Estimate from raw prompt characters / 4 (assuming roughly 4 chars per token)
+		// This is what prompt text length-based logic would give us.
+		textEstimate := max(int64(len(tc.promptText))/4, 1)
+
+		// Calculate error percentage of size-based estimation compared to text-based estimation
+		diff := sizeEstimate - textEstimate
+		errPercent := (float64(diff) / float64(textEstimate)) * 100.0
+
+		fmt.Printf("%-30s | %-10d | %-10d | %-10d | %-8.2f%%\n",
+			tc.name, reqSize, sizeEstimate, textEstimate, errPercent)
+	}
+	fmt.Println("=============================================================================")
 }
