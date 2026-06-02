@@ -64,13 +64,9 @@ const (
 	encoderUseTLS                  = "UseTLSForEncoder"
 	prefillerTLSInsecureSkipVerify = "prefiller-tls-insecure-skip-verify"
 	decoderTLSInsecureSkipVerify   = "decoder-tls-insecure-skip-verify"
-	inferencePoolNamespace         = "inference-pool-namespace"
-	inferencePoolName              = "inference-pool-name"
 
 	// Environment variables
 	envInferencePool           = "INFERENCE_POOL"
-	envInferencePoolNamespace  = "INFERENCE_POOL_NAMESPACE"
-	envInferencePoolName       = "INFERENCE_POOL_NAME"
 	envEnablePrefillerSampling = "ENABLE_PREFILLER_SAMPLING"
 
 	// Defaults
@@ -179,8 +175,6 @@ func NewOptions() *Options {
 			EnablePrefillerSampling: enablePrefillerSampling,
 			MaxIdleConnsPerHost:     defaultMaxIdleConnsPerHost,
 			PoolGroup:               routing.InferencePoolAPIGroup,
-			InferencePoolNamespace:  os.Getenv(envInferencePoolNamespace),
-			InferencePoolName:       os.Getenv(envInferencePoolName),
 			DecodeChunkSize:         0,
 			// MoRI-IO defaults: OFF by default to preserve existing NIXLv2 behaviour.
 			// 61005 matches MoRIIOConstants.DEFAULT_NOTIFY_PORT in vLLM.
@@ -319,10 +313,6 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&opts.decoderInsecureSkipVerify, decoderTLSInsecureSkipVerify, opts.decoderInsecureSkipVerify, "Deprecated: use --tls-insecure-skip-verify=decoder instead. Skip TLS verification for requests to decoder.")
 	_ = fs.MarkDeprecated(decoderTLSInsecureSkipVerify, "use --tls-insecure-skip-verify=decoder instead")
 
-	fs.StringVar(&opts.InferencePoolNamespace, inferencePoolNamespace, opts.InferencePoolNamespace, "Deprecated: use --inference-pool instead. The Kubernetes namespace for the InferencePool (defaults to INFERENCE_POOL_NAMESPACE env var)")
-	_ = fs.MarkDeprecated(inferencePoolNamespace, "use --inference-pool instead")
-	fs.StringVar(&opts.InferencePoolName, inferencePoolName, opts.InferencePoolName, "Deprecated: use --inference-pool instead. The specific InferencePool name (defaults to INFERENCE_POOL_NAME env var)")
-	_ = fs.MarkDeprecated(inferencePoolName, "use --inference-pool instead")
 	fs.IntVar(&opts.MaxIdleConnsPerHost, "max-idle-conns-per-host", opts.MaxIdleConnsPerHost, "max idle keep-alive connections per host for reverse proxy transports; set to at least the expected concurrency")
 	fs.StringVar(&opts.inlineConfiguration, inlineConfiguration, "", "Sidecar configuration in YAML provided as inline specification. Example `--configuration={port: 8085, vllm-port: 8203}. Inline configuration and file configuration are mutually exclusive.`")
 	fs.StringVar(&opts.fileConfiguration, configurationFile, "", "Path to file which contains sidecar configuration in YAML. Example `--configuration-file=/etc/config/sidecar-config.yaml`. Inline configuration and file configuration are mutually exclusive.")
@@ -352,7 +342,7 @@ func (opts *Options) Complete() error {
 		opts.KVConnector = opts.connector
 	}
 
-	// Parse inferencePool field (namespace/name or just name), overriding deprecated separate flags
+	// Parse inferencePool field (namespace/name or just name) into Config.
 	if opts.inferencePool != "" {
 		parts := strings.SplitN(opts.inferencePool, "/", 2)
 		if len(parts) == 2 {
@@ -474,11 +464,8 @@ func (opts *Options) Validate() error {
 
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
-		if opts.InferencePoolNamespace == "" {
-			return errors.New("--inference-pool, --inference-pool-namespace, INFERENCE_POOL, or INFERENCE_POOL_NAMESPACE environment variable is required when --enable-ssrf-protection is true")
-		}
-		if opts.InferencePoolName == "" {
-			return errors.New("--inference-pool, --inference-pool-name, INFERENCE_POOL, or INFERENCE_POOL_NAME environment variable is required when --enable-ssrf-protection is true")
+		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {
+			return errors.New("--inference-pool flag or INFERENCE_POOL environment variable is required when --enable-ssrf-protection is true")
 		}
 	}
 
