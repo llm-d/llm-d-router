@@ -81,11 +81,17 @@ func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 		},
 	}
 	return &ExtProcServerRunner{
-		GrpcPort:                         opts.GRPCPort,
-		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
-		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
-		GKNN:                             gknn,
-		ControllerCfg:                    ControllerConfig{true, true, true},
+		GrpcPort:           opts.GRPCPort,
+		GRPCMaxRecvMsgSize: opts.GRPCMaxRecvMsgSize,
+		GRPCMaxSendMsgSize: opts.GRPCMaxSendMsgSize,
+		GKNN:               gknn,
+		ControllerCfg: ControllerConfig{
+			startCrdReconcilers:       true,
+			hasInferenceObjective:     true,
+			hasInferenceModelRewrites: true,
+			InferenceObjectiveGV:      inferenceAPIGV,
+			InferenceModelRewriteGV:   inferenceAPIGV,
+		},
 		SecureServing:                    opts.SecureServing,
 		HealthChecking:                   opts.HealthChecking,
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,

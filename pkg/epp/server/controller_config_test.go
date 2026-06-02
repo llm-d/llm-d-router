@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -40,10 +41,12 @@ func TestNewControllerConfig(t *testing.T) {
 
 func TestPopulateWithDiscovery(t *testing.T) {
 	tests := []struct {
-		name                      string
-		apiResourceLists          []*metav1.APIResourceList
-		wantInferenceObjective    bool
-		wantInferenceModelRewrite bool
+		name                        string
+		apiResourceLists            []*metav1.APIResourceList
+		wantInferenceObjective      bool
+		wantInferenceModelRewrite   bool
+		wantInferenceObjectiveGV    schema.GroupVersion
+		wantInferenceModelRewriteGV schema.GroupVersion
 	}{
 		{
 			name: "Both resources exist in llm-d group",
@@ -56,8 +59,10 @@ func TestPopulateWithDiscovery(t *testing.T) {
 					},
 				},
 			},
-			wantInferenceObjective:    true,
-			wantInferenceModelRewrite: true,
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   true,
+			wantInferenceObjectiveGV:    inferenceAPIGV,
+			wantInferenceModelRewriteGV: inferenceAPIGV,
 		},
 		{
 			name: "Both resources exist in legacy group",
@@ -70,8 +75,10 @@ func TestPopulateWithDiscovery(t *testing.T) {
 					},
 				},
 			},
-			wantInferenceObjective:    true,
-			wantInferenceModelRewrite: true,
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   true,
+			wantInferenceObjectiveGV:    legacyInferenceAPIGV,
+			wantInferenceModelRewriteGV: legacyInferenceAPIGV,
 		},
 		{
 			name: "Resources do not exist",
@@ -85,8 +92,10 @@ func TestPopulateWithDiscovery(t *testing.T) {
 					APIResources: []metav1.APIResource{},
 				},
 			},
-			wantInferenceObjective:    false,
-			wantInferenceModelRewrite: false,
+			wantInferenceObjective:      false,
+			wantInferenceModelRewrite:   false,
+			wantInferenceObjectiveGV:    schema.GroupVersion{},
+			wantInferenceModelRewriteGV: schema.GroupVersion{},
 		},
 		{
 			name: "Only InferenceObjective exists in llm-d group",
@@ -98,8 +107,10 @@ func TestPopulateWithDiscovery(t *testing.T) {
 					},
 				},
 			},
-			wantInferenceObjective:    true,
-			wantInferenceModelRewrite: false,
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   false,
+			wantInferenceObjectiveGV:    inferenceAPIGV,
+			wantInferenceModelRewriteGV: schema.GroupVersion{},
 		},
 		{
 			name: "Resources exist across supported groups",
@@ -117,8 +128,10 @@ func TestPopulateWithDiscovery(t *testing.T) {
 					},
 				},
 			},
-			wantInferenceObjective:    true,
-			wantInferenceModelRewrite: true,
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   true,
+			wantInferenceObjectiveGV:    inferenceAPIGV,
+			wantInferenceModelRewriteGV: legacyInferenceAPIGV,
 		},
 		{
 			name: "Only InferenceModelRewrite exists in legacy group",
@@ -130,8 +143,10 @@ func TestPopulateWithDiscovery(t *testing.T) {
 					},
 				},
 			},
-			wantInferenceObjective:    false,
-			wantInferenceModelRewrite: true,
+			wantInferenceObjective:      false,
+			wantInferenceModelRewrite:   true,
+			wantInferenceObjectiveGV:    schema.GroupVersion{},
+			wantInferenceModelRewriteGV: legacyInferenceAPIGV,
 		},
 	}
 
@@ -148,8 +163,14 @@ func TestPopulateWithDiscovery(t *testing.T) {
 			if cc.hasInferenceObjective != tt.wantInferenceObjective {
 				t.Errorf("populateWithDiscovery() hasInferenceObjective = %v, want %v", cc.hasInferenceObjective, tt.wantInferenceObjective)
 			}
+			if cc.InferenceObjectiveGV != tt.wantInferenceObjectiveGV {
+				t.Errorf("populateWithDiscovery() InferenceObjectiveGV = %v, want %v", cc.InferenceObjectiveGV, tt.wantInferenceObjectiveGV)
+			}
 			if cc.hasInferenceModelRewrites != tt.wantInferenceModelRewrite {
 				t.Errorf("populateWithDiscovery() hasInferenceModelRewrites = %v, want %v", cc.hasInferenceModelRewrites, tt.wantInferenceModelRewrite)
+			}
+			if cc.InferenceModelRewriteGV != tt.wantInferenceModelRewriteGV {
+				t.Errorf("populateWithDiscovery() InferenceModelRewriteGV = %v, want %v", cc.InferenceModelRewriteGV, tt.wantInferenceModelRewriteGV)
 			}
 		})
 	}
