@@ -296,8 +296,8 @@ func TestLoadRawConfiguration(t *testing.T) {
 				},
 				FeatureGates: configapi.FeatureGates{},
 				RequestHandler: &configapi.RequestHandlerConfig{
-					Parser: &configapi.ParserConfig{
-						PluginRef: "openai-parser",
+					Parsers: []configapi.ParserConfig{
+						{PluginRef: "openai-parser"},
 					},
 				},
 				Parser: &configapi.ParserConfig{
@@ -504,8 +504,9 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, cfg.ParserConfig, "Parser config should be loaded")
-				require.Equal(t, "openai-parser", cfg.ParserConfig.Parser.TypedName().Name, "Should have openai parser name")
-				require.Equal(t, openai.OpenAIParserType, cfg.ParserConfig.Parser.TypedName().Type, "Should contain openai parser type")
+				require.Len(t, cfg.ParserConfig.Parsers, 1, "Should have one parser")
+				require.Equal(t, "openai-parser", cfg.ParserConfig.Parsers[0].TypedName().Name, "Should have openai parser name")
+				require.Equal(t, openai.OpenAIParserType, cfg.ParserConfig.Parsers[0].TypedName().Type, "Should contain openai parser type")
 			},
 		},
 		{
@@ -514,8 +515,9 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, cfg.ParserConfig, "Parser config should be loaded")
-				require.Equal(t, "openai-parser", cfg.ParserConfig.Parser.TypedName().Name, "Should have openai parser name")
-				require.Equal(t, openai.OpenAIParserType, cfg.ParserConfig.Parser.TypedName().Type, "Should contain openai parser type")
+				require.Len(t, cfg.ParserConfig.Parsers, 1, "Should have one parser")
+				require.Equal(t, "openai-parser", cfg.ParserConfig.Parsers[0].TypedName().Name, "Should have openai parser name")
+				require.Equal(t, openai.OpenAIParserType, cfg.ParserConfig.Parsers[0].TypedName().Type, "Should contain openai parser type")
 			},
 		},
 		{
@@ -524,8 +526,20 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, cfg.ParserConfig, "Parser config should be loaded")
-				require.Equal(t, "openaiParser", cfg.ParserConfig.Parser.TypedName().Name, "Should have openai parser name")
-				require.Equal(t, openai.OpenAIParserType, cfg.ParserConfig.Parser.TypedName().Type, "Should contain openai parser type")
+				require.Len(t, cfg.ParserConfig.Parsers, 1, "Should have one parser")
+				require.Equal(t, "openaiParser", cfg.ParserConfig.Parsers[0].TypedName().Name, "Should have openai parser name")
+				require.Equal(t, openai.OpenAIParserType, cfg.ParserConfig.Parsers[0].TypedName().Type, "Should contain openai parser type")
+			},
+		},
+		{
+			name:       "Success - Multiple Parsers Config",
+			configText: successMultipleParsersConfigText,
+			wantErr:    false,
+			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, cfg.ParserConfig, "Parser config should be loaded")
+				require.Len(t, cfg.ParserConfig.Parsers, 2, "Should have two parsers")
+				require.Equal(t, "openai-parser", cfg.ParserConfig.Parsers[0].TypedName().Name, "First parser should be openai-parser")
+				require.Equal(t, "secondParser", cfg.ParserConfig.Parsers[1].TypedName().Name, "Second parser should be secondParser")
 			},
 		},
 
@@ -544,7 +558,8 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, cfg.ParserConfig, "ParserConfig should be loaded")
-				require.Equal(t, "openai-parser", cfg.ParserConfig.Parser.TypedName().Name)
+				require.Len(t, cfg.ParserConfig.Parsers, 1, "Should have one parser")
+				require.Equal(t, "openai-parser", cfg.ParserConfig.Parsers[0].TypedName().Name)
 			},
 		},
 

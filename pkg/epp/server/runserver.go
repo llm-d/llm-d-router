@@ -59,7 +59,7 @@ type ExtProcServerRunner struct {
 	RefreshPrometheusMetricsInterval time.Duration
 	MetricsStalenessThreshold        time.Duration
 	Director                         *requestcontrol.Director
-	Parser                           fwkrh.Parser
+	Parsers                          []fwkrh.Parser
 	SaturationDetector               fwkfc.SaturationDetector
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
@@ -198,7 +198,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		if poolCap == 0 {
 			poolCap = 4 * 1024 * 1024 // gRPC default 4MB
 		}
-		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.Parser, poolCap)
+		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.Parsers, poolCap)
 		extProcPb.RegisterExternalProcessorServer(srv, extProcServer)
 
 		if r.HealthChecking {

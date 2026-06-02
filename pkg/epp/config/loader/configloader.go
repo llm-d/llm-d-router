@@ -104,17 +104,17 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 			}
 		}
 
-		//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.Parser instead.
+		//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.parsers instead.
 		// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
 		if rawConfig.Parser != nil {
-			logger.Info("DEPRECATION: top-level parser is deprecated, use requestHandler.parser instead. If both are set, the new field is used.")
+			logger.Info("DEPRECATION: top-level parser is deprecated, use requestHandler.parsers instead. If both are set, the new field is used.")
 			if rawConfig.RequestHandler == nil {
 				rawConfig.RequestHandler = &configapi.RequestHandlerConfig{}
 			}
-			if rawConfig.RequestHandler.Parser == nil {
-				//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.Parser instead.
+			if len(rawConfig.RequestHandler.Parsers) == 0 {
+				//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.parsers instead.
 				// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
-				rawConfig.RequestHandler.Parser = rawConfig.Parser
+				rawConfig.RequestHandler.Parsers = []configapi.ParserConfig{*rawConfig.Parser}
 			}
 		}
 
@@ -180,9 +180,9 @@ func InstantiateAndConfigure(
 		}
 	}
 
-	parserConfig, err := buildParserConfig(rawConfig.RequestHandler.Parser, handle)
+	parserConfig, err := buildParsersConfig(rawConfig.RequestHandler.Parsers, handle)
 	if err != nil {
-		return nil, fmt.Errorf("parse config build failed: %w", err)
+		return nil, fmt.Errorf("parsers config build failed: %w", err)
 	}
 
 	plugin, ok := handle.GetAllPluginsWithNames()[rawConfig.FlowControl.SaturationDetector.PluginRef]
@@ -307,20 +307,25 @@ func loadFeatureConfig(gates configapi.FeatureGates) map[string]bool {
 	return config
 }
 
-func buildParserConfig(rawParserConfig *configapi.ParserConfig, handle fwkplugin.Handle) (*handlers.Config, error) {
-	if rawParserConfig == nil {
-		return nil, errors.New("parserConfig is not configured")
+func buildParsersConfig(rawParserConfigs []configapi.ParserConfig, handle fwkplugin.Handle) (*handlers.Config, error) {
+	if len(rawParserConfigs) == 0 {
+		return nil, errors.New("no parsers configured")
 	}
-	plugin, ok := handle.GetAllPluginsWithNames()[rawParserConfig.PluginRef]
-	if !ok {
-		return nil, errors.New("the configured parser is not loaded")
-	}
-	v, ok := plugin.(fwkrh.Parser)
-	if !ok {
-		return nil, errors.New("the specified plugin is not a parser plugin in the config")
+	allPlugins := handle.GetAllPluginsWithNames()
+	parsers := make([]fwkrh.Parser, 0, len(rawParserConfigs))
+	for _, pc := range rawParserConfigs {
+		plugin, ok := allPlugins[pc.PluginRef]
+		if !ok {
+			return nil, fmt.Errorf("the configured parser %q is not loaded", pc.PluginRef)
+		}
+		v, ok := plugin.(fwkrh.Parser)
+		if !ok {
+			return nil, fmt.Errorf("the plugin %q is not a parser plugin", pc.PluginRef)
+		}
+		parsers = append(parsers, v)
 	}
 	return &handlers.Config{
-		Parser: v,
+		Parsers: parsers,
 	}, nil
 }
 

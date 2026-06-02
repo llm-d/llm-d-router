@@ -24,7 +24,7 @@ import (
 
 // Config holds the configuration for the Parser.
 type Config struct {
-	Parser fwkrh.Parser
+	Parsers []fwkrh.Parser
 }
 
 func (c *Config) String() string {
@@ -38,6 +38,7 @@ func (c *Config) String() string {
 	return fmt.Sprintf("%+v", temp(*c))
 }
 
-func NewParser(config *Config) fwkrh.Parser {
-	return config.Parser
+// NewParsers returns the configured parsers.
+func NewParsers(config *Config) []fwkrh.Parser {
+	return config.Parsers
 }

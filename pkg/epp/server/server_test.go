@@ -135,7 +135,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	director := &testDirector{}
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser(), 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, []fwkrh.Parser{openai.NewOpenAIParser()}, 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
@@ -435,7 +435,7 @@ func TestServer_Skip(t *testing.T) {
 
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, mockPar, 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, []fwkrh.Parser{mockPar}, 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
@@ -512,7 +512,7 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
 
-	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser(), 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, []fwkrh.Parser{openai.NewOpenAIParser()}, 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)

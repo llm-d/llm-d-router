@@ -58,11 +58,11 @@ type EvictChannelLookup interface {
 	Deregister(requestID string)
 }
 
-func NewStreamingServer(datastore Datastore, director Director, parser fwkrh.Parser, maxPoolBufferSize int) *StreamingServer {
+func NewStreamingServer(datastore Datastore, director Director, parsers []fwkrh.Parser, maxPoolBufferSize int) *StreamingServer {
 	return &StreamingServer{
 		director:          director,
 		datastore:         datastore,
-		parser:            parser,
+		parsers:           parsers,
 		maxPoolBufferSize: maxPoolBufferSize,
 		bufferPool: sync.Pool{
 			New: func() any {
@@ -93,7 +93,7 @@ type Datastore interface {
 type StreamingServer struct {
 	datastore         Datastore
 	director          Director
-	parser            fwkrh.Parser
+	parsers           []fwkrh.Parser
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
@@ -343,7 +343,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.RequestSize = buf.Len()
 				buf.Reset()
 
-				parseResult, parseErr := s.parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
+				parseResult, parseErr := s.parsers[0].ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				if parseErr != nil {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: parseErr.Error()}
 					logger.Error(err, "Error parsing request")

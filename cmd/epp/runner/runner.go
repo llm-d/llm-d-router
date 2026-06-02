@@ -159,7 +159,7 @@ type Runner struct {
 	requestControlConfig *requestcontrol.Config
 	schedulerConfig      *scheduling.SchedulerConfig
 	customCollectors     []prometheus.Collector
-	parser               fwkrh.Parser
+	parsers              []fwkrh.Parser
 	dlRuntime            *datalayer.Runtime
 	PluginHandle         fwkplugin.Handle
 	// rawConfig caches the result of parseConfigurationPhaseOne.
@@ -382,7 +382,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
 		Director:                         director,
-		Parser:                           r.parser,
+		Parsers:                          r.parsers,
 		SaturationDetector:               eppConfig.SaturationDetector,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
@@ -395,7 +395,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	// --- Add Runnables to Manager ---
 	// Register health server.
-	if err := registerHealthServer(mgr, ctrl.Log.WithName("health"), ds, opts.GRPCHealthPort, isLeader, opts.EnableLeaderElection, r.parser); err != nil {
+	if err := registerHealthServer(mgr, ctrl.Log.WithName("health"), ds, opts.GRPCHealthPort, isLeader, opts.EnableLeaderElection, r.parsers[0]); err != nil {
 		return nil, nil, err
 	}
 
@@ -657,7 +657,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	// The plugins will be executed in topologically sorted order to ensure that data is produced before it is consumed.
 	r.requestControlConfig.OrderDataProducerPlugins(dag)
 
-	r.parser = handlers.NewParser(cfg.ParserConfig)
+	r.parsers = handlers.NewParsers(cfg.ParserConfig)
 	logger.Info("loaded configuration from file/text successfully")
 
 	return cfg, nil
@@ -918,7 +918,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
 		Director:                         director,
-		Parser:                           r.parser,
+		Parsers:                          r.parsers,
 		SaturationDetector:               eppConfig.SaturationDetector,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
@@ -943,7 +943,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		datastore:             ds,
 		isLeader:              isLeader,
 		leaderElectionEnabled: false,
-		supporter:             r.parser,
+		supporter:             r.parsers[0],
 	})
 
 	g := newRunnableGroup()

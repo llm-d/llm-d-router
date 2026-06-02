@@ -48,7 +48,7 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 
 	reqCtx.ResponseSize += len(responseBytes)
 
-	parsedResp, err := s.parser.ParseResponse(ctx, responseBytes, reqCtx.Response.Headers, endOfStream)
+	parsedResp, err := s.parsers[0].ParseResponse(ctx, responseBytes, reqCtx.Response.Headers, endOfStream)
 	if err != nil {
 		logger.Error(err, "parsing response")
 	} else if parsedResp != nil && parsedResp.Usage != nil {

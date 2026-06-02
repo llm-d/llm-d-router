@@ -244,8 +244,8 @@ schedulingProfiles:
   plugins:
   - pluginRef: maxScore
 requestHandler:
-  parser:
-    pluginRef: openai-parser
+  parsers:
+  - pluginRef: openai-parser
 `
 
 // successWithNoParserConfigText tests that a default openaiParser is injected when no parser is configured.
@@ -261,7 +261,7 @@ schedulingProfiles:
   - pluginRef: maxScore
 `
 
-// successParserConfigText tests that configuration with parser plugin with custom name is correctly loaded.
+// successParserWithNameConfigText tests that configuration with parser plugin with custom name is correctly loaded.
 const successParserWithNameConfigText = `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
@@ -275,8 +275,28 @@ schedulingProfiles:
   plugins:
   - pluginRef: maxScore
 requestHandler:
-  parser:
-    pluginRef: openaiParser
+  parsers:
+  - pluginRef: openaiParser
+`
+
+// successMultipleParsersConfigText tests that multiple parser plugins are correctly loaded.
+const successMultipleParsersConfigText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- type: openai-parser
+- name: secondParser
+  type: openai-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+  - pluginRef: secondParser
 `
 
 // --- Invalid Configurations (Syntax/Structure) ---
@@ -669,11 +689,11 @@ schedulingProfiles:
   plugins:
   - pluginRef: maxScore
 requestHandler:
-  parser:
-    pluginRef: maxScore # Wrong name
+  parsers:
+  - pluginRef: maxScore # Wrong type
 `
 
-// errorParserWrongPluginTypeName references a plugin of the wrong name.
+// errorParserWrongPluginNameText references a plugin of the wrong name.
 const errorParserWrongPluginNameText = `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
@@ -687,8 +707,8 @@ schedulingProfiles:
   plugins:
   - pluginRef: maxScore
 requestHandler:
-  parser:
-    pluginRef: wrongParser # Wrong names
+  parsers:
+  - pluginRef: wrongParser # Wrong name
 `
 
 // successFilterOrderConfigText defines filters and scorers in a specific order.
