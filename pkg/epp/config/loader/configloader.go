@@ -118,6 +118,16 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 			}
 		}
 
+		//nolint:staticcheck // SA1019: rawConfig.RequestHandler.Parser is deprecated: use requestHandler.parsers instead.
+		// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
+		if rawConfig.RequestHandler != nil && rawConfig.RequestHandler.Parser != nil {
+			logger.Info("DEPRECATION: requestHandler.parser is deprecated, use requestHandler.parsers instead. If both are set, the new field is used.")
+			if len(rawConfig.RequestHandler.Parsers) == 0 {
+				//nolint:staticcheck // SA1019: rawConfig.RequestHandler.Parser is deprecated: use requestHandler.parsers instead.
+				rawConfig.RequestHandler.Parsers = []configapi.ParserConfig{*rawConfig.RequestHandler.Parser}
+			}
+		}
+
 		logger.Info("Loaded raw configuration", "config", rawConfig.String())
 	} else {
 		logger.Info("A configuration wasn't specified. A default one is being used.")
