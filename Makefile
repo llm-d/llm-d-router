@@ -285,7 +285,7 @@ test-integration-hermetic: image-build-builder ## Run hermetic integration tests
 	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/integration-hermetic.out | tail -1'
 
 .PHONY: test-e2e-gaie-run
-test-e2e-gaie-run: image-pull ## Run GAIE e2e tests (images must already exist)
+test-e2e-gaie-run: image-pull ## Ensure images are present, then run GAIE e2e tests
 	@printf "\033[33;1m==== Running GAIE End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		-e EPP_IMAGE=$(GAIE_E2E_IMAGE) \
@@ -297,7 +297,7 @@ test-e2e-gaie: image-build-builder image-build ## Build images and run GAIE e2e 
 	$(MAKE) test-e2e-gaie-run
 
 .PHONY: test-e2e-scheduler-run
-test-e2e-scheduler-run: image-pull ## Run scheduler e2e tests (images must already exist)
+test-e2e-scheduler-run: image-pull ## Ensure images are present, then run scheduler e2e tests
 	@printf "\033[33;1m==== Running End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		$(BUILDER_IMAGE) ./test/scripts/run_e2e.sh
