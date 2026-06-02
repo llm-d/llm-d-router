@@ -76,25 +76,33 @@ func completionsRequest(prompt string) *scheduling.InferenceRequest {
 	}
 }
 
-// chatRequest builds a chat-completions InferenceRequest with optional multimodal blocks.
+// chatRequest builds a chat-completions InferenceRequest, populating the
+// tokenized prompt with one multimodal feature per requested modality so
+// that multimodal detection (which reads TokenizedPrompt) is exercised.
 func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest {
 	blocks := []fwkrh.ContentBlock{{Type: "text", Text: "describe this"}}
+	var features []fwkrh.MultiModalFeature
 	if hasImage {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/img.jpg"}})
+		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
 	}
 	if hasVideo {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "video_url"})
+		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
 	}
 	if hasAudio {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "input_audio"})
+		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
 	}
-	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: blocks}}},
-			},
+	body := &fwkrh.InferenceRequestBody{
+		ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: blocks}}},
 		},
 	}
+	if len(features) > 0 {
+		body.TokenizedPrompt = &fwkrh.TokenizedPrompt{MultiModalFeatures: features}
+	}
+	return &scheduling.InferenceRequest{Body: body}
 }
 
 // withPrompt adds a completions body to a chat request so the PD decider can estimate tokens.
@@ -145,17 +153,18 @@ func TestHasMultimodalContent(t *testing.T) {
 	}{
 		{"nil request", nil, false},
 		{"nil body", &scheduling.InferenceRequest{Body: nil}, false},
-		{"nil chat completions", &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}, false},
+		{"nil tokenized prompt", &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}, false},
+		{"empty multimodal features", &scheduling.InferenceRequest{
+			Body: &fwkrh.InferenceRequestBody{TokenizedPrompt: &fwkrh.TokenizedPrompt{}},
+		}, false},
 		{"text only", chatRequest(false, false, false), false},
 		{"image", chatRequest(true, false, false), true},
 		{"video", chatRequest(false, true, false), true},
-		{"audio input_audio", chatRequest(false, false, true), true},
-		{"audio audio_url", &scheduling.InferenceRequest{
+		{"audio", chatRequest(false, false, true), true},
+		{"feature present", &scheduling.InferenceRequest{
 			Body: &fwkrh.InferenceRequestBody{
-				ChatCompletions: &fwkrh.ChatCompletionsRequest{
-					Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{
-						Structured: []fwkrh.ContentBlock{{Type: "audio_url"}},
-					}}},
+				TokenizedPrompt: &fwkrh.TokenizedPrompt{
+					MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage}},
 				},
 			},
 		}, true},

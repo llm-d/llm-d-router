@@ -55,13 +55,12 @@ var (
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
 type dataProducer struct {
-	typedName      plugin.TypedName
-	config         config
-	indexerInst    indexerInterface
-	pluginState    *plugin.PluginState
-	tokenEstimator TokenEstimator
-	wg             sync.WaitGroup // Used for waiting on async cache updates in tests.
-	dk             plugin.DataKey
+	typedName   plugin.TypedName
+	config      config
+	indexerInst indexerInterface
+	pluginState *plugin.PluginState
+	wg          sync.WaitGroup // Used for waiting on async cache updates in tests.
+	dk          plugin.DataKey
 }
 
 // TypedName returns the type and name of the plugin.
@@ -114,11 +113,10 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 			Type: ApproxPrefixCachePluginType,
 			Name: name,
 		},
-		config:         config,
-		indexerInst:    indexer,
-		pluginState:    plugin.NewPluginState(ctx),
-		tokenEstimator: NewApproximatePrefixCacheTokenEstimator(ctx, config.MultimodalTokenEstimator),
-		dk:             attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		config:      config,
+		indexerInst: indexer,
+		pluginState: plugin.NewPluginState(ctx),
+		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
 	if handle != nil {
@@ -171,7 +169,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
 		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
 	}
-	hashes := getBlockHashes(ctx, request, blockSize, maxBlocks, p.tokenEstimator)
+	hashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
 	total := len(hashes)
 	prefixCacheServers := p.matchLongestPrefix(ctx, hashes)
 
@@ -224,7 +222,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		}
 	})
 
-	// Record metrics.
+	// Record metrics. Lengths are reported in tokens.
 	total := len(state.PrefixHashes)
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
