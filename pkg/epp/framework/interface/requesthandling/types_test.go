@@ -194,7 +194,7 @@ func TestLLMRequestBody_PromptText(t *testing.T) {
 			expected: "instructions user input",
 		},
 		{
-			name: "unified prompt with documents",
+			name: "unified prompt with documents and tools (ignored in text)",
 			body: &InferenceRequestBody{
 				Prompts: []UnifiedPrompt{
 					{
@@ -203,15 +203,15 @@ func TestLLMRequestBody_PromptText(t *testing.T) {
 								Role: "user",
 								Blocks: []PromptBlock{
 									{Type: BlockTypeText, Text: "query"},
-									{Type: BlockTypeDocument, Text: "doc1 text"},
-									{Type: BlockTypeDocument, Text: `{"content":"doc2 text"}`},
 								},
 							},
 						},
+						Tools:     []any{"tool1", "tool2"},
+						Documents: []any{"doc1", "doc2"},
 					},
 				},
 			},
-			expected: `query doc1 text {"content":"doc2 text"}`,
+			expected: "query",
 		},
 		{
 			name: "unified prompt prioritized over legacy completions",

@@ -76,6 +76,8 @@ type InferenceRequestBody struct {
 	TokenInputs []TokenizedInput
 	// ExtractedCacheSalt is an optional request parameter to isolate prefix caches for security reasons.
 	ExtractedCacheSalt string
+	// OriginalRequestName indicates the name of the original request type (e.g., 'ChatCompletions', 'Messages').
+	OriginalRequestName string
 
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
@@ -118,11 +120,15 @@ type TokenizedInput struct {
 type UnifiedPrompt struct {
 	// Messages represents the structured chat history or conversation turns.
 	Messages []PromptMessage
+	// Tools represents the tools available to the model.
+	Tools []any
+	// Documents represents the documents available to the model.
+	Documents []any
 }
 
 // PromptMessage represents a single turn or message in a conversation.
 type PromptMessage struct {
-	// Role specifies the role (e.g., 'user', 'assistant', 'system').
+	// Role specifies the role (e.g., 'user', 'assistant', 'system'). Can be empty if not needed.
 	Role string
 	// Blocks contains the content blocks for this message.
 	Blocks []PromptBlock
@@ -132,24 +138,20 @@ type PromptMessage struct {
 type BlockType string
 
 const (
-	BlockTypeText     BlockType = "text"
-	BlockTypeImage    BlockType = "image"
-	BlockTypeAudio    BlockType = "audio"
-	BlockTypeVideo    BlockType = "video"
-	BlockTypeTool     BlockType = "tool"
-	BlockTypeDocument BlockType = "document"
+	BlockTypeText  BlockType = "text"
+	BlockTypeImage BlockType = "image"
+	BlockTypeAudio BlockType = "audio"
+	BlockTypeVideo BlockType = "video"
 )
 
-// PromptBlock represents a content block (text, asset, tool, or document) within a prompt item.
+// PromptBlock represents a content block (text or asset) within a prompt item.
 type PromptBlock struct {
-	// Type specifies the block type (e.g., 'text', 'image', 'tool', 'document').
+	// Type specifies the block type (e.g., 'text', 'image').
 	Type BlockType
-	// Text contains raw text content (e.g. text block, document content, tool description).
+	// Text contains raw text content (e.g. text block).
 	Text string
-	// AssetURI refers to a multimodal asset (e.g., image URL, audio data hash).
+	// AssetURI refers to a multimodal asset (e.g., image URL, audio data hash, or data URI with format for inline assets).
 	AssetURI string
-	// Data holds structured data for complex blocks (like Tool or Document).
-	Data any
 }
 
 // TokenizedPrompt contains the result of tokenizing a single request prompt.
@@ -184,7 +186,7 @@ func (r *InferenceRequestBody) PromptText() string {
 		for _, prompt := range r.Prompts {
 			for _, msg := range prompt.Messages {
 				for _, block := range msg.Blocks {
-					if (block.Type == BlockTypeText || block.Type == BlockTypeDocument) && block.Text != "" {
+					if block.Type == BlockTypeText && block.Text != "" {
 						sb.WriteString(block.Text)
 						sb.WriteString(" ")
 					}

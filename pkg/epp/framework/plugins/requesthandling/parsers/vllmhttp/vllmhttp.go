@@ -119,8 +119,9 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 	}
 
 	body := &fwkrh.InferenceRequestBody{
-		Generate: &generate,
-		Payload:  fwkrh.PayloadMap(bodyMap),
+		Generate:            &generate,
+		Payload:             fwkrh.PayloadMap(bodyMap),
+		OriginalRequestName: "Generate",
 	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		body.Stream = true

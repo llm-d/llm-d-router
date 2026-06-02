@@ -196,7 +196,8 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 			Completions: &fwkrh.CompletionsRequest{
 				Prompt: fwkrh.Prompt{Raw: pbReq.GetText()},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
+			Payload:             fwkrh.PayloadProto{Message: pbReq},
+			OriginalRequestName: "Completions",
 		}
 	case *pb.GenerateRequest_Tokenized:
 		tokenized := pbReq.GetTokenized()
@@ -210,7 +211,8 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 			Completions: &fwkrh.CompletionsRequest{
 				Prompt: fwkrh.Prompt{TokenIDs: copiedTokenIDsInt},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
+			Payload:             fwkrh.PayloadProto{Message: pbReq},
+			OriginalRequestName: "Completions",
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
 				TokenIDs:           copiedTokenIDsInt,
 				MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
@@ -268,7 +270,8 @@ func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.Inferenc
 					TokenIDs: tokenIDs,
 				},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
+			Payload:             fwkrh.PayloadProto{Message: pbReq},
+			OriginalRequestName: "Embeddings",
 		}
 	} else {
 		return nil, errors.New("missing tokenized input in EmbedRequest")

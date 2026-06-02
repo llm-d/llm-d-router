@@ -203,14 +203,20 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 	case conversationsAPI:
 		var conversations fwkrh.ConversationsRequest
 		if err := json.Unmarshal(rawBody, &conversations); err == nil && len(conversations.Items) > 0 {
-			return &fwkrh.InferenceRequestBody{Conversations: &conversations}, nil
+			return &fwkrh.InferenceRequestBody{
+				Conversations:       &conversations,
+				OriginalRequestName: "Conversations",
+			}, nil
 		}
 		return nil, errors.New("invalid conversations request: must have items field")
 
 	case responsesAPI:
 		var responses fwkrh.ResponsesRequest
 		if err := json.Unmarshal(rawBody, &responses); err == nil && responses.Input != nil {
-			return &fwkrh.InferenceRequestBody{Responses: &responses}, nil
+			return &fwkrh.InferenceRequestBody{
+				Responses:           &responses,
+				OriginalRequestName: "Responses",
+			}, nil
 		}
 		return nil, errors.New("invalid responses request: must have input field")
 
@@ -218,7 +224,10 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 		var chatCompletions fwkrh.ChatCompletionsRequest
 		if err := json.Unmarshal(rawBody, &chatCompletions); err == nil {
 			if err = validateChatCompletionsMessages(chatCompletions.Messages); err == nil {
-				return &fwkrh.InferenceRequestBody{ChatCompletions: &chatCompletions}, nil
+				return &fwkrh.InferenceRequestBody{
+					ChatCompletions:     &chatCompletions,
+					OriginalRequestName: "ChatCompletions",
+				}, nil
 			}
 		}
 		return nil, errors.New("invalid chat completions request: must have valid messages field")
@@ -226,14 +235,20 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 	case completionsAPI:
 		var completions fwkrh.CompletionsRequest
 		if err := json.Unmarshal(rawBody, &completions); err == nil && !completions.Prompt.IsEmpty() {
-			return &fwkrh.InferenceRequestBody{Completions: &completions}, nil
+			return &fwkrh.InferenceRequestBody{
+				Completions:         &completions,
+				OriginalRequestName: "Completions",
+			}, nil
 		}
 		return nil, errors.New("invalid completions request: must have prompt field")
 
 	case embeddingsAPI:
 		var embeddings fwkrh.EmbeddingsRequest
 		if err := json.Unmarshal(rawBody, &embeddings); err == nil && !embeddings.Input.IsEmpty() {
-			return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
+			return &fwkrh.InferenceRequestBody{
+				Embeddings:          &embeddings,
+				OriginalRequestName: "Embeddings",
+			}, nil
 		}
 		return nil, errors.New("invalid embeddings request: must have input field")
 	default:
