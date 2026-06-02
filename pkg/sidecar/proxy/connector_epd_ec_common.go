@@ -132,7 +132,7 @@ func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID stri
 	for _, item := range raw {
 		if url := mmItemURL(item); url != "" {
 			if _, seen := seenURLs[url]; seen {
-				s.logger.V(4).Info("skipping duplicate multimodal URL", "url", url, "requestID", requestID)
+				s.logger.V(logging.DEBUG).Info("skipping duplicate multimodal URL", "url", url, "requestID", requestID)
 				continue
 			}
 			seenURLs[url] = struct{}{}
