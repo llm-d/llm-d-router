@@ -38,25 +38,36 @@ func TestRecordPrefixCacheMetrics(t *testing.T) {
 	resetMetrics()
 	t.Cleanup(resetMetrics)
 
-	recordPrefixCacheSize(4096)
-	recordPrefixCacheMatch(10, 20)
-	recordPrefixCacheMatch(0, 0)
+	recordPrefixCacheSize("test-plugin", "test-type", 4096)
+	recordPrefixCacheMatch("test-plugin", "test-type", 10, 20)
+	recordPrefixCacheMatch("test-plugin", "test-type", 0, 0)
 
 	require.Equal(t, float64(4096), testutil.ToFloat64(prefixCacheSize.WithLabelValues()))
+	require.Equal(t, float64(4096), testutil.ToFloat64(llmdPrefixCacheSize.WithLabelValues("test-plugin", "test-type")))
 
 	hitRatio, err := getHistogram(prefixCacheHitRatio)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), hitRatio.GetSampleCount())
 	require.Equal(t, 0.5, hitRatio.GetSampleSum())
 
+	llmdHitRatio, err := getHistogram(llmdPrefixCacheHitRatio, "test-plugin", "test-type")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), llmdHitRatio.GetSampleCount())
+	require.Equal(t, 0.5, llmdHitRatio.GetSampleSum())
+
 	hitLength, err := getHistogram(prefixCacheHitLength)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), hitLength.GetSampleCount())
 	require.Equal(t, float64(10), hitLength.GetSampleSum())
+
+	llmdHitLength, err := getHistogram(llmdPrefixCacheHitLength, "test-plugin", "test-type")
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), llmdHitLength.GetSampleCount())
+	require.Equal(t, float64(10), llmdHitLength.GetSampleSum())
 }
 
-func getHistogram(histogram *prometheus.HistogramVec) (*dto.Histogram, error) {
-	metric, err := histogram.GetMetricWithLabelValues()
+func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*dto.Histogram, error) {
+	metric, err := histogram.GetMetricWithLabelValues(labelValues...)
 	if err != nil {
 		return nil, err
 	}

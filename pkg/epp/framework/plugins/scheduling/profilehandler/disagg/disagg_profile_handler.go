@@ -326,7 +326,7 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	prefillUsed := profileResults[h.prefillProfile] != nil
 
 	decision := DisaggDecisionType(encodeUsed, prefillUsed)
-	RecordDisaggDecision(request.TargetModel, decision)
+	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
 	span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "complete_"+decision))
 
 	return map[string]scheduling.SchedulerProfile{}

@@ -59,7 +59,7 @@ var (
 			Name:      "pd_decision_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of P/D disaggregation decisions made", compbasemetrics.ALPHA),
 		},
-		[]string{"model_name", "decision_type"},
+		[]string{"plugin_name", "plugin_type", "model_name", "decision_type"},
 	)
 
 	// SchedulerDisaggDecisionCount records disaggregation routing decisions,
@@ -83,7 +83,7 @@ var (
 			Name:      "disagg_decision_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of disaggregation routing decisions made", compbasemetrics.ALPHA),
 		},
-		[]string{"model_name", "decision_type"},
+		[]string{"plugin_name", "plugin_type", "model_name", "decision_type"},
 	)
 )
 
@@ -111,24 +111,24 @@ func registerMetrics(registerer prometheus.Registerer) error {
 // RecordPDDecision increments the counter for a specific P/D routing decision.
 //
 // Deprecated: Use RecordDisaggDecision instead.
-func RecordPDDecision(modelName, decisionType string) {
+func RecordPDDecision(pluginName, pluginType, modelName, decisionType string) {
 	if modelName == "" {
 		modelName = "unknown"
 	}
 	SchedulerPDDecisionCount.WithLabelValues(modelName, decisionType).Inc()
-	LlmdPDDecisionCount.WithLabelValues(modelName, decisionType).Inc()
+	LlmdPDDecisionCount.WithLabelValues(pluginName, pluginType, modelName, decisionType).Inc()
 }
 
 // RecordDisaggDecision increments the counter for a disaggregation routing decision.
 // The decisionType must be one of the DecisionType* constants (DecisionTypeDecodeOnly,
 // DecisionTypePrefillDecode, DecisionTypeEncodeDecode, DecisionTypeEncodePrefillDecode).
 // The model parameter should be the target model name; if empty, "unknown" is used.
-func RecordDisaggDecision(modelName, decisionType string) {
+func RecordDisaggDecision(pluginName, pluginType, modelName, decisionType string) {
 	if modelName == "" {
 		modelName = "unknown"
 	}
 	SchedulerDisaggDecisionCount.WithLabelValues(modelName, decisionType).Inc()
-	LlmdDisaggDecisionCount.WithLabelValues(modelName, decisionType).Inc()
+	LlmdDisaggDecisionCount.WithLabelValues(pluginName, pluginType, modelName, decisionType).Inc()
 }
 
 // DisaggDecisionType returns the DecisionType* constant corresponding to which

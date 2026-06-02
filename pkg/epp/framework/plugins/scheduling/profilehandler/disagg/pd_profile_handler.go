@@ -199,7 +199,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 	}
 
 	if h.decider != nil && h.decider.disaggregate(ctx, request, profileResults[h.decodeProfile].TargetEndpoints[0]) {
-		RecordPDDecision(request.TargetModel, DecisionTypePrefillDecode) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
+		RecordPDDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, DecisionTypePrefillDecode) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
 		// run the prefill profile
 		span.SetAttributes(
 			attribute.String("llm_d.profile_handler.decision", "prefill_decode"),
@@ -210,7 +210,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 		}
 	}
 
-	RecordPDDecision(request.TargetModel, DecisionTypeDecodeOnly) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
+	RecordPDDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, DecisionTypeDecodeOnly) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
 	span.SetAttributes(
 		attribute.String("llm_d.profile_handler.decision", "decode_only"),
 	)

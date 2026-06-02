@@ -39,29 +39,44 @@ func TestRecordRequestLatencyMetrics(t *testing.T) {
 	t.Cleanup(resetMetrics)
 	ctx := t.Context()
 
-	require.True(t, recordRequestTTFT(ctx, "model", "target", 0.5))
-	require.True(t, recordRequestPredictedTTFT(ctx, "model", "target", 0.4))
-	require.True(t, recordRequestTTFTPredictionDuration(ctx, "model", "target", 0.1))
-	require.True(t, recordRequestTTFTWithSLO(ctx, "model", "target", 2, 1))
-	require.True(t, recordRequestTPOT(ctx, "model", "target", 0.05))
-	require.True(t, recordRequestPredictedTPOT(ctx, "model", "target", 0.04))
-	require.True(t, recordRequestTPOTPredictionDuration(ctx, "model", "target", 0.2))
-	require.True(t, recordRequestTPOTWithSLO(ctx, "model", "target", 3, 1))
+	require.True(t, recordRequestTTFT(ctx, "test-plugin", "test-type", "model", "target", 0.5))
+	require.True(t, recordRequestPredictedTTFT(ctx, "test-plugin", "test-type", "model", "target", 0.4))
+	require.True(t, recordRequestTTFTPredictionDuration(ctx, "test-plugin", "test-type", "model", "target", 0.1))
+	require.True(t, recordRequestTTFTWithSLO(ctx, "test-plugin", "test-type", "model", "target", 2, 1))
+	require.True(t, recordRequestTPOT(ctx, "test-plugin", "test-type", "model", "target", 0.05))
+	require.True(t, recordRequestPredictedTPOT(ctx, "test-plugin", "test-type", "model", "target", 0.04))
+	require.True(t, recordRequestTPOTPredictionDuration(ctx, "test-plugin", "test-type", "model", "target", 0.2))
+	require.True(t, recordRequestTPOTWithSLO(ctx, "test-plugin", "test-type", "model", "target", 3, 1))
 
 	ttft, err := getHistogram(requestTTFT, "model", "target")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), ttft.GetSampleCount())
 	require.Equal(t, 0.5, ttft.GetSampleSum())
 
+	llmdTtft, err := getHistogram(llmdRequestTTFT, "test-plugin", "test-type", "model", "target")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), llmdTtft.GetSampleCount())
+	require.Equal(t, 0.5, llmdTtft.GetSampleSum())
+
 	tpot, err := getHistogram(requestTPOT, "model", "target")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), tpot.GetSampleCount())
 	require.Equal(t, 0.05, tpot.GetSampleSum())
 
+	llmdTpot, err := getHistogram(llmdRequestTPOT, "test-plugin", "test-type", "model", "target")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), llmdTpot.GetSampleCount())
+	require.Equal(t, 0.05, llmdTpot.GetSampleSum())
+
 	require.Equal(t, 0.5, testutil.ToFloat64(inferenceGauges.WithLabelValues("model", "target", typeTTFT)))
 	require.Equal(t, 0.05, testutil.ToFloat64(inferenceGauges.WithLabelValues("model", "target", typeTPOT)))
 	require.Equal(t, float64(1), testutil.ToFloat64(sloViolationCounter.WithLabelValues("model", "target", typeTTFT)))
 	require.Equal(t, float64(1), testutil.ToFloat64(sloViolationCounter.WithLabelValues("model", "target", typeTPOT)))
+
+	require.Equal(t, 0.5, testutil.ToFloat64(llmdInferenceGauges.WithLabelValues("test-plugin", "test-type", "model", "target", typeTTFT)))
+	require.Equal(t, 0.05, testutil.ToFloat64(llmdInferenceGauges.WithLabelValues("test-plugin", "test-type", "model", "target", typeTPOT)))
+	require.Equal(t, float64(1), testutil.ToFloat64(llmdSloViolationCounter.WithLabelValues("test-plugin", "test-type", "model", "target", typeTTFT)))
+	require.Equal(t, float64(1), testutil.ToFloat64(llmdSloViolationCounter.WithLabelValues("test-plugin", "test-type", "model", "target", typeTPOT)))
 }
 
 func TestRecordRequestLatencyMetricsRejectNegativeValues(t *testing.T) {
@@ -69,14 +84,14 @@ func TestRecordRequestLatencyMetricsRejectNegativeValues(t *testing.T) {
 	t.Cleanup(resetMetrics)
 	ctx := t.Context()
 
-	require.False(t, recordRequestTTFT(ctx, "model", "target", -1))
-	require.False(t, recordRequestPredictedTTFT(ctx, "model", "target", -1))
-	require.False(t, recordRequestTTFTPredictionDuration(ctx, "model", "target", -1))
-	require.False(t, recordRequestTTFTWithSLO(ctx, "model", "target", -1, 1))
-	require.False(t, recordRequestTPOT(ctx, "model", "target", -1))
-	require.False(t, recordRequestPredictedTPOT(ctx, "model", "target", -1))
-	require.False(t, recordRequestTPOTPredictionDuration(ctx, "model", "target", -1))
-	require.False(t, recordRequestTPOTWithSLO(ctx, "model", "target", -1, 1))
+	require.False(t, recordRequestTTFT(ctx, "test-plugin", "test-type", "model", "target", -1))
+	require.False(t, recordRequestPredictedTTFT(ctx, "test-plugin", "test-type", "model", "target", -1))
+	require.False(t, recordRequestTTFTPredictionDuration(ctx, "test-plugin", "test-type", "model", "target", -1))
+	require.False(t, recordRequestTTFTWithSLO(ctx, "test-plugin", "test-type", "model", "target", -1, 1))
+	require.False(t, recordRequestTPOT(ctx, "test-plugin", "test-type", "model", "target", -1))
+	require.False(t, recordRequestPredictedTPOT(ctx, "test-plugin", "test-type", "model", "target", -1))
+	require.False(t, recordRequestTPOTPredictionDuration(ctx, "test-plugin", "test-type", "model", "target", -1))
+	require.False(t, recordRequestTPOTWithSLO(ctx, "test-plugin", "test-type", "model", "target", -1, 1))
 }
 
 func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*dto.Histogram, error) {

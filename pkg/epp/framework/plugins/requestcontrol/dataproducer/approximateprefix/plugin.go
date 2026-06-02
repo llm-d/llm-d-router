@@ -94,7 +94,6 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	if err := registerMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
-
 	// Surface the override to the operator so a too-small configured value is
 	// not silently swallowed. The clamp itself happens at request time in
 	// GetBlockSize and applies uniformly across endpoint metric, autotune
@@ -108,7 +107,7 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 		)
 	}
 
-	indexer := newIndexer(ctx, config.LRUCapacityPerServer)
+	indexer := newIndexer(ctx, config.LRUCapacityPerServer, name, ApproxPrefixCachePluginType)
 
 	p := &dataProducer{
 		typedName: plugin.TypedName{
@@ -230,7 +229,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	avgChars := averageCharactersPerToken
-	recordPrefixCacheMatch(matchLen*blockSize*avgChars, total*blockSize*avgChars)
+	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*avgChars, total*blockSize*avgChars)
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
