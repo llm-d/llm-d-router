@@ -146,7 +146,6 @@ type imageTokenEstimatorConfig struct {
 // multiModalTokenEstimatorConfig defines the configuration for multimodal inputs.
 type multiModalTokenEstimatorConfig struct {
 	Image *imageTokenEstimatorConfig `json:"image,omitempty"`
-	Audio *fixedTokenEstimatorConfig `json:"audio,omitempty"`
 	Video *fixedTokenEstimatorConfig `json:"video,omitempty"`
 }
 
@@ -163,7 +162,6 @@ var defaultMultimodalConfig = multiModalTokenEstimatorConfig{
 			Factor: 1024,
 		},
 	},
-	Audio: &fixedTokenEstimatorConfig{FixedToken: 256},
 	Video: &fixedTokenEstimatorConfig{FixedToken: 1000},
 }
 
