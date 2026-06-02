@@ -59,25 +59,26 @@ func TestPrefixPluginScoreWithWeights(t *testing.T) {
 
 	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
 
-	// Endpoint 1: match 50, total 80, block size 1
-	// matchRatio = 50/80 = 0.625
-	// matchLengthRatio = 80*1/100 = 0.8 -> squared = 0.64
-	// score = 0.5 * 0.64 + 0.5 * 0.625 = 0.6325
+	// Endpoint 1: match 5, total 10, block size 1
+	// matchRatio = 5/10 = 0.5
+	// matchLengthRatio = min(1.0, 5*1/100) = 0.05 -> squared = 0.0025
+	// score = 0.5 * 0.0025 + 0.5 * 0.5 = 0.25125
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), nil)
-	endpoint1.Put(key, attrprefix.NewPrefixCacheMatchInfo(50, 80, 1))
+	endpoint1.Put(key, attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
 
-	// Endpoint 2: match 10, total 200, block size 1 (exceeds maxModelLen)
-	// matchRatio = 10/200 = 0.05
-	// matchLengthRatio = 200*1/100 = 2.0 -> squared = 4.0 -> capped at 1.0
-	// score = 0.5 * 1.0 + 0.5 * 0.05 = 0.525
+	// Endpoint 2: match 50, total 100, block size 1
+	// matchRatio = 50/100 = 0.5
+	// matchLengthRatio = min(1.0, 50*1/100) = 0.5 -> squared = 0.25
+	// score = 0.5 * 0.25 + 0.5 * 0.5 = 0.375
 	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), nil)
-	endpoint2.Put(key, attrprefix.NewPrefixCacheMatchInfo(10, 200, 1))
+	endpoint2.Put(key, attrprefix.NewPrefixCacheMatchInfo(50, 100, 1))
 
 	endpoints := []fwksched.Endpoint{endpoint1, endpoint2}
 	scores := p.Score(context.Background(), nil, endpoints)
 
-	assert.InDelta(t, 0.6325, scores[endpoint1], 1e-6)
-	assert.InDelta(t, 0.525, scores[endpoint2], 1e-6)
+	// matchRatio is the same but we still give longer request higher score
+	assert.InDelta(t, 0.25125, scores[endpoint1], 1e-6)
+	assert.InDelta(t, 0.375, scores[endpoint2], 1e-6)
 }
 
 func TestPrefixPluginFactoryValidation(t *testing.T) {
