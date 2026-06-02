@@ -182,6 +182,31 @@ func NewOptions() *Options {
 			InferencePoolNamespace:  os.Getenv(envInferencePoolNamespace),
 			InferencePoolName:       os.Getenv(envInferencePoolName),
 			DecodeChunkSize:         0,
+			// MoRI-IO defaults: OFF by default to preserve existing NIXLv2 behaviour.
+			// 61005 matches MoRIIOConstants.DEFAULT_NOTIFY_PORT in vLLM.
+			MoRIIOWriteMode:           false,
+			MoRIIODecodeNotifyPort:    61005,
+			MoRIIODecodeDPRank:        0,
+			MoRIIODecodeHandshakePort: 6301,
+			// MoRIIODecodePodIP defaults to the POD_IP env var which Helm
+			// templates from K8s downward API.  Empty here preserves NIXLv2
+			// behaviour for non-MoRI deployments.
+			MoRIIODecodePodIP: os.Getenv("POD_IP"),
+			// Concurrent-dispatch defaults.  OFF by default so existing
+			// strictly-serial deployments stay bit-identical.  When
+			// MoRIIOParallelDispatch is true the proxy synthesises the
+			// decode-leg kv_transfer_params from these MoRIIOPrefill*
+			// values + prefillPodHostPort and fires prefill/decode in
+			// parallel goroutines.
+			MoRIIOParallelDispatch:     false,
+			MoRIIOPrefillHandshakePort: 6301,
+			MoRIIOPrefillNotifyPort:    61005,
+			MoRIIOPrefillDPRank:        0,
+			MoRIIOTPSize:               1,
+			// Single-DP default keeps remote_dp_size: 1 in
+			// runNIXLProtocolV2WriteParallel.  Set to the engine's DP
+			// world size for Wide-EP.
+			MoRIIODPSize: 1,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
@@ -213,6 +238,69 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&opts.EnablePrefillerSampling, enablePrefillerSampling, opts.EnablePrefillerSampling, "if true, the target prefill instance will be selected randomly from among the provided prefill host values")
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
+
+	// MoRI-IO WRITE-mode flags.  Only meaningful with --kv-connector=nixlv2 when
+	// the vLLM engines run MoRIIOConnector with VLLM_MORIIO_CONNECTOR_READ_MODE=0.
+	// Otherwise these are silent no-ops.
+	fs.BoolVar(&opts.MoRIIOWriteMode, "moriio-write-mode", opts.MoRIIOWriteMode,
+		"Enable MoRI-IO WRITE-mode passthrough of remote_host, remote_notify_port and "+
+			"transfer_id in kv_transfer_params to the prefill engine.  Requires "+
+			"--kv-connector=nixlv2 with vLLM engines running MoRI-IO in WRITE mode "+
+			"(VLLM_MORIIO_CONNECTOR_READ_MODE unset or 0).  Default false.")
+	fs.IntVar(&opts.MoRIIODecodeNotifyPort, "moriio-decode-notify-port", opts.MoRIIODecodeNotifyPort,
+		"Base MoRI-IO notify port on the decode pod (matches "+
+			"MoRIIOConstants.DEFAULT_NOTIFY_PORT in vLLM, 61005).")
+	fs.IntVar(&opts.MoRIIODecodeDPRank, "moriio-decode-dp-rank", opts.MoRIIODecodeDPRank,
+		"Data-parallel rank of the decode engine, used by the prefill connector to "+
+			"compute per-TP target_port offsets in send_notify_block.")
+	fs.StringVar(&opts.MoRIIODecodePodIP, "moriio-local-pod-ip", opts.MoRIIODecodePodIP,
+		"Decode pod's routable IP address as seen from other pods.  Used in "+
+			"WRITE mode as kv_transfer_params remote_host on the prefill "+
+			"leg so the prefill engine can handshake with decode for RDMA "+
+			"WRITE.  Defaults to the POD_IP environment variable (templated "+
+			"by Helm from K8s downward API).  Required when --moriio-write-mode "+
+			"is set; otherwise prefill handshakes with itself at localhost:6301.")
+	fs.IntVar(&opts.MoRIIODecodeHandshakePort, "moriio-decode-handshake-port", opts.MoRIIODecodeHandshakePort,
+		"Base MoRI-IO handshake port on the decode pod (matches "+
+			"MoRIIOConstants.DEFAULT_HANDSHAKE_PORT in vLLM, 6301).")
+
+	// Concurrent-dispatch flags.  These let the proxy synthesise the
+	// decode-leg kv_transfer_params without waiting for the prefill
+	// response, so prefill+decode HTTP dispatch overlap with the decode
+	// engine's block allocation.  See Config.MoRIIOParallelDispatch for the
+	// TTFT win this enables and the failure mode if --moriio-write-mode is
+	// not also set.
+	fs.BoolVar(&opts.MoRIIOParallelDispatch, "moriio-parallel-dispatch", opts.MoRIIOParallelDispatch,
+		"Enable concurrent prefill/decode dispatch.  Requires "+
+			"--moriio-write-mode.  Trades the strictly-serial flow for "+
+			"parallel goroutines where decode's kv_transfer_params is synthesised "+
+			"from the --moriio-prefill-* flags + the EPP-supplied prefill "+
+			"host:port instead of being read from the prefill response.  Default false.")
+	fs.IntVar(&opts.MoRIIOPrefillHandshakePort, "moriio-prefill-handshake-port", opts.MoRIIOPrefillHandshakePort,
+		"Prefill pod's base MoRI-IO handshake port (matches "+
+			"MoRIIOConstants.DEFAULT_HANDSHAKE_PORT in vLLM, 6301).  Used in "+
+			"concurrent-dispatch mode to populate the decode-leg kv_transfer_params remote_handshake_port "+
+			"so decode can send notify-block to prefill in parallel with prefill's "+
+			"forward pass.")
+	fs.IntVar(&opts.MoRIIOPrefillNotifyPort, "moriio-prefill-notify-port", opts.MoRIIOPrefillNotifyPort,
+		"Prefill pod's base MoRI-IO notify port (matches "+
+			"MoRIIOConstants.DEFAULT_NOTIFY_PORT in vLLM, 61005).")
+	fs.IntVar(&opts.MoRIIOPrefillDPRank, "moriio-prefill-dp-rank", opts.MoRIIOPrefillDPRank,
+		"Data-parallel rank of the prefill engine, used by the decode connector "+
+			"to compute per-TP target_port offsets in send_notify_block.")
+	fs.IntVar(&opts.MoRIIOTPSize, "moriio-tp-size", opts.MoRIIOTPSize,
+		"Tensor-parallel size of the prefill/decode engines.  Echoed into the "+
+			"decode-leg kv_transfer_params[tp_size] when --moriio-parallel-dispatch "+
+			"is set, so vLLM's MoRIIOConnector can size its per-TP notify-port stride "+
+			"without waiting for prefill's response.")
+	fs.IntVar(&opts.MoRIIODPSize, "moriio-dp-size", opts.MoRIIODPSize,
+		"Data-parallel world size of the prefill/decode engines.  Emitted "+
+			"as kv_transfer_params[remote_dp_size] on BOTH legs in "+
+			"concurrent-dispatch (WriteParallel) mode.  Required for "+
+			"Wide-EP deployments (TP=1, DP>1) where vLLM's "+
+			"MoRIIOConnector iterates a per-DP-rank handshake loop "+
+			"sized by this value; the default of 1 keeps the wire "+
+			"shape identical for single-DP deployments.")
 
 	fs.StringSliceVar(&opts.enableTLS, enableTLS, opts.enableTLS, "stages to enable TLS for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
 	fs.StringSliceVar(&opts.tlsInsecureSkipVerify, tlsInsecureSkipVerify, opts.tlsInsecureSkipVerify, "stages to skip TLS verification for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
@@ -307,6 +395,30 @@ func (opts *Options) Complete() error {
 	opts.DecoderURL, err = url.Parse(scheme + "://localhost:" + opts.vllmPort)
 	if err != nil {
 		return fmt.Errorf("failed to parse target URL: %w", err)
+	}
+
+	// Surface misconfiguration up front: WRITE mode without a routable
+	// decode pod IP causes prefill to handshake with itself (localhost),
+	// which hangs silently with no error logs (see proxy.go MoRIIODecodePodIP
+	// comment for the full failure mode).
+	if opts.MoRIIOWriteMode && opts.MoRIIODecodePodIP == "" {
+		return errors.New(
+			"--moriio-write-mode requires --moriio-local-pod-ip (or " +
+				"the POD_IP env var) to be set to decode's routable pod IP; " +
+				"a falsy value would make prefill handshake with itself")
+	}
+
+	// Concurrent dispatch only makes sense in WRITE mode -- the READ-mode
+	// path needs remote_block_ids and remote_engine_id from the prefill
+	// response and cannot proceed in parallel.  Surface the
+	// misconfiguration up front rather than silently fall back to the
+	// strictly-serial path.
+	if opts.MoRIIOParallelDispatch && !opts.MoRIIOWriteMode {
+		return errors.New(
+			"--moriio-parallel-dispatch requires --moriio-write-mode " +
+				"(concurrent dispatch is a WRITE-mode-only optimisation; the " +
+				"READ-mode path depends on prefill-supplied kv_transfer_params " +
+				"fields that the sidecar cannot synthesise)")
 	}
 
 	return nil

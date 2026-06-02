@@ -18,11 +18,15 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 
+	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
@@ -511,5 +515,124 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
+	})
+
+	// MoRI-IO WRITE-mode regression test.
+	// When --moriio-write-mode is enabled, the sidecar must populate
+	// remote_host / remote_notify_port / transfer_id on the prefill leg
+	// (rather than leaving them nil as the standard NIXLv2 contract does) so
+	// the prefill engine's MoRIIOConnector can issue RDMA Write to decode.
+	// The same transfer_id must also be carried forward into the decode request
+	// so the consumer side can bind notifications to the right transfer.
+	It("populates MoRI-IO WRITE-mode kv_transfer_params when MoRIIOWriteMode is enabled", func() {
+		// Manual setup because sidecarConnectionTestSetup does not accept
+		// MoRI-IO config knobs.  Mirrors the helper exactly otherwise.
+		ctx := newTestContext()
+		ctx, cancelFn := context.WithCancel(ctx)
+		stoppedCh := make(chan struct{})
+
+		decodeHandler := &mock.ChatCompletionHandler{
+			Connector:       KVConnectorNIXLV2,
+			Role:            mock.RoleDecode,
+			MoRIIOWriteMode: true,
+		}
+		decodeBackend := httptest.NewServer(decodeHandler)
+		DeferCleanup(decodeBackend.Close)
+
+		prefillHandler := &mock.ChatCompletionHandler{
+			Connector:       KVConnectorNIXLV2,
+			Role:            mock.RolePrefill,
+			MoRIIOWriteMode: true,
+		}
+		prefillBackend := httptest.NewServer(prefillHandler)
+		DeferCleanup(prefillBackend.Close)
+
+		decodeURL, err := url.Parse(decodeBackend.URL)
+		Expect(err).ToNot(HaveOccurred())
+
+		cfg := Config{
+			Port:                   "0",
+			DecoderURL:             decodeURL,
+			KVConnector:            KVConnectorNIXLV2,
+			MoRIIOWriteMode:        true,
+			MoRIIODecodeNotifyPort: 61005,
+			MoRIIODecodeDPRank:     0,
+			// r6: kv_transfer_params["remote_host"] is sourced from this
+			// field (the decode pod's routable IP) instead of
+			// DecoderURL.Hostname().  Set it so the assertion at
+			// line 195 (remote_host == decodeURL.Hostname()) holds.
+			MoRIIODecodePodIP: decodeURL.Hostname(),
+		}
+		proxy := NewProxy(cfg)
+
+		By("starting the proxy")
+		go func() {
+			defer GinkgoRecover()
+			proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+			err := proxy.Start(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			stoppedCh <- struct{}{}
+		}()
+
+		<-proxy.readyCh
+		proxyBaseAddr := "http://" + proxy.addr.String()
+
+		By("sending a /v1/chat/completions request")
+		body := `{
+			"model": "Qwen/Qwen2-0.5B",
+			"messages": [{"role": "user", "content": "Hello"}],
+			"max_tokens": 50
+		}`
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, strings.NewReader(body))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		if rp.StatusCode != 200 {
+			bp, _ := io.ReadAll(rp.Body) //nolint:all
+			Fail(string(bp))
+		}
+
+		By("verifying prefill request has WRITE-mode kv_transfer_params populated")
+		Expect(prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(prefillHandler.CompletionRequests).To(HaveLen(1))
+		prq := prefillHandler.CompletionRequests[0]
+
+		Expect(prq).To(HaveKey(requestFieldKVTransferParams))
+		kv, ok := prq[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+
+		// New WRITE-mode fields must be non-nil and match config / request UUID.
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteHost, decodeURL.Hostname()))
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteNotifyPort, BeNumerically("==", 61005)))
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteDPRank, BeNumerically("==", 0)))
+		Expect(kv).To(HaveKey(requestFieldTransferID))
+		Expect(kv[requestFieldTransferID]).ToNot(BeEmpty())
+
+		// Pre-existing nil fields are still nil because they are populated by
+		// the prefill engine's request_finished, not the sidecar.
+		Expect(kv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+		Expect(kv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteEngineID, BeNil()))
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteBlockIDs, BeNil()))
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemotePort, BeNil()))
+
+		transferID := kv[requestFieldTransferID]
+
+		By("verifying decode request carries the same transfer_id")
+		Expect(decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(decodeHandler.CompletionRequests).To(HaveLen(1))
+		drq := decodeHandler.CompletionRequests[0]
+
+		Expect(drq).To(HaveKey(requestFieldKVTransferParams))
+		dkv, ok := drq[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(dkv).To(HaveKey(requestFieldTransferID))
+		Expect(dkv[requestFieldTransferID]).To(Equal(transferID))
+
+		cancelFn()
+		<-stoppedCh
 	})
 })
