@@ -59,3 +59,27 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 		return nil, errors.New("unsupported request body type, skipping tokenization")
 	}
 }
+
+// cacheSaltFromBody returns the cache salt from whichever protocol is populated.
+// The protocol switch lives in the producer so consumers read only
+// TokenizedPrompt.CacheSalt.
+func cacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
+	switch {
+	case body.Conversations != nil:
+		return body.Conversations.CacheSalt
+	case body.Responses != nil:
+		return body.Responses.CacheSalt
+	case body.ChatCompletions != nil:
+		return body.ChatCompletions.CacheSalt
+	case body.Messages != nil:
+		return body.Messages.CacheSalt
+	case body.Completions != nil:
+		return body.Completions.CacheSalt
+	case body.Embeddings != nil:
+		return body.Embeddings.CacheSalt
+	case body.Generate != nil:
+		return body.Generate.CacheSalt
+	default:
+		return ""
+	}
+}

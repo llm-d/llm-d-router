@@ -269,7 +269,6 @@ type predictedLatencyCtx struct {
 	tpotObservations          []float64
 	predictedTPOTObservations []float64
 
-	promptText      string
 	inputTokenCount int
 
 	prefixCacheScoresForEndpoints map[string]float64
@@ -285,17 +284,14 @@ type predictedLatencyCtx struct {
 }
 
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
-	var promptText string
 	inputTokenCount := 0
 	if request.Body != nil {
-		promptText = request.Body.PromptText()
 		if tp := request.Body.TokenizedPrompt; tp != nil {
 			inputTokenCount = len(tp.TokenIDs)
 		}
 	}
 	return &predictedLatencyCtx{
 		schedulingRequest:             *request,
-		promptText:                    promptText,
 		inputTokenCount:               inputTokenCount,
 		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints: make(map[string]float64),

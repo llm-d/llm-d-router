@@ -133,9 +133,9 @@ func TestGetBlockHashes(t *testing.T) {
 func TestGetBlockHashesCacheSalt(t *testing.T) {
 	body := func(salt string) *fwkrh.InferenceRequestBody {
 		return &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{CacheSalt: salt},
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				TokenIDs: []uint32{1, 2, 3, 4},
+				TokenIDs:  []uint32{1, 2, 3, 4},
+				CacheSalt: salt,
 			},
 		}
 	}

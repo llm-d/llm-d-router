@@ -80,7 +80,7 @@ func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRe
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.
 	_, _ = h.Write([]byte(request.TargetModel))
-	if cacheSalt := request.Body.CacheSalt(); cacheSalt != "" {
+	if cacheSalt := request.Body.TokenizedPrompt.CacheSalt; cacheSalt != "" {
 		_, _ = h.Write([]byte(cacheSalt))
 	}
 
