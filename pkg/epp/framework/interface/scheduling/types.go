@@ -95,6 +95,9 @@ func (r *InferenceRequest) EstimatedTokenLength() (length int64, tokenized bool)
 			return int64(hint), true
 		}
 	}
+	// TODO(#1439): For multimodal requests, falling back to RequestSizeBytes
+	// leads to severe inaccuracies: massive over-estimation for base64 media payloads (e.g. images),
+	// or massive under-estimation for remote asset URLs (e.g. image_url).
 	if r.RequestSizeBytes > 0 {
 		return max(int64(r.RequestSizeBytes)/bytesPerTokenEstimate, 1), false
 	}
