@@ -34,8 +34,8 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 	pod := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
 	podKey := pod.String()
 
-	initialQueries := testutil.ToFloat64(encoderCacheQueriesTotal)
-	initialHits := testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(podKey))
+	initialQueries := testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName))
+	initialHits := testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(ProducerType, testName, podKey))
 
 	// Case 1: Cache Misses
 	items := []attrmm.MatchItem{
@@ -44,8 +44,8 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 	}
 	producer.recordItemLookups(items)
 
-	assert.Equal(t, initialQueries+2, testutil.ToFloat64(encoderCacheQueriesTotal))
-	assert.Equal(t, initialHits, testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(podKey)))
+	assert.Equal(t, initialQueries+2, testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName)))
+	assert.Equal(t, initialHits, testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(ProducerType, testName, podKey)))
 
 	// Case 2: Cache Hits (add one to cache first)
 	producer.putCacheEntry("hash-1", pod)
@@ -56,8 +56,8 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 	}
 	producer.recordItemLookups(items)
 
-	assert.Equal(t, initialQueries+4, testutil.ToFloat64(encoderCacheQueriesTotal))
-	assert.Equal(t, initialHits+1, testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(podKey)))
+	assert.Equal(t, initialQueries+4, testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName)))
+	assert.Equal(t, initialHits+1, testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(ProducerType, testName, podKey)))
 }
 
 func TestRegisterEncoderCacheMetrics(t *testing.T) {
@@ -74,10 +74,10 @@ func TestProduceRecordsMetrics(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
 	request := requestWithHashes("req-1", map[string]int{"hash-1": 1, "hash-2": 1})
 
-	initialQueries := testutil.ToFloat64(encoderCacheQueriesTotal)
+	initialQueries := testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName))
 
 	// Produce should call recordItemLookups
 	require.NoError(t, producer.Produce(context.Background(), request, nil))
 
-	assert.Equal(t, initialQueries+2, testutil.ToFloat64(encoderCacheQueriesTotal))
+	assert.Equal(t, initialQueries+2, testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName)))
 }

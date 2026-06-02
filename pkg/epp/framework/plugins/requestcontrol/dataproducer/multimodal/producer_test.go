@@ -38,11 +38,11 @@ import (
 func TestLRUCapacityFromCacheSizeMB(t *testing.T) {
 	assert.Equal(t, 2, lruCapacityFromCacheSizeMB(4))
 	assert.Equal(t, 1024, lruCapacityFromCacheSizeMB(2048))
-	assert.Equal(t, 1024, lruCapacityFromCacheSizeMB(0))
+	assert.Equal(t, 2048, lruCapacityFromCacheSizeMB(0))
 }
 
 func TestFactory(t *testing.T) {
-	raw, err := json.Marshal(map[string]any{"cacheSizeInMB": 4})
+	raw, err := json.Marshal(map[string]any{"cacheSizeInMBPerServer": 4})
 	require.NoError(t, err)
 
 	created, err := Factory("mm-producer", plugin.StrictDecoder(raw), &testHandle{ctx: context.Background()})
@@ -51,7 +51,7 @@ func TestFactory(t *testing.T) {
 	assert.Equal(t, "mm-producer", created.TypedName().Name)
 	assert.Equal(t, ProducerType, created.TypedName().Type)
 
-	_, err = Factory("bad", plugin.StrictDecoder(json.RawMessage(`{"cacheSizeInMB":"bad"}`)), &testHandle{ctx: context.Background()})
+	_, err = Factory("bad", plugin.StrictDecoder(json.RawMessage(`{"cacheSizeInMBPerServer":"bad"}`)), &testHandle{ctx: context.Background()})
 	require.Error(t, err)
 }
 
@@ -242,7 +242,7 @@ func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
 }
 
 func TestLRUEviction(t *testing.T) {
-	producer := newTestProducer(t, &Parameters{CacheSizeInMB: 4}, nil)
+	producer := newTestProducer(t, &Parameters{CacheSizeInMBPerServer: 4}, nil)
 	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
 
 	for _, hash := range []string{"hash-1", "hash-2", "hash-3"} {

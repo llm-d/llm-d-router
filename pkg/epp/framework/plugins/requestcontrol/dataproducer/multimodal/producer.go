@@ -50,8 +50,8 @@ const (
 	// defaultCacheSizeInMB is 4 GiB (4096 MiB).
 	defaultCacheSizeInMB = 4096
 
-	// bytesPerLRUEntry is the assumed memory per tracked hash.
-	bytesPerLRUEntry = 2 * 1024 * 1024
+	// bytesPerImage is the assumed memory per tracked image.
+	bytesPerImage = 2 * 1024 * 1024
 )
 
 var (
@@ -65,8 +65,8 @@ var (
 
 // Parameters configures the multimodal encoder-cache data producer.
 type Parameters struct {
-	// CacheSizeInMB is the per-endpoint LRU memory budget in mebibytes (MiB).
-	CacheSizeInMB int `json:"cacheSizeInMB"`
+	// CacheSizeInMBPerServer is the per-endpoint LRU memory budget in mebibytes (MiB).
+	CacheSizeInMBPerServer int `json:"cacheSizeInMBPerServer"`
 }
 
 // lruCapacityFromCacheSizeMB converts a MiB budget to a maximum LRU entry count.
@@ -74,7 +74,7 @@ func lruCapacityFromCacheSizeMB(mb int) int {
 	if mb <= 0 {
 		mb = defaultCacheSizeInMB
 	}
-	n := (int64(mb) * 1024 * 1024) / bytesPerLRUEntry
+	n := (int64(mb) * 1024 * 1024) / bytesPerImage
 	if n < 1 {
 		return 1
 	}
@@ -125,7 +125,7 @@ func (s *requestState) Clone() plugin.StateData {
 func New(ctx context.Context, name string, params *Parameters, podList func() []k8stypes.NamespacedName) (*Producer, error) {
 	cacheSizeMB := 0
 	if params != nil {
-		cacheSizeMB = params.CacheSizeInMB
+		cacheSizeMB = params.CacheSizeInMBPerServer
 	}
 	cacheSize := lruCapacityFromCacheSizeMB(cacheSizeMB)
 
@@ -307,11 +307,12 @@ func itemSlice(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
 func (p *Producer) recordItemLookups(items []attrmm.MatchItem) {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
+	pluginType, pluginName := p.typedName.Type, p.typedName.Name
 	for _, item := range items {
-		encoderCacheQueriesTotal.Inc()
+		encoderCacheQueriesTotal.WithLabelValues(pluginType, pluginName).Inc()
 		for pod, podCache := range p.caches {
 			if podCache.Contains(item.Hash) {
-				encoderCacheHitsTotal.WithLabelValues(pod).Inc()
+				encoderCacheHitsTotal.WithLabelValues(pluginType, pluginName, pod).Inc()
 			}
 		}
 	}
