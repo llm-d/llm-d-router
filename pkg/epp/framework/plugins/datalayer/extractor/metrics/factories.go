@@ -60,6 +60,15 @@ type (
 		// CacheNumBlocksSpec defines the metric specification string for retrieving num GPU blocks directly
 		// as a gauge value (alternative to CacheInfoSpec labels). Used by engines like Triton TRT-LLM.
 		CacheNumBlocksSpec string `json:"cacheNumBlocksSpec,omitempty"`
+		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
+		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
+	}
+
+	customMetricConfigParams struct {
+		// AttributeKey is the endpoint attribute key where the scalar value is stored.
+		AttributeKey string `json:"attributeKey"`
+		// MetricSpec defines the source metric specification string.
+		MetricSpec string `json:"metricSpec"`
 	}
 
 	// modelServerExtractorParams holds the configuration parameters for the core metrics extractor plugin.
@@ -197,6 +206,11 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			return nil, fmt.Errorf("engine config name cannot be %q (reserved)", DefaultEngineType)
 		}
 
+		customMetrics, customMetricErrs := customMetricConfigs(engineConfig.CustomMetrics)
+		if len(customMetricErrs) != 0 {
+			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, errors.Join(customMetricErrs...))
+		}
+
 		mapping, err := NewMappingFromConfig(MappingConfig{
 			Queue:               engineConfig.QueuedRequestsSpec,
 			Running:             engineConfig.RunningRequestsSpec,
@@ -207,6 +221,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			CacheNumBlocksLabel: engineConfig.CacheNumBlocksLabelName,
 			CacheBlockSize:      engineConfig.CacheBlockSizeSpec,
 			CacheNumBlocks:      engineConfig.CacheNumBlocksSpec,
+			CustomMetrics:       customMetrics,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, err)
@@ -239,6 +254,23 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 	}
 	extractor.typedName.Name = name
 	return extractor, nil
+}
+
+func customMetricConfigs(configs []customMetricConfigParams) ([]CustomMetric, []error) {
+	custom := make([]CustomMetric, 0, len(configs))
+	var errs []error
+	for _, cfg := range configs {
+		spec, err := parseStringToSpec(cfg.MetricSpec)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("custom metric %q: %w", cfg.AttributeKey, err))
+			continue
+		}
+		custom = append(custom, CustomMetric{
+			AttributeKey: cfg.AttributeKey,
+			Spec:         spec,
+		})
+	}
+	return custom, errs
 }
 
 func defaultExtractorParams() *modelServerExtractorParams {
