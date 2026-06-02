@@ -344,6 +344,12 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				t.Errorf("got.SkipResponseProcessing = %v, want %v", got.SkipResponseProcessing, tt.wantSkipResponseProcessing)
 			}
 
+			if tt.wantSkipResponseProcessing && tt.want == nil {
+				tt.want = &fwkrh.InferenceRequestBody{
+					Payload: fwkrh.RawPayload(payload),
+				}
+			}
+
 			if diff := cmp.Diff(tt.want, got.Body, protocmp.Transform()); diff != "" {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
 			}

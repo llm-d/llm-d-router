@@ -114,7 +114,12 @@ func (p *VertexAIParser) ParseRequest(ctx context.Context, body []byte, headers 
 		return p.parseVertexRequest(ctx, body, headers, &aiplatformpb.RawPredictRequest{}, "RawPredictRequest", openAIResponsesPath)
 
 	default:
-		return &fwkrh.ParseResult{SkipResponseProcessing: true}, nil
+		return &fwkrh.ParseResult{
+			Body: &fwkrh.InferenceRequestBody{
+				Payload: fwkrh.RawPayload(body),
+			},
+			SkipResponseProcessing: true,
+		}, nil
 	}
 }
 

@@ -114,7 +114,12 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 
 	default:
 		logger.V(logutil.TRACE).Info("unsupported gRPC path, skipping", "path", headers[parsers.MethodPathKey])
-		return &fwkrh.ParseResult{SkipResponseProcessing: true}, nil
+		return &fwkrh.ParseResult{
+			Body: &fwkrh.InferenceRequestBody{
+				Payload: fwkrh.RawPayload(body),
+			},
+			SkipResponseProcessing: true,
+		}, nil
 	}
 }
 

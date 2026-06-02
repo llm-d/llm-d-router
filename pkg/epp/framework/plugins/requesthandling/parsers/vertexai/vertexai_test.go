@@ -140,6 +140,9 @@ func TestParseRequest(t *testing.T) {
 			body:    []byte{},
 			headers: map[string]string{":path": "/unsupported/path", "content-type": "application/grpc"},
 			wantResult: &fwkrh.ParseResult{
+				Body: &fwkrh.InferenceRequestBody{
+					Payload: fwkrh.RawPayload([]byte{}),
+				},
 				SkipResponseProcessing: true,
 			},
 		},

@@ -350,12 +350,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					break
 				}
 
-				if parseResult != nil && parseResult.SkipResponseProcessing {
-					parseResult.Body = &fwkrh.InferenceRequestBody{
-						Payload: fwkrh.RawPayload(reqCtx.Request.RawBody),
-					}
-				}
-
 				reqCtx, err = s.director.HandleRequest(ctx, reqCtx, parseResult.Body)
 				if err != nil {
 					logger.Error(err, "Error handling request")
