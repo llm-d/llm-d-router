@@ -18,6 +18,7 @@ package approximateprefix
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,10 +69,7 @@ func TestGetKVCacheBlocksFromTokens(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var blocks []HashBlock
-			for block := range getKVCacheBlocksFromTokens(tt.ids, tt.blockSizeTokens) {
-				blocks = append(blocks, block)
-			}
+			blocks := slices.Collect(getKVCacheBlocksFromTokens(tt.ids, tt.blockSizeTokens))
 			assert.Equal(t, tt.expected, blocks)
 		})
 	}
