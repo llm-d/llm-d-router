@@ -107,7 +107,7 @@ func (s *Server) fanoutEncoderCollect(
 // response's ec_transfer_params into the prefill request body, and hands
 // off to the configured P/D connector.
 func (s *Server) handleECEPD(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
-	s.logger.V(4).Info("running EC-EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
+	s.logger.V(logging.DEBUG).Info("running EC-EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, completionRequest, ok := s.readJSONBody(r, w)
 	if !ok {
