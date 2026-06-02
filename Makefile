@@ -199,9 +199,13 @@ vulncheck: image-build-builder ## Run govulncheck for known vulnerabilities
 	@printf "\033[33;1m==== Running govulncheck ====\033[0m\n"
 	$(BUILDER_RUN) 'govulncheck ./...'
 
+.PHONY: check-latest-tags
+check-latest-tags: ## Check that YAML files do not use the ':latest' image tag
+	@./scripts/check-latest-tags.sh
+
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck
+presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags
 
 .PHONY: git-branch-check
 git-branch-check:
