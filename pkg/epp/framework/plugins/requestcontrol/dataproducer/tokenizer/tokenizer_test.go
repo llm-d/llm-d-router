@@ -64,14 +64,18 @@ func TestPluginFactory_Validation(t *testing.T) {
 		errContain string
 	}{
 		{
-			name:       "missing modelName",
-			params:     `{}`,
-			expectErr:  true,
-			errContain: "'modelName' must be specified",
+			name:      "empty object selects estimate",
+			params:    `{}`,
+			expectErr: false,
 		},
 		{
-			name:       "nil parameters",
-			params:     "",
+			name:      "nil parameters select estimate",
+			params:    "",
+			expectErr: false,
+		},
+		{
+			name:       "render backend requires modelName",
+			params:     `{"vllm":{}}`,
 			expectErr:  true,
 			errContain: "'modelName' must be specified",
 		},
