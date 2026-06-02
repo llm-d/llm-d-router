@@ -32,6 +32,20 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
+// tokenLimitMap returns the map holding the token-limit fields: sampling_params
+// for the generate API (created if absent), or the request itself otherwise.
+func tokenLimitMap(req map[string]any, apiType APIType) map[string]any {
+	if apiType != APITypeGenerate {
+		return req
+	}
+	if sp, ok := req[requestFieldSamplingParams].(map[string]any); ok {
+		return sp
+	}
+	sp := map[string]any{}
+	req[requestFieldSamplingParams] = sp
+	return sp
+}
+
 func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType APIType) {
 	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
 	s.logger.V(4).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
@@ -80,9 +94,10 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		val     any
 		present bool
 	}
+	tokenMap := tokenLimitMap(completionRequest, apiType)
 	var savedTokenValues [2]savedField
 	for i, field := range tokenLimitFields {
-		if v, ok := completionRequest[field]; ok {
+		if v, ok := tokenMap[field]; ok {
 			savedTokenValues[i] = savedField{field: field, val: v, present: true}
 		} else {
 			savedTokenValues[i] = savedField{field: field}
@@ -106,7 +121,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	delete(completionRequest, requestFieldStreamOptions)
 
 	for _, field := range tokenLimitFields {
-		completionRequest[field] = 1
+		tokenMap[field] = 1
 	}
 
 	pbody, err := json.Marshal(completionRequest)
@@ -221,9 +236,9 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	for i := range savedTokenValues[:len(tokenLimitFields)] {
 		sv := &savedTokenValues[i]
-		delete(completionRequest, sv.field)
+		delete(tokenMap, sv.field)
 		if sv.present {
-			completionRequest[sv.field] = sv.val
+			tokenMap[sv.field] = sv.val
 		}
 	}
 

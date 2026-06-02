@@ -44,6 +44,9 @@ var (
 
 	// ResponsesPath is the OpenAI Responses API path
 	ResponsesPath = "/v1/responses"
+
+	// GeneratePath is vLLM's token-in generate endpoint
+	GeneratePath = "/inference/v1/generate"
 )
 
 func openAIAPIAttr(apiType APIType) attribute.KeyValue {

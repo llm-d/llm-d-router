@@ -48,6 +48,8 @@ const (
 	requestFieldMaxTokens            = "max_tokens"
 	requestFieldMaxCompletionTokens  = "max_completion_tokens"
 	requestFieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
+	requestFieldMinTokens            = "min_tokens"
+	requestFieldSamplingParams       = "sampling_params"
 	requestFieldDoRemotePrefill      = "do_remote_prefill"
 	requestFieldDoRemoteDecode       = "do_remote_decode"
 	requestFieldRemoteBlockIDs       = "remote_block_ids"
@@ -86,6 +88,8 @@ const (
 	APITypeChatCompletions APIType = iota
 	// APITypeResponses is the Responses API (/v1/responses)
 	APITypeResponses
+	// APITypeGenerate is vLLM's token-in generate API (/inference/v1/generate)
+	APITypeGenerate
 )
 
 // String implements fmt.Stringer so structured logs show readable API names.
@@ -95,6 +99,8 @@ func (a APIType) String() string {
 		return "chat_completions"
 	case APITypeResponses:
 		return "responses"
+	case APITypeGenerate:
+		return "generate"
 	default:
 		return fmt.Sprintf("APIType(%d)", int(a))
 	}
@@ -105,6 +111,7 @@ func (a APIType) String() string {
 var (
 	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens}
 	responsesStyleTokenLimitFields = []string{requestFieldMaxOutputTokens}
+	generateStyleTokenLimitFields  = []string{requestFieldMaxTokens, requestFieldMinTokens}
 )
 
 // tokenLimitFieldsForAPIType returns token limit field names for the given API.
@@ -113,6 +120,8 @@ func tokenLimitFieldsForAPIType(api APIType) []string {
 	switch api {
 	case APITypeResponses:
 		return responsesStyleTokenLimitFields
+	case APITypeGenerate:
+		return generateStyleTokenLimitFields
 	default:
 		return chatCompletionTokenLimitFields
 	}
@@ -391,6 +400,7 @@ func (s *Server) createRoutes() *http.ServeMux {
 	mux.HandleFunc("POST "+ChatCompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+CompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+ResponsesPath, s.disaggregatedPrefillHandler(APITypeResponses))
+	mux.HandleFunc("POST "+GeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 
