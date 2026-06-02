@@ -306,6 +306,13 @@ func (dle DataLayerExtractor) String() string {
 // RequestHandlerConfig contains the configuration for incoming request handling.
 type RequestHandlerConfig struct {
 	// +optional
+	// Parser specifies a single parsing plugin used by the EPP to process protocol messages.
+	//
+	// Deprecated: use parsers instead. If both are set, parsers is used.
+	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
+	Parser *ParserConfig `json:"parser,omitempty"`
+
+	// +optional
 	// Parsers specifies the parsing plugins used by the EPP to process protocol messages.
 	// If unspecified, default parsing behavior will be applied.
 	Parsers []ParserConfig `json:"parsers,omitempty"`
@@ -316,6 +323,9 @@ func (rhc *RequestHandlerConfig) String() string {
 		return nilString
 	}
 	var parts []string
+	if rhc.Parser != nil {
+		parts = append(parts, fmt.Sprintf("Parser: %v", rhc.Parser))
+	}
 	if len(rhc.Parsers) > 0 {
 		parserStrs := make([]string, len(rhc.Parsers))
 		for i := range rhc.Parsers {
