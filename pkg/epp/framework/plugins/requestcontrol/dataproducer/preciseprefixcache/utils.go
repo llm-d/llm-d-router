@@ -18,6 +18,7 @@ package preciseprefixcache
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -46,14 +47,7 @@ func extractEndpointSet(endpoints []scheduling.Endpoint) sets.Set[string] {
 func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) int {
 	count := 0
 	for _, key := range keys {
-		held := false
-		for _, entry := range keyToPods[key] {
-			if entry.PodIdentifier == podID {
-				held = true
-				break
-			}
-		}
-		if !held {
+		if !slices.ContainsFunc(keyToPods[key], func(e kvblock.PodEntry) bool { return e.PodIdentifier == podID }) {
 			break
 		}
 		count++

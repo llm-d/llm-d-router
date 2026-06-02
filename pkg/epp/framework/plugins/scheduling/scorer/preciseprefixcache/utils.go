@@ -2,6 +2,7 @@ package preciseprefixcache
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -20,14 +21,7 @@ type endpointToKeyFunc func(endpoint scheduling.Endpoint) (string, bool)
 func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) int {
 	count := 0
 	for _, key := range keys {
-		held := false
-		for _, entry := range keyToPods[key] {
-			if entry.PodIdentifier == podID {
-				held = true
-				break
-			}
-		}
-		if !held {
+		if !slices.ContainsFunc(keyToPods[key], func(e kvblock.PodEntry) bool { return e.PodIdentifier == podID }) {
 			break
 		}
 		count++
