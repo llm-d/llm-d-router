@@ -62,7 +62,8 @@ func (e *approximatePrefixCacheTokenEstimator) Estimate(block fwkrh.ContentBlock
 	case "video_url":
 		return getVideoPlaceholders(e.multimodalConfig)
 	case "input_audio", "audio_url":
-		return getAudioPlaceholders(e.multimodalConfig)
+		// Add audio support later
+		return 0
 	default:
 		return 0
 	}
@@ -95,13 +96,6 @@ func getImagePlaceholders(ctx context.Context, url string, multimodalConfig *mul
 	}
 	logger.Info(fmt.Sprintf("Using numPlaceHolders %d", numPlaceHolders))
 	return numPlaceHolders
-}
-
-func getAudioPlaceholders(multimodalConfig *multiModalTokenEstimatorConfig) int {
-	if multimodalConfig == nil || multimodalConfig.Audio == nil {
-		return defaultMultimodalConfig.Audio.FixedToken
-	}
-	return multimodalConfig.Audio.FixedToken
 }
 
 func getVideoPlaceholders(multimodalConfig *multiModalTokenEstimatorConfig) int {
