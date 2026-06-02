@@ -3,6 +3,9 @@
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
+  parameters:
+    estimate: {}
 - type: approx-prefix-cache-producer
   parameters:
     maxPrefixBlocksToMatch: 256

@@ -64,6 +64,9 @@ schedulingProfiles:
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
+  parameters:
+    estimate: {}
 - type: approx-prefix-cache-producer
   name: cpu-prefix-cache-producer
   parameters:
@@ -90,6 +93,7 @@ schedulingProfiles:
     weight: 1.0
 `,
 		expectedPlugins: []configapi.PluginSpec{
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"}, // this one is auto configured.
 			{Name: "cpu-prefix-cache-producer", Type: "approx-prefix-cache-producer"},    // this one is configured manually.
 			{Name: "queue-scorer", Type: "queue-scorer"},
@@ -206,6 +210,9 @@ schedulingProfiles:
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
+  parameters:
+    estimate: {}
 - type: prefix-based-pd-decider
 - type: prefill-header-handler
 - type: prefill-filter
@@ -233,6 +240,7 @@ schedulingProfiles:
     weight: 1
 `,
 		expectedPlugins: []configapi.PluginSpec{
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "prefill-header-handler", Type: "disagg-headers-handler"},
 			{Name: "prefill-filter", Type: "by-label"},
 			{Name: "decode-filter", Type: "by-label"},

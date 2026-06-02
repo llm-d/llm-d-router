@@ -4,6 +4,9 @@ package e2e
 const simpleConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
+  parameters:
+    estimate: {}
 - type: approx-prefix-cache-producer
   parameters:
     maxPrefixBlocksToMatch: 256
@@ -26,6 +29,9 @@ schedulingProfiles:
 const deprecatedPdConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
+  parameters:
+    estimate: {}
 - type: prefill-header-handler
 - type: approx-prefix-cache-producer
   parameters:
@@ -84,6 +90,9 @@ schedulingProfiles:
 const epdConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
+  parameters:
+    estimate: {}
 - type: encode-filter
 - type: prefill-filter
 - type: decode-filter
@@ -125,6 +134,9 @@ schedulingProfiles:
 const pdConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
+  parameters:
+    estimate: {}
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
@@ -160,6 +172,9 @@ schedulingProfiles:
 const decodeOnlyConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
+  parameters:
+    estimate: {}
 - type: approx-prefix-cache-producer
   parameters:
     maxPrefixBlocksToMatch: 256
