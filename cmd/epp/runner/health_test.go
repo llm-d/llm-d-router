@@ -178,9 +178,9 @@ func TestHealthServer_Check(t *testing.T) {
 			var isLeader atomic.Bool
 			isLeader.Store(tt.isLeader)
 
-			var supporter appProtocolSupporter
+			var supporters []appProtocolSupporter
 			if tt.supporter != nil {
-				supporter = tt.supporter
+				supporters = []appProtocolSupporter{tt.supporter}
 			}
 
 			s := &healthServer{
@@ -188,7 +188,7 @@ func TestHealthServer_Check(t *testing.T) {
 				datastore:             ds,
 				isLeader:              &isLeader,
 				leaderElectionEnabled: tt.leaderElectionEnabled,
-				supporter:             supporter,
+				supporters:            supporters,
 			}
 
 			resp, err := s.Check(context.Background(), &healthPb.HealthCheckRequest{Service: tt.service})

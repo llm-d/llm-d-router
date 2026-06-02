@@ -395,7 +395,11 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	// --- Add Runnables to Manager ---
 	// Register health server.
-	if err := registerHealthServer(mgr, ctrl.Log.WithName("health"), ds, opts.GRPCHealthPort, isLeader, opts.EnableLeaderElection, r.parsers[0]); err != nil {
+	supporters := make([]appProtocolSupporter, len(r.parsers))
+	for i, p := range r.parsers {
+		supporters[i] = p
+	}
+	if err := registerHealthServer(mgr, ctrl.Log.WithName("health"), ds, opts.GRPCHealthPort, isLeader, opts.EnableLeaderElection, supporters); err != nil {
 		return nil, nil, err
 	}
 
@@ -699,14 +703,14 @@ func registerExtProcServer(mgr manager.Manager, runner *runserver.ExtProcServerR
 }
 
 // registerHealthServer adds the Health gRPC server as a Runnable to the given manager.
-func registerHealthServer(mgr manager.Manager, logger logr.Logger, ds datastore.Datastore, port int, isLeader *atomic.Bool, leaderElectionEnabled bool, supporter appProtocolSupporter) error {
+func registerHealthServer(mgr manager.Manager, logger logr.Logger, ds datastore.Datastore, port int, isLeader *atomic.Bool, leaderElectionEnabled bool, supporters []appProtocolSupporter) error {
 	srv := grpc.NewServer()
 	healthPb.RegisterHealthServer(srv, &healthServer{
 		logger:                logger,
 		datastore:             ds,
 		isLeader:              isLeader,
 		leaderElectionEnabled: leaderElectionEnabled,
-		supporter:             supporter,
+		supporters:            supporters,
 	})
 	if err := mgr.Add(
 		runnable.NoLeaderElection(runnable.GRPCServer("health", srv, port))); err != nil {
@@ -938,12 +942,16 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	isLeader.Store(true)
 
 	healthSrv := grpc.NewServer()
+	ps := make([]appProtocolSupporter, len(r.parsers))
+	for i, p := range r.parsers {
+		ps[i] = p
+	}
 	healthPb.RegisterHealthServer(healthSrv, &healthServer{
 		logger:                ctrl.Log.WithName("health"),
 		datastore:             ds,
 		isLeader:              isLeader,
 		leaderElectionEnabled: false,
-		supporter:             r.parsers[0],
+		supporters:            ps,
 	})
 
 	g := newRunnableGroup()
