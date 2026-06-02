@@ -109,6 +109,15 @@ var (
 		},
 		[]string{"program_id"},
 	)
+
+	deficitTokens = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: programAwareSubsystem,
+			Name:      "deficit_tokens",
+			Help:      metricsutil.HelpMsgWithStability("DRR deficit counter per program (positive = owed service, negative = overserved); decays exponentially when the queue is empty", compbasemetrics.ALPHA),
+		},
+		[]string{"program_id"},
+	)
 )
 
 // GetCollectors returns all Prometheus collectors for the program-aware plugin.
@@ -126,5 +135,6 @@ func GetCollectors() []prometheus.Collector {
 		ewmaWaitTimeMs,
 		serviceRateTokensPerSec,
 		queueScore,
+		deficitTokens,
 	}
 }

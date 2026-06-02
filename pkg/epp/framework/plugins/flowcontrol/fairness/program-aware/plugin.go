@@ -208,9 +208,10 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	// Strategy owns scoring, normalization, and internal bookkeeping.
 	bestQueue, scores := strategy.Pick(band.Priority(), infos)
 
-	// Emit per-queue scores for observability.
+	// Emit per-queue scores and deficit for observability.
 	for id, score := range scores {
 		queueScore.WithLabelValues(id).Set(score)
+		deficitTokens.WithLabelValues(id).Set(float64(infos[id].Metrics.Deficit()))
 	}
 
 	// Record the selected item's enqueue time so PreRequest can compute
