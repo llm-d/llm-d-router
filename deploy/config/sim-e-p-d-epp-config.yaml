@@ -2,9 +2,6 @@
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: token-producer
-  parameters:
-    estimate: {}
 - type: queue-scorer
 - type: encode-filter
 - type: prefill-filter

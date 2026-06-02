@@ -57,6 +57,8 @@ schedulingProfiles:
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
+			// Auto created transitively: the approx producer consumes TokenizedPrompt.
+			{Name: "token-producer", Type: "token-producer"},
 		},
 	},
 	"tiered-prefix-cache-cpu": {
@@ -65,8 +67,6 @@ apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: token-producer
-  parameters:
-    estimate: {}
 - type: approx-prefix-cache-producer
   name: cpu-prefix-cache-producer
   parameters:
@@ -148,6 +148,8 @@ schedulingProfiles:
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
+			// Auto created transitively: the approx producer consumes TokenizedPrompt.
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "queue-scorer", Type: "queue-scorer"},
 			{Name: "kv-cache-utilization-scorer", Type: "kv-cache-utilization-scorer"},
 			{Name: "active-request-scorer", Type: "active-request-scorer"},
@@ -199,6 +201,8 @@ schedulingProfiles:
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
+			// Auto created transitively: the approx producer consumes TokenizedPrompt.
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "queue-scorer", Type: "queue-scorer"},
 			{Name: "kv-cache-utilization-scorer", Type: "kv-cache-utilization-scorer"},
 			{Name: "active-request-scorer", Type: "active-request-scorer"},
@@ -211,8 +215,6 @@ apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: token-producer
-  parameters:
-    estimate: {}
 - type: prefix-based-pd-decider
 - type: prefill-header-handler
 - type: prefill-filter
@@ -304,6 +306,8 @@ flowControl:
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
+			// Auto created transitively: the approx producer consumes TokenizedPrompt.
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "round-robin-fairness-policy", Type: "round-robin-fairness-policy"},
 			{Name: "fcfs-ordering-policy", Type: "fcfs-ordering-policy"},
 			{Name: "concurrency-detector", Type: "concurrency-detector"},
@@ -354,6 +358,8 @@ schedulingProfiles:
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
+			// Auto created transitively: the approx producer consumes TokenizedPrompt.
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "metrics-data-source", Type: "metrics-data-source"},
 			{Name: "core-metrics-extractor", Type: "core-metrics-extractor"},
 			{Name: "predicted-latency-producer", Type: "predicted-latency-producer"},

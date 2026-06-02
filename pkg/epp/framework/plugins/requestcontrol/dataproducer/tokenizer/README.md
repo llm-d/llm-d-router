@@ -2,7 +2,7 @@
 
 **Type:** `token-producer`
 
-`DataProducer` plugin that renders the request prompt and publishes
+`DataProducer` plugin that tokenizes the request prompt and publishes
 `TokenIDs` (and a flat sorted `MultiModalFeatures` list) on
 `InferenceRequestBody.TokenizedPrompt` for downstream consumers (scorers,
 filters, other data producers).
@@ -19,11 +19,24 @@ upstream list shape, sorted by placeholder offset.
 
 ## Backend
 
-The plugin calls vLLM's `/v1/completions/render` and
-`/v1/chat/completions/render` over plain HTTP (TLS is not supported). An
-empty configuration falls back to `vllm` with `http://localhost:8000`.
-Future protocol fields (e.g. `grpc`) can be added alongside `url` under
-the same `vllm` block.
+Backend selection:
+
+- **`estimate`** (default): tokenizer-free byte-packing — no model, no service.
+  Selected when no backend is set, and auto-created by the framework for any
+  config whose plugins consume `TokenizedPrompt` (prefix cache, context-length,
+  P/D routing) without declaring a `token-producer`.
+- **`vllm`** (or `modelName`): calls vLLM's `/v1/completions/render` and
+  `/v1/chat/completions/render` over plain HTTP (TLS is not supported). Future
+  protocol fields (e.g. `grpc`) can be added alongside `url` under the same
+  `vllm` block.
+- **`udsTokenizerConfig`**: deprecated gRPC-over-UDS sidecar (see warning below).
+
+> [!WARNING]
+> The `estimate` backend approximates token boundaries (≈4 bytes/token); its
+> token IDs do not correspond to engine tokens. The precise prefix-cache scorer
+> requires real tokens — configure a `vllm` `token-producer` explicitly for it.
+> If omitted, the auto-created `estimate` producer satisfies the dependency but
+> silently degrades precise cache correlation.
 
 > [!WARNING]
 > The `udsTokenizerConfig` backend (gRPC-over-UDS sidecar) is **deprecated**
@@ -35,7 +48,7 @@ the same `vllm` block.
 
 | Parameter        | Default                 | Description                                                       |
 | ---------------- | ----------------------- | ----------------------------------------------------------------- |
-| `modelName`      | – (required)            | Model whose tokenizer should be loaded / sent in render requests. |
+| `modelName`      | – (required for `vllm`) | Model whose tokenizer should be loaded / sent in render requests. |
 | `vllm.url`       | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).         |
 | `vllm.timeout`   | `5s`                    | Per-request timeout for text-only requests.                       |
 | `vllm.mmTimeout` | `30s`                   | Per-request timeout for multimodal requests.                      |

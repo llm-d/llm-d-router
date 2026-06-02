@@ -35,6 +35,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
@@ -142,6 +143,15 @@ func (p *Producer) TypedName() plugin.TypedName {
 // Produces returns the data keys this plugin produces.
 func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrmm.EncoderCacheMatchInfo{}}
+}
+
+// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// the token-producer before this producer runs and auto-creates one when none
+// is configured; multimodal features come from the tokenizer output.
+func (p *Producer) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+	}
 }
 
 // PluginState returns request-scoped state shared between producer extension points.

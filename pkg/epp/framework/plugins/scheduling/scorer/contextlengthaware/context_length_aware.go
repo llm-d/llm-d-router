@@ -13,6 +13,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 const (
@@ -100,6 +101,15 @@ func (p *ContextLengthAware) TypedName() plugin.TypedName {
 func (p *ContextLengthAware) WithName(name string) *ContextLengthAware {
 	p.typedName.Name = name
 	return p
+}
+
+// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// the token-producer before this plugin runs and auto-creates one when none is
+// configured; the context length is the token count it provides.
+func (p *ContextLengthAware) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+	}
 }
 
 // Filter filters out endpoints that don't have a context length range matching the request.

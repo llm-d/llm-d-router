@@ -48,7 +48,7 @@ schedulingProfiles:
 
 #### Token Counting
 
-Derives context length from `len(request.Body.TokenizedPrompt.TokenIDs)`, written by the `token-producer` DataProducer plugin. A `token-producer` must be configured; the tokenizer-free `estimate` backend is the zero-dependency option. Without a configured token-producer there is no context length to score against.
+Derives context length from `len(request.Body.TokenizedPrompt.TokenIDs)`, written by a `token-producer` — auto-created with the tokenizer-free `estimate` backend when none is configured, so context-length scoring works without extra setup.
 
 **Example — Scorer with token-producer:**
 ```yaml

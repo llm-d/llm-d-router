@@ -3,9 +3,6 @@
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: token-producer
-  parameters:
-    estimate: {}
 - type: single-profile-handler
 - type: decode-filter
 - type: prefix-cache-scorer

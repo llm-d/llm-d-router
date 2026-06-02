@@ -183,7 +183,7 @@ Compares the uncached portion of the request prompt against a configurable thres
 
 #### How It Works
 
-The prompt token count is `len(request.Body.TokenizedPrompt.TokenIDs)`, populated by a `token-producer` plugin (the tokenizer-free `estimate` backend is the zero-dependency option); without one the count is zero. Prefix cache state is read from the `PrefixCacheMatchInfo` attribute on the decode endpoint, populated by `approx-prefix-cache-producer`. If the attribute is absent or malformed, disaggregation is skipped. Setting `nonCachedTokens: 0` disables the decider entirely (always returns false).
+The prompt token count is `len(request.Body.TokenizedPrompt.TokenIDs)`, populated by a `token-producer` — auto-created with the tokenizer-free `estimate` backend when none is configured. Prefix cache state is read from the `PrefixCacheMatchInfo` attribute on the decode endpoint, populated by `approx-prefix-cache-producer`. If the attribute is absent or malformed, disaggregation is skipped. Setting `nonCachedTokens: 0` disables the decider entirely (always returns false).
 
 #### Inputs consumed
 
@@ -212,7 +212,7 @@ plugins:
 #### Limitations
 
 - `nonCachedTokens: 0` disables disaggregation entirely (the decider always returns false).
-- Requires a `token-producer` plugin to populate `TokenizedPrompt`; without one the token count is zero and disaggregation never triggers.
+- A `token-producer` populates `TokenizedPrompt`; when none is configured the framework auto-creates one with the `estimate` backend, so disaggregation works without extra setup.
 - Requires `PrefixCacheMatchInfo` on the decode endpoint; if absent, disaggregation is skipped with an error log.
 
 ---

@@ -24,9 +24,6 @@ var e2eConfigsForSmoke = map[string]string{
 	"simpleConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: token-producer
-  parameters:
-    estimate: {}
 - type: approx-prefix-cache-producer
   parameters:
     maxPrefixBlocksToMatch: 256
@@ -46,9 +43,6 @@ schedulingProfiles:
 	"deprecatedPdConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: token-producer
-  parameters:
-    estimate: {}
 - type: prefill-header-handler
 - type: approx-prefix-cache-producer
   parameters:
@@ -82,9 +76,6 @@ schedulingProfiles:
 	"pdConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: token-producer
-  parameters:
-    estimate: {}
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
@@ -118,9 +109,6 @@ schedulingProfiles:
 	"epdConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: token-producer
-  parameters:
-    estimate: {}
 - type: encode-filter
 - type: prefill-filter
 - type: decode-filter
@@ -160,9 +148,6 @@ schedulingProfiles:
 	"decodeOnlyConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: token-producer
-  parameters:
-    estimate: {}
 - type: approx-prefix-cache-producer
   parameters:
     maxPrefixBlocksToMatch: 256
