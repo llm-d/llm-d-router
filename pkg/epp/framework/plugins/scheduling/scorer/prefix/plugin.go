@@ -138,16 +138,17 @@ func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 		}
 
 		if prefixMatchInfo, ok := info.(*attrprefix.PrefixCacheMatchInfo); ok {
+			matchBlocks := prefixMatchInfo.MatchBlocks()
 			totalBlocks := prefixMatchInfo.TotalBlocks()
 			if totalBlocks != 0 {
-				matchRatio := float64(prefixMatchInfo.MatchBlocks()) / float64(totalBlocks)
+				matchRatio := float64(matchBlocks) / float64(totalBlocks)
 				matchLengthRatio := 0.0
 				blockSize := prefixMatchInfo.BlockSizeTokens()
 				if blockSize > 0 && p.maxModelLen > 0 {
-					// (TotalBlocks * BlockSize / maxModelLen) ^ 2
+					// (MatchBlocks * BlockSize / maxModelLen) ^ 2
 					// Capped at 1.0 as the normalized score term cannot be greater than 1.
-					matchLengthRatio = float64(totalBlocks) * float64(blockSize) / float64(p.maxModelLen)
-					matchLengthRatio = math.Min(1.0, matchLengthRatio*matchLengthRatio)
+					matchLengthRatio = math.Min(1.0, float64(matchBlocks)*float64(blockSize)/float64(p.maxModelLen))
+					matchLengthRatio *= matchLengthRatio
 				}
 				scores[endpoint] = p.prefixLengthWeight*matchLengthRatio + (1.0-p.prefixLengthWeight)*matchRatio
 			}

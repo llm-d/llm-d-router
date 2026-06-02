@@ -16,7 +16,7 @@ score = prefixLengthWeight * matchLengthRatio + (1.0 - prefixLengthWeight) * mat
 
 Where:
 - `matchRatio = matchBlocks / totalBlocks` (the fraction of the request prefix matched)
-- `matchLengthRatio = min(1.0, (totalBlocks * blockSize / maxModelLen) ^ 2)` (normalized square of the total request prefix length relative to `maxModelLen`)
+- `matchLengthRatio = min(1.0, matchedBlocks * blockSize / maxModelLen) ^ 2` (square of normalized matched blocks relative to `maxModelLen`)
 
 If `prefixLengthWeight` is `0.0` (the default), the score simplifies to just the `matchRatio`.
 
