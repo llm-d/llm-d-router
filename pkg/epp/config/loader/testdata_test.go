@@ -779,3 +779,21 @@ schedulingProfiles:
 parser:
   pluginRef: openai-parser
 `
+
+// successDeprecatedNestedParserText tests that requestHandler.parser (singular, deprecated)
+// is correctly migrated to requestHandler.parsers.
+const successDeprecatedNestedParserText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- type: openai-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+requestHandler:
+  parser:
+    pluginRef: openai-parser
+`

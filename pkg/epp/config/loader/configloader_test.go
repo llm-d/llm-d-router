@@ -308,6 +308,39 @@ func TestLoadRawConfiguration(t *testing.T) {
 			deprecated: true,
 		},
 		{
+			name:       "Success - Deprecated Nested requestHandler.parser",
+			configText: successDeprecatedNestedParserText,
+			want: &configapi.EndpointPickerConfig{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "EndpointPickerConfig",
+					APIVersion: configapi.GroupVersion.String(),
+				},
+				Plugins: []configapi.PluginSpec{
+					{Name: "maxScore", Type: "max-score-picker"},
+					{Name: "openai-parser", Type: "openai-parser"},
+				},
+				SchedulingProfiles: []configapi.SchedulingProfile{
+					{
+						Name: "default",
+						Plugins: []configapi.SchedulingPlugin{
+							{PluginRef: "maxScore"},
+						},
+					},
+				},
+				FeatureGates: configapi.FeatureGates{},
+				RequestHandler: &configapi.RequestHandlerConfig{
+					Parser: &configapi.ParserConfig{
+						PluginRef: "openai-parser",
+					},
+					Parsers: []configapi.ParserConfig{
+						{PluginRef: "openai-parser"},
+					},
+				},
+			},
+			wantErr:    false,
+			deprecated: true,
+		},
+		{
 			name:       "Error - Invalid YAML",
 			configText: errorBadYamlText,
 			wantErr:    true,
@@ -555,6 +588,16 @@ func TestInstantiateAndConfigure(t *testing.T) {
 		{
 			name:       "Success - Deprecated Top-level Parser",
 			configText: successDeprecatedTopLevelParserText,
+			wantErr:    false,
+			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, cfg.ParserConfig, "ParserConfig should be loaded")
+				require.Len(t, cfg.ParserConfig.Parsers, 1, "Should have one parser")
+				require.Equal(t, "openai-parser", cfg.ParserConfig.Parsers[0].TypedName().Name)
+			},
+		},
+		{
+			name:       "Success - Deprecated Nested requestHandler.parser",
+			configText: successDeprecatedNestedParserText,
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, cfg.ParserConfig, "ParserConfig should be loaded")
