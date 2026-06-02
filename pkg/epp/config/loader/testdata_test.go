@@ -797,3 +797,26 @@ requestHandler:
   parser:
     pluginRef: openai-parser
 `
+
+// successNestedParserAndParsersText tests that when both requestHandler.parser
+// and requestHandler.parsers are set, parsers takes precedence.
+const successNestedParserAndParsersText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- type: openai-parser
+- name: secondParser
+  type: openai-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+requestHandler:
+  parser:
+    pluginRef: secondParser
+  parsers:
+  - pluginRef: openai-parser
+  - pluginRef: secondParser
+`
