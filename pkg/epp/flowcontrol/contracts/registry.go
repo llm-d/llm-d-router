@@ -38,14 +38,6 @@ import (
 //     When the lease count drops to zero, the flow becomes "Idle".
 //  4. Garbage Collection: The implementation MUST automatically garbage collect a flow after it has remained
 //     continuously Idle for a configurable duration.
-//
-// # System Invariants
-//
-// Concrete implementations MUST uphold the following invariants:
-//
-//  1. Shard Consistency: All configured priority bands and registered flow instances must exist on every Active shard.
-//  2. Capacity Partitioning: Global and per-band capacity limits must be uniformly partitioned across all Active
-//     shards.
 type FlowRegistry interface {
 	FlowRegistryObserver
 	FlowRegistryDataPlane
@@ -83,23 +75,23 @@ type FlowRegistryDataPlane interface {
 	// ErrFlowInstanceNotFound if no instance exists for the given key.
 	ManagedQueue(key flowcontrol.FlowKey) (ManagedQueue, error)
 
-	// FairnessPolicy retrieves the FairnessPolicy singleton configured for the specified priority band on this shard.
+	// FairnessPolicy retrieves the FairnessPolicy singleton configured for the specified priority band.
 	// This method provides access to the immutable logic component that governs inter-flow contention.
 	// The registry guarantees that a non-nil policy is returned for any active priority band.
 	//
 	// Returns:
 	//   - FairnessPolicy: The active policy instance.
-	//   - error: A wrapped ErrPriorityBandNotFound if the priority level is not configured on this shard.
+	//   - error: A wrapped ErrPriorityBandNotFound if the priority level is not configured.
 	FairnessPolicy(priority int) (flowcontrol.FairnessPolicy, error)
 
 	// PriorityBandAccessor retrieves the read-only view of the "Flow Group" for a specific priority level.
-	// This accessor provides the state of all contending flows within the band (as seen by this shard) and serves as the
+	// This accessor provides the state of all contending flows within the band and serves as the
 	// primary input for FairnessPolicy execution.
 	//
 	// Returns an error wrapping ErrPriorityBandNotFound if the priority level is not configured.
 	PriorityBandAccessor(priority int) (flowcontrol.PriorityBandAccessor, error)
 
-	// AllOrderedPriorityLevels returns all configured priority levels that this shard is aware of, sorted in descending
+	// AllOrderedPriorityLevels returns all configured priority levels, sorted in descending
 	// numerical order. This order corresponds to highest priority (highest numeric value) to lowest priority (lowest
 	// numeric value).
 	// The returned slice provides a definitive, ordered list of priority levels for iteration, for example, by a
@@ -123,15 +115,13 @@ type ActiveFlowConnection interface {
 	FlowKey() flowcontrol.FlowKey
 }
 
-// ManagedQueue defines the interface for a flow's queue on a specific shard.
+// ManagedQueue defines the interface for a flow's queue.
 // It acts as a stateful decorator that *use an underlying SafeQueue, augmenting it with statistics tracking, and
-// lifecycle awareness (e.g., rejecting adds when a shard is draining).
+// lifecycle awareness.
 //
 // Conformance: Implementations MUST be goroutine-safe.
 type ManagedQueue interface {
-	// Add attempts to enqueue an item, performing an atomic check on the parent shard's lifecycle state before adding
-	// the item to the underlying queue.
-	// Returns ErrShardDraining if the parent shard is no longer Active.
+	// Add attempts to enqueue an item.
 	Add(item flowcontrol.QueueItemAccessor) error
 
 	// Remove atomically finds and removes an item from the underlying queue using its handle.
@@ -151,9 +141,9 @@ type ManagedQueue interface {
 // AggregateStats holds globally aggregated statistics for the entire `FlowRegistry`.
 // It is a read-only data object representing a near-consistent snapshot of the registry's state.
 type AggregateStats struct {
-	// TotalCapacityBytes is the globally configured maximum total byte size limit across all priority bands and shards.
+	// TotalCapacityBytes is the globally configured maximum total byte size limit across all priority bands.
 	TotalCapacityBytes uint64
-	// TotalCapacityRequests is the globally configured maximum total request count limit across all priority bands and shards.
+	// TotalCapacityRequests is the globally configured maximum total request count limit across all priority bands.
 	TotalCapacityRequests uint64
 	// TotalByteSize is the total byte size of all items currently queued across the entire system.
 	TotalByteSize uint64
@@ -169,8 +159,7 @@ type PriorityBandStats struct {
 	// Priority is the numerical priority level this struct describes.
 	Priority int
 	// CapacityBytes is the configured maximum total byte size for this priority band.
-	// When viewed via `AggregateStats`, this is the global limit. When viewed via `ShardStats`, this is the partitioned
-	// value for that specific shard.
+	// When viewed via `AggregateStats`, this is the global limit.
 	// The `controller.FlowController` enforces this limit.
 	// A default non-zero value is guaranteed if not configured.
 	CapacityBytes uint64

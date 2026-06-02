@@ -160,11 +160,12 @@ const (
 	BodyResponseResponsesComplete    StreamRequestState = 6
 	TrailerResponseResponsesComplete StreamRequestState = 7
 	// RequestEvicted indicates the request was evicted by flow control.
-	// The state machine sends an ImmediateResponse(429) to Envoy.
+	// The state machine sends an ImmediateResponse(429) to the proxy.
 	RequestEvicted StreamRequestState = 8
-	// RequestSkipped indicates the request parsing was skipped.
-	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with fallback routing(randomly pick an endpoint from inferencePool) to Envoy.
-	RequestSkipped StreamRequestState = 9
+	// RequestResponseProcessingSkipped indicates that EPP response-phase stream interception was skipped for this request.
+	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
+	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
+	RequestResponseProcessingSkipped StreamRequestState = 9
 )
 
 // recvResult holds the result of a srv.Recv() call from the reader goroutine.
@@ -349,15 +350,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					break
 				}
 
-				if parseResult.Skip {
-					if err = s.fallbackToRandomEndpoint(ctx, reqCtx, reqCtx.RequestSize); err != nil {
-						logger.Error(err, "Error falling back to random endpoint")
-						break
-					}
-					reqCtx.RequestState = RequestSkipped
-					break
-				}
-
 				reqCtx, err = s.director.HandleRequest(ctx, reqCtx, parseResult.Body)
 				if err != nil {
 					logger.Error(err, "Error handling request")
@@ -380,6 +372,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
 				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.Priority)
 				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestSize)
+
+				if parseResult.SkipResponseProcessing {
+					reqCtx.RequestState = RequestResponseProcessingSkipped
+				}
 			}
 		case *extProcPb.ProcessingRequest_RequestTrailers:
 			// This is currently unused.
@@ -451,8 +447,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		if err := reqCtx.updateStateAndSendIfNeeded(srv, logger); err != nil {
 			return err
 		}
-		if reqCtx.RequestState == RequestSkipped {
-			logger.V(logutil.DEFAULT).Info("EPP skipped the request")
+		if reqCtx.RequestState == RequestResponseProcessingSkipped {
+			logger.V(logutil.DEFAULT).Info("EPP skipped response interception, routed request",
+				"targetEndpoint", reqCtx.TargetEndpoint,
+				"targetModel", reqCtx.TargetModelName)
 			// Gracefully close the gRPC stream to stop external processing for this request.
 			// This ensures Envoy continues with the request without calling further phases.
 			// See: https://github.com/envoyproxy/envoy/blob/0533de0acca281110945e5726bbb306fbb12bde5/api/envoy/service/ext_proc/v3/external_processor.proto#L40-L41
@@ -534,8 +532,8 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		})
 	}
 
-	// Handle skip — send response with fallback routing to the proxy.
-	if r.RequestState == RequestSkipped {
+	// Handle skip — send response with the director's routing decision to the proxy.
+	if r.RequestState == RequestResponseProcessingSkipped {
 		if r.reqHeaderResp != nil {
 			if err := srv.Send(r.reqHeaderResp); err != nil {
 				logger.Error(err, "error sending response")

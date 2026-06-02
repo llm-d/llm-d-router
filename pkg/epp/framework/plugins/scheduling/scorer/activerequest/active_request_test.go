@@ -18,6 +18,8 @@ import (
 
 // Test helper functions
 
+func float64Ptr(v float64) *float64 { return &v }
+
 func newTestEndpoint(name string, queueSize int) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&datalayer.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
@@ -147,8 +149,8 @@ func TestActiveRequestScorer_Consumes(t *testing.T) {
 	scorer := NewActiveRequest(ctx, nil)
 	consumes := scorer.Consumes()
 
-	require.Len(t, consumes, 1)
-	assert.Equal(t, attrconcurrency.InFlightLoad{}, consumes[attrconcurrency.InFlightLoadDataKey])
+	require.Len(t, consumes.Required, 1)
+	assert.Equal(t, attrconcurrency.InFlightLoad{}, consumes.Required[attrconcurrency.InFlightLoadDataKey])
 }
 
 func TestActiveRequestScorer_TypedName(t *testing.T) {
@@ -176,7 +178,7 @@ func TestActiveRequest_IdleThresholdAndMaxBusyScore(t *testing.T) {
 	t.Run("binary mode: idleThreshold=0, maxBusyScore=0", func(t *testing.T) {
 		params := &Parameters{
 			IdleThreshold: 0,
-			MaxBusyScore:  0.0,
+			MaxBusyScore:  float64Ptr(0.0),
 		}
 		scorer := NewActiveRequest(ctx, params)
 
@@ -198,7 +200,7 @@ func TestActiveRequest_IdleThresholdAndMaxBusyScore(t *testing.T) {
 	t.Run("hybrid mode: idleThreshold=1, maxBusyScore=0.5", func(t *testing.T) {
 		params := &Parameters{
 			IdleThreshold: 1,
-			MaxBusyScore:  0.5,
+			MaxBusyScore:  float64Ptr(0.5),
 		}
 		scorer := NewActiveRequest(ctx, params)
 
@@ -211,6 +213,23 @@ func TestActiveRequest_IdleThresholdAndMaxBusyScore(t *testing.T) {
 		assert.Equal(t, 0.0, scores[podB], "Pod with 2 requests (busiest) scores 0.0")
 		assert.Equal(t, 1.0, scores[podC], "Pod with 0 requests is idle")
 	})
+}
+
+// TestActiveRequest_DefaultParamsProduceContinuousScores guards against the
+// regression where an unset MaxBusyScore (Go zero-value 0.0) silently put the
+// scorer into binary mode, returning 0.0 for every non-idle pod.
+func TestActiveRequest_DefaultParamsProduceContinuousScores(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	scorer := NewActiveRequest(ctx, &Parameters{})
+
+	podLight := newTestEndpointWithLoad("pod-light", 3)
+	podHeavy := newTestEndpointWithLoad("pod-heavy", 11)
+
+	scores := scorer.Score(ctx, nil, []scheduling.Endpoint{podLight, podHeavy})
+
+	assert.InDelta(t, 0.7272, scores[podLight], 0.001,
+		"light pod must get a non-zero score when no parameters are configured")
+	assert.Equal(t, 0.0, scores[podHeavy])
 }
 
 func inFlightRequests(t *testing.T, endpoint scheduling.Endpoint) int64 {

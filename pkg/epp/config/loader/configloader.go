@@ -47,7 +47,7 @@ var (
 	scheme                       = runtime.NewScheme()
 	registeredFeatureGatesMu     sync.RWMutex
 	registeredFeatureGates       = sets.New[string]()
-	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: "v1alpha1"}
+	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: "v1alpha1"} // TODO: deprecated should be clean up
 )
 
 func init() {
@@ -163,22 +163,18 @@ func InstantiateAndConfigure(
 	}
 
 	featureGates := loadFeatureConfig(rawConfig.FeatureGates)
-	var dataConfig *datalayer.Config
-	if !featureGates[datalayer.EnableLegacyMetricsFeatureGate] {
-		var err error
-		dataConfig, err = buildDataLayerConfig(rawConfig.DataLayer, handle)
-		if err != nil {
-			return nil, fmt.Errorf("data layer config build failed: %w", err)
-		}
-		if len(dataConfig.Sources) == 0 {
-			logger.Info("No data sources configured; metrics collection is disabled")
-		}
+	dataConfig, err := buildDataLayerConfig(rawConfig.DataLayer, handle)
+	if err != nil {
+		return nil, fmt.Errorf("data layer config build failed: %w", err)
+	}
+	if len(dataConfig.Sources) == 0 {
+		logger.Info("No data sources configured; metrics collection is disabled")
 	}
 
 	var flowControlConfig *flowcontrol.Config
 	if featureGates[flowcontrol.FeatureGate] {
 		var err error
-		flowControlConfig, err = flowcontrol.NewConfigFromAPI(rawConfig.FlowControl, handle)
+		flowControlConfig, err = buildFlowControlConfig(rawConfig.FlowControl, handle)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load flow control config: %w", err)
 		}
@@ -341,14 +337,14 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 		if sourcePlugin, ok := handle.Plugin(source.PluginRef).(fwkdl.DataSource); ok {
 			sourceConfig := datalayer.DataSourceConfig{
 				Plugin:     sourcePlugin,
-				Extractors: []fwkdl.ExtractorBase{},
+				Extractors: []fwkplugin.Plugin{},
 			}
 			for _, extractor := range source.Extractors {
-				if extractorPlugin, ok := handle.Plugin(extractor.PluginRef).(fwkdl.ExtractorBase); ok {
-					sourceConfig.Extractors = append(sourceConfig.Extractors, extractorPlugin)
-				} else {
-					return nil, fmt.Errorf("the plugin %s is not a fwkdl.ExtractorBase", source.PluginRef)
+				extractorPlugin := handle.Plugin(extractor.PluginRef)
+				if extractorPlugin == nil {
+					return nil, fmt.Errorf("the plugin %s is not registered", extractor.PluginRef)
 				}
+				sourceConfig.Extractors = append(sourceConfig.Extractors, extractorPlugin)
 			}
 			cfg.Sources = append(cfg.Sources, sourceConfig)
 		} else {

@@ -40,7 +40,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	metricsutils "k8s.io/component-base/metrics/testutil"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -48,7 +47,6 @@ import (
 
 	eppRunner "github.com/llm-d/llm-d-router/cmd/epp/runner"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -74,9 +72,6 @@ const (
 	// mockDataSourceType is the plugin type name used for the mock data source in integration tests.
 	mockDataSourceType = "mock-metrics-source"
 )
-
-//go:embed testdata/default-config.yaml
-var testConfig string
 
 //go:embed testdata/datalayer-config.yaml
 var testDLConfig string
@@ -104,9 +99,6 @@ type HarnessConfig struct {
 
 	// Tracing indicates if tracing should be enabled for this test.
 	Tracing bool
-
-	// useDataLayer switches the harness to use the data layer pipeline instead of FakePodMetricsClient.
-	useDataLayer bool
 }
 
 // HarnessOption is a functional option for configuring the TestHarness.
@@ -141,37 +133,18 @@ func WithTracing() HarnessOption {
 	}
 }
 
-// WithDataLayer configures the harness to use the data layer pipeline with a mock DataSource.
-func WithDataLayer() HarnessOption {
-	return func(c *HarnessConfig) {
-		c.useDataLayer = true
-	}
-}
-
 // metricsBackend abstracts how pod metrics are injected into the test environment.
-// The standard harness uses FakePodMetricsClient; the datalayer harness uses a mock DataSource.
 type metricsBackend interface {
 	SetPodMetrics(m map[types.NamespacedName]*fwkdl.Metrics)
-}
-
-// fakePmcBackend wraps FakePodMetricsClient to implement metricsBackend.
-type fakePmcBackend struct {
-	fakePmc *backendmetrics.FakePodMetricsClient
-}
-
-func (b *fakePmcBackend) SetPodMetrics(m map[types.NamespacedName]*fwkdl.Metrics) {
-	b.fakePmc.SetRes(m)
 }
 
 // mockDataSourceBackend wraps the mock DataSource to implement metricsBackend.
 type mockDataSourceBackend struct {
 	mockDataSource *dlmocks.MetricsDataSource
-	fakePmc        *backendmetrics.FakePodMetricsClient
 }
 
 func (b *mockDataSourceBackend) SetPodMetrics(m map[types.NamespacedName]*fwkdl.Metrics) {
 	b.mockDataSource.SetMetrics(m)
-	b.fakePmc.SetRes(m)
 }
 
 // TestHarness encapsulates the environment for a single isolated EPP test run.
@@ -217,19 +190,14 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 	}
 
 	// Determine config text and namespace prefix.
-	configText := testConfig
-	nsPrefix := "epp-test-"
-	if config.useDataLayer {
-		configText = testDLConfig
-		nsPrefix = "epp-dl-test-"
-	}
+	configText := testDLConfig
 	if config.configText != nil {
 		configText = *config.configText
 	}
 
 	// Create dedicated namespace for the whole test.
 	uid := uuid.New().String()[:8]
-	testNamespaceName := nsPrefix + uid
+	testNamespaceName := "epp-test-" + uid
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespaceName}}
 	require.NoError(t, k8sClient.Create(ctx, ns), "failed to create test namespace")
 
@@ -239,32 +207,17 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 		eppOptions.EndpointSelector = "app=" + testPoolName
 	}
 
-	fakePmc := &backendmetrics.FakePodMetricsClient{}
-	var backend metricsBackend
-	var mgr ctrl.Manager
-	var dataStore datastore.Datastore
-	var err error
-	var runner *eppRunner.Runner
+	// Shorten the Prometheus refresh interval so WaitForReadyPodsMetric (10s timeout)
+	// has many opportunities to observe the metric update instead of only ~2.
+	eppOptions.RefreshPrometheusMetricsInterval = 500 * time.Millisecond
 
-	if config.useDataLayer {
-		// Shorten the Prometheus refresh interval so WaitForReadyPodsMetric (10s timeout)
-		// has many opportunities to observe the metric update instead of only ~2.
-		eppOptions.RefreshPrometheusMetricsInterval = 500 * time.Millisecond
-
-		// Data layer path: create mock data source and wire it in.
-		mockDataSource := dlmocks.NewDataSource(plugin.TypedName{
-			Type: mockDataSourceType,
-			Name: mockDataSourceType,
-		})
-		runner, mgr, dataStore, err = eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, fakePmc, mockDataSource)
-		require.NoError(t, err, "failed to create manager")
-		backend = &mockDataSourceBackend{mockDataSource: mockDataSource, fakePmc: fakePmc}
-	} else {
-		// Standard path: use FakePodMetricsClient directly.
-		runner, mgr, dataStore, err = eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, fakePmc, nil)
-		require.NoError(t, err, "failed to create manager")
-		backend = &fakePmcBackend{fakePmc: fakePmc}
-	}
+	mockDataSource := dlmocks.NewDataSource(plugin.TypedName{
+		Type: mockDataSourceType,
+		Name: mockDataSourceType,
+	})
+	runner, mgr, dataStore, err := eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, mockDataSource)
+	require.NoError(t, err, "failed to create manager")
+	backend := metricsBackend(&mockDataSourceBackend{mockDataSource: mockDataSource})
 
 	// Tracing Setup (InMemory)
 	var exporter *tracetest.InMemoryExporter

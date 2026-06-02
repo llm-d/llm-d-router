@@ -17,186 +17,41 @@ limitations under the License.
 package flowcontrol
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/utils/ptr"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
-	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
-	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
-func TestNewConfigFromAPI(t *testing.T) {
+func TestNewConfig(t *testing.T) {
 	t.Parallel()
 
-	handle := igwtestutils.NewTestHandle(context.Background())
-	handle.AddPlugin(globalstrict.GlobalStrictFairnessPolicyType, &mocks.MockFairnessPolicy{
-		TypedNameV: fwkplugin.TypedName{
-			Name: globalstrict.GlobalStrictFairnessPolicyType,
-			Type: globalstrict.GlobalStrictFairnessPolicyType,
-		},
+	t.Run("all fields are correctly assigned", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := &controller.Config{EnqueueChannelBufferSize: 42}
+		reg := &registry.Config{MaxBytes: 1024}
+		ulp := usagelimits.DefaultPolicy()
+
+		cfg := NewConfig(ctrl, reg, ulp)
+
+		assert.NotNil(t, cfg, "NewConfig should return a non-nil Config")
+		assert.Same(t, ctrl, cfg.Controller, "Controller should be the same pointer passed in")
+		assert.Same(t, reg, cfg.Registry, "Registry should be the same pointer passed in")
+		assert.Same(t, ulp, cfg.UsageLimitPolicy, "UsageLimitPolicy should be the same pointer passed in")
 	})
-	handle.AddPlugin(fcfs.FCFSOrderingPolicyType, &mocks.MockOrderingPolicy{
-		TypedNameV: fwkplugin.TypedName{
-			Name: fcfs.FCFSOrderingPolicyType,
-			Type: fcfs.FCFSOrderingPolicyType,
-		},
+
+	t.Run("nil values are handled gracefully", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := NewConfig(nil, nil, nil)
+
+		assert.NotNil(t, cfg, "NewConfig should return a non-nil Config even when all arguments are nil")
+		assert.Nil(t, cfg.Controller, "Controller should be nil when nil was passed")
+		assert.Nil(t, cfg.Registry, "Registry should be nil when nil was passed")
+		assert.Nil(t, cfg.UsageLimitPolicy, "UsageLimitPolicy should be nil when nil was passed")
 	})
-	handle.AddPlugin(usagelimits.StaticUsageLimitPolicyType, usagelimits.DefaultPolicy())
-
-	// A func-based custom policy that always returns 0.8 — demonstrates that users can define
-	// their policy in the standard plugins section and reference it via UsageLimit.PluginRef.
-	const funcPolicyName = "func-policy"
-	handle.AddPlugin(funcPolicyName, usagelimits.NewPolicyFunc(funcPolicyName, func(_ context.Context, _ float64, priorities []int) []float64 {
-		result := make([]float64, len(priorities))
-		for i := range result {
-			result[i] = 0.8
-		}
-		return result
-	}))
-
-	// A hand-rolled struct implementing UsageLimitPolicy — demonstrates that any struct
-	// satisfying the interface can be registered and resolved, without relying on usagelimits helpers.
-	const structPolicyName = "struct-policy"
-	handle.AddPlugin(structPolicyName, &constantPointEightPolicy{})
-
-	testCases := []struct {
-		name        string
-		apiConfig   *configapi.FlowControlConfig
-		assertion   func(*testing.T, *Config)
-		expectedErr string
-	}{
-		{
-			name:      "Success - Nil Config defaults",
-			apiConfig: nil,
-			assertion: func(t *testing.T, cfg *Config) {
-				assert.NotNil(t, cfg.Registry, "Registry config sub-struct should be initialized even when API config is nil")
-				assert.NotNil(t, cfg.Controller,
-					"Controller config sub-struct should be initialized even when API config is nil")
-				assert.NotZero(t, cfg.Controller.EnqueueChannelBufferSize,
-					"Controller should contain default values (EnqueueChannelBufferSize) when API config is nil")
-			},
-		},
-		{
-			name: "Success - Explicit Values",
-			apiConfig: &configapi.FlowControlConfig{
-				MaxBytes: ptr.To(resource.MustParse("2048")),
-			},
-			assertion: func(t *testing.T, cfg *Config) {
-				assert.Equal(t, uint64(2048), cfg.Registry.MaxBytes,
-					"MaxBytes should be correctly translated from resource.Quantity in API to uint64 in internal config")
-			},
-		},
-		{
-			name:      "Success - Default UsageLimitPolicy when UsageLimit is nil",
-			apiConfig: nil,
-			assertion: func(t *testing.T, cfg *Config) {
-				require.NotNil(t, cfg.UsageLimitPolicy, "UsageLimitPolicy should be resolved even when not explicitly configured")
-				ceilings := cfg.UsageLimitPolicy.ComputeLimit(context.Background(), 0.5, []int{0})
-				assert.Equal(t, []float64{1.0}, ceilings, "Default noop policy should return 1.0 (no gating)")
-			},
-		},
-		{
-			name: "Success - UsageLimitPolicyPluginRef is resolved",
-			apiConfig: &configapi.FlowControlConfig{
-				UsageLimitPolicyPluginRef: usagelimits.StaticUsageLimitPolicyType,
-			},
-			assertion: func(t *testing.T, cfg *Config) {
-				require.NotNil(t, cfg.UsageLimitPolicy, "UsageLimitPolicy should be resolved from the handle")
-				ceilings := cfg.UsageLimitPolicy.ComputeLimit(context.Background(), 0.5, []int{0})
-				assert.Equal(t, []float64{1.0}, ceilings, "Noop policy should return 1.0 (no gating)")
-			},
-		},
-		{
-			name: "Success - Func-based UsageLimitPolicy resolved via PluginRef",
-			apiConfig: &configapi.FlowControlConfig{
-				UsageLimitPolicyPluginRef: funcPolicyName,
-			},
-			assertion: func(t *testing.T, cfg *Config) {
-				require.NotNil(t, cfg.UsageLimitPolicy)
-				ctx := context.Background()
-				for _, tc := range []struct {
-					name       string
-					priority   int
-					saturation float64
-				}{
-					{"zero saturation", 0, 0.0},
-					{"half saturation", 1, 0.5},
-					{"full saturation", 5, 1.0},
-				} {
-					assert.Equal(t, []float64{0.8}, cfg.UsageLimitPolicy.ComputeLimit(ctx, tc.saturation, []int{tc.priority}),
-						"func-based policy should return 0.8 at %s", tc.name)
-				}
-			},
-		},
-		{
-			name: "Success - Struct-based UsageLimitPolicy resolved via PluginRef",
-			apiConfig: &configapi.FlowControlConfig{
-				UsageLimitPolicyPluginRef: structPolicyName,
-			},
-			assertion: func(t *testing.T, cfg *Config) {
-				require.NotNil(t, cfg.UsageLimitPolicy)
-				ctx := context.Background()
-				for _, tc := range []struct {
-					name       string
-					priority   int
-					saturation float64
-				}{
-					{"zero saturation", 0, 0.0},
-					{"half saturation", 1, 0.5},
-					{"full saturation", 5, 1.0},
-				} {
-					assert.Equal(t, []float64{0.8}, cfg.UsageLimitPolicy.ComputeLimit(ctx, tc.saturation, []int{tc.priority}),
-						"struct-based policy should return 0.8 at %s", tc.name)
-				}
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			cfg, err := NewConfigFromAPI(tc.apiConfig, handle)
-
-			require.NoError(t, err, "NewConfigFromAPI should not return an error for valid configuration")
-			require.NotNil(t, cfg, "NewConfigFromAPI should return a non-nil Config object on success")
-
-			if tc.assertion != nil {
-				tc.assertion(t, cfg)
-			}
-		})
-	}
 }
-
-// constantPointEightPolicy is a hand-rolled UsageLimitPolicy implementation that always returns 0.8.
-// It exists to show that any struct satisfying the interface can be registered and resolved,
-// without relying on the usagelimits.NewPolicyFunc helper.
-type constantPointEightPolicy struct{}
-
-func (p *constantPointEightPolicy) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{
-		Type: "constant-point-eight-policy-type",
-		Name: "constant-point-eight-policy",
-	}
-}
-
-func (p *constantPointEightPolicy) ComputeLimit(_ context.Context, _ float64, priorities []int) []float64 {
-	result := make([]float64, len(priorities))
-	for i := range result {
-		result[i] = 0.8
-	}
-	return result
-}
-
-// compile-time check that constantPointEightPolicy satisfies the interface.
-var _ fwkfc.UsageLimitPolicy = (*constantPointEightPolicy)(nil)

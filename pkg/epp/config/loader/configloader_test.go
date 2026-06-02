@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -74,7 +73,6 @@ func TestLoadRawConfiguration(t *testing.T) {
 
 	// Register known feature gates for validation.
 	RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	RegisterFeatureGate(datalayer.EnableLegacyMetricsFeatureGate)
 	RegisterFeatureGate(flowcontrol.FeatureGate)
 
 	queueScorerWeight := 2.0
@@ -94,7 +92,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "EndpointPickerConfig",
-					APIVersion: "llm-d.ai/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 				},
 				Plugins: []configapi.PluginSpec{
 					{Name: "test1", Type: testPluginType, Parameters: json.RawMessage(`{"threshold":10}`)},
@@ -168,7 +166,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "EndpointPickerConfig",
-					APIVersion: "llm-d.ai/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 				},
 				Plugins: []configapi.PluginSpec{
 					{Name: "test1", Type: testPluginType, Parameters: json.RawMessage(`{"threshold":10}`)},
@@ -183,7 +181,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			configText: "",
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: "llm-d.ai/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 					Kind:       "EndpointPickerConfig",
 				},
 				FeatureGates: configapi.FeatureGates{}, // Empty means datalayer enabled (default behavior)
@@ -248,7 +246,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "EndpointPickerConfig",
-					APIVersion: "llm-d.ai/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 				},
 				Plugins: []configapi.PluginSpec{
 					{Name: "maxScore", Type: "max-score-picker"},
@@ -282,7 +280,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			want: &configapi.EndpointPickerConfig{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "EndpointPickerConfig",
-					APIVersion: "llm-d.ai/v1alpha1",
+					APIVersion: configapi.GroupVersion.String(),
 				},
 				Plugins: []configapi.PluginSpec{
 					{Name: "maxScore", Type: "max-score-picker"},
@@ -355,7 +353,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 	registerTestPlugins(t)
 
 	RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	RegisterFeatureGate(datalayer.EnableLegacyMetricsFeatureGate)
 	RegisterFeatureGate(flowcontrol.FeatureGate)
 
 	tests := []struct {
@@ -634,16 +631,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 		{
-			name:       "Success (DataLayer) - Legacy metrics via enableLegacyMetrics gate",
-			configText: successDataLayerDisabledText,
-			wantErr:    false,
-			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.Nil(t, rawCfg.DataLayer, "Data section should NOT be injected when datalayer is disabled")
-				require.Nil(t, handle.Plugin(sourcemetrics.MetricsDataSourceType), "MetricsDataSource should not be instantiated")
-				require.Nil(t, handle.Plugin(extractormetrics.MetricsExtractorType), "MetricsExtractor should not be instantiated")
-			},
-		},
-		{
 			name:       "Success (DataLayer) - Empty dataLayer section injects defaults (additive)",
 			configText: successDataLayerNoSourcesText,
 			wantErr:    false,
@@ -832,11 +819,7 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, endpoints []fwk
 	return 0.5
 }
 
-func (m *mockSource) AddExtractor(_ fwkdl.Extractor) error {
-	return nil
-}
-
-func (m *mockSource) Collect(ctx context.Context, ep fwkdl.Endpoint) error {
+func (m *mockSource) Collect(_ context.Context, _ fwkdl.Endpoint) error {
 	return nil
 }
 
@@ -844,22 +827,10 @@ func (m *mockSource) Extractors() []string {
 	return []string{}
 }
 
-func (m *mockSource) OutputType() reflect.Type {
-	return fwkdl.NotificationEventType
-}
-
-func (m *mockSource) ExtractorType() reflect.Type {
-	return fwkdl.ExtractorType
-}
-
-// Mock Extractor
+// Mock Extractor: satisfies Extractor[NotificationEvent] for loader tests.
 type mockExtractor struct{ mockPlugin }
 
-func (m *mockExtractor) ExpectedInputType() reflect.Type {
-	return reflect.TypeFor[string]()
-}
-
-func (m *mockExtractor) Extract(ctx context.Context, data any, ep fwkdl.Endpoint) error {
+func (m *mockExtractor) Extract(_ context.Context, _ fwkdl.NotificationEvent) error {
 	return nil
 }
 

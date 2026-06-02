@@ -69,14 +69,21 @@ spec:
         ports:
         - name: render-http
           containerPort: 8000
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 2
+          periodSeconds: 1
+          timeoutSeconds: 1
+          failureThreshold: 600
         readinessProbe:
           httpGet:
             path: /health
             port: 8000
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 60
+          periodSeconds: 5
+          timeoutSeconds: 1
+          failureThreshold: 1
         volumeMounts:
         - name: model-cache
           mountPath: /root/.cache/huggingface

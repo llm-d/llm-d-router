@@ -18,12 +18,10 @@ package loader
 
 import (
 	"fmt"
-	"slices"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
-	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -49,7 +47,7 @@ func loadDefaultConfig() *configapi.EndpointPickerConfig {
 	prefixCacheScorerWeight := 3.0
 	return &configapi.EndpointPickerConfig{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "llm-d.ai/v1alpha1",
+			APIVersion: configapi.GroupVersion.String(),
 			Kind:       "EndpointPickerConfig",
 		},
 		FeatureGates: []string{}, // Data layer is now enabled by default (no feature gate needed)
@@ -298,9 +296,6 @@ func ensureSaturationDetector(
 // Unlike other ensureXxx functions, it checks for explicit opt-out via InjectDefaults and avoids
 // double-injection when the metrics source is already present in a user-supplied config.
 func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin) error {
-	if slices.Contains(cfg.FeatureGates, datalayer.EnableLegacyMetricsFeatureGate) {
-		return nil
-	}
 	if cfg.DataLayer != nil && cfg.DataLayer.InjectDefaults != nil && !*cfg.DataLayer.InjectDefaults {
 		return nil
 	}

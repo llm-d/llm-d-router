@@ -125,5 +125,5 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		body.Stream = true
 	}
-	return &fwkrh.ParseResult{Body: body, Skip: false}, nil
+	return &fwkrh.ParseResult{Body: body, SkipResponseProcessing: false}, nil
 }

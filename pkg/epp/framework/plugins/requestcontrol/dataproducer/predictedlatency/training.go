@@ -153,6 +153,7 @@ func getLatestMetricsForProfile(predictedLatencyCtx *predictedLatencyCtx, profil
 // bulkPredictWithMetrics performs bulk predictions for multiple pods using their metrics states.
 func bulkPredictWithMetrics(
 	ctx context.Context,
+	pluginName, pluginType string,
 	predictedLatencyContext *predictedLatencyCtx,
 	predictor latencypredictor.PredictorInterface,
 	metricsStates []*fwkdl.Metrics,
@@ -219,8 +220,8 @@ func bulkPredictWithMetrics(
 	}
 
 	if predictedLatencyContext != nil {
-		recordRequestTTFTPredictionDuration(ctx, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
-		recordRequestTPOTPredictionDuration(ctx, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
+		recordRequestTTFTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
+		recordRequestTPOTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
 	}
 
 	results := make([]*latencypredictor.PredictionResponse, len(bulkResponse.Predictions))

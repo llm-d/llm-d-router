@@ -40,7 +40,19 @@ func testHandle() plugin.Handle {
 	return plugin.NewEppHandle(context.Background(), nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
 }
 
+// disableMinBlockSizeClamp lowers the runtime block-size floor to 1 for tests
+// that exercise prefix-match logic with deliberately small block sizes. The
+// production default (64) would clamp tiny test inputs, hiding the behavior
+// under test. Restores the previous value on cleanup.
+func disableMinBlockSizeClamp(t *testing.T) {
+	t.Helper()
+	prev := minBlockSizeTokens
+	minBlockSizeTokens = 1
+	t.Cleanup(func() { minBlockSizeTokens = prev })
+}
+
 func TestProduce(t *testing.T) {
+	disableMinBlockSizeClamp(t)
 	config := config{
 		BlockSizeTokens:        1,
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
@@ -89,49 +101,104 @@ func TestProduce(t *testing.T) {
 }
 
 func TestPreRequest(t *testing.T) {
-	config := config{
-		BlockSizeTokens:        1,
-		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
-		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
-	}
-	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
+	disableMinBlockSizeClamp(t)
+	t.Run("Basic cache update", func(t *testing.T) {
+		config := config{
+			BlockSizeTokens:        1,
+			MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+			LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+		}
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
-	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
-	req1 := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model1",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: "aaaabbbb"},
+		endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+		req1 := &fwksched.InferenceRequest{
+			RequestID:   uuid.NewString(),
+			TargetModel: "test-model1",
+			Body: &fwkrh.InferenceRequestBody{
+				Completions: &fwkrh.CompletionsRequest{
+					Prompt: fwkrh.Prompt{Raw: "aaaabbbb"},
+				},
 			},
-		},
-	}
+		}
 
-	// 1. Produce data (this saves state)
-	_ = p.Produce(context.Background(), req1, []fwksched.Endpoint{endpoint1})
+		// 1. Produce data (this saves state)
+		_ = p.Produce(context.Background(), req1, []fwksched.Endpoint{endpoint1})
 
-	// 2. Simulate scheduling result
-	res := &fwksched.SchedulingResult{
-		PrimaryProfileName: "default",
-		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			"default": {
-				TargetEndpoints: []fwksched.Endpoint{endpoint1},
+		// 2. Simulate scheduling result
+		res := &fwksched.SchedulingResult{
+			PrimaryProfileName: "default",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {
+					TargetEndpoints: []fwksched.Endpoint{endpoint1},
+				},
 			},
-		},
-	}
+		}
 
-	// 3. Call PreRequest
-	p.PreRequest(context.Background(), req1, res)
+		// 3. Call PreRequest
+		p.PreRequest(context.Background(), req1, res)
 
-	// Wait for async update
-	p.wg.Wait()
+		// Wait for async update
+		p.wg.Wait()
 
-	// 4. Verify indexer was updated
-	hashes := getBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks, NewApproximatePrefixCacheTokenEstimator(context.Background(), &defaultMultimodalConfig))
-	for _, hash := range hashes {
-		pods := p.indexer().Get(hash)
-		assert.Contains(t, pods, ServerID(endpoint1.GetMetadata().NamespacedName))
-	}
+		// 4. Verify indexer was updated
+		hashes := getBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks, NewApproximatePrefixCacheTokenEstimator(context.Background(), &defaultMultimodalConfig))
+		for _, hash := range hashes {
+			pods := p.indexer().Get(hash)
+			assert.Contains(t, pods, ServerID(endpoint1.GetMetadata().NamespacedName))
+		}
+	})
+
+	t.Run("Respects LRUCapacityPerServer config", func(t *testing.T) {
+		config := config{
+			AutoTune:               false,
+			BlockSizeTokens:        1,
+			MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+			LRUCapacityPerServer:   2,
+		}
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
+
+		endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+
+		// We will send three requests with different prompts to generate distinct hashes.
+		// Since BlockSizeTokens is 1, each request should generate hashes.
+		// We want each request to have exactly 1 block of characters to easily control capacity.
+		// averageCharactersPerToken is 4. So 4 characters = 1 block.
+		prompts := []string{"aaaa", "bbbb", "cccc"}
+		allHashes := make([][]blockHash, 0, len(prompts))
+
+		for _, prompt := range prompts {
+			req := &fwksched.InferenceRequest{
+				RequestID:   uuid.NewString(),
+				TargetModel: "test-model1",
+				Body: &fwkrh.InferenceRequestBody{
+					Completions: &fwkrh.CompletionsRequest{
+						Prompt: fwkrh.Prompt{Raw: prompt},
+					},
+				},
+			}
+			_ = p.Produce(context.Background(), req, []fwksched.Endpoint{endpoint1})
+
+			res := &fwksched.SchedulingResult{
+				PrimaryProfileName: "default",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"default": {
+						TargetEndpoints: []fwksched.Endpoint{endpoint1},
+					},
+				},
+			}
+			p.PreRequest(context.Background(), req, res)
+			p.wg.Wait()
+
+			hashes := getBlockHashes(context.Background(), req, config.BlockSizeTokens, defaultMaxPrefixBlocks, NewApproximatePrefixCacheTokenEstimator(context.Background(), &defaultMultimodalConfig))
+			allHashes = append(allHashes, hashes)
+		}
+
+		// Since capacity is 2, the first prompt's hash ("aaaa") should have been evicted.
+		// "bbbb" and "cccc" should still be present.
+		assert.Empty(t, p.indexer().Get(allHashes[0][0]))
+		assert.NotEmpty(t, p.indexer().Get(allHashes[1][0]))
+		assert.NotEmpty(t, p.indexer().Get(allHashes[2][0]))
+	})
 }
 
 func TestDataProducerValidation(t *testing.T) {
@@ -166,6 +233,7 @@ func TestDataProducerValidation(t *testing.T) {
 }
 
 func TestPrefixPluginCompletion(t *testing.T) {
+	disableMinBlockSizeClamp(t)
 	config := config{
 		BlockSizeTokens:        1,
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
@@ -235,6 +303,7 @@ func TestPrefixPluginCompletion(t *testing.T) {
 }
 
 func TestPrefixPluginChatCompletionsGrowth(t *testing.T) {
+	disableMinBlockSizeClamp(t)
 	config := config{
 		BlockSizeTokens:        2, // Use larger block size
 		AutoTune:               false,
@@ -525,6 +594,7 @@ func TestPrefixPluginChatCompletionsMultimodalSameImageContentMatches(t *testing
 }
 
 func TestPrefixPluginChatCompletionsMultimodalPrefixImageContentMatches(t *testing.T) {
+	disableMinBlockSizeClamp(t)
 	mmCfg := multiModalTokenEstimatorConfig{
 		Image: &imageTokenEstimatorConfig{
 			Mode: ModeFixed,
@@ -617,7 +687,10 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 	podName := "pod-autotune"
 	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: podName}},
 		&fwkdl.Metrics{
-			CacheBlockSize: 16,   // 16 tokens * 4 chars/token = 64 chars per block
+			// Pod reports a block size above minBlockSizeTokens so the autotune
+			// path passes the metric through unclamped. (Metric values below the
+			// minimum are clamped per #1158; see TestGetBlockSize_AutotuneClampsBelowMinimum.)
+			CacheBlockSize: 128,  // 128 tokens * 4 chars/token = 512 chars per block
 			CacheNumBlocks: 1000, // 1000 blocks capacity
 		}, fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint}
@@ -627,16 +700,15 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{
-				// Length 128 chars.
-				// If block size is 64 chars: 2 blocks
-				Prompt: fwkrh.Prompt{Raw: strings.Repeat("a", 128)},
+				// Length 1024 chars / 512 chars per block = 2 blocks.
+				Prompt: fwkrh.Prompt{Raw: strings.Repeat("a", 1024)},
 			},
 		},
 	}
 
 	config := config{
 		AutoTune:               true,
-		BlockSizeTokens:        32, // Should be ignored in favor of pod metrics (16)
+		BlockSizeTokens:        256, // Should be ignored in favor of pod metrics (128)
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   1,
 	}
@@ -644,8 +716,8 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 
 	_ = p.Produce(context.Background(), req, endpoints)
 	state, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
-	// 128 chars / (16 tokens * 4 chars/token) = 2 blocks
-	assert.Equal(t, 2, len(state.PrefixHashes), "Should use pod block size (16 tokens) -> 2 body blocks")
+	// 1024 chars / (128 tokens * 4 chars/token) = 2 blocks
+	assert.Equal(t, 2, len(state.PrefixHashes), "Should use pod block size (128 tokens) -> 2 body blocks")
 
 	schedulingResult := &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
@@ -661,6 +733,7 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 }
 
 func TestMaxPrefixTokensToMatch(t *testing.T) {
+	disableMinBlockSizeClamp(t)
 	// BlockSizeTokens=1 means each block is 4 chars (1 token * 4 chars/token).
 	// With MaxPrefixTokensToMatch=2, maxBlocks = 2/1 = 2, so only the first
 	// 2 blocks (8 chars) of the prompt should be hashed.
@@ -721,6 +794,87 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 	state2, err := plugin.ReadPluginStateKey[*SchedulingContextState](p2.PluginState(), req2.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	assert.NoError(t, err)
 	assert.Equal(t, 3, len(state2.PrefixHashes), "should fall back to MaxPrefixBlocksToMatch when MaxPrefixTokensToMatch is 0")
+}
+
+// TestGetBlockSize_AutotuneClampsBelowMinimum verifies that when AutoTune is on and
+// the endpoint reports a small CacheBlockSize, GetBlockSize floors the result at
+// minBlockSizeTokens to bound EPP indexer memory. See issue #1158.
+func TestGetBlockSize_AutotuneClampsBelowMinimum(t *testing.T) {
+	cfg := config{
+		AutoTune:        true,
+		BlockSizeTokens: 16, // also small; metric should override but clamp wins
+	}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.Metrics{CacheBlockSize: 16}, // model server uses small blocks
+		fwkdl.NewAttributes(),
+	)
+
+	got := p.GetBlockSize([]fwksched.Endpoint{endpoint})
+	assert.Equal(t, minBlockSizeTokens, got,
+		"autotuned block size below the minimum should be clamped to minBlockSizeTokens")
+}
+
+// TestGetBlockSize_AutotuneAboveMinimumPassesThrough verifies the clamp is one-sided —
+// metric values at or above the minimum are returned unchanged.
+func TestGetBlockSize_AutotuneAboveMinimumPassesThrough(t *testing.T) {
+	cfg := config{AutoTune: true, BlockSizeTokens: 16}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.Metrics{CacheBlockSize: 128},
+		fwkdl.NewAttributes(),
+	)
+
+	got := p.GetBlockSize([]fwksched.Endpoint{endpoint})
+	assert.Equal(t, 128, got, "autotuned block size at or above minimum should not be clamped")
+}
+
+// TestGetBlockSize_ManualConfigClampedBelowMinimum verifies that the floor
+// applies to manual configuration as well — configured BlockSizeTokens below
+// minBlockSizeTokens is silently raised so the indexer memory bound holds
+// across both manual and autotune paths.
+func TestGetBlockSize_ManualConfigClampedBelowMinimum(t *testing.T) {
+	cfg := config{AutoTune: false, BlockSizeTokens: 32}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	got := p.GetBlockSize(nil)
+	assert.Equal(t, minBlockSizeTokens, got,
+		"manual BlockSizeTokens below the minimum should be clamped to the floor")
+}
+
+// TestGetBlockSize_AutotuneFallbackClampsLowConfig verifies that the floor applies
+// to the autotune fallback path too — when AutoTune is on but no endpoint metric is
+// available, the configured BlockSizeTokens still gets clamped. This is the path the
+// default config (AutoTune=true, BlockSizeTokens=16) would land on if endpoint
+// metrics are missing.
+func TestGetBlockSize_AutotuneFallbackClampsLowConfig(t *testing.T) {
+	cfg := config{AutoTune: true, BlockSizeTokens: 16} // default config shape
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	// No endpoints passed — exercise the autotune fallback path.
+	got := p.GetBlockSize(nil)
+	assert.Equal(t, minBlockSizeTokens, got,
+		"autotune fallback should clamp BlockSizeTokens to the floor when below minimum")
+}
+
+// TestNewDataProducer_AcceptsLowManualBlockSize verifies that a low
+// BlockSizeTokens with AutoTune off does not cause initialization to fail —
+// GetBlockSize clamps the effective value to minBlockSizeTokens at request
+// time, but the producer construction itself accepts any positive
+// BlockSizeTokens.
+func TestNewDataProducer_AcceptsLowManualBlockSize(t *testing.T) {
+	cfg := config{AutoTune: false, BlockSizeTokens: 32}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err, "low manual BlockSizeTokens should not error at init")
+	assert.NotNil(t, p)
 }
 
 // BenchmarkPrefixPluginStress is a stress test using prompts of increasing length.
@@ -810,6 +964,7 @@ func TestFactory_DeprecatedBlockSizeMapped(t *testing.T) {
 }
 
 func TestPrefixPluginGenerateRequest(t *testing.T) {
+	disableMinBlockSizeClamp(t)
 	// BlockSizeTokens=1 means each block covers 1 token (4 bytes in the serialized key).
 	cfg := config{
 		BlockSizeTokens:        1,

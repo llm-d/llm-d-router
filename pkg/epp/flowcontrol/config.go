@@ -19,11 +19,9 @@ package flowcontrol
 import (
 	"fmt"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const FeatureGate = "flowControl"
@@ -37,40 +35,23 @@ type Config struct {
 	UsageLimitPolicy flowcontrol.UsageLimitPolicy
 }
 
-// NewConfigFromAPI creates a new Config by translating the top-level API configuration.
-func NewConfigFromAPI(apiConfig *configapi.FlowControlConfig, handle plugin.Handle) (*Config, error) {
-	registryConfig, err := registry.NewConfigFromAPI(apiConfig, handle)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create registry config: %w", err)
+func (c *Config) String() string {
+	if c == nil {
+		return "<nil>"
 	}
-	ctrlCfg, err := controller.NewConfigFromAPI(apiConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create controller config: %w", err)
-	}
-	usageLimitPolicy, err := ensureUsageLimitPolicy(apiConfig, handle)
-	if err != nil {
-		return nil, err
-	}
-	cfg := &Config{
-		Controller:       ctrlCfg,
-		Registry:         registryConfig,
-		UsageLimitPolicy: usageLimitPolicy,
-	}
-	return cfg, nil
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
+	// A new type definition inherits the struct fields but does not copy its methods,
+	// bypassing the Stringer check and allowing a safe reflection-based field dump.
+	type temp Config
+	return fmt.Sprintf("%+v", temp(*c))
 }
 
-func ensureUsageLimitPolicy(apiConfig *configapi.FlowControlConfig, handle plugin.Handle) (flowcontrol.UsageLimitPolicy, error) {
-	ref := registry.DefaultUsageLimitPolicyRef
-	if apiConfig != nil && apiConfig.UsageLimitPolicyPluginRef != "" {
-		ref = apiConfig.UsageLimitPolicyPluginRef
+// NewConfig constructs a Config from pre-resolved components.
+// All plugin resolution is performed by the config loader before calling this constructor.
+func NewConfig(ctrl *controller.Config, reg *registry.Config, ulp flowcontrol.UsageLimitPolicy) *Config {
+	return &Config{
+		Controller:       ctrl,
+		Registry:         reg,
+		UsageLimitPolicy: ulp,
 	}
-	p := handle.Plugin(ref)
-	if p == nil {
-		return nil, fmt.Errorf("usage limit policy plugin '%s' not found", ref)
-	}
-	usageLimitPolicy, ok := p.(flowcontrol.UsageLimitPolicy)
-	if !ok {
-		return nil, fmt.Errorf("plugin '%s' does not implement UsageLimitPolicy", ref)
-	}
-	return usageLimitPolicy, nil
 }

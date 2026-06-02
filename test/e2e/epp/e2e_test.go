@@ -184,12 +184,12 @@ var _ = ginkgo.Describe("InferencePool", func() {
 			verifyTrafficRouting()
 		})
 
-		ginkgo.It("Should expose EPP metrics after generating traffic", func() {
+		ginkgo.It("Should expose EPP metrics after generating traffic", ginkgo.Label(gaieMetricsTestLabel), func() {
 			verifyMetrics()
 		})
 	})
 
-	ginkgo.When("Leader election is enabled", func() {
+	ginkgo.When("Leader election is enabled", ginkgo.Label(gaieLeaderElectionTestLabel), func() {
 		ginkgo.It("Should elect one leader and have other pods as not ready", func() {
 			if !leaderElectionEnabled {
 				ginkgo.Skip("Leader election is not enabled for this test run, skipping.")

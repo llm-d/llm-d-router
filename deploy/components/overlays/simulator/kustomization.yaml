@@ -55,18 +55,28 @@ patches:
         ports:
         - name: http
           containerPort: 8082
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 2
+          periodSeconds: 1
+          failureThreshold: 600
+          timeoutSeconds: 1
         livenessProbe:
           httpGet:
             path: /health
             port: 8082
-          initialDelaySeconds: 10
           periodSeconds: 10
+          failureThreshold: 5
+          timeoutSeconds: 1
         readinessProbe:
           httpGet:
             path: /health
             port: 8082
-          initialDelaySeconds: 5
           periodSeconds: 5
+          failureThreshold: 1
+          timeoutSeconds: 1
         volumeMounts:
         - name: model-cache
           mountPath: /root/.cache/huggingface
@@ -96,18 +106,28 @@ patches:
         ports:
         - name: http
           containerPort: 8082
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 2
+          periodSeconds: 1
+          failureThreshold: 600
+          timeoutSeconds: 1
         livenessProbe:
           httpGet:
             path: /health
             port: 8082
-          initialDelaySeconds: 10
           periodSeconds: 10
+          failureThreshold: 5
+          timeoutSeconds: 1
         readinessProbe:
           httpGet:
             path: /health
             port: 8082
-          initialDelaySeconds: 5
           periodSeconds: 5
+          failureThreshold: 1
+          timeoutSeconds: 1
         volumeMounts:
         - name: model-cache
           mountPath: /root/.cache/huggingface
