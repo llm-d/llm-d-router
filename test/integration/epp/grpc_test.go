@@ -51,8 +51,8 @@ schedulingProfiles:
       - pluginRef: prefix-cache-scorer
       - pluginRef: lora-affinity-scorer
 requestHandler:
-  parser:
-    pluginRef: vllmgrpc-parser
+  parsers:
+  - pluginRef: vllmgrpc-parser
 dataLayer:
   sources:
   - pluginRef: mock-metrics-source
