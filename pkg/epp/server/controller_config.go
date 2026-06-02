@@ -24,6 +24,15 @@ import (
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
+var (
+	inferenceAPIGV           = schema.GroupVersion{Group: v1alpha2.GroupVersion.Group, Version: v1alpha2.GroupVersion.Version}
+	legacyInferenceAPIGV     = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: v1alpha2.GroupVersion.Version}
+	supportedInferenceAPIGVs = []schema.GroupVersion{
+		inferenceAPIGV,
+		legacyInferenceAPIGV,
+	}
+)
+
 type ControllerConfig struct {
 	startCrdReconcilers       bool
 	hasInferenceObjective     bool
@@ -49,19 +58,17 @@ func (cc *ControllerConfig) PopulateControllerConfig(cfg *rest.Config) error {
 }
 
 func (cc *ControllerConfig) populateWithDiscovery(dc discovery.DiscoveryInterface) {
-	inferenceObjectiveGVK := schema.GroupVersionKind{
-		Group:   v1alpha2.GroupVersion.Group,
-		Version: v1alpha2.GroupVersion.Version,
-		Kind:    "InferenceObjective",
-	}
-	cc.hasInferenceObjective = gvkExists(dc, inferenceObjectiveGVK)
+	cc.hasInferenceObjective = kindExistsInAnyGroupVersion(dc, "InferenceObjective", supportedInferenceAPIGVs)
+	cc.hasInferenceModelRewrites = kindExistsInAnyGroupVersion(dc, "InferenceModelRewrite", supportedInferenceAPIGVs)
+}
 
-	inferenceModelRewriteGVK := schema.GroupVersionKind{
-		Group:   v1alpha2.GroupVersion.Group,
-		Version: v1alpha2.GroupVersion.Version,
-		Kind:    "InferenceModelRewrite",
+func kindExistsInAnyGroupVersion(dc discovery.DiscoveryInterface, kind string, groupVersions []schema.GroupVersion) bool {
+	for _, gv := range groupVersions {
+		if gvkExists(dc, gv.WithKind(kind)) {
+			return true
+		}
 	}
-	cc.hasInferenceModelRewrites = gvkExists(dc, inferenceModelRewriteGVK)
+	return false
 }
 
 func gvkExists(dc discovery.DiscoveryInterface, gvk schema.GroupVersionKind) bool {

@@ -333,6 +333,17 @@ EPP generic validations
 {{- include "llm-d-router.validations.deprecations" . }}
 {{- include "llm-d-router.validations.epp.resources" . }}
 {{- include "llm-d-router.validations.epp.inferenceObjectives" . }}
+{{- include "llm-d-router.validations.epp.tokenizer" . }}
+{{- end -}}
+
+{{/*
+Tokenizer validations: require modelName for the render sidecar's command args.
+*/}}
+{{- define "llm-d-router.validations.epp.tokenizer" -}}
+{{- $tokenizer := .Values.router.tokenizer | default dict }}
+{{- if and (dig "enabled" false $tokenizer) (not (dig "modelName" "" $tokenizer)) }}
+{{- fail ".Values.router.tokenizer.modelName is required when the tokenizer is enabled." }}
+{{- end }}
 {{- end -}}
 
 {{/*

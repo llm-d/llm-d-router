@@ -259,32 +259,46 @@ spec:
         {{- toYaml .Values.router.epp.volumeMounts | nindent 12 }}
         {{- end }}
         {{- if .Values.router.tokenizer.enabled }}
-            - name: tokenizer-uds
-              mountPath: /tmp/tokenizer
-        {{- end }}
-        {{- if .Values.router.tokenizer.enabled }}
-        - name: tokenizer-uds
-          image: {{ .Values.router.tokenizer.image.registry }}/{{ .Values.router.tokenizer.image.repository }}:{{ .Values.router.tokenizer.image.tag }}
-          imagePullPolicy: {{ .Values.router.tokenizer.image.pullPolicy | default "IfNotPresent" }}
+        {{- $tokenizer := .Values.router.tokenizer }}
+        {{- $renderPort := $tokenizer.port | default 8000 | int }}
+        - name: vllm-render
+          image: {{ $tokenizer.image.registry }}/{{ $tokenizer.image.repository }}:{{ $tokenizer.image.tag }}
+          imagePullPolicy: {{ $tokenizer.image.pullPolicy | default "IfNotPresent" }}
+          command:
+          {{- if $tokenizer.command }}
+          {{- toYaml $tokenizer.command | nindent 12 }}
+          {{- else }}
+            - vllm
+            - launch
+            - render
+          {{- end }}
+          args:
+          {{- if $tokenizer.args }}
+          {{- toYaml $tokenizer.args | nindent 12 }}
+          {{- else }}
+            - {{ $tokenizer.modelName | quote }}
+            - {{ printf "--port=%d" $renderPort | quote }}
+          {{- end }}
+          ports:
+            - name: render-http
+              containerPort: {{ $renderPort }}
+          {{- with $tokenizer.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $tokenizer.env }}
           env:
-            - name: TOKENIZERS_DIR
-              value: /tokenizers
-            - name: HF_HOME
-              value: /tokenizers
-            {{- if .Values.router.tokenizer.env }}
-            {{- toYaml .Values.router.tokenizer.env | nindent 12 }}
-            {{- end }}
-          {{- if .Values.router.tokenizer.resources }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $tokenizer.resources }}
           resources:
-            {{- toYaml .Values.router.tokenizer.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
-            - mountPath: /tokenizers
-              name: tokenizers
-            - mountPath: /tmp/tokenizer
-              name: tokenizer-uds
-            {{- if .Values.router.tokenizer.volumeMounts }}
-            {{- toYaml .Values.router.tokenizer.volumeMounts | nindent 12 }}
+            - mountPath: /root/.cache/huggingface
+              name: model-cache
+            {{- with $tokenizer.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- end }}
       {{- include "llm-d-router.latencyPredictor.containers" . | nindent 8 }}
@@ -293,9 +307,7 @@ spec:
       {{- toYaml .Values.router.epp.volumes | nindent 8 }}
       {{- end }}
       {{- if .Values.router.tokenizer.enabled }}
-        - name: tokenizers
-          emptyDir: {}
-        - name: tokenizer-uds
+        - name: model-cache
           emptyDir: {}
       {{- end }}
       {{- if and $proxy.enabled (eq $proxyType "agentgateway") $proxyConfigMapName }}
