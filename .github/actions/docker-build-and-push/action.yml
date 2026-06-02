@@ -60,5 +60,6 @@ runs:
         build-args: |
           LDFLAGS=-s -w
           COMMIT_SHA=${{ inputs.commit-sha || 'unknown' }}
+          BUILD_REF=${{ inputs.tag || 'unknown' }}
         cache-from: type=gha,scope=${{ inputs.image-name }}
         cache-to: type=gha,mode=max,scope=${{ inputs.image-name }}

@@ -41,6 +41,7 @@ jobs:
           registry: ghcr.io/llm-d
           github-token: ${{ github.token }}
           prerelease: ${{ inputs.prerelease }}
+          commit-sha: ${{ github.sha }}
 
       - name: Run Trivy scan on EPP image
         uses: ./.github/actions/trivy-scan
@@ -62,6 +63,7 @@ jobs:
           registry: ghcr.io/llm-d
           github-token: ${{ github.token }}
           prerelease: ${{ inputs.prerelease }}
+          commit-sha: ${{ github.sha }}
 
       - name: Run Trivy scan on sidecar image
         uses: ./.github/actions/trivy-scan
