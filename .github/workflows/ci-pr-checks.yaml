@@ -126,7 +126,7 @@ jobs:
         run: |
           gh api "repos/${{ github.repository }}/branches" \
             --paginate \
-            --jq '[.[] | select(.name | startswith("release-")) | .name][]' \
+            --jq '[.[] | select(.name | test("^release-[0-9]")) | .name][]' \
             | sort -V | tail -1 > /tmp/release_branches.txt
           echo "Release branches found:"
           cat /tmp/release_branches.txt
