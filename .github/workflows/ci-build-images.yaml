@@ -42,7 +42,7 @@ jobs:
           push: 'false'
           buildx-outputs: type=docker,dest=/tmp/epp-image.tar
 
-      # Gate the push on the scan: a HIGH/CRITICAL by default when not set but configable
+      # Gate the push on the scan: a HIGH/CRITICAL by default when not set but configurable
       - name: Run Trivy scan for EPP on AMD64
         uses: ./.github/actions/trivy-scan
         with:
