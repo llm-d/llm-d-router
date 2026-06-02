@@ -19,7 +19,9 @@ package prefix
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -32,13 +34,17 @@ import (
 // Config defines the configuration for the prefix cache scorer plugin.
 type Config struct {
 	// The name of the data producer that produces PrefixCacheMatchInfo.
-	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
+	PrefixMatchInfoProducerName string   `json:"prefixMatchInfoProducerName,omitempty"`
+	PrefixLengthWeight          *float64 `json:"prefixLengthWeight,omitempty"`
+	MaxModelLen                 *int     `json:"maxModelLen,omitempty"`
 }
 
 // Plugin implements the prefix cache aware scoring logic.
 type Plugin struct {
 	typedName          plugin.TypedName
 	prefixMatchDataKey plugin.DataKey
+	prefixLengthWeight float64
+	maxModelLen        int
 }
 
 // compile-time type assertions
@@ -64,6 +70,23 @@ func PrefixCachePluginFactory(name string, decoder *json.Decoder, handle plugin.
 	if err != nil {
 		return nil, err
 	}
+
+	if cfg.PrefixLengthWeight != nil {
+		if *cfg.PrefixLengthWeight < 0.0 || *cfg.PrefixLengthWeight > 1.0 {
+			return nil, fmt.Errorf("prefixLengthWeight must be between 0.0 and 1.0, got %f", *cfg.PrefixLengthWeight)
+		}
+		p.prefixLengthWeight = *cfg.PrefixLengthWeight
+	}
+	if cfg.MaxModelLen != nil {
+		if *cfg.MaxModelLen <= 0 {
+			return nil, fmt.Errorf("maxModelLen must be greater than 0, got %d", *cfg.MaxModelLen)
+		}
+		p.maxModelLen = *cfg.MaxModelLen
+	}
+	if p.prefixLengthWeight > 0.0 && cfg.MaxModelLen == nil {
+		return nil, errors.New("maxModelLen must be specified when prefixLengthWeight is greater than 0")
+	}
+
 	return p, nil
 }
 
@@ -115,8 +138,18 @@ func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 		}
 
 		if prefixMatchInfo, ok := info.(*attrprefix.PrefixCacheMatchInfo); ok {
-			if prefixMatchInfo.TotalBlocks() != 0 {
-				scores[endpoint] = float64(prefixMatchInfo.MatchBlocks()) / float64(prefixMatchInfo.TotalBlocks())
+			totalBlocks := prefixMatchInfo.TotalBlocks()
+			if totalBlocks != 0 {
+				matchRatio := float64(prefixMatchInfo.MatchBlocks()) / float64(totalBlocks)
+				matchLengthRatio := 0.0
+				blockSize := prefixMatchInfo.BlockSizeTokens()
+				if blockSize > 0 && p.maxModelLen > 0 {
+					// (TotalBlocks * BlockSize / maxModelLen) ^ 2
+					// Capped at 1.0 as the normalized score term cannot be greater than 1.
+					matchLengthRatio = float64(totalBlocks) * float64(blockSize) / float64(p.maxModelLen)
+					matchLengthRatio = math.Min(1.0, matchLengthRatio*matchLengthRatio)
+				}
+				scores[endpoint] = p.prefixLengthWeight*matchLengthRatio + (1.0-p.prefixLengthWeight)*matchRatio
 			}
 		} else {
 			logger.V(logutil.DEFAULT).Error(nil, "PrefixCacheMatchInfo has unexpected type, assigning score 0", "endpoint", endpoint)
