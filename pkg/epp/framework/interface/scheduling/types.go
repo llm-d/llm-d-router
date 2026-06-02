@@ -28,6 +28,10 @@ import (
 
 const nilString = "<nil>"
 
+// bytesPerTokenEstimate is the fallback multiplier used to estimate token length
+// from raw request bytes (assuming roughly 4 bytes per token on average).
+const bytesPerTokenEstimate = 4
+
 type Modality = fwkrh.Modality
 
 const ModalityImage = fwkrh.ModalityImage
@@ -56,7 +60,7 @@ type InferenceRequest struct {
 	// FairnessID is the identity used by the flow control system to group requests into fairness queues.
 	FairnessID string
 	// RequestSizeBytes is the size of the raw request body in bytes when available.
-	// Used for token estimation (e.g. inputTokens ≈ RequestSizeBytes/4) without parsing body or calling PlainText().
+	// Used for token estimation (e.g. inputTokens ≈ RequestSizeBytes/bytesPerTokenEstimate) without parsing body or calling PlainText().
 	RequestSizeBytes int
 	// SchedulingResult captures the scheduling decisions made during the cycle.
 	SchedulingResult *SchedulingResult
@@ -92,7 +96,7 @@ func (r *InferenceRequest) EstimatedTokenLength() (length int64, tokenized bool)
 		}
 	}
 	if r.RequestSizeBytes > 0 {
-		return max(int64(r.RequestSizeBytes)/4, 1), false
+		return max(int64(r.RequestSizeBytes)/bytesPerTokenEstimate, 1), false
 	}
 	if r.Body != nil {
 		return 1, false
