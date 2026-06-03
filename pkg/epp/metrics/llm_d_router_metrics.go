@@ -24,7 +24,8 @@ import (
 )
 
 const (
-	llmdInferenceSchedulerSubsystem = "llm_d_router_epp"
+	// LLMDRouterEndpointPickerSubsystem is the subsystem for llm-d router endpoint picker metrics.
+	LLMDRouterEndpointPickerSubsystem = "llm_d_router_epp"
 )
 
 var (
@@ -36,7 +37,7 @@ var (
 var (
 	llmdRequestCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_total",
 			Help:      metricsutil.HelpMsgWithStability("Counter of inference objective requests broken out for each model and target model.", compbasemetrics.ALPHA),
 		},
@@ -45,7 +46,7 @@ var (
 
 	llmdRequestErrCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_error_total",
 			Help:      metricsutil.HelpMsgWithStability("Counter of inference objective requests errors broken out for each model and target model.", compbasemetrics.ALPHA),
 		},
@@ -54,7 +55,7 @@ var (
 
 	llmdRequestLatencies = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Inference objective response latency distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   generalLatencyBuckets,
@@ -64,7 +65,7 @@ var (
 
 	llmdRequestSizes = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_sizes",
 			Help:      metricsutil.HelpMsgWithStability("Inference objective requests size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
 			Buckets: []float64{
@@ -78,7 +79,7 @@ var (
 
 	llmdResponseSizes = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "response_sizes",
 			Help:      metricsutil.HelpMsgWithStability("Inference objective responses size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536},
@@ -88,7 +89,7 @@ var (
 
 	llmdInputTokens = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "input_tokens",
 			Help:      metricsutil.HelpMsgWithStability("Inference objective input token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
@@ -98,7 +99,7 @@ var (
 
 	llmdOutputTokens = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "output_tokens",
 			Help:      metricsutil.HelpMsgWithStability("Inference objective output token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192},
@@ -108,7 +109,7 @@ var (
 
 	llmdPromptCachedTokens = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "prompt_cached_tokens",
 			Help:      metricsutil.HelpMsgWithStability("Inference objective prompt cached token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
@@ -118,7 +119,7 @@ var (
 
 	llmdRunningRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "running_requests",
 			Help:      metricsutil.HelpMsgWithStability("Inference objective number of running requests in each model.", compbasemetrics.ALPHA),
 		},
@@ -127,7 +128,7 @@ var (
 
 	llmdNormalizedTimePerOutputToken = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "normalized_time_per_output_token_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Inference objective latency divided by number of output tokens in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets: []float64{
@@ -142,7 +143,7 @@ var (
 var (
 	llmdInferencePoolAvgKVCache = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "average_kv_cache_utilization",
 			Help:      metricsutil.HelpMsgWithStability("The average kv cache utilization for an inference server pool.", compbasemetrics.ALPHA),
 		},
@@ -151,7 +152,7 @@ var (
 
 	llmdInferencePoolAvgQueueSize = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "average_queue_size",
 			Help:      metricsutil.HelpMsgWithStability("The average number of requests pending in the model server queue.", compbasemetrics.ALPHA),
 		},
@@ -160,7 +161,7 @@ var (
 
 	llmdInferencePoolAvgRunningRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "average_running_requests",
 			Help:      metricsutil.HelpMsgWithStability("The average number of running requests across model servers in the pool.", compbasemetrics.ALPHA),
 		},
@@ -169,7 +170,7 @@ var (
 
 	llmdInferencePoolReadyEndpoints = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "ready_endpoints",
 			Help:      metricsutil.HelpMsgWithStability("The number of ready endpoints in the inference server pool.", compbasemetrics.ALPHA),
 		},
@@ -181,7 +182,7 @@ var (
 var (
 	llmdSchedulerE2ELatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "scheduler_e2e_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("End-to-end scheduling latency distribution in seconds.", compbasemetrics.ALPHA),
 			Buckets: []float64{
@@ -193,7 +194,7 @@ var (
 
 	llmdSchedulerAttemptsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "scheduler_attempts_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of scheduling attempts.", compbasemetrics.ALPHA),
 		},
@@ -202,7 +203,7 @@ var (
 
 	llmdPluginProcessingLatencies = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "plugin_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Plugin processing latency distribution in seconds for each extension point, plugin type and plugin name.", compbasemetrics.ALPHA),
 			Buckets: []float64{
@@ -216,7 +217,7 @@ var (
 // --- llm-d Info Metrics ---
 var llmdInferenceExtensionInfo = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
-		Subsystem: llmdInferenceSchedulerSubsystem,
+		Subsystem: LLMDRouterEndpointPickerSubsystem,
 		Name:      "info",
 		Help:      metricsutil.HelpMsgWithStability("General information of the current build of Inference Extension.", compbasemetrics.ALPHA),
 	},
@@ -227,7 +228,7 @@ var llmdInferenceExtensionInfo = prometheus.NewGaugeVec(
 var (
 	llmdFlowControlRequestQueueDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "flow_control_request_queue_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Distribution of total time requests spend in the Flow Control layer (from enqueue to final outcome).", compbasemetrics.ALPHA),
 			Buckets: []float64{
@@ -239,7 +240,7 @@ var (
 
 	llmdFlowControlDispatchCycleDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "flow_control_dispatch_cycle_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Distribution of time taken for each internal dispatch cycle in the Flow Control layer.", compbasemetrics.ALPHA),
 			Buckets: []float64{
@@ -251,7 +252,7 @@ var (
 
 	llmdFlowControlRequestEnqueueDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "flow_control_request_enqueue_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Distribution of time taken to enqueue requests into the Flow Control layer.", compbasemetrics.ALPHA),
 			Buckets: []float64{
@@ -263,7 +264,7 @@ var (
 
 	llmdFlowControlQueueSize = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "flow_control_queue_size",
 			Help:      metricsutil.HelpMsgWithStability("Current number of requests actively held in the Flow Control queue.", compbasemetrics.ALPHA),
 		},
@@ -272,7 +273,7 @@ var (
 
 	llmdFlowControlQueueBytes = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "flow_control_queue_bytes",
 			Help:      metricsutil.HelpMsgWithStability("Current total size in bytes of requests actively held in the Flow Control queue.", compbasemetrics.ALPHA),
 		},
@@ -281,7 +282,7 @@ var (
 
 	llmdFlowControlPoolSaturation = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Subsystem: llmdInferenceSchedulerSubsystem,
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "flow_control_pool_saturation",
 			Help:      metricsutil.HelpMsgWithStability("Current saturation level of the inference pool (0.0 = empty, 1.0 = fully saturated).", compbasemetrics.ALPHA),
 		},
@@ -292,11 +293,34 @@ var (
 // --- llm-d Inference Model Rewrite Metrics ---
 var llmdInferenceModelRewriteDecisionsTotal = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
-		Subsystem: llmdInferenceSchedulerSubsystem,
+		Subsystem: LLMDRouterEndpointPickerSubsystem,
 		Name:      "model_rewrite_decisions_total",
 		Help:      metricsutil.HelpMsgWithStability("Total number of inference model rewrite decisions.", compbasemetrics.ALPHA),
 	},
 	[]string{"model_rewrite_name", "model_name", "target_model"},
+)
+
+// --- llm-d Data-layer Metrics ---
+var (
+	// LlmdDataLayerPollErrorsTotal records data-source poll errors per source type.
+	LlmdDataLayerPollErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "datalayer_poll_errors_total",
+			Help:      metricsutil.HelpMsgWithStability("Data-source poll errors per source type.", compbasemetrics.ALPHA),
+		},
+		[]string{"source_type"},
+	)
+
+	// LlmdDataLayerExtractErrorsTotal records extract errors per source/extractor type.
+	LlmdDataLayerExtractErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "datalayer_extract_errors_total",
+			Help:      metricsutil.HelpMsgWithStability("Extract errors per source/extractor type.", compbasemetrics.ALPHA),
+		},
+		[]string{"source_type", "extractor_type"},
+	)
 )
 
 var (

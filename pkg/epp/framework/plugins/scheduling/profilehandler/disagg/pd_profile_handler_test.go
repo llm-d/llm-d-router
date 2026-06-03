@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
@@ -545,7 +546,7 @@ func TestPdProfileHandler_ProcessResults(t *testing.T) {
 }
 
 func createHandleWithDeciderPlugins(ctx context.Context) (plugin.Handle, error) {
-	handle := plugin.NewEppHandle(ctx, nil)
+	handle := plugin.NewEppHandle(ctx, nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
 	plugin1, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 4})
 	if err != nil {
 		return nil, err

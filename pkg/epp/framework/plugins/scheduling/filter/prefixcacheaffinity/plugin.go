@@ -182,17 +182,17 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 	return sticky
 }
 
-func (p *Plugin) Consumes() map[fwkplugin.DataKey]any {
-	res := map[fwkplugin.DataKey]any{
+func (p *Plugin) Consumes() fwkplugin.DataDependencies {
+	required := map[fwkplugin.DataKey]any{
 		p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{},
 	}
 	if p.config.MaxTTFTPenaltyMs > 0 {
-		res[p.latencyPredictionInfoDataKey] = attrlatency.LatencyPredictionInfo{}
+		required[p.latencyPredictionInfoDataKey] = attrlatency.LatencyPredictionInfo{}
 	}
 	if p.config.MaxTokensInFlightPenalty > 0 {
-		res[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
+		required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
 	}
-	return res
+	return fwkplugin.DataDependencies{Required: required}
 }
 
 func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {

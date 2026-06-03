@@ -1,5 +1,11 @@
 FROM quay.io/projectquay/golang:1.25
 
+# Upgrade Go to 1.25.11 to fix standard library vulnerabilities (CVEs)
+RUN ARCH=$(uname -m) && \
+    GOARCH=$(echo ${ARCH} | sed 's/x86_64/amd64/; s/aarch64/arm64/') && \
+    rm -rf /usr/local/go && \
+    curl -sSfL "https://go.dev/dl/go1.25.11.linux-${GOARCH}.tar.gz" | tar -C /usr/local -xzf -
+
 RUN mkdir /app
 WORKDIR /app
 

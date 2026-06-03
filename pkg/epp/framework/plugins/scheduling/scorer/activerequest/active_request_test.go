@@ -149,8 +149,8 @@ func TestActiveRequestScorer_Consumes(t *testing.T) {
 	scorer := NewActiveRequest(ctx, nil)
 	consumes := scorer.Consumes()
 
-	require.Len(t, consumes, 1)
-	assert.Equal(t, attrconcurrency.InFlightLoad{}, consumes[attrconcurrency.InFlightLoadDataKey])
+	require.Len(t, consumes.Required, 1)
+	assert.Equal(t, attrconcurrency.InFlightLoad{}, consumes.Required[attrconcurrency.InFlightLoadDataKey])
 }
 
 func TestActiveRequestScorer_TypedName(t *testing.T) {

@@ -205,8 +205,8 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			if got.Skip {
-				t.Errorf("ParseRequest() got.Skip = true, want false")
+			if got.SkipResponseProcessing {
+				t.Errorf("ParseRequest() got.SkipResponseProcessing = true, want false")
 			}
 			if diff := cmp.Diff(tt.want, got.Body); diff != "" {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)

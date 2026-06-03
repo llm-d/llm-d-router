@@ -445,7 +445,7 @@ The `always-disagg-multimodal-decider` triggers encode disaggregation whenever t
 > [!NOTE]
 > This plugin accepts no parameters.
 
-It checks for the presence of `image_url`, `video_url`, or `input_audio` content blocks in the chat-completions request body. If any multimodal content is found, the encode stage is activated.
+It checks for the presence of `image_url`, `audio_url`, `video_url`, or `input_audio` content blocks in the chat-completions request body. If any multimodal content is found, the encode stage is activated.
 
 ---
 

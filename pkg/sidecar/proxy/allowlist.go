@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -43,8 +44,8 @@ const (
 
 // InferencePool API group to version mapping
 var inferencePoolGroupToVersion = map[string]string{
-	DefaultPoolGroup: "v1",
-	LegacyPoolGroup:  "v1alpha2",
+	routing.InferencePoolAPIGroup:   "v1",
+	"inference.networking.x-k8s.io": "v1alpha2", // TODO: deprecated should be clean up
 }
 
 // AllowlistValidator manages allowed prefill targets based on InferencePool resources
