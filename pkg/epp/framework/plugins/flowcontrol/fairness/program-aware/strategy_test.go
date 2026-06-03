@@ -479,7 +479,19 @@ func TestLASStrategy_Name(t *testing.T) {
 	assert.Equal(t, "las", s.Name())
 }
 
-func TestLASStrategy_Pick_DecaysService(t *testing.T) {
+func TestLASStrategy_Pick_DecaysInactiveService(t *testing.T) {
+	s := testService()
+	m := &ProgramMetrics{}
+	m.AddService(1000.0)
+
+	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
+	s.Pick(0, queues)
+
+	assert.InDelta(t, 1000.0*defaultServiceDecayFactor, m.AttainedService(), 0.01,
+		"Pick should decay attained service for inactive queue")
+}
+
+func TestLASStrategy_Pick_NoDecayOnActive(t *testing.T) {
 	s := testService()
 	m := &ProgramMetrics{}
 	m.AddService(1000.0)
@@ -488,8 +500,21 @@ func TestLASStrategy_Pick_DecaysService(t *testing.T) {
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 5, m, now)}
 	s.Pick(0, queues)
 
-	assert.InDelta(t, 1000.0*defaultServiceDecayFactor, m.AttainedService(), 0.01,
-		"Pick should decay attained service")
+	assert.InDelta(t, 1000.0, m.AttainedService(), 0.01,
+		"active queue's attained service must not be decayed — heavy users stay deprioritized")
+}
+
+func TestLASStrategy_Pick_NoDecayWhenInFlight(t *testing.T) {
+	s := testService()
+	m := &ProgramMetrics{}
+	m.AddService(1000.0)
+	m.IncrementInFlight() // request mid-flight
+
+	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
+	s.Pick(0, queues)
+
+	assert.InDelta(t, 1000.0, m.AttainedService(), 0.01,
+		"empty queue with in-flight request must not decay — preserves upcoming AddService")
 }
 
 func TestLASStrategy_OnCompleted_AddsService(t *testing.T) {
@@ -547,11 +572,10 @@ func TestLASStrategy_DecayForgetsOldService(t *testing.T) {
 	s := testService()
 	m := &ProgramMetrics{}
 	m.AddService(1000.0)
-	now := time.Now()
 
-	// After many decay cycles, service should approach 0.
+	// After many decay cycles on an inactive queue, service should approach 0.
 	for range 1000 {
-		queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 1, m, now)}
+		queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 		s.Pick(0, queues)
 	}
 	// 1000 * 0.995^1000 ≈ 6.7 — verify significant decay occurred.
@@ -628,10 +652,9 @@ func TestLASStrategy_Pick_UsesTimedDecay(t *testing.T) {
 	s := testServiceTimed(30.0)
 	m := &ProgramMetrics{}
 	m.AddService(1000.0)
-	now := time.Now()
 
-	// First Pick initializes timer.
-	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 1, m, now)}
+	// First Pick on an inactive queue initializes the decay timer; service unchanged.
+	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
 	assert.InDelta(t, 1000.0, m.AttainedService(), 0.01)
 }

@@ -49,7 +49,7 @@ Each program is identified by its `x-gateway-inference-fairness-id` header and a
 The plugin builds a `map[string]QueueInfo` from all program queues and delegates to the configured `ScoringStrategy.Pick()`. Each strategy owns its own selection logic:
 
 - **LAS and DRR** use a two-pass algorithm with adaptive normalization:
-  1. **Pass 1** — Bookkeeping (decay service / allocate quantum) for all queues, then collect raw metric dimensions for non-empty queues, tracking per-dimension min/max.
+  1. **Pass 1** — Bookkeeping (decay inactive queues / allocate quantum to non-empty queues), then collect raw metric dimensions for non-empty queues, tracking per-dimension min/max.
   2. **Pass 2** — Normalize each dimension to `[0, 1]` using the observed min/max range, compute a weighted score, and select the highest-scoring queue.
 - **RR** walks a sorted cursor through program IDs and picks the next non-empty queue.
 
@@ -88,11 +88,12 @@ Tracks a time-decayed accumulator of weighted tokens consumed per program. Progr
 | Head-of-queue wait | Age of oldest queued request | Tiebreaker for cold start |
 
 **How it works:**
-- Each `Pick()` cycle decays every program's attained service (forgetting old usage over time)
+- Inactive programs (queue empty and no in-flight request) have their attained service decayed so stale usage shrinks; decay is skipped while a request is in flight to preserve the upcoming `OnCompleted` `AddService`
+- Active programs accumulate service without decay so persistent heavy users stay deprioritized; idle programs lose stale service so they can compete on return
 - When a response completes, the weighted token cost is added to the program's attained service
 - Scoring inverts the service dimension so programs that have consumed less compute are promoted
 
-This is the default and recommended strategy. It directly targets equitable resource allocation — programs that have received less service are promoted, and the decay mechanism ensures that historical usage is gradually forgotten so programs are not permanently penalized for past bursts.
+This is the default and recommended strategy. It directly targets equitable resource allocation — underserved programs are promoted, while idle-program decay prevents permanent penalty for old bursts and absent-program decay gives returning programs a fair start.
 
 **Configuration parameters:**
 

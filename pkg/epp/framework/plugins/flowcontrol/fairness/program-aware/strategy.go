@@ -254,14 +254,17 @@ const (
 // consumed) across programs. Programs with lower attained service receive higher
 // scores, directly targeting fair resource allocation.
 //
-//   - attainedService (inverted): time-decayed accumulator of weighted tokens
-//     consumed — lower service → higher score (underserved programs promoted).
+//   - attainedService (inverted): accumulator of weighted tokens consumed,
+//     decayed when the program is inactive — lower service → higher score
+//     (underserved programs promoted).
 //   - headWait: age of the oldest request — tiebreaker for cold start when
 //     all programs have zero attained service.
 //
-// On each Pick() cycle, every queue's attained service is decayed by decayFactor,
-// causing old service to be gradually forgotten. On each completion, the actual
-// weighted token cost is added to the program's attained service.
+// Decay is applied only to inactive programs (Len==0 and no in-flight
+// requests). Active programs accumulate service without decay so persistent
+// heavy users stay deprioritized; idle programs lose stale service so they
+// can compete on return. On each completion the weighted token cost is added
+// to the program's attained service.
 //
 // Weights and decay factor are configurable via the plugin config.
 type LASStrategy struct {
@@ -276,16 +279,17 @@ func (s *LASStrategy) Name() string { return "las" }
 
 // Pick selects the queue with the lowest attained service (highest need).
 //
-// First decays every queue's attained service, then uses two-pass adaptive
-// normalization across non-empty queues. The service dimension is inverted
-// so that lower attained service maps to a higher score.
+// Decays attained service only for inactive queues (Len==0 and no in-flight
+// requests), then uses two-pass adaptive normalization across non-empty
+// queues. The service dimension is inverted so that lower attained service
+// maps to a higher score.
 func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) (flowcontrol.FlowQueueAccessor, map[string]float64) {
 	type entry struct {
 		service    float64
 		headWaitMs float64
 	}
 
-	// Pass 1: decay service for all queues, collect raw values for non-empty.
+	// Pass 1: decay inactive queues, collect raw values for non-empty.
 	entries := make(map[string]entry)
 	minService, maxService := 0.0, 0.0
 	minWait, maxWait := 0.0, 0.0
@@ -296,14 +300,18 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) (flowcontrol.Flow
 		if qi.Metrics == nil {
 			continue
 		}
-		// Decay runs for every queue, including empty ones.
-		if s.halfLifeSeconds > 0 {
-			qi.Metrics.DecayServiceTimed(s.halfLifeSeconds, now)
-		} else {
-			qi.Metrics.DecayService(s.decayFactor)
-		}
 
 		if qi.Len == 0 {
+			// Inactive (no queued and no in-flight) queues: decay attained
+			// service so stale usage shrinks. Skip decay while a request is
+			// in flight to preserve the upcoming OnCompleted() AddService.
+			if qi.Metrics.InFlight() == 0 {
+				if s.halfLifeSeconds > 0 {
+					qi.Metrics.DecayServiceTimed(s.halfLifeSeconds, now)
+				} else {
+					qi.Metrics.DecayService(s.decayFactor)
+				}
+			}
 			continue
 		}
 
