@@ -84,14 +84,17 @@ func getImagePlaceholders(ctx context.Context, url string, multimodalConfig *mul
 			resolution, err := getImageDimensionsFromBase64(url)
 			if err != nil {
 				logger.Error(err, "failed to get image dimensions from base64 content, using default image resolution")
-				numPlaceHolders = multimodalConfig.Image.DefaultResolution.Width * multimodalConfig.Image.DefaultResolution.Height / multimodalConfig.Image.DynamicCfg.Factor
+				f := multimodalConfig.Image.DynamicCfg.Factor
+				numPlaceHolders = multimodalConfig.Image.DefaultResolution.Width*multimodalConfig.Image.DefaultResolution.Height/(f*f) + 2
 			} else {
 				logger.Info(fmt.Sprintf("Using image resolution height %d width %d", resolution.Height, resolution.Width))
-				numPlaceHolders = (resolution.Width * resolution.Height) / (multimodalConfig.Image.DynamicCfg.Factor)
+				f := multimodalConfig.Image.DynamicCfg.Factor
+				numPlaceHolders = resolution.Width*resolution.Height/(f*f) + 2
 			}
 		} else {
 			logger.Info("Failed to get image dimensions with unsupported type, now we only support base64 encoded image content, using default image resolution")
-			numPlaceHolders = multimodalConfig.Image.DefaultResolution.Width * multimodalConfig.Image.DefaultResolution.Height / multimodalConfig.Image.DynamicCfg.Factor
+			f := multimodalConfig.Image.DynamicCfg.Factor
+			numPlaceHolders = multimodalConfig.Image.DefaultResolution.Width*multimodalConfig.Image.DefaultResolution.Height/(f*f) + 2
 		}
 	}
 	logger.Info(fmt.Sprintf("Using numPlaceHolders %d", numPlaceHolders))
@@ -100,9 +103,26 @@ func getImagePlaceholders(ctx context.Context, url string, multimodalConfig *mul
 
 func getVideoPlaceholders(multimodalConfig *multiModalTokenEstimatorConfig) int {
 	if multimodalConfig == nil || multimodalConfig.Video == nil {
-		return defaultMultimodalConfig.Video.FixedToken
+		multimodalConfig = &defaultMultimodalConfig
 	}
-	return multimodalConfig.Video.FixedToken
+	cfg := multimodalConfig.Video
+	numFrames := cfg.NumFrames
+	if numFrames <= 0 {
+		numFrames = defaultMultimodalConfig.Video.NumFrames
+	}
+	tpf := cfg.TokensPerFrame
+	if tpf == nil {
+		tpf = defaultMultimodalConfig.Video.TokensPerFrame
+	}
+	var tokensPerFrame int
+	switch tpf.Mode {
+	case ModeFixed:
+		tokensPerFrame = tpf.FixedCfg.FixedToken
+	case ModeDynamic:
+		f := tpf.DynamicCfg.Factor
+		tokensPerFrame = tpf.DefaultResolution.Width*tpf.DefaultResolution.Height/(f*f) + 2
+	}
+	return numFrames * tokensPerFrame
 }
 
 func getImageDimensionsFromBase64(url string) (*resolution, error) {

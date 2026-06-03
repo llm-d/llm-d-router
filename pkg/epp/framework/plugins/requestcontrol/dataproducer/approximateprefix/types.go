@@ -131,6 +131,13 @@ type fixedTokenEstimatorConfig struct {
 	FixedToken int `json:"fixedToken"`
 }
 
+// dynamicTokenEstimatorConfig holds the effective patch stride for dynamic token estimation.
+// Factor is patch_size × spatial_merge_size from the model's vision config
+// (e.g. 32 for Qwen3-VL: patch_size=16, spatial_merge_size=2;
+//
+//	28 for Qwen2.5-VL: patch_size=14, spatial_merge_size=2).
+//
+// Token count is computed as (width * height) / (Factor * Factor) + 2.
 type dynamicTokenEstimatorConfig struct {
 	Factor int `json:"factor"`
 }
@@ -143,10 +150,19 @@ type imageTokenEstimatorConfig struct {
 	FixedCfg          *fixedTokenEstimatorConfig   `json:"fixed,omitempty"`
 }
 
+// videoTokenEstimatorConfig defines the configuration for video modality.
+// Token count is estimated as NumFrames * TokensPerFrame.
+// NumFrames is model-specific in vLLM; 32 is used as a configurable starting point.
+// TokensPerFrame reuses imageTokenEstimatorConfig since a video frame is treated as an image.
+type videoTokenEstimatorConfig struct {
+	NumFrames      int                        `json:"numFrames"`
+	TokensPerFrame *imageTokenEstimatorConfig `json:"tokensPerFrame,omitempty"`
+}
+
 // multiModalTokenEstimatorConfig defines the configuration for multimodal inputs.
 type multiModalTokenEstimatorConfig struct {
 	Image *imageTokenEstimatorConfig `json:"image,omitempty"`
-	Video *fixedTokenEstimatorConfig `json:"video,omitempty"`
+	Video *videoTokenEstimatorConfig `json:"video,omitempty"`
 }
 
 // defaultMultimodalConfig provides default configuration for multimodal inputs.
@@ -159,10 +175,22 @@ var defaultMultimodalConfig = multiModalTokenEstimatorConfig{
 			Height: 360,
 		},
 		DynamicCfg: &dynamicTokenEstimatorConfig{
-			Factor: 1024,
+			Factor: 32,
 		},
 	},
-	Video: &fixedTokenEstimatorConfig{FixedToken: 1000},
+	Video: &videoTokenEstimatorConfig{
+		NumFrames: 32,
+		TokensPerFrame: &imageTokenEstimatorConfig{
+			Mode: ModeDynamic,
+			DefaultResolution: resolution{
+				Width:  640,
+				Height: 360,
+			},
+			DynamicCfg: &dynamicTokenEstimatorConfig{
+				Factor: 32,
+			},
+		},
+	},
 }
 
 // config defines the configuration for the prefix cache plugins.
