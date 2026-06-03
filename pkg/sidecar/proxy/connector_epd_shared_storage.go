@@ -39,7 +39,7 @@ func (s *Server) fanoutEncoderPrimer(originalRequest map[string]any, encoderHost
 
 // handleEPD handles an Encoder-Prefiller-Decoder disaggregation request
 func (s *Server) handleEPD(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
-	s.logger.V(4).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
+	s.logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, completionRequest, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -86,12 +86,12 @@ func (s *Server) handleEPD(w http.ResponseWriter, r *http.Request, prefillEndPoi
 
 	// If prefiller is configured, use P/D protocol; otherwise go directly to decoder
 	if len(prefillEndPoint) > 0 {
-		s.logger.V(4).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
+		s.logger.V(logging.DEBUG).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
 		// Run the configured P/D protocol (prefill + decode)
 		// This will use whichever protocol is configured: shared-storage, nixlv2, or sglang
 		s.handlePDConnector(w, pdRequest, prefillEndPoint, APITypeChatCompletions)
 	} else {
-		s.logger.V(4).Info("no prefiller configured, going directly to decoder after encoder")
+		s.logger.V(logging.DEBUG).Info("no prefiller configured, going directly to decoder after encoder")
 		// No prefiller, go directly to decoder (Encoder-Decoder mode)
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, pdRequest) {
 			s.decoderProxy.ServeHTTP(w, pdRequest)
