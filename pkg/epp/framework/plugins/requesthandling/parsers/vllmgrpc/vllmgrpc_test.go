@@ -83,13 +83,13 @@ func TestVllmGRPCParser_PluginLifecycle(t *testing.T) {
 
 func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 	tests := []struct {
-		name          string
-		reqMsg        proto.Message
-		headers       map[string]string
-		malformedData []byte
-		wantErr       bool
-		wantSkip      bool
-		want          *fwkrh.InferenceRequestBody
+		name                       string
+		reqMsg                     proto.Message
+		headers                    map[string]string
+		malformedData              []byte
+		wantErr                    bool
+		wantSkipResponseProcessing bool
+		want                       *fwkrh.InferenceRequestBody
 	}{
 		{
 			name: "Valid Text Request",
@@ -306,10 +306,10 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
-			name:     "Unsupported Path skip",
-			reqMsg:   &pb.GenerateRequest{Input: &pb.GenerateRequest_Text{Text: "hello"}},
-			headers:  map[string]string{":path": "/unsupported/path"},
-			wantSkip: true,
+			name:                       "Unsupported Path skip",
+			reqMsg:                     &pb.GenerateRequest{Input: &pb.GenerateRequest_Text{Text: "hello"}},
+			headers:                    map[string]string{":path": "/unsupported/path"},
+			wantSkipResponseProcessing: true,
 		},
 		{
 			name:    "Embed Request missing tokenized input",
@@ -340,8 +340,14 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				return
 			}
 
-			if got.Skip != tt.wantSkip {
-				t.Errorf("got.Skip = %v, want %v", got.Skip, tt.wantSkip)
+			if got.SkipResponseProcessing != tt.wantSkipResponseProcessing {
+				t.Errorf("got.SkipResponseProcessing = %v, want %v", got.SkipResponseProcessing, tt.wantSkipResponseProcessing)
+			}
+
+			if tt.wantSkipResponseProcessing && tt.want == nil {
+				tt.want = &fwkrh.InferenceRequestBody{
+					Payload: fwkrh.RawPayload(payload),
+				}
 			}
 
 			if diff := cmp.Diff(tt.want, got.Body, protocmp.Transform()); diff != "" {

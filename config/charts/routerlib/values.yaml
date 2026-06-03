@@ -66,14 +66,21 @@ epp:
 proxy:
   enabled: false    
 
-# Tokenizer sidecar configuration
+# Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` and exposes
+# `/render` over loopback HTTP to EPP. modelName is passed as the first
+# positional arg to the render command (required when enabled). EPP is wired to
+# the sidecar via `router.epp.pluginsCustomConfig`.
 tokenizer:
   enabled: false
+  modelName: ""
   image:
-    registry: ghcr.io/llm-d
-    repository: llm-d-uds-tokenizer
-    tag: vllm-v0.19.1
+    registry: docker.io
+    repository: vllm/vllm-openai-cpu
+    tag: v0.19.1
     pullPolicy: IfNotPresent
+  port: 8000
+  command: []
+  args: []
   env:
     - name: HF_TOKEN
       valueFrom:
@@ -82,9 +89,18 @@ tokenizer:
           key: HF_TOKEN
   resources:
     requests:
-      cpu: "8"
+      cpu: "4"
       memory: 8Gi
-    
+  volumeMounts: []
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: render-http
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 60
+
 # Monitoring configuration for EPP
 monitoring:
   interval: "10s"

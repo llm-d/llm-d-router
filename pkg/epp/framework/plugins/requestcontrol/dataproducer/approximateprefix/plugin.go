@@ -38,6 +38,16 @@ const (
 	ApproxPrefixCachePluginType = approxprefixconstants.ApproxPrefixCachePluginType
 )
 
+// minBlockSizeTokens is the floor applied to the block size returned by
+// GetBlockSize. The routing-side indexer keeps one LRU entry per (pod, block),
+// so very small block sizes cause gigabyte-scale memory growth at scale. 64
+// tokens is coarse enough to bound memory while still preserving useful
+// prefix-match signal. Defined as a var so tests in this package can lower it
+// to exercise prefix-match logic at small block sizes without leaking a knob
+// into the public configuration surface. See
+// https://github.com/llm-d/llm-d-router/issues/1158.
+var minBlockSizeTokens = 64
+
 var (
 	_ requestcontrol.DataProducer = &dataProducer{}
 	_ requestcontrol.PreRequest   = &dataProducer{}
@@ -84,7 +94,20 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	if err := registerMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
-	indexer := newIndexer(ctx, config.LRUCapacityPerServer)
+	// Surface the override to the operator so a too-small configured value is
+	// not silently swallowed. The clamp itself happens at request time in
+	// GetBlockSize and applies uniformly across endpoint metric, autotune
+	// fallback, and manual configuration.
+	if config.BlockSizeTokens > 0 && config.BlockSizeTokens < minBlockSizeTokens {
+		log.FromContext(ctx).Info(
+			"WARNING: configured blockSizeTokens is below the recommended minimum, overriding it.",
+			"blockSizeTokens", config.BlockSizeTokens,
+			"minimum", minBlockSizeTokens,
+			"issue", "https://github.com/llm-d/llm-d-router/issues/1158",
+		)
+	}
+
+	indexer := newIndexer(ctx, config.LRUCapacityPerServer, name, ApproxPrefixCachePluginType)
 
 	p := &dataProducer{
 		typedName: plugin.TypedName{
@@ -206,13 +229,15 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	avgChars := averageCharactersPerToken
-	recordPrefixCacheMatch(matchLen*blockSize*avgChars, total*blockSize*avgChars)
+	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*avgChars, total*blockSize*avgChars)
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 	gpuBlocks := defaultLRUCapacityPerServer
-	if p.config.AutoTune && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
+	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
 		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
+	} else if p.config.LRUCapacityPerServer > 0 {
+		gpuBlocks = p.config.LRUCapacityPerServer
 	}
 	return server{
 		ServerID:       ServerID(targetEndpoint.GetMetadata().NamespacedName),
@@ -240,18 +265,28 @@ func (p *dataProducer) matchLongestPrefix(ctx context.Context, hashes []blockHas
 }
 
 // GetBlockSize returns the block size in tokens, potentially auto-tuned from endpoint metrics.
+//
+// Values below minBlockSizeTokens are overridden with minBlockSizeTokens
+// regardless of where they originate (endpoint metric, autotune fallback, or
+// manual configuration). The routing-side indexer holds one LRU entry per
+// (pod, block), so a small block size (e.g., vLLM's default of 16) would
+// inflate indexer memory by ~64x. Routing intentionally measures matches at
+// coarser granularity than the model server's true block size; a startup
+// warning is logged in newDataProducer when a configured value triggers the
+// override. See #1158.
 func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
-	if !p.config.AutoTune || len(endpoints) == 0 {
-		return p.config.BlockSizeTokens
-	}
-
-	if endpoint := endpoints[0]; endpoint.GetMetrics() != nil {
-		cacheBlockSize := endpoint.GetMetrics().CacheBlockSize
-		if cacheBlockSize > 0 {
-			return cacheBlockSize
+	blockSize := p.config.BlockSizeTokens
+	if p.config.AutoTune && len(endpoints) > 0 {
+		if endpoint := endpoints[0]; endpoint.GetMetrics() != nil {
+			if metric := endpoint.GetMetrics().CacheBlockSize; metric > 0 {
+				blockSize = metric
+			}
 		}
 	}
-	return p.config.BlockSizeTokens
+	if blockSize < minBlockSizeTokens {
+		return minBlockSizeTokens
+	}
+	return blockSize
 }
 
 // ApproxPrefixCacheFactory is the factory function for the prefix cache data producer plugin.

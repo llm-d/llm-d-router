@@ -73,7 +73,7 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 	}
 
 	// Bulk predict
-	bulkPredictions, err := bulkPredictWithMetrics(ctx, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, prompts, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights)
+	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, prompts, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights)
 	if err != nil {
 		logger.V(logutil.DEBUG).Error(err, "Bulk prediction failed")
 		return nil, err

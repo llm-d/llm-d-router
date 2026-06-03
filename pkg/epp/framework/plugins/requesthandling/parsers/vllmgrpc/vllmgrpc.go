@@ -98,7 +98,7 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 			return nil, err
 		}
 		logger.V(logutil.TRACE).Info("parsed EmbedRequest")
-		return &fwkrh.ParseResult{Body: extractedBody, Skip: false}, nil
+		return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 
 	case vllmGeneratePath:
 		var req pb.GenerateRequest
@@ -110,11 +110,16 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 			return nil, err
 		}
 		logger.V(logutil.TRACE).Info("parsed GenerateRequest")
-		return &fwkrh.ParseResult{Body: extractedBody, Skip: false}, nil
+		return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 
 	default:
 		logger.V(logutil.TRACE).Info("unsupported gRPC path, skipping", "path", headers[parsers.MethodPathKey])
-		return &fwkrh.ParseResult{Skip: true}, nil
+		return &fwkrh.ParseResult{
+			Body: &fwkrh.InferenceRequestBody{
+				Payload: fwkrh.RawPayload(body),
+			},
+			SkipResponseProcessing: true,
+		}, nil
 	}
 }
 

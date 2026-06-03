@@ -73,7 +73,7 @@ func TestConfigure_ExtractorWiredToUserConfiguredSource(t *testing.T) {
 	cfg := &Config{
 		Sources: []DataSourceConfig{{Plugin: src}},
 	}
-	err := r.Configure(cfg, false, "", logger)
+	err := r.Configure(cfg, logger)
 	require.NoError(t, err)
 
 	exts, ok := r.extractors.Get("ep-src")
@@ -98,7 +98,7 @@ func TestConfigure_DefaultSourceAutoRegisteredWhenAbsent(t *testing.T) {
 	}))
 
 	// No user sources; default should be auto-created.
-	err := r.Configure(nil, false, "", logger)
+	err := r.Configure(nil, logger)
 	require.NoError(t, err)
 
 	// Source should be in the endpoint manager.
@@ -125,7 +125,7 @@ func TestConfigure_FailPolicyMissingSource(t *testing.T) {
 		IfMissing:  fwkdl.Fail,
 	}))
 
-	err := r.Configure(nil, false, "", logger)
+	err := r.Configure(nil, logger)
 	require.Error(t, err, "Fail policy should return error when source is absent")
 }
 
@@ -142,7 +142,7 @@ func TestConfigure_WarnPolicyMissingSource(t *testing.T) {
 		IfMissing:  fwkdl.Warn,
 	}))
 
-	err := r.Configure(nil, false, "", logger)
+	err := r.Configure(nil, logger)
 	require.NoError(t, err, "Warn policy should not return error when source is absent")
 }
 
@@ -186,7 +186,7 @@ func TestConfigure_PendingRegistrationYieldsToConfigByType(t *testing.T) {
 				Extractor:  tc.pendingExt,
 			}))
 
-			require.NoError(t, r.Configure(cfg, false, "", logger))
+			require.NoError(t, r.Configure(cfg, logger))
 
 			exts, ok := r.extractors.Get("ep-src")
 			require.True(t, ok)
@@ -219,7 +219,7 @@ func TestConfigure_PendingVsPending_FirstWinsOnSameType(t *testing.T) {
 		Extractor:  second,
 	}))
 
-	require.NoError(t, r.Configure(nil, false, "", logger))
+	require.NoError(t, r.Configure(nil, logger))
 
 	exts, ok := r.extractors.Get(notifications.EndpointNotificationSourceType)
 	require.True(t, ok)
@@ -243,7 +243,7 @@ func TestConfigure_DuplicateExtractorTypePerSource(t *testing.T) {
 		}},
 	}
 
-	err := r.Configure(cfg, false, "", logger)
+	err := r.Configure(cfg, logger)
 	require.ErrorIs(t, err, ErrDuplicateExtractorType)
 }
 
@@ -290,7 +290,7 @@ func TestConfigure_CrossVariantCollisionNoPending(t *testing.T) {
 			for i, s := range tc.sources {
 				srcCfgs[i] = DataSourceConfig{Plugin: s}
 			}
-			err := r.Configure(&Config{Sources: srcCfgs}, false, "", newTestLogger(t))
+			err := r.Configure(&Config{Sources: srcCfgs}, newTestLogger(t))
 			require.ErrorIs(t, err, ErrSourceTypeCollision)
 		})
 	}
@@ -336,7 +336,7 @@ func TestConfigure_CrossVariantSourceTypeCollisionRejected(t *testing.T) {
 				srcCfgs[i] = DataSourceConfig{Plugin: s}
 			}
 
-			err := r.Configure(&Config{Sources: srcCfgs}, false, "", logger)
+			err := r.Configure(&Config{Sources: srcCfgs}, logger)
 			require.ErrorIs(t, err, ErrSourceTypeCollision)
 		})
 	}

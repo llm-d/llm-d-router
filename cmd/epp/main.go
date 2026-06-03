@@ -30,7 +30,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-router/cmd/epp/runner"
-	"github.com/llm-d/llm-d-router/pkg/metrics"
 	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
@@ -59,7 +58,6 @@ func run() int {
 	// when it processes configuration in runner.parsePluginsConfiguration()
 
 	if err := runner.NewRunner().
-		WithCustomCollectors(metrics.GetCollectors()...).
 		Run(ctx); err != nil {
 		return 1
 	}

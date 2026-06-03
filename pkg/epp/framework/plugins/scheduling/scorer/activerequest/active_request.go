@@ -143,9 +143,9 @@ func (s *ActiveRequest) Category() scheduling.ScorerCategory {
 }
 
 // Consumes returns the in-flight load attribute required for scoring.
-func (s *ActiveRequest) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{
-		s.inFlightLoadDataKey: attrconcurrency.InFlightLoad{},
+func (s *ActiveRequest) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{s.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
 	}
 }
 

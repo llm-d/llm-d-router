@@ -37,7 +37,6 @@ import (
 	"github.com/llm-d/llm-d-router/internal/runnable"
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/controller"
 	datalayerlogger "github.com/llm-d/llm-d-router/pkg/epp/datalayer/logger"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
@@ -62,7 +61,6 @@ type ExtProcServerRunner struct {
 	Director                         *requestcontrol.Director
 	Parser                           fwkrh.Parser
 	SaturationDetector               fwkfc.SaturationDetector
-	UseExperimentalDatalayerV2       bool // Pluggable data layer feature flag
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
 }
@@ -83,11 +81,17 @@ func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 		},
 	}
 	return &ExtProcServerRunner{
-		GrpcPort:                         opts.GRPCPort,
-		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
-		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
-		GKNN:                             gknn,
-		ControllerCfg:                    ControllerConfig{true, true, true},
+		GrpcPort:           opts.GRPCPort,
+		GRPCMaxRecvMsgSize: opts.GRPCMaxRecvMsgSize,
+		GRPCMaxSendMsgSize: opts.GRPCMaxSendMsgSize,
+		GKNN:               gknn,
+		ControllerCfg: ControllerConfig{
+			startCrdReconcilers:       true,
+			hasInferenceObjective:     true,
+			hasInferenceModelRewrites: true,
+			InferenceObjectiveGV:      inferenceAPIGV,
+			InferenceModelRewriteGV:   inferenceAPIGV,
+		},
 		SecureServing:                    opts.SecureServing,
 		HealthChecking:                   opts.HealthChecking,
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
@@ -140,11 +144,7 @@ func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 // The runnable implements LeaderElectionRunnable with leader election disabled.
 func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 	return runnable.NoLeaderElection(manager.RunnableFunc(func(ctx context.Context) error {
-		if r.UseExperimentalDatalayerV2 {
-			datalayerlogger.StartMetricsLogger(ctx, r.Datastore, r.RefreshPrometheusMetricsInterval, r.MetricsStalenessThreshold)
-		} else {
-			backendmetrics.StartMetricsLogger(ctx, r.Datastore, r.RefreshPrometheusMetricsInterval, r.MetricsStalenessThreshold)
-		}
+		datalayerlogger.StartMetricsLogger(ctx, r.Datastore, r.RefreshPrometheusMetricsInterval, r.MetricsStalenessThreshold)
 
 		var srv *grpc.Server
 		var creds credentials.TransportCredentials

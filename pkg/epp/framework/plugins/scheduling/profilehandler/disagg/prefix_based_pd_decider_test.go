@@ -427,7 +427,7 @@ func TestConsumes(t *testing.T) {
 	require.NoError(t, err)
 
 	consumed := handler.Consumes()
-	assert.Contains(t, consumed, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+	assert.Contains(t, consumed.Required, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 }
 
 func TestWithName(t *testing.T) {

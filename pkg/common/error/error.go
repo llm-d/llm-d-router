@@ -59,6 +59,7 @@ const (
 	Unauthorized       = "Unauthorized"
 	Forbidden          = "Forbidden"
 	NotFound           = "NotFound"
+	PreconditionFailed = "PreconditionFailed"
 	Internal           = "Internal"
 	ServiceUnavailable = "ServiceUnavailable"
 	ModelServerError   = "ModelServerError"
@@ -94,6 +95,8 @@ func BuildErrResponse(err error) (*extProcPb.ProcessingResponse, error) {
 		httpCode = envoyTypePb.StatusCode_Forbidden
 	case NotFound:
 		httpCode = envoyTypePb.StatusCode_NotFound
+	case PreconditionFailed:
+		httpCode = envoyTypePb.StatusCode_PreconditionFailed
 	case ResourceExhausted:
 		httpCode = envoyTypePb.StatusCode_TooManyRequests
 	case Internal:
