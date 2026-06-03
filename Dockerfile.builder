@@ -1,10 +1,4 @@
-FROM quay.io/projectquay/golang:1.25
-
-# Upgrade Go to 1.25.11 to fix standard library vulnerabilities (CVEs)
-RUN ARCH=$(uname -m) && \
-    GOARCH=$(echo ${ARCH} | sed 's/x86_64/amd64/; s/aarch64/arm64/') && \
-    rm -rf /usr/local/go && \
-    curl -sSfL "https://go.dev/dl/go1.25.11.linux-${GOARCH}.tar.gz" | tar -C /usr/local -xzf -
+FROM golang:1.25.11
 
 RUN mkdir /app
 WORKDIR /app
@@ -20,7 +14,7 @@ ARG ENVTEST_VERSION=release-0.19
 ARG ENVTEST_K8S_VERSION=1.31.0
 ARG GOVULNCHECK_VERSION=v1.3.0
 
-RUN dnf install -y podman gcc-toolset-12 && dnf clean all
+RUN apt-get update && apt-get install -y podman gcc-12 && apt-get clean all
 
 # The base image ships GCC 8 (RHEL 8 default), which lacks the ARM64 LSE
 # atomic emulation helpers (__aarch64_ldadd8_sync etc.) required by Go's
