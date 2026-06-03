@@ -255,16 +255,26 @@ func (m *ProgramMetrics) Deficit() int64 {
 	return m.deficitTokens.Load()
 }
 
-// DecayDeficit multiplies the deficit counter by the given factor, causing
-// stale credit to be gradually forgotten across Pick() cycles.
+// DecayDeficit multiplies the deficit counter by the given factor.
+//
+// Uses a CompareAndSwap retry loop so concurrent AddDeficit/DeductTokens
+// updates between the read and the write are not lost.
 func (m *ProgramMetrics) DecayDeficit(factor float64) {
-	current := m.deficitTokens.Load()
-	m.deficitTokens.Store(int64(float64(current) * factor))
+	for {
+		current := m.deficitTokens.Load()
+		decayed := int64(float64(current) * factor)
+		if m.deficitTokens.CompareAndSwap(current, decayed) {
+			return
+		}
+	}
 }
 
 // DecayDeficitTimed applies time-based exponential decay to the deficit counter
 // using a half-life. The decay factor is 0.5^(elapsed/halfLifeSeconds), so the
 // deficit halves every halfLifeSeconds regardless of call frequency.
+//
+// The mu lock guards lastDeficitDecay; the deficit value itself is updated via
+// a CompareAndSwap retry loop so concurrent AddDeficit/DeductTokens are not lost.
 func (m *ProgramMetrics) DecayDeficitTimed(halfLifeSeconds float64, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -277,8 +287,12 @@ func (m *ProgramMetrics) DecayDeficitTimed(halfLifeSeconds float64, now time.Tim
 		return
 	}
 	factor := math.Pow(0.5, elapsed/halfLifeSeconds)
-	current := m.deficitTokens.Load()
-	decayed := int64(float64(current) * factor)
-	m.deficitTokens.Store(decayed)
+	for {
+		current := m.deficitTokens.Load()
+		decayed := int64(float64(current) * factor)
+		if m.deficitTokens.CompareAndSwap(current, decayed) {
+			break
+		}
+	}
 	m.lastDeficitDecay = now
 }
