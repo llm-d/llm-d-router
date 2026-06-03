@@ -222,10 +222,10 @@ func chatImageBody(url string) *fwkrh.InferenceRequestBody {
 	}}
 }
 
-// TestImageEstimator_FixedMode asserts fixed mode emits a constant placeholder
+// TestImageEstimator_StaticMode asserts static mode emits a constant placeholder
 // count regardless of image dimensions.
-func TestImageEstimator_FixedMode(t *testing.T) {
-	b := estimateBackend{img: newImageEstimator(&estimateConfig{Image: &imageEstimateConfig{Mode: imageModeFixed, FixedTokens: 7}})}
+func TestImageEstimator_StaticMode(t *testing.T) {
+	b := estimateBackend{img: newImageEstimator(&estimateConfig{Image: &imageEstimateConfig{Mode: imageModeStatic, Static: &staticImageConfig{StaticToken: 7}}})}
 	tp, err := b.produce(context.Background(), chatImageBody(pngBase64DataURL))
 	if err != nil {
 		t.Fatalf("produce: %v", err)
@@ -234,14 +234,14 @@ func TestImageEstimator_FixedMode(t *testing.T) {
 		t.Fatalf("got %d features, want 1", len(tp.MultiModalFeatures))
 	}
 	if got := tp.MultiModalFeatures[0].Length; got != 7 {
-		t.Errorf("fixed image length: got %d, want 7", got)
+		t.Errorf("static image length: got %d, want 7", got)
 	}
 }
 
 // TestImageEstimator_CustomFactor asserts the dynamic factor knob changes the
 // placeholder count for the default resolution.
 func TestImageEstimator_CustomFactor(t *testing.T) {
-	b := estimateBackend{img: newImageEstimator(&estimateConfig{Image: &imageEstimateConfig{Factor: 2048}})}
+	b := estimateBackend{img: newImageEstimator(&estimateConfig{Image: &imageEstimateConfig{Dynamic: &dynamicImageConfig{Factor: 2048}}})}
 	// Non-decodable URL falls back to the default 640x360 resolution.
 	tp, err := b.produce(context.Background(), chatImageBody("https://example.com/a.png"))
 	if err != nil {

@@ -80,8 +80,8 @@ func TestPluginFactory_Validation(t *testing.T) {
 			errContain: "'modelName' must be specified",
 		},
 		{
-			name:      "estimate image fixed mode parses",
-			params:    `{"estimate":{"image":{"mode":"fixed","fixedTokens":8}}}`,
+			name:      "estimate image static mode parses",
+			params:    `{"estimate":{"image":{"mode":"static","static":{"staticToken":8}}}}`,
 			expectErr: false,
 		},
 		{

@@ -88,15 +88,27 @@ type estimateConfig struct {
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.
 // Empty fields fall back to built-in defaults (dynamic mode, 640x360, factor 1024).
 type imageEstimateConfig struct {
-	// Mode selects "dynamic" (width*height/factor) or "fixed" (a constant count).
+	// Mode selects "dynamic" (width*height/factor) or "static" (a constant count).
 	Mode string `json:"mode,omitempty"`
-	// DefaultResolution is the dynamic-mode fallback when an image's dimensions
-	// cannot be decoded.
+	// DefaultResolution is the fallback resolution for dynamic mode when an
+	// image's dimensions cannot be decoded.
 	DefaultResolution *resolution `json:"defaultResolution,omitempty"`
-	// Factor maps pixels to placeholder tokens in dynamic mode (width*height/factor).
+	// Static configures the static (constant per-image) mode.
+	Static *staticImageConfig `json:"static,omitempty"`
+	// Dynamic configures the dynamic (pixels/factor) mode.
+	Dynamic *dynamicImageConfig `json:"dynamic,omitempty"`
+}
+
+// staticImageConfig is the static-mode parameter.
+type staticImageConfig struct {
+	// StaticToken is the per-image placeholder count.
+	StaticToken int `json:"staticToken,omitempty"`
+}
+
+// dynamicImageConfig is the dynamic-mode parameter.
+type dynamicImageConfig struct {
+	// Factor maps pixels to placeholder tokens (width*height/factor).
 	Factor int `json:"factor,omitempty"`
-	// FixedTokens is the per-image placeholder count in fixed mode.
-	FixedTokens int `json:"fixedTokens,omitempty"`
 }
 
 // resolution is an image width/height in pixels.
@@ -127,8 +139,8 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		return nil, fmt.Errorf("invalid configuration for '%s' plugin: 'modelName' must be specified", PluginType)
 	}
 	if config.Estimate != nil && config.Estimate.Image != nil {
-		if m := config.Estimate.Image.Mode; m != "" && m != imageModeDynamic && m != imageModeFixed {
-			return nil, fmt.Errorf("invalid configuration for '%s' plugin: estimate.image.mode must be %q or %q", PluginType, imageModeDynamic, imageModeFixed)
+		if m := config.Estimate.Image.Mode; m != "" && m != imageModeDynamic && m != imageModeStatic {
+			return nil, fmt.Errorf("invalid configuration for '%s' plugin: estimate.image.mode must be %q or %q", PluginType, imageModeDynamic, imageModeStatic)
 		}
 	}
 

@@ -31,7 +31,7 @@ import (
 const (
 	// Image estimation modes.
 	imageModeDynamic = "dynamic"
-	imageModeFixed   = "fixed"
+	imageModeStatic  = "static"
 
 	// defaultImageWidth and defaultImageHeight model a 360p image, used when an
 	// image URL is not a decodable base64 payload.
@@ -48,7 +48,7 @@ type imageEstimator struct {
 	defWidth    int
 	defHeight   int
 	factor      int
-	fixedTokens int
+	staticToken int
 }
 
 // newImageEstimator resolves an estimateConfig into an imageEstimator, leaving
@@ -58,21 +58,27 @@ func newImageEstimator(cfg *estimateConfig) imageEstimator {
 		return imageEstimator{}
 	}
 	img := cfg.Image
-	est := imageEstimator{mode: img.Mode, factor: img.Factor, fixedTokens: img.FixedTokens}
+	est := imageEstimator{mode: img.Mode}
 	if img.DefaultResolution != nil {
 		est.defWidth, est.defHeight = img.DefaultResolution.Width, img.DefaultResolution.Height
+	}
+	if img.Dynamic != nil {
+		est.factor = img.Dynamic.Factor
+	}
+	if img.Static != nil {
+		est.staticToken = img.Static.StaticToken
 	}
 	return est
 }
 
 // placeholderCount estimates the number of placeholder tokens an image occupies.
-// Fixed mode returns a constant count; dynamic mode uses decoded pixel dimensions
+// Static mode returns a constant count; dynamic mode uses decoded pixel dimensions
 // (or the default resolution) divided by the factor. The result is always >= 1 so
 // an image contributes weight to the pseudo-token stream.
 func (e imageEstimator) placeholderCount(url string) int {
-	if e.mode == imageModeFixed {
-		if e.fixedTokens > 0 {
-			return e.fixedTokens
+	if e.mode == imageModeStatic {
+		if e.staticToken > 0 {
+			return e.staticToken
 		}
 		return 1
 	}

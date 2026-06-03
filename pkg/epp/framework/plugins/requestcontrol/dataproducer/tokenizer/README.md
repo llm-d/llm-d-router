@@ -56,12 +56,12 @@ Backend selection:
 The `estimate` backend tunes multimodal image placeholder estimation (empty uses
 the defaults below):
 
-| Parameter                          | Default   | Description                                                               |
-| ---------------------------------- | --------- | ------------------------------------------------------------------------- |
-| `estimate.image.mode`              | `dynamic` | `dynamic` (width×height/factor) or `fixed` (a constant per-image count).  |
-| `estimate.image.defaultResolution` | 640×360   | Dynamic-mode fallback when an image's dimensions can't be decoded.        |
-| `estimate.image.factor`            | `1024`    | Dynamic-mode pixels-per-placeholder-token divisor.                        |
-| `estimate.image.fixedTokens`       | –         | Fixed-mode per-image placeholder count.                                   |
+| Parameter                          | Default   | Description                                                                |
+| ---------------------------------- | --------- | -------------------------------------------------------------------------- |
+| `estimate.image.mode`              | `dynamic` | `dynamic` (width×height/factor) or `static` (a constant per-image count).  |
+| `estimate.image.defaultResolution` | 640×360   | Dynamic-mode fallback when an image's dimensions can't be decoded.         |
+| `estimate.image.dynamic.factor`    | `1024`    | Dynamic-mode pixels-per-placeholder-token divisor.                         |
+| `estimate.image.static.staticToken`| –         | Static-mode per-image placeholder count.                                   |
 
 ## Failure mode
 
