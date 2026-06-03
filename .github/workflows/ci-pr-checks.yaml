@@ -331,19 +331,19 @@ jobs:
         uses: ./.github/actions/e2e-runner-setup
 
       - name: Download builder image
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: e2e-image-builder
           path: ${{ runner.temp }}/e2e-images
 
       - name: Download EPP image
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: e2e-image-epp
           path: ${{ runner.temp }}/e2e-images
 
       - name: Download simulator image
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: e2e-image-simulator
           path: ${{ runner.temp }}/e2e-images
@@ -405,32 +405,32 @@ jobs:
         uses: ./.github/actions/e2e-runner-setup
 
       - name: Download builder image
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: e2e-image-builder
           path: ${{ runner.temp }}/e2e-images
 
       - name: Download EPP image
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: e2e-image-epp
           path: ${{ runner.temp }}/e2e-images
 
       - name: Download sidecar image
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: e2e-image-sidecar
           path: ${{ runner.temp }}/e2e-images
 
       - name: Download simulator image
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: e2e-image-simulator
           path: ${{ runner.temp }}/e2e-images
 
       - name: Download renderer image
         if: ${{ matrix.suite.needs-renderer == 'true' }}
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: e2e-image-renderer
           path: ${{ runner.temp }}/e2e-images
