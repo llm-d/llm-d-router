@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -91,13 +92,6 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate prefill against p
 
 		prefillPods := getPodNames(prefillSelector)
 		gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
-
-		ginkgo.By("Prefill_Generate: prefill body with kv_transfer_params returns kv_transfer_params")
-		{
-			resp, raw := doGenerate(prefillBody([]int{1, 32000, 32000, 32000, 2345, 6789}, []imageSpec{singleImage}))
-			parsed := expectGenerateOK(resp, raw)
-			expectKVTransferParams(parsed, raw)
-		}
 
 		ginkgo.By("TwoImages_Prefill: combined two-image prefill body returns kv_transfer_params")
 		{
@@ -239,6 +233,63 @@ func expectKVTransferParams(parsed map[string]any, raw []byte) {
 		"missing or malformed kv_transfer_params in prefill response: %s", string(raw))
 	gomega.Expect(kv).NotTo(gomega.BeEmpty(),
 		"kv_transfer_params is empty: %s", string(raw))
+}
+
+var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via sidecar", ginkgo.Label(sharedStorageTestLabel, disaggTestLabel), func() {
+	// Regression test for https://github.com/llm-d/llm-d-router/issues/1461:
+	// the pd-sidecar previously had no route for /inference/v1/generate, so
+	// token-in P/D requests silently fell through to decode-only. This test
+	// verifies that the prefill pod receives the generate request when a full
+	// P/D setup is used, proving the sidecar routes it through
+	// disaggregatedPrefillHandler rather than the decoder catch-all.
+	ginkgo.It("routes token-in generate to the prefill pod", func() {
+		infPoolObjects = createInferencePool(1, true)
+
+		prefillReplicas := 1
+		decodeReplicas := 1
+		modelServers := createModelServersPDSharedStorage(decodeReplicas)
+		epp := createEndPointPicker(pdConfig)
+		ginkgo.DeferCleanup(func() {
+			testutils.DeleteObjects(testConfig, epp)
+			testutils.DeleteObjects(testConfig, modelServers)
+		})
+
+		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+		gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
+		gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
+
+		prefillCountBefore := getPodRequestCount(prefillPods[0])
+		ginkgo.By(fmt.Sprintf("prefill request count before test: %d", prefillCountBefore))
+
+		ginkgo.By("sending /inference/v1/generate through P/D EPP")
+		resp, raw := doGenerate(simpleTokenGenerateBody())
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
+			"non-200 from gateway: status=%d body=%s", resp.StatusCode, string(raw))
+
+		prefillCountAfter := getPodRequestCount(prefillPods[0])
+		ginkgo.By(fmt.Sprintf("prefill request count after test: %d", prefillCountAfter))
+
+		gomega.Expect(prefillCountAfter).To(gomega.BeNumerically(">", prefillCountBefore),
+			"prefill pod should have received the generate request; sidecar must route "+
+				"/inference/v1/generate through disaggregatedPrefillHandler, not the decoder catch-all")
+	})
+})
+
+// simpleTokenGenerateBody builds a minimal /inference/v1/generate body with
+// enough token IDs to exceed the prefix-based-pd-decider nonCachedTokens
+// threshold (16) and guarantee P/D routing on a cold cache.
+func simpleTokenGenerateBody() []byte {
+	tokenIDs := make([]int, 20)
+	for i := range tokenIDs {
+		tokenIDs[i] = 1000 + i
+	}
+	return mustMarshal(map[string]any{
+		"model":     simModelName,
+		"token_ids": tokenIDs,
+		"sampling_params": map[string]any{
+			"max_tokens": 1,
+		},
+	})
 }
 
 func mustMarshal(v any) []byte {

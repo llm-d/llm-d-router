@@ -162,9 +162,14 @@ schedulingProfiles:
 `
 
 // EPP configuration for running with P/D using the unified disagg-profile-handler
+// pdConfig uses vllmhttp-parser as the request handler so the EPP can parse
+// both OpenAI-style and /inference/v1/generate (token-in) traffic. The parser
+// delegates non-generate paths to the embedded OpenAI parser, so existing
+// chat/completions tests are unaffected.
 const pdConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: vllmhttp-parser
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
@@ -181,6 +186,9 @@ plugins:
   parameters:
     deciders:
       prefill: prefix-based-pd-decider
+requestHandler:
+  parser:
+    pluginRef: vllmhttp-parser
 schedulingProfiles:
 - name: prefill
   plugins:
