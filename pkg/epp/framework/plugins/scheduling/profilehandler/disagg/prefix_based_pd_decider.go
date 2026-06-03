@@ -159,5 +159,14 @@ func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) 
 		}
 		return len(request.Body.Completions.Prompt.PlainText()) / AverageCharactersPerToken, nil
 	}
+	if request.Body.Embeddings != nil {
+		if hint := request.Body.Embeddings.Input.TokenCountHint(); hint >= 0 {
+			return hint, nil
+		}
+		return len(request.Body.Embeddings.Input.PlainText()) / AverageCharactersPerToken, nil
+	}
+	if request.Body.Generate != nil {
+		return len(request.Body.Generate.TokenIDs), nil
+	}
 	return len(request.Body.PromptText()) / AverageCharactersPerToken, nil
 }
