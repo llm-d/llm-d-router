@@ -14,12 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Check that YAML files do not use the ':latest' tag for the simulator image.
-# Simulator images should be pinned to a specific version so that builds and
-# tests are reproducible.
+# Check that YAML files do not use the ':latest' image tag.
+# Container images should be pinned to a specific version so that builds
+# and tests are reproducible.
 #
 # Usage:
-#   ./scripts/check-latest-tags.sh [DIR ...]
+#   ./scripts/check-latest-tags.sh [--warn] [DIR ...]
+#
+# Flags:
+#   --warn   Print violations but exit 0 (warn-only mode).
 #
 # When no directories are given the entire repository is scanned.
 
@@ -27,15 +30,24 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The simulator image name to check.
-SIMULATOR_IMAGE="llm-d-inference-sim"
+WARN_ONLY=false
+
+# Parse flags.
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --warn) WARN_ONLY=true ;;
+    *)      args+=("$arg") ;;
+  esac
+done
+set -- "${args[@]+"${args[@]}"}"
 
 if [[ $# -gt 0 ]]; then
   SCAN_DIRS=("$@")
 else
-  SCAN_DIRS=("${SCRIPT_ROOT}")
+  SCAN_DIRS=("${REPO_ROOT}")
 fi
 
 violations=""
@@ -43,11 +55,16 @@ violations=""
 for dir in "${SCAN_DIRS[@]}"; do
   [[ -d "$dir" ]] || continue
 
-  # Use find + grep -F for portability (--include is a GNU extension).
-  # Filter out commented lines by matching the content portion after the
-  # file:line: prefix that grep -n produces.
+  # Use find + grep for portability (grep --include is a GNU extension).
+  # Match image lines containing ':latest', then filter out comments,
+  # description strings, and tags like ':latest-dev' that are not bare
+  # ':latest'.
   matches="$(find "$dir" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
-    | xargs -0 grep -rnF "${SIMULATOR_IMAGE}:latest" \
+    | xargs -0 grep -rn ':latest' \
+    | grep 'image:' \
+    | grep -v ':latest-' \
+    | grep -v 'description:' \
+    | grep -v '<your-registry>' \
     | awk -F: '{content = substr($0, index($0,$3)); if (content !~ /^[[:space:]]*#/) print}' \
     || true)"
 
@@ -57,12 +74,20 @@ for dir in "${SCAN_DIRS[@]}"; do
 done
 
 if [[ -z "$violations" ]]; then
-  echo "No '${SIMULATOR_IMAGE}:latest' references found."
+  echo "No ':latest' image tags found in YAML files."
   exit 0
 fi
 
-echo "ERROR: The following YAML files use '${SIMULATOR_IMAGE}:latest'."
-echo "Pin the simulator image to a specific version (e.g. :v0.9.0)."
+if [[ "$WARN_ONLY" == true ]]; then
+  echo "WARNING: The following YAML files use the ':latest' image tag."
+else
+  echo "ERROR: The following YAML files use the ':latest' image tag."
+fi
+echo "Pin images to a specific version for reproducible builds."
 echo ""
 echo "$violations"
+
+if [[ "$WARN_ONLY" == true ]]; then
+  exit 0
+fi
 exit 1

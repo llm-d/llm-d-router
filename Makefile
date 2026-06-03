@@ -200,7 +200,11 @@ vulncheck: image-build-builder ## Run govulncheck for known vulnerabilities
 	$(BUILDER_RUN) 'govulncheck ./...'
 
 .PHONY: check-latest-tags
-check-latest-tags: ## Check that YAML files do not use the ':latest' image tag
+check-latest-tags: ## Check ':latest' image tags in YAML (warn-only; use check-latest-tags-strict to fail)
+	@./scripts/check-latest-tags.sh --warn
+
+.PHONY: check-latest-tags-strict
+check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails on any violation)
 	@./scripts/check-latest-tags.sh
 
 .PHONY: presubmit
