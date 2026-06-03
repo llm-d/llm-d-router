@@ -60,7 +60,7 @@ func TestApproximatePrefixCacheTokenEstimator(t *testing.T) {
 						Height: 1080,
 					},
 					DynamicCfg: &dynamicTokenEstimatorConfig{
-						Factor: 1024,
+						Factor: 32,
 					},
 				},
 			},
@@ -68,18 +68,51 @@ func TestApproximatePrefixCacheTokenEstimator(t *testing.T) {
 				Type:     "image_url",
 				ImageURL: fwkrh.ImageBlock{URL: base64Image180p1},
 			},
-			expected: 56,
+			expected: 58, // 320*180/(32*32) + 2
 		},
 		{
 			name: "Video_Fixed",
 			multimodalCfg: &multiModalTokenEstimatorConfig{
-				Video: &fixedTokenEstimatorConfig{FixedToken: 2000},
+				Video: &videoTokenEstimatorConfig{
+					NumFrames: 10,
+					TokensPerFrame: &imageTokenEstimatorConfig{
+						Mode:    ModeFixed,
+						FixedCfg: &fixedTokenEstimatorConfig{FixedToken: 200},
+					},
+				},
 			},
 			block: fwkrh.ContentBlock{
 				Type:     "video_url",
 				VideoURL: fwkrh.VideoBlock{URL: "https://example.com/video.mp4"},
 			},
-			expected: 2000,
+			expected: 2000, // 10 * 200
+		},
+		{
+			name: "Video_Dynamic",
+			multimodalCfg: &multiModalTokenEstimatorConfig{
+				Video: &videoTokenEstimatorConfig{
+					NumFrames: 32,
+					TokensPerFrame: &imageTokenEstimatorConfig{
+						Mode:              ModeDynamic,
+						DefaultResolution: resolution{Width: 640, Height: 360},
+						DynamicCfg:        &dynamicTokenEstimatorConfig{Factor: 32},
+					},
+				},
+			},
+			block: fwkrh.ContentBlock{
+				Type:     "video_url",
+				VideoURL: fwkrh.VideoBlock{URL: "https://example.com/video.mp4"},
+			},
+			expected: 7264, // 32 * (640*360/(32*32) + 2) = 32 * 227
+		},
+		{
+			name:          "Video_NilConfig",
+			multimodalCfg: nil,
+			block: fwkrh.ContentBlock{
+				Type:     "video_url",
+				VideoURL: fwkrh.VideoBlock{URL: "https://example.com/video.mp4"},
+			},
+			expected: 7264, // default: 32 * (640*360/(32*32) + 2) = 32 * 227
 		},
 	}
 
