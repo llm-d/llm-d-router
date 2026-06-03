@@ -55,13 +55,17 @@ violations=""
 for dir in "${SCAN_DIRS[@]}"; do
   [[ -d "$dir" ]] || continue
 
-  # Use find + grep for portability (grep --include is a GNU extension).
-  # Match image lines containing ':latest', then filter out comments,
-  # description strings, and tags like ':latest-dev' that are not bare
-  # ':latest'.
-  matches="$(find "$dir" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
-    | xargs -0 grep -rn ':latest' \
-    | grep 'image:' \
+  # Find YAML files, pruning .git and vendor trees for speed.
+  # Use grep -Hn (force filenames, no recursion) since find already
+  # supplies explicit paths. Match "image:" as a YAML key (leading
+  # whitespace) to avoid substring hits in unrelated fields.
+  matches="$(find "$dir" \
+    -path '*/.git' -prune -o \
+    -path '*/vendor' -prune -o \
+    -path '*/node_modules' -prune -o \
+    -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
+    | xargs -0 grep -Hn ':latest' \
+    | grep '[[:space:]]image:' \
     | grep -v ':latest-' \
     | grep -v 'description:' \
     | grep -v '<your-registry>' \
