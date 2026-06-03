@@ -62,6 +62,35 @@ func TestFactory_InvalidStrategy(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestFactory_InvalidConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantSub string
+	}{
+		{"negative weightDeficit", `{"strategy":"drr","weightDeficit":-0.1}`, "weightDeficit"},
+		{"negative weightDrrHeadWait", `{"strategy":"drr","weightDrrHeadWait":-1}`, "weightDrrHeadWait"},
+		{"negative weightService", `{"strategy":"las","weightService":-0.5}`, "weightService"},
+		{"negative weightServiceHeadWait", `{"strategy":"las","weightServiceHeadWait":-0.2}`, "weightServiceHeadWait"},
+		{"zero quantumTokens", `{"strategy":"drr","quantumTokens":0}`, "quantumTokens"},
+		{"negative quantumTokens", `{"strategy":"drr","quantumTokens":-100}`, "quantumTokens"},
+		{"negative deficitHalfLifeSeconds", `{"strategy":"drr","deficitHalfLifeSeconds":-1}`, "deficitHalfLifeSeconds"},
+		{"negative serviceHalfLifeSeconds", `{"strategy":"las","serviceHalfLifeSeconds":-1}`, "serviceHalfLifeSeconds"},
+		{"deficitDecayFactor at 1", `{"strategy":"drr","deficitDecayFactor":1.0}`, "deficitDecayFactor"},
+		{"deficitDecayFactor above 1", `{"strategy":"drr","deficitDecayFactor":1.5}`, "deficitDecayFactor"},
+		{"deficitDecayFactor negative", `{"strategy":"drr","deficitDecayFactor":-0.1}`, "deficitDecayFactor"},
+		{"serviceDecayFactor at 0", `{"strategy":"las","serviceDecayFactor":0}`, "serviceDecayFactor"},
+		{"serviceDecayFactor above 1", `{"strategy":"las","serviceDecayFactor":1.1}`, "serviceDecayFactor"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ProgramAwarePluginFactory("test", plugin.StrictDecoder([]byte(tc.body)), nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantSub)
+		})
+	}
+}
+
 // =============================================================================
 // DRR Strategy tests
 // =============================================================================

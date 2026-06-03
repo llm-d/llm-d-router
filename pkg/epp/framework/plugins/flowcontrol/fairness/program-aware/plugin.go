@@ -87,6 +87,40 @@ type Config struct {
 	ServiceHalfLifeSeconds *float64 `json:"serviceHalfLifeSeconds,omitempty"`
 }
 
+// validate checks that user-provided numeric fields fall in the ranges the
+// scoring strategies assume. nil pointers mean "use the default" and are
+// always accepted; only fields the user explicitly set are checked.
+func (c Config) validate() error {
+	if c.WeightDeficit != nil && *c.WeightDeficit < 0 {
+		return fmt.Errorf("weightDeficit must be >= 0, got %v", *c.WeightDeficit)
+	}
+	if c.WeightDRRHeadWait != nil && *c.WeightDRRHeadWait < 0 {
+		return fmt.Errorf("weightDrrHeadWait must be >= 0, got %v", *c.WeightDRRHeadWait)
+	}
+	if c.WeightService != nil && *c.WeightService < 0 {
+		return fmt.Errorf("weightService must be >= 0, got %v", *c.WeightService)
+	}
+	if c.WeightServiceHeadWait != nil && *c.WeightServiceHeadWait < 0 {
+		return fmt.Errorf("weightServiceHeadWait must be >= 0, got %v", *c.WeightServiceHeadWait)
+	}
+	if c.QuantumTokens != nil && *c.QuantumTokens <= 0 {
+		return fmt.Errorf("quantumTokens must be > 0, got %d", *c.QuantumTokens)
+	}
+	if c.DeficitHalfLifeSeconds != nil && *c.DeficitHalfLifeSeconds < 0 {
+		return fmt.Errorf("deficitHalfLifeSeconds must be >= 0, got %v", *c.DeficitHalfLifeSeconds)
+	}
+	if c.ServiceHalfLifeSeconds != nil && *c.ServiceHalfLifeSeconds < 0 {
+		return fmt.Errorf("serviceHalfLifeSeconds must be >= 0, got %v", *c.ServiceHalfLifeSeconds)
+	}
+	if c.DeficitDecayFactor != nil && (*c.DeficitDecayFactor < 0 || *c.DeficitDecayFactor >= 1) {
+		return fmt.Errorf("deficitDecayFactor must be in [0, 1), got %v", *c.DeficitDecayFactor)
+	}
+	if c.ServiceDecayFactor != nil && (*c.ServiceDecayFactor <= 0 || *c.ServiceDecayFactor > 1) {
+		return fmt.Errorf("serviceDecayFactor must be in (0, 1], got %v", *c.ServiceDecayFactor)
+	}
+	return nil
+}
+
 // Compile-time interface assertions.
 var (
 	_ flowcontrol.FairnessPolicy  = &ProgramAwarePlugin{}
@@ -105,6 +139,9 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 		if err := parameters.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("invalid config for %s plugin %q: %w", ProgramAwarePluginType, name, err)
 		}
+	}
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
 	strategy, err := newStrategy(cfg)
 	if err != nil {
@@ -234,13 +271,21 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 }
 
 // getOrCreateMetrics returns the ProgramMetrics for the given program ID, creating if needed.
+// Type assertions use the comma-ok form so a stray non-*ProgramMetrics entry
+// (only reachable via a future bug) degrades to a fresh metrics object instead
+// of panicking the scheduler.
 func (p *ProgramAwarePlugin) getOrCreateMetrics(programID string) *ProgramMetrics {
 	if metricsRaw, ok := p.programMetrics.Load(programID); ok {
-		return metricsRaw.(*ProgramMetrics)
+		if m, ok := metricsRaw.(*ProgramMetrics); ok {
+			return m
+		}
 	}
 	m := &ProgramMetrics{}
 	actual, _ := p.programMetrics.LoadOrStore(programID, m)
-	return actual.(*ProgramMetrics)
+	if existing, ok := actual.(*ProgramMetrics); ok {
+		return existing
+	}
+	return m
 }
 
 // computeFairnessIndex returns Jain's Fairness Index over the service rate
@@ -250,7 +295,10 @@ func (p *ProgramAwarePlugin) computeFairnessIndex() float64 {
 	var sum, sumSq float64
 	var n float64
 	p.programMetrics.Range(func(_, value any) bool {
-		m := value.(*ProgramMetrics)
+		m, ok := value.(*ProgramMetrics)
+		if !ok {
+			return true
+		}
 		x := m.ServiceRate()
 		if x == 0 {
 			return true
