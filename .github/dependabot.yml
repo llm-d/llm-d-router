@@ -54,6 +54,6 @@ updates:
     commit-message:
       prefix: "deps(docker)"
     ignore:
-      # Major/minor upgrades are handled intentionally via `make upgrade-deps`; dependabot covers patches only
+      # ßdependabot covers patches only
       - dependency-name: "*"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
