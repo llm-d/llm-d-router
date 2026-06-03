@@ -41,6 +41,11 @@ type ProgramMetrics struct {
 	totalInputTokens  atomic.Int64
 	totalOutputTokens atomic.Int64
 
+	// inFlight counts requests that have been dispatched but whose response
+	// has not yet completed. Used to gate deficit decay so that a queue with
+	// Len==0 but an outstanding dispatch is not treated as inactive.
+	inFlight atomic.Int64
+
 	// deficitTokens is the DRR deficit counter: positive means the program is owed
 	// service; negative means it has been overserved relative to its quantum.
 	// Only used by DRRStrategy.
@@ -56,6 +61,23 @@ func (m *ProgramMetrics) IncrementRequests() {
 // IncrementDispatched atomically increments the dispatched counter.
 func (m *ProgramMetrics) IncrementDispatched() {
 	m.dispatchedCount.Add(1)
+}
+
+// IncrementInFlight atomically increments the in-flight request counter.
+// Called when a request is dispatched (PreRequest hook).
+func (m *ProgramMetrics) IncrementInFlight() {
+	m.inFlight.Add(1)
+}
+
+// DecrementInFlight atomically decrements the in-flight request counter.
+// Called when a request completes (ResponseBody hook).
+func (m *ProgramMetrics) DecrementInFlight() {
+	m.inFlight.Add(-1)
+}
+
+// InFlight returns the current count of dispatched-but-not-completed requests.
+func (m *ProgramMetrics) InFlight() int64 {
+	return m.inFlight.Load()
 }
 
 // RecordWaitTime updates the EWMA of wait time with a new observation
@@ -231,6 +253,13 @@ func (m *ProgramMetrics) ResetDeficit() {
 // Deficit returns the current deficit counter value in tokens.
 func (m *ProgramMetrics) Deficit() int64 {
 	return m.deficitTokens.Load()
+}
+
+// DecayDeficit multiplies the deficit counter by the given factor, causing
+// stale credit to be gradually forgotten across Pick() cycles.
+func (m *ProgramMetrics) DecayDeficit(factor float64) {
+	current := m.deficitTokens.Load()
+	m.deficitTokens.Store(int64(float64(current) * factor))
 }
 
 // DecayDeficitTimed applies time-based exponential decay to the deficit counter

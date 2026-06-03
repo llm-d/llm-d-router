@@ -77,12 +77,6 @@ The simplest scheduling strategy. Programs are sorted by ID for deterministic or
 
 Round-robin is appropriate as a baseline or when all programs have roughly equal workloads and no program-level fairness adjustment is needed. It does not account for differences in token consumption or queue depth across programs.
 
-**Configuration parameters:**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `deferRRCursor` | `false` | When `true`, the cursor only advances in `OnPreRequest()` (after a real dispatch) rather than in `Pick()`. This prevents the cursor from advancing when `Pick()` is called but the request is not actually dispatched. |
-
 ### Least-Attained Service (default)
 
 Tracks a time-decayed accumulator of weighted tokens consumed per program. Programs with **lower** attained service receive **higher** scores, promoting programs that have received less compute.
@@ -120,8 +114,8 @@ Adapted from [Shreedhar & Varghese 1995](https://dl.acm.org/doi/pdf/10.1145/2173
 | Head-of-queue wait | Age of oldest queued request | Prevents starvation of new programs |
 
 **How it works:**
-- The first `Pick()` in a dispatch cycle allocates `quantumTokens` to all non-empty queues; subsequent `Pick()` calls in the same cycle only allocate to newly arrived programs (cycle-aware quantum prevents double allocation)
-- Idle programs have their deficit reset to 0 (standard DRR: no credit accumulation while inactive)
+- Each `Pick()` allocates `quantumTokens` to every non-empty queue (the dispatch loop guarantees one Pick per dispatch)
+- Inactive programs (queue empty and no in-flight request) have their deficit decayed so stale credit shrinks toward zero; decay is skipped while a request is in flight to preserve the upcoming `OnCompleted` deduction
 - When a response completes, actual token cost is deducted from the deficit
 - The program with the highest deficit (most owed service) is selected next
 
@@ -134,6 +128,8 @@ DRR is suited for workloads where programs have highly variable request sizes (t
 | `weightDeficit` | 0.8 | Weight for the deficit counter signal |
 | `weightDrrHeadWait` | 0.2 | Weight for head-of-queue wait time |
 | `quantumTokens` | 1000 | Token budget added per program per `Pick()` cycle |
+| `deficitHalfLifeSeconds` | 60 | Half-life (seconds) for time-based decay of inactive-program deficit. Set to 0 to disable time-based decay. Takes precedence over `deficitDecayFactor` when both are set. |
+| `deficitDecayFactor` | 0 (disabled) | Per-Pick multiplicative decay factor applied to inactive-program deficit when time-based decay is disabled. Must be in `(0, 1)` to take effect. |
 
 ## Configuration
 

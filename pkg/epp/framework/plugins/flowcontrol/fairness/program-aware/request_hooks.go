@@ -61,6 +61,7 @@ func (p *ProgramAwarePlugin) PreRequest(ctx context.Context, request *fwksched.I
 	p.getStrategy().OnPreRequest(metrics, request)
 
 	metrics.IncrementDispatched()
+	metrics.IncrementInFlight()
 	dispatchedTotal.WithLabelValues(programID).Inc()
 
 	if enqueueTimeRaw, ok := p.requestTimestamps.Load(request.RequestID); ok {
@@ -78,9 +79,12 @@ func (p *ProgramAwarePlugin) PreRequest(ctx context.Context, request *fwksched.I
 
 // --- ResponseComplete interface ---
 
-// ResponseBody records token usage and cleans up per-request state.
+// ResponseBody records token usage and cleans up per-request state. For
+// streaming responses ResponseBody fires once per chunk; only the final
+// invocation (response.EndOfStream == true) carries the terminal Usage and
+// is treated as the request-lifecycle hook.
 func (p *ProgramAwarePlugin) ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
-	if request == nil {
+	if request == nil || response == nil || !response.EndOfStream {
 		return
 	}
 	programID := request.FairnessID
@@ -91,26 +95,26 @@ func (p *ProgramAwarePlugin) ResponseBody(ctx context.Context, request *fwksched
 	// Clean up the enqueue timestamp stored by Pick().
 	p.requestTimestamps.Delete(request.RequestID)
 
-	if response != nil {
-		metrics := p.getOrCreateMetrics(programID)
-		promptTokens := int64(response.Usage.PromptTokens)
-		completionTokens := int64(response.Usage.CompletionTokens)
+	metrics := p.getOrCreateMetrics(programID)
+	metrics.DecrementInFlight()
 
-		metrics.RecordTokens(promptTokens, completionTokens)
-		inputTokensTotal.WithLabelValues(programID).Add(float64(promptTokens))
-		outputTokensTotal.WithLabelValues(programID).Add(float64(completionTokens))
+	promptTokens := int64(response.Usage.PromptTokens)
+	completionTokens := int64(response.Usage.CompletionTokens)
 
-		p.getStrategy().OnCompleted(metrics, request, response)
-		attainedServiceTokens.WithLabelValues(programID).Set(metrics.AttainedService())
+	metrics.RecordTokens(promptTokens, completionTokens)
+	inputTokensTotal.WithLabelValues(programID).Add(float64(promptTokens))
+	outputTokensTotal.WithLabelValues(programID).Add(float64(completionTokens))
 
-		// Update service rate for fairness index (weighted tokens/sec EWMA).
-		cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
-		metrics.RecordServiceRate(cost, time.Now())
-		serviceRateTokensPerSec.WithLabelValues(programID).Set(metrics.ServiceRate())
+	p.getStrategy().OnCompleted(metrics, request, response)
+	attainedServiceTokens.WithLabelValues(programID).Set(metrics.AttainedService())
 
-		log.FromContext(ctx).V(logutil.TRACE).Info("ResponseComplete: recorded tokens",
-			"requestId", request.RequestID, "programId", programID,
-			"promptTokens", promptTokens, "completionTokens", completionTokens,
-			"attainedService", metrics.AttainedService())
-	}
+	// Update service rate for fairness index (weighted tokens/sec EWMA).
+	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
+	metrics.RecordServiceRate(cost, time.Now())
+	serviceRateTokensPerSec.WithLabelValues(programID).Set(metrics.ServiceRate())
+
+	log.FromContext(ctx).V(logutil.TRACE).Info("ResponseComplete: recorded tokens",
+		"requestId", request.RequestID, "programId", programID,
+		"promptTokens", promptTokens, "completionTokens", completionTokens,
+		"attainedService", metrics.AttainedService())
 }

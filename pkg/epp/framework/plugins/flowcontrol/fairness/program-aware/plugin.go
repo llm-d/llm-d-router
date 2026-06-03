@@ -53,8 +53,16 @@ type Config struct {
 	// DeficitHalfLifeSeconds enables time-based decay for the DRR deficit counter.
 	// Defines the half-life in seconds: deficit decays to 50% after this duration.
 	// Prevents unbounded deficit accumulation for programs that stop sending requests.
-	// Default: 60 (deficit halves every 60s). Set to 0 to disable decay.
+	// Default: 60 (deficit halves every 60s). Set to 0 to disable time-based decay.
+	// When > 0, this takes precedence over DeficitDecayFactor.
 	DeficitHalfLifeSeconds *float64 `json:"deficitHalfLifeSeconds,omitempty"`
+
+	// DeficitDecayFactor enables per-Pick factor decay for the DRR deficit
+	// counter when DeficitHalfLifeSeconds is 0. Each Pick() multiplies the
+	// deficit of inactive queues (Len==0 and no in-flight requests) by this
+	// factor. Must be in (0, 1) to take effect; 0 disables it.
+	// Default: 0 (disabled).
+	DeficitDecayFactor *float64 `json:"deficitDecayFactor,omitempty"`
 
 	// --- Service weights (only used when strategy == "las") ---
 
@@ -77,13 +85,6 @@ type Config struct {
 	// When set (> 0), overrides ServiceDecayFactor with wall-clock based decay.
 	// Example: 30 = service halves every 30s regardless of Pick() frequency.
 	ServiceHalfLifeSeconds *float64 `json:"serviceHalfLifeSeconds,omitempty"`
-
-	// --- RR options (only used when strategy == "rr") ---
-
-	// DeferRRCursor controls whether the round-robin cursor advances in
-	// Pick() (false, default) or is deferred to OnPreRequest() so the
-	// cursor only moves after a real dispatch. Default: false.
-	DeferRRCursor *bool `json:"deferRRCursor,omitempty"`
 }
 
 // Compile-time interface assertions.

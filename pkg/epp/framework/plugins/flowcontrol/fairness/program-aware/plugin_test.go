@@ -216,6 +216,7 @@ func TestResponseComplete_RecordsTokensAndCleanup(t *testing.T) {
 		FairnessID: "prog-a",
 	}
 	response := &fwkrc.Response{
+		EndOfStream: true,
 		Usage: requesthandling.Usage{
 			PromptTokens:     100,
 			CompletionTokens: 50,
@@ -237,18 +238,50 @@ func TestResponseComplete_RecordsTokensAndCleanup(t *testing.T) {
 	assert.Greater(t, metrics.AverageTokens(), 0.0, "token usage should be recorded")
 }
 
-func TestResponseComplete_NoFairnessID_StillCleansTimestamp(t *testing.T) {
+func TestResponseBody_IntermediateChunks_AreNoOp(t *testing.T) {
+	// Streaming responses fire ResponseBody once per chunk; only the final
+	// chunk (EndOfStream=true) should perform terminal-state work. Verifies
+	// InFlight is decremented exactly once and tokens are recorded once.
+	p := &ProgramAwarePlugin{}
+	m := &ProgramMetrics{}
+	p.programMetrics.Store("prog-a", m)
+	p.requestTimestamps.Store("req-1", time.Now())
+	m.IncrementInFlight() // simulates PreRequest
+
+	request := &fwksched.InferenceRequest{RequestID: "req-1", FairnessID: "prog-a"}
+
+	// Five intermediate chunks — must be no-ops.
+	for range 5 {
+		p.ResponseBody(context.Background(), request, &fwkrc.Response{EndOfStream: false}, &datalayer.EndpointMetadata{})
+	}
+	assert.Equal(t, int64(1), m.InFlight(), "intermediate chunks must not decrement InFlight")
+	assert.Equal(t, int64(0), m.TotalInputTokens(), "intermediate chunks must not record tokens")
+
+	// Final chunk fires the terminal hook exactly once.
+	finalResp := &fwkrc.Response{
+		EndOfStream: true,
+		Usage:       requesthandling.Usage{PromptTokens: 100, CompletionTokens: 50},
+	}
+	p.ResponseBody(context.Background(), request, finalResp, &datalayer.EndpointMetadata{})
+	assert.Equal(t, int64(0), m.InFlight())
+	assert.Equal(t, int64(100), m.TotalInputTokens())
+	assert.Equal(t, int64(50), m.TotalOutputTokens())
+}
+
+func TestResponseComplete_NilOrIntermediateResponse_NoCleanup(t *testing.T) {
+	// Nil response and non-EndOfStream response must not run terminal work,
+	// including timestamp cleanup — that work happens only on the final chunk.
 	p := &ProgramAwarePlugin{}
 	p.requestTimestamps.Store("req-1", time.Now())
-
-	request := &fwksched.InferenceRequest{
-		RequestID: "req-1",
-	}
+	request := &fwksched.InferenceRequest{RequestID: "req-1"}
 
 	p.ResponseBody(context.Background(), request, nil, nil)
-
 	_, ok := p.requestTimestamps.Load("req-1")
-	assert.False(t, ok, "timestamp should be cleaned up even without fairness header")
+	assert.True(t, ok, "nil response leaves timestamp for the eventual final-chunk call")
+
+	p.ResponseBody(context.Background(), request, &fwkrc.Response{EndOfStream: false}, nil)
+	_, ok = p.requestTimestamps.Load("req-1")
+	assert.True(t, ok, "intermediate chunk leaves timestamp for the eventual final-chunk call")
 }
 
 // --- rangeNormalize tests ---
@@ -304,7 +337,7 @@ func TestFullLifecycle(t *testing.T) {
 	assert.Greater(t, metrics.AverageWaitTime(), 0.0, "wait time should reflect queue residence time")
 
 	// 3. ResponseComplete
-	response := &fwkrc.Response{Headers: map[string]string{}}
+	response := &fwkrc.Response{Headers: map[string]string{}, EndOfStream: true}
 	response.Usage = requesthandling.Usage{PromptTokens: 42, CompletionTokens: 17}
 	p.ResponseBody(context.Background(), request, response, &datalayer.EndpointMetadata{})
 	assert.Equal(t, int64(42), metrics.TotalInputTokens())
