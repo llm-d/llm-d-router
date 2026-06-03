@@ -34,16 +34,18 @@ import (
 
 // tokenLimitMap returns the map holding the token-limit fields: sampling_params
 // for the generate API (created if absent), or the request itself otherwise.
-func tokenLimitMap(req map[string]any, apiType APIType) map[string]any {
+// The second return value reports whether an empty sampling_params map was
+// synthesized; callers must drop it before dispatching downstream if it stays empty.
+func tokenLimitMap(req map[string]any, apiType APIType) (map[string]any, bool) {
 	if apiType != APITypeGenerate {
-		return req
+		return req, false
 	}
 	if sp, ok := req[requestFieldSamplingParams].(map[string]any); ok {
-		return sp
+		return sp, false
 	}
 	sp := map[string]any{}
 	req[requestFieldSamplingParams] = sp
-	return sp
+	return sp, true
 }
 
 func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType APIType) {
@@ -94,7 +96,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		val     any
 		present bool
 	}
-	tokenMap := tokenLimitMap(completionRequest, apiType)
+	tokenMap, createdSamplingParams := tokenLimitMap(completionRequest, apiType)
 	var savedTokenValues [2]savedField
 	for i, field := range tokenLimitFields {
 		if v, ok := tokenMap[field]; ok {
@@ -240,6 +242,11 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		if sv.present {
 			tokenMap[sv.field] = sv.val
 		}
+	}
+	// Drop the sampling_params map synthesized for prefill capping if it ended up
+	// empty, so the decode request matches the caller's original (which omitted it).
+	if createdSamplingParams && len(tokenMap) == 0 {
+		delete(completionRequest, requestFieldSamplingParams)
 	}
 
 	completionRequest[requestFieldKVTransferParams] = pKVTransferParams

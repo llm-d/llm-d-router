@@ -528,6 +528,11 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		}()
 
 		<-testInfo.proxy.readyCh
+		DeferCleanup(func() {
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		})
+
 		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
 
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+GeneratePath, strings.NewReader(body))
@@ -538,15 +543,12 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		rp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:all
+			bp, readErr := io.ReadAll(rp.Body)
+			Expect(readErr).ToNot(HaveOccurred())
 			Fail(string(bp))
 		}
-
-		DeferCleanup(func() {
-			testInfo.cancelFn()
-			<-testInfo.stoppedCh
-		})
 	}
 
 	samplingParamsOf := func(req map[string]any) map[string]any {
@@ -571,8 +573,8 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
 		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
 
-		Expect(samplingParamsOf(prq1)).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 1)))
-		Expect(samplingParamsOf(prq1)).To(HaveKeyWithValue("min_tokens", BeNumerically("==", 1)))
+		Expect(samplingParamsOf(prq1)).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(samplingParamsOf(prq1)).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
 		Expect(prq1).To(HaveKeyWithValue("stream", false))
 
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
@@ -587,12 +589,12 @@ var _ = Describe("NIXL Connector (v2)", func() {
 			}`, true)
 
 		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
-		Expect(prefillSP).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 1)))
-		Expect(prefillSP).To(HaveKeyWithValue("min_tokens", BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
 
 		decodeSP := samplingParamsOf(testInfo.decodeHandler.CompletionRequests[0])
-		Expect(decodeSP).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 100)))
-		Expect(decodeSP).To(HaveKeyWithValue("min_tokens", BeNumerically("==", 5)))
+		Expect(decodeSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
+		Expect(decodeSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
 	})
 
 	It("should cap prefill and drop the caps in decode when sampling_params omits them", func() {
@@ -603,13 +605,27 @@ var _ = Describe("NIXL Connector (v2)", func() {
 			}`, true)
 
 		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
-		Expect(prefillSP).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 1)))
-		Expect(prefillSP).To(HaveKeyWithValue("min_tokens", BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
 
 		decodeSP := samplingParamsOf(testInfo.decodeHandler.CompletionRequests[0])
-		Expect(decodeSP).ToNot(HaveKey("max_tokens"))
-		Expect(decodeSP).ToNot(HaveKey("min_tokens"))
+		Expect(decodeSP).ToNot(HaveKey(requestFieldMaxTokens))
+		Expect(decodeSP).ToNot(HaveKey(requestFieldMinTokens))
 		Expect(decodeSP).To(HaveKeyWithValue("temperature", BeNumerically("==", 0.7)))
+	})
+
+	It("should cap prefill and drop synthesized sampling_params in decode when the request omits it", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4]
+			}`, true)
+
+		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+
+		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
+		Expect(decodeReq).ToNot(HaveKey(requestFieldSamplingParams))
 	})
 
 	It("should pass through generate API request when no prefill header is set", func() {
