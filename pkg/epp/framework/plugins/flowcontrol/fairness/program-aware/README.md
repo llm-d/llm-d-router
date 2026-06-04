@@ -1,214 +1,203 @@
 # Program-Aware Fairness Plugin
 
-The program-aware fairness plugin introduces program-level scheduling to `llm-d-router`. Rather than treating each inference request independently, this plugin recognizes that requests belong to higher-level **agentic programs** — workflows composed of multiple LLM calls — and makes scheduling decisions based on aggregated program-level metrics.
+**Type:** `program-aware-fairness`
+**Interfaces:** `flowcontrol.FairnessPolicy`, `requestcontrol.DataProducer`, `requestcontrol.PreRequest`, `requestcontrol.ResponseBodyProcessor`
 
-## Overview
+Program-level fairness for agentic workloads: requests are grouped by program ID, and dispatch decisions are made on aggregated per-program metrics rather than per-request attributes.
 
-Agentic workloads (coding agents, research pipelines, multi-step reasoning chains) generate sequences of LLM inference requests that form a logical program. Scheduling these requests individually ignores the program-level context: one program may have consumed far more compute than another, or a program's requests may be consistently starved while others proceed.
+## What It Does
 
-This plugin addresses that by:
+Agentic workloads (coding agents, research pipelines, multi-step reasoning chains) generate sequences of LLM inference requests that form a logical program. Scheduling those requests individually ignores the program-level context: one program may have consumed far more compute than another, or a program's requests may be consistently starved while others proceed.
 
-- **Identifying agentic programs** via the standard `x-gateway-inference-fairness-id` HTTP header (defined by the [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/))
-- **Tracking program-level metrics** across the full request lifecycle — accumulated token usage, queue wait times, dispatch counts, and service rates
-- **Making dispatch decisions at the program level** using configurable scoring strategies that consider each program's accumulated metrics rather than individual request attributes
+This plugin recognizes that requests belong to higher-level programs and:
 
-The plugin type is `program-aware-fairness`.
+- **Identifies programs** via the `x-gateway-inference-fairness-id` HTTP header (defined by the Gateway API Inference Extension).
+- **Tracks program-level metrics** across the full request lifecycle — accumulated token usage, queue wait times, dispatch counts, and service rates.
+- **Selects which program to dispatch next** using a configurable scoring strategy that compares per-program metrics.
 
-## Architecture
+Use it when distinct workflows or tenants share the same inference pool and you want fair allocation at the workflow level — not just per-request fairness.
 
-The plugin implements four interfaces from the Gateway API Inference Extension framework, giving it visibility into the full request lifecycle:
+## How It Works
+
+The plugin participates in the request lifecycle at four points:
 
 ```
 Incoming Request
        |
        v
   Flow Control ─── FairnessPolicy.Pick()
-       |             Evaluates program-level metrics to decide which
-       |             program's queue to service next
+       |             Picks which program's queue to service next.
        v
-  PrepareData ──── DataProducer.PrepareRequestData()
-       |             Associates request with its program, updates counters
+  Produce ──────── DataProducer.Produce()
+       |             Associates the request with its program; updates counters.
        v
-  Scheduling ───── (queue-scorer + max-score-picker select the best endpoint)
+  Scheduling ───── (queue-scorer + max-score-picker select the endpoint)
        |
        v
   PreRequest ───── PreRequest.PreRequest()
-       |             Records wait time from queue entry to dispatch
+       |             Records flow-control queue wait time.
        v
   Model Server
        |
        v
-  ResponseComplete ─ ResponseComplete.ResponseComplete()
-                       Records token usage, updates program-level state
+  ResponseBody ──── ResponseBodyProcessor.ResponseBody()
+                       On EndOfStream: records token usage and updates
+                       per-program EWMA / attained service.
 ```
 
-Each program is identified by its `x-gateway-inference-fairness-id` header and automatically gets its own flow queue. The `Pick()` function evaluates all program queues using accumulated metrics to decide which program should be serviced next.
+Each program is identified by its `x-gateway-inference-fairness-id` header and gets its own flow queue.
 
-### How Pick() Works
+### Picking a queue
 
-The plugin builds a `map[string]QueueInfo` from all program queues and delegates to the configured `ScoringStrategy.Pick()`. Each strategy owns its own selection logic:
+`Pick()` builds a `map[string]QueueInfo` from all program queues in the priority band and delegates to the configured `ScoringStrategy`:
 
-- **LAS and DRR** use a two-pass algorithm with adaptive normalization:
-  1. **Pass 1** — Bookkeeping (decay inactive queues / allocate quantum to non-empty queues), then collect raw metric dimensions for non-empty queues, tracking per-dimension min/max.
-  2. **Pass 2** — Normalize each dimension to `[0, 1]` using the observed min/max range, compute a weighted score, and select the highest-scoring queue.
+- **LAS** and **DRR** use a two-pass algorithm with adaptive normalization:
+  1. *Pass 1* — Bookkeeping (decay inactive queues / allocate quantum to non-empty queues), then collect raw metric dimensions for non-empty queues, tracking per-dimension min/max.
+  2. *Pass 2* — Normalize each dimension to `[0, 1]` using the observed range, compute a weighted score, and select the highest-scoring queue.
 - **RR** walks a sorted cursor through program IDs and picks the next non-empty queue.
 
-### Token Weighting
+The selected item's enqueue time is stashed on the `*scheduling.InferenceRequest` itself so `PreRequest` can compute the actual flow-control wait without a side map.
 
-Token costs are weighted to reflect actual compute:
-- Prompt (input) tokens: weight = 1
-- Completion (output) tokens: weight = 2
+### Token weighting
 
-This means the plugin accounts for the fact that generation is roughly twice as expensive as prompt processing when evaluating how much compute a program has consumed.
+Token costs are weighted to reflect compute:
 
-## Scheduling Strategies
+| Token type | Weight |
+|---|---|
+| Prompt (input) | 1 |
+| Completion (output) | 2 |
 
-The plugin supports multiple scoring strategies, selected via the `strategy` config field. All strategies operate on program-level aggregated metrics rather than individual request attributes.
+Generation is roughly twice as expensive as prompt processing; the plugin accounts for that when comparing how much compute a program has consumed.
 
-| Strategy | `strategy` value | Description |
-|----------|-----------------|-------------|
-| Round-Robin | `rr` | Cycles through programs in order, equal turns regardless of usage |
-| Least-Attained Service | `las` (default) | Promotes programs that have consumed the least compute |
-| Deficit Round Robin | `drr` | Token-budget based proportional fairness |
+### Strategies
 
-### Round-Robin
+The `strategy` config field selects the scoring algorithm. All strategies operate on per-program aggregated metrics.
 
-The simplest scheduling strategy. Programs are sorted by ID for deterministic ordering, and a cursor walks forward picking the next non-empty queue. Each program gets an equal turn regardless of how many tokens it has consumed or how long its requests have been waiting.
+| Strategy | `strategy` value | When to use |
+|---|---|---|
+| Round-Robin | `rr` | Baseline; equal turns regardless of usage |
+| Least-Attained Service | `las` (default) | Equitable resource allocation; promotes underserved programs |
+| Deficit Round Robin | `drr` | Highly variable request sizes; proportional bandwidth |
 
-Round-robin is appropriate as a baseline or when all programs have roughly equal workloads and no program-level fairness adjustment is needed. It does not account for differences in token consumption or queue depth across programs.
+**Round-Robin.** Programs are sorted by ID for deterministic ordering, and a cursor walks forward picking the next non-empty queue. Each program gets an equal turn regardless of how many tokens it has consumed or how long its requests have been waiting. Appropriate when all programs have roughly equal workloads.
 
-### Least-Attained Service (default)
+**Least-Attained Service.** Tracks a time-decayed accumulator of weighted tokens consumed per program. Programs with **lower** attained service receive **higher** scores.
 
-Tracks a time-decayed accumulator of weighted tokens consumed per program. Programs with **lower** attained service receive **higher** scores, promoting programs that have received less compute.
-
-**Dimensions:**
 | Dimension | Signal | Effect |
-|-----------|--------|--------|
+|---|---|---|
 | Attained service (inverted) | Time-decayed weighted tokens consumed | Lower service = higher priority |
 | Head-of-queue wait | Age of oldest queued request | Tiebreaker for cold start |
 
-**How it works:**
-- Inactive programs (queue empty and no in-flight request) have their attained service decayed so stale usage shrinks; decay is skipped while a request is in flight to preserve the upcoming `OnCompleted` `AddService`
-- Active programs accumulate service without decay so persistent heavy users stay deprioritized; idle programs lose stale service so they can compete on return
-- When a response completes, the weighted token cost is added to the program's attained service
-- Scoring inverts the service dimension so programs that have consumed less compute are promoted
+Active programs accumulate service without decay so persistent heavy users stay deprioritized; idle programs lose stale service so they can compete on return. On each completion the weighted token cost is added to the program's attained service. Decay is skipped while a request is in flight to preserve the upcoming `OnCompleted` `AddService`.
 
-This is the default and recommended strategy. It directly targets equitable resource allocation — underserved programs are promoted, while idle-program decay prevents permanent penalty for old bursts and absent-program decay gives returning programs a fair start.
+**Deficit Round Robin.** Adapted from Shreedhar & Varghese 1995 for token-based scheduling. Each non-empty program earns a fixed token quantum per `Pick()` cycle; actual token cost is deducted at response completion. Provides provably proportional fairness regardless of request rate or size.
 
-**Configuration parameters:**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `weightService` | 0.8 | Weight for the inverted attained-service signal |
-| `weightServiceHeadWait` | 0.2 | Weight for head-of-queue wait time |
-| `serviceDecayFactor` | 0.995 | Per-cycle multiplicative decay (ignored if `serviceHalfLifeSeconds` is set) |
-| `serviceHalfLifeSeconds` | — | Time-based decay: service halves every N seconds (overrides `serviceDecayFactor`) |
-
-### Deficit Round Robin (DRR)
-
-Adapted from [Shreedhar & Varghese 1995](https://dl.acm.org/doi/pdf/10.1145/217391.217453) for token-based LLM scheduling. Each active program earns a fixed token quantum per round; actual token usage is deducted at response completion. Provides provably proportional fairness regardless of request rate or size.
-
-**Dimensions:**
 | Dimension | Signal | Effect |
-|-----------|--------|--------|
+|---|---|---|
 | Deficit counter | Quantum allocated minus tokens consumed | Positive = owed service, negative = overserved |
 | Head-of-queue wait | Age of oldest queued request | Prevents starvation of new programs |
 
-**How it works:**
-- Each `Pick()` allocates `quantumTokens` to every non-empty queue (the dispatch loop guarantees one Pick per dispatch)
-- Inactive programs (queue empty and no in-flight request) have their deficit decayed so stale credit shrinks toward zero; decay is skipped while a request is in flight to preserve the upcoming `OnCompleted` deduction
-- When a response completes, actual token cost is deducted from the deficit
-- The program with the highest deficit (most owed service) is selected next
+Inactive programs (queue empty and no in-flight request) have their deficit decayed so stale credit shrinks toward zero. The program with the highest deficit (most owed service) is selected next.
 
-DRR is suited for workloads where programs have highly variable request sizes (token counts). Unlike attained-service fairness which equalizes total consumption, DRR guarantees proportional bandwidth allocation through its quantum mechanism — programs that submit large requests are naturally throttled by deficit deduction without needing explicit rate limiting.
+### Eviction
 
-**Configuration parameters:**
+The per-program metrics map is bounded by a periodic sweeper. A program with no completed requests inside `evictionTtlSeconds` (default 1 hour) and no in-flight work is dropped. The next request from that program reallocates fresh metrics. Default deficit half-life of 60 s means an hour-idle program's accumulators are already near zero, so eviction is observationally indistinguishable from natural decay. Set `evictionTtlSeconds: 0` to disable eviction entirely.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `weightDeficit` | 0.8 | Weight for the deficit counter signal |
-| `weightDrrHeadWait` | 0.2 | Weight for head-of-queue wait time |
-| `quantumTokens` | 1000 | Token budget added per program per `Pick()` cycle |
-| `deficitHalfLifeSeconds` | 60 | Half-life (seconds) for time-based decay of inactive-program deficit. Set to 0 to disable time-based decay. Takes precedence over `deficitDecayFactor` when both are set. |
-| `deficitDecayFactor` | 0 (disabled) | Per-Pick multiplicative decay factor applied to inactive-program deficit when time-based decay is disabled. Must be in `(0, 1)` to take effect. |
+## Inputs Consumed
+
+| Input | Source | Required | Notes |
+|---|---|---|---|
+| `x-gateway-inference-fairness-id` header | HTTP request | No | Falls back to a default fairness ID when absent; all unidentified requests share one queue |
+| Token usage | Model-server response (`Usage.PromptTokens`, `Usage.CompletionTokens`) | Yes | Read on the final stream chunk (`response.EndOfStream == true`) |
+| Flow-control enqueue time | `flowcontrol.QueueItemAccessor.EnqueueTime()` | Yes | Stashed on the request's attribute store at `Pick()`, read at `PreRequest()` |
 
 ## Configuration
 
-The plugin is configured via an `EndpointPickerConfig` YAML file. See [`deploy/config/sim-program-aware-config.yaml`](../../../deploy/config/sim-program-aware-config.yaml) for a complete working example.
+**Location:** plugin entry under top-level `plugins`; referenced from `flowControl.defaultPriorityBand.fairnessPolicyRef`.
+**Enabled by default:** No. Both `flowControl` and `prepareDataPlugins` feature gates must be enabled.
 
-### Minimal Configuration
+### Parameters
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `strategy` | string | no | `las` | One of `las`, `drr`, `rr` |
+| `weightDeficit` | float | no | `0.8` | DRR: weight for the deficit signal |
+| `weightDrrHeadWait` | float | no | `0.2` | DRR: weight for head-of-queue wait |
+| `quantumTokens` | int | no | `1000` | DRR: token budget added per Pick() per non-empty queue |
+| `deficitHalfLifeSeconds` | float | no | `60` | DRR: half-life of inactive-program deficit decay; `0` disables time-based decay |
+| `deficitDecayFactor` | float | no | `0` | DRR: per-Pick decay factor when time-based decay is disabled. Must be in `[0, 1)`; `0` disables |
+| `weightService` | float | no | `0.8` | LAS: weight for the inverted attained-service signal |
+| `weightServiceHeadWait` | float | no | `0.2` | LAS: weight for head-of-queue wait |
+| `serviceDecayFactor` | float | no | `0.995` | LAS: per-cycle multiplicative decay. Must be in `(0, 1]`. Ignored when `serviceHalfLifeSeconds` is set |
+| `serviceHalfLifeSeconds` | float | no | `0` | LAS: half-life of attained-service decay when set; overrides `serviceDecayFactor` |
+| `evictionTtlSeconds` | float | no | `3600` | Programs with no completions in this window are evicted from the metrics map. `0` disables eviction |
+| `evictionSweepSeconds` | float | no | `300` | Eviction sweep cadence. Must be `> 0` |
+
+### Examples
+
+Minimal config (default LAS strategy):
 
 ```yaml
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: program-aware-fairness
-- type: queue-scorer
-- type: max-score-picker
-- type: single-profile-handler
+  - type: program-aware-fairness
+  - type: queue-scorer
+  - type: max-score-picker
+  - type: single-profile-handler
 
 featureGates:
-- flowControl
-- prepareDataPlugins
+  - flowControl
+  - prepareDataPlugins
 
 flowControl:
   defaultPriorityBand:
     fairnessPolicyRef: program-aware-fairness
 
 schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: queue-scorer
-  - pluginRef: max-score-picker
+  - name: default
+    plugins:
+      - pluginRef: queue-scorer
+      - pluginRef: max-score-picker
 ```
 
-Key points:
-- **`featureGates`** — Both `flowControl` and `prepareDataPlugins` must be enabled
-- **`fairnessPolicyRef`** — Must reference the plugin type `program-aware-fairness` to wire it as the flow control fairness policy
-- **`schedulingProfiles`** — Defines the endpoint scoring pipeline that runs after flow control dispatches a request from the selected program's queue
+Round-robin:
 
-### Declaring a Strategy with Custom Parameters
-
-To select a strategy and tune its weights, add a `config` block to the plugin entry:
-
-**Round-robin:**
 ```yaml
 plugins:
-- type: program-aware-fairness
-  config:
-    strategy: rr
+  - type: program-aware-fairness
+    config:
+      strategy: rr
 ```
 
-**LAS strategy with time-based decay:**
+LAS with time-based decay:
+
 ```yaml
 plugins:
-- type: program-aware-fairness
-  config:
-    strategy: las
-    weightService: 0.9
-    weightServiceHeadWait: 0.1
-    serviceHalfLifeSeconds: 30
+  - type: program-aware-fairness
+    config:
+      strategy: las
+      weightService: 0.9
+      weightServiceHeadWait: 0.1
+      serviceHalfLifeSeconds: 30
 ```
 
-**DRR strategy with custom quantum:**
+DRR with custom quantum:
+
 ```yaml
 plugins:
-- type: program-aware-fairness
-  config:
-    strategy: drr
-    weightDeficit: 0.7
-    weightDrrHeadWait: 0.3
-    quantumTokens: 2000
+  - type: program-aware-fairness
+    config:
+      strategy: drr
+      weightDeficit: 0.7
+      weightDrrHeadWait: 0.3
+      quantumTokens: 2000
 ```
 
-If no `config` block is provided, the plugin defaults to the **las** strategy with default weights.
-
-## Observability
-
-The plugin exports Prometheus metrics for monitoring program-level scheduling behavior:
+### Observability
 
 | Metric | Type | Description |
-|--------|------|-------------|
+|---|---|---|
 | `program_aware_requests_total` | Counter | Total requests per program |
 | `program_aware_dispatched_total` | Counter | Total dispatched per program |
 | `program_aware_ewma_wait_time_milliseconds` | Gauge | EWMA of queue wait time per program |
@@ -219,13 +208,19 @@ The plugin exports Prometheus metrics for monitoring program-level scheduling be
 | `program_aware_attained_service_tokens` | Gauge | Current attained service per program |
 | `program_aware_service_rate_tokens_per_second` | Gauge | EWMA of weighted tokens/sec per program |
 | `program_aware_queue_score` | Gauge | Score computed per program during `Pick()` |
+| `program_aware_deficit_tokens` | Gauge | DRR deficit counter per program |
 
-## Source Files
+## Limitations
 
-| File | Purpose |
-|------|---------|
-| `plugin.go` | Plugin struct, factory, `FairnessPolicy.Pick()` |
-| `strategy.go` | `ScoringStrategy` interface, LAS, DRR, and RR implementations |
-| `programmetrics.go` | Per-program metrics aggregation (EWMA, atomic counters) |
-| `request_hooks.go` | Lifecycle hooks: `PrepareData`, `PreRequest`, `ResponseComplete` |
-| `prometheus.go` | Prometheus metric definitions |
+- Requests without the `x-gateway-inference-fairness-id` header fall into a single shared default queue and receive no per-program isolation.
+- `rr` does not track tokens or service; programs are equal turns regardless of consumed compute.
+- Eviction reset: a program whose metrics are dropped (idle past `evictionTtlSeconds`) starts with zero deficit / attained service on its next request. With default 60 s deficit half-life and 1-hour TTL, accumulated state is already near zero by the time eviction fires, so this is observationally indistinguishable from natural decay.
+- The plugin requires the `flowControl` and `prepareDataPlugins` feature gates; it cannot run without them.
+- Token weighting (input=1, output=2) is hard-coded; there is no config knob today.
+
+## Related Documentation
+
+- Gateway API Inference Extension fairness contract: <https://gateway-api-inference-extension.sigs.k8s.io/>
+- Sibling fairness plugins in this repo: `roundrobin`, `globalstrict` under `pkg/epp/framework/plugins/flowcontrol/fairness/`
+- DRR paper — Shreedhar & Varghese, 1995: <https://dl.acm.org/doi/pdf/10.1145/217391.217453>
+- Example config: `deploy/config/sim-program-aware-config.yaml`
