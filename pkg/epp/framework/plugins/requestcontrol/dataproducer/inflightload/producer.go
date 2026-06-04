@@ -184,16 +184,29 @@ func (p *InFlightLoadProducer) RegisterDependencies(r datalayer.Registrar) error
 	})
 }
 
-// Extract handles endpoint deletion events to prune stateful trackers.
+// Extract handles endpoint lifecycle events to manage dynamic attributes.
 func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.EndpointEvent) error {
-	if event.Type != datalayer.EventDelete || event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
+	if event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
 		return nil
 	}
 
 	id := event.Endpoint.GetMetadata().NamespacedName.String()
 
-	p.DeleteEndpoint(id)
-	log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
+	switch event.Type {
+	case datalayer.EventDelete:
+		p.DeleteEndpoint(id)
+		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
+	case datalayer.EventAddOrUpdate:
+		event.Endpoint.GetAttributes().Put(p.dk.String(), &datalayer.DynamicAttribute{
+			Get: func() datalayer.Cloneable {
+				return &attrconcurrency.InFlightLoad{
+					Tokens:   p.GetTokens(id),
+					Requests: p.GetRequests(id),
+				}
+			},
+		})
+		log.FromContext(ctx).V(logutil.DEFAULT).Info("Injected dynamic attribute into endpoint", "key", p.dk.String(), "endpoint", id)
+	}
 	return nil
 }
 

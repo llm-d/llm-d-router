@@ -664,23 +664,6 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	r.parserRegistry = cfg.ParserRegistry
 	logger.Info("loaded configuration from file/text successfully")
 
-	var loadProducer *inflightload.InFlightLoadProducer
-	for _, p := range handle.GetAllPlugins() {
-		if prod, ok := p.(*inflightload.InFlightLoadProducer); ok {
-			loadProducer = prod
-			break
-		}
-	}
-
-	if loadProducer != nil {
-		key := attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(loadProducer.TypedName().Name)
-		r.dlRuntime.RegisterAttributeProvider(key.String(), func(eid string) fwkdl.Cloneable {
-			return &attrconcurrency.InFlightLoad{
-				Tokens:   loadProducer.GetTokens(eid),
-				Requests: loadProducer.GetRequests(eid),
-			}
-		})
-	}
 
 	return cfg, nil
 }

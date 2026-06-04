@@ -48,8 +48,8 @@ plugins:
     headroom: 0.0
 - type: mock-metrics-source
 requestHandler:
-  parser:
-    pluginRef: passthrough-parser
+  parsers:
+  - pluginRef: passthrough-parser
 dataLayer:
   sources:
   - pluginRef: mock-metrics-source
