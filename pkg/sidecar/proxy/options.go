@@ -148,7 +148,7 @@ var (
 	// supportedECConnectors defines all valid E/P EC connector types
 	supportedECConnectors = map[string]struct{}{
 		ECExampleConnector: {},
-		ECEPDConnector:     {},
+		ECConnectorNixl:    {},
 	}
 
 	// supportedTLSStages defines all valid stages for TLS configuration
@@ -159,7 +159,7 @@ var (
 	}
 
 	supportedKVConnectorNamesStr = strings.Join([]string{KVConnectorNIXLV2, KVConnectorSharedStorage, KVConnectorSGLang}, ", ")
-	supportedECConnectorNamesStr = strings.Join([]string{ECExampleConnector, ECEPDConnector}, ", ")
+	supportedECConnectorNamesStr = strings.Join([]string{ECExampleConnector, ECConnectorNixl}, ", ")
 	supportedTLSStageNamesStr    = strings.Join([]string{prefillStage, decodeStage, encodeStage}, ", ")
 )
 

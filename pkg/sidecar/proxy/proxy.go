@@ -75,7 +75,7 @@ const (
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
 	KVConnectorSGLang        = constants.KVConnectorSGLang
 	ECExampleConnector       = constants.ECExampleConnector
-	ECEPDConnector           = constants.ECEPDConnector
+	ECConnectorNixl          = constants.ECConnectorNixl
 )
 
 // APIType represents the type of OpenAI API being used.
@@ -377,9 +377,9 @@ func (s *Server) setECConnector() {
 
 	switch ecConnector {
 	case ECExampleConnector:
-		s.handleEPDConnector = s.handleEPD
-	case ECEPDConnector:
-		s.handleEPDConnector = s.handleECEPD
+		s.handleEPDConnector = s.handleECSharedStorage
+	case ECConnectorNixl:
+		s.handleEPDConnector = s.handleECNIXL
 	default:
 		// Unknown EC connector value, skip encoder stage
 		return

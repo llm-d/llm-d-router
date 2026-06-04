@@ -2,18 +2,54 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// errorCaptureSink is a logr.LogSink that records every Error call. Used to
+// verify per-goroutine error visibility in the encoder fan-out path.
+type errorCaptureSink struct {
+	mu     sync.Mutex
+	errors []capturedError
+}
+
+type capturedError struct {
+	err error
+	msg string
+	kv  []any
+}
+
+func (c *errorCaptureSink) Init(_ logr.RuntimeInfo)        {}
+func (c *errorCaptureSink) Enabled(_ int) bool             { return true }
+func (c *errorCaptureSink) Info(_ int, _ string, _ ...any) {}
+func (c *errorCaptureSink) Error(err error, msg string, kv ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.errors = append(c.errors, capturedError{err: err, msg: msg, kv: kv})
+}
+func (c *errorCaptureSink) WithValues(_ ...any) logr.LogSink { return c }
+func (c *errorCaptureSink) WithName(_ string) logr.LogSink   { return c }
+
+func (c *errorCaptureSink) snapshot() []capturedError {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]capturedError, len(c.errors))
+	copy(out, c.errors)
+	return out
+}
 
 // TestFanoutEncoderCollectAggregates verifies that ec_transfer_params from
 // each encoder response are merged into a single flat map keyed by the
@@ -43,7 +79,7 @@ func TestFanoutEncoderCollectAggregates(t *testing.T) {
 		imageURLItem("https://example.com/img2.jpg"),
 	)
 
-	params, contributed, total, err := srv.fanoutEncoderCollect(req, []string{encoderURL.Host}, "test-req-id")
+	params, contributed, total, err := srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-req-id")
 	assert.NoError(t, err)
 	assert.Equal(t, 2, total, "total item count")
 	assert.Equal(t, 2, contributed, "both encoder responses carried ec_transfer_params")
@@ -74,7 +110,7 @@ func TestFanoutEncoderCollectMissingField(t *testing.T) {
 	srv.logger = log.Log
 
 	req := userMessageRequest(imageURLItem("https://example.com/img.jpg"))
-	params, contributed, total, err := srv.fanoutEncoderCollect(req, []string{encoderURL.Host}, "test-req-id")
+	params, contributed, total, err := srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-req-id")
 	assert.NoError(t, err, "missing ec_transfer_params must not fail the request")
 	assert.Equal(t, 1, total, "one item processed")
 	assert.Equal(t, 0, contributed, "no encoder response carried ec_transfer_params")
@@ -96,11 +132,11 @@ func TestFanoutEncoderCollectEncoderError(t *testing.T) {
 	srv.logger = log.Log
 
 	req := userMessageRequest(imageURLItem("https://example.com/img.jpg"))
-	_, _, _, err = srv.fanoutEncoderCollect(req, []string{encoderURL.Host}, "test-req-id")
+	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-req-id")
 	assert.Error(t, err, "5xx from encoder must surface as an error")
 }
 
-// TestHandleECEPDThreadsParamsToPrefill verifies that handleECEPD mutates
+// TestHandleECEPDThreadsParamsToPrefill verifies that handleECNIXL mutates
 // the prefill request body to carry a flat ec_transfer_params map keyed by
 // the per-image mm_hash, and sets cache_hit_threshold=0. Bypasses the
 // real P/D connector by stubbing s.handlePDConnector. The contract under
@@ -126,7 +162,7 @@ func TestHandleECEPDThreadsParamsToPrefill(t *testing.T) {
 	srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
 	srv.logger = log.Log
 
-	// Capture what handleECEPD hands to the P/D connector instead of
+	// Capture what handleECNIXL hands to the P/D connector instead of
 	// running real prefill→decode plumbing.
 	var capturedBody []byte
 	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ APIType) {
@@ -142,7 +178,7 @@ func TestHandleECEPDThreadsParamsToPrefill(t *testing.T) {
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
-	srv.handleECEPD(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host})
+	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host})
 
 	if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {
 		return
@@ -198,7 +234,7 @@ func TestHandleECEPDAllMissingDoesNotAddField(t *testing.T) {
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
-	srv.handleECEPD(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host})
+	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host})
 
 	if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {
 		return
@@ -255,7 +291,7 @@ func TestHandleECEPDPartiallyPopulated(t *testing.T) {
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
-	srv.handleECEPD(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host})
+	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host})
 
 	if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {
 		return
@@ -271,4 +307,188 @@ func TestHandleECEPDPartiallyPopulated(t *testing.T) {
 		assert.Truef(t, ok, "ec[%q] should be an object", k)
 		assert.Containsf(t, entry, "peer_host", "ec[%q] should carry transfer metadata", k)
 	}
+}
+
+// TestFanoutEncoderFailFastCancellation verifies the errgroup fail-fast
+// behavior: when one encoder goroutine returns an error, the function must
+// return well before a slow sibling would finish on its own. The test uses
+// wall-clock time as the observable signal.
+//
+// A barrier (allConnected) ensures both backend handlers have started before
+// the failing one responds, preventing the race where the error goroutine
+// cancels gctx before the sibling even connects.
+func TestFanoutEncoderFailFastCancellation(t *testing.T) {
+	const slowEncoderDelay = 5 * time.Second
+
+	var seq atomic.Int32
+	allConnected := make(chan struct{})
+
+	encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := int(seq.Add(1) - 1)
+		if idx == 1 {
+			close(allConnected)
+		}
+		<-allConnected // both handlers wait until second has started
+
+		if idx == 0 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"boom"}`))
+			return
+		}
+		// Sibling: block until client drops the connection or the slow timeout
+		// expires, whichever comes first. Without fail-fast this takes
+		// slowEncoderDelay; with fail-fast the transport cancels the request
+		// and grp.Wait() returns before the timeout fires.
+		select {
+		case <-r.Context().Done():
+		case <-time.After(slowEncoderDelay):
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer encoderBackend.Close()
+
+	encoderURL, err := url.Parse(encoderBackend.URL)
+	assert.NoError(t, err)
+	srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+	srv.logger = log.Log
+
+	req := userMessageRequest(
+		imageURLItem("https://example.com/img1.jpg"),
+		imageURLItem("https://example.com/img2.jpg"),
+	)
+
+	start := time.Now()
+	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-cancel")
+	elapsed := time.Since(start)
+
+	assert.Error(t, err, "5xx from one encoder must surface as an error")
+	assert.Less(t, elapsed, slowEncoderDelay/2,
+		"fanoutEncoderCollect must return before half the slow sibling's delay (%s); got %s", slowEncoderDelay, elapsed)
+}
+
+// TestFanoutEncoderAllFail verifies that when every encoder goroutine returns
+// an error, fanoutEncoderCollect still surfaces an error (the first one).
+func TestFanoutEncoderAllFail(t *testing.T) {
+	encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer encoderBackend.Close()
+
+	encoderURL, err := url.Parse(encoderBackend.URL)
+	assert.NoError(t, err)
+	srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+	srv.logger = log.Log
+
+	req := userMessageRequest(
+		imageURLItem("https://example.com/img1.jpg"),
+		imageURLItem("https://example.com/img2.jpg"),
+		imageURLItem("https://example.com/img3.jpg"),
+	)
+	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-all-fail")
+	assert.Error(t, err, "all-fail must surface an error")
+}
+
+// TestFanoutEncoderParentContextCancel verifies that canceling the caller's
+// context (r.Context() from handleECNIXL) propagates through errgroup's derived
+// context to the in-flight HTTP requests, causing fanoutEncoderCollect to return
+// early rather than waiting for slow encoders.
+func TestFanoutEncoderParentContextCancel(t *testing.T) {
+	const slowEncoderDelay = 5 * time.Second
+
+	encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block until the client cancels or the slow timeout fires.
+		select {
+		case <-r.Context().Done():
+		case <-time.After(slowEncoderDelay):
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer encoderBackend.Close()
+
+	encoderURL, err := url.Parse(encoderBackend.URL)
+	assert.NoError(t, err)
+	srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+	srv.logger = log.Log
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := userMessageRequest(imageURLItem("https://example.com/img.jpg"))
+
+	// Cancel the parent context after a short delay to simulate client disconnection.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, _, _, err = srv.fanoutEncoderCollect(ctx, req, []string{encoderURL.Host}, "test-ctx-cancel")
+	elapsed := time.Since(start)
+
+	assert.Error(t, err, "canceled parent context must surface as an error")
+	assert.Less(t, elapsed, slowEncoderDelay/2,
+		"fanoutEncoderCollect must return after parent context cancellation, not wait for slow encoder; got %s", elapsed)
+}
+
+// TestFanoutEncoderPerErrorVisibility verifies the "sibling visibility"
+// guarantee: every failing goroutine logs its own error before returning,
+// even though grp.Wait surfaces only the first error to the caller.
+//
+// The reviewer concern: the previous implementation used a buffered errChan
+// and only the error that won the race was reachable. Operators lost N-1
+// errors to silent discard. This test asserts each failed item produces a
+// distinct log entry.
+func TestFanoutEncoderPerErrorVisibility(t *testing.T) {
+	// Barrier: hold all encoder responses until every goroutine has connected.
+	// Without this barrier, fail-fast cancellation could prevent later
+	// goroutines from ever issuing their failing response, defeating the
+	// "every failure is logged" assertion.
+	var connected atomic.Int32
+	allConnected := make(chan struct{})
+	const failingItems = 3
+
+	encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if connected.Add(1) == failingItems {
+			close(allConnected)
+		}
+		<-allConnected
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer encoderBackend.Close()
+
+	encoderURL, err := url.Parse(encoderBackend.URL)
+	assert.NoError(t, err)
+	srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+
+	sink := &errorCaptureSink{}
+	srv.logger = logr.New(sink)
+
+	req := userMessageRequest(
+		imageURLItem("https://example.com/img1.jpg"),
+		imageURLItem("https://example.com/img2.jpg"),
+		imageURLItem("https://example.com/img3.jpg"),
+	)
+	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-visibility")
+	assert.Error(t, err, "all encoders return 5xx; an error must surface")
+
+	captured := sink.snapshot()
+
+	// Build the set of item indices observed in error log lines.
+	seenItems := make(map[int]struct{})
+	for _, e := range captured {
+		// kv is "encoder fanout" key-value pairs: ["item", idx, "requestID", ...]
+		for i := 0; i+1 < len(e.kv); i += 2 {
+			if e.kv[i] == "item" {
+				if idx, ok := e.kv[i+1].(int); ok {
+					seenItems[idx] = struct{}{}
+				}
+			}
+		}
+	}
+	assert.Lenf(t, seenItems, failingItems,
+		"expected one error log per failed item; got logs for items %v (raw=%d entries)", seenItems, len(captured))
 }

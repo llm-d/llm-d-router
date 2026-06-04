@@ -1,7 +1,7 @@
 // This file holds the encoder fan-out scaffolding shared by every EC
 // connector: deduplicated multimodal-item extraction and the parallel
 // per-item encoder dispatch loop. Each EC connector
-// (ec-example via fanoutEncoderPrimer, ec-epd via fanoutEncoderCollect)
+// (ec-example via fanoutEncoderPrimer, ec-nixl via fanoutEncoderCollect)
 // supplies its own per-response perItem callback and otherwise reuses
 // these helpers verbatim.
 
@@ -9,12 +9,13 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sync"
 
 	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"golang.org/x/sync/errgroup"
 )
 
 // Multimodal content types that need encoder processing.
@@ -139,9 +140,11 @@ func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID stri
 // callback may return an error to fail the whole fan-out, or nil to
 // accept. perItem may be nil for fire-and-forget primer-style usage.
 //
-// Encoder transport errors and non-2xx responses are hard-fail; the first
-// error from any goroutine is returned, all others discarded.
+// The first goroutine to fail cancels ctx so sibling encoder requests are
+// aborted at the transport layer. Every failure is logged before propagating;
+// grp.Wait returns the first non-nil error.
 func (s *Server) fanoutEncoder(
+	ctx context.Context,
 	originalRequest map[string]any,
 	items []map[string]any,
 	encoderHostPorts []string,
@@ -150,68 +153,56 @@ func (s *Server) fanoutEncoder(
 ) error {
 	s.logger.Info("processing multimodal items", "count", len(items), "requestID", requestID, "encoderHostPorts", encoderHostPorts)
 
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(items))
-
+	grp, gctx := errgroup.WithContext(ctx)
 	for idx, mmItem := range items {
-		wg.Add(1)
-		// We will add more sophisticated Encoder pickup option later.
-		encoderHostPort := encoderHostPorts[idx%len(encoderHostPorts)]
-
-		go func(item map[string]any, hostPort string, itemIdx int) {
-			defer wg.Done()
-
-			encoderRequest := buildEncoderRequest(originalRequest, item)
+		hostPort := encoderHostPorts[idx%len(encoderHostPorts)]
+		grp.Go(func() error {
+			encoderRequest := buildEncoderRequest(originalRequest, mmItem)
 
 			body, err := json.Marshal(encoderRequest)
 			if err != nil {
-				errChan <- fmt.Errorf("failed to marshal encoder request for item %d: %w", itemIdx, err)
-				return
+				err = fmt.Errorf("failed to marshal encoder request for item %d: %w", idx, err)
+				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				return err
 			}
 
 			encoderHandler, err := s.encoderProxyHandler(hostPort)
 			if err != nil {
-				errChan <- fmt.Errorf("failed to get encoder proxy handler for %s: %w", hostPort, err)
-				return
+				err = fmt.Errorf("failed to get encoder proxy handler for %s: %w", hostPort, err)
+				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				return err
 			}
 
-			req, err := http.NewRequest("POST", ChatCompletionsPath, bytes.NewReader(body))
+			req, err := http.NewRequestWithContext(gctx, "POST", ChatCompletionsPath, bytes.NewReader(body))
 			if err != nil {
-				errChan <- fmt.Errorf("failed to create encoder request for item %d: %w", itemIdx, err)
-				return
+				err = fmt.Errorf("failed to create encoder request for item %d: %w", idx, err)
+				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				return err
 			}
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set(requestHeaderRequestID, fmt.Sprintf("%s-enc-%d", requestID, itemIdx))
+			req.Header.Set(requestHeaderRequestID, fmt.Sprintf("%s-enc-%d", requestID, idx))
 
-			s.logger.V(logging.DEBUG).Info("sending encoder request", "item", itemIdx, "to", hostPort, "requestID", requestID)
+			s.logger.V(logging.DEBUG).Info("sending encoder request", "item", idx, "to", hostPort, "requestID", requestID)
 
 			pw := &bufferedResponseWriter{}
 			encoderHandler.ServeHTTP(pw, req)
 
 			if isHTTPError(pw.statusCode) {
-				errChan <- fmt.Errorf("encoder request failed for item %d with status %d: %s", itemIdx, pw.statusCode, pw.buffer.String())
-				return
+				err := fmt.Errorf("encoder request failed for item %d with status %d: %s", idx, pw.statusCode, pw.buffer.String())
+				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				return err
 			}
 
 			if perItem != nil {
-				if err := perItem(itemIdx, pw); err != nil {
-					errChan <- err
-					return
+				if err := perItem(idx, pw); err != nil {
+					s.logger.Error(err, "encoder fanout perItem", "item", idx, "requestID", requestID)
+					return err
 				}
 			}
 
-			s.logger.V(logging.DEBUG).Info("encoder request completed", "item", itemIdx, "requestID", requestID)
-		}(mmItem, encoderHostPort, idx)
+			s.logger.V(logging.DEBUG).Info("encoder request completed", "item", idx, "requestID", requestID)
+			return nil
+		})
 	}
-
-	wg.Wait()
-	close(errChan)
-
-	for err := range errChan {
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return grp.Wait()
 }

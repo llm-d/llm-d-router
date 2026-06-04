@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -45,6 +46,7 @@ func truncateLongStrings(v any, maxLen int) any {
 // NIXLv2 tolerance for missing kv_transfer_params); transport errors,
 // non-2xx, and unparsable JSON are hard-fail.
 func (s *Server) fanoutEncoderCollect(
+	ctx context.Context,
 	originalRequest map[string]any,
 	encoderHostPorts []string,
 	requestID string,
@@ -60,31 +62,31 @@ func (s *Server) fanoutEncoderCollect(
 		paramsMu    sync.Mutex
 		contributed int
 	)
-	err := s.fanoutEncoder(originalRequest, items, encoderHostPorts, requestID, func(idx int, pw *bufferedResponseWriter) error {
+	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, func(idx int, pw *bufferedResponseWriter) error {
 		var encoderResponse map[string]any
 		if err := json.Unmarshal(pw.bodyBytes(), &encoderResponse); err != nil {
 			return fmt.Errorf("failed to parse encoder response for item %d: %w", idx, err)
 		}
-		if s.logger.Enabled() {
-			s.logger.Info("encoder response",
+		if v := s.logger.V(logging.DEBUG); v.Enabled() {
+			v.Info("encoder response",
 				"item", idx,
 				"requestID", requestID,
 				requestFieldECTransferParams, truncateLongStrings(encoderResponse[requestFieldECTransferParams], 64))
 		}
 		ec, ok := encoderResponse[requestFieldECTransferParams]
 		if !ok || ec == nil {
-			s.logger.Info("warning: missing ec_transfer_params field in encoder response",
+			s.logger.V(logging.DEBUG).Info("missing ec_transfer_params field in encoder response",
 				"item", idx, "requestID", requestID)
 			return nil
 		}
 		ecMap, ok := ec.(map[string]any)
 		if !ok {
-			s.logger.Info("warning: ec_transfer_params is not a JSON object; skipping",
+			s.logger.V(logging.DEBUG).Info("ec_transfer_params is not a JSON object; skipping",
 				"item", idx, "requestID", requestID, "type", fmt.Sprintf("%T", ec))
 			return nil
 		}
 		if len(ecMap) == 0 {
-			s.logger.Info("warning: ec_transfer_params is empty",
+			s.logger.V(logging.DEBUG).Info("ec_transfer_params is empty",
 				"item", idx, "requestID", requestID)
 			return nil
 		}
@@ -92,7 +94,7 @@ func (s *Server) fanoutEncoderCollect(
 		defer paramsMu.Unlock()
 		for k, v := range ecMap {
 			if _, exists := params[k]; exists {
-				s.logger.Info("warning: duplicate ec_transfer_params key across encoder responses; overwriting",
+				s.logger.V(logging.DEBUG).Info("duplicate ec_transfer_params key across encoder responses; overwriting",
 					"item", idx, "requestID", requestID, "key", k)
 			}
 			params[k] = v
@@ -106,10 +108,10 @@ func (s *Server) fanoutEncoderCollect(
 	return params, contributed, len(items), nil
 }
 
-// handleECEPD fans out per-image encoder requests, aggregates each
+// handleECNIXL fans out per-image encoder requests, aggregates each
 // response's ec_transfer_params into the prefill request body, and hands
 // off to the configured P/D connector.
-func (s *Server) handleECEPD(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
+func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
 	s.logger.V(logging.DEBUG).Info("running EC-EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, completionRequest, ok := s.readJSONBody(r, w)
@@ -128,7 +130,7 @@ func (s *Server) handleECEPD(w http.ResponseWriter, r *http.Request, prefillEndP
 
 	// Step 1: fan out to encoders, collect per-image ec_transfer_params.
 	if len(encodeEndPoints) > 0 {
-		params, contributed, total, err := s.fanoutEncoderCollect(completionRequest, encodeEndPoints, requestID)
+		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), completionRequest, encodeEndPoints, requestID)
 		if err != nil {
 			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
