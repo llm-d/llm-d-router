@@ -8,11 +8,10 @@ import (
 )
 
 type Config struct {
-	LogLevel  int             `mapstructure:"log_level"`
-	Server    ServerConfig    `mapstructure:"server"`
-	Gateway   GatewayConfig   `mapstructure:"gateway"`
-	Rendering RenderingConfig `mapstructure:"rendering_service"`
-	Pipeline  PipelineConfig  `mapstructure:"pipeline"`
+	LogLevel int            `mapstructure:"log_level"`
+	Server   ServerConfig   `mapstructure:"server"`
+	Gateway  GatewayConfig  `mapstructure:"gateway"`
+	Pipeline PipelineConfig `mapstructure:"pipeline"`
 }
 
 type ServerConfig struct {
@@ -27,11 +26,6 @@ type GatewayConfig struct {
 	IdleConnTimeout     time.Duration `mapstructure:"idle_conn_timeout"`
 	Timeout             time.Duration `mapstructure:"timeout"`
 	UseOpenAIFormat     bool          `mapstructure:"use_openai_format"`
-}
-
-type RenderingConfig struct {
-	Address string        `mapstructure:"address"`
-	Timeout time.Duration `mapstructure:"timeout"`
 }
 
 type PipelineConfig struct {
@@ -59,7 +53,6 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("gateway.idle_conn_timeout", 90*time.Second)
 	v.SetDefault("gateway.timeout", 60*time.Second)
 	v.SetDefault("gateway.use_openai_format", true)
-	v.SetDefault("rendering_service.timeout", 30*time.Second)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)

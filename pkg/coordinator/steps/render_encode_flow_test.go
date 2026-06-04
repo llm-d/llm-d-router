@@ -60,9 +60,10 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 	renderStep.(*RenderStep).SetServiceAddress(renderServer.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		RequestID: "render-encode-flow",
-		Model:     "test-model",
-		Body:      map[string]any{"model": "test-model"},
+		RequestID:    "render-encode-flow",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        "test-model",
+		Body:         map[string]any{"model": "test-model"},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0},
 			{Index: 1},

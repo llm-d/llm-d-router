@@ -39,15 +39,16 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, err := NewRenderStep(map[string]any{"endpoint": gateway.PathChatCompletions + "/render"})
+	step, err := NewRenderStep(map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		Body:  map[string]any{"model": "gpt-4o", "messages": []any{}},
-		Model: "gpt-4o",
+		OriginalPath: gateway.PathChatCompletions,
+		Body:         map[string]any{"model": "gpt-4o", "messages": []any{}},
+		Model:        "gpt-4o",
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0},
 			{Index: 1},
@@ -111,6 +112,7 @@ func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath:      gateway.PathChatCompletions,
 		Body:              map[string]any{"model": "test"},
 		MultimodalEntries: nil,
 	}
@@ -160,8 +162,8 @@ func TestRenderStep_CompletionsTextPrompt_CallsRender(t *testing.T) {
 	var receivedPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"token_ids": []int{1, 2345, 6789},
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"token_ids": []int{1, 2345, 6789}},
 		})
 	}))
 	defer server.Close()
@@ -207,6 +209,7 @@ func TestRenderStep_ServiceError(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath:      gateway.PathChatCompletions,
 		Body:              map[string]any{"model": "test"},
 		MultimodalEntries: []pipeline.MultimodalEntry{{Index: 0}},
 	}
