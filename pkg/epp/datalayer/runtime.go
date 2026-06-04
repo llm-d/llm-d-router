@@ -59,6 +59,9 @@ type Runtime struct {
 
 	collectors *collectorManager // per-endpoint poller, keyed by namespaced name
 	logger     logr.Logger       // Set in Configure; used where no context is available (e.g. ReleaseEndpoint).
+
+	provMu    sync.RWMutex
+	providers map[string]func(endpointID string) fwkdl.Cloneable
 }
 
 const (
@@ -80,6 +83,7 @@ func NewRuntime(pollingInterval time.Duration) *Runtime {
 		extractors:      newExtractorMap(),
 		collectors:      newCollectorManager(),
 		logger:          logr.Discard(),
+		providers:       make(map[string]func(endpointID string) fwkdl.Cloneable),
 	}
 }
 
@@ -220,6 +224,16 @@ func (r *Runtime) Register(reg fwkdl.PendingRegistration) error {
 	r.pendingRegistrations = append(r.pendingRegistrations, reg)
 	r.pendingMu.Unlock()
 	return nil
+}
+
+// RegisterAttributeProvider registers a provider function for a dynamic attribute.
+func (r *Runtime) RegisterAttributeProvider(key string, provider func(endpointID string) fwkdl.Cloneable) {
+	r.provMu.Lock()
+	defer r.provMu.Unlock()
+	if r.providers == nil {
+		r.providers = make(map[string]func(endpointID string) fwkdl.Cloneable)
+	}
+	r.providers[key] = provider
 }
 
 // registerSource dispatches src to the matching variant manager. g enforces
@@ -371,18 +385,29 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 	logger, _ := logr.FromContext(ctx)
 	logger = logger.WithValues("endpoint", endpointMetadata.GetNamespacedName())
 
+	endpoint := fwkdl.NewEndpoint(endpointMetadata, nil)
+	eid := endpointMetadata.GetNamespacedName().String()
+
+	r.provMu.RLock()
+	for key, provider := range r.providers {
+		endpoint.GetAttributes().Put(key, &fwkdl.DynamicAttribute{
+			Get: func() fwkdl.Cloneable {
+				return provider(eid)
+			},
+		})
+	}
+	r.provMu.RUnlock()
+
 	dispatchers := make([]fwkdl.PollingDispatcher, 0, r.dispatchers.Count())
 	for _, d := range r.dispatchers.Dispatchers() {
 		dispatchers = append(dispatchers, d)
 	}
 	if len(dispatchers) == 0 {
 		logger.Info("No polling sources configured, creating endpoint without collector")
-		endpoint := fwkdl.NewEndpoint(endpointMetadata, nil)
 		r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint})
 		return endpoint
 	}
 
-	endpoint := fwkdl.NewEndpoint(endpointMetadata, nil)
 	collector := NewCollector()
 
 	key := endpointMetadata.GetNamespacedName()

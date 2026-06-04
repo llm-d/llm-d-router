@@ -475,6 +475,14 @@ func (p *InFlightLoadProducer) DeleteEndpoint(endpointID string) {
 	p.tokenTracker.delete(endpointID)
 }
 
+func (p *InFlightLoadProducer) GetTokens(eid string) int64 {
+	return p.tokenTracker.get(eid)
+}
+
+func (p *InFlightLoadProducer) GetRequests(eid string) int64 {
+	return p.requestTracker.get(eid)
+}
+
 // concurrencyTracker manages thread-safe counters for inflight requests.
 type concurrencyTracker struct {
 	mu     sync.RWMutex

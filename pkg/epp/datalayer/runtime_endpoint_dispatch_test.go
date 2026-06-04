@@ -30,6 +30,17 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
+type dummy struct {
+	Text string
+}
+
+func (d *dummy) Clone() fwkdl.Cloneable {
+	if d == nil {
+		return nil
+	}
+	return &dummy{Text: d.Text}
+}
+
 // TestNewEndpointDispatchesEventWithNoPollers verifies that endpoint lifecycle
 // events are dispatched to EndpointSource even when no PollingDataSource is configured.
 // Regression test for: endpoint-notification-source silently drops events when
@@ -100,4 +111,27 @@ func TestUpdateEndpointDispatchesEvent(t *testing.T) {
 	require.Len(t, events, 1, "EndpointExtractor should receive EventAddOrUpdate from UpdateEndpoint")
 	assert.Equal(t, fwkdl.EventAddOrUpdate, events[0].Type)
 	assert.Equal(t, "5.6.7.8", events[0].Endpoint.GetMetadata().Address)
+}
+
+func TestRuntimeRegisterAttributeProvider(t *testing.T) {
+	r := NewRuntime(1)
+
+	r.RegisterAttributeProvider("test-key", func(endpointID string) fwkdl.Cloneable {
+		return &dummy{Text: endpointID + "-value"}
+	})
+
+	pod := &fwkdl.EndpointMetadata{
+		NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
+		Address:        "1.2.3.4",
+	}
+
+	endpoint := r.NewEndpoint(context.Background(), pod)
+	assert.NotNil(t, endpoint)
+
+	val, ok := endpoint.GetAttributes().Get("test-key")
+	assert.True(t, ok)
+
+	dVal, ok := val.(*dummy)
+	assert.True(t, ok)
+	assert.Equal(t, "default/pod1-value", dVal.Text)
 }

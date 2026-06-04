@@ -102,3 +102,29 @@ func TestReadAttribute(t *testing.T) {
 	assert.Nil(t, other) // zero value of pointer is nil
 
 }
+
+func TestDynamicAttribute(t *testing.T) {
+	attrs := NewAttributes()
+
+	val := &dummy{"live"}
+	dynamic := &DynamicAttribute{
+		Get: func() Cloneable {
+			return val
+		},
+	}
+
+	attrs.Put("dynamic_key", dynamic)
+
+	// First read
+	got, ok := attrs.Get("dynamic_key")
+	assert.True(t, ok)
+	assert.Equal(t, "live", got.(*dummy).Text)
+
+	// Mutate the source value
+	val.Text = "changed"
+
+	// Second read should reflect change
+	got2, ok := attrs.Get("dynamic_key")
+	assert.True(t, ok)
+	assert.Equal(t, "changed", got2.(*dummy).Text)
+}
