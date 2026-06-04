@@ -381,12 +381,13 @@ nodes:
 // extraMountsBlock returns a YAML fragment to splice under the kind node when a
 // HuggingFace weights cache is provided. The host path is bind-mounted into the
 // kind node at hfCacheNodePath; setup_test.go points the render sidecar's
-// model-cache volume at the same node path.
+// model-cache volume at the same node path. Paths are quoted so YAML-significant
+// characters (e.g. ':' on Windows-style paths) cannot break parsing.
 func extraMountsBlock(hostPath string) string {
 	if hostPath == "" {
 		return ""
 	}
-	return fmt.Sprintf("\n  extraMounts:\n  - hostPath: %s\n    containerPath: %s", hostPath, hfCacheNodePath)
+	return fmt.Sprintf("\n  extraMounts:\n  - hostPath: %q\n    containerPath: %q", hostPath, hfCacheNodePath)
 }
 
 // hfCacheNodePath is the path inside the kind node where the host HF cache is

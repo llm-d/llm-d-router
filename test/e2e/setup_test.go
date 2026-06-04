@@ -156,8 +156,10 @@ func createEndPointPicker(eppConfig string) []string {
 		})
 	if !usesTokenProducer(eppConfig) {
 		eppYamls = removeRenderSidecar(eppYamls)
-	} else {
-		eppYamls = rewriteModelCacheToHostPath(eppYamls, hfCacheHostPath)
+	} else if hfCacheHostPath != "" {
+		// Pod hostPath references the kind node's filesystem, where the runner
+		// HF cache is bind-mounted at hfCacheNodePath via kind extraMounts.
+		eppYamls = rewriteModelCacheToHostPath(eppYamls, hfCacheNodePath)
 	}
 
 	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls)...)
