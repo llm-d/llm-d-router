@@ -17,23 +17,18 @@ const (
 // ProgramMetrics holds aggregated metrics for a single program (identified by its fairness ID).
 // All methods are goroutine-safe.
 type ProgramMetrics struct {
-	mu                sync.Mutex
-	averageWaitTime   float64 // EWMA in milliseconds
-	accumulatedWaitMs float64 // total accumulated wait time in milliseconds
-	waitCount         int64   // number of wait time observations
-	hasWaitData       bool
+	mu              sync.Mutex
+	averageWaitTime float64 // cumulative mean of wait time in milliseconds
+	waitCount       int64   // number of wait time observations
 
 	averageTokens float64 // EWMA of per-request token usage (input+output)
 
 	// Service rate: EWMA of weighted tokens per second, updated on each completion.
-	// Used for Jain's fairness index (equalizing rates across programs = fair).
 	serviceRate        float64
 	lastCompletionTime time.Time
 
-	totalRequests     atomic.Int64
-	dispatchedCount   atomic.Int64
-	totalInputTokens  atomic.Int64
-	totalOutputTokens atomic.Int64
+	totalRequests   atomic.Int64
+	dispatchedCount atomic.Int64
 
 	// inFlight counts requests that have been dispatched but whose response
 	// has not yet completed. Used to gate deficit decay so that a queue with
@@ -68,52 +63,33 @@ func (m *ProgramMetrics) InFlight() int64 {
 	return m.inFlight.Load()
 }
 
-// RecordWaitTime updates the EWMA of wait time with a new observation
-// and accumulates the total wait time for lifetime average computation.
+// RecordWaitTime adds a new wait-time observation and updates the cumulative
+// mean using Welford's incremental form: avg += (x - avg) / n.
 func (m *ProgramMetrics) RecordWaitTime(waitMs float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.hasWaitData {
-		m.averageWaitTime = waitMs
-		m.hasWaitData = true
-	} else {
-		m.averageWaitTime = ewmaAlpha*waitMs + (1-ewmaAlpha)*m.averageWaitTime
-	}
-	m.accumulatedWaitMs += waitMs
 	m.waitCount++
+	m.averageWaitTime += (waitMs - m.averageWaitTime) / float64(m.waitCount)
 }
 
-// HasWaitData returns true if at least one wait time observation has been recorded.
-func (m *ProgramMetrics) HasWaitData() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.hasWaitData
-}
-
-// AverageWaitTime returns the current EWMA of wait time in milliseconds.
+// AverageWaitTime returns the cumulative mean of wait time in milliseconds.
+// Returns 0 if no observations have been recorded.
 func (m *ProgramMetrics) AverageWaitTime() float64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.averageWaitTime
 }
 
-// TotalAverageWaitTime returns the lifetime average wait time in milliseconds
-// (accumulated wait time / total observations). Returns 0 if no data.
-func (m *ProgramMetrics) TotalAverageWaitTime() float64 {
+// WaitCount returns the number of wait-time observations recorded.
+func (m *ProgramMetrics) WaitCount() int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.waitCount == 0 {
-		return 0
-	}
-	return m.accumulatedWaitMs / float64(m.waitCount)
+	return m.waitCount
 }
 
-// RecordTokens adds token counts from a completed request and updates the
-// EWMA of per-request token usage so recent heavy/light requests carry more weight.
+// RecordTokens updates the EWMA of per-request weighted token cost so recent
+// heavy/light requests carry more weight.
 func (m *ProgramMetrics) RecordTokens(input, output int64) {
-	m.totalInputTokens.Add(input)
-	m.totalOutputTokens.Add(output)
-
 	cost := weightInputToken*float64(input) + weightOutputToken*float64(output)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -179,13 +155,4 @@ func (m *ProgramMetrics) DispatchedCount() int64 {
 	return m.dispatchedCount.Load()
 }
 
-// TotalInputTokens returns the total number of input tokens across all requests.
-func (m *ProgramMetrics) TotalInputTokens() int64 {
-	return m.totalInputTokens.Load()
-}
-
-// TotalOutputTokens returns the total number of output tokens across all requests.
-func (m *ProgramMetrics) TotalOutputTokens() int64 {
-	return m.totalOutputTokens.Load()
-}
 

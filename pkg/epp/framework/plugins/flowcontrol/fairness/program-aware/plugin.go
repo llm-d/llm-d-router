@@ -371,9 +371,10 @@ func (p *ProgramAwarePlugin) evictIdle(ttl time.Duration) {
 	})
 }
 
-// computeFairnessIndex returns Jain's Fairness Index over the service rate
-// (weighted tokens/sec) for each program. Equal service rates = perfect fairness.
-// Returns 1.0 when fewer than 2 programs have rate data.
+// computeFairnessIndex returns Jain's Fairness Index over the average wait
+// time per program. Equal average waits = perfect fairness (= 1.0). Programs
+// with no wait observations are skipped. Returns 1.0 when fewer than 2
+// programs have wait data.
 func (p *ProgramAwarePlugin) computeFairnessIndex() float64 {
 	var sum, sumSq float64
 	var n float64
@@ -382,10 +383,10 @@ func (p *ProgramAwarePlugin) computeFairnessIndex() float64 {
 		if !ok {
 			return true
 		}
-		x := m.ServiceRate()
-		if x == 0 {
+		if m.WaitCount() == 0 {
 			return true
 		}
+		x := m.AverageWaitTime()
 		sum += x
 		sumSq += x * x
 		n++

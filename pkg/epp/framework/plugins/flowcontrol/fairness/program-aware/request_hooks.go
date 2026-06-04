@@ -67,7 +67,7 @@ func (p *ProgramAwarePlugin) PreRequest(ctx context.Context, request *fwksched.I
 	if enqueueTime, ok := fwksched.ReadRequestAttribute[time.Time](request, enqueueTimeAttributeKey); ok {
 		waitMs := float64(time.Since(enqueueTime).Milliseconds())
 		metrics.RecordWaitTime(waitMs)
-		ewmaWaitTimeMs.WithLabelValues(programID).Set(metrics.AverageWaitTime())
+		avgWaitTimeMs.WithLabelValues(programID).Set(metrics.AverageWaitTime())
 
 		log.FromContext(ctx).V(logutil.TRACE).Info("PreRequest: recorded wait time",
 			"requestId", request.RequestID, "programId", programID,

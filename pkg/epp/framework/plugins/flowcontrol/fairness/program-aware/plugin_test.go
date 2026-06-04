@@ -28,21 +28,23 @@ func TestFactory(t *testing.T) {
 
 // --- ProgramMetrics tests ---
 
-func TestProgramMetrics_TotalAverageWaitTime(t *testing.T) {
+func TestProgramMetrics_AverageWaitTime(t *testing.T) {
 	m := &ProgramMetrics{}
 
-	assert.Equal(t, 0.0, m.TotalAverageWaitTime(), "no data → 0")
+	assert.Equal(t, 0.0, m.AverageWaitTime(), "no data → 0")
+	assert.Equal(t, int64(0), m.WaitCount())
 
 	m.RecordWaitTime(100)
-	assert.InDelta(t, 100.0, m.TotalAverageWaitTime(), 0.01)
+	assert.InDelta(t, 100.0, m.AverageWaitTime(), 0.01)
 
 	m.RecordWaitTime(200)
-	// total = 300, count = 2 → 150
-	assert.InDelta(t, 150.0, m.TotalAverageWaitTime(), 0.01)
+	// (100 + 200) / 2 = 150
+	assert.InDelta(t, 150.0, m.AverageWaitTime(), 0.01)
 
 	m.RecordWaitTime(50)
-	// total = 350, count = 3 → 116.67
-	assert.InDelta(t, 116.67, m.TotalAverageWaitTime(), 0.01)
+	// (100 + 200 + 50) / 3 = 116.67
+	assert.InDelta(t, 116.67, m.AverageWaitTime(), 0.01)
+	assert.Equal(t, int64(3), m.WaitCount())
 }
 
 func TestProgramMetrics_Counters(t *testing.T) {
@@ -56,8 +58,6 @@ func TestProgramMetrics_Counters(t *testing.T) {
 
 	assert.Equal(t, int64(2), m.TotalRequests())
 	assert.Equal(t, int64(1), m.DispatchedCount())
-	assert.Equal(t, int64(300), m.TotalInputTokens())
-	assert.Equal(t, int64(125), m.TotalOutputTokens())
 }
 
 // --- Pick tests ---
@@ -219,8 +219,6 @@ func TestResponseComplete_RecordsTokens(t *testing.T) {
 
 	metricsRaw, _ := p.programMetrics.Load("prog-a")
 	metrics := metricsRaw.(*ProgramMetrics)
-	assert.Equal(t, int64(100), metrics.TotalInputTokens())
-	assert.Equal(t, int64(50), metrics.TotalOutputTokens())
 
 	// EWMA token cost should be recorded: 100*1 + 50*2 = 200 weighted tokens.
 	assert.Greater(t, metrics.AverageTokens(), 0.0, "token usage should be recorded")
@@ -242,7 +240,7 @@ func TestResponseBody_IntermediateChunks_AreNoOp(t *testing.T) {
 		p.ResponseBody(context.Background(), request, &fwkrc.Response{EndOfStream: false}, &datalayer.EndpointMetadata{})
 	}
 	assert.Equal(t, int64(1), m.InFlight(), "intermediate chunks must not decrement InFlight")
-	assert.Equal(t, int64(0), m.TotalInputTokens(), "intermediate chunks must not record tokens")
+	assert.Equal(t, 0.0, m.AverageTokens(), "intermediate chunks must not record tokens")
 
 	// Final chunk fires the terminal hook exactly once.
 	finalResp := &fwkrc.Response{
@@ -251,8 +249,7 @@ func TestResponseBody_IntermediateChunks_AreNoOp(t *testing.T) {
 	}
 	p.ResponseBody(context.Background(), request, finalResp, &datalayer.EndpointMetadata{})
 	assert.Equal(t, int64(0), m.InFlight())
-	assert.Equal(t, int64(100), m.TotalInputTokens())
-	assert.Equal(t, int64(50), m.TotalOutputTokens())
+	assert.Greater(t, m.AverageTokens(), 0.0, "terminal chunk records token cost")
 }
 
 func TestResponseComplete_NilResponse_NoOp(t *testing.T) {
@@ -267,7 +264,7 @@ func TestResponseComplete_NilResponse_NoOp(t *testing.T) {
 
 	p.ResponseBody(context.Background(), request, nil, nil)
 	assert.Equal(t, int64(1), m.InFlight(), "nil response must not decrement InFlight")
-	assert.Equal(t, int64(0), m.TotalInputTokens(), "nil response must not record tokens")
+	assert.Equal(t, 0.0, m.AverageTokens(), "nil response must not record tokens")
 }
 
 // --- rangeNormalize tests ---
@@ -326,69 +323,63 @@ func TestFullLifecycle(t *testing.T) {
 	response := &fwkrc.Response{Headers: map[string]string{}, EndOfStream: true}
 	response.Usage = requesthandling.Usage{PromptTokens: 42, CompletionTokens: 17}
 	p.ResponseBody(context.Background(), request, response, &datalayer.EndpointMetadata{})
-	assert.Equal(t, int64(42), metrics.TotalInputTokens())
-	assert.Equal(t, int64(17), metrics.TotalOutputTokens())
+	// 42 input + 17 output → weighted cost 42 + 34 = 76 tokens.
+	assert.InDelta(t, 76.0, metrics.AverageTokens(), 0.01)
 }
 
-// --- fairness index tests (attained-service-based) ---
+// --- fairness index tests (wait-time-based) ---
 
-func TestComputeFairnessIndex_EqualServiceRate(t *testing.T) {
+func TestComputeFairnessIndex_EqualWaitTime(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
-	now := time.Now()
 	mA := &ProgramMetrics{}
-	mA.RecordServiceRate(1000.0, now)                  // first call sets baseline
-	mA.RecordServiceRate(1000.0, now.Add(time.Second)) // rate = 1000 tok/s
+	mA.RecordWaitTime(100)
+	mA.RecordWaitTime(100)
 	p.programMetrics.Store("prog-a", mA)
 
 	mB := &ProgramMetrics{}
-	mB.RecordServiceRate(1000.0, now)
-	mB.RecordServiceRate(1000.0, now.Add(time.Second))
+	mB.RecordWaitTime(100)
+	mB.RecordWaitTime(100)
 	p.programMetrics.Store("prog-b", mB)
 
-	assert.InDelta(t, 1.0, p.computeFairnessIndex(), 0.001, "equal service rate → perfect fairness")
+	assert.InDelta(t, 1.0, p.computeFairnessIndex(), 0.001, "equal wait time → perfect fairness")
 }
 
-func TestComputeFairnessIndex_SkewedServiceRate(t *testing.T) {
+func TestComputeFairnessIndex_SkewedWaitTime(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
-	now := time.Now()
 	mA := &ProgramMetrics{}
-	mA.RecordServiceRate(10000.0, now)
-	mA.RecordServiceRate(10000.0, now.Add(time.Second)) // rate = 10000
+	mA.RecordWaitTime(1000)
 	p.programMetrics.Store("prog-a", mA)
 
 	mB := &ProgramMetrics{}
-	mB.RecordServiceRate(1000.0, now)
-	mB.RecordServiceRate(1000.0, now.Add(time.Second)) // rate = 1000
+	mB.RecordWaitTime(100)
 	p.programMetrics.Store("prog-b", mB)
 
 	idx := p.computeFairnessIndex()
-	assert.Less(t, idx, 1.0, "skewed rate should produce index < 1")
-	// J = (10000+1000)^2 / (2 * (10000^2 + 1000^2)) ≈ 0.599
+	assert.Less(t, idx, 1.0, "skewed wait should produce index < 1")
+	// J = (1000+100)^2 / (2 * (1000^2 + 100^2)) ≈ 0.599
 	assert.InDelta(t, 0.599, idx, 0.01)
 }
 
 func TestComputeFairnessIndex_SingleProgram(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
-	now := time.Now()
 	m := &ProgramMetrics{}
-	m.RecordServiceRate(5000.0, now)
-	m.RecordServiceRate(5000.0, now.Add(time.Second))
+	m.RecordWaitTime(500)
 	p.programMetrics.Store("prog-a", m)
 
 	assert.InDelta(t, 1.0, p.computeFairnessIndex(), 0.001, "single program → trivially fair")
 }
 
-func TestComputeFairnessIndex_NoServiceData(t *testing.T) {
+func TestComputeFairnessIndex_NoWaitData(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
-	// Programs exist but have no rate data yet.
+	// Programs exist but have no wait observations yet.
 	p.programMetrics.Store("prog-a", &ProgramMetrics{})
 	p.programMetrics.Store("prog-b", &ProgramMetrics{})
 
-	assert.InDelta(t, 1.0, p.computeFairnessIndex(), 0.001, "no service data → 1.0")
+	assert.InDelta(t, 1.0, p.computeFairnessIndex(), 0.001, "no wait data → 1.0")
 }
 
 // --- Two-pass scoring tests ---
