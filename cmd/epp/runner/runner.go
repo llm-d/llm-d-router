@@ -664,7 +664,6 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	r.parserRegistry = cfg.ParserRegistry
 	logger.Info("loaded configuration from file/text successfully")
 
-
 	return cfg, nil
 }
 
