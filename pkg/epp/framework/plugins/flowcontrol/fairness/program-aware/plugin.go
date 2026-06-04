@@ -17,7 +17,9 @@ import (
 // ProgramAwarePluginType is the registered type name for this plugin.
 const ProgramAwarePluginType = "program-aware-fairness"
 
-// Config holds the JSON-decoded configuration for the plugin.
+// Config holds the JSON-decoded configuration for the plugin. JSON parameters
+// are merged onto a copy of DefaultConfig, so any field omitted from the
+// user's JSON keeps its default value.
 type Config struct {
 	// Strategy selects the fairness scoring algorithm used by Pick().
 	// Valid values: "las" (default), "drr", "rr".
@@ -39,84 +41,94 @@ type Config struct {
 	// --- DRR weights (only used when strategy == "drr") ---
 
 	// WeightDeficit is the weight for the deficit counter signal.
-	// Default: 0.7.
-	WeightDeficit *float64 `json:"weightDeficit,omitempty"`
+	WeightDeficit float64 `json:"weightDeficit,omitempty"`
 
 	// WeightDRRHeadWait is the weight for head-of-queue age in DRR.
-	// Default: 0.3.
-	WeightDRRHeadWait *float64 `json:"weightDrrHeadWait,omitempty"`
+	WeightDRRHeadWait float64 `json:"weightDrrHeadWait,omitempty"`
 
 	// QuantumTokens is the token budget added to each non-empty queue per Pick() cycle.
-	// Default: 1000.
-	QuantumTokens *int64 `json:"quantumTokens,omitempty"`
+	QuantumTokens int64 `json:"quantumTokens,omitempty"`
 
-	// DeficitHalfLifeSeconds enables time-based decay for the DRR deficit counter.
-	// Defines the half-life in seconds: deficit decays to 50% after this duration.
-	// Prevents unbounded deficit accumulation for programs that stop sending requests.
-	// Default: 60 (deficit halves every 60s). Set to 0 to disable time-based decay.
-	// When > 0, this takes precedence over DeficitDecayFactor.
-	DeficitHalfLifeSeconds *float64 `json:"deficitHalfLifeSeconds,omitempty"`
+	// DeficitHalfLifeSeconds is the half-life of the DRR deficit counter.
+	// Deficit decays to 50% after this duration. 0 disables time-based decay
+	// (DeficitDecayFactor takes over). When > 0, this takes precedence over
+	// DeficitDecayFactor.
+	DeficitHalfLifeSeconds float64 `json:"deficitHalfLifeSeconds,omitempty"`
 
-	// DeficitDecayFactor enables per-Pick factor decay for the DRR deficit
+	// DeficitDecayFactor is the per-Pick factor decay for the DRR deficit
 	// counter when DeficitHalfLifeSeconds is 0. Each Pick() multiplies the
 	// deficit of inactive queues (Len==0 and no in-flight requests) by this
-	// factor. Must be in (0, 1) to take effect; 0 disables it.
-	// Default: 0 (disabled).
-	DeficitDecayFactor *float64 `json:"deficitDecayFactor,omitempty"`
+	// factor. Must be in [0, 1); 0 disables factor decay.
+	DeficitDecayFactor float64 `json:"deficitDecayFactor,omitempty"`
 
 	// --- Service weights (only used when strategy == "las") ---
 
 	// WeightService is the weight for the inverted attained service signal.
-	// Programs with lower attained service score higher. Default: 0.8.
-	WeightService *float64 `json:"weightService,omitempty"`
+	// Programs with lower attained service score higher.
+	WeightService float64 `json:"weightService,omitempty"`
 
 	// WeightServiceHeadWait is the weight for head-of-queue age in service strategy.
-	// Acts as a tiebreaker for cold start. Default: 0.2.
-	WeightServiceHeadWait *float64 `json:"weightServiceHeadWait,omitempty"`
+	// Acts as a tiebreaker for cold start.
+	WeightServiceHeadWait float64 `json:"weightServiceHeadWait,omitempty"`
 
 	// ServiceDecayFactor controls how quickly old service is forgotten.
 	// Applied to each program's attained service every Pick() cycle.
-	// Higher values (closer to 1.0) = longer memory. Default: 0.995.
+	// Higher values (closer to 1.0) = longer memory. Must be in (0, 1].
 	// Ignored when ServiceHalfLifeSeconds is set.
-	ServiceDecayFactor *float64 `json:"serviceDecayFactor,omitempty"`
+	ServiceDecayFactor float64 `json:"serviceDecayFactor,omitempty"`
 
-	// ServiceHalfLifeSeconds enables time-based decay for the service strategy.
-	// Defines the half-life in seconds: service decays to 50% after this duration.
-	// When set (> 0), overrides ServiceDecayFactor with wall-clock based decay.
-	// Example: 30 = service halves every 30s regardless of Pick() frequency.
-	ServiceHalfLifeSeconds *float64 `json:"serviceHalfLifeSeconds,omitempty"`
+	// ServiceHalfLifeSeconds is the half-life of the LAS attained-service
+	// counter when set (> 0); overrides ServiceDecayFactor with wall-clock
+	// based decay. Service decays to 50% after this duration.
+	ServiceHalfLifeSeconds float64 `json:"serviceHalfLifeSeconds,omitempty"`
 }
 
-// validate checks that user-provided numeric fields fall in the ranges the
-// scoring strategies assume. nil pointers mean "use the default" and are
-// always accepted; only fields the user explicitly set are checked.
+// DefaultConfig is the canonical Config used when JSON parameters are absent
+// or partial. The factory makes a copy of this value before decoding, so
+// every fairness-plugin default lives in one place.
+var DefaultConfig = Config{
+	Strategy:               "las",
+	WeightDeficit:          0.8,
+	WeightDRRHeadWait:      0.2,
+	QuantumTokens:          1000,
+	DeficitHalfLifeSeconds: 60,
+	DeficitDecayFactor:     0,
+	WeightService:          0.8,
+	WeightServiceHeadWait:  0.2,
+	ServiceDecayFactor:     0.995,
+	ServiceHalfLifeSeconds: 0,
+}
+
+// validate checks that numeric fields fall in the ranges the scoring
+// strategies assume. Defaults from DefaultConfig already satisfy every rule;
+// validation only catches user overrides that fall outside the safe range.
 func (c Config) validate() error {
-	if c.WeightDeficit != nil && *c.WeightDeficit < 0 {
-		return fmt.Errorf("weightDeficit must be >= 0, got %v", *c.WeightDeficit)
+	if c.WeightDeficit < 0 {
+		return fmt.Errorf("weightDeficit must be >= 0, got %v", c.WeightDeficit)
 	}
-	if c.WeightDRRHeadWait != nil && *c.WeightDRRHeadWait < 0 {
-		return fmt.Errorf("weightDrrHeadWait must be >= 0, got %v", *c.WeightDRRHeadWait)
+	if c.WeightDRRHeadWait < 0 {
+		return fmt.Errorf("weightDrrHeadWait must be >= 0, got %v", c.WeightDRRHeadWait)
 	}
-	if c.WeightService != nil && *c.WeightService < 0 {
-		return fmt.Errorf("weightService must be >= 0, got %v", *c.WeightService)
+	if c.WeightService < 0 {
+		return fmt.Errorf("weightService must be >= 0, got %v", c.WeightService)
 	}
-	if c.WeightServiceHeadWait != nil && *c.WeightServiceHeadWait < 0 {
-		return fmt.Errorf("weightServiceHeadWait must be >= 0, got %v", *c.WeightServiceHeadWait)
+	if c.WeightServiceHeadWait < 0 {
+		return fmt.Errorf("weightServiceHeadWait must be >= 0, got %v", c.WeightServiceHeadWait)
 	}
-	if c.QuantumTokens != nil && *c.QuantumTokens <= 0 {
-		return fmt.Errorf("quantumTokens must be > 0, got %d", *c.QuantumTokens)
+	if c.QuantumTokens <= 0 {
+		return fmt.Errorf("quantumTokens must be > 0, got %d", c.QuantumTokens)
 	}
-	if c.DeficitHalfLifeSeconds != nil && *c.DeficitHalfLifeSeconds < 0 {
-		return fmt.Errorf("deficitHalfLifeSeconds must be >= 0, got %v", *c.DeficitHalfLifeSeconds)
+	if c.DeficitHalfLifeSeconds < 0 {
+		return fmt.Errorf("deficitHalfLifeSeconds must be >= 0, got %v", c.DeficitHalfLifeSeconds)
 	}
-	if c.ServiceHalfLifeSeconds != nil && *c.ServiceHalfLifeSeconds < 0 {
-		return fmt.Errorf("serviceHalfLifeSeconds must be >= 0, got %v", *c.ServiceHalfLifeSeconds)
+	if c.ServiceHalfLifeSeconds < 0 {
+		return fmt.Errorf("serviceHalfLifeSeconds must be >= 0, got %v", c.ServiceHalfLifeSeconds)
 	}
-	if c.DeficitDecayFactor != nil && (*c.DeficitDecayFactor < 0 || *c.DeficitDecayFactor >= 1) {
-		return fmt.Errorf("deficitDecayFactor must be in [0, 1), got %v", *c.DeficitDecayFactor)
+	if c.DeficitDecayFactor < 0 || c.DeficitDecayFactor >= 1 {
+		return fmt.Errorf("deficitDecayFactor must be in [0, 1), got %v", c.DeficitDecayFactor)
 	}
-	if c.ServiceDecayFactor != nil && (*c.ServiceDecayFactor <= 0 || *c.ServiceDecayFactor > 1) {
-		return fmt.Errorf("serviceDecayFactor must be in (0, 1], got %v", *c.ServiceDecayFactor)
+	if c.ServiceDecayFactor <= 0 || c.ServiceDecayFactor > 1 {
+		return fmt.Errorf("serviceDecayFactor must be in (0, 1], got %v", c.ServiceDecayFactor)
 	}
 	return nil
 }
@@ -132,9 +144,12 @@ var (
 // ProgramAwarePluginFactory creates a new ProgramAwarePlugin from JSON config.
 // Example config: {"strategy": "drr"}
 //
-//nolint:revive
+// The qualified name matches sibling fairness factories
+// (roundrobin.RoundRobinFairnessPolicyFactory, globalstrict.GlobalStrictFairnessPolicyFactory).
+//
+//nolint:revive // factory name matches sibling fairness plugins; see comment above.
 func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
-	cfg := Config{Strategy: "las"}
+	cfg := DefaultConfig
 	if parameters != nil {
 		if err := parameters.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("invalid config for %s plugin %q: %w", ProgramAwarePluginType, name, err)
@@ -192,15 +207,13 @@ func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 	}
 }
 
-// getStrategy returns the configured strategy, falling back to LAS for zero-value
-// plugin instances constructed directly in tests.
+// getStrategy returns the configured strategy, falling back to a strategy
+// built from DefaultConfig for zero-value plugin instances constructed
+// directly in tests. DefaultConfig is known-valid so newStrategy cannot fail.
 func (p *ProgramAwarePlugin) getStrategy() ScoringStrategy {
 	if p.strategy == nil {
-		return &LASStrategy{
-			weightService:  defaultServiceWeightService,
-			weightHeadWait: defaultServiceWeightHeadWait,
-			decayFactor:    defaultServiceDecayFactor,
-		}
+		s, _ := newStrategy(DefaultConfig)
+		return s
 	}
 	return p.strategy
 }

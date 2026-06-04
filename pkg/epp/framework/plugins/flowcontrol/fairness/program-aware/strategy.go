@@ -38,45 +38,31 @@ type QueueInfo struct {
 	Len     int
 }
 
-// newStrategy constructs a ScoringStrategy from the plugin config.
+// newStrategy constructs a ScoringStrategy from the plugin config. The
+// caller is responsible for passing a Config already merged onto
+// DefaultConfig and validated, so every numeric field is known-good here.
 func newStrategy(cfg Config) (ScoringStrategy, error) {
 	switch cfg.Strategy {
 	case "drr":
 		return &DRRStrategy{
-			weightDeficit:          floatOr(cfg.WeightDeficit, defaultDRRWeightDeficit),
-			weightHeadWait:         floatOr(cfg.WeightDRRHeadWait, defaultDRRWeightHeadWait),
-			quantumTokens:          int64Or(cfg.QuantumTokens, defaultDRRQuantumTokens),
-			deficitHalfLifeSeconds: floatOr(cfg.DeficitHalfLifeSeconds, defaultDRRDeficitHalfLifeSeconds),
-			decayFactor:            floatOr(cfg.DeficitDecayFactor, 0),
+			weightDeficit:          cfg.WeightDeficit,
+			weightHeadWait:         cfg.WeightDRRHeadWait,
+			quantumTokens:          cfg.QuantumTokens,
+			deficitHalfLifeSeconds: cfg.DeficitHalfLifeSeconds,
+			decayFactor:            cfg.DeficitDecayFactor,
 		}, nil
 	case "", "las":
 		return &LASStrategy{
-			weightService:   floatOr(cfg.WeightService, defaultServiceWeightService),
-			weightHeadWait:  floatOr(cfg.WeightServiceHeadWait, defaultServiceWeightHeadWait),
-			decayFactor:     floatOr(cfg.ServiceDecayFactor, defaultServiceDecayFactor),
-			halfLifeSeconds: floatOr(cfg.ServiceHalfLifeSeconds, 0),
+			weightService:   cfg.WeightService,
+			weightHeadWait:  cfg.WeightServiceHeadWait,
+			decayFactor:     cfg.ServiceDecayFactor,
+			halfLifeSeconds: cfg.ServiceHalfLifeSeconds,
 		}, nil
 	case "rr":
 		return &RRStrategy{}, nil
 	default:
 		return nil, fmt.Errorf("unknown scoring strategy %q: valid values are \"drr\", \"las\", \"rr\"", cfg.Strategy)
 	}
-}
-
-// floatOr returns *p if non-nil, otherwise the default.
-func floatOr(p *float64, def float64) float64 {
-	if p != nil {
-		return *p
-	}
-	return def
-}
-
-// int64Or returns *p if non-nil, otherwise the default.
-func int64Or(p *int64, def int64) int64 {
-	if p != nil {
-		return *p
-	}
-	return def
 }
 
 // rangeNormalize performs min-max normalization: (v - min) / (max - min) → [0, 1].
@@ -91,14 +77,6 @@ func rangeNormalize(v, min, max float64) float64 {
 // =============================================================================
 // DRR Strategy
 // =============================================================================
-
-// Default DRR strategy values.
-const (
-	defaultDRRQuantumTokens          int64   = 1000
-	defaultDRRWeightDeficit          float64 = 0.8
-	defaultDRRWeightHeadWait         float64 = 0.2
-	defaultDRRDeficitHalfLifeSeconds float64 = 60
-)
 
 // DRRStrategy implements Deficit Round Robin adapted for token-based LLM fwksched.
 //
@@ -119,7 +97,7 @@ const (
 // headWaitMs is used as a secondary signal to prevent starvation of
 // new or returning programs that start with deficit=0.
 //
-// Weights and quantum are configurable via the plugin config; defaults are 0.8/0.2/1000.
+// Weights and quantum are configurable via the plugin config; defaults live in DefaultConfig.
 type DRRStrategy struct {
 	weightDeficit          float64
 	weightHeadWait         float64
@@ -242,13 +220,6 @@ func (s *DRRStrategy) OnCompleted(metrics *ProgramMetrics, _ *fwksched.Inference
 // =============================================================================
 // LAS (Least Attained Service) Strategy
 // =============================================================================
-
-// Default LAS strategy values.
-const (
-	defaultServiceWeightService  float64 = 0.8
-	defaultServiceWeightHeadWait float64 = 0.2
-	defaultServiceDecayFactor    float64 = 0.995
-)
 
 // LASStrategy scores queues by equalizing attained service (weighted tokens
 // consumed) across programs. Programs with lower attained service receive higher
