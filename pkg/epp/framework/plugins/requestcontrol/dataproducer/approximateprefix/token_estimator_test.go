@@ -60,7 +60,7 @@ func TestApproximatePrefixCacheTokenEstimator(t *testing.T) {
 						Height: 1080,
 					},
 					DynamicCfg: &dynamicTokenEstimatorConfig{
-						Factor: 1024,
+						Factor: 32,
 					},
 				},
 			},
@@ -68,7 +68,34 @@ func TestApproximatePrefixCacheTokenEstimator(t *testing.T) {
 				Type:     "image_url",
 				ImageURL: fwkrh.ImageBlock{URL: base64Image180p1},
 			},
-			expected: 56,
+			expected: 58, // 320*180/(32*32) + 2
+		},
+		{
+			name: "Video",
+			multimodalCfg: &multiModalTokenEstimatorConfig{
+				Video: &videoTokenEstimatorConfig{
+					Duration: 5.0,
+					FPS:      2.0,
+					TokensPerFrame: &imageTokenEstimatorConfig{
+						Mode:     ModeFixed,
+						FixedCfg: &fixedTokenEstimatorConfig{FixedToken: 200},
+					},
+				},
+			},
+			block: fwkrh.ContentBlock{
+				Type:     "video_url",
+				VideoURL: fwkrh.VideoBlock{URL: "https://example.com/video.mp4"},
+			},
+			expected: 2000, // int(5.0 * 2.0) * 200 = 10 * 200
+		},
+		{
+			name:          "Video_NilConfig",
+			multimodalCfg: nil,
+			block: fwkrh.ContentBlock{
+				Type:     "video_url",
+				VideoURL: fwkrh.VideoBlock{URL: "https://example.com/video.mp4"},
+			},
+			expected: 7264, // default: int(16.0 * 2.0) * (640*360/(32*32) + 2) = 32 * 227
 		},
 	}
 
