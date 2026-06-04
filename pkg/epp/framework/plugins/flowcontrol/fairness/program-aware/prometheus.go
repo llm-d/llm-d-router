@@ -29,16 +29,6 @@ var (
 		[]string{"program_id"},
 	)
 
-	waitTimeMs = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: programAwareSubsystem,
-			Name:      "wait_time_milliseconds",
-			Help:      metricsutil.HelpMsgWithStability("Flow control queue wait time per program in milliseconds", compbasemetrics.ALPHA),
-			Buckets:   []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000},
-		},
-		[]string{"program_id"},
-	)
-
 	inputTokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: programAwareSubsystem,
@@ -126,7 +116,6 @@ func GetCollectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		requestsTotal,
 		dispatchedTotal,
-		waitTimeMs,
 		inputTokensTotal,
 		outputTokensTotal,
 		pickLatencyUs,

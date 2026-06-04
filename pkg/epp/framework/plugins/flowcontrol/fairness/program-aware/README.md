@@ -211,7 +211,6 @@ The plugin exports Prometheus metrics for monitoring program-level scheduling be
 |--------|------|-------------|
 | `program_aware_requests_total` | Counter | Total requests per program |
 | `program_aware_dispatched_total` | Counter | Total dispatched per program |
-| `program_aware_wait_time_milliseconds` | Histogram | Flow-control queue wait time |
 | `program_aware_ewma_wait_time_milliseconds` | Gauge | EWMA of queue wait time per program |
 | `program_aware_input_tokens_total` | Counter | Prompt tokens per program |
 | `program_aware_output_tokens_total` | Counter | Completion tokens per program |
