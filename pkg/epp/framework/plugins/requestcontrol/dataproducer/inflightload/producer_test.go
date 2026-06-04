@@ -107,25 +107,68 @@ func TestInFlightLoadProducer_Produce(t *testing.T) {
 	producer := newTestProducer(t)
 
 	endpointName := "test-endpoint"
+	endpoint := newStubSchedulingEndpoint(endpointName)
+	endpoints := []fwksched.Endpoint{endpoint}
+
+	// 1. Produce with nil request -> should not put anything
+	err := producer.Produce(context.Background(), nil, endpoints)
+	require.NoError(t, err)
+	_, ok := endpoint.Get(producer.uncachedRequestTokensDk.String())
+	require.False(t, ok)
+
+	// 2. Produce with request -> should put UncachedRequestTokens
+	req := makeTokenRequest("req1", 4) // 4 input tokens -> 10 total (with output)
+	err = producer.Produce(context.Background(), req, endpoints)
+
+	require.NoError(t, err)
+
+	val, ok := endpoint.Get(producer.uncachedRequestTokensDk.String())
+	require.True(t, ok)
+	uncached := val.(*attrconcurrency.UncachedRequestTokens)
+	require.Equal(t, int64(10), uncached.Tokens)
+
+	// Verify that InFlightLoad was NOT put/overwritten by Produce
+	_, ok = endpoint.Get(producer.dk.String())
+	require.False(t, ok, "InFlightLoad should not be populated by Produce")
+}
+
+func TestInFlightLoadProducer_Extract(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	endpointName := "test-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	// Mock some initial load
+	endpoint := newStubSchedulingEndpoint(endpointName)
+	ctx := context.Background()
+
+	// Simulate Add event
+	err := producer.Extract(ctx, datalayer.EndpointEvent{
+		Type:     datalayer.EventAddOrUpdate,
+		Endpoint: endpoint,
+	})
+	require.NoError(t, err)
+
+	// Verify dynamic attribute is registered
+	key := producer.dk.String()
+	val, ok := endpoint.Get(key)
+	require.True(t, ok)
+
+	// Verify initial values (should be 0)
+	load := val.(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(0), load.Requests)
+	require.Equal(t, int64(0), load.Tokens)
+
+	// Update trackers
 	producer.requestTracker.add(endpointID, 5)
 	producer.tokenTracker.add(endpointID, 500)
 
-	ctx := context.Background()
-	endpoints := []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}
-
-	err := producer.Produce(ctx, nil, endpoints)
-	require.NoError(t, err)
-
-	// Verify AttributeMap population
-	key := producer.dk.String()
-	val, ok := endpoints[0].Get(key)
+	// Verify values are updated dynamically without calling Produce
+	val2, ok := endpoint.Get(key)
 	require.True(t, ok)
-	load := val.(*attrconcurrency.InFlightLoad)
-	require.Equal(t, int64(5), load.Requests)
-	require.Equal(t, int64(500), load.Tokens)
+	load2 := val2.(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(5), load2.Requests)
+	require.Equal(t, int64(500), load2.Tokens)
 }
 
 func TestInFlightLoadProducer_Lifecycle(t *testing.T) {

@@ -83,6 +83,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
+		uncachedRequestTokensDk:  attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name),
 		PluginState:              fwkplugin.NewPluginState(ctx),
 	}, nil
 }
@@ -105,6 +106,7 @@ type InFlightLoadProducer struct {
 	PluginState              *fwkplugin.PluginState
 	dk                       fwkplugin.DataKey
 	prefixMatchInfoDK        fwkplugin.DataKey
+	uncachedRequestTokensDk  fwkplugin.DataKey
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -220,20 +222,12 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 		if e == nil || e.GetMetadata() == nil {
 			continue
 		}
-		endpointID := e.GetMetadata().NamespacedName.String()
-
-		load := &attrconcurrency.InFlightLoad{
-			Tokens:   p.tokenTracker.get(endpointID),
-			Requests: p.requestTracker.get(endpointID),
-		}
 		if request != nil {
-			// Project this request's additional work onto the endpoint: uncached
-			// input tokens (per its prefix-cache state) plus estimated output
-			// when the producer is configured to include it. Per-cycle, not
-			// persisted in the tracker — that happens only on PreRequest.
-			load.UncachedRequestTokens = p.estimateRequestTokens(e, inputTokens)
+			tokens := p.estimateRequestTokens(e, inputTokens)
+			e.Put(p.uncachedRequestTokensDk.String(), &attrconcurrency.UncachedRequestTokens{
+				Tokens: tokens,
+			})
 		}
-		e.Put(p.dk.String(), load)
 	}
 	return nil
 }
@@ -459,7 +453,8 @@ func nonNeg(v int64) int64 {
 
 func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
-		p.dk: attrconcurrency.InFlightLoad{},
+		p.dk:                      attrconcurrency.InFlightLoad{},
+		p.uncachedRequestTokensDk: attrconcurrency.UncachedRequestTokens{},
 	}
 }
 
