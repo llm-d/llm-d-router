@@ -3,9 +3,11 @@ package steps
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -102,13 +104,19 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		return nil
 	}
 
-	logger.V(logutil.TRACE).Info("downloading images", "count", len(imageURLs))
-
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxConcurrentDownloads)
 
 	results := make([]downloadResult, len(imageURLs))
 	for i, ref := range imageURLs {
+		if strings.HasPrefix(ref.url, "data:") {
+			contentType, b64, err := parseDataURI(ref.url)
+			if err != nil {
+				return fmt.Errorf("parsing data URI at message %d part %d: %w", ref.msgIdx, ref.partIdx, err)
+			}
+			results[i] = downloadResult{ref: ref, base64Data: b64, contentType: contentType}
+			continue
+		}
 		g.Go(func() error {
 			data, contentType, err := s.download(gCtx, ref.url)
 			if err != nil {
@@ -123,27 +131,34 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		})
 	}
 
+	logger.V(logutil.TRACE).Info("downloading images", "count", len(imageURLs))
+
 	if err := g.Wait(); err != nil {
 		return err
 	}
 
 	for _, r := range results {
-		dataURI := fmt.Sprintf("data:%s;base64,%s", r.contentType, r.base64Data)
+		if !strings.HasPrefix(r.ref.url, "data:") {
+			dataURI := fmt.Sprintf("data:%s;base64,%s", r.contentType, r.base64Data)
+			msg := messages[r.ref.msgIdx].(map[string]any)
+			content := msg["content"].([]any)
+			part := content[r.ref.partIdx].(map[string]any)
+			imageURL := part[imageURLPartType].(map[string]any)
+			imageURL["url"] = dataURI
+		}
 
-		msg := messages[r.ref.msgIdx].(map[string]any)
-		content := msg["content"].([]any)
-		part := content[r.ref.partIdx].(map[string]any)
-		imageURL := part[imageURLPartType].(map[string]any)
-		imageURL["url"] = dataURI
-
-		reqCtx.MultimodalEntries = append(reqCtx.MultimodalEntries, pipeline.MultimodalEntry{
-			Index:       len(reqCtx.MultimodalEntries),
-			Base64Data:  r.base64Data,
-			ContentType: r.contentType,
-		})
+		appendMultimodalEntry(reqCtx, r.contentType, r.base64Data)
 	}
 
 	return nil
+}
+
+func appendMultimodalEntry(reqCtx *pipeline.RequestContext, contentType, b64 string) {
+	reqCtx.MultimodalEntries = append(reqCtx.MultimodalEntries, pipeline.MultimodalEntry{
+		Index:       len(reqCtx.MultimodalEntries),
+		Base64Data:  b64,
+		ContentType: contentType,
+	})
 }
 
 func (s *ReplaceMediaURLsStep) download(ctx context.Context, url string) ([]byte, string, error) {
@@ -182,4 +197,27 @@ type downloadResult struct {
 	ref         imageRef
 	base64Data  string
 	contentType string
+}
+
+func parseDataURI(uri string) (contentType, b64 string, err error) {
+	rest := strings.TrimPrefix(uri, "data:")
+	meta, payload, ok := strings.Cut(rest, ",")
+	if !ok {
+		return "", "", errors.New("missing comma in data URI")
+	}
+	ct, params, _ := strings.Cut(meta, ";")
+	hasBase64 := false
+	for _, p := range strings.Split(params, ";") {
+		if strings.EqualFold(strings.TrimSpace(p), "base64") {
+			hasBase64 = true
+			break
+		}
+	}
+	if !hasBase64 {
+		return "", "", errors.New("data URI must be base64-encoded")
+	}
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	return ct, payload, nil
 }
