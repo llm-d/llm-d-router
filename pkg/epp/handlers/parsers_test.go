@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/go-logr/logr"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
@@ -50,7 +51,7 @@ func TestParserRegistry(t *testing.T) {
 	openai := &testParser{name: "openai", paths: []string{"v1/chat/completions", "v1/completions"}}
 	anthropic := &testParser{name: "anthropic", paths: []string{"v1/messages"}}
 	vertex := &testParser{name: "vertex", paths: []string{"PredictionService/ChatCompletions"}}
-	registry := NewParserRegistry([]fwkrh.Parser{openai, anthropic, vertex})
+	registry := NewParserRegistry([]fwkrh.Parser{openai, anthropic, vertex}, logr.Discard())
 
 	tests := []struct {
 		name        string
@@ -113,7 +114,7 @@ func TestParserRegistryPriority(t *testing.T) {
 	custom := &testParser{name: "custom", paths: []string{"v1/chat/completions"}}
 
 	// 1. OpenAI configured first
-	registry1 := NewParserRegistry([]fwkrh.Parser{openai, custom})
+	registry1 := NewParserRegistry([]fwkrh.Parser{openai, custom}, logr.Discard())
 	parser1, err := registry1.Resolve("/v1/chat/completions")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -123,7 +124,7 @@ func TestParserRegistryPriority(t *testing.T) {
 	}
 
 	// 2. Custom configured first
-	registry2 := NewParserRegistry([]fwkrh.Parser{custom, openai})
+	registry2 := NewParserRegistry([]fwkrh.Parser{custom, openai}, logr.Discard())
 	parser2, err := registry2.Resolve("/v1/chat/completions")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -136,7 +137,7 @@ func TestParserRegistryPriority(t *testing.T) {
 func TestParserRegistryWithPassthrough(t *testing.T) {
 	openai := &testParser{name: "openai", paths: []string{"v1/chat/completions", "v1/completions"}}
 	passthrough := &testParser{name: "passthrough", paths: nil}
-	registry := NewParserRegistry([]fwkrh.Parser{openai, passthrough})
+	registry := NewParserRegistry([]fwkrh.Parser{openai, passthrough}, logr.Discard())
 
 	tests := []struct {
 		name        string
@@ -177,7 +178,7 @@ func TestParserRegistryDuplicateTypes(t *testing.T) {
 	p1 := &testParser{name: "openai", paths: []string{"v1/chat/completions"}}
 	p2 := &testParser{name: "openai", paths: []string{"v1/completions"}}
 
-	registry := NewParserRegistry([]fwkrh.Parser{p1, p2})
+	registry := NewParserRegistry([]fwkrh.Parser{p1, p2}, logr.Discard())
 	parsers := registry.Parsers()
 	if len(parsers) != 1 {
 		t.Errorf("expected 1 parser after skipping duplicate type, got %d", len(parsers))

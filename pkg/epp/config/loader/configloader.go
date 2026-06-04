@@ -180,7 +180,7 @@ func InstantiateAndConfigure(
 		}
 	}
 
-	parserRegistry, err := buildParserRegistry(rawConfig.RequestHandler.Parsers, handle)
+	parserRegistry, err := buildParserRegistry(rawConfig.RequestHandler.Parsers, handle, logger)
 	if err != nil {
 		return nil, fmt.Errorf("parser registry build failed: %w", err)
 	}
@@ -307,7 +307,7 @@ func loadFeatureConfig(gates configapi.FeatureGates) map[string]bool {
 	return config
 }
 
-func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkplugin.Handle) (*handlers.ParserRegistry, error) {
+func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {
 	if len(rawParserConfigs) == 0 {
 		return nil, errors.New("no parsers configured")
 	}
@@ -324,7 +324,7 @@ func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkpl
 		}
 		parsers = append(parsers, v)
 	}
-	return handlers.NewParserRegistry(parsers), nil
+	return handlers.NewParserRegistry(parsers, logger), nil
 }
 
 func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkplugin.Handle) (*datalayer.Config, error) {

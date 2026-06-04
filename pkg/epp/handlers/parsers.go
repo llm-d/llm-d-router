@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type parserEntry struct {
@@ -30,19 +30,19 @@ type parserEntry struct {
 	normalizedPaths []string
 }
 
-// ParserRegistry handles the routing of incoming requests to the appropriate Parser.
+// ParserRegistry handles the resolution of incoming requests to the appropriate Parser.
 type ParserRegistry struct {
 	entries        []parserEntry
 	fallbackParser fwkrh.Parser
 	parsers        []fwkrh.Parser
 }
 
-// NewParserRegistry builds a central routing table from a list of active parsers.
+// NewParserRegistry builds a central resolution table from a list of active parsers.
 // The order of the input parsers determines the priority (first match wins).
-func NewParserRegistry(parsers []fwkrh.Parser) *ParserRegistry {
+func NewParserRegistry(parsers []fwkrh.Parser, logger logr.Logger) *ParserRegistry {
 	registry := &ParserRegistry{}
 	seenTypes := make(map[string]bool)
-	logger := log.Log.WithName("ParserRegistry")
+	logger = logger.WithName("ParserRegistry")
 
 	for i, parser := range parsers {
 		paths := parser.Claims().Paths
@@ -55,10 +55,10 @@ func NewParserRegistry(parsers []fwkrh.Parser) *ParserRegistry {
 				seenTypes[typeName] = true
 				registry.parsers = append(registry.parsers, parser)
 			} else {
-				logger.Info("Parser type is already registered, skipping duplicate type configuration", "type", typeName, "parser", parser.TypedName().Name)
+				logger.Info("Parser type is already registered, skipping duplicate type configuration", "severity", "warning", "type", typeName, "parser", parser.TypedName().Name)
 			}
 			for _, skipped := range parsers[i+1:] {
-				logger.Info("Parser is skipped because it is configured after fallback parser", "skippedParser", skipped.TypedName().Name, "fallbackParser", parser.TypedName().Name)
+				logger.Info("Parser is skipped because it is configured after fallback parser", "severity", "warning", "skippedParser", skipped.TypedName().Name, "fallbackParser", parser.TypedName().Name)
 			}
 			break
 		}
@@ -74,7 +74,7 @@ func NewParserRegistry(parsers []fwkrh.Parser) *ParserRegistry {
 				normalizedPaths: normalizedPaths,
 			})
 		} else {
-			logger.Info("Parser type is already registered, skipping duplicate type configuration", "type", typeName, "parser", parser.TypedName().Name)
+			logger.Info("Parser type is already registered, skipping duplicate type configuration", "severity", "warning", "type", typeName, "parser", parser.TypedName().Name)
 		}
 	}
 	return registry
