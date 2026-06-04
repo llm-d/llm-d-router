@@ -206,6 +206,15 @@ func (m *ProgramMetrics) ServiceRate() float64 {
 	return m.serviceRate
 }
 
+// LastCompletionTime returns the wall-clock time of the most recent response
+// completion, or the zero time if the program has never completed a request.
+// Used by the eviction sweeper to identify idle programs.
+func (m *ProgramMetrics) LastCompletionTime() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastCompletionTime
+}
+
 // AttainedService returns the current time-decayed attained service value.
 func (m *ProgramMetrics) AttainedService() float64 {
 	m.mu.Lock()

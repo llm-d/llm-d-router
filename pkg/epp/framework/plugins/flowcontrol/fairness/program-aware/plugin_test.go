@@ -426,3 +426,50 @@ func TestPick_AllIdenticalMetrics(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, queue, "should select a queue even when all metrics are identical")
 }
+
+// --- Eviction tests ---
+
+func TestEvictIdle_RemovesIdleEntries(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+
+	idle := &ProgramMetrics{}
+	idle.RecordServiceRate(100, time.Now().Add(-1*time.Hour))
+	p.programMetrics.Store("idle-prog", idle)
+
+	recent := &ProgramMetrics{}
+	recent.RecordServiceRate(100, time.Now())
+	p.programMetrics.Store("recent-prog", recent)
+
+	p.evictIdle(time.Minute)
+
+	_, idleStillThere := p.programMetrics.Load("idle-prog")
+	_, recentStillThere := p.programMetrics.Load("recent-prog")
+	assert.False(t, idleStillThere, "program past TTL should be evicted")
+	assert.True(t, recentStillThere, "program inside TTL must be kept")
+}
+
+func TestEvictIdle_KeepsInFlight(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+
+	m := &ProgramMetrics{}
+	m.RecordServiceRate(100, time.Now().Add(-1*time.Hour))
+	m.IncrementInFlight()
+	p.programMetrics.Store("busy-prog", m)
+
+	p.evictIdle(time.Minute)
+
+	_, ok := p.programMetrics.Load("busy-prog")
+	assert.True(t, ok, "program with in-flight requests must not be evicted regardless of TTL")
+}
+
+func TestEvictIdle_KeepsZeroCompletion(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+
+	// Fresh entry with no completions yet — e.g. queued but not dispatched.
+	p.programMetrics.Store("new-prog", &ProgramMetrics{})
+
+	p.evictIdle(time.Nanosecond)
+
+	_, ok := p.programMetrics.Load("new-prog")
+	assert.True(t, ok, "program with no completion time must not be evicted")
+}

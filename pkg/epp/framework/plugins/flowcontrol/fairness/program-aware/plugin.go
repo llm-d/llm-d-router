@@ -85,6 +85,17 @@ type Config struct {
 	// counter when set (> 0); overrides ServiceDecayFactor with wall-clock
 	// based decay. Service decays to 50% after this duration.
 	ServiceHalfLifeSeconds float64 `json:"serviceHalfLifeSeconds,omitempty"`
+
+	// --- Eviction (applies to all strategies) ---
+
+	// EvictionTTLSeconds bounds the lifetime of per-program metrics.
+	// A program with no completed requests in this window is evicted from
+	// the metrics map. Set to 0 to disable eviction (unbounded growth).
+	EvictionTTLSeconds float64 `json:"evictionTtlSeconds,omitempty"`
+
+	// EvictionSweepSeconds is how often the eviction sweep runs.
+	// Must be > 0 when EvictionTTLSeconds > 0.
+	EvictionSweepSeconds float64 `json:"evictionSweepSeconds,omitempty"`
 }
 
 // DefaultConfig is the canonical Config used when JSON parameters are absent
@@ -101,6 +112,8 @@ var DefaultConfig = Config{
 	WeightServiceHeadWait:  0.2,
 	ServiceDecayFactor:     0.995,
 	ServiceHalfLifeSeconds: 0,
+	EvictionTTLSeconds:     3600,
+	EvictionSweepSeconds:   300,
 }
 
 // validate checks that numeric fields fall in the ranges the scoring
@@ -133,6 +146,12 @@ func (c Config) validate() error {
 	}
 	if c.ServiceDecayFactor <= 0 || c.ServiceDecayFactor > 1 {
 		return fmt.Errorf("serviceDecayFactor must be in (0, 1], got %v", c.ServiceDecayFactor)
+	}
+	if c.EvictionTTLSeconds < 0 {
+		return fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", c.EvictionTTLSeconds)
+	}
+	if c.EvictionSweepSeconds <= 0 {
+		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
 	}
 	return nil
 }
@@ -177,6 +196,11 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 			for _, c := range GetCollectors() {
 				reg.MustRegister(c)
 			}
+		}
+		if cfg.EvictionTTLSeconds > 0 {
+			interval := time.Duration(cfg.EvictionSweepSeconds * float64(time.Second))
+			ttl := time.Duration(cfg.EvictionTTLSeconds * float64(time.Second))
+			go p.runEviction(handle.Context(), interval, ttl)
 		}
 	}
 	return p, nil
@@ -303,6 +327,48 @@ func (p *ProgramAwarePlugin) getOrCreateMetrics(programID string) *ProgramMetric
 		return existing
 	}
 	return m
+}
+
+// runEviction sweeps the programMetrics map on a fixed interval, removing
+// entries idle for longer than ttl. Exits when ctx is cancelled.
+func (p *ProgramAwarePlugin) runEviction(ctx context.Context, interval, ttl time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.evictIdle(ttl)
+		}
+	}
+}
+
+// evictIdle removes metrics entries whose last completion is older than ttl
+// and that have no in-flight requests. Entries with no completions yet are
+// skipped — eviction would race their first completion.
+//
+// The Range/Delete pair is not atomic: a request landing concurrently can
+// recreate a freshly-deleted entry via getOrCreateMetrics, losing one cycle
+// of accumulated state. With a default deficit half-life of 60 s, an
+// hour-idle program's deficit is ~0 already, so the reset is benign.
+func (p *ProgramAwarePlugin) evictIdle(ttl time.Duration) {
+	now := time.Now()
+	p.programMetrics.Range(func(key, value any) bool {
+		m, ok := value.(*ProgramMetrics)
+		if !ok {
+			return true
+		}
+		if m.InFlight() != 0 {
+			return true
+		}
+		last := m.LastCompletionTime()
+		if last.IsZero() || now.Sub(last) <= ttl {
+			return true
+		}
+		p.programMetrics.Delete(key)
+		return true
+	})
 }
 
 // computeFairnessIndex returns Jain's Fairness Index over the service rate

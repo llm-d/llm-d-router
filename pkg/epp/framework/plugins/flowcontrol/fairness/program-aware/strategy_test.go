@@ -81,6 +81,9 @@ func TestFactory_InvalidConfig(t *testing.T) {
 		{"deficitDecayFactor negative", `{"strategy":"drr","deficitDecayFactor":-0.1}`, "deficitDecayFactor"},
 		{"serviceDecayFactor at 0", `{"strategy":"las","serviceDecayFactor":0}`, "serviceDecayFactor"},
 		{"serviceDecayFactor above 1", `{"strategy":"las","serviceDecayFactor":1.1}`, "serviceDecayFactor"},
+		{"negative evictionTtlSeconds", `{"strategy":"las","evictionTtlSeconds":-1}`, "evictionTtlSeconds"},
+		{"zero evictionSweepSeconds", `{"strategy":"las","evictionSweepSeconds":0}`, "evictionSweepSeconds"},
+		{"negative evictionSweepSeconds", `{"strategy":"las","evictionSweepSeconds":-5}`, "evictionSweepSeconds"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
