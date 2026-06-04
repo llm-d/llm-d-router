@@ -17,6 +17,10 @@ import (
 // ProgramAwarePluginType is the registered type name for this plugin.
 const ProgramAwarePluginType = "program-aware-fairness"
 
+// enqueueTimeAttributeKey is the per-request attribute key under which Pick
+// stashes the flow-control enqueue timestamp for PreRequest to read back.
+const enqueueTimeAttributeKey = "program-aware/enqueue-time"
+
 // Config holds the JSON-decoded configuration for the plugin. JSON parameters
 // are merged onto a copy of DefaultConfig, so any field omitted from the
 // user's JSON keeps its default value.
@@ -192,11 +196,6 @@ type ProgramAwarePlugin struct {
 	// programMetrics stores aggregated metrics per program.
 	// Key: program ID (string), Value: *ProgramMetrics.
 	programMetrics sync.Map
-
-	// requestTimestamps tracks when Pick() dispatched each request,
-	// used to compute flow-control queue wait time in PreRequest.
-	// Key: request ID (string), Value: time.Time.
-	requestTimestamps sync.Map
 }
 
 // TypedName returns the plugin type and instance name.
@@ -270,11 +269,16 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 		}
 	}
 
-	// Record the selected item's enqueue time so PreRequest can compute
-	// the actual flow-control queue wait time (enqueue → dispatch).
+	// Stash the selected item's enqueue time on the InferenceRequest's own
+	// attribute store so PreRequest can compute the flow-control queue wait
+	// time (enqueue → dispatch). The attribute lifetime is the request
+	// lifetime, so an abandoned request cannot leak into a side map.
+	// Pick precedes PreRequest on a single request goroutine; no concurrent writes.
 	if bestQueue != nil {
 		if head := bestQueue.PeekHead(); head != nil {
-			p.requestTimestamps.Store(head.OriginalRequest().ID(), head.EnqueueTime())
+			if req := head.OriginalRequest().InferenceRequest(); req != nil {
+				req.PutAttribute(enqueueTimeAttributeKey, head.EnqueueTime())
+			}
 		}
 	}
 

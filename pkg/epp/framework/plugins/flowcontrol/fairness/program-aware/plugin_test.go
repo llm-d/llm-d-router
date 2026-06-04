@@ -111,13 +111,15 @@ func TestPick_RecordsEnqueueTime(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
 	enqueueTime := time.Now().Add(-500 * time.Millisecond)
+	request := &fwksched.InferenceRequest{RequestID: "req-123"}
 	queueA := &fwkfcmocks.MockFlowQueueAccessor{
 		LenV:     1,
 		FlowKeyV: flowcontrol.FlowKey{ID: "prog-a"},
 		PeekHeadV: &fwkfcmocks.MockQueueItemAccessor{
 			EnqueueTimeV: enqueueTime,
 			OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{
-				IDV: "req-123",
+				IDV:               "req-123",
+				InferenceRequestV: request,
 			},
 		},
 	}
@@ -132,10 +134,9 @@ func TestPick_RecordsEnqueueTime(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, queueA, queue)
 
-	// Verify Pick() stored the enqueue time for the dispatched request.
-	storedTimeRaw, ok := p.requestTimestamps.Load("req-123")
-	require.True(t, ok, "Pick should store enqueue time for selected request")
-	storedTime := storedTimeRaw.(time.Time)
+	// Verify Pick() stored the enqueue time on the request's own attribute store.
+	storedTime, ok := fwksched.ReadRequestAttribute[time.Time](request, enqueueTimeAttributeKey)
+	require.True(t, ok, "Pick should stash enqueue time on the request")
 	assert.Equal(t, enqueueTime, storedTime, "stored time should be the item's enqueue time")
 }
 
@@ -157,10 +158,6 @@ func TestProduce_UpdatesMetrics(t *testing.T) {
 	require.True(t, ok)
 	metrics := metricsRaw.(*ProgramMetrics)
 	assert.Equal(t, int64(1), metrics.TotalRequests())
-
-	// PrepareData does NOT store timestamps — Pick() does that.
-	_, ok = p.requestTimestamps.Load("req-1")
-	assert.False(t, ok)
 }
 
 func TestProduce_NoFairnessID(t *testing.T) {
@@ -176,10 +173,6 @@ func TestProduce_NoFairnessID(t *testing.T) {
 	// No metrics should be created.
 	_, ok := p.programMetrics.Load("")
 	assert.False(t, ok)
-
-	// No timestamp either.
-	_, ok = p.requestTimestamps.Load("req-1")
-	assert.False(t, ok)
 }
 
 // --- PreRequest tests ---
@@ -187,14 +180,14 @@ func TestProduce_NoFairnessID(t *testing.T) {
 func TestPreRequest_RecordsWaitTime(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 
-	// Simulate Pick() having stored the enqueue time 50ms ago.
-	p.requestTimestamps.Store("req-1", time.Now().Add(-50*time.Millisecond))
 	p.programMetrics.Store("prog-a", &ProgramMetrics{})
 
 	request := &fwksched.InferenceRequest{
 		RequestID:  "req-1",
 		FairnessID: "prog-a",
 	}
+	// Simulate Pick() having stashed the enqueue time 50ms ago on the request.
+	request.PutAttribute(enqueueTimeAttributeKey, time.Now().Add(-50*time.Millisecond))
 
 	p.PreRequest(context.Background(), request, nil)
 
@@ -206,10 +199,9 @@ func TestPreRequest_RecordsWaitTime(t *testing.T) {
 
 // --- ResponseComplete tests ---
 
-func TestResponseComplete_RecordsTokensAndCleanup(t *testing.T) {
+func TestResponseComplete_RecordsTokens(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 	p.programMetrics.Store("prog-a", &ProgramMetrics{})
-	p.requestTimestamps.Store("req-1", time.Now().Add(-100*time.Millisecond))
 
 	request := &fwksched.InferenceRequest{
 		RequestID:  "req-1",
@@ -230,10 +222,6 @@ func TestResponseComplete_RecordsTokensAndCleanup(t *testing.T) {
 	assert.Equal(t, int64(100), metrics.TotalInputTokens())
 	assert.Equal(t, int64(50), metrics.TotalOutputTokens())
 
-	// Timestamp should be cleaned up.
-	_, ok := p.requestTimestamps.Load("req-1")
-	assert.False(t, ok)
-
 	// EWMA token cost should be recorded: 100*1 + 50*2 = 200 weighted tokens.
 	assert.Greater(t, metrics.AverageTokens(), 0.0, "token usage should be recorded")
 }
@@ -245,7 +233,6 @@ func TestResponseBody_IntermediateChunks_AreNoOp(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 	m := &ProgramMetrics{}
 	p.programMetrics.Store("prog-a", m)
-	p.requestTimestamps.Store("req-1", time.Now())
 	m.IncrementInFlight() // simulates PreRequest
 
 	request := &fwksched.InferenceRequest{RequestID: "req-1", FairnessID: "prog-a"}
@@ -268,20 +255,19 @@ func TestResponseBody_IntermediateChunks_AreNoOp(t *testing.T) {
 	assert.Equal(t, int64(50), m.TotalOutputTokens())
 }
 
-func TestResponseComplete_NilOrIntermediateResponse_NoCleanup(t *testing.T) {
-	// Nil response and non-EndOfStream response must not run terminal work,
-	// including timestamp cleanup — that work happens only on the final chunk.
+func TestResponseComplete_NilResponse_NoOp(t *testing.T) {
+	// A nil response must not run terminal work — the final-chunk hook is
+	// the only place tokens are recorded and InFlight is decremented.
 	p := &ProgramAwarePlugin{}
-	p.requestTimestamps.Store("req-1", time.Now())
-	request := &fwksched.InferenceRequest{RequestID: "req-1"}
+	m := &ProgramMetrics{}
+	p.programMetrics.Store("prog-a", m)
+	m.IncrementInFlight()
+
+	request := &fwksched.InferenceRequest{RequestID: "req-1", FairnessID: "prog-a"}
 
 	p.ResponseBody(context.Background(), request, nil, nil)
-	_, ok := p.requestTimestamps.Load("req-1")
-	assert.True(t, ok, "nil response leaves timestamp for the eventual final-chunk call")
-
-	p.ResponseBody(context.Background(), request, &fwkrc.Response{EndOfStream: false}, nil)
-	_, ok = p.requestTimestamps.Load("req-1")
-	assert.True(t, ok, "intermediate chunk leaves timestamp for the eventual final-chunk call")
+	assert.Equal(t, int64(1), m.InFlight(), "nil response must not decrement InFlight")
+	assert.Equal(t, int64(0), m.TotalInputTokens(), "nil response must not record tokens")
 }
 
 // --- rangeNormalize tests ---
@@ -315,10 +301,10 @@ func TestFullLifecycle(t *testing.T) {
 		FairnessID: programID,
 	}
 
-	// 0. Simulate Pick() recording the enqueue time (flow control layer).
-	//    In production, this happens when the request is dispatched from the queue.
-	enqueueTime := time.Now().Add(-20 * time.Millisecond) // enqueued 20ms ago
-	p.requestTimestamps.Store(request.RequestID, enqueueTime)
+	// 0. Simulate Pick() stashing the enqueue time on the request (flow
+	//    control layer). In production this happens when the request is
+	//    dispatched from the queue.
+	request.PutAttribute(enqueueTimeAttributeKey, time.Now().Add(-20*time.Millisecond))
 
 	// 1. PrepareData (runs after flow control dispatch)
 	err := p.Produce(context.Background(), request, nil)
@@ -331,7 +317,7 @@ func TestFullLifecycle(t *testing.T) {
 	assert.Equal(t, int64(1), metrics.TotalRequests())
 	assert.Equal(t, int64(0), metrics.DispatchedCount())
 
-	// 2. PreRequest — computes wait time from enqueue time
+	// 2. PreRequest — computes wait time from the request's enqueue-time attribute
 	p.PreRequest(context.Background(), request, nil)
 	assert.Equal(t, int64(1), metrics.DispatchedCount())
 	assert.Greater(t, metrics.AverageWaitTime(), 0.0, "wait time should reflect queue residence time")
@@ -342,10 +328,6 @@ func TestFullLifecycle(t *testing.T) {
 	p.ResponseBody(context.Background(), request, response, &datalayer.EndpointMetadata{})
 	assert.Equal(t, int64(42), metrics.TotalInputTokens())
 	assert.Equal(t, int64(17), metrics.TotalOutputTokens())
-
-	// Verify cleanup.
-	_, ok = p.requestTimestamps.Load("req-lifecycle")
-	assert.False(t, ok)
 }
 
 // --- fairness index tests (attained-service-based) ---

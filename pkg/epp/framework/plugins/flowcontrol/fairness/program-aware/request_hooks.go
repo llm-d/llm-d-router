@@ -64,26 +64,24 @@ func (p *ProgramAwarePlugin) PreRequest(ctx context.Context, request *fwksched.I
 	metrics.IncrementInFlight()
 	dispatchedTotal.WithLabelValues(programID).Inc()
 
-	if enqueueTimeRaw, ok := p.requestTimestamps.Load(request.RequestID); ok {
-		if enqueueTime, ok := enqueueTimeRaw.(time.Time); ok {
-			waitMs := float64(time.Since(enqueueTime).Milliseconds())
-			metrics.RecordWaitTime(waitMs)
-			waitTimeMs.WithLabelValues(programID).Observe(waitMs)
-			ewmaWaitTimeMs.WithLabelValues(programID).Set(metrics.AverageWaitTime())
+	if enqueueTime, ok := fwksched.ReadRequestAttribute[time.Time](request, enqueueTimeAttributeKey); ok {
+		waitMs := float64(time.Since(enqueueTime).Milliseconds())
+		metrics.RecordWaitTime(waitMs)
+		waitTimeMs.WithLabelValues(programID).Observe(waitMs)
+		ewmaWaitTimeMs.WithLabelValues(programID).Set(metrics.AverageWaitTime())
 
-			log.FromContext(ctx).V(logutil.TRACE).Info("PreRequest: recorded wait time",
-				"requestId", request.RequestID, "programId", programID,
-				"waitMs", waitMs, "avgWaitMs", metrics.AverageWaitTime())
-		}
+		log.FromContext(ctx).V(logutil.TRACE).Info("PreRequest: recorded wait time",
+			"requestId", request.RequestID, "programId", programID,
+			"waitMs", waitMs, "avgWaitMs", metrics.AverageWaitTime())
 	}
 }
 
 // --- ResponseComplete interface ---
 
-// ResponseBody records token usage and cleans up per-request state. For
-// streaming responses ResponseBody fires once per chunk; only the final
-// invocation (response.EndOfStream == true) carries the terminal Usage and
-// is treated as the request-lifecycle hook.
+// ResponseBody records token usage on the final stream chunk. For streaming
+// responses ResponseBody fires once per chunk; only the final invocation
+// (response.EndOfStream == true) carries the terminal Usage and is treated
+// as the request-lifecycle hook.
 func (p *ProgramAwarePlugin) ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
@@ -92,9 +90,6 @@ func (p *ProgramAwarePlugin) ResponseBody(ctx context.Context, request *fwksched
 	if programID == "" {
 		programID = metadata.DefaultFairnessID
 	}
-
-	// Clean up the enqueue timestamp stored by Pick().
-	p.requestTimestamps.Delete(request.RequestID)
 
 	metrics := p.getOrCreateMetrics(programID)
 	metrics.DecrementInFlight()
