@@ -15,9 +15,16 @@
 # limitations under the License.
 
 SCRIPT_ROOT=$(dirname "${BASH_SOURCE}")/..
-GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
+GOMODCACHE="${GOMODCACHE:-$(go env GOMODCACHE)}"
+
+GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-$(go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api)}"
+GATEWAY_API_MOD="${GOMODCACHE}/sigs.k8s.io/gateway-api@${GATEWAY_API_VERSION}"
+
 GKE_GATEWAY_API_VERSION="${GKE_GATEWAY_API_VERSION:-v1.4.0}"
-GIE_VERSION="${GIE_VERSION:-v1.5.0}"
+
+GIE_VERSION="${GIE_VERSION:-$(go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api-inference-extension)}"
+GIE_MOD="${GOMODCACHE}/sigs.k8s.io/gateway-api-inference-extension@${GIE_VERSION}"
+
 HELM="${HELM:-${SCRIPT_ROOT}/bin/helm}"
 KUBECTL_VALIDATE="${KUBECTL_VALIDATE:-${SCRIPT_ROOT}/bin/kubectl-validate}"
 TEMP_DIR=$(mktemp -d)
@@ -34,13 +41,19 @@ fetch_crds() {
   curl -sL "${url}" -o "${TEMP_DIR}/$(basename "${url}")"
 }
 
+copy_crds() {
+  local src="$1"
+  cp "${src}" "${TEMP_DIR}/$(basename "${src}")"
+}
+
+go mod download sigs.k8s.io/gateway-api-inference-extension sigs.k8s.io/gateway-api
 # Use local 'config/crd/bases', run "make generate" to regenerate llm-d CRDs
 cp "${SCRIPT_ROOT}/config/crd/bases/"*.yaml "${TEMP_DIR}/"
 # GIE (Gateway API Inference Extension) CRDs - owned by upstream GIE
-fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${GIE_VERSION}/config/crd/bases/inference.networking.k8s.io_inferencepools.yaml"
-fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${GIE_VERSION}/config/crd/bases/inference.networking.x-k8s.io_inferencepoolimports.yaml"
+copy_crds "${GIE_MOD}/config/crd/bases/inference.networking.k8s.io_inferencepools.yaml"
+copy_crds "${GIE_MOD}/config/crd/bases/inference.networking.x-k8s.io_inferencepoolimports.yaml"
 # GW API CRD
-fetch_crds "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/refs/tags/${GATEWAY_API_VERSION}/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml"
+copy_crds "${GATEWAY_API_MOD}/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml"
 # GKE CRD
 fetch_crds "https://raw.githubusercontent.com/GoogleCloudPlatform/gke-gateway-api/refs/tags/${GKE_GATEWAY_API_VERSION}/config/crd/networking.gke.io_gcpbackendpolicies.yaml"
 fetch_crds "https://raw.githubusercontent.com/GoogleCloudPlatform/gke-gateway-api/refs/tags/${GKE_GATEWAY_API_VERSION}/config/crd/networking.gke.io_healthcheckpolicies.yaml"
