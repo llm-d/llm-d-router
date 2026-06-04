@@ -60,8 +60,12 @@ func (p *ProgramAwarePlugin) PreRequest(ctx context.Context, request *fwksched.I
 	metrics := p.getOrCreateMetrics(programID)
 	p.getStrategy().OnPreRequest(metrics, request)
 
-	metrics.IncrementDispatched()
+	// Increment InFlight first so the eviction sweep's InFlight==0 gate
+	// covers the entire dispatch sequence; otherwise a sub-microsecond window
+	// exists between dispatched++ and inFlight++ where the program could be
+	// evicted under the dispatcher.
 	metrics.IncrementInFlight()
+	metrics.IncrementDispatched()
 	dispatchedTotal.WithLabelValues(programID).Inc()
 
 	if enqueueTime, ok := fwksched.ReadRequestAttribute[time.Time](request, enqueueTimeAttributeKey); ok {
