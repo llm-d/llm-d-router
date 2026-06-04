@@ -7,9 +7,13 @@ import (
 	"sync"
 	"time"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/prometheus/client_golang/prometheus"
+	compbasemetrics "k8s.io/component-base/metrics"
 )
 
 // ScoringStrategy determines how program queues are prioritized for dispatch.
@@ -29,6 +33,17 @@ type ScoringStrategy interface {
 
 	// OnCompleted is called when a response finishes with actual token usage.
 	OnCompleted(metrics *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrc.Response)
+
+	// EvictProgram drops any per-program state held by this strategy.
+	// Called by the plugin's eviction sweep after the program is removed from
+	// the central programMetrics map. Strategies with no per-program state
+	// (RR) supply a no-op.
+	EvictProgram(id string)
+
+	// Collectors returns the Prometheus collectors this strategy owns so the
+	// plugin can register them at startup. Strategies with no metrics return
+	// nil. Called once during plugin init, after the strategy is constructed.
+	Collectors() []prometheus.Collector
 }
 
 // QueueInfo bundles read-only data for each queue passed to Pick.
@@ -74,9 +89,29 @@ func rangeNormalize(v, min, max float64) float64 {
 	return (v - min) / (max - min)
 }
 
+// programIDFromRequest mirrors the fallback rule applied by the request hooks
+// so strategies can resolve their per-program state key from the request alone.
+func programIDFromRequest(req *fwksched.InferenceRequest) string {
+	if req == nil || req.FairnessID == "" {
+		return metadata.DefaultFairnessID
+	}
+	return req.FairnessID
+}
+
 // =============================================================================
 // DRR Strategy
 // =============================================================================
+
+// drrState holds DRRStrategy's per-program state. Callers must hold mu for the
+// duration of any read-modify-write on deficit/lastDecay. The struct is
+// declared with no methods so the math at the call site stays visible and
+// the lock contract is explicit; a single mutex covers both fields together
+// because the time-based decay path mutates them as a pair.
+type drrState struct {
+	mu        sync.Mutex
+	deficit   int64
+	lastDecay time.Time
+}
 
 // DRRStrategy implements Deficit Round Robin adapted for token-based LLM fwksched.
 //
@@ -104,6 +139,19 @@ type DRRStrategy struct {
 	quantumTokens          int64
 	deficitHalfLifeSeconds float64 // > 0 enables time-based decay
 	decayFactor            float64 // in (0, 1) enables per-cycle factor decay; ignored if half-life is set
+
+	// state holds per-program deficit state, populated in Step 4 once Pick
+	// and OnCompleted are cut over. Allocated but unused until then while
+	// ProgramMetrics still holds the deficit.
+	state sync.Map // key: program ID (string), value: *drrState
+}
+
+func (s *DRRStrategy) getState(id string) *drrState {
+	if v, ok := s.state.Load(id); ok {
+		return v.(*drrState)
+	}
+	actual, _ := s.state.LoadOrStore(id, &drrState{})
+	return actual.(*drrState)
 }
 
 // Name returns "drr".
@@ -135,25 +183,37 @@ func (s *DRRStrategy) Pick(_ int, queues map[string]QueueInfo) (flowcontrol.Flow
 		if qi.Metrics == nil {
 			continue
 		}
+		st := s.getState(id)
 
 		if qi.Len == 0 {
 			// Inactive (no queued and no in-flight) queues: decay deficit so
 			// stale credit shrinks. Skip decay while a request is in flight
 			// to preserve the upcoming OnCompleted() deduction.
 			if qi.Metrics.InFlight() == 0 {
+				st.mu.Lock()
 				if s.deficitHalfLifeSeconds > 0 {
-					qi.Metrics.DecayDeficitTimed(s.deficitHalfLifeSeconds, now)
+					if st.lastDecay.IsZero() {
+						st.lastDecay = now
+					} else if elapsed := now.Sub(st.lastDecay).Seconds(); elapsed > 0 {
+						st.deficit = int64(float64(st.deficit) * math.Pow(0.5, elapsed/s.deficitHalfLifeSeconds))
+						st.lastDecay = now
+					}
 				} else if s.decayFactor > 0 && s.decayFactor < 1.0 {
-					qi.Metrics.DecayDeficit(s.decayFactor)
+					st.deficit = int64(float64(st.deficit) * s.decayFactor)
 				}
+				deficit := st.deficit
+				st.mu.Unlock()
+				deficitTokensGauge.WithLabelValues(id).Set(float64(deficit))
 			}
 			continue
 		}
 
 		// Non-empty queues: allocate quantum each Pick.
-		qi.Metrics.AddDeficit(s.quantumTokens)
-
-		deficit := float64(qi.Metrics.Deficit())
+		st.mu.Lock()
+		st.deficit += s.quantumTokens
+		deficit := float64(st.deficit)
+		st.mu.Unlock()
+		deficitTokensGauge.WithLabelValues(id).Set(deficit)
 		var headWaitMs float64
 		if head := qi.Queue.PeekHead(); head != nil {
 			headWaitMs = float64(time.Since(head.EnqueueTime()).Milliseconds())
@@ -208,18 +268,51 @@ func (s *DRRStrategy) Pick(_ int, queues map[string]QueueInfo) (flowcontrol.Flow
 func (s *DRRStrategy) OnPreRequest(_ *ProgramMetrics, _ *fwksched.InferenceRequest) {}
 
 // OnCompleted deducts actual token usage from the deficit counter.
-func (s *DRRStrategy) OnCompleted(metrics *ProgramMetrics, _ *fwksched.InferenceRequest, response *fwkrc.Response) {
-	if metrics == nil || response == nil {
+func (s *DRRStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrc.Response) {
+	if request == nil || response == nil {
 		return
 	}
 	promptTokens := int64(response.Usage.PromptTokens)
 	completionTokens := int64(response.Usage.CompletionTokens)
-	metrics.DeductTokens(weightInputToken*promptTokens + weightOutputToken*completionTokens)
+	cost := weightInputToken*promptTokens + weightOutputToken*completionTokens
+	st := s.getState(programIDFromRequest(request))
+	st.mu.Lock()
+	st.deficit -= cost
+	st.mu.Unlock()
 }
+
+// EvictProgram drops the per-program deficit state.
+func (s *DRRStrategy) EvictProgram(id string) {
+	s.state.Delete(id)
+}
+
+// Collectors returns the Prometheus collectors owned by DRR.
+func (s *DRRStrategy) Collectors() []prometheus.Collector {
+	return []prometheus.Collector{deficitTokensGauge}
+}
+
+// deficitTokensGauge tracks the DRR deficit per program; only DRRStrategy writes to it.
+var deficitTokensGauge = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Subsystem: programAwareSubsystem,
+		Name:      "deficit_tokens",
+		Help:      metricsutil.HelpMsgWithStability("DRR deficit counter per program (positive = owed service, negative = overserved); decays exponentially when the queue is empty", compbasemetrics.ALPHA),
+	},
+	[]string{"program_id"},
+)
 
 // =============================================================================
 // LAS (Least Attained Service) Strategy
 // =============================================================================
+
+// lasState holds LASStrategy's per-program state. Callers must hold mu for
+// the duration of any read-modify-write on attainedService/lastDecay; the
+// time-based decay path mutates them as a pair.
+type lasState struct {
+	mu              sync.Mutex
+	attainedService float64
+	lastDecay       time.Time
+}
 
 // LASStrategy scores queues by equalizing attained service (weighted tokens
 // consumed) across programs. Programs with lower attained service receive higher
@@ -243,6 +336,16 @@ type LASStrategy struct {
 	weightHeadWait  float64
 	decayFactor     float64
 	halfLifeSeconds float64 // if > 0, use time-based decay instead of per-cycle decayFactor
+
+	state sync.Map // key: program ID (string), value: *lasState
+}
+
+func (s *LASStrategy) getState(id string) *lasState {
+	if v, ok := s.state.Load(id); ok {
+		return v.(*lasState)
+	}
+	actual, _ := s.state.LoadOrStore(id, &lasState{})
+	return actual.(*lasState)
 }
 
 // Name returns "service".
@@ -272,21 +375,32 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) (flowcontrol.Flow
 			continue
 		}
 
+		st := s.getState(id)
+
 		if qi.Len == 0 {
 			// Inactive (no queued and no in-flight) queues: decay attained
 			// service so stale usage shrinks. Skip decay while a request is
 			// in flight to preserve the upcoming OnCompleted() AddService.
 			if qi.Metrics.InFlight() == 0 {
+				st.mu.Lock()
 				if s.halfLifeSeconds > 0 {
-					qi.Metrics.DecayServiceTimed(s.halfLifeSeconds, now)
+					if st.lastDecay.IsZero() {
+						st.lastDecay = now
+					} else if elapsed := now.Sub(st.lastDecay).Seconds(); elapsed > 0 {
+						st.attainedService *= math.Pow(0.5, elapsed/s.halfLifeSeconds)
+						st.lastDecay = now
+					}
 				} else {
-					qi.Metrics.DecayService(s.decayFactor)
+					st.attainedService *= s.decayFactor
 				}
+				st.mu.Unlock()
 			}
 			continue
 		}
 
-		service := qi.Metrics.AttainedService()
+		st.mu.Lock()
+		service := st.attainedService
+		st.mu.Unlock()
 		var headWaitMs float64
 		if head := qi.Queue.PeekHead(); head != nil {
 			headWaitMs = float64(time.Since(head.EnqueueTime()).Milliseconds())
@@ -342,15 +456,41 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) (flowcontrol.Flow
 func (s *LASStrategy) OnPreRequest(_ *ProgramMetrics, _ *fwksched.InferenceRequest) {}
 
 // OnCompleted accumulates the weighted token cost into the program's attained service.
-func (s *LASStrategy) OnCompleted(metrics *ProgramMetrics, _ *fwksched.InferenceRequest, response *fwkrc.Response) {
-	if metrics == nil || response == nil {
+func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrc.Response) {
+	if request == nil || response == nil {
 		return
 	}
 	promptTokens := int64(response.Usage.PromptTokens)
 	completionTokens := int64(response.Usage.CompletionTokens)
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
-	metrics.AddService(cost)
+	id := programIDFromRequest(request)
+	st := s.getState(id)
+	st.mu.Lock()
+	st.attainedService += cost
+	service := st.attainedService
+	st.mu.Unlock()
+	attainedServiceTokensGauge.WithLabelValues(id).Set(service)
 }
+
+// EvictProgram drops the per-program attained-service state.
+func (s *LASStrategy) EvictProgram(id string) {
+	s.state.Delete(id)
+}
+
+// Collectors returns the Prometheus collectors owned by LAS.
+func (s *LASStrategy) Collectors() []prometheus.Collector {
+	return []prometheus.Collector{attainedServiceTokensGauge}
+}
+
+// attainedServiceTokensGauge tracks decayed attained service per program; only LASStrategy writes to it.
+var attainedServiceTokensGauge = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Subsystem: programAwareSubsystem,
+		Name:      "attained_service_tokens",
+		Help:      metricsutil.HelpMsgWithStability("Time-decayed attained service (weighted tokens consumed) per program", compbasemetrics.ALPHA),
+	},
+	[]string{"program_id"},
+)
 
 // =============================================================================
 // RR (Round-Robin) Strategy
@@ -418,3 +558,11 @@ func (s *RRStrategy) OnPreRequest(_ *ProgramMetrics, _ *fwksched.InferenceReques
 // OnCompleted is a no-op for round-robin (no token tracking needed).
 func (s *RRStrategy) OnCompleted(_ *ProgramMetrics, _ *fwksched.InferenceRequest, _ *fwkrc.Response) {
 }
+
+// EvictProgram is a no-op. The per-band lastSelected cursor is keyed by band
+// priority, not program ID, and self-corrects on the next Pick() if the
+// cursor's program disappears.
+func (s *RRStrategy) EvictProgram(_ string) {}
+
+// Collectors returns no collectors — RR has no strategy-specific metrics.
+func (s *RRStrategy) Collectors() []prometheus.Collector { return nil }

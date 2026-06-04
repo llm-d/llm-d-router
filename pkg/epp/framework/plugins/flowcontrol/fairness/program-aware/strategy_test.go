@@ -2,6 +2,8 @@ package programaware
 
 import (
 	"context"
+	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +12,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	requesthandling "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -126,6 +130,23 @@ func makeEmptyQueueInfo(id string, metrics *ProgramMetrics) QueueInfo {
 	}
 }
 
+// drrDeficit returns the strategy's per-program deficit. Test helper that
+// reads through the same path Pick/OnCompleted use.
+func drrDeficit(s *DRRStrategy, id string) int64 {
+	st := s.getState(id)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.deficit
+}
+
+// drrSeedDeficit primes the strategy's per-program deficit for a test.
+func drrSeedDeficit(s *DRRStrategy, id string, n int64) {
+	st := s.getState(id)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.deficit = n
+}
+
 func TestDRRStrategy_Pick_AllocatesQuantum(t *testing.T) {
 	s := testDRR()
 	m := &ProgramMetrics{}
@@ -134,7 +155,7 @@ func TestDRRStrategy_Pick_AllocatesQuantum(t *testing.T) {
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 3, m, now)}
 	s.Pick(0, queues)
 
-	assert.Equal(t, DefaultConfig.QuantumTokens, m.Deficit(), "non-empty queue should receive quantum")
+	assert.Equal(t, DefaultConfig.QuantumTokens, drrDeficit(s, "prog"), "non-empty queue should receive quantum")
 }
 
 func TestDRRStrategy_Pick_QuantumAccumulates(t *testing.T) {
@@ -146,7 +167,7 @@ func TestDRRStrategy_Pick_QuantumAccumulates(t *testing.T) {
 		queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 1, m, now)}
 		s.Pick(0, queues)
 	}
-	assert.Equal(t, DefaultConfig.QuantumTokens*5, m.Deficit(), "deficit should accumulate across rounds")
+	assert.Equal(t, DefaultConfig.QuantumTokens*5, drrDeficit(s, "prog"), "deficit should accumulate across rounds")
 }
 
 func TestDRRStrategy_Pick_IdleNoQuantum(t *testing.T) {
@@ -159,32 +180,32 @@ func TestDRRStrategy_Pick_IdleNoQuantum(t *testing.T) {
 		queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 2, m, now)}
 		s.Pick(0, queues)
 	}
-	assert.Equal(t, DefaultConfig.QuantumTokens*3, m.Deficit())
+	assert.Equal(t, DefaultConfig.QuantumTokens*3, drrDeficit(s, "prog"))
 
 	// Queue drains — deficit should NOT increase (no quantum for empty queues).
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
-	assert.Equal(t, DefaultConfig.QuantumTokens*3, m.Deficit(), "idle queues do not receive quantum")
+	assert.Equal(t, DefaultConfig.QuantumTokens*3, drrDeficit(s, "prog"), "idle queues do not receive quantum")
 }
 
 func TestDRRStrategy_OnCompleted_DeductsTokens(t *testing.T) {
 	s := testDRR()
-	m := &ProgramMetrics{}
-	m.AddDeficit(DefaultConfig.QuantumTokens) // one round of quantum
+	drrSeedDeficit(s, metadata.DefaultFairnessID, DefaultConfig.QuantumTokens) // one round of quantum
 
+	req := &fwksched.InferenceRequest{}
 	resp := &fwkrc.Response{Usage: requesthandling.Usage{PromptTokens: 700, CompletionTokens: 300}}
-	s.OnCompleted(m, nil, resp) // weighted cost: 700*1 + 300*2 = 1300
-	assert.Equal(t, int64(-300), m.Deficit(), "weighted 1300-token cost against 1000 quantum")
+	s.OnCompleted(nil, req, resp) // weighted cost: 700*1 + 300*2 = 1300
+	assert.Equal(t, int64(-300), drrDeficit(s, metadata.DefaultFairnessID), "weighted 1300-token cost against 1000 quantum")
 }
 
 func TestDRRStrategy_OnCompleted_GoesNegativeOnOveruse(t *testing.T) {
 	s := testDRR()
-	m := &ProgramMetrics{}
-	m.AddDeficit(DefaultConfig.QuantumTokens) // 1000 tokens
+	drrSeedDeficit(s, metadata.DefaultFairnessID, DefaultConfig.QuantumTokens) // 1000 tokens
 
+	req := &fwksched.InferenceRequest{}
 	resp := &fwkrc.Response{Usage: requesthandling.Usage{PromptTokens: 1500, CompletionTokens: 500}}
-	s.OnCompleted(m, nil, resp) // weighted cost: 1500*1 + 500*2 = 2500
-	assert.Equal(t, int64(-1500), m.Deficit(), "deficit should be negative after overuse")
+	s.OnCompleted(nil, req, resp) // weighted cost: 1500*1 + 500*2 = 2500
+	assert.Equal(t, int64(-1500), drrDeficit(s, metadata.DefaultFairnessID), "deficit should be negative after overuse")
 }
 
 func TestDRRStrategy_Pick_PreferHighDeficit(t *testing.T) {
@@ -192,10 +213,10 @@ func TestDRRStrategy_Pick_PreferHighDeficit(t *testing.T) {
 	now := time.Now()
 
 	mHigh := &ProgramMetrics{}
-	mHigh.AddDeficit(20000)
+	drrSeedDeficit(s, "high", 20000)
 
 	mLow := &ProgramMetrics{}
-	mLow.DeductTokens(20000)
+	drrSeedDeficit(s, "low", -20000)
 
 	queues := map[string]QueueInfo{
 		"high": makeQueueInfo("high", 1, mHigh, now),
@@ -216,10 +237,10 @@ func TestDRRStrategy_Pick_QuantumPerPick(t *testing.T) {
 
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 3, m, now)}
 	s.Pick(0, queues)
-	assert.Equal(t, DefaultConfig.QuantumTokens, m.Deficit(), "first Pick allocates quantum")
+	assert.Equal(t, DefaultConfig.QuantumTokens, drrDeficit(s, "prog"), "first Pick allocates quantum")
 
 	s.Pick(0, queues)
-	assert.Equal(t, DefaultConfig.QuantumTokens*2, m.Deficit(),
+	assert.Equal(t, DefaultConfig.QuantumTokens*2, drrDeficit(s, "prog"),
 		"each Pick allocates quantum (one Pick == one dispatch)")
 }
 
@@ -236,83 +257,53 @@ func testDRRWithDecay(halfLife float64) *DRRStrategy {
 	}
 }
 
-func TestDRRStrategy_DecayDeficit_FirstCallNoDecay(t *testing.T) {
-	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
-
-	m.DecayDeficitTimed(60.0, time.Now())
-	assert.Equal(t, int64(10000), m.Deficit(),
-		"first decay call should not reduce deficit (only sets timestamp)")
-}
-
-func TestDRRStrategy_DecayDeficit_HalvesAtHalfLife(t *testing.T) {
-	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
-
-	now := time.Now()
-	m.DecayDeficitTimed(60.0, now)                     // initialize
-	m.DecayDeficitTimed(60.0, now.Add(60*time.Second)) // one half-life
-
-	assert.Equal(t, int64(5000), m.Deficit(),
-		"deficit should halve after exactly one half-life")
-}
-
-func TestDRRStrategy_DecayDeficit_NegativeDeficitDecays(t *testing.T) {
-	m := &ProgramMetrics{}
-	m.DeductTokens(10000) // deficit = -10000
-
-	now := time.Now()
-	m.DecayDeficitTimed(60.0, now)
-	m.DecayDeficitTimed(60.0, now.Add(60*time.Second))
-
-	assert.Equal(t, int64(-5000), m.Deficit(),
-		"negative deficit should also decay toward zero")
-}
-
-func TestDRRStrategy_DecayDeficit_ConsistentWindow(t *testing.T) {
-	// Single call over 60s vs many calls over 60s should yield same result.
-	m1 := &ProgramMetrics{}
-	m1.AddDeficit(10000)
-	now := time.Now()
-	m1.DecayDeficitTimed(60.0, now)
-	m1.DecayDeficitTimed(60.0, now.Add(60*time.Second))
-	single := m1.Deficit()
-
-	m2 := &ProgramMetrics{}
-	m2.AddDeficit(10000)
-	m2.DecayDeficitTimed(60.0, now)
-	for i := 1; i <= 100; i++ {
-		m2.DecayDeficitTimed(60.0, now.Add(time.Duration(i)*600*time.Millisecond))
-	}
-	many := m2.Deficit()
-
-	// Wider tolerance than LAS (which uses float64) because int64 truncation
-	// on each intermediate step compounds rounding error.
-	assert.InDelta(t, float64(single), float64(many), 50.0,
-		"time-based decay should be consistent regardless of call frequency")
+// drrSeedState plants a deficit and lastDecay on the strategy's per-program
+// state directly. Useful for tests that need to control the decay starting
+// point (Pick uses real wall-clock time internally, so we can't inject now).
+func drrSeedState(s *DRRStrategy, id string, deficit int64, lastDecay time.Time) {
+	st := s.getState(id)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.deficit = deficit
+	st.lastDecay = lastDecay
 }
 
 func TestDRRStrategy_Pick_IdleDecaysDeficit(t *testing.T) {
 	s := testDRRWithDecay(60.0)
 	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
-	now := time.Now()
 
-	// Initialize the decay timer.
-	m.DecayDeficitTimed(60.0, now)
+	// Seed lastDecay to one half-life in the past so the next Pick decays
+	// the seeded 10000 deficit by 0.5.
+	drrSeedState(s, "prog", 10000, time.Now().Add(-60*time.Second))
 
-	// Simulate 60s later (one half-life) — deficit should halve.
-	m.DecayDeficitTimed(60.0, now.Add(60*time.Second))
-	assert.Equal(t, int64(5000), m.Deficit(),
+	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
+	s.Pick(0, queues)
+	assert.InDelta(t, 5000, drrDeficit(s, "prog"), 50,
 		"idle queue deficit should halve after one half-life")
+}
 
-	// Verify Pick on non-empty queue adds quantum without decay.
-	m2 := &ProgramMetrics{}
-	m2.AddDeficit(10000)
-	queues2 := map[string]QueueInfo{"prog": makeQueueInfo("prog", 1, m2, now)}
-	s.Pick(0, queues2)
-	assert.Equal(t, 10000+DefaultConfig.QuantumTokens, m2.Deficit(),
-		"non-empty queue should get quantum, no decay")
+func TestDRRStrategy_Pick_NegativeDeficitDecays(t *testing.T) {
+	s := testDRRWithDecay(60.0)
+	m := &ProgramMetrics{}
+	drrSeedState(s, "prog", -10000, time.Now().Add(-60*time.Second))
+
+	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
+	s.Pick(0, queues)
+	assert.InDelta(t, -5000, drrDeficit(s, "prog"), 50,
+		"negative deficit should also decay toward zero")
+}
+
+func TestDRRStrategy_Pick_FirstDecayCallOnlyInitializes(t *testing.T) {
+	s := testDRRWithDecay(60.0)
+	m := &ProgramMetrics{}
+	// Fresh strategy: no prior lastDecay timestamp. Pick on an empty queue
+	// must only seed the timer, not decay.
+	drrSeedState(s, "prog", 10000, time.Time{})
+
+	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
+	s.Pick(0, queues)
+	assert.Equal(t, int64(10000), drrDeficit(s, "prog"),
+		"first decay call should not reduce deficit (only sets timestamp)")
 }
 
 func TestDRRStrategy_Pick_NoDecayOnNonEmpty(t *testing.T) {
@@ -325,19 +316,19 @@ func TestDRRStrategy_Pick_NoDecayOnNonEmpty(t *testing.T) {
 		s.Pick(0, queues)
 	}
 	// All 100 quanta should have accumulated — no decay on non-empty queues.
-	assert.Equal(t, DefaultConfig.QuantumTokens*100, m.Deficit(),
+	assert.Equal(t, DefaultConfig.QuantumTokens*100, drrDeficit(s, "prog"),
 		"non-empty queues should not be decayed")
 }
 
 func TestDRRStrategy_Pick_NoDecayWhenDisabled(t *testing.T) {
 	s := testDRR() // deficitHalfLifeSeconds = 0 (no decay)
 	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
+	drrSeedDeficit(s, "prog", 10000)
 
 	// Empty queue with decay disabled — deficit should not change.
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
-	assert.Equal(t, int64(10000), m.Deficit(),
+	assert.Equal(t, int64(10000), drrDeficit(s, "prog"),
 		"with deficitHalfLifeSeconds=0, no decay should occur")
 }
 
@@ -377,37 +368,37 @@ func testDRRWithFactor(factor float64) *DRRStrategy {
 func TestDRRStrategy_DecayDeficit_FactorBased_InactiveQueue(t *testing.T) {
 	s := testDRRWithFactor(0.5)
 	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
+	drrSeedDeficit(s, "prog", 10000)
 
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
-	assert.Equal(t, int64(5000), m.Deficit(),
+	assert.Equal(t, int64(5000), drrDeficit(s, "prog"),
 		"factor-based decay should halve deficit on inactive queue with factor=0.5")
 }
 
 func TestDRRStrategy_DecayDeficit_FactorBased_SkipsInFlight(t *testing.T) {
 	s := testDRRWithFactor(0.5)
 	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
+	drrSeedDeficit(s, "prog", 10000)
 	m.IncrementInFlight() // pretend a request is mid-flight
 
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	for range 5 {
 		s.Pick(0, queues)
 	}
-	assert.Equal(t, int64(10000), m.Deficit(),
+	assert.Equal(t, int64(10000), drrDeficit(s, "prog"),
 		"deficit should not decay while a request is in flight")
 }
 
 func TestDRRStrategy_DecayDeficit_FactorBased_SkipsActive(t *testing.T) {
 	s := testDRRWithFactor(0.5)
 	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
+	drrSeedDeficit(s, "prog", 10000)
 	now := time.Now()
 
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 1, m, now)}
 	s.Pick(0, queues)
-	assert.Equal(t, 10000+DefaultConfig.QuantumTokens, m.Deficit(),
+	assert.Equal(t, 10000+DefaultConfig.QuantumTokens, drrDeficit(s, "prog"),
 		"non-empty queue should receive quantum, not factor-decay")
 }
 
@@ -420,13 +411,13 @@ func TestDRRStrategy_TimeBasedWinsWhenBothConfigured(t *testing.T) {
 		decayFactor:            0.5, // should be ignored
 	}
 	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
+	drrSeedDeficit(s, "prog", 10000)
 
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
-	// First time-based call only initializes lastDeficitDecay; deficit unchanged.
+	// First time-based call only initializes lastDecay; deficit unchanged.
 	// If factor-based had run, deficit would be 5000.
-	assert.Equal(t, int64(10000), m.Deficit(),
+	assert.Equal(t, int64(10000), drrDeficit(s, "prog"),
 		"time-based decay should take precedence; first call only initializes timestamp")
 }
 
@@ -450,17 +441,16 @@ func TestProgramMetrics_InFlight_IncrementDecrement(t *testing.T) {
 // =============================================================================
 
 func TestDRR_Pick_TokenHeavyProgramDeprioritized(t *testing.T) {
-	p := &ProgramAwarePlugin{strategy: testDRR()}
+	drr := testDRR()
+	p := &ProgramAwarePlugin{strategy: drr}
 
 	// "heavy" has consumed many tokens relative to its quantum allocation.
-	mHeavy := p.getOrCreateMetrics("heavy")
-	mHeavy.AddDeficit(DefaultConfig.QuantumTokens * 2)
-	mHeavy.DeductTokens(DefaultConfig.QuantumTokens * 10)
+	_ = p.getOrCreateMetrics("heavy")
+	drrSeedDeficit(drr, "heavy", DefaultConfig.QuantumTokens*2-DefaultConfig.QuantumTokens*10)
 
 	// "light" has only consumed its fair share.
-	mLight := p.getOrCreateMetrics("light")
-	mLight.AddDeficit(DefaultConfig.QuantumTokens * 2)
-	mLight.DeductTokens(DefaultConfig.QuantumTokens * 1)
+	_ = p.getOrCreateMetrics("light")
+	drrSeedDeficit(drr, "light", DefaultConfig.QuantumTokens*2-DefaultConfig.QuantumTokens*1)
 
 	now := time.Now()
 	queueHeavy := &fwkfcmocks.MockFlowQueueAccessor{
@@ -511,52 +501,68 @@ func TestLASStrategy_Name(t *testing.T) {
 	assert.Equal(t, "las", s.Name())
 }
 
+// lasService returns the strategy's per-program attained service.
+func lasService(s *LASStrategy, id string) float64 {
+	st := s.getState(id)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.attainedService
+}
+
+// lasSeedService primes the strategy's per-program attained service.
+func lasSeedService(s *LASStrategy, id string, v float64) {
+	st := s.getState(id)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.attainedService = v
+}
+
 func TestLASStrategy_Pick_DecaysInactiveService(t *testing.T) {
 	s := testService()
 	m := &ProgramMetrics{}
-	m.AddService(1000.0)
+	lasSeedService(s, "prog", 1000.0)
 
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
 
-	assert.InDelta(t, 1000.0*DefaultConfig.ServiceDecayFactor, m.AttainedService(), 0.01,
+	assert.InDelta(t, 1000.0*DefaultConfig.ServiceDecayFactor, lasService(s, "prog"), 0.01,
 		"Pick should decay attained service for inactive queue")
 }
 
 func TestLASStrategy_Pick_NoDecayOnActive(t *testing.T) {
 	s := testService()
 	m := &ProgramMetrics{}
-	m.AddService(1000.0)
+	lasSeedService(s, "prog", 1000.0)
 	now := time.Now()
 
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 5, m, now)}
 	s.Pick(0, queues)
 
-	assert.InDelta(t, 1000.0, m.AttainedService(), 0.01,
+	assert.InDelta(t, 1000.0, lasService(s, "prog"), 0.01,
 		"active queue's attained service must not be decayed — heavy users stay deprioritized")
 }
 
 func TestLASStrategy_Pick_NoDecayWhenInFlight(t *testing.T) {
 	s := testService()
 	m := &ProgramMetrics{}
-	m.AddService(1000.0)
+	lasSeedService(s, "prog", 1000.0)
 	m.IncrementInFlight() // request mid-flight
 
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
 
-	assert.InDelta(t, 1000.0, m.AttainedService(), 0.01,
+	assert.InDelta(t, 1000.0, lasService(s, "prog"), 0.01,
 		"empty queue with in-flight request must not decay — preserves upcoming AddService")
 }
 
 func TestLASStrategy_OnCompleted_AddsService(t *testing.T) {
 	s := testService()
-	m := &ProgramMetrics{}
 
 	// 100 input + 50 output → weighted: 100*1 + 50*2 = 200
+	req := &fwksched.InferenceRequest{}
 	resp := &fwkrc.Response{Usage: requesthandling.Usage{PromptTokens: 100, CompletionTokens: 50}}
-	s.OnCompleted(m, nil, resp)
-	assert.InDelta(t, 200.0, m.AttainedService(), 0.01,
+	s.OnCompleted(nil, req, resp)
+	assert.InDelta(t, 200.0, lasService(s, metadata.DefaultFairnessID), 0.01,
 		"OnCompleted should add weighted token cost to attained service")
 }
 
@@ -565,10 +571,10 @@ func TestLASStrategy_Pick_PreferLowService(t *testing.T) {
 	now := time.Now()
 
 	mLow := &ProgramMetrics{}
-	mLow.AddService(100.0)
+	lasSeedService(s, "low", 100.0)
 
 	mHigh := &ProgramMetrics{}
-	mHigh.AddService(10000.0)
+	lasSeedService(s, "high", 10000.0)
 
 	queues := map[string]QueueInfo{
 		"low":  makeQueueInfo("low", 1, mLow, now),
@@ -603,7 +609,7 @@ func TestLASStrategy_Pick_ColdStartUsesHeadWait(t *testing.T) {
 func TestLASStrategy_DecayForgetsOldService(t *testing.T) {
 	s := testService()
 	m := &ProgramMetrics{}
-	m.AddService(1000.0)
+	lasSeedService(s, "prog", 1000.0)
 
 	// After many decay cycles on an inactive queue, service should approach 0.
 	for range 1000 {
@@ -611,7 +617,7 @@ func TestLASStrategy_DecayForgetsOldService(t *testing.T) {
 		s.Pick(0, queues)
 	}
 	// 1000 * 0.995^1000 ≈ 6.7 — verify significant decay occurred.
-	assert.Less(t, m.AttainedService(), 10.0,
+	assert.Less(t, lasService(s, "prog"), 10.0,
 		"after 1000 decay cycles, attained service should be nearly forgotten")
 }
 
@@ -636,59 +642,35 @@ func testServiceTimed(halfLife float64) *LASStrategy {
 	}
 }
 
-func TestLASStrategy_TimedDecay_FirstCallNoDecay(t *testing.T) {
-	m := &ProgramMetrics{}
-	m.AddService(1000.0)
-
-	// First call should set lastDecayTime but not decay.
-	m.DecayServiceTimed(30.0, time.Now())
-	assert.InDelta(t, 1000.0, m.AttainedService(), 0.01,
-		"first timed decay call should not reduce service")
+// lasSeedState plants service and lastDecay on the strategy's per-program state.
+func lasSeedState(s *LASStrategy, id string, service float64, lastDecay time.Time) {
+	st := s.getState(id)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.attainedService = service
+	st.lastDecay = lastDecay
 }
 
 func TestLASStrategy_TimedDecay_HalvesAtHalfLife(t *testing.T) {
+	s := testServiceTimed(30.0)
 	m := &ProgramMetrics{}
-	m.AddService(1000.0)
+	lasSeedState(s, "prog", 1000.0, time.Now().Add(-30*time.Second))
 
-	now := time.Now()
-	m.DecayServiceTimed(30.0, now)                     // initialize lastDecayTime
-	m.DecayServiceTimed(30.0, now.Add(30*time.Second)) // exactly one half-life later
-
-	assert.InDelta(t, 500.0, m.AttainedService(), 1.0,
+	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
+	s.Pick(0, queues)
+	assert.InDelta(t, 500.0, lasService(s, "prog"), 1.0,
 		"service should halve after exactly one half-life")
-}
-
-func TestLASStrategy_TimedDecay_ConsistentWindow(t *testing.T) {
-	// Whether we call DecayServiceTimed once after 30s or 100 times over 30s,
-	// the result should be the same.
-	m1 := &ProgramMetrics{}
-	m1.AddService(1000.0)
-	now := time.Now()
-	m1.DecayServiceTimed(30.0, now)
-	m1.DecayServiceTimed(30.0, now.Add(30*time.Second))
-	singleCall := m1.AttainedService()
-
-	m2 := &ProgramMetrics{}
-	m2.AddService(1000.0)
-	m2.DecayServiceTimed(30.0, now)
-	for i := 1; i <= 100; i++ {
-		m2.DecayServiceTimed(30.0, now.Add(time.Duration(i)*300*time.Millisecond))
-	}
-	manyCalls := m2.AttainedService()
-
-	assert.InDelta(t, singleCall, manyCalls, 1.0,
-		"time-based decay should produce same result regardless of call frequency")
 }
 
 func TestLASStrategy_Pick_UsesTimedDecay(t *testing.T) {
 	s := testServiceTimed(30.0)
 	m := &ProgramMetrics{}
-	m.AddService(1000.0)
+	lasSeedService(s, "prog", 1000.0)
 
 	// First Pick on an inactive queue initializes the decay timer; service unchanged.
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
-	assert.InDelta(t, 1000.0, m.AttainedService(), 0.01)
+	assert.InDelta(t, 1000.0, lasService(s, "prog"), 0.01)
 }
 
 func TestFactory_ServiceHalfLifeSeconds(t *testing.T) {
@@ -871,7 +853,8 @@ func TestRR_Pick_CyclesThroughPrograms(t *testing.T) {
 }
 
 func TestDRR_Pick_QuantumAllocatedDuringPick(t *testing.T) {
-	p := &ProgramAwarePlugin{strategy: testDRR()}
+	drr := testDRR()
+	p := &ProgramAwarePlugin{strategy: drr}
 
 	// Two fresh programs with no prior state.
 	_ = p.getOrCreateMetrics("alpha")
@@ -900,10 +883,122 @@ func TestDRR_Pick_QuantumAllocatedDuringPick(t *testing.T) {
 	require.NoError(t, err)
 
 	// Both queues should have received a quantum during Pick().
-	alphaMetrics, _ := p.programMetrics.Load("alpha")
-	betaMetrics, _ := p.programMetrics.Load("beta")
+	// Deficit after Pick() = quantumTokens (added by strategy.Pick(), not yet deducted).
+	assert.Equal(t, DefaultConfig.QuantumTokens, drrDeficit(drr, "alpha"))
+	assert.Equal(t, DefaultConfig.QuantumTokens, drrDeficit(drr, "beta"))
+}
 
-	// Deficit after Pick() = quantumTokens (added by strategy.Pick(), not yet deducted)
-	assert.Equal(t, DefaultConfig.QuantumTokens, alphaMetrics.(*ProgramMetrics).Deficit())
-	assert.Equal(t, DefaultConfig.QuantumTokens, betaMetrics.(*ProgramMetrics).Deficit())
+// =============================================================================
+// drrState concurrency tests
+//
+// These guard the invariant the previous CAS-loop deficit decay enforced:
+// concurrent additions must not be lost while a decay pass runs. The
+// per-program mutex inside drrState is what now provides this guarantee.
+// =============================================================================
+
+// TestDRRState_NoLostUpdates verifies that concurrent additions during a
+// factor-based decay pass are not silently overwritten. With factor=1.0 the
+// decay is a no-op, so any lost addition would show up as a final value
+// below the expected sum.
+func TestDRRState_NoLostUpdates(t *testing.T) {
+	s := testDRR()
+	id := "prog"
+
+	const adders = 32
+	const addsPerGoroutine = 1000
+	const decayCalls = 1000
+	const addAmount int64 = 1
+
+	var wg sync.WaitGroup
+	wg.Add(adders + 1)
+
+	// Adders: each performs addsPerGoroutine st.deficit += 1 calls.
+	for range adders {
+		go func() {
+			defer wg.Done()
+			st := s.getState(id)
+			for range addsPerGoroutine {
+				st.mu.Lock()
+				st.deficit += addAmount
+				st.mu.Unlock()
+			}
+		}()
+	}
+
+	// Decayer: hammers a factor-1.0 decay (mathematical no-op) concurrently
+	// with the adders. With a non-atomic read/write this would race and drop
+	// adds; with the inner mutex it must preserve every add.
+	go func() {
+		defer wg.Done()
+		st := s.getState(id)
+		for range decayCalls {
+			st.mu.Lock()
+			st.deficit = int64(float64(st.deficit) * 1.0)
+			st.mu.Unlock()
+		}
+	}()
+
+	wg.Wait()
+
+	expected := int64(adders) * addsPerGoroutine * addAmount
+	assert.Equal(t, expected, drrDeficit(s, id), "decay pass must not lose concurrent additions")
+}
+
+// TestDRRState_TimedDecay_NoLostUpdates exercises the time-based decay path
+// under concurrency. A single decay call with a very long half-life is
+// near-no-op, so the assertion stays tight.
+func TestDRRState_TimedDecay_NoLostUpdates(t *testing.T) {
+	s := testDRR()
+	id := "prog"
+	st := s.getState(id)
+
+	// Prime lastDecay so the goroutine's call performs the decay branch
+	// (otherwise the first call just records lastDecay and returns).
+	st.mu.Lock()
+	st.lastDecay = time.Now().Add(-time.Hour)
+	st.mu.Unlock()
+
+	const adders = 32
+	const addsPerGoroutine = 1000
+	const addAmount int64 = 1
+	// Half-life of 1e9 seconds → factor over a few ms is float-indistinguishable from 1.0.
+	const longHalfLife = 1e9
+
+	var wg sync.WaitGroup
+	wg.Add(adders + 1)
+
+	for range adders {
+		go func() {
+			defer wg.Done()
+			for range addsPerGoroutine {
+				st.mu.Lock()
+				st.deficit += addAmount
+				st.mu.Unlock()
+			}
+		}()
+	}
+
+	go func() {
+		defer wg.Done()
+		// Single decay call concurrent with the adders.
+		now := time.Now()
+		st.mu.Lock()
+		elapsed := now.Sub(st.lastDecay).Seconds()
+		if elapsed > 0 {
+			st.deficit = int64(float64(st.deficit) * math.Pow(0.5, elapsed/longHalfLife))
+			st.lastDecay = now
+		}
+		st.mu.Unlock()
+	}()
+
+	wg.Wait()
+
+	expected := int64(adders) * addsPerGoroutine * addAmount
+	got := drrDeficit(s, id)
+	// With a long half-life, a single decay call's truncation is at most 1
+	// token. Anything beyond that signals a lost addition.
+	assert.GreaterOrEqual(t, got, expected-1,
+		"timed decay lost concurrent additions (expected ~%d, got %d)", expected, got)
+	assert.LessOrEqual(t, got, expected,
+		"deficit overshot expected sum (expected %d, got %d)", expected, got)
 }

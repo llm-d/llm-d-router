@@ -196,6 +196,9 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 			for _, c := range GetCollectors() {
 				reg.MustRegister(c)
 			}
+			for _, c := range strategy.Collectors() {
+				reg.MustRegister(c)
+			}
 		}
 		if cfg.EvictionTTLSeconds > 0 {
 			interval := time.Duration(cfg.EvictionSweepSeconds * float64(time.Second))
@@ -286,12 +289,6 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	for id, score := range scores {
 		queueScore.WithLabelValues(id).Set(score)
 	}
-	// Emit deficit for all queues, including empty ones, so decay is observable.
-	for id, qi := range infos {
-		if qi.Metrics != nil {
-			deficitTokens.WithLabelValues(id).Set(float64(qi.Metrics.Deficit()))
-		}
-	}
 
 	// Stash the selected item's enqueue time on the InferenceRequest's own
 	// attribute store so PreRequest can compute the flow-control queue wait
@@ -367,6 +364,9 @@ func (p *ProgramAwarePlugin) evictIdle(ttl time.Duration) {
 			return true
 		}
 		p.programMetrics.Delete(key)
+		if id, ok := key.(string); ok {
+			p.getStrategy().EvictProgram(id)
+		}
 		return true
 	})
 }

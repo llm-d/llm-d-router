@@ -1,7 +1,6 @@
 package programaware
 
 import (
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,11 +25,6 @@ type ProgramMetrics struct {
 
 	averageTokens float64 // EWMA of per-request token usage (input+output)
 
-	// Attained service: time-decayed accumulator of weighted tokens consumed.
-	// Increased on each completion, decayed on each Pick() cycle.
-	attainedService float64
-	lastDecayTime   time.Time // last wall-clock time DecayServiceTimed was called
-
 	// Service rate: EWMA of weighted tokens per second, updated on each completion.
 	// Used for Jain's fairness index (equalizing rates across programs = fair).
 	serviceRate        float64
@@ -45,12 +39,6 @@ type ProgramMetrics struct {
 	// has not yet completed. Used to gate deficit decay so that a queue with
 	// Len==0 but an outstanding dispatch is not treated as inactive.
 	inFlight atomic.Int64
-
-	// deficitTokens is the DRR deficit counter: positive means the program is owed
-	// service; negative means it has been overserved relative to its quantum.
-	// Only used by DRRStrategy.
-	deficitTokens    atomic.Int64
-	lastDeficitDecay time.Time // last wall-clock time DecayDeficitTimed was called
 }
 
 // IncrementRequests atomically increments the total request counter.
@@ -143,40 +131,6 @@ func (m *ProgramMetrics) AverageTokens() float64 {
 	return m.averageTokens
 }
 
-// AddService accumulates weighted token cost into the attained service counter.
-func (m *ProgramMetrics) AddService(weightedTokens float64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.attainedService += weightedTokens
-}
-
-// DecayService multiplies the attained service counter by the given factor,
-// causing old service to be gradually forgotten.
-func (m *ProgramMetrics) DecayService(factor float64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.attainedService *= factor
-}
-
-// DecayServiceTimed applies time-based exponential decay using a half-life.
-// The decay factor is computed as 0.5^(elapsed/halfLifeSeconds), so service
-// halves every halfLifeSeconds regardless of how frequently this is called.
-func (m *ProgramMetrics) DecayServiceTimed(halfLifeSeconds float64, now time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.lastDecayTime.IsZero() {
-		m.lastDecayTime = now
-		return
-	}
-	elapsed := now.Sub(m.lastDecayTime).Seconds()
-	if elapsed <= 0 {
-		return
-	}
-	factor := math.Pow(0.5, elapsed/halfLifeSeconds)
-	m.attainedService *= factor
-	m.lastDecayTime = now
-}
-
 // RecordServiceRate updates the EWMA of service rate (weighted tokens/sec)
 // using the elapsed time since the last completion.
 func (m *ProgramMetrics) RecordServiceRate(weightedTokens float64, now time.Time) {
@@ -215,13 +169,6 @@ func (m *ProgramMetrics) LastCompletionTime() time.Time {
 	return m.lastCompletionTime
 }
 
-// AttainedService returns the current time-decayed attained service value.
-func (m *ProgramMetrics) AttainedService() float64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.attainedService
-}
-
 // TotalRequests returns the total number of requests seen for this program.
 func (m *ProgramMetrics) TotalRequests() int64 {
 	return m.totalRequests.Load()
@@ -242,66 +189,3 @@ func (m *ProgramMetrics) TotalOutputTokens() int64 {
 	return m.totalOutputTokens.Load()
 }
 
-// --- DRR deficit counter ---
-
-// AddDeficit increases the deficit counter by n tokens (quantum allocation).
-func (m *ProgramMetrics) AddDeficit(n int64) {
-	m.deficitTokens.Add(n)
-}
-
-// DeductTokens decreases the deficit counter by n tokens (actual cost deduction).
-func (m *ProgramMetrics) DeductTokens(n int64) {
-	m.deficitTokens.Add(-n)
-}
-
-// ResetDeficit sets the deficit counter to zero (called when the queue drains).
-func (m *ProgramMetrics) ResetDeficit() {
-	m.deficitTokens.Store(0)
-}
-
-// Deficit returns the current deficit counter value in tokens.
-func (m *ProgramMetrics) Deficit() int64 {
-	return m.deficitTokens.Load()
-}
-
-// DecayDeficit multiplies the deficit counter by the given factor.
-//
-// Uses a CompareAndSwap retry loop so concurrent AddDeficit/DeductTokens
-// updates between the read and the write are not lost.
-func (m *ProgramMetrics) DecayDeficit(factor float64) {
-	for {
-		current := m.deficitTokens.Load()
-		decayed := int64(float64(current) * factor)
-		if m.deficitTokens.CompareAndSwap(current, decayed) {
-			return
-		}
-	}
-}
-
-// DecayDeficitTimed applies time-based exponential decay to the deficit counter
-// using a half-life. The decay factor is 0.5^(elapsed/halfLifeSeconds), so the
-// deficit halves every halfLifeSeconds regardless of call frequency.
-//
-// The mu lock guards lastDeficitDecay; the deficit value itself is updated via
-// a CompareAndSwap retry loop so concurrent AddDeficit/DeductTokens are not lost.
-func (m *ProgramMetrics) DecayDeficitTimed(halfLifeSeconds float64, now time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.lastDeficitDecay.IsZero() {
-		m.lastDeficitDecay = now
-		return
-	}
-	elapsed := now.Sub(m.lastDeficitDecay).Seconds()
-	if elapsed <= 0 {
-		return
-	}
-	factor := math.Pow(0.5, elapsed/halfLifeSeconds)
-	for {
-		current := m.deficitTokens.Load()
-		decayed := int64(float64(current) * factor)
-		if m.deficitTokens.CompareAndSwap(current, decayed) {
-			break
-		}
-	}
-	m.lastDeficitDecay = now
-}

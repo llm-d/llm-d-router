@@ -64,15 +64,6 @@ var (
 		},
 	)
 
-	attainedServiceTokens = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: programAwareSubsystem,
-			Name:      "attained_service_tokens",
-			Help:      metricsutil.HelpMsgWithStability("Time-decayed attained service (weighted tokens consumed) per program", compbasemetrics.ALPHA),
-		},
-		[]string{"program_id"},
-	)
-
 	ewmaWaitTimeMs = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: programAwareSubsystem,
@@ -99,19 +90,11 @@ var (
 		},
 		[]string{"program_id"},
 	)
-
-	deficitTokens = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: programAwareSubsystem,
-			Name:      "deficit_tokens",
-			Help:      metricsutil.HelpMsgWithStability("DRR deficit counter per program (positive = owed service, negative = overserved); decays exponentially when the queue is empty", compbasemetrics.ALPHA),
-		},
-		[]string{"program_id"},
-	)
 )
 
-// GetCollectors returns all Prometheus collectors for the program-aware plugin.
-// Called from pkg/metrics/metrics.go to register with the runner at startup.
+// GetCollectors returns the shared Prometheus collectors for the program-aware
+// plugin. Strategy-owned collectors are exposed via ScoringStrategy.Collectors
+// and registered separately by the plugin factory.
 func GetCollectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		requestsTotal,
@@ -120,10 +103,8 @@ func GetCollectors() []prometheus.Collector {
 		outputTokensTotal,
 		pickLatencyUs,
 		fairnessIndex,
-		attainedServiceTokens,
 		ewmaWaitTimeMs,
 		serviceRateTokensPerSec,
 		queueScore,
-		deficitTokens,
 	}
 }

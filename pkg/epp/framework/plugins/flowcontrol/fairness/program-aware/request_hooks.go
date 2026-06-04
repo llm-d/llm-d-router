@@ -101,7 +101,6 @@ func (p *ProgramAwarePlugin) ResponseBody(ctx context.Context, request *fwksched
 	outputTokensTotal.WithLabelValues(programID).Add(float64(completionTokens))
 
 	p.getStrategy().OnCompleted(metrics, request, response)
-	attainedServiceTokens.WithLabelValues(programID).Set(metrics.AttainedService())
 
 	// Update service rate for fairness index (weighted tokens/sec EWMA).
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
@@ -110,6 +109,5 @@ func (p *ProgramAwarePlugin) ResponseBody(ctx context.Context, request *fwksched
 
 	log.FromContext(ctx).V(logutil.TRACE).Info("ResponseComplete: recorded tokens",
 		"requestId", request.RequestID, "programId", programID,
-		"promptTokens", promptTokens, "completionTokens", completionTokens,
-		"attainedService", metrics.AttainedService())
+		"promptTokens", promptTokens, "completionTokens", completionTokens)
 }
