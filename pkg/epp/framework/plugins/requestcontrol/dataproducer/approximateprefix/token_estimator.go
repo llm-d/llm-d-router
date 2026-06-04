@@ -106,10 +106,15 @@ func getVideoPlaceholders(multimodalConfig *multiModalTokenEstimatorConfig) int 
 		multimodalConfig = &defaultMultimodalConfig
 	}
 	cfg := multimodalConfig.Video
-	numFrames := cfg.NumFrames
-	if numFrames <= 0 {
-		numFrames = defaultMultimodalConfig.Video.NumFrames
+	duration := cfg.Duration
+	fps := cfg.FPS
+	if duration <= 0 {
+		duration = defaultMultimodalConfig.Video.Duration
 	}
+	if fps <= 0 {
+		fps = defaultMultimodalConfig.Video.FPS
+	}
+	numFrames := int(duration * fps)
 	tpf := cfg.TokensPerFrame
 	if tpf == nil {
 		tpf = defaultMultimodalConfig.Video.TokensPerFrame

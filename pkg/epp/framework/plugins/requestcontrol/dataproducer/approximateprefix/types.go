@@ -159,11 +159,13 @@ type imageTokenEstimatorConfig struct {
 }
 
 // videoTokenEstimatorConfig defines the configuration for video modality.
-// Token count is estimated as NumFrames * TokensPerFrame.
-// NumFrames is model-specific in vLLM; 32 is used as a configurable starting point.
+// Token count is estimated as int(Duration * FPS) * TokensPerFrame.
+// Duration and FPS mirror the metadata vLLM uses to derive num_frames;
+// they serve as EPP-level fallbacks until per-request or fetched metadata is available.
 // TokensPerFrame reuses imageTokenEstimatorConfig since a video frame is treated as an image.
 type videoTokenEstimatorConfig struct {
-	NumFrames      int                        `json:"numFrames"`
+	Duration       float64                    `json:"duration"`
+	FPS            float64                    `json:"fps"`
 	TokensPerFrame *imageTokenEstimatorConfig `json:"tokensPerFrame,omitempty"`
 }
 
@@ -187,7 +189,8 @@ var defaultMultimodalConfig = multiModalTokenEstimatorConfig{
 		},
 	},
 	Video: &videoTokenEstimatorConfig{
-		NumFrames: 32,
+		Duration: 16.0,
+		FPS:      2.0,
 		TokensPerFrame: &imageTokenEstimatorConfig{
 			Mode: ModeDynamic,
 			DefaultResolution: resolution{
