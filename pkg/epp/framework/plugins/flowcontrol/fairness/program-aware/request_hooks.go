@@ -95,7 +95,6 @@ func (p *ProgramAwarePlugin) ResponseBody(ctx context.Context, request *fwksched
 	}
 
 	metrics := p.getOrCreateMetrics(programID)
-	metrics.DecrementInFlight()
 
 	promptTokens := int64(response.Usage.PromptTokens)
 	completionTokens := int64(response.Usage.CompletionTokens)
@@ -111,6 +110,13 @@ func (p *ProgramAwarePlugin) ResponseBody(ctx context.Context, request *fwksched
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	metrics.RecordServiceRate(cost, time.Now())
 	serviceRateTokensPerSec.WithLabelValues(programID).Set(metrics.ServiceRate())
+
+	// Decrement InFlight last so the eviction sweep's InFlight==0 gate becomes
+	// true only after LastCompletionTime has been advanced by RecordServiceRate
+	// above. Otherwise a sweep tick during this method's tail could observe
+	// InFlight==0 with a stale LastCompletionTime and evict the program while
+	// its strategy state and Prom series are still being written.
+	metrics.DecrementInFlight()
 
 	log.FromContext(ctx).V(logutil.TRACE).Info("ResponseComplete: recorded tokens",
 		"requestId", request.RequestID, "programId", programID,

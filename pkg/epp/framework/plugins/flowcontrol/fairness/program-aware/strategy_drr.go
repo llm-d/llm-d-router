@@ -36,9 +36,12 @@ type drrState struct {
 //   - "quantum" = quantumTokens added per Pick() cycle to each non-empty queue
 //   - Actual token cost is deducted in OnCompleted() (ResponseComplete hook)
 //   - Inactive queues (Len==0 and no in-flight requests) do not receive quantum;
-//     their deficit is decayed so stale credit shrinks toward zero. Decay is
-//     time-based when deficitHalfLifeSeconds > 0, otherwise a per-cycle factor
-//     (decayFactor) is applied if it is in (0, 1).
+//     their deficit is decayed so stale credit shrinks over time. Decay is
+//     time-based when deficitHalfLifeSeconds > 0 (predictable wall-clock
+//     half-life, recommended for production), otherwise a per-cycle factor
+//     (decayFactor) is applied if it is in (0, 1) — note that factor decay is
+//     coupled to Pick() cadence, so its effective half-life depends on the
+//     cluster's pick rate.
 //
 // headWaitMs is used as a secondary signal to prevent starvation of
 // new or returning programs that start with deficit=0.
@@ -51,9 +54,6 @@ type DRRStrategy struct {
 	deficitHalfLifeSeconds float64 // > 0 enables time-based decay
 	decayFactor            float64 // in (0, 1) enables per-cycle factor decay; ignored if half-life is set
 
-	// state holds per-program deficit state, populated in Step 4 once Pick
-	// and OnCompleted are cut over. Allocated but unused until then while
-	// ProgramMetrics still holds the deficit.
 	state sync.Map // key: program ID (string), value: *drrState
 }
 

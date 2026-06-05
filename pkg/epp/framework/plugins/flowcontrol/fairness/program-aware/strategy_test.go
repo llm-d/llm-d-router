@@ -612,13 +612,16 @@ func TestLASStrategy_DecayForgetsOldService(t *testing.T) {
 	lasSeedService(s, "prog", 1000.0)
 
 	// After many decay cycles on an inactive queue, service should approach 0.
-	for range 1000 {
+	// With DefaultConfig.ServiceDecayFactor = 0.99997, the factor's per-cycle
+	// half-life is ~23,105 cycles, so meaningful decay requires a large number
+	// of iterations.
+	for range 200000 {
 		queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 		s.Pick(0, queues)
 	}
-	// 1000 * 0.995^1000 ≈ 6.7 — verify significant decay occurred.
+	// 1000 * 0.99997^200000 ≈ 2.48 — verify significant decay occurred.
 	assert.Less(t, lasService(s, "prog"), 10.0,
-		"after 1000 decay cycles, attained service should be nearly forgotten")
+		"after 200000 decay cycles, attained service should be nearly forgotten")
 }
 
 func TestNewStrategy_LAS(t *testing.T) {

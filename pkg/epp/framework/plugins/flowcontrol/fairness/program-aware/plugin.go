@@ -63,6 +63,11 @@ type Config struct {
 	// counter when DeficitHalfLifeSeconds is 0. Each Pick() multiplies the
 	// deficit of inactive queues (Len==0 and no in-flight requests) by this
 	// factor. Must be in [0, 1); 0 disables factor decay.
+	//
+	// Because decay fires per Pick(), the effective half-life depends on the
+	// cluster's pick rate — at low pick rates an idle program may retain most
+	// of its deficit through the eviction TTL. Prefer DeficitHalfLifeSeconds
+	// when predictable wall-clock decay is required.
 	DeficitDecayFactor float64 `json:"deficitDecayFactor,omitempty"`
 
 	// --- Service weights (only used when strategy == "las") ---
@@ -79,6 +84,11 @@ type Config struct {
 	// Applied to each program's attained service every Pick() cycle.
 	// Higher values (closer to 1.0) = longer memory. Must be in (0, 1].
 	// Ignored when ServiceHalfLifeSeconds is set.
+	//
+	// Because decay fires per Pick(), the effective half-life depends on the
+	// cluster's pick rate — at low pick rates an idle program may retain most
+	// of its attained service through the eviction TTL. Prefer
+	// ServiceHalfLifeSeconds when predictable wall-clock decay is required.
 	ServiceDecayFactor float64 `json:"serviceDecayFactor,omitempty"`
 
 	// ServiceHalfLifeSeconds is the half-life of the LAS attained-service
@@ -294,7 +304,13 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	// attribute store so PreRequest can compute the flow-control queue wait
 	// time (enqueue → dispatch). The attribute lifetime is the request
 	// lifetime, so an abandoned request cannot leak into a side map.
-	// Pick precedes PreRequest on a single request goroutine; no concurrent writes.
+	//
+	// Pick runs on the dispatcher's per-shard Processor.Run goroutine;
+	// PreRequest runs on the per-request director goroutine. The write here
+	// happens-before PreRequest's read because FlowItem.finalizeInternal
+	// (pkg/epp/flowcontrol/controller/internal/item.go) atomically stores the
+	// final state and closes the done channel before EnqueueAndWait returns
+	// to the director — that channel-close is the synchronization edge.
 	if bestQueue != nil {
 		if head := bestQueue.PeekHead(); head != nil {
 			if req := head.OriginalRequest().InferenceRequest(); req != nil {
@@ -350,10 +366,20 @@ func (p *ProgramAwarePlugin) runEviction(ctx context.Context, interval, ttl time
 // still in the flow-control queue). Without the second check, a request
 // landing between Produce and Pick could be evicted from under the dispatcher.
 //
-// The Range/Delete pair is still not atomic: a request landing concurrently
-// can recreate a freshly-deleted entry via getOrCreateMetrics, losing one
-// cycle of accumulated state. With a default deficit half-life of 60 s, an
-// hour-idle program's deficit is ~0 already, so the reset is benign.
+// The InFlight check appears twice — before and after the Total/Dispatched
+// check — to close the TOCTOU window where a request lands mid-sweep:
+// PreRequest runs IncrementInFlight before IncrementDispatched
+// (request_hooks.go), so if Total==Dispatched is true at the second gate, a
+// concurrently-running PreRequest must have already done IncrementInFlight,
+// which the third gate catches. This is not a perfectly atomic snapshot but
+// is sufficient given the dispatch path's increment ordering.
+//
+// The Range/Delete pair is still not atomic for arrivals strictly after the
+// final gate: a request landing concurrently can recreate a freshly-deleted
+// entry via getOrCreateMetrics. Strategy state and Prom series for the
+// recreated entry are reseeded on demand by getOrCreateMetrics and
+// strategy.getState, so the reset costs at most one cycle of accumulated
+// per-program state for a long-idle program.
 func (p *ProgramAwarePlugin) evictIdle(ttl time.Duration) {
 	now := time.Now()
 	p.programMetrics.Range(func(key, value any) bool {
@@ -365,6 +391,11 @@ func (p *ProgramAwarePlugin) evictIdle(ttl time.Duration) {
 			return true
 		}
 		if m.TotalRequests() != m.DispatchedCount() {
+			return true
+		}
+		// Re-check InFlight after the Total/Dispatched gate so a PreRequest
+		// that landed mid-sweep cannot be evicted out from under.
+		if m.InFlight() != 0 {
 			return true
 		}
 		last := m.LastCompletionTime()

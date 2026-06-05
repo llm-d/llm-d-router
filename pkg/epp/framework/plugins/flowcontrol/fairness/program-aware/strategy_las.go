@@ -34,8 +34,12 @@ type lasState struct {
 //
 // Decay is applied only to inactive programs (Len==0 and no in-flight
 // requests). Active programs accumulate service without decay so persistent
-// heavy users stay deprioritized; idle programs lose stale service so they
-// can compete on return. On each completion the weighted token cost is added
+// heavy users stay deprioritized; idle programs lose stale service over time
+// so they can compete on return. Decay is time-based when halfLifeSeconds > 0
+// (predictable wall-clock half-life, recommended for production), otherwise a
+// per-Pick factor (decayFactor) is applied — note that factor decay is
+// coupled to Pick() cadence, so its effective half-life depends on the
+// cluster's pick rate. On each completion the weighted token cost is added
 // to the program's attained service.
 //
 // Weights and decay factor are configurable via the plugin config.

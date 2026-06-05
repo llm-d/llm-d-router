@@ -154,5 +154,3 @@ func (m *ProgramMetrics) TotalRequests() int64 {
 func (m *ProgramMetrics) DispatchedCount() int64 {
 	return m.dispatchedCount.Load()
 }
-
-
