@@ -50,6 +50,8 @@ import (
 // When returnNil is true, NewEndpoint returns nil (simulating a duplicate-start race).
 type mockEndpointFactory struct {
 	returnNil bool
+	mu        sync.Mutex
+	updates   []fwkdl.Endpoint
 }
 
 func (f *mockEndpointFactory) NewEndpoint(_ context.Context, meta *fwkdl.EndpointMetadata) fwkdl.Endpoint {
@@ -60,6 +62,18 @@ func (f *mockEndpointFactory) NewEndpoint(_ context.Context, meta *fwkdl.Endpoin
 }
 
 func (f *mockEndpointFactory) ReleaseEndpoint(_ fwkdl.Endpoint) {}
+
+func (f *mockEndpointFactory) UpdateEndpoint(_ context.Context, ep fwkdl.Endpoint) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updates = append(f.updates, ep)
+}
+
+func (f *mockEndpointFactory) updateEvents() []fwkdl.Endpoint {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fwkdl.Endpoint(nil), f.updates...)
+}
 
 func TestPoolGet_NoDeadlockWithConcurrentWrite(t *testing.T) {
 	pool := &datalayer.EndpointPool{
@@ -1362,6 +1376,39 @@ func TestEndpointUpsert_UpdateExisting(t *testing.T) {
 	eps := ds.PodList(AllPodsPredicate)
 	assert.Len(t, eps, 1)
 	assert.Equal(t, addr2, eps[0].GetMetadata().Address)
+}
+
+func TestEndpointUpsert_UpdateExistingNotifiesEndpointFactory(t *testing.T) {
+	const addr1, addr2 = "10.0.0.1", "10.0.0.2"
+	ctx := context.Background()
+	factory := &mockEndpointFactory{}
+	ds := NewDatastore(ctx, factory, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr1})
+	assert.Empty(t, factory.updateEvents())
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr2})
+
+	updates := factory.updateEvents()
+	assert.Len(t, updates, 1)
+	assert.Equal(t, addr2, updates[0].GetMetadata().Address)
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr2})
+	assert.Len(t, factory.updateEvents(), 1)
+}
+
+func TestEndpointUpsert_SemanticallyEqualMetadataDoesNotNotify(t *testing.T) {
+	const addr = "10.0.0.1"
+	ctx := context.Background()
+	factory := &mockEndpointFactory{}
+	ds := NewDatastore(ctx, factory, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Labels: nil})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Labels: map[string]string{}})
+
+	assert.Empty(t, factory.updateEvents())
 }
 
 func TestEndpointUpsert_NewEndpointFactoryReturnsNil(t *testing.T) {

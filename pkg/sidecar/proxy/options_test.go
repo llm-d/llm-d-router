@@ -431,8 +431,8 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	assertEqual(secureServing, expected.SecureServing, actual.SecureServing)
 
 	assertEqual(inferencePool, expected.inferencePool, actual.inferencePool)
-	assertEqual(inferencePoolNamespace, expected.InferencePoolNamespace, actual.InferencePoolNamespace)
-	assertEqual(inferencePoolName, expected.InferencePoolName, actual.InferencePoolName)
+	assertEqual("InferencePoolNamespace", expected.InferencePoolNamespace, actual.InferencePoolNamespace)
+	assertEqual("InferencePoolName", expected.InferencePoolName, actual.InferencePoolName)
 	assertEqual(poolGroup, expected.PoolGroup, actual.PoolGroup)
 
 	assertEqual(decodeChunkSize, expected.DecodeChunkSize, actual.DecodeChunkSize)
@@ -531,11 +531,11 @@ func compareSlices(expected, got []string) (bool, []string, []string) {
 
 func TestNewOptionsWithEnvVars(t *testing.T) {
 	// Set environment variables - t.Setenv automatically handles cleanup
-	t.Setenv("INFERENCE_POOL_NAMESPACE", "test-namespace")
-	t.Setenv("INFERENCE_POOL_NAME", "test-pool")
+	t.Setenv("INFERENCE_POOL", "test-namespace/test-pool")
 	t.Setenv("ENABLE_PREFILLER_SAMPLING", "true")
 
 	opts := NewOptions()
+	require.NoError(t, opts.Complete())
 
 	if opts.InferencePoolNamespace != "test-namespace" {
 		t.Errorf("Expected InferencePoolNamespace to be 'test-namespace', got '%s'", opts.InferencePoolNamespace)

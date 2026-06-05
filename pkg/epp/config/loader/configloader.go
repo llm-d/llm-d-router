@@ -104,17 +104,17 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 			}
 		}
 
-		//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.Parser instead.
+		//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.parsers instead.
 		// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
 		if rawConfig.Parser != nil {
-			logger.Info("DEPRECATION: top-level parser is deprecated, use requestHandler.parser instead. If both are set, the new field is used.")
+			logger.Info("DEPRECATION: top-level parser is deprecated, use requestHandler.parsers instead. If both are set, the new field is used.")
 			if rawConfig.RequestHandler == nil {
 				rawConfig.RequestHandler = &configapi.RequestHandlerConfig{}
 			}
-			if rawConfig.RequestHandler.Parser == nil {
-				//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.Parser instead.
+			if len(rawConfig.RequestHandler.Parsers) == 0 {
+				//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.parsers instead.
 				// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
-				rawConfig.RequestHandler.Parser = rawConfig.Parser
+				rawConfig.RequestHandler.Parsers = []configapi.ParserConfig{*rawConfig.Parser}
 			}
 		}
 
@@ -174,15 +174,15 @@ func InstantiateAndConfigure(
 	var flowControlConfig *flowcontrol.Config
 	if featureGates[flowcontrol.FeatureGate] {
 		var err error
-		flowControlConfig, err = flowcontrol.NewConfigFromAPI(rawConfig.FlowControl, handle)
+		flowControlConfig, err = buildFlowControlConfig(rawConfig.FlowControl, handle)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load flow control config: %w", err)
 		}
 	}
 
-	parserConfig, err := buildParserConfig(rawConfig.RequestHandler.Parser, handle)
+	parserRegistry, err := buildParserRegistry(rawConfig.RequestHandler.Parsers, handle, logger)
 	if err != nil {
-		return nil, fmt.Errorf("parse config build failed: %w", err)
+		return nil, fmt.Errorf("parser registry build failed: %w", err)
 	}
 
 	plugin, ok := handle.GetAllPluginsWithNames()[rawConfig.FlowControl.SaturationDetector.PluginRef]
@@ -199,7 +199,7 @@ func InstantiateAndConfigure(
 		SaturationDetector: saturationDetector,
 		DataConfig:         dataConfig,
 		FlowControlConfig:  flowControlConfig,
-		ParserConfig:       parserConfig,
+		ParserRegistry:     parserRegistry,
 	}, nil
 }
 
@@ -307,21 +307,24 @@ func loadFeatureConfig(gates configapi.FeatureGates) map[string]bool {
 	return config
 }
 
-func buildParserConfig(rawParserConfig *configapi.ParserConfig, handle fwkplugin.Handle) (*handlers.Config, error) {
-	if rawParserConfig == nil {
-		return nil, errors.New("parserConfig is not configured")
+func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {
+	if len(rawParserConfigs) == 0 {
+		return nil, errors.New("no parsers configured")
 	}
-	plugin, ok := handle.GetAllPluginsWithNames()[rawParserConfig.PluginRef]
-	if !ok {
-		return nil, errors.New("the configured parser is not loaded")
+	allPlugins := handle.GetAllPluginsWithNames()
+	parsers := make([]fwkrh.Parser, 0, len(rawParserConfigs))
+	for _, pc := range rawParserConfigs {
+		plugin, ok := allPlugins[pc.PluginRef]
+		if !ok {
+			return nil, fmt.Errorf("the configured parser %q is not loaded", pc.PluginRef)
+		}
+		v, ok := plugin.(fwkrh.Parser)
+		if !ok {
+			return nil, fmt.Errorf("the plugin %q is not a parser plugin", pc.PluginRef)
+		}
+		parsers = append(parsers, v)
 	}
-	v, ok := plugin.(fwkrh.Parser)
-	if !ok {
-		return nil, errors.New("the specified plugin is not a parser plugin in the config")
-	}
-	return &handlers.Config{
-		Parser: v,
-	}, nil
+	return handlers.NewParserRegistry(parsers, logger), nil
 }
 
 func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkplugin.Handle) (*datalayer.Config, error) {

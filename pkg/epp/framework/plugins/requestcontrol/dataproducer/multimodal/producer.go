@@ -21,8 +21,6 @@ package multimodal
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -35,9 +33,9 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
@@ -45,8 +43,13 @@ const (
 	// ProducerType is the type name used to register the multimodal data producer.
 	ProducerType = "mm-embeddings-cache-producer"
 
-	defaultCacheSize   = 10000
 	podCleanupInterval = 2 * time.Minute
+
+	// defaultCacheSizeInMB is 4 GiB (4096 MiB).
+	defaultCacheSizeInMB = 4096
+
+	// bytesPerImage is the assumed memory per tracked image.
+	bytesPerImage = 2 * 1024 * 1024
 )
 
 var (
@@ -60,8 +63,23 @@ var (
 
 // Parameters configures the multimodal encoder-cache data producer.
 type Parameters struct {
-	// CacheSize defines the maximum number of mm_hash -> pod-set entries to track.
-	CacheSize int `json:"cacheSize"`
+	// CacheSizeInMBPerServer is the per-endpoint LRU memory budget in mebibytes (MiB).
+	CacheSizeInMBPerServer int `json:"cacheSizeInMBPerServer"`
+}
+
+// lruCapacityFromCacheSizeMB converts a MiB budget to a maximum LRU entry count.
+func lruCapacityFromCacheSizeMB(mb int) int {
+	if mb <= 0 {
+		mb = defaultCacheSizeInMB
+	}
+	n := (int64(mb) * 1024 * 1024) / bytesPerImage
+	if n < 1 {
+		return 1
+	}
+	if n > int64(^uint(0)>>1) {
+		return int(^uint(0) >> 1)
+	}
+	return int(n)
 }
 
 // Factory creates a multimodal encoder-cache data producer.
@@ -77,11 +95,13 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 }
 
 // Producer tracks multimodal content hashes and the pods that likely hold their
-// encoder-cache entries.
+// encoder-cache entries. Each pod has its own LRU cache of hashes, so eviction
+// is scoped per endpoint rather than global.
 type Producer struct {
 	typedName   plugin.TypedName
 	dk          plugin.DataKey
-	cache       *lru.Cache[string, map[string]struct{}]
+	caches      map[string]*lru.Cache[string, struct{}]
+	cacheSize   int
 	pluginState *plugin.PluginState
 	podList     func() []k8stypes.NamespacedName
 	mutex       sync.RWMutex
@@ -101,20 +121,19 @@ func (s *requestState) Clone() plugin.StateData {
 
 // New creates a Producer.
 func New(ctx context.Context, name string, params *Parameters, podList func() []k8stypes.NamespacedName) (*Producer, error) {
-	cacheSize := defaultCacheSize
-	if params != nil && params.CacheSize > 0 {
-		cacheSize = params.CacheSize
+	cacheSizeMB := 0
+	if params != nil {
+		cacheSizeMB = params.CacheSizeInMBPerServer
 	}
+	cacheSize := lruCapacityFromCacheSizeMB(cacheSizeMB)
 
-	cache, err := lru.New[string, map[string]struct{}](cacheSize)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create multimodal encoder-cache LRU with size %d: %w", cacheSize, err)
-	}
+	registerEncoderCacheMetrics()
 
 	p := &Producer{
 		typedName:   plugin.TypedName{Type: ProducerType, Name: name},
 		dk:          attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(name),
-		cache:       cache,
+		caches:      make(map[string]*lru.Cache[string, struct{}]),
+		cacheSize:   cacheSize,
 		pluginState: plugin.NewPluginState(ctx),
 		podList:     podList,
 	}
@@ -122,6 +141,17 @@ func New(ctx context.Context, name string, params *Parameters, podList func() []
 		go p.cleanupLoop(ctx)
 	}
 	return p, nil
+}
+
+// getOrCreatePodCache returns the LRU cache for the given pod, creating one if absent.
+// Must be called with p.mutex held for write.
+func (p *Producer) getOrCreatePodCache(pod string) *lru.Cache[string, struct{}] {
+	if c, ok := p.caches[pod]; ok {
+		return c
+	}
+	c, _ := lru.New[string, struct{}](p.cacheSize)
+	p.caches[pod] = c
+	return c
 }
 
 func (p *Producer) cleanupLoop(ctx context.Context) {
@@ -147,6 +177,15 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrmm.EncoderCacheMatchInfo{}}
 }
 
+// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// the token-producer before this producer runs and auto-creates one when none
+// is configured; multimodal features come from the tokenizer output.
+func (p *Producer) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+	}
+}
+
 // PluginState returns request-scoped state shared between producer extension points.
 func (p *Producer) PluginState() *plugin.PluginState {
 	return p.pluginState
@@ -160,6 +199,8 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		logger.Info("No multimodal content found, skipping encoder-cache match data")
 		return nil
 	}
+
+	p.recordItemLookups(requestItems)
 
 	if request != nil && request.RequestID != "" {
 		p.pluginState.Write(request.RequestID, plugin.StateKey(ProducerType), &requestState{items: requestItems})
@@ -180,76 +221,20 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 }
 
 // ExtractMMItems returns deterministic, unique multimodal encoder-cache items
-// for a request. Parser-provided multimodal features are preferred; if
-// unavailable, typed structured media blocks are hashed from stable identifiers.
+// derived from the tokenized prompt's multimodal features.
 func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
-	if request == nil || request.Body == nil {
+	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
 		return nil
 	}
 
-	if request.Body.TokenizedPrompt != nil && len(request.Body.TokenizedPrompt.MultiModalFeatures) > 0 {
-		return itemsFromTokenizedPrompt(request.Body.TokenizedPrompt.MultiModalFeatures)
-	}
-
-	if g := request.Body.Generate; g != nil && g.Features != nil && len(g.Features.MMHashes) > 0 {
-		return itemsFromGenerateFeatures(g.Features.MMHashes)
-	}
-
-	if request.Body.ChatCompletions != nil {
-		return itemsFromChat(request.Body.ChatCompletions)
-	}
-
-	return nil
-}
-
-func itemsFromGenerateFeatures(mmHashes map[string][]string) []attrmm.MatchItem {
 	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, hashes := range mmHashes {
-		for _, hash := range hashes {
-			if hash == "" {
-				continue
-			}
-			addItem(itemsByHash, hash)
-		}
-	}
-	return itemSlice(itemsByHash)
-}
-
-func itemsFromTokenizedPrompt(features []fwkrh.MultiModalFeature) []attrmm.MatchItem {
-	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, feature := range features {
+	for _, feature := range request.Body.TokenizedPrompt.MultiModalFeatures {
 		if feature.Hash == "" {
 			continue
 		}
 		addItem(itemsByHash, feature.Hash)
 	}
 	return itemSlice(itemsByHash)
-}
-
-func itemsFromChat(request *fwkrh.ChatCompletionsRequest) []attrmm.MatchItem {
-	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, message := range request.Messages {
-		for _, block := range message.Content.Structured {
-			addBlockItem(itemsByHash, block)
-		}
-	}
-	return itemSlice(itemsByHash)
-}
-
-func addBlockItem(itemsByHash map[string]attrmm.MatchItem, block fwkrh.ContentBlock) {
-	switch {
-	case block.ImageURL.URL != "":
-		addItem(itemsByHash, contentHash("image_url", block.ImageURL.URL))
-	case block.VideoURL.URL != "":
-		addItem(itemsByHash, contentHash("video_url", block.VideoURL.URL))
-	case block.InputAudio.Data != "":
-		addItem(itemsByHash, contentHash("input_audio", block.InputAudio.Format+":"+block.InputAudio.Data))
-	}
-}
-
-func contentHash(kind, identifier string) string {
-	sum := sha256.Sum256([]byte(kind + "\x00" + identifier))
-	return hex.EncodeToString(sum[:])
 }
 
 func addItem(itemsByHash map[string]attrmm.MatchItem, hash string) {
@@ -267,16 +252,33 @@ func itemSlice(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
 	return items
 }
 
-func (p *Producer) matchedItemsForPod(pod string, requestItems []attrmm.MatchItem) []attrmm.MatchItem {
-	matchedItemsByHash := map[string]attrmm.MatchItem{}
+// recordItemLookups increments the queries counter for each item and, for every
+// endpoint whose LRU contains the hash, increments that endpoint's hits counter.
+// Contains is used instead of Get to avoid altering recency during a read-only path.
+func (p *Producer) recordItemLookups(items []attrmm.MatchItem) {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
-	for _, item := range requestItems {
-		pods, ok := p.cache.Get(item.Hash)
-		if !ok {
-			continue
+	pluginType, pluginName := p.typedName.Type, p.typedName.Name
+	for _, item := range items {
+		encoderCacheQueriesTotal.WithLabelValues(pluginType, pluginName).Inc()
+		for pod, podCache := range p.caches {
+			if podCache.Contains(item.Hash) {
+				encoderCacheHitsTotal.WithLabelValues(pluginType, pluginName, pod).Inc()
+			}
 		}
-		if _, ok := pods[pod]; ok {
+	}
+}
+
+func (p *Producer) matchedItemsForPod(pod string, requestItems []attrmm.MatchItem) []attrmm.MatchItem {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	podCache, ok := p.caches[pod]
+	if !ok {
+		return nil
+	}
+	matchedItemsByHash := map[string]attrmm.MatchItem{}
+	for _, item := range requestItems {
+		if podCache.Contains(item.Hash) {
 			matchedItemsByHash[item.Hash] = item
 		}
 	}
@@ -298,21 +300,10 @@ func (p *Producer) removeStalePods() {
 
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
-	for _, hash := range p.cache.Keys() {
-		pods, ok := p.cache.Get(hash)
-		if !ok {
-			continue
+	for pod := range p.caches {
+		if _, ok := validPods[pod]; !ok {
+			delete(p.caches, pod)
 		}
-		for pod := range pods {
-			if _, ok := validPods[pod]; !ok {
-				delete(pods, pod)
-			}
-		}
-		if len(pods) == 0 {
-			p.cache.Remove(hash)
-			continue
-		}
-		p.cache.Add(hash, pods)
 	}
 }
 
@@ -335,16 +326,5 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 func (p *Producer) removePod(pod string) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
-	for _, hash := range p.cache.Keys() {
-		pods, ok := p.cache.Get(hash)
-		if !ok {
-			continue
-		}
-		delete(pods, pod)
-		if len(pods) == 0 {
-			p.cache.Remove(hash)
-			continue
-		}
-		p.cache.Add(hash, pods)
-	}
+	delete(p.caches, pod)
 }

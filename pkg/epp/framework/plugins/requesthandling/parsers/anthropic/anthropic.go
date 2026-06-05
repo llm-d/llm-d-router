@@ -61,8 +61,11 @@ func (p *AnthropicParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *AnthropicParser) SupportedAppProtocols() []v1.AppProtocol {
-	return []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP}
+func (p *AnthropicParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
+		Paths:     []string{messagesAPI},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
+	}
 }
 
 func AnthropicParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -101,7 +104,7 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		result.Stream = true
 	}
 
-	return &fwkrh.ParseResult{Body: result, Skip: false}, nil
+	return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: false}, nil
 }
 
 func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {

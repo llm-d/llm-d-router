@@ -60,7 +60,6 @@ import (
 	fcregistry "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
@@ -160,7 +159,7 @@ type Runner struct {
 	requestControlConfig *requestcontrol.Config
 	schedulerConfig      *scheduling.SchedulerConfig
 	customCollectors     []prometheus.Collector
-	parser               fwkrh.Parser
+	parserRegistry       *handlers.ParserRegistry
 	dlRuntime            *datalayer.Runtime
 	PluginHandle         fwkplugin.Handle
 	// rawConfig caches the result of parseConfigurationPhaseOne.
@@ -383,7 +382,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
 		Director:                         director,
-		Parser:                           r.parser,
+		ParserRegistry:                   r.parserRegistry,
 		SaturationDetector:               eppConfig.SaturationDetector,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
@@ -396,7 +395,12 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	// --- Add Runnables to Manager ---
 	// Register health server.
-	if err := registerHealthServer(mgr, ctrl.Log.WithName("health"), ds, opts.GRPCHealthPort, isLeader, opts.EnableLeaderElection, r.parser); err != nil {
+	parsers := r.parserRegistry.Parsers()
+	supporters := make([]appProtocolSupporter, len(parsers))
+	for i, p := range parsers {
+		supporters[i] = p
+	}
+	if err := registerHealthServer(mgr, ctrl.Log.WithName("health"), ds, opts.GRPCHealthPort, isLeader, opts.EnableLeaderElection, supporters); err != nil {
 		return nil, nil, err
 	}
 
@@ -515,7 +519,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(inflightload.InFlightLoadProducerType, inflightload.InFlightLoadProducerFactory, attrconcurrency.InFlightLoadDataKey)
 	fwkplugin.RegisterAsDefaultProducer(mmproducer.ProducerType, mmproducer.Factory, mmproducer.ProducedKey)
 	fwkplugin.RegisterAsDefaultProducer(latencyproducer.LatencyDataProviderPluginType, latencyproducer.PredictedLatencyFactory, attrlatency.LatencyPredictionInfoDataKey)
-	fwkplugin.Register(tokenizer.PluginType, tokenizer.PluginFactory)
+	fwkplugin.RegisterAsDefaultProducer(tokenizer.PluginType, tokenizer.PluginFactory, tokenizer.TokenizedPromptDataKey)
 	fwkplugin.Register(tokenizer.LegacyPluginType, tokenizer.LegacyPluginFactory) //nolint:staticcheck // intentional: keep backward compatibility
 	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, sessionid.Factory, attrsession.SessionIDDataKey)
 
@@ -659,7 +663,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	// The plugins will be executed in topologically sorted order to ensure that data is produced before it is consumed.
 	r.requestControlConfig.OrderDataProducerPlugins(dag)
 
-	r.parser = handlers.NewParser(cfg.ParserConfig)
+	r.parserRegistry = cfg.ParserRegistry
 	logger.Info("loaded configuration from file/text successfully")
 
 	return cfg, nil
@@ -701,14 +705,14 @@ func registerExtProcServer(mgr manager.Manager, runner *runserver.ExtProcServerR
 }
 
 // registerHealthServer adds the Health gRPC server as a Runnable to the given manager.
-func registerHealthServer(mgr manager.Manager, logger logr.Logger, ds datastore.Datastore, port int, isLeader *atomic.Bool, leaderElectionEnabled bool, supporter appProtocolSupporter) error {
+func registerHealthServer(mgr manager.Manager, logger logr.Logger, ds datastore.Datastore, port int, isLeader *atomic.Bool, leaderElectionEnabled bool, supporters []appProtocolSupporter) error {
 	srv := grpc.NewServer()
 	healthPb.RegisterHealthServer(srv, &healthServer{
 		logger:                logger,
 		datastore:             ds,
 		isLeader:              isLeader,
 		leaderElectionEnabled: leaderElectionEnabled,
-		supporter:             supporter,
+		supporters:            supporters,
 	})
 	if err := mgr.Add(
 		runnable.NoLeaderElection(runnable.GRPCServer("health", srv, port))); err != nil {
@@ -920,7 +924,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
 		Director:                         director,
-		Parser:                           r.parser,
+		ParserRegistry:                   r.parserRegistry,
 		SaturationDetector:               eppConfig.SaturationDetector,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
@@ -940,12 +944,17 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	isLeader.Store(true)
 
 	healthSrv := grpc.NewServer()
+	parsers := r.parserRegistry.Parsers()
+	ps := make([]appProtocolSupporter, len(parsers))
+	for i, p := range parsers {
+		ps[i] = p
+	}
 	healthPb.RegisterHealthServer(healthSrv, &healthServer{
 		logger:                ctrl.Log.WithName("health"),
 		datastore:             ds,
 		isLeader:              isLeader,
 		leaderElectionEnabled: false,
-		supporter:             r.parser,
+		supporters:            ps,
 	})
 
 	g := newRunnableGroup()

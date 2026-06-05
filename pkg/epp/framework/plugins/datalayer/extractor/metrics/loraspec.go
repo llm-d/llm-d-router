@@ -17,8 +17,6 @@ limitations under the License.
 package metrics
 
 import (
-	"fmt"
-
 	dto "github.com/prometheus/client_model/go"
 
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
@@ -50,10 +48,16 @@ func parseStringToLoRASpec(spec string) (*LoRASpec, error) {
 // generates new series and only most recent should be used. The value of each
 // series is its creation timestamp so we can retrieve the latest by sorting on
 // that the value first.
-func (spec *LoRASpec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) (*dto.Metric, error) {
-	family, err := extractFamily(spec.Spec, families)
-	if err != nil {
-		return nil, err
+//
+// vLLM only emits vllm:lora_requests_info once an adapter has been loaded, so a
+// vanilla deployment scrape legitimately has no family present. Both "family
+// missing" and "family present but no matching labels" are reported as a nil
+// metric so the extractor can skip the LoRA section silently rather than
+// incrementing DataLayerExtractErrorsTotal on every poll (#926).
+func (spec *LoRASpec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) *dto.Metric {
+	family, exists := families[spec.Name]
+	if !exists || len(family.GetMetric()) == 0 {
+		return nil
 	}
 
 	var latest *dto.Metric
@@ -69,9 +73,5 @@ func (spec *LoRASpec) getLatestMetric(families sourcemetrics.PrometheusMetricMap
 		}
 	}
 
-	if latest == nil {
-		return nil, fmt.Errorf("no matching lora metric found for %q with labels %v", spec.Name, spec.Labels)
-	}
-
-	return latest, nil
+	return latest
 }

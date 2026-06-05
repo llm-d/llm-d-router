@@ -2,8 +2,17 @@ name: Trivy Scan
 description: Scan container image with official Aqua Security Trivy action
 inputs:
   image:
-    required: true
-    description: "Image to scan (e.g., 'my-repo/my-image:latest')"
+    required: false
+    default: ''
+    description: "Image reference to scan (e.g., 'my-repo/my-image:latest'). Mutually exclusive with 'tarball'."
+  tarball:
+    required: false
+    default: ''
+    description: "Path to a local image tarball to scan (e.g. /tmp/image.tar from buildx type=docker,dest=...). Mutually exclusive with 'image'."
+  severity:
+    required: false
+    default: 'HIGH,CRITICAL'
+    description: "Comma-separated severities that fail the scan (e.g. 'CRITICAL' or 'MEDIUM,HIGH,CRITICAL')."
 
 runs:
   using: "composite"
@@ -12,9 +21,10 @@ runs:
       uses: aquasecurity/trivy-action@v0.36.0 # v0.36.0 ed142fd0673e97e23eac54620cfb913e5ce36c25
       with:
         image-ref: ${{ inputs.image }}
+        input: ${{ inputs.tarball }}
         format: 'sarif'
         output: 'trivy-results.sarif'
-        severity: 'HIGH,CRITICAL'
+        severity: ${{ inputs.severity }}
         exit-code: '1'
 
     - name: Upload Trivy SARIF to Security tab

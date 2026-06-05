@@ -28,7 +28,9 @@ import (
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
@@ -126,7 +128,7 @@ func applySystemDefaults(cfg *configapi.EndpointPickerConfig, handle fwkplugin.H
 	if err := ensureFlowControlLayer(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply flow control system defaults: %w", err)
 	}
-	if err := ensureParser(cfg, handle, allPlugins); err != nil {
+	if err := ensureParsers(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply parser defaults: %w", err)
 	}
 	if err := ensureSaturationDetector(cfg, handle, allPlugins); err != nil {
@@ -235,9 +237,9 @@ func ensureFlowControlLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugi
 	return nil
 }
 
-// ensureParser guarantees that parser is configured.
-// If the parser is not configured, the openAI parser is configured by default.
-func ensureParser(
+// ensureParsers guarantees that at least one parser is configured.
+// If no parsers are configured, the openAI parser is configured by default.
+func ensureParsers(
 	cfg *configapi.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
@@ -245,17 +247,18 @@ func ensureParser(
 	if cfg.RequestHandler == nil {
 		cfg.RequestHandler = &configapi.RequestHandlerConfig{}
 	}
-	parserConfig := cfg.RequestHandler.Parser
-	if parserConfig == nil {
-		parserConfig = &configapi.ParserConfig{
-			// Set default parser to openAI parser if the parser is not set in the config.
-			PluginRef: openai.OpenAIParserType,
+	if len(cfg.RequestHandler.Parsers) == 0 {
+		cfg.RequestHandler.Parsers = []configapi.ParserConfig{
+			{PluginRef: openai.OpenAIParserType},
+			{PluginRef: anthropic.AnthropicParserType},
+			{PluginRef: vllmhttp.VllmHTTPParserType},
 		}
-		cfg.RequestHandler.Parser = parserConfig
 	}
-	if _, ok := allPlugins[parserConfig.PluginRef]; !ok {
-		if err := registerDefaultPlugin(cfg, handle, openai.OpenAIParserType); err != nil {
-			return err
+	for _, pc := range cfg.RequestHandler.Parsers {
+		if _, ok := allPlugins[pc.PluginRef]; !ok {
+			if err := registerDefaultPlugin(cfg, handle, pc.PluginRef); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

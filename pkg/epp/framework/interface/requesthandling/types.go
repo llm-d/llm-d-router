@@ -103,6 +103,8 @@ type TokenizedPrompt struct {
 	// MultiModalFeatures holds one entry per multimodal item in prompt order.
 	// Nil if the prompt contains no multimodal content.
 	MultiModalFeatures []MultiModalFeature
+	// CacheSalt isolates prefix caches across requests. Populated by the token-producer.
+	CacheSalt string
 }
 
 // MultiModalFeature holds all data needed for prefix-cache scoring of a single
@@ -117,96 +119,6 @@ type MultiModalFeature struct {
 	Offset int
 	// Length is the number of placeholder tokens this item occupies in TokenIDs.
 	Length int
-}
-
-// PromptText returns a plain-text representation of the prompt from whichever
-// API type is populated, analogous to CacheSalt().
-func (r *InferenceRequestBody) PromptText() string {
-	switch {
-	case r.Completions != nil:
-		return r.Completions.Prompt.PlainText()
-	case r.ChatCompletions != nil:
-		var sb strings.Builder
-		for _, msg := range r.ChatCompletions.Messages {
-			text := msg.Content.PlainText()
-			if text != "" {
-				sb.WriteString(text)
-				sb.WriteString(" ")
-			}
-		}
-		return sb.String()
-	case r.Messages != nil:
-		var sb strings.Builder
-		sysText := r.Messages.System.PlainText()
-		if sysText != "" {
-			sb.WriteString(sysText)
-			sb.WriteString(" ")
-		}
-		for _, msg := range r.Messages.Messages {
-			text := msg.Content.PlainText()
-			if text != "" {
-				sb.WriteString(text)
-				sb.WriteString(" ")
-			}
-		}
-		return sb.String()
-	case r.Responses != nil:
-		if s, ok := r.Responses.Input.(string); ok {
-			return s
-		}
-		b, _ := json.Marshal(r.Responses.Input)
-		return string(b)
-	case r.Conversations != nil:
-		b, _ := json.Marshal(r.Conversations.Items)
-		return string(b)
-	case r.Embeddings != nil:
-		return r.Embeddings.Input.PlainText()
-	case r.Generate != nil:
-		return ""
-	default:
-		return ""
-	}
-}
-
-// InputTokenCountHint returns a best-effort input token count when the
-// caller knows it exactly (token-ID inputs), or -1 when the count has
-// to be estimated from text.
-func (r *InferenceRequestBody) InputTokenCountHint() int {
-	if r.Completions != nil {
-		return r.Completions.Prompt.TokenCountHint()
-	}
-	if r.Embeddings != nil {
-		return r.Embeddings.Input.TokenCountHint()
-	}
-	if r.Generate != nil {
-		return len(r.Generate.TokenIDs)
-	}
-	return -1
-}
-
-func (r *InferenceRequestBody) CacheSalt() string {
-	if r.Conversations != nil {
-		return r.Conversations.CacheSalt
-	}
-	if r.Responses != nil {
-		return r.Responses.CacheSalt
-	}
-	if r.ChatCompletions != nil {
-		return r.ChatCompletions.CacheSalt
-	}
-	if r.Messages != nil {
-		return r.Messages.CacheSalt
-	}
-	if r.Completions != nil {
-		return r.Completions.CacheSalt
-	}
-	if r.Embeddings != nil {
-		return r.Embeddings.CacheSalt
-	}
-	if r.Generate != nil {
-		return r.Generate.CacheSalt
-	}
-	return ""
 }
 
 // Prompt represents the prompt field in a /v1/completions request.

@@ -26,7 +26,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -131,9 +131,7 @@ func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, d
 				dispCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
 				if err := disp.Dispatch(dispCtx, ep); err != nil {
 					tn := disp.TypedName()
-					//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
-					metrics.DataLayerPollErrorsTotal.WithLabelValues(tn.Type).Inc()
-					metrics.LlmdDataLayerPollErrorsTotal.WithLabelValues(tn.Type).Inc()
+					metrics.RecordDataLayerPollError(tn.Type)
 					logger.V(logging.DEBUG).Info("dispatch failed", "source", tn, "err", err)
 				}
 				cancel()

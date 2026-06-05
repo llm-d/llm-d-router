@@ -86,16 +86,25 @@ func ReqResponseOnly(
 	return reqs
 }
 
-// ReqResponseGRPCWithTailer creates a sequence simulating only the response phase from Envoy while passing gRPC payload.
-// It also generate a response trailer.
-// It skips the RequestHeaders phase entirely.
-func ReqResponseGRPCWithTailer(
+// ReqRequestHeadersAndResponseGRPC creates a sequence that starts with request headers (to resolve parser)
+// followed by response phase.
+func ReqRequestHeadersAndResponseGRPC(
+	reqHeaders map[string]string,
 	respHeaders map[string]string,
 	bodyChunks ...[]byte,
 ) []*extProcPb.ProcessingRequest {
-	reqs := make([]*extProcPb.ProcessingRequest, 0, 1+len(bodyChunks))
+	reqs := make([]*extProcPb.ProcessingRequest, 0, 2+len(bodyChunks))
 
-	// 1. Response Headers
+	// 1. Request Headers
+	reqs = append(reqs, &extProcPb.ProcessingRequest{
+		Request: &extProcPb.ProcessingRequest_RequestHeaders{
+			RequestHeaders: &extProcPb.HttpHeaders{
+				Headers: &envoyCorev3.HeaderMap{Headers: buildEnvoyHeaders(reqHeaders)},
+			},
+		},
+	})
+
+	// 2. Response Headers
 	reqs = append(reqs, &extProcPb.ProcessingRequest{
 		Request: &extProcPb.ProcessingRequest_ResponseHeaders{
 			ResponseHeaders: &extProcPb.HttpHeaders{
@@ -104,7 +113,7 @@ func ReqResponseGRPCWithTailer(
 		},
 	})
 
-	// 2. Response Body Chunks
+	// 3. Response Body Chunks
 	for _, chunk := range bodyChunks {
 		reqs = append(reqs, &extProcPb.ProcessingRequest{
 			Request: &extProcPb.ProcessingRequest_ResponseBody{
@@ -116,7 +125,7 @@ func ReqResponseGRPCWithTailer(
 		})
 	}
 
-	// 3. Response Trailer
+	// 4. Response Trailer
 	reqs = append(reqs, &extProcPb.ProcessingRequest{
 		Request: &extProcPb.ProcessingRequest_ResponseTrailers{
 			ResponseTrailers: &extProcPb.HttpTrailers{},

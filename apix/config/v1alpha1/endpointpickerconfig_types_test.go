@@ -74,11 +74,11 @@ func TestStringers(t *testing.T) {
 		{
 			name: "RequestHandlerConfig",
 			obj: &RequestHandlerConfig{
-				Parser: &ParserConfig{
-					PluginRef: "test-parser",
+				Parsers: []ParserConfig{
+					{PluginRef: "test-parser"},
 				},
 			},
-			want: "{Parser: {PluginRef: test-parser}}",
+			want: "{Parsers: [{PluginRef: test-parser}]}",
 		},
 		{
 			name: "EndpointPickerConfig",
@@ -92,12 +92,12 @@ func TestStringers(t *testing.T) {
 					},
 				},
 				RequestHandler: &RequestHandlerConfig{
-					Parser: &ParserConfig{
-						PluginRef: "parser1",
+					Parsers: []ParserConfig{
+						{PluginRef: "parser1"},
 					},
 				},
 			},
-			want: "{Plugins: [{Name: p1, Type: t1}], FlowControl: {MaxBytes: unlimited, MaxRequests: unlimited, SaturationDetector: {PluginRef: sd1}}, RequestHandler: {Parser: {PluginRef: parser1}}}",
+			want: "{Plugins: [{Name: p1, Type: t1}], FlowControl: {MaxBytes: unlimited, MaxRequests: unlimited, SaturationDetector: {PluginRef: sd1}}, RequestHandler: {Parsers: [{PluginRef: parser1}]}}",
 		},
 	}
 

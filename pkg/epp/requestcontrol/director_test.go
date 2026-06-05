@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
@@ -36,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
@@ -50,6 +52,7 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -257,7 +260,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: modelRewritten,
-							Weight:       100,
+							Weight:       ptr.To[int32](100),
 						},
 					},
 				},
@@ -970,7 +973,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: "model-a-old-tuned",
-							Weight:       100,
+							Weight:       ptr.To[int32](100),
 						},
 					},
 				},
@@ -996,7 +999,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: "model-a-new-tuned",
-							Weight:       100,
+							Weight:       ptr.To[int32](100),
 						},
 					},
 				},
@@ -1022,7 +1025,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: "model-b-tuned",
-							Weight:       100,
+							Weight:       ptr.To[int32](100),
 						},
 					},
 				},
@@ -1048,11 +1051,11 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: "model-c-v1",
-							Weight:       70,
+							Weight:       ptr.To[int32](70),
 						},
 						{
 							ModelRewrite: "model-c-v2",
-							Weight:       30,
+							Weight:       ptr.To[int32](30),
 						},
 					},
 				},
@@ -1122,7 +1125,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 				TargetModelName:   test.initialTarget,
 			}
 
-			director.applyWeightedModelRewrite(reqCtx)
+			director.applyWeightedModelRewrite(t.Context(), reqCtx)
 			assert.Contains(t, test.expectedTarget, reqCtx.TargetModelName, "TargetModelName mismatch")
 		})
 	}
@@ -1137,33 +1140,41 @@ func TestDirector_SelectWeightedModel(t *testing.T) {
 		{
 			name: "single target",
 			targets: []v1alpha2.TargetModel{
-				{ModelRewrite: "model-a", Weight: 100},
+				{ModelRewrite: "model-a", Weight: ptr.To[int32](100)},
 			},
 			possibleModels: sets.New("model-a"),
 		},
 		{
 			name: "multiple targets, equal weight",
 			targets: []v1alpha2.TargetModel{
-				{ModelRewrite: "model-a", Weight: 50},
-				{ModelRewrite: "model-b", Weight: 50},
+				{ModelRewrite: "model-a", Weight: ptr.To[int32](50)},
+				{ModelRewrite: "model-b", Weight: ptr.To[int32](50)},
 			},
 			possibleModels: sets.New("model-a", "model-b"),
 		},
 		{
 			name: "multiple targets, different weights",
 			targets: []v1alpha2.TargetModel{
-				{ModelRewrite: "model-x", Weight: 70},
-				{ModelRewrite: "model-y", Weight: 30},
+				{ModelRewrite: "model-x", Weight: ptr.To[int32](70)},
+				{ModelRewrite: "model-y", Weight: ptr.To[int32](30)},
 			},
 			possibleModels: sets.New("model-x", "model-y"),
 		},
 		{
-			name: "zero total weight, distribute evenly",
+			name: "omitted weights, distribute evenly",
 			targets: []v1alpha2.TargetModel{
-				{ModelRewrite: "model-z1", Weight: 0},
-				{ModelRewrite: "model-z2", Weight: 0},
+				{ModelRewrite: "model-z1"},
+				{ModelRewrite: "model-z2"},
 			},
 			possibleModels: sets.New("model-z1", "model-z2"),
+		},
+		{
+			name: "mixed weights select explicitly weighted targets",
+			targets: []v1alpha2.TargetModel{
+				{ModelRewrite: "model-without-weight"},
+				{ModelRewrite: "model-with-weight", Weight: ptr.To[int32](100)},
+			},
+			possibleModels: sets.New("model-with-weight"),
 		},
 	}
 
@@ -1175,7 +1186,7 @@ func TestDirector_SelectWeightedModel(t *testing.T) {
 			counter := make(map[string]int)
 			numRuns := 1000
 			for range numRuns {
-				selected := director.selectWeightedModel(test.targets)
+				selected := director.selectWeightedModel(t.Context(), test.targets)
 				counter[selected]++
 			}
 
@@ -1190,7 +1201,9 @@ func TestDirector_SelectWeightedModel(t *testing.T) {
 			if len(test.targets) > 1 {
 				totalWeight := int32(0)
 				for _, target := range test.targets {
-					totalWeight += target.Weight
+					if target.Weight != nil {
+						totalWeight += *target.Weight
+					}
 				}
 
 				if totalWeight == 0 { // Special case for zero total weight
@@ -1200,7 +1213,11 @@ func TestDirector_SelectWeightedModel(t *testing.T) {
 					}
 				} else {
 					for _, target := range test.targets {
-						expectedCount := float64(numRuns) * (float64(target.Weight) / float64(totalWeight))
+						if target.Weight == nil {
+							assert.Zero(t, counter[target.ModelRewrite], "Unweighted target %s should not be selected when other targets have weights", target.ModelRewrite)
+							continue
+						}
+						expectedCount := float64(numRuns) * (float64(*target.Weight) / float64(totalWeight))
 						assert.InDelta(t, expectedCount, float64(counter[target.ModelRewrite]), expectedCount*0.2, "Distribution for %s is off", target.ModelRewrite)
 					}
 				}
@@ -1590,5 +1607,186 @@ func newResponseBodyTestRequestContext(requestID string, completionTokens int) *
 		},
 		TargetPod: &fwkdl.EndpointMetadata{},
 		Usage:     fwkrh.Usage{CompletionTokens: completionTokens},
+	}
+}
+
+// ── Conditional-decode gate (Prefer: if-available) ─────────────────────────
+
+// wrongTypeAttr is a Cloneable that is NOT *attrprefix.PrefixCacheMatchInfo,
+// used to exercise the type-assertion failure branch.
+type wrongTypeAttr struct{}
+
+func (w wrongTypeAttr) Clone() fwkdl.Cloneable { return w }
+
+func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
+	endpointWith := func(matched, total int) fwksched.Endpoint {
+		attrs := fwkdl.NewAttributes()
+		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+			attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
+		return fwksched.NewEndpoint(
+			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
+			nil, attrs,
+		)
+	}
+	endpointBare := func() fwksched.Endpoint {
+		return fwksched.NewEndpoint(
+			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
+			nil, fwkdl.NewAttributes(),
+		)
+	}
+	endpointWithWrongType := func() fwksched.Endpoint {
+		attrs := fwkdl.NewAttributes()
+		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), wrongTypeAttr{})
+		return fwksched.NewEndpoint(
+			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
+			nil, attrs,
+		)
+	}
+	resultWith := func(eps ...fwksched.Endpoint) *fwksched.SchedulingResult {
+		return &fwksched.SchedulingResult{
+			PrimaryProfileName: "decode",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"decode": {TargetEndpoints: eps},
+			},
+		}
+	}
+
+	tests := []struct {
+		name string
+		in   *fwksched.SchedulingResult
+		want bool
+	}{
+		{"nil result", nil, false},
+		{"empty profile results", &fwksched.SchedulingResult{PrimaryProfileName: "decode"}, false},
+		{"primary profile missing", &fwksched.SchedulingResult{
+			PrimaryProfileName: "decode",
+			ProfileResults:     map[string]*fwksched.ProfileRunResult{"other": {TargetEndpoints: []fwksched.Endpoint{endpointWith(2, 4)}}},
+		}, false},
+		{"primary profile nil", &fwksched.SchedulingResult{
+			PrimaryProfileName: "decode",
+			ProfileResults:     map[string]*fwksched.ProfileRunResult{"decode": nil},
+		}, false},
+		{"primary has no endpoints", resultWith(), false},
+		{"endpoint has no match info", resultWith(endpointBare()), false},
+		{"wrong type in attribute", resultWith(endpointWithWrongType()), false},
+		{"zero match blocks", resultWith(endpointWith(0, 4)), false},
+		{"some match blocks", resultWith(endpointWith(2, 4)), true},
+		{"full match", resultWith(endpointWith(4, 4)), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, primaryEndpointHasCachedPrefix(logr.Discard(), tt.in))
+		})
+	}
+}
+
+// newConditionalDecodeDirector builds a minimal Director suitable for
+// exercising the conditional-decode gate end-to-end.
+func newConditionalDecodeDirector(t *testing.T, scheduleResult *fwksched.SchedulingResult) (*Director, context.Context) {
+	t.Helper()
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	period := time.Second
+	epf := datalayer.NewTestRuntime(t, period)
+	ds := datastore.NewDatastore(t.Context(), epf, 0)
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	pool := &v1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec: v1.InferencePoolSpec{
+			TargetPorts: []v1.Port{{Number: v1.PortNumber(int32(8000))}},
+			Selector: v1.LabelSelector{
+				MatchLabels: map[v1.LabelKey]v1.LabelValue{"app": "inference"},
+			},
+		},
+	}
+	if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(pool)); err != nil {
+		t.Fatalf("PoolSet: %v", err)
+	}
+	ds.PodUpdateOrAddIfNotExist(ctx, &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "default", Labels: map[string]string{"app": "inference"}},
+		Status: corev1.PodStatus{
+			PodIP:      "192.168.1.100",
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	})
+
+	mockSched := &mockScheduler{scheduleResults: scheduleResult}
+	cfg := NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil))
+	candidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
+	dir := NewDirectorWithConfig(ds, mockSched, &mockAdmissionController{}, candidates, cfg)
+	return dir, ctx
+}
+
+func TestDirector_HandleRequest_ConditionalDecode(t *testing.T) {
+	scheduleResultWith := func(matched, total int) *fwksched.SchedulingResult {
+		attrs := fwkdl.NewAttributes()
+		if matched >= 0 {
+			attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+				attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
+		}
+		return &fwksched.SchedulingResult{
+			PrimaryProfileName: "decode",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"decode": {TargetEndpoints: []fwksched.Endpoint{
+					fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+						Address:        "192.168.1.100",
+						Port:           "8000",
+						MetricsHost:    "192.168.1.100:8000",
+						NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
+					}, nil, attrs),
+				}},
+			},
+		}
+	}
+
+	tests := []struct {
+		name        string
+		preferValue string // empty == no Prefer header
+		matched     int    // -1 == no PrefixCacheMatchInfo at all
+		total       int
+		wantErrCode string
+	}{
+		{"prefer if-available + cache hit forwards", "if-available", 2, 4, ""},
+		{"prefer if-available + zero match returns 412", "if-available", 0, 4, errcommon.PreconditionFailed},
+		{"prefer if-available + no match info returns 412", "if-available", -1, 0, errcommon.PreconditionFailed},
+		{"absent Prefer header proceeds even with no cache", "", -1, 0, ""},
+		{"unrelated Prefer token proceeds even with no cache", "return=minimal", -1, 0, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, ctx := newConditionalDecodeDirector(t, scheduleResultWith(tt.matched, tt.total))
+
+			reqCtx := &handlers.RequestContext{
+				Request: &handlers.Request{
+					Headers: map[string]string{
+						reqcommon.RequestIDHeaderKey: "test-req-id",
+						":path":                      "/v1/completions",
+					},
+				},
+			}
+			if tt.preferValue != "" {
+				reqCtx.Request.Headers["prefer"] = tt.preferValue
+			}
+			body, err := json.Marshal(map[string]any{"model": "m", "prompt": "p"})
+			require.NoError(t, err)
+			reqCtx.Request.RawBody = body
+
+			parseResult, err := openai.NewOpenAIParser().ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
+			require.NoError(t, err)
+
+			_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
+			if tt.wantErrCode == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			var e errcommon.Error
+			require.ErrorAs(t, err, &e)
+			assert.Equal(t, tt.wantErrCode, e.Code)
+		})
 	}
 }

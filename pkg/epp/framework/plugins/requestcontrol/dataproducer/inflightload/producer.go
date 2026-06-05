@@ -35,6 +35,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 const (
@@ -47,6 +48,11 @@ type Config struct {
 	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
 	// the in-flight token counter. Defaults to false.
 	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
+	// PrefixMatchInfoProducerName selects which prefix-cache producer's
+	// PrefixCacheMatchInfo to read for the cached-prefix discount. Empty defaults
+	// to the approximate-prefix producer; set it to a precise-prefix-cache
+	// producer's instance name to discount against precise cache state instead.
+	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
 }
 
 func defaultConfig() Config {
@@ -76,6 +82,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		tokenEstimator:           NewSimpleTokenEstimator(),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
+		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		PluginState:              fwkplugin.NewPluginState(ctx),
 	}, nil
 }
@@ -86,6 +93,7 @@ var (
 	_ requestcontrol.DataProducer          = &InFlightLoadProducer{}
 	_ datalayer.EndpointExtractor          = (*InFlightLoadProducer)(nil)
 	_ datalayer.Registrant                 = &InFlightLoadProducer{}
+	_ fwkplugin.ConsumerPlugin             = &InFlightLoadProducer{}
 )
 
 type InFlightLoadProducer struct {
@@ -96,6 +104,7 @@ type InFlightLoadProducer struct {
 	addEstimatedOutputTokens bool
 	PluginState              *fwkplugin.PluginState
 	dk                       fwkplugin.DataKey
+	prefixMatchInfoDK        fwkplugin.DataKey
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -274,7 +283,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 }
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, inputTokens int64) int64 {
-	adjustedInput := uncachedInputTokens(endpoint, inputTokens)
+	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK.String())
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
 		// Output tokens are based on the full input, not the cached portion.
@@ -388,19 +397,20 @@ func addedTokensKey(endpointID, profileName string) string {
 // uncachedInputTokens returns the prompt tokens this endpoint must actually compute,
 // excluding any prefix already cached on it.
 //
-// When the approximate prefix producer has populated PrefixCacheMatchInfo on the
-// endpoint, the matched and total block counts are in real (tokenized) units, so
-// we use them directly: uncached = (TotalBlocks - MatchBlocks) * BlockSizeTokens.
-// For very long prompts where the prefix index is capped (MaxPrefixTokensToMatch),
-// any tail beyond the cap is added back from the (estimated) inputTokens so the
-// full prompt cost is still reflected.
+// When the configured prefix producer (approximate or precise) has populated
+// PrefixCacheMatchInfo on the endpoint under prefixMatchInfoKey, the matched and
+// total block counts are in real (tokenized) units, so we use them directly:
+// uncached = (TotalBlocks - MatchBlocks) * BlockSizeTokens. For very long prompts
+// where the prefix index is capped (MaxPrefixTokensToMatch), any tail beyond the
+// cap is added back from the (estimated) inputTokens so the full prompt cost is
+// still reflected.
 //
 // When the attribute is missing, we fall back to the estimated inputTokens.
-func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64) int64 {
+func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMatchInfoKey string) int64 {
 	if endpoint == nil {
 		return nonNeg(inputTokens)
 	}
-	raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String())
+	raw, ok := endpoint.Get(prefixMatchInfoKey)
 	if !ok {
 		return nonNeg(inputTokens)
 	}
@@ -440,9 +450,20 @@ func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 	}
 }
 
-func (p *InFlightLoadProducer) Consumes() map[string]any {
-	return map[string]any{
-		attrprefix.PrefixCacheMatchInfoDataKey.String(): (*attrprefix.PrefixCacheMatchInfo)(nil),
+// Consumes declares TokenizedPrompt as required so the data-layer DAG orders a
+// token-producer ahead of this producer and auto-creates one when none is
+// configured; without it the input-token estimate silently reads zero.
+// PrefixCacheMatchInfo is optional — used to discount the already-cached prompt
+// prefix from the prefix producer selected by prefixMatchInfoProducerName
+// (approximate by default, or a precise-prefix-cache producer).
+func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{},
+		},
+		Optional: map[fwkplugin.DataKey]any{
+			p.prefixMatchInfoDK: attrprefix.PrefixCacheMatchInfo{},
+		},
 	}
 }
 

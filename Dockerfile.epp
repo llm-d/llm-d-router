@@ -6,13 +6,10 @@
 ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
 
 # Go build stage
-FROM --platform=${BUILDPLATFORM} quay.io/projectquay/golang:1.25 AS go-builder
+FROM --platform=${BUILDPLATFORM} golang:1.25.11 AS go-builder
 
 ARG TARGETOS
 ARG TARGETARCH
-ARG COMMIT_SHA=unknown
-ARG BUILD_REF
-ARG LDFLAGS="-s -w"
 
 WORKDIR /workspace
 
@@ -30,9 +27,15 @@ COPY internal/ internal/
 COPY pkg/      pkg/
 COPY version/  version/
 
-RUN go mod download
+# Precompile without version flags so commit-only changes can reuse the
+# expensive compile work from the Docker layer cache.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -o /dev/null cmd/epp/main.go
 
-# Build EPP
+# Build EPP with version metadata.
+ARG COMMIT_SHA=unknown
+ARG BUILD_REF
+ARG LDFLAGS="-s -w"
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags="${LDFLAGS} -X github.com/llm-d/llm-d-router/version.CommitSHA=${COMMIT_SHA} -X github.com/llm-d/llm-d-router/version.BuildRef=${BUILD_REF}" \
     -o bin/epp cmd/epp/main.go
