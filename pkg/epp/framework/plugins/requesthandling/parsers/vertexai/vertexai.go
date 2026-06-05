@@ -82,8 +82,15 @@ func (p *VertexAIParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *VertexAIParser) SupportedAppProtocols() []v1.AppProtocol {
-	return []v1.AppProtocol{v1.AppProtocolH2C}
+func (p *VertexAIParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
+		Paths: []string{
+			chatCompletionsMethod,
+			streamRawPredictServiceMethod,
+			rawPredictServiceMethod,
+		},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C},
+	}
 }
 
 func VertexAIParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {

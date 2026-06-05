@@ -171,8 +171,8 @@ schedulingProfiles:
       - pluginRef: queue-scorer
       - pluginRef: kv-cache-utilization-scorer
 requestHandler:
-  parser:
-    pluginRef: passthrough-parser
+  parsers:
+  - pluginRef: passthrough-parser
 dataLayer:
   sources:
   - pluginRef: mock-metrics-source

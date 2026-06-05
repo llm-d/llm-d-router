@@ -37,14 +37,14 @@ func validateConfig(cfg *configapi.EndpointPickerConfig) error {
 	if err := validateSaturationDetector(cfg); err != nil {
 		return fmt.Errorf("saturation detector validation failed: %w", err)
 	}
-	if err := validateParser(cfg); err != nil {
+	if err := validateParsers(cfg); err != nil {
 		return fmt.Errorf("parser validation failed: %w", err)
 	}
 	return nil
 }
 
-func validateParser(cfg *configapi.EndpointPickerConfig) error {
-	if cfg.RequestHandler == nil || cfg.RequestHandler.Parser == nil {
+func validateParsers(cfg *configapi.EndpointPickerConfig) error {
+	if cfg.RequestHandler == nil || len(cfg.RequestHandler.Parsers) == 0 {
 		return nil
 	}
 
@@ -53,8 +53,10 @@ func validateParser(cfg *configapi.EndpointPickerConfig) error {
 		definedPlugins.Insert(p.Name)
 	}
 
-	if !definedPlugins.Has(cfg.RequestHandler.Parser.PluginRef) {
-		return fmt.Errorf("parser references undefined plugin '%s'", cfg.RequestHandler.Parser.PluginRef)
+	for _, pc := range cfg.RequestHandler.Parsers {
+		if !definedPlugins.Has(pc.PluginRef) {
+			return fmt.Errorf("parser references undefined plugin '%s'", pc.PluginRef)
+		}
 	}
 
 	return nil

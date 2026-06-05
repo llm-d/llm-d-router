@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
@@ -259,7 +260,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: modelRewritten,
-							Weight:       100,
+							Weight:       ptr.To[int32](100),
 						},
 					},
 				},
@@ -972,7 +973,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: "model-a-old-tuned",
-							Weight:       100,
+							Weight:       ptr.To[int32](100),
 						},
 					},
 				},
@@ -998,7 +999,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: "model-a-new-tuned",
-							Weight:       100,
+							Weight:       ptr.To[int32](100),
 						},
 					},
 				},
@@ -1024,7 +1025,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: "model-b-tuned",
-							Weight:       100,
+							Weight:       ptr.To[int32](100),
 						},
 					},
 				},
@@ -1050,11 +1051,11 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: "model-c-v1",
-							Weight:       70,
+							Weight:       ptr.To[int32](70),
 						},
 						{
 							ModelRewrite: "model-c-v2",
-							Weight:       30,
+							Weight:       ptr.To[int32](30),
 						},
 					},
 				},
@@ -1124,7 +1125,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 				TargetModelName:   test.initialTarget,
 			}
 
-			director.applyWeightedModelRewrite(reqCtx)
+			director.applyWeightedModelRewrite(t.Context(), reqCtx)
 			assert.Contains(t, test.expectedTarget, reqCtx.TargetModelName, "TargetModelName mismatch")
 		})
 	}
@@ -1139,33 +1140,41 @@ func TestDirector_SelectWeightedModel(t *testing.T) {
 		{
 			name: "single target",
 			targets: []v1alpha2.TargetModel{
-				{ModelRewrite: "model-a", Weight: 100},
+				{ModelRewrite: "model-a", Weight: ptr.To[int32](100)},
 			},
 			possibleModels: sets.New("model-a"),
 		},
 		{
 			name: "multiple targets, equal weight",
 			targets: []v1alpha2.TargetModel{
-				{ModelRewrite: "model-a", Weight: 50},
-				{ModelRewrite: "model-b", Weight: 50},
+				{ModelRewrite: "model-a", Weight: ptr.To[int32](50)},
+				{ModelRewrite: "model-b", Weight: ptr.To[int32](50)},
 			},
 			possibleModels: sets.New("model-a", "model-b"),
 		},
 		{
 			name: "multiple targets, different weights",
 			targets: []v1alpha2.TargetModel{
-				{ModelRewrite: "model-x", Weight: 70},
-				{ModelRewrite: "model-y", Weight: 30},
+				{ModelRewrite: "model-x", Weight: ptr.To[int32](70)},
+				{ModelRewrite: "model-y", Weight: ptr.To[int32](30)},
 			},
 			possibleModels: sets.New("model-x", "model-y"),
 		},
 		{
-			name: "zero total weight, distribute evenly",
+			name: "omitted weights, distribute evenly",
 			targets: []v1alpha2.TargetModel{
-				{ModelRewrite: "model-z1", Weight: 0},
-				{ModelRewrite: "model-z2", Weight: 0},
+				{ModelRewrite: "model-z1"},
+				{ModelRewrite: "model-z2"},
 			},
 			possibleModels: sets.New("model-z1", "model-z2"),
+		},
+		{
+			name: "mixed weights select explicitly weighted targets",
+			targets: []v1alpha2.TargetModel{
+				{ModelRewrite: "model-without-weight"},
+				{ModelRewrite: "model-with-weight", Weight: ptr.To[int32](100)},
+			},
+			possibleModels: sets.New("model-with-weight"),
 		},
 	}
 
@@ -1177,7 +1186,7 @@ func TestDirector_SelectWeightedModel(t *testing.T) {
 			counter := make(map[string]int)
 			numRuns := 1000
 			for range numRuns {
-				selected := director.selectWeightedModel(test.targets)
+				selected := director.selectWeightedModel(t.Context(), test.targets)
 				counter[selected]++
 			}
 
@@ -1192,7 +1201,9 @@ func TestDirector_SelectWeightedModel(t *testing.T) {
 			if len(test.targets) > 1 {
 				totalWeight := int32(0)
 				for _, target := range test.targets {
-					totalWeight += target.Weight
+					if target.Weight != nil {
+						totalWeight += *target.Weight
+					}
 				}
 
 				if totalWeight == 0 { // Special case for zero total weight
@@ -1202,7 +1213,11 @@ func TestDirector_SelectWeightedModel(t *testing.T) {
 					}
 				} else {
 					for _, target := range test.targets {
-						expectedCount := float64(numRuns) * (float64(target.Weight) / float64(totalWeight))
+						if target.Weight == nil {
+							assert.Zero(t, counter[target.ModelRewrite], "Unweighted target %s should not be selected when other targets have weights", target.ModelRewrite)
+							continue
+						}
+						expectedCount := float64(numRuns) * (float64(*target.Weight) / float64(totalWeight))
 						assert.InDelta(t, expectedCount, float64(counter[target.ModelRewrite]), expectedCount*0.2, "Distribution for %s is off", target.ModelRewrite)
 					}
 				}

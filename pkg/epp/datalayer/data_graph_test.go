@@ -429,6 +429,42 @@ func TestCreateMissingDataProducers(t *testing.T) {
 	}
 }
 
+// TestCreateMissingDataProducers_Transitive verifies that a producer auto-created
+// to satisfy one consumer, which itself declares a Required dependency, triggers
+// creation of that second producer in the same call (transitive resolution).
+func TestCreateMissingDataProducers_Transitive(t *testing.T) {
+	typeOuter := "producer-outer"
+	typeInner := "producer-inner"
+	keyOuter := fwkplugin.NewDataKey("keyOuter", typeOuter)
+	keyInner := fwkplugin.NewDataKey("keyInner", typeInner)
+
+	// producer-outer produces keyOuter and itself requires keyInner.
+	outerFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{
+			name:     name,
+			produces: map[fwkplugin.DataKey]any{keyOuter: nil},
+			consumes: map[fwkplugin.DataKey]any{keyInner: nil},
+		}, nil
+	})
+	// producer-inner produces keyInner with no further dependencies.
+	innerFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{name: name, produces: map[fwkplugin.DataKey]any{keyInner: nil}}, nil
+	})
+
+	handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+	// Only a consumer of keyOuter is configured; neither producer is present.
+	handle.AddPlugin("consumer", &MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyOuter: nil}})
+
+	err := CreateMissingDataProducers(context.Background(),
+		map[string]string{keyOuter.String(): typeOuter, keyInner.String(): typeInner},
+		map[string]fwkplugin.FactoryFunc{typeOuter: outerFactory, typeInner: innerFactory},
+		handle)
+	assert.NoError(t, err)
+
+	assert.NotNil(t, handle.Plugin(typeOuter), "directly-needed producer should be auto-created")
+	assert.NotNil(t, handle.Plugin(typeInner), "transitive dependency should be auto-created in the same call")
+}
+
 // mockMayConsumerPlugin is a plugin that only optionally consumes certain data keys.
 type mockMayConsumerPlugin struct {
 	name             string

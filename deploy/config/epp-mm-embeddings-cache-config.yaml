@@ -12,7 +12,7 @@ plugins:
   - type: core-metrics-extractor
   - type: mm-embeddings-cache-producer
     parameters:
-      cacheSize: 10000
+      cacheSizeInMB: 2048
   - type: mm-embeddings-cache-scorer
   - type: precise-prefix-cache-scorer
     parameters:
