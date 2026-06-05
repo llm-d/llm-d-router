@@ -137,6 +137,34 @@ var (
 		},
 		modelLabels,
 	)
+
+	llmdRequestTTFT = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "request_ttft_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Time to first token in seconds, measured from request received to first response byte.", compbasemetrics.ALPHA),
+			Buckets: []float64{
+				0.005, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2, 3, 4, 5, 6,
+				8, 10, 15, 20, 30, 45, 60, 120, 180, 240, 300, 360, 480, 600, 900, 1200,
+				1800, 2700, 3600,
+			},
+		},
+		modelLabels,
+	)
+
+	llmdRequestTPOT = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "request_tpot_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Average time per output token in seconds, computed as (e2e - TTFT) / (output_tokens - 1).", compbasemetrics.ALPHA),
+			Buckets: []float64{
+				0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.125, 0.15, 0.2,
+				0.3, 0.4, 0.5, 0.6, 0.8, 1, 1.5, 2, 3, 4.5, 6, 12, 18, 24, 30, 36, 48, 60,
+				90, 120, 180, 270, 360,
+			},
+		},
+		modelLabels,
+	)
 )
 
 // --- llm-d Inference Pool Metrics ---
