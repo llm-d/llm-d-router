@@ -390,3 +390,40 @@ func TestEstimateBackend_NonChatNoFeatures(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, tp.MultiModalFeatures, "non-chat features should be nil")
 }
+
+// TestEstimateBackend_MultiStringCompletionsPopulatesPerPromptTokens asserts
+// that a multi-string completions prompt estimates each string independently
+// and populates PerPromptTokens.
+func TestEstimateBackend_MultiStringCompletionsPopulatesPerPromptTokens(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{
+			Prompt: fwkrh.Prompt{Strings: []string{"hello world", "foo bar"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if len(tp.PerPromptTokens) != 2 {
+		t.Fatalf("PerPromptTokens: got %d prompts, want 2", len(tp.PerPromptTokens))
+	}
+	if len(tp.TokenIDs) != len(tp.PerPromptTokens[0])+len(tp.PerPromptTokens[1]) {
+		t.Errorf("flat TokenIDs length %d != sum of per-prompt lengths %d+%d",
+			len(tp.TokenIDs), len(tp.PerPromptTokens[0]), len(tp.PerPromptTokens[1]))
+	}
+}
+
+// TestEstimateBackend_SingleStringCompletionsNoPerPromptTokens asserts that a
+// single-element string array does not set PerPromptTokens.
+func TestEstimateBackend_SingleStringCompletionsNoPerPromptTokens(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{
+			Prompt: fwkrh.Prompt{Strings: []string{"hello world"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if tp.PerPromptTokens != nil {
+		t.Errorf("single-string prompt should not set PerPromptTokens, got %v", tp.PerPromptTokens)
+	}
+}

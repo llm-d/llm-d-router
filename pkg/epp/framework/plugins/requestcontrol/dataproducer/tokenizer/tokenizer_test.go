@@ -240,6 +240,25 @@ func TestRenderBackend_CompletionsArrayRendersPerPrompt(t *testing.T) {
 	require.Len(t, tp.PerPromptTokens, 2)
 }
 
+func TestRenderBackend_CompletionsSingleArrayUsesPlainText(t *testing.T) {
+	var got string
+	tok := &mockTokenizer{
+		renderFunc: func(payload fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error) {
+			pm, ok := payload.AsMap()
+			require.True(t, ok)
+			got, _ = pm["prompt"].(string)
+			return []uint32{1}, nil, nil
+		},
+	}
+	tp, err := renderBackend{tk: tok}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Strings: []string{"alpha beta"}}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "alpha beta", got)
+	assert.Equal(t, []uint32{1}, tp.TokenIDs)
+	assert.Nil(t, tp.PerPromptTokens)
+}
+
 func TestProduce_NilBody(t *testing.T) {
 	p := newTestPlugin(&mockTokenizer{})
 	req := &scheduling.InferenceRequest{}
@@ -458,8 +477,9 @@ func TestProduce_StringArrayPrompt(t *testing.T) {
 
 func TestProduce_StringArrayPromptFailsOpenOnPartialRenderError(t *testing.T) {
 	tok := &mockTokenizer{
-		renderFunc: func(prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
-			switch prompt {
+		renderFunc: func(payload fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error) {
+			pm, _ := payload.AsMap()
+			switch pm["prompt"] {
 			case "hello":
 				return []uint32{10, 20, 30}, nil, nil
 			case "broken":
@@ -486,7 +506,7 @@ func TestProduce_StringArrayPromptFailsOpenOnPartialRenderError(t *testing.T) {
 
 func TestProduce_StringArrayPromptDoesNotPublishEmptyTokenResult(t *testing.T) {
 	tok := &mockTokenizer{
-		renderFunc: func(_ string) ([]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(_ fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error) {
 			return nil, nil, nil
 		},
 	}

@@ -118,10 +118,10 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 							Strings: []string{"hello world", "foo bar baz"},
 						},
 					},
+					TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, 5)},
 				},
 			},
-			// PlainText() = "hello world foo bar baz" = 23 chars / 4 = 5
-			wantMin: 5,
+			want: 5,
 		},
 		{
 			name:     "empty completions prompt",
