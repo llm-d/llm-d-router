@@ -360,49 +360,32 @@ type timeoutAwareMockPlugin struct {
 
 func (p *timeoutAwareMockPlugin) ProduceTimeout() time.Duration { return p.timeout }
 
-func TestEffectiveDataProducerTimeout(t *testing.T) {
+func TestProducerTimeout(t *testing.T) {
 	testCases := []struct {
-		name    string
-		plugins []fwkrc.DataProducer
-		want    time.Duration
+		name string
+		p    fwkrc.DataProducer
+		want time.Duration
 	}{
 		{
-			name: "no producers uses default",
+			name: "producer without timeout awareness uses default",
+			p:    &executorMockDataProducerPlugin{name: "p1"},
 			want: dataProducerTimeout,
 		},
 		{
-			name:    "producer without timeout awareness uses default",
-			plugins: []fwkrc.DataProducer{&executorMockDataProducerPlugin{name: "p1"}},
-			want:    dataProducerTimeout,
-		},
-		{
-			name: "aware producer with a longer timeout overrides the default",
-			plugins: []fwkrc.DataProducer{
-				&timeoutAwareMockPlugin{executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "tok"}, timeout: 30 * time.Second},
-			},
+			name: "declared timeout overrides the default",
+			p:    &timeoutAwareMockPlugin{executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "tok"}, timeout: 30 * time.Second},
 			want: 30 * time.Second,
 		},
 		{
-			name: "aware producer with a shorter timeout does not lower the default",
-			plugins: []fwkrc.DataProducer{
-				&timeoutAwareMockPlugin{executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "fast"}, timeout: 10 * time.Millisecond},
-			},
+			name: "non-positive declared timeout uses default",
+			p:    &timeoutAwareMockPlugin{executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "zero"}, timeout: 0},
 			want: dataProducerTimeout,
-		},
-		{
-			name: "largest declared timeout wins across producers",
-			plugins: []fwkrc.DataProducer{
-				&timeoutAwareMockPlugin{executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "a"}, timeout: 5 * time.Second},
-				&executorMockDataProducerPlugin{name: "b"},
-				&timeoutAwareMockPlugin{executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "c"}, timeout: 30 * time.Second},
-			},
-			want: 30 * time.Second,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, effectiveDataProducerTimeout(tc.plugins))
+			assert.Equal(t, tc.want, producerTimeout(tc.p))
 		})
 	}
 }

@@ -74,10 +74,8 @@ type DataProducer interface {
 }
 
 // TimeoutAwareProducer is an optional interface a DataProducer may implement to
-// raise the data-producer execution deadline above the director's default. A
-// producer whose work can legitimately exceed it. returns the timeout it already
-// manages internally; the director uses the largest value declared across producers.
-// A non-positive value keeps the default.
+// declare its own execution timeout, overriding the default. A non-positive
+// value selects the default.
 type TimeoutAwareProducer interface {
 	ProduceTimeout() time.Duration
 }

@@ -38,21 +38,15 @@ func executePluginsAsDAG(ctx context.Context, plugins []fwkrc.DataProducer, requ
 	return nil
 }
 
-// effectiveDataProducerTimeout returns the default data-producer budget
-// (dataProducerTimeout), raised to the largest timeout any producer declares
-// via TimeoutAwareProducer. A producer whose work has a higher latency profile
-// (e.g. the token-producer's render/tokenize, including multimodal input
-// download) thus overrides the default for the whole batch.
-func effectiveDataProducerTimeout(plugins []fwkrc.DataProducer) time.Duration {
-	timeout := dataProducerTimeout
-	for _, p := range plugins {
-		if tp, ok := p.(fwkrc.TimeoutAwareProducer); ok {
-			if pt := tp.ProduceTimeout(); pt > timeout {
-				timeout = pt
-			}
+// producerTimeout returns the producer's declared timeout when it implements
+// TimeoutAwareProducer with a positive value, otherwise dataProducerTimeout.
+func producerTimeout(p fwkrc.DataProducer) time.Duration {
+	if tp, ok := p.(fwkrc.TimeoutAwareProducer); ok {
+		if t := tp.ProduceTimeout(); t > 0 {
+			return t
 		}
 	}
-	return timeout
+	return dataProducerTimeout
 }
 
 // dataProducerPluginsWithTimeout executes DataProducer plugins with a timeout.

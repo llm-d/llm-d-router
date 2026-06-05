@@ -54,9 +54,8 @@ import (
 )
 
 const (
-	// dataProducerTimeout is the default budget for running all DataProducer
-	// plugins. A producer whose work has a higher latency profile overrides it
-	// by implementing requestcontrol.TimeoutAwareProducer.
+	// dataProducerTimeout is the default per-producer execution timeout. A
+	// producer overrides it by implementing requestcontrol.TimeoutAwareProducer.
 	dataProducerTimeout       = 400 * time.Millisecond
 	responseBodyQueueCapacity = 100
 )
@@ -607,7 +606,14 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 	if len(plugins) == 0 {
 		return nil
 	}
-	return dataProducerPluginsWithTimeout(ctx, effectiveDataProducerTimeout(plugins), plugins, request, endpoints)
+	// Each producer runs under its own timeout so a slow one does not extend the
+	// budget of the others.
+	for _, p := range plugins {
+		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *Director) runAdmissionPlugins(ctx context.Context,
