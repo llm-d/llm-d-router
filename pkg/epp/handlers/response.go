@@ -18,6 +18,7 @@ package handlers
 
 import (
 	"context"
+	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -49,6 +50,10 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 
 	reqCtx.ResponseSize += len(responseBytes)
 
+	if reqCtx.FirstTokenTimestamp.IsZero() && len(responseBytes) > 0 {
+		reqCtx.FirstTokenTimestamp = time.Now()
+	}
+
 	var parsedResp *fwkrh.ParsedResponse
 	parser, err := s.getOrResolveParser(ctx, reqCtx)
 	if err != nil {
@@ -71,6 +76,8 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
 		metrics.RecordRequestLatencies(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp)
 		metrics.RecordResponseSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.ResponseSize)
+		metrics.RecordRequestTTFT(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestReceivedTimestamp, reqCtx.FirstTokenTimestamp)
+		metrics.RecordRequestTPOT(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestReceivedTimestamp, reqCtx.FirstTokenTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
 	}
 	return s.director.HandleResponseBody(ctx, reqCtx, endOfStream)
 }
