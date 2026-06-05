@@ -113,7 +113,7 @@ type RequestContext struct {
 	ObjectiveKey              string
 	Priority                  int
 	RequestReceivedTimestamp  time.Time
-	FirstTokenTimestamp      time.Time
+	FirstTokenTimestamp       time.Time
 	ResponseCompleteTimestamp time.Time
 	RequestSize               int
 	Usage                     fwkrh.Usage
