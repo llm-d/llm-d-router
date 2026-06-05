@@ -60,10 +60,45 @@ func TestInFlightLoadProducer_Consumes(t *testing.T) {
 	// token-producer and orders it ahead of this producer; without it the input
 	// token estimate silently reads zero.
 	require.Contains(t, deps.Required, tokenproducer.TokenizedPromptDataKey)
-	// PrefixCacheMatchInfo is optional: consumed for the cached-prefix discount
-	// when an approximate-prefix producer is present, absent otherwise.
+	// PrefixCacheMatchInfo is optional: consumed for the cached-prefix discount.
+	// With no prefixMatchInfoProducerName set, it defaults to the approximate
+	// producer's key.
 	require.Contains(t, deps.Optional, attrprefix.PrefixCacheMatchInfoDataKey)
 	require.NotContains(t, deps.Required, attrprefix.PrefixCacheMatchInfoDataKey)
+}
+
+// prefixMatchInfoProducerName selects which prefix producer (approximate or
+// precise) feeds the cached-prefix discount, by both the optional dependency key
+// and the runtime read.
+func TestInFlightLoadProducer_PrefixMatchInfoProducerName(t *testing.T) {
+	t.Parallel()
+
+	const preciseName = "precise-prefix-cache-producer"
+	raw, err := json.Marshal(Config{PrefixMatchInfoProducerName: preciseName})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	p, err := InFlightLoadProducerFactory("inflight-load-producer",
+		json.NewDecoder(bytes.NewReader(raw)), igwtestutils.NewTestHandle(ctx))
+	require.NoError(t, err)
+	producer := p.(*InFlightLoadProducer)
+
+	preciseKey := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(preciseName)
+
+	// The optional dependency points at the configured precise producer, not approx.
+	require.Contains(t, producer.Consumes().Optional, preciseKey)
+	require.NotContains(t, producer.Consumes().Optional, attrprefix.PrefixCacheMatchInfoDataKey)
+
+	// The discount reads PrefixCacheMatchInfo from the configured producer's key
+	// (indexed 2*4=8, matched 1*4=4 -> uncached 4).
+	hit := newStubSchedulingEndpoint("ep-hit")
+	hit.Put(preciseKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	require.Equal(t, int64(4), producer.estimateRequestTokens(hit, 5))
+
+	// Data under the approx (default) key is ignored, so it falls back to inputTokens.
+	miss := newStubSchedulingEndpoint("ep-miss")
+	miss.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	require.Equal(t, int64(5), producer.estimateRequestTokens(miss, 5))
 }
 
 func TestInFlightLoadProducer_Produce(t *testing.T) {
@@ -603,7 +638,7 @@ func TestUncachedInputTokens_Overestimate(t *testing.T) {
 
 	inputTokens := int64(5)
 
-	uncached := uncachedInputTokens(endpoint, inputTokens)
+	uncached := uncachedInputTokens(endpoint, inputTokens, attrprefix.PrefixCacheMatchInfoDataKey.String())
 
 	// When the prefix cache says 4 tokens are definitely uncached in the indexed portion (8-4),
 	// we trust that over the smaller (approximate) estimate of 5.
