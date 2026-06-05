@@ -35,6 +35,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
@@ -48,6 +49,21 @@ func newTestProducer(t testing.TB) *InFlightLoadProducer {
 	p, err := InFlightLoadProducerFactory("inflight-load-producer", decoder, igwtestutils.NewTestHandle(ctx))
 	require.NoError(t, err)
 	return p.(*InFlightLoadProducer)
+}
+
+func TestInFlightLoadProducer_Consumes(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestProducer(t).Consumes()
+
+	// TokenizedPrompt is required so the data-layer DAG auto-creates a
+	// token-producer and orders it ahead of this producer; without it the input
+	// token estimate silently reads zero.
+	require.Contains(t, deps.Required, tokenproducer.TokenizedPromptDataKey)
+	// PrefixCacheMatchInfo is optional: consumed for the cached-prefix discount
+	// when an approximate-prefix producer is present, absent otherwise.
+	require.Contains(t, deps.Optional, attrprefix.PrefixCacheMatchInfoDataKey)
+	require.NotContains(t, deps.Required, attrprefix.PrefixCacheMatchInfoDataKey)
 }
 
 func TestInFlightLoadProducer_Produce(t *testing.T) {

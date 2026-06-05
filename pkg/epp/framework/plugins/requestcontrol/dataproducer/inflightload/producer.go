@@ -35,6 +35,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 const (
@@ -86,6 +87,7 @@ var (
 	_ requestcontrol.DataProducer          = &InFlightLoadProducer{}
 	_ datalayer.EndpointExtractor          = (*InFlightLoadProducer)(nil)
 	_ datalayer.Registrant                 = &InFlightLoadProducer{}
+	_ fwkplugin.ConsumerPlugin             = &InFlightLoadProducer{}
 )
 
 type InFlightLoadProducer struct {
@@ -440,9 +442,19 @@ func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 	}
 }
 
-func (p *InFlightLoadProducer) Consumes() map[string]any {
-	return map[string]any{
-		attrprefix.PrefixCacheMatchInfoDataKey.String(): (*attrprefix.PrefixCacheMatchInfo)(nil),
+// Consumes declares TokenizedPrompt as required so the data-layer DAG orders a
+// token-producer ahead of this producer and auto-creates one when none is
+// configured; without it the input-token estimate silently reads zero.
+// PrefixCacheMatchInfo is optional — used to discount the already-cached prompt
+// prefix when an approximate-prefix producer is present.
+func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{},
+		},
+		Optional: map[fwkplugin.DataKey]any{
+			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
+		},
 	}
 }
 
