@@ -21,6 +21,7 @@ import (
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
@@ -31,29 +32,70 @@ type kvCacheIndexer interface {
 	KVBlockIndex() kvblock.Index
 }
 
-// computeBlockKeys hashes the request's TokenizedPrompt into KV-block keys,
-// passing any multimodal features into the block-extra-features computation
-// so MM tokens land in the right blocks. A non-empty CacheSalt is folded into
-// the first block's extra keys so salted prompts get isolated keys. Returns
-// (nil, nil) when the request carries no tokens.
+// computeBlockKeys hashes the request's TokenizedPrompt into KV-block keys.
+// When PerPromptTokens has more than one entry (multi-prompt completions),
+// each prompt is hashed independently so cross-prompt block adjacency (which
+// never exists in the model server cache) is avoided. Single-prompt requests
+// produce a length-1 outer slice. A non-empty CacheSalt is folded into each
+// prompt's first block. Returns nil when the request carries no tokens or no
+// prompt produces full KV blocks.
 func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	request *scheduling.InferenceRequest, blockSizeTokens int,
-) ([]kvblock.BlockHash, error) {
+) ([][]kvblock.BlockHash, error) {
 	if request == nil || request.Body == nil {
 		return nil, nil
 	}
 	tp := request.Body.TokenizedPrompt
-	if tp == nil || len(tp.TokenIDs) == 0 {
+	if tp == nil {
 		return nil, nil
 	}
-	var extraFeatures []*kvblock.BlockExtraFeatures
-	if len(tp.MultiModalFeatures) > 0 {
-		mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(tp.MultiModalFeatures)
-		extraFeatures = kvblock.ComputeBlockExtraFeatures(
-			mmHashes, mmPlaceholders, blockSizeTokens, len(tp.TokenIDs))
+
+	// Multi-prompt: score each prompt independently.
+	if len(tp.PerPromptTokens) > 1 {
+		var result [][]kvblock.BlockHash
+		for _, tokens := range tp.PerPromptTokens {
+			if len(tokens) == 0 {
+				continue
+			}
+			// MM features are nil: multi-prompt completions don't carry multimodal content.
+			keys, err := computeBlockKeysForTokens(ctx, idx, tokens, nil, tp.CacheSalt, request.TargetModel, blockSizeTokens)
+			if err != nil {
+				return nil, err
+			}
+			if len(keys) == 0 {
+				continue
+			}
+			result = append(result, keys)
+		}
+		return result, nil
 	}
-	extraFeatures = foldCacheSalt(extraFeatures, tp.CacheSalt, len(tp.TokenIDs)/blockSizeTokens)
-	return idx.ComputeBlockKeysFromTokens(ctx, tp.TokenIDs, request.TargetModel, extraFeatures)
+
+	// Single prompt.
+	if len(tp.TokenIDs) == 0 {
+		return nil, nil
+	}
+	tokens := tp.TokenIDs
+	keys, err := computeBlockKeysForTokens(ctx, idx, tokens, tp.MultiModalFeatures, tp.CacheSalt, request.TargetModel, blockSizeTokens)
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	return [][]kvblock.BlockHash{keys}, nil
+}
+
+func computeBlockKeysForTokens(ctx context.Context, idx kvCacheIndexer,
+	tokens []uint32, mmFeatures []fwkrh.MultiModalFeature, cacheSalt, model string, blockSizeTokens int,
+) ([]kvblock.BlockHash, error) {
+	var extraFeatures []*kvblock.BlockExtraFeatures
+	if len(mmFeatures) > 0 {
+		mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(mmFeatures)
+		extraFeatures = kvblock.ComputeBlockExtraFeatures(
+			mmHashes, mmPlaceholders, blockSizeTokens, len(tokens))
+	}
+	extraFeatures = foldCacheSalt(extraFeatures, cacheSalt, len(tokens)/blockSizeTokens)
+	return idx.ComputeBlockKeysFromTokens(ctx, tokens, model, extraFeatures)
 }
 
 // foldCacheSalt appends the cache salt to the first block's extra keys, after

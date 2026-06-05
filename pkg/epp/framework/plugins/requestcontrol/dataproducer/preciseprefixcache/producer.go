@@ -238,33 +238,52 @@ func (p *Producer) Produce(ctx context.Context,
 		}
 	}
 
-	logger := log.FromContext(ctx).WithName(p.typedName.String())
-
-	blockKeys, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, p.blockSizeTokens)
+	perPromptKeys, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, p.blockSizeTokens)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("failed to compute block keys: %w", err)
 	}
-	if len(blockKeys) == 0 {
+	if len(perPromptKeys) == 0 {
 		span.SetAttributes(attribute.String("llm_d.producer.result", "skipped_no_tokens"))
 		return nil
 	}
 
+	return p.produceFromBlockKeys(ctx, span, request, endpoints, perPromptKeys)
+}
+
+func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
+	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
+	perPromptKeys [][]kvblock.BlockHash,
+) error {
+	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	endpointSet := extractEndpointSet(endpoints)
 
-	keyToPods, err := p.kvCacheIndexer.KVBlockIndex().Lookup(ctx, blockKeys, endpointSet)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("failed to lookup block keys: %w", err)
+	type promptLookup struct {
+		keys      []kvblock.BlockHash
+		keyToPods map[kvblock.BlockHash][]kvblock.PodEntry
 	}
 
-	scores, err := p.kvBlockScorer.Score(ctx, blockKeys, keyToPods)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("failed to score block keys: %w", err)
+	aggregatedScores := make(map[string]float64)
+	totalBlocks := 0
+	lookups := make([]promptLookup, 0, len(perPromptKeys))
+	for _, blockKeys := range perPromptKeys {
+		keyToPods, err := p.kvCacheIndexer.KVBlockIndex().Lookup(ctx, blockKeys, endpointSet)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return fmt.Errorf("failed to lookup block keys: %w", err)
+		}
+		scores, err := p.kvBlockScorer.Score(ctx, blockKeys, keyToPods)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return fmt.Errorf("failed to score block keys: %w", err)
+		}
+		for pod, score := range scores {
+			aggregatedScores[pod] += score
+		}
+		totalBlocks += len(blockKeys)
+		lookups = append(lookups, promptLookup{keys: blockKeys, keyToPods: keyToPods})
 	}
 
-	totalBlocks := len(blockKeys)
 	maxMatch := 0
 	for _, ep := range endpoints {
 		md := ep.GetMetadata()
@@ -272,18 +291,21 @@ func (p *Producer) Produce(ctx context.Context,
 			continue
 		}
 		addr := fmt.Sprintf("%s:%s", md.Address, md.Port)
-		matchLen := int(scores[addr])
+		matchLen := int(aggregatedScores[addr])
 		if matchLen > maxMatch {
 			maxMatch = matchLen
 		}
-		cachedBlocks := matchedBlockCount(blockKeys, keyToPods, addr)
+		cachedBlocks := 0
+		for _, lu := range lookups {
+			cachedBlocks += matchedBlockCount(lu.keys, lu.keyToPods, addr)
+		}
 		ep.Put(p.dk.String(),
 			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).WithCachedBlockCount(cachedBlocks))
 	}
 
 	if p.speculativeEnabled {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,
-			&blockKeysState{blockKeys: blockKeys})
+			&blockKeysState{perPromptKeys: perPromptKeys})
 	}
 
 	span.SetAttributes(
@@ -292,6 +314,6 @@ func (p *Producer) Produce(ctx context.Context,
 	)
 
 	logger.V(logging.TRACE).Info("Produce completed",
-		"blockKeys", totalBlocks, "scores", scores)
+		"blockKeys", totalBlocks, "scores", aggregatedScores)
 	return nil
 }

@@ -19,6 +19,7 @@ package preciseprefixcache
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -48,15 +49,20 @@ type speculativeEntries struct {
 
 // blockKeysState carries the block keys computed in Produce to PreRequest
 // via PluginState, avoiding a second hash on the same request.
+// perPromptKeys holds one slice of block keys per prompt; single-prompt
+// requests use a length-1 outer slice.
 type blockKeysState struct {
-	blockKeys []kvblock.BlockHash
+	perPromptKeys [][]kvblock.BlockHash
 }
 
 // Clone implements plugin.StateData.
 func (s *blockKeysState) Clone() plugin.StateData {
-	cp := make([]kvblock.BlockHash, len(s.blockKeys))
-	copy(cp, s.blockKeys)
-	return &blockKeysState{blockKeys: cp}
+	cp := make([][]kvblock.BlockHash, len(s.perPromptKeys))
+	for i, keys := range s.perPromptKeys {
+		cp[i] = make([]kvblock.BlockHash, len(keys))
+		copy(cp[i], keys)
+	}
+	return &blockKeysState{perPromptKeys: cp}
 }
 
 // buildSpeculativeCache constructs the TTL cache used to evict speculative
@@ -129,7 +135,8 @@ func (p *Producer) PreRequest(ctx context.Context,
 	}
 	p.pluginState.Delete(request.RequestID)
 
-	if len(state.blockKeys) == 0 {
+	allBlockKeys := slices.Concat(state.perPromptKeys...)
+	if len(allBlockKeys) == 0 {
 		return
 	}
 
@@ -148,10 +155,12 @@ func (p *Producer) PreRequest(ctx context.Context,
 	}
 
 	index := p.kvCacheIndexer.KVBlockIndex()
-	// nil engineKeys: confirmed KV events will fill them in.
-	if err := index.Add(ctx, nil, state.blockKeys, []kvblock.PodEntry{speculativePod}); err != nil {
-		logger.Error(err, "Failed to add speculative entries to index",
-			"pod", speculativePod.PodIdentifier)
+	// Insert per-prompt keys separately to preserve correct block adjacency.
+	for _, promptKeys := range state.perPromptKeys {
+		if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{speculativePod}); err != nil {
+			logger.Error(err, "Failed to add speculative entries to index",
+				"pod", speculativePod.PodIdentifier)
+		}
 	}
 
 	allPodEntries := []kvblock.PodEntry{speculativePod}
@@ -163,22 +172,24 @@ func (p *Producer) PreRequest(ctx context.Context,
 				PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
 				Speculative:   true,
 			}
-			if err := index.Add(ctx, nil, state.blockKeys, []kvblock.PodEntry{prefillPod}); err != nil {
-				logger.Error(err, "Failed to add speculative entries for prefill endpoint",
-					"pod", prefillPod.PodIdentifier)
+			for _, promptKeys := range state.perPromptKeys {
+				if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{prefillPod}); err != nil {
+					logger.Error(err, "Failed to add speculative entries for prefill endpoint",
+						"pod", prefillPod.PodIdentifier)
+				}
 			}
 			allPodEntries = append(allPodEntries, prefillPod)
 		}
 	}
 
 	p.speculativeCache.Set(request.RequestID, &speculativeEntries{
-		blockKeys:  state.blockKeys,
+		blockKeys:  allBlockKeys,
 		podEntries: allPodEntries,
 	}, p.speculativeTTL)
 
 	logger.V(logging.TRACE).Info("Added speculative entries",
 		"requestID", request.RequestID,
 		"pod", speculativePod.PodIdentifier,
-		"blockKeys", len(state.blockKeys),
+		"blockKeys", len(allBlockKeys),
 		"ttl", p.speculativeTTL)
 }

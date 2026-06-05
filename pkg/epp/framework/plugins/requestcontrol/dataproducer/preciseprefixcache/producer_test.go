@@ -110,6 +110,23 @@ var testEndpoints = []scheduling.Endpoint{
 
 const testBlockSize = 16
 
+func freshEndpoints() []scheduling.Endpoint {
+	return []scheduling.Endpoint{
+		scheduling.NewEndpoint(
+			&fwkdl.EndpointMetadata{
+				NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
+				Address:        "10.0.0.1",
+				Port:           "8080",
+			}, nil, nil),
+		scheduling.NewEndpoint(
+			&fwkdl.EndpointMetadata{
+				NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
+				Address:        "10.0.0.2",
+				Port:           "8080",
+			}, nil, nil),
+	}
+}
+
 func newProducerWithIndexer(ctx context.Context, idx kvCacheIndexer, scorer kvcache.KVBlockScorer) *Producer {
 	return &Producer{
 		typedName:       plugin.TypedName{Type: PluginType, Name: "test"},
@@ -221,6 +238,128 @@ func TestProduce_EmptyTokenizedPrompt_NoOp(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(ctx, req, testEndpoints))
+}
+
+func TestProduce_MultiPromptEmptyBlockKeys_NoOp(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+
+	promptA := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
+	promptB := []uint32{9, 10, 11, 12, 13, 14, 15, 16}
+	tokenIDs := append(append([]uint32{}, promptA...), promptB...)
+
+	var computeCalls [][]uint32
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, ts []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			computeCalls = append(computeCalls, append([]uint32{}, ts...))
+			if len(ts) >= testBlockSize {
+				return []kvblock.BlockHash{0xABCD}, nil
+			}
+			return nil, nil
+		},
+		index: &fakeKVBlockIndex{
+			lookup: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+				t.Fatalf("Lookup must not be called when no prompt produces block keys")
+				return nil, assert.AnError
+			},
+		},
+	}
+	scorer := &fakeKVBlockScorer{
+		score: func(_ context.Context, _ []kvblock.BlockHash, _ map[kvblock.BlockHash][]kvblock.PodEntry) (map[string]float64, error) {
+			t.Fatalf("Score must not be called when no prompt produces block keys")
+			return nil, assert.AnError
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx, scorer)
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-multi-empty",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				TokenIDs:        tokenIDs,
+				PerPromptTokens: [][]uint32{promptA, promptB},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+	require.Equal(t, [][]uint32{promptA, promptB}, computeCalls)
+
+	_, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	assert.False(t, ok)
+}
+
+func TestProduce_MultiPromptSkipsEmptyPromptKeys(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+
+	shortPrompt := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
+	fullPrompt := []uint32{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35}
+	tokenIDs := append(append([]uint32{}, shortPrompt...), fullPrompt...)
+	wantKey := kvblock.BlockHash(0xCAFE)
+
+	var computeCalls [][]uint32
+	var lookupCalls [][]kvblock.BlockHash
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, ts []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			computeCalls = append(computeCalls, append([]uint32{}, ts...))
+			switch {
+			case len(ts) == len(shortPrompt):
+				return nil, nil
+			case len(ts) == len(fullPrompt):
+				return []kvblock.BlockHash{wantKey}, nil
+			default:
+				t.Fatalf("unexpected flat token lookup with %d tokens", len(ts))
+				return nil, nil
+			}
+		},
+		index: &fakeKVBlockIndex{
+			lookup: func(_ context.Context, keys []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+				require.NotEmpty(t, keys)
+				lookupCalls = append(lookupCalls, append([]kvblock.BlockHash{}, keys...))
+				return map[kvblock.BlockHash][]kvblock.PodEntry{
+					wantKey: {{PodIdentifier: "10.0.0.1:8080"}},
+				}, nil
+			},
+		},
+	}
+	scorer := &fakeKVBlockScorer{
+		score: func(_ context.Context, keys []kvblock.BlockHash, _ map[kvblock.BlockHash][]kvblock.PodEntry) (map[string]float64, error) {
+			require.Equal(t, []kvblock.BlockHash{wantKey}, keys)
+			return map[string]float64{"10.0.0.1:8080": 1.0}, nil
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx, scorer)
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-multi-mixed",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				TokenIDs:        tokenIDs,
+				PerPromptTokens: [][]uint32{shortPrompt, fullPrompt},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+	require.Equal(t, [][]uint32{shortPrompt, fullPrompt}, computeCalls)
+	require.Equal(t, [][]kvblock.BlockHash{{wantKey}}, lookupCalls)
+
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	require.True(t, ok)
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+	assert.Equal(t, 1, info.MatchBlocks())
+	assert.Equal(t, 1, info.TotalBlocks())
+
+	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	require.True(t, ok)
+	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+	assert.Equal(t, 0, info.MatchBlocks())
+	assert.Equal(t, 1, info.TotalBlocks())
 }
 
 // Multimodal features flow through to ComputeBlockKeysFromTokens.
