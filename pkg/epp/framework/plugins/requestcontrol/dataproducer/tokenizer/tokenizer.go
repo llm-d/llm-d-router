@@ -196,11 +196,15 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		backend = estimateBackend{img: newImageEstimator(config.Estimate)}
 	}
 
-	return &Plugin{
+	p := &Plugin{
 		typedName: plugin.TypedName{Type: PluginType, Name: name},
 		backend:   backend,
 		dk:        TokenizedPromptDataKey.WithNonEmptyProducerName(name),
-	}, nil
+	}
+	if w, ok := backend.(warmer); ok {
+		go w.warmup(ctx)
+	}
+	return p, nil
 }
 
 // Plugin tokenizes the prompt in the incoming request and writes the result to
