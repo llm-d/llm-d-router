@@ -111,13 +111,21 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) (pluginStateDebugRespon
 		}
 		state, err := dumper.DumpState()
 		if err != nil {
-			return pluginStateDebugResponse{}, fmt.Errorf("plugin %q failed to dump state: %w", name, err)
+			response.Plugins[name] = pluginStateDebugEntry{
+				Type:    plugin.TypedName().Type,
+				Message: fmt.Sprintf("failed to dump plugin state: %v", err),
+			}
+			continue
 		}
 		if len(state) == 0 {
 			state = json.RawMessage("null")
 		}
 		if !json.Valid(state) {
-			return pluginStateDebugResponse{}, fmt.Errorf("plugin %q returned invalid JSON state", name)
+			response.Plugins[name] = pluginStateDebugEntry{
+				Type:    plugin.TypedName().Type,
+				Message: "plugin returned invalid JSON state",
+			}
+			continue
 		}
 		response.Plugins[name] = pluginStateDebugEntry{
 			Type:  plugin.TypedName().Type,

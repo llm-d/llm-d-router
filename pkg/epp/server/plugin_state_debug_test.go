@@ -104,17 +104,29 @@ func TestPluginStateDebugHandlerRejectsNonGet(t *testing.T) {
 	require.Equal(t, http.MethodGet, recorder.Header().Get("Allow"))
 }
 
-func TestPluginStateDebugHandlerReportsEncodingErrors(t *testing.T) {
+func TestPluginStateDebugHandlerReportsPluginStateErrors(t *testing.T) {
+	withFrozenNow(t, time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC))
+
 	handle := fwkplugin.NewEppHandle(context.Background(), nil)
 	handle.AddPlugin("bad-dumper", &stateDebugTestDumper{
 		stateDebugTestPlugin: stateDebugTestPlugin{typedName: fwkplugin.TypedName{Type: "test-type", Name: "bad-dumper"}},
 		state:                json.RawMessage(`{`),
+	})
+	handle.AddPlugin("good-dumper", &stateDebugTestDumper{
+		stateDebugTestPlugin: stateDebugTestPlugin{typedName: fwkplugin.TypedName{Type: "test-type", Name: "good-dumper"}},
+		state:                json.RawMessage(`{"ok":true}`),
 	})
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, PluginStateDebugPath, nil)
 	NewPluginStateDebugHandler(handle).ServeHTTP(recorder, request)
 
-	require.Equal(t, http.StatusInternalServerError, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "failed to collect plugin state")
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.JSONEq(t, `{
+		"timestamp": "2025-01-02T03:04:05Z",
+		"plugins": {
+			"bad-dumper": {"type":"test-type","message":"plugin returned invalid JSON state"},
+			"good-dumper": {"type":"test-type","state":{"ok":true}}
+		}
+	}`, recorder.Body.String())
 }

@@ -10,6 +10,8 @@ The endpoint is intended for on-demand operational debugging. It returns a snaps
 
 The endpoint is registered on the same metrics/admin server as the metrics endpoint and pprof handlers. Operators should use the existing metrics/admin server exposure and authentication controls to restrict access. When metrics endpoint authentication is enabled, the metrics/admin server authentication and authorization filters apply to this endpoint.
 
+This endpoint is available in the EPP controller-manager server path. The standalone file-discovery mode uses a separate metrics mux and does not expose plugin debug state.
+
 ## Response format
 
 ```json
