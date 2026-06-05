@@ -59,10 +59,16 @@ type DRRStrategy struct {
 
 func (s *DRRStrategy) getState(id string) *drrState {
 	if v, ok := s.state.Load(id); ok {
-		return v.(*drrState)
+		if st, ok := v.(*drrState); ok {
+			return st
+		}
 	}
-	actual, _ := s.state.LoadOrStore(id, &drrState{})
-	return actual.(*drrState)
+	st := &drrState{}
+	actual, _ := s.state.LoadOrStore(id, st)
+	if existing, ok := actual.(*drrState); ok {
+		return existing
+	}
+	return st
 }
 
 // Name returns "drr".

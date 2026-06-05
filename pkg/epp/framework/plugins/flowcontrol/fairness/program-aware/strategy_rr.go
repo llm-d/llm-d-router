@@ -42,7 +42,9 @@ func (s *RRStrategy) Pick(bandPriority int, queues map[string]QueueInfo) (flowco
 	// Load per-band cursor.
 	cursor := ""
 	if v, ok := s.lastSelected.Load(bandPriority); ok {
-		cursor = v.(string)
+		if c, ok := v.(string); ok {
+			cursor = c
+		}
 	}
 
 	// Find the start index (next after cursor).

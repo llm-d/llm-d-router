@@ -54,10 +54,16 @@ type LASStrategy struct {
 
 func (s *LASStrategy) getState(id string) *lasState {
 	if v, ok := s.state.Load(id); ok {
-		return v.(*lasState)
+		if st, ok := v.(*lasState); ok {
+			return st
+		}
 	}
-	actual, _ := s.state.LoadOrStore(id, &lasState{})
-	return actual.(*lasState)
+	st := &lasState{}
+	actual, _ := s.state.LoadOrStore(id, st)
+	if existing, ok := actual.(*lasState); ok {
+		return existing
+	}
+	return st
 }
 
 // Name returns "service".
