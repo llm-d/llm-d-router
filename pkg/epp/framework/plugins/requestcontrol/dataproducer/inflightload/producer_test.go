@@ -60,11 +60,10 @@ func TestInFlightLoadProducer_Consumes(t *testing.T) {
 	// token-producer and orders it ahead of this producer; without it the input
 	// token estimate silently reads zero.
 	require.Contains(t, deps.Required, tokenproducer.TokenizedPromptDataKey)
-	// PrefixCacheMatchInfo is consumed opportunistically with a graceful fallback,
-	// so it is not declared as a dependency (which would force a prefix producer
-	// or emit a spurious "no producer" warning for prefix-less configs).
+	// PrefixCacheMatchInfo is optional: consumed for the cached-prefix discount
+	// when an approximate-prefix producer is present, absent otherwise.
+	require.Contains(t, deps.Optional, attrprefix.PrefixCacheMatchInfoDataKey)
 	require.NotContains(t, deps.Required, attrprefix.PrefixCacheMatchInfoDataKey)
-	require.NotContains(t, deps.Optional, attrprefix.PrefixCacheMatchInfoDataKey)
 }
 
 func TestInFlightLoadProducer_Produce(t *testing.T) {

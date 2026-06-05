@@ -445,14 +445,15 @@ func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 // Consumes declares TokenizedPrompt as required so the data-layer DAG orders a
 // token-producer ahead of this producer and auto-creates one when none is
 // configured; without it the input-token estimate silently reads zero.
-//
-// PrefixCacheMatchInfo is read opportunistically in uncachedInputTokens with a
-// graceful fallback and is intentionally not declared here: a missing prefix
-// producer is a valid configuration, not a degraded one.
+// PrefixCacheMatchInfo is optional — used to discount the already-cached prompt
+// prefix when an approximate-prefix producer is present.
 func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
 			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{},
+		},
+		Optional: map[fwkplugin.DataKey]any{
+			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
 		},
 	}
 }
