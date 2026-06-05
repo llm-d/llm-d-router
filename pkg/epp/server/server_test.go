@@ -25,10 +25,10 @@ import (
 	"testing"
 
 	pb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	extv1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -135,7 +135,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	director := &testDirector{}
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser(), 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
@@ -347,10 +347,12 @@ func recvResponseTrailers(stream pb.ExternalProcessor_ProcessClient) error {
 type testDirector struct {
 	requestHeaders                   map[string]string
 	handleResponseBodyEndStreamCount int
+	lastInferenceRequestBody         *fwkrh.InferenceRequestBody
 }
 
 func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*handlers.RequestContext, error) {
 	ts.requestHeaders = reqCtx.Request.Headers
+	ts.lastInferenceRequestBody = inferenceRequestBody
 
 	bodyMap := make(map[string]any)
 	if err := json.Unmarshal(reqCtx.Request.RawBody, &bodyMap); err != nil {
@@ -399,15 +401,25 @@ type mockParser struct {
 }
 
 func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	return &fwkrh.ParseResult{Skip: m.skip, Body: &fwkrh.InferenceRequestBody{}}, nil
+	if m.skip {
+		return &fwkrh.ParseResult{
+			SkipResponseProcessing: true,
+			Body: &fwkrh.InferenceRequestBody{
+				Payload: fwkrh.RawPayload(body),
+			},
+		}, nil
+	}
+	return &fwkrh.ParseResult{SkipResponseProcessing: false, Body: &fwkrh.InferenceRequestBody{}}, nil
 }
 
 func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
 	return nil, errors.New("sentinel error for mock parser")
 }
-
-func (m *mockParser) SupportedAppProtocols() []extv1.AppProtocol {
-	return nil
+func (m *mockParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
+		Paths:     []string{"completions"},
+		Protocols: nil,
+	}
 }
 
 func (m *mockParser) TypedName() fwkplugin.TypedName {
@@ -425,7 +437,7 @@ func TestServer_Skip(t *testing.T) {
 
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, mockPar, 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{mockPar}, logr.Discard()), 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
@@ -475,6 +487,17 @@ func TestServer_Skip(t *testing.T) {
 	_, err = process.Recv()
 	require.Error(t, err, "Expected error or EOF when receiving after skip")
 
+	// Verify that the director's HandleRequest was called even for skipped request
+	require.NotEmpty(t, director.requestHeaders, "HandleRequest should have been called for skipped request")
+	require.Equal(t, "test-request-id", director.requestHeaders["x-request-id"])
+
+	// Verify that the body was forced to have RawPayload
+	require.NotNil(t, director.lastInferenceRequestBody, "InferenceRequestBody should be non-nil")
+	require.NotNil(t, director.lastInferenceRequestBody.Payload, "Payload should be non-nil")
+	rawPayload, ok := director.lastInferenceRequestBody.Payload.(fwkrh.RawPayload)
+	require.True(t, ok, "Payload should be RawPayload")
+	require.Equal(t, []byte(`{"model":"test"}`), []byte(rawPayload), "Payload should match raw body")
+
 	cancel()
 	<-errChan
 	testListener.Close()
@@ -491,7 +514,7 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
 
-	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser(), 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)

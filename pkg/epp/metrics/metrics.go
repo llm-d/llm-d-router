@@ -42,6 +42,9 @@ const (
 	InferenceObjectiveSubsystem = inferenceObjectiveComponent
 	// InferenceExtensionSubsystem is the legacy subsystem for inference extension metrics.
 	InferenceExtensionSubsystem = inferenceExtension
+
+	// SchedulerSubsystem is the legacy metric prefix for scheduler.
+	SchedulerSubsystem = "llm_d_inference_scheduler"
 )
 
 var (
@@ -381,6 +384,34 @@ var inferenceModelRewriteDecisionsTotal = prometheus.NewCounterVec(
 	[]string{"model_rewrite_name", "model_name", "target_model"},
 )
 
+// --- Data-layer Metrics ---
+
+var (
+	// DataLayerPollErrorsTotal records data-source poll errors per source type.
+	//
+	// Deprecated: Use LlmdDataLayerPollErrorsTotal instead.
+	DataLayerPollErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: SchedulerSubsystem,
+			Name:      "datalayer_poll_errors_total",
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_datalayer_poll_errors_total] Data-source poll errors per source type.", compbasemetrics.ALPHA),
+		},
+		[]string{"source_type"},
+	)
+
+	// DataLayerExtractErrorsTotal records extract errors per source/extractor type.
+	//
+	// Deprecated: Use LlmdDataLayerExtractErrorsTotal instead.
+	DataLayerExtractErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: SchedulerSubsystem,
+			Name:      "datalayer_extract_errors_total",
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_datalayer_extract_errors_total] Extract errors per source/extractor type.", compbasemetrics.ALPHA),
+		},
+		[]string{"source_type", "extractor_type"},
+	)
+)
+
 var registerMetrics sync.Once
 
 // Register all metrics.
@@ -437,6 +468,10 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdFlowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
+		metrics.Registry.MustRegister(DataLayerPollErrorsTotal)
+		metrics.Registry.MustRegister(LlmdDataLayerPollErrorsTotal)
+		metrics.Registry.MustRegister(DataLayerExtractErrorsTotal)
+		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
 		}
@@ -494,6 +529,10 @@ func Reset() {
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
+	DataLayerPollErrorsTotal.Reset()
+	LlmdDataLayerPollErrorsTotal.Reset()
+	DataLayerExtractErrorsTotal.Reset()
+	LlmdDataLayerExtractErrorsTotal.Reset()
 }
 
 // RecordRequestCounter records the number of requests.
@@ -738,4 +777,16 @@ func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 func RecordInferenceModelRewriteDecision(modelRewriteName, modelName, targetModel string) {
 	inferenceModelRewriteDecisionsTotal.WithLabelValues(modelRewriteName, modelName, targetModel).Inc()
 	llmdInferenceModelRewriteDecisionsTotal.WithLabelValues(modelRewriteName, modelName, targetModel).Inc()
+}
+
+// RecordDataLayerPollError increments the poll error counter for a source type.
+func RecordDataLayerPollError(sourceType string) {
+	DataLayerPollErrorsTotal.WithLabelValues(sourceType).Inc()
+	LlmdDataLayerPollErrorsTotal.WithLabelValues(sourceType).Inc()
+}
+
+// RecordDataLayerExtractError increments the extract error counter for a source/extractor type.
+func RecordDataLayerExtractError(sourceType, extractorType string) {
+	DataLayerExtractErrorsTotal.WithLabelValues(sourceType, extractorType).Inc()
+	LlmdDataLayerExtractErrorsTotal.WithLabelValues(sourceType, extractorType).Inc()
 }

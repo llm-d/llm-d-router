@@ -86,7 +86,7 @@ func TestInFlightLoadProducer_Lifecycle(t *testing.T) {
 	endpointID := fullEndpointName(endpointName)
 
 	// 1. PreRequest (Inc)
-	req := makeTokenRequest("req1", "1234567890123456") // 16 chars / 4 = 4 input + 6 output = 10 tokens
+	req := makeTokenRequest("req1", 4) // 4 input + 6 output = 10 tokens
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 
@@ -112,7 +112,7 @@ func TestInFlightLoadProducer_MultiPodLifecycle(t *testing.T) {
 	idB := fullEndpointName(podB)
 
 	// 1. Dispatch to PodA (Prefill) and PodB (Decode)
-	req := makeTokenRequest("multi-req", "1234567890123456") // 10 tokens
+	req := makeTokenRequest("multi-req", 4) // 4 input + 6 output = 10 tokens
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
@@ -241,11 +241,15 @@ func (f *stubSchedulingEndpoint) Get(key string) (datalayer.Cloneable, bool) {
 }
 func (f *stubSchedulingEndpoint) Keys() []string { return f.attr.Keys() }
 
-func makeTokenRequest(requestID, prompt string) *fwksched.InferenceRequest {
+// makeTokenRequest builds a request whose tokenized prompt carries inputTokens token IDs,
+// which is what the estimator reads to derive the input token count.
+func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,
 		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				TokenIDs: make([]uint32, inputTokens),
+			},
 		},
 	}
 }
@@ -262,8 +266,8 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease(t *testin
 	endpointName := "exclude-output-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	// 16 chars / 4 = 4 input tokens. Output tokens are excluded.
-	req := makeTokenRequest("req-no-output", "1234567890123456")
+	// 4 input tokens. Output tokens are excluded.
+	req := makeTokenRequest("req-no-output", 4)
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
@@ -292,7 +296,7 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_SingleChunk(t *testing.T) {
 	endpointName := "single-chunk-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	req := makeTokenRequest("req-single", "1234567890123456")
+	req := makeTokenRequest("req-single", 4)
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 	require.Equal(t, int64(4), producer.tokenTracker.get(endpointID))
@@ -314,14 +318,14 @@ func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
 	endpointName := "prefix-cache-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	// Prompt: 32 chars / 4 = 8 input tokens. Output = 8 * 1.5 = 12.
+	// 8 input tokens. Output = 8 * 1.5 = 12.
 	// With block_size=4, total=2 blocks, matched=1 block (4 tokens cached):
 	//   uncached_input = (2-1)*4 + max(0, 8-2*4) = 4
 	//   total tokens = 4 + 12 = 16
 	endpoint := newStubSchedulingEndpoint(endpointName)
 	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
 
-	req := makeTokenRequest("req-prefix", "12345678901234567890123456789012")
+	req := makeTokenRequest("req-prefix", 8)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
@@ -361,7 +365,7 @@ func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
 	epB := newStubSchedulingEndpoint(podB)
 	epB.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(0, 2, 4)) // none cached
 
-	req := makeTokenRequest("req-multi-cache", "12345678901234567890123456789012")
+	req := makeTokenRequest("req-multi-cache", 8)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
@@ -396,9 +400,9 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 	endpointName := "shared-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	// 16 chars / 4 = 4 input tokens, 6 output, total 10 tokens per profile.
+	// 4 input tokens, 6 output, total 10 tokens per profile.
 	// Two profiles both targeting the same endpoint => 2 requests, 20 tokens.
-	req := makeTokenRequest("req-shared", "1234567890123456")
+	req := makeTokenRequest("req-shared", 4)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
@@ -438,7 +442,7 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_EndOfStreamWithoutStart(t *tes
 	endpointName := "no-start-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	req := makeTokenRequest("req-no-start", "1234567890123456") // 4 input tokens
+	req := makeTokenRequest("req-no-start", 4) // 4 input tokens
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
@@ -473,7 +477,7 @@ func TestInFlightLoadProducer_Eviction(t *testing.T) {
 	endpointID := fullEndpointName(endpointName)
 
 	// 1. PreRequest: Adds load
-	req := makeTokenRequest("req-eviction", "1234567890123456") // 10 tokens
+	req := makeTokenRequest("req-eviction", 4) // 4 input + 6 output = 10 tokens
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 
@@ -495,7 +499,7 @@ func TestInFlightLoadProducer_Touch(t *testing.T) {
 	ctx := context.Background()
 	endpointName := "touch-endpoint"
 
-	req := makeTokenRequest("req-touch", "1234567890123456")
+	req := makeTokenRequest("req-touch", 4)
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 
@@ -522,7 +526,7 @@ func TestInFlightLoadProducer_LateResponseAfterReap(t *testing.T) {
 	endpointName := "late-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	req := makeTokenRequest("req-late", "1234567890123456") // 10 tokens
+	req := makeTokenRequest("req-late", 4) // 4 input + 6 output = 10 tokens
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 
@@ -548,7 +552,7 @@ func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
 	endpointName := "race-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	req := makeTokenRequest("req-race", "1234567890123456") // 10 tokens
+	req := makeTokenRequest("req-race", 4) // 4 input + 6 output = 10 tokens
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))

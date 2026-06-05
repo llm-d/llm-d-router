@@ -300,6 +300,29 @@ var llmdInferenceModelRewriteDecisionsTotal = prometheus.NewCounterVec(
 	[]string{"model_rewrite_name", "model_name", "target_model"},
 )
 
+// --- llm-d Data-layer Metrics ---
+var (
+	// LlmdDataLayerPollErrorsTotal records data-source poll errors per source type.
+	LlmdDataLayerPollErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "datalayer_poll_errors_total",
+			Help:      metricsutil.HelpMsgWithStability("Data-source poll errors per source type.", compbasemetrics.ALPHA),
+		},
+		[]string{"source_type"},
+	)
+
+	// LlmdDataLayerExtractErrorsTotal records extract errors per source/extractor type.
+	LlmdDataLayerExtractErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "datalayer_extract_errors_total",
+			Help:      metricsutil.HelpMsgWithStability("Extract errors per source/extractor type.", compbasemetrics.ALPHA),
+		},
+		[]string{"source_type", "extractor_type"},
+	)
+)
+
 var (
 	// DescInferencePoolPerEndpointQueueSize is the standardized exported prometheus descriptor.
 	DescInferencePoolPerEndpointQueueSize = prometheus.NewDesc(

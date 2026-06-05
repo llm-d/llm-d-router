@@ -82,8 +82,15 @@ func (p *VertexAIParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *VertexAIParser) SupportedAppProtocols() []v1.AppProtocol {
-	return []v1.AppProtocol{v1.AppProtocolH2C}
+func (p *VertexAIParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
+		Paths: []string{
+			chatCompletionsMethod,
+			streamRawPredictServiceMethod,
+			rawPredictServiceMethod,
+		},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C},
+	}
 }
 
 func VertexAIParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -114,7 +121,12 @@ func (p *VertexAIParser) ParseRequest(ctx context.Context, body []byte, headers 
 		return p.parseVertexRequest(ctx, body, headers, &aiplatformpb.RawPredictRequest{}, "RawPredictRequest", openAIResponsesPath)
 
 	default:
-		return &fwkrh.ParseResult{Skip: true}, nil
+		return &fwkrh.ParseResult{
+			Body: &fwkrh.InferenceRequestBody{
+				Payload: fwkrh.RawPayload(body),
+			},
+			SkipResponseProcessing: true,
+		}, nil
 	}
 }
 
@@ -172,5 +184,5 @@ func (p *VertexAIParser) parseVertexRequest(ctx context.Context, body []byte, he
 
 	inferenceRequestBody := parseResult.Body
 	inferenceRequestBody.Payload = fwkrh.PayloadProto{Message: req}
-	return &fwkrh.ParseResult{Body: inferenceRequestBody, Skip: parseResult.Skip}, nil
+	return &fwkrh.ParseResult{Body: inferenceRequestBody, SkipResponseProcessing: parseResult.SkipResponseProcessing}, nil
 }

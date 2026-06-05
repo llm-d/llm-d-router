@@ -43,7 +43,7 @@ var (
 			Name:      "prefix_indexer_size",
 			Help:      metricsutil.HelpMsgWithStability("Size of the prefix indexer.", compbasemetrics.ALPHA),
 		},
-		[]string{},
+		[]string{"plugin_name", "plugin_type"},
 	)
 
 	prefixCacheHitRatio = prometheus.NewHistogramVec(
@@ -63,7 +63,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Ratio of prefix length matched to total prefix length in the cache lookup.", compbasemetrics.ALPHA),
 			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
 		},
-		[]string{},
+		[]string{"plugin_name", "plugin_type"},
 	)
 
 	prefixCacheHitLength = prometheus.NewHistogramVec(
@@ -83,7 +83,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Length of the prefix match in number of bytes in the cache lookup.", compbasemetrics.ALPHA),
 			Buckets:   []float64{0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536},
 		},
-		[]string{},
+		[]string{"plugin_name", "plugin_type"},
 	)
 )
 
@@ -111,20 +111,20 @@ func registerMetrics(registerer prometheus.Registerer) error {
 }
 
 // recordPrefixCacheSize records the size of the prefix indexer in megabytes.
-func recordPrefixCacheSize(size int64) {
+func recordPrefixCacheSize(pluginName, pluginType string, size int64) {
 	prefixCacheSize.WithLabelValues().Set(float64(size))
-	llmdPrefixCacheSize.WithLabelValues().Set(float64(size))
+	llmdPrefixCacheSize.WithLabelValues(pluginName, pluginType).Set(float64(size))
 }
 
 // recordPrefixCacheMatch records both the hit ratio and hit length for a prefix indexer match.
 // matchedLength is the number of characters that matched, and totalLength is the total prefix length.
-func recordPrefixCacheMatch(matchedLength, totalLength int) {
+func recordPrefixCacheMatch(pluginName, pluginType string, matchedLength, totalLength int) {
 	prefixCacheHitLength.WithLabelValues().Observe(float64(matchedLength))
-	llmdPrefixCacheHitLength.WithLabelValues().Observe(float64(matchedLength))
+	llmdPrefixCacheHitLength.WithLabelValues(pluginName, pluginType).Observe(float64(matchedLength))
 
 	if totalLength > 0 {
 		ratio := float64(matchedLength) / float64(totalLength)
 		prefixCacheHitRatio.WithLabelValues().Observe(ratio)
-		llmdPrefixCacheHitRatio.WithLabelValues().Observe(ratio)
+		llmdPrefixCacheHitRatio.WithLabelValues(pluginName, pluginType).Observe(ratio)
 	}
 }

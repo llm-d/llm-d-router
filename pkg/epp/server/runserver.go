@@ -41,7 +41,6 @@ import (
 	datalayerlogger "github.com/llm-d/llm-d-router/pkg/epp/datalayer/logger"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 )
@@ -59,7 +58,7 @@ type ExtProcServerRunner struct {
 	RefreshPrometheusMetricsInterval time.Duration
 	MetricsStalenessThreshold        time.Duration
 	Director                         *requestcontrol.Director
-	Parser                           fwkrh.Parser
+	ParserRegistry                   *handlers.ParserRegistry
 	SaturationDetector               fwkfc.SaturationDetector
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
@@ -81,11 +80,17 @@ func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 		},
 	}
 	return &ExtProcServerRunner{
-		GrpcPort:                         opts.GRPCPort,
-		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
-		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
-		GKNN:                             gknn,
-		ControllerCfg:                    ControllerConfig{true, true, true},
+		GrpcPort:           opts.GRPCPort,
+		GRPCMaxRecvMsgSize: opts.GRPCMaxRecvMsgSize,
+		GRPCMaxSendMsgSize: opts.GRPCMaxSendMsgSize,
+		GKNN:               gknn,
+		ControllerCfg: ControllerConfig{
+			startCrdReconcilers:       true,
+			hasInferenceObjective:     true,
+			hasInferenceModelRewrites: true,
+			InferenceObjectiveGV:      inferenceAPIGV,
+			InferenceModelRewriteGV:   inferenceAPIGV,
+		},
 		SecureServing:                    opts.SecureServing,
 		HealthChecking:                   opts.HealthChecking,
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
@@ -192,7 +197,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		if poolCap == 0 {
 			poolCap = 4 * 1024 * 1024 // gRPC default 4MB
 		}
-		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.Parser, poolCap)
+		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
 		extProcPb.RegisterExternalProcessorServer(srv, extProcServer)
 
 		if r.HealthChecking {

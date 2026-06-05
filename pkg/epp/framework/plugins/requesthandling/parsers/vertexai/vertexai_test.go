@@ -98,7 +98,7 @@ func TestParseRequest(t *testing.T) {
 					Stream:  true,
 					Payload: fwkrh.PayloadProto{Message: reqMsg},
 				},
-				Skip: false,
+				SkipResponseProcessing: false,
 			},
 		},
 		{
@@ -115,7 +115,7 @@ func TestParseRequest(t *testing.T) {
 					},
 					Payload: fwkrh.PayloadProto{Message: streamRawPredictReqMsg},
 				},
-				Skip: false,
+				SkipResponseProcessing: false,
 			},
 		},
 		{
@@ -132,7 +132,7 @@ func TestParseRequest(t *testing.T) {
 					},
 					Payload: fwkrh.PayloadProto{Message: rawPredictReqMsg},
 				},
-				Skip: false,
+				SkipResponseProcessing: false,
 			},
 		},
 		{
@@ -140,7 +140,10 @@ func TestParseRequest(t *testing.T) {
 			body:    []byte{},
 			headers: map[string]string{":path": "/unsupported/path", "content-type": "application/grpc"},
 			wantResult: &fwkrh.ParseResult{
-				Skip: true,
+				Body: &fwkrh.InferenceRequestBody{
+					Payload: fwkrh.RawPayload([]byte{}),
+				},
+				SkipResponseProcessing: true,
 			},
 		},
 		{
@@ -287,9 +290,18 @@ func TestVertexAIParser_Metadata(t *testing.T) {
 		t.Errorf("Expected name %s, got %s", VertexAIParserType, typedName.Name)
 	}
 
-	protocols := parser.SupportedAppProtocols()
-	if len(protocols) != 1 || protocols[0] != v1.AppProtocolH2C {
-		t.Errorf("Expected protocols [h2c], got %v", protocols)
+	got := parser.Claims()
+	want := fwkrh.Claims{
+		Paths: []string{
+			chatCompletionsMethod,
+			streamRawPredictServiceMethod,
+			rawPredictServiceMethod,
+		},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C},
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }
 
