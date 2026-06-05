@@ -152,8 +152,9 @@ type imageTokenEstimatorConfig struct {
 
 // videoTokenEstimatorConfig defines the configuration for video modality.
 // Token count is estimated as int(Duration * FPS) * TokensPerFrame.
-// Duration and FPS mirror the metadata vLLM uses to derive num_frames;
-// they serve as EPP-level fallbacks until per-request or fetched metadata is available.
+// Duration and FPS are EPP-level fallbacks used to approximate num_frames
+// (int(Duration * FPS)); the actual num_frames in vLLM is model-specific and
+// requires downloading the video, so llm-d uses configurable defaults instead.
 // TokensPerFrame reuses imageTokenEstimatorConfig since a video frame is treated as an image.
 type videoTokenEstimatorConfig struct {
 	Duration       float64                    `json:"duration"`
