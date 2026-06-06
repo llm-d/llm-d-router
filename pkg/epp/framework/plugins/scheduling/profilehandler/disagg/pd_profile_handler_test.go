@@ -214,13 +214,16 @@ func (p *mockSchedulerProfile) Run(_ context.Context, _ *scheduling.InferenceReq
 	return &scheduling.ProfileRunResult{}, nil
 }
 
-// creates and returns llm completion request forthe given prompt
+// creates and returns llm completion request for the given prompt. The tokenized
+// prompt carries len(prompt)/averageCharactersPerToken token IDs, which the decider
+// reads as the input token count.
 func createRequest(prompt string) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{
 				Prompt: fwkrh.Prompt{Raw: prompt},
 			},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)},
 		},
 	}
 }
@@ -329,7 +332,7 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 			assert.NoError(t, err)
 
 			// set prefix to the given cached tokens number for pod "pod1" in decode profile results
-			inputTokens := len(request.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
+			inputTokens := len(request.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 
 			for profileName, profileRes := range tt.profileResults {
 				if profileName == defaultDecodeProfile && profileRes != nil {
@@ -379,7 +382,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 				expectedProfiles: []string{defaultPrefillProfile},
 			}, {
 				request:          request,
-				cachedTokens:     len(request.Body.Completions.Prompt.Raw) / AverageCharactersPerToken,
+				cachedTokens:     len(request.Body.Completions.Prompt.Raw) / averageCharactersPerToken,
 				expectedProfiles: []string{},
 			}},
 		}, {
@@ -393,7 +396,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 				expectedProfiles: []string{defaultPrefillProfile},
 			}, {
 				request:          longerRequest,
-				cachedTokens:     len(request.Body.Completions.Prompt.Raw) / AverageCharactersPerToken,
+				cachedTokens:     len(request.Body.Completions.Prompt.Raw) / averageCharactersPerToken,
 				expectedProfiles: []string{},
 			}},
 		}, {
@@ -407,7 +410,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 				expectedProfiles: []string{defaultPrefillProfile},
 			}, {
 				request:          longRequest,
-				cachedTokens:     len(request.Body.Completions.Prompt.Raw) / AverageCharactersPerToken,
+				cachedTokens:     len(request.Body.Completions.Prompt.Raw) / averageCharactersPerToken,
 				expectedProfiles: []string{defaultPrefillProfile},
 			}},
 		},
@@ -431,7 +434,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 			// run sequences of request
 			for _, innerTest := range tt.tests {
 				// set prefix to the given cached tokens number for pod "pod1" in decode profile results
-				inputTokens := len(innerTest.request.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
+				inputTokens := len(innerTest.request.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 
 				for profileName, profileRes := range profileResults {
 					if profileName == defaultDecodeProfile && profileRes != nil {

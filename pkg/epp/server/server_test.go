@@ -25,10 +25,10 @@ import (
 	"testing"
 
 	pb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	extv1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -135,7 +135,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	director := &testDirector{}
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser(), 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
@@ -415,9 +415,11 @@ func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[
 func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
 	return nil, errors.New("sentinel error for mock parser")
 }
-
-func (m *mockParser) SupportedAppProtocols() []extv1.AppProtocol {
-	return nil
+func (m *mockParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
+		Paths:     []string{"completions"},
+		Protocols: nil,
+	}
 }
 
 func (m *mockParser) TypedName() fwkplugin.TypedName {
@@ -435,7 +437,7 @@ func TestServer_Skip(t *testing.T) {
 
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, mockPar, 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{mockPar}, logr.Discard()), 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
@@ -512,7 +514,7 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
 
-	streamingServer := handlers.NewStreamingServer(ds, director, openai.NewOpenAIParser(), 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)

@@ -28,6 +28,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 var _ requestcontrol.DataProducer = &PredictedLatency{}
@@ -114,6 +115,9 @@ func (pl *PredictedLatency) Produces() map[plugin.DataKey]any {
 
 func (pl *PredictedLatency) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{pl.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}},
+		Required: map[plugin.DataKey]any{
+			pl.prefixMatchDataKey:                attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{},
+		},
 	}
 }

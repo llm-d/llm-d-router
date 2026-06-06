@@ -45,9 +45,10 @@ type Config struct {
 var _ fwksched.Scorer = &TokenLoadScorer{}
 
 type TokenLoadScorer struct {
-	typedName            fwkplugin.TypedName
-	queueThresholdTokens float64
-	inFlightLoadDataKey  fwkplugin.DataKey
+	typedName                    fwkplugin.TypedName
+	queueThresholdTokens         float64
+	inFlightLoadDataKey          fwkplugin.DataKey
+	uncachedRequestTokensDataKey fwkplugin.DataKey
 }
 
 func TokenLoadScorerFactory(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -64,9 +65,10 @@ func TokenLoadScorerFactory(name string, params *json.Decoder, _ fwkplugin.Handl
 	}
 
 	return &TokenLoadScorer{
-		typedName:            fwkplugin.TypedName{Type: TokenLoadScorerType, Name: name},
-		queueThresholdTokens: float64(cfg.QueueThresholdTokens),
-		inFlightLoadDataKey:  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
+		typedName:                    fwkplugin.TypedName{Type: TokenLoadScorerType, Name: name},
+		queueThresholdTokens:         float64(cfg.QueueThresholdTokens),
+		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
+		uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
 	}, nil
 }
 
@@ -80,7 +82,10 @@ func (s *TokenLoadScorer) Category() fwksched.ScorerCategory {
 
 func (s *TokenLoadScorer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
-		Required: map[fwkplugin.DataKey]any{s.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
+		Required: map[fwkplugin.DataKey]any{
+			s.inFlightLoadDataKey:          attrconcurrency.InFlightLoad{},
+			s.uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokens{},
+		},
 	}
 }
 
@@ -92,14 +97,20 @@ func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceReques
 		endpointID := endpoint.GetMetadata().NamespacedName.String()
 		tokenLoad := 0.0
 
-		// Single read: accumulated in-flight load plus the projected impact
-		// of the request being scored, both carried on the same InFlightLoad
-		// struct populated by InFlightLoadProducer.Produce.
+		// Read both accumulated in-flight load and the projected impact of the
+		// request being scored, which are now carried on separate attributes.
+		var tokens int64
 		if val, ok := endpoint.Get(s.inFlightLoadDataKey.String()); ok {
 			if load, ok := val.(*attrconcurrency.InFlightLoad); ok && load != nil {
-				tokenLoad = float64(load.Tokens + load.UncachedRequestTokens)
+				tokens += load.Tokens
 			}
 		}
+		if val, ok := endpoint.Get(s.uncachedRequestTokensDataKey.String()); ok {
+			if uncached, ok := val.(*attrconcurrency.UncachedRequestTokens); ok && uncached != nil {
+				tokens += uncached.Tokens
+			}
+		}
+		tokenLoad = float64(tokens)
 
 		score := 0.0
 		if tokenLoad <= 0 {

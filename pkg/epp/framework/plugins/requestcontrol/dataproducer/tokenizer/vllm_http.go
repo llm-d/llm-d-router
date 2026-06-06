@@ -152,6 +152,15 @@ func (r *vllmHTTPRenderer) chatTimeout(req *tokenizerTypes.RenderChatRequest) ti
 	return r.timeout
 }
 
+// produceTimeout returns the worst-case configured render timeout (multimodal),
+// surfaced so the data-producer executor extends its budget past the default.
+func (r *vllmHTTPRenderer) produceTimeout() time.Duration {
+	if r.mmTimeout > r.timeout {
+		return r.mmTimeout
+	}
+	return r.timeout
+}
+
 // completionsRenderRequest is the wire body for POST /v1/completions/render.
 type completionsRenderRequest struct {
 	Model  string `json:"model"`
@@ -173,8 +182,9 @@ type chatRenderRequest struct {
 // chatMessage is one OpenAI-shaped message. Content is either a plain string
 // or an array of parts; chatContent's MarshalJSON picks the right wire form.
 type chatMessage struct {
-	Role    string      `json:"role"`
-	Content chatContent `json:"content"`
+	Role      string      `json:"role"`
+	Content   chatContent `json:"content"`
+	ToolCalls []any       `json:"tool_calls,omitempty"`
 }
 
 // chatContent serializes either Raw (string) or Parts (array of typed parts).
@@ -208,7 +218,11 @@ type chatImageURL struct {
 func buildChatRenderRequest(model string, req *tokenizerTypes.RenderChatRequest) chatRenderRequest {
 	msgs := make([]chatMessage, len(req.Conversation))
 	for idx, c := range req.Conversation {
-		msgs[idx] = chatMessage{Role: c.Role, Content: toChatContent(c.Content)}
+		msgs[idx] = chatMessage{
+			Role:      c.Role,
+			Content:   toChatContent(c.Content),
+			ToolCalls: c.ToolCalls,
+		}
 	}
 	return chatRenderRequest{
 		Model:                model,

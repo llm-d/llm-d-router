@@ -31,6 +31,7 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -41,7 +42,7 @@ const (
 	VllmHTTPParserType = "vllmhttp-parser"
 
 	// generatePathSuffix is the vLLM disaggregated Prefill/Decode API path.
-	generatePathSuffix = "/inference/v1/generate"
+	generatePathSuffix = "inference/v1/generate"
 )
 
 // compile-time type validation
@@ -82,18 +83,20 @@ func (p *VllmHTTPParser) WithName(name string) *VllmHTTPParser {
 	return p
 }
 
-// SupportedAppProtocols mirrors the OpenAI parser; we accept the same HTTP-style transports.
-func (p *VllmHTTPParser) SupportedAppProtocols() []v1.AppProtocol {
-	return p.openai.SupportedAppProtocols()
+func (p *VllmHTTPParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
+		Paths:     []string{generatePathSuffix},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
+	}
 }
 
 // ParseRequest handles /inference/v1/generate locally and delegates everything
 // else to the embedded OpenAI parser.
 func (p *VllmHTTPParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	if strings.HasSuffix(openai.GetRequestPath(headers), generatePathSuffix) {
+	if strings.HasSuffix(request.GetRequestPath(headers), generatePathSuffix) {
 		return p.parseGenerateRequest(body)
 	}
-	return p.openai.ParseRequest(ctx, body, headers)
+	return nil, fmt.Errorf("unsupported path: %s", request.GetRequestPath(headers))
 }
 
 // ParseResponse delegates to the OpenAI parser. /inference/v1/generate

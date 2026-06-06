@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,8 +38,8 @@ import (
 const (
 	VllmGRPCParserType = "vllmgrpc-parser"
 
-	vllmGeneratePath = "/vllm.grpc.engine.VllmEngine/Generate"
-	vllmEmbedPath    = "/vllm.grpc.engine.VllmEngine/Embed"
+	vllmGeneratePath = "vllm.grpc.engine.VllmEngine/Generate"
+	vllmEmbedPath    = "vllm.grpc.engine.VllmEngine/Embed"
 )
 
 // compile-time type validation
@@ -73,8 +74,14 @@ func (p *VllmGRPCParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *VllmGRPCParser) SupportedAppProtocols() []v1.AppProtocol {
-	return []v1.AppProtocol{v1.AppProtocolH2C}
+func (p *VllmGRPCParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
+		Paths: []string{
+			vllmGeneratePath,
+			vllmEmbedPath,
+		},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C},
+	}
 }
 
 // ParseRequest parses the gRPC request body and headers and returns an InferenceRequestBody.
@@ -87,8 +94,8 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 	}
 
 	path := headers[parsers.MethodPathKey]
-	switch path {
-	case vllmEmbedPath:
+	switch {
+	case strings.HasSuffix(path, vllmEmbedPath):
 		var req pb.EmbedRequest
 		if err := proto.Unmarshal(parsedPayload, &req); err != nil {
 			return nil, fmt.Errorf("unmarshaling EmbedRequest: %w", err)
@@ -100,7 +107,7 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 		logger.V(logutil.TRACE).Info("parsed EmbedRequest")
 		return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 
-	case vllmGeneratePath:
+	case strings.HasSuffix(path, vllmGeneratePath):
 		var req pb.GenerateRequest
 		if err := proto.Unmarshal(parsedPayload, &req); err != nil {
 			return nil, fmt.Errorf("unmarshaling GenerateRequest: %w", err)

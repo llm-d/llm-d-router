@@ -38,6 +38,17 @@ func executePluginsAsDAG(ctx context.Context, plugins []fwkrc.DataProducer, requ
 	return nil
 }
 
+// producerTimeout returns the producer's declared timeout when it implements
+// TimeoutAwareProducer with a positive value, otherwise dataProducerTimeout.
+func producerTimeout(p fwkrc.DataProducer) time.Duration {
+	if tp, ok := p.(fwkrc.TimeoutAwareProducer); ok {
+		if t := tp.ProduceTimeout(); t > 0 {
+			return t
+		}
+	}
+	return dataProducerTimeout
+}
+
 // dataProducerPluginsWithTimeout executes DataProducer plugins with a timeout.
 // The child context is cancelled when the timeout fires so plugins can observe cancellation
 // (e.g. abort outbound HTTP calls) and avoid committing state after the director has moved on.

@@ -17,10 +17,6 @@ import (
 const (
 	// PrefixBasedPDDeciderPluginType is the type-name of the prefixBasedPDDecider plugin.
 	PrefixBasedPDDeciderPluginType = "prefix-based-pd-decider"
-
-	// AverageCharactersPerToken is an estimated average characters per token,
-	// used since the request we cache is not tokenized.
-	AverageCharactersPerToken = 4
 )
 
 // PrefixBasedPDDeciderConfig holds the configuration for the prefixBasedPDDecider plugin.
@@ -157,8 +153,8 @@ func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) 
 		return 0, errors.New("request or request body is nil")
 	}
 
-	if tokenCountHint := request.Body.InputTokenCountHint(); tokenCountHint >= 0 {
-		return tokenCountHint, nil
+	if tp := request.Body.TokenizedPrompt; tp != nil {
+		return len(tp.TokenIDs), nil
 	}
-	return len(request.Body.PromptText()) / AverageCharactersPerToken, nil
+	return 0, nil
 }
