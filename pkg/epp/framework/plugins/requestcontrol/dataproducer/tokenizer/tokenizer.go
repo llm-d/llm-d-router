@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
@@ -195,11 +196,15 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		backend = estimateBackend{img: newImageEstimator(config.Estimate)}
 	}
 
-	return &Plugin{
+	p := &Plugin{
 		typedName: plugin.TypedName{Type: PluginType, Name: name},
 		backend:   backend,
 		dk:        TokenizedPromptDataKey.WithNonEmptyProducerName(name),
-	}, nil
+	}
+	if w, ok := backend.(warmer); ok {
+		go w.warmup(ctx)
+	}
+	return p, nil
 }
 
 // Plugin tokenizes the prompt in the incoming request and writes the result to
@@ -210,8 +215,11 @@ type Plugin struct {
 	dk        plugin.DataKey
 }
 
-// compile-time assertion.
-var _ requestcontrol.DataProducer = &Plugin{}
+// compile-time assertions.
+var (
+	_ requestcontrol.DataProducer         = &Plugin{}
+	_ requestcontrol.TimeoutAwareProducer = &Plugin{}
+)
 
 // TypedName returns the typed name of the plugin.
 func (p *Plugin) TypedName() plugin.TypedName {
@@ -221,6 +229,16 @@ func (p *Plugin) TypedName() plugin.TypedName {
 // Produces returns the data keys this plugin produces.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedPrompt{}}
+}
+
+// ProduceTimeout surfaces the backend's render timeout when it manages one, so
+// the director extends the data-producer budget past its default. Returns 0 to
+// keep the default (e.g. the estimate backend, which is in-memory).
+func (p *Plugin) ProduceTimeout() time.Duration {
+	if ta, ok := p.backend.(timeoutAware); ok {
+		return ta.produceTimeout()
+	}
+	return 0
 }
 
 // Produce derives the request's TokenizedPrompt via the configured backend and
@@ -255,8 +273,9 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 	conversation := make([]tokenizerTypes.Conversation, 0, len(chat.Messages))
 	for _, msg := range chat.Messages {
 		conv := tokenizerTypes.Conversation{
-			Role:    msg.Role,
-			Content: tokenizerTypes.Content{Raw: msg.Content.Raw},
+			Role:      msg.Role,
+			Content:   tokenizerTypes.Content{Raw: msg.Content.Raw},
+			ToolCalls: msg.ToolCalls,
 		}
 		for _, block := range msg.Content.Structured {
 			conv.Content.Structured = append(conv.Content.Structured, tokenizerTypes.ContentBlock{

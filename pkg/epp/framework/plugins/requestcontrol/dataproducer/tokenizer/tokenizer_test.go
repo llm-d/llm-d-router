@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
@@ -51,6 +52,28 @@ func newTestPlugin(tok tokenizer) *Plugin {
 		typedName: plugin.TypedName{Type: PluginType, Name: "test"},
 		backend:   renderBackend{tk: tok},
 	}
+}
+
+func TestProduceTimeout(t *testing.T) {
+	ctx := context.Background()
+
+	// vLLM backend surfaces its configured render timeout (default mmTimeout).
+	vp, err := NewPlugin(ctx, "tok", &tokenizerPluginConfig{ModelName: "m", VLLM: &vllmConfig{}})
+	require.NoError(t, err)
+	assert.Equal(t, defaultHTTPRenderMMTimeout, vp.ProduceTimeout())
+
+	// The override value is the plugin's own configurable timeout.
+	vp2, err := NewPlugin(ctx, "tok", &tokenizerPluginConfig{ModelName: "m", VLLM: &vllmConfig{MMTimeout: "45s"}})
+	require.NoError(t, err)
+	assert.Equal(t, 45*time.Second, vp2.ProduceTimeout())
+
+	// Estimate backend declares none, so the director keeps its default.
+	ep, err := NewPlugin(ctx, "tok", &tokenizerPluginConfig{Estimate: &estimateConfig{}})
+	require.NoError(t, err)
+	assert.Zero(t, ep.ProduceTimeout())
+
+	// A render backend whose tokenizer manages no timeout (e.g. UDS) keeps the default.
+	assert.Zero(t, newTestPlugin(&mockTokenizer{}).ProduceTimeout())
 }
 
 func TestPluginFactory_Validation(t *testing.T) {
@@ -353,10 +376,24 @@ func TestConvertMMFeaturesNil(t *testing.T) {
 }
 
 func TestChatCompletionsToRenderChatRequest(t *testing.T) {
+	toolCalls := []any{
+		map[string]any{
+			"id":   "chatcmpl-tool-1",
+			"type": "function",
+			"function": map[string]any{
+				"name":      "bash",
+				"arguments": `{"command":"ls -la"}`,
+			},
+		},
+	}
 	chat := &fwkrh.ChatCompletionsRequest{
 		Messages: []fwkrh.Message{
 			{Role: "system", Content: fwkrh.Content{Raw: "You are a helpful assistant."}},
-			{Role: "user", Content: fwkrh.Content{Raw: "Hello!"}},
+			{
+				Role:      "assistant",
+				Content:   fwkrh.Content{Raw: "Reflection."},
+				ToolCalls: toolCalls,
+			},
 		},
 		ChatTemplate:              "template",
 		AddGenerationPrompt:       true,
@@ -369,12 +406,14 @@ func TestChatCompletionsToRenderChatRequest(t *testing.T) {
 	require.Len(t, result.Conversation, 2)
 	assert.Equal(t, "system", result.Conversation[0].Role)
 	assert.Equal(t, tokenizerTypes.Content{Raw: "You are a helpful assistant."}, result.Conversation[0].Content)
-	assert.Equal(t, "user", result.Conversation[1].Role)
-	assert.Equal(t, tokenizerTypes.Content{Raw: "Hello!"}, result.Conversation[1].Content)
+	assert.Equal(t, "assistant", result.Conversation[1].Role)
+	assert.Equal(t, tokenizerTypes.Content{Raw: "Reflection."}, result.Conversation[1].Content)
 	assert.Equal(t, "template", result.ChatTemplate)
 	assert.True(t, result.AddGenerationPrompt)
 	assert.False(t, result.ContinueFinalMessage)
 	assert.True(t, result.ReturnAssistantTokensMask)
+
+	assert.Equal(t, toolCalls, result.Conversation[1].ToolCalls)
 }
 
 func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {

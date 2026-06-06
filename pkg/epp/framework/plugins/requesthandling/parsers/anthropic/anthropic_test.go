@@ -615,11 +615,60 @@ func TestAnthropicParser_Claims(t *testing.T) {
 	parser := NewAnthropicParser()
 	got := parser.Claims()
 	want := fwkrh.Claims{
-		Paths:     []string{messagesAPI},
+		Paths:     []string{messagesAPI, countTokensAPI},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestAnthropicParser_ParseRequest_CountTokens(t *testing.T) {
+	parser := NewAnthropicParser()
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		body    []byte
+	}{
+		{
+			name:    "valid count_tokens body forwarded as raw payload",
+			headers: map[string]string{":path": "/v1/messages/count_tokens"},
+			body: []byte(`{"model":"test-model",` +
+				`"system":"You are a helpful assistant.",` +
+				`"messages":[{"role":"user","content":"Hello"}]}`),
+		},
+		{
+			name:    "empty body still forwarded",
+			headers: map[string]string{":path": "/v1/messages/count_tokens"},
+			body:    []byte{},
+		},
+		{
+			name:    "non-JSON body still forwarded",
+			headers: map[string]string{":path": "/v1/messages/count_tokens"},
+			body:    []byte("not-json"),
+		},
+		{
+			name:    "path read from x-original-path header",
+			headers: map[string]string{"x-original-path": "/v1/messages/count_tokens"},
+			body:    []byte(`{}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseRequest(context.Background(), tt.body, tt.headers)
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			if !got.SkipResponseProcessing {
+				t.Errorf("ParseRequest() SkipResponseProcessing = false, want true")
+			}
+			want := &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(tt.body)}
+			if diff := cmp.Diff(want, got.Body); diff != "" {
+				t.Errorf("ParseRequest() body mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

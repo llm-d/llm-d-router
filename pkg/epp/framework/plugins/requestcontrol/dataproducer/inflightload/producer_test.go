@@ -35,6 +35,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
@@ -50,31 +51,124 @@ func newTestProducer(t testing.TB) *InFlightLoadProducer {
 	return p.(*InFlightLoadProducer)
 }
 
+func TestInFlightLoadProducer_Consumes(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestProducer(t).Consumes()
+
+	// TokenizedPrompt is required so the data-layer DAG auto-creates a
+	// token-producer and orders it ahead of this producer; without it the input
+	// token estimate silently reads zero.
+	require.Contains(t, deps.Required, tokenproducer.TokenizedPromptDataKey)
+	// PrefixCacheMatchInfo is optional: consumed for the cached-prefix discount.
+	// With no prefixMatchInfoProducerName set, it defaults to the approximate
+	// producer's key.
+	require.Contains(t, deps.Optional, attrprefix.PrefixCacheMatchInfoDataKey)
+	require.NotContains(t, deps.Required, attrprefix.PrefixCacheMatchInfoDataKey)
+}
+
+// prefixMatchInfoProducerName selects which prefix producer (approximate or
+// precise) feeds the cached-prefix discount, by both the optional dependency key
+// and the runtime read.
+func TestInFlightLoadProducer_PrefixMatchInfoProducerName(t *testing.T) {
+	t.Parallel()
+
+	const preciseName = "precise-prefix-cache-producer"
+	raw, err := json.Marshal(Config{PrefixMatchInfoProducerName: preciseName})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	p, err := InFlightLoadProducerFactory("inflight-load-producer",
+		json.NewDecoder(bytes.NewReader(raw)), igwtestutils.NewTestHandle(ctx))
+	require.NoError(t, err)
+	producer := p.(*InFlightLoadProducer)
+
+	preciseKey := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(preciseName)
+
+	// The optional dependency points at the configured precise producer, not approx.
+	require.Contains(t, producer.Consumes().Optional, preciseKey)
+	require.NotContains(t, producer.Consumes().Optional, attrprefix.PrefixCacheMatchInfoDataKey)
+
+	// The discount reads PrefixCacheMatchInfo from the configured producer's key
+	// (indexed 2*4=8, matched 1*4=4 -> uncached 4).
+	hit := newStubSchedulingEndpoint("ep-hit")
+	hit.Put(preciseKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	require.Equal(t, int64(4), producer.estimateRequestTokens(hit, 5))
+
+	// Data under the approx (default) key is ignored, so it falls back to inputTokens.
+	miss := newStubSchedulingEndpoint("ep-miss")
+	miss.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	require.Equal(t, int64(5), producer.estimateRequestTokens(miss, 5))
+}
+
 func TestInFlightLoadProducer_Produce(t *testing.T) {
 	t.Parallel()
 
 	producer := newTestProducer(t)
 
 	endpointName := "test-endpoint"
+	endpoint := newStubSchedulingEndpoint(endpointName)
+	endpoints := []fwksched.Endpoint{endpoint}
+
+	// 1. Produce with nil request -> should not put anything
+	err := producer.Produce(context.Background(), nil, endpoints)
+	require.NoError(t, err)
+	_, ok := endpoint.Get(producer.uncachedRequestTokensDk.String())
+	require.False(t, ok)
+
+	// 2. Produce with request -> should put UncachedRequestTokens
+	req := makeTokenRequest("req1", 4) // 4 input tokens -> 10 total (with output)
+	err = producer.Produce(context.Background(), req, endpoints)
+
+	require.NoError(t, err)
+
+	val, ok := endpoint.Get(producer.uncachedRequestTokensDk.String())
+	require.True(t, ok)
+	uncached := val.(*attrconcurrency.UncachedRequestTokens)
+	require.Equal(t, int64(10), uncached.Tokens)
+
+	// Verify that InFlightLoad was NOT put/overwritten by Produce
+	_, ok = endpoint.Get(producer.dk.String())
+	require.False(t, ok, "InFlightLoad should not be populated by Produce")
+}
+
+func TestInFlightLoadProducer_Extract(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	endpointName := "test-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	// Mock some initial load
+	endpoint := newStubSchedulingEndpoint(endpointName)
+	ctx := context.Background()
+
+	// Simulate Add event
+	err := producer.Extract(ctx, datalayer.EndpointEvent{
+		Type:     datalayer.EventAddOrUpdate,
+		Endpoint: endpoint,
+	})
+	require.NoError(t, err)
+
+	// Verify dynamic attribute is registered
+	key := producer.dk.String()
+	val, ok := endpoint.Get(key)
+	require.True(t, ok)
+
+	// Verify initial values (should be 0)
+	load := val.(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(0), load.Requests)
+	require.Equal(t, int64(0), load.Tokens)
+
+	// Update trackers
 	producer.requestTracker.add(endpointID, 5)
 	producer.tokenTracker.add(endpointID, 500)
 
-	ctx := context.Background()
-	endpoints := []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}
-
-	err := producer.Produce(ctx, nil, endpoints)
-	require.NoError(t, err)
-
-	// Verify AttributeMap population
-	key := producer.dk.String()
-	val, ok := endpoints[0].Get(key)
+	// Verify values are updated dynamically without calling Produce
+	val2, ok := endpoint.Get(key)
 	require.True(t, ok)
-	load := val.(*attrconcurrency.InFlightLoad)
-	require.Equal(t, int64(5), load.Requests)
-	require.Equal(t, int64(500), load.Tokens)
+	load2 := val2.(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(5), load2.Requests)
+	require.Equal(t, int64(500), load2.Tokens)
 }
 
 func TestInFlightLoadProducer_Lifecycle(t *testing.T) {
@@ -587,7 +681,7 @@ func TestUncachedInputTokens_Overestimate(t *testing.T) {
 
 	inputTokens := int64(5)
 
-	uncached := uncachedInputTokens(endpoint, inputTokens)
+	uncached := uncachedInputTokens(endpoint, inputTokens, attrprefix.PrefixCacheMatchInfoDataKey.String())
 
 	// When the prefix cache says 4 tokens are definitely uncached in the indexed portion (8-4),
 	// we trust that over the smaller (approximate) estimate of 5.
