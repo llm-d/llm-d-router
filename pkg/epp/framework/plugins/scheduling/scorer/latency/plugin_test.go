@@ -60,7 +60,7 @@ func TestScorePositiveHeadroom(t *testing.T) {
 	setLatencyPrediction(ep2, true, true, 30, 5, 120, 25)
 
 	endpoints := []fwksched.Endpoint{ep1, ep2}
-	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
+	scores := scorer.Score(context.Background(), nil, endpoints)
 
 	s1, s2 := scores[ep1], scores[ep2]
 
@@ -83,7 +83,7 @@ func TestScoreNegativeOnly(t *testing.T) {
 	setLatencyPrediction(ep2, false, false, -100, -30, 200, 60)
 
 	endpoints := []fwksched.Endpoint{ep1, ep2}
-	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
+	scores := scorer.Score(context.Background(), nil, endpoints)
 
 	s1, s2 := scores[ep1], scores[ep2]
 
@@ -112,7 +112,7 @@ func TestScoreTierSplit(t *testing.T) {
 	setLatencyPrediction(ep2, true, true, 50, 10, 50, 20)
 
 	endpoints := []fwksched.Endpoint{ep1, ep2}
-	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
+	scores := scorer.Score(context.Background(), nil, endpoints)
 
 	s1, s2 := scores[ep1], scores[ep2]
 
@@ -146,7 +146,7 @@ func TestScoreIdlePodPreference(t *testing.T) {
 		attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 
 	endpoints := []fwksched.Endpoint{epBusy, epIdle}
-	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
+	scores := scorer.Score(context.Background(), nil, endpoints)
 
 	sBusy, sIdle := scores[epBusy], scores[epIdle]
 
@@ -174,7 +174,7 @@ func TestScoreHierarchicalBuckets(t *testing.T) {
 	setLatencyPrediction(epTPOTNeg, true, false, 10, -8, 90, 38)     // only TPOT negative
 
 	endpoints := []fwksched.Endpoint{epBothNeg, epTTFTNeg, epTPOTNeg}
-	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
+	scores := scorer.Score(context.Background(), nil, endpoints)
 
 	// All should have non-zero scores (they're all in the negative tier).
 	for _, ep := range endpoints {
@@ -195,7 +195,7 @@ func TestScoreCompositeFallback(t *testing.T) {
 	ep2 := makeLatencyScorerEndpoint("pod2", 0.8, 5, 10)
 
 	endpoints := []fwksched.Endpoint{ep1, ep2}
-	scores := scorer.Score(context.Background(), fwksched.NewCycleState(), nil, endpoints)
+	scores := scorer.Score(context.Background(), nil, endpoints)
 
 	s1, s2 := scores[ep1], scores[ep2]
 

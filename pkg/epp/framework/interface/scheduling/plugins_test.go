@@ -53,7 +53,7 @@ type fakeFilter struct {
 	called bool
 }
 
-func (f *fakeFilter) Filter(_ context.Context, _ *CycleState, _ *InferenceRequest, pods []Endpoint) []Endpoint {
+func (f *fakeFilter) Filter(_ context.Context, _ *InferenceRequest, pods []Endpoint) []Endpoint {
 	f.called = true
 	return pods
 }
@@ -64,7 +64,7 @@ type fakeScorer struct {
 }
 
 func (s *fakeScorer) Category() ScorerCategory { return s.cat }
-func (s *fakeScorer) Score(_ context.Context, _ *CycleState, _ *InferenceRequest, pods []Endpoint) map[Endpoint]float64 {
+func (s *fakeScorer) Score(_ context.Context, _ *InferenceRequest, pods []Endpoint) map[Endpoint]float64 {
 	out := make(map[Endpoint]float64, len(pods))
 	for _, p := range pods {
 		out[p] = 1
@@ -76,7 +76,7 @@ type fakePicker struct {
 	fakeBase
 }
 
-func (p *fakePicker) Pick(_ context.Context, _ *CycleState, scored []*ScoredEndpoint) *ProfileRunResult {
+func (p *fakePicker) Pick(_ context.Context, scored []*ScoredEndpoint) *ProfileRunResult {
 	res := &ProfileRunResult{}
 	for _, s := range scored {
 		res.TargetEndpoints = append(res.TargetEndpoints, s.Endpoint)
@@ -88,12 +88,12 @@ type fakeProfileHandler struct {
 	fakeBase
 }
 
-func (h *fakeProfileHandler) Pick(_ context.Context, _ *CycleState, _ *InferenceRequest,
+func (h *fakeProfileHandler) Pick(_ context.Context, _ *InferenceRequest,
 	profiles map[string]SchedulerProfile, _ map[string]*ProfileRunResult) map[string]SchedulerProfile {
 	return profiles
 }
 
-func (h *fakeProfileHandler) ProcessResults(_ context.Context, _ *CycleState, _ *InferenceRequest,
+func (h *fakeProfileHandler) ProcessResults(_ context.Context, _ *InferenceRequest,
 	profileResults map[string]*ProfileRunResult) (*SchedulingResult, error) {
 	primary := ""
 	for k := range profileResults {
@@ -109,7 +109,7 @@ func TestFilter_InterfaceCompliance(t *testing.T) {
 	var _ plugin.Plugin = f
 
 	pods := []Endpoint{NewEndpoint(newTestMetadata("p1"), newTestMetrics(), nil)}
-	got := f.Filter(context.Background(), NewCycleState(), &InferenceRequest{}, pods)
+	got := f.Filter(context.Background(), &InferenceRequest{}, pods)
 	assert.True(t, f.called)
 	assert.Equal(t, pods, got)
 }
@@ -123,7 +123,7 @@ func TestScorer_InterfaceCompliance(t *testing.T) {
 	var _ plugin.Plugin = s
 
 	pods := []Endpoint{NewEndpoint(newTestMetadata("p1"), newTestMetrics(), nil)}
-	scores := s.Score(context.Background(), NewCycleState(), &InferenceRequest{}, pods)
+	scores := s.Score(context.Background(), &InferenceRequest{}, pods)
 	assert.Len(t, scores, 1)
 	assert.Equal(t, Balance, s.Category())
 }
@@ -134,7 +134,7 @@ func TestPicker_InterfaceCompliance(t *testing.T) {
 	var _ plugin.Plugin = p
 
 	ep := NewEndpoint(newTestMetadata("p1"), newTestMetrics(), nil)
-	res := p.Pick(context.Background(), NewCycleState(), []*ScoredEndpoint{{Endpoint: ep, Score: 1}})
+	res := p.Pick(context.Background(), []*ScoredEndpoint{{Endpoint: ep, Score: 1}})
 	assert.NotNil(t, res)
 	assert.Len(t, res.TargetEndpoints, 1)
 }
@@ -145,11 +145,11 @@ func TestProfileHandler_InterfaceCompliance(t *testing.T) {
 	var _ plugin.Plugin = h
 
 	profiles := map[string]SchedulerProfile{"primary": nil}
-	picked := h.Pick(context.Background(), NewCycleState(), &InferenceRequest{}, profiles, nil)
+	picked := h.Pick(context.Background(), &InferenceRequest{}, profiles, nil)
 	assert.Len(t, picked, 1)
 
 	results := map[string]*ProfileRunResult{"primary": {}}
-	sched, err := h.ProcessResults(context.Background(), NewCycleState(), &InferenceRequest{}, results)
+	sched, err := h.ProcessResults(context.Background(), &InferenceRequest{}, results)
 	assert.NoError(t, err)
 	assert.Equal(t, "primary", sched.PrimaryProfileName)
 	assert.Same(t, results["primary"], sched.ProfileResults["primary"])

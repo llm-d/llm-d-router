@@ -18,7 +18,6 @@ package multimodal
 
 import (
 	"context"
-	"maps"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -52,18 +51,14 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	p.wg.Go(func() {
 		p.mutex.Lock()
 		defer p.mutex.Unlock()
-		for _, item := range items {
-			pods := map[string]struct{}{}
-			if existing, ok := p.cache.Get(item.Hash); ok {
-				pods = maps.Clone(existing)
+		for _, endpoint := range targets {
+			metadata := endpoint.GetMetadata()
+			if metadata == nil {
+				continue
 			}
-			for _, endpoint := range targets {
-				if metadata := endpoint.GetMetadata(); metadata != nil {
-					pods[metadata.NamespacedName.String()] = struct{}{}
-				}
-			}
-			if len(pods) > 0 {
-				p.cache.Add(item.Hash, pods)
+			podCache := p.getOrCreatePodCache(metadata.NamespacedName.String())
+			for _, item := range items {
+				podCache.Add(item.Hash, struct{}{})
 			}
 		}
 	})

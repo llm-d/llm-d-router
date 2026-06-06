@@ -34,7 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
@@ -84,7 +83,7 @@ type testHarness struct {
 	startSignal chan struct{}
 
 	// Core components under test
-	processor          *ShardProcessor
+	processor          *Processor
 	clock              *testclock.FakeClock
 	logger             logr.Logger
 	saturationDetector *mockSaturationDetector
@@ -109,7 +108,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		clock:                 testclock.NewFakeClock(time.Now()),
 		logger:                logr.Discard(),
 		saturationDetector:    &mockSaturationDetector{},
-		endpointCandidates:    &mocks.MockEndpointCandidates{Candidates: []fwkdl.Endpoint{&metrics.FakePodMetrics{}}},
+		endpointCandidates:    &mocks.MockEndpointCandidates{Candidates: []fwkdl.Endpoint{fwkdl.NewEndpoint(nil, nil)}},
 		startSignal:           make(chan struct{}),
 		queues:                make(map[flowcontrol.FlowKey]*mocks.MockManagedQueue),
 		priorityFlows:         make(map[int][]flowcontrol.FlowKey),
@@ -132,7 +131,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		}
 	}
 
-	h.processor = NewShardProcessor(
+	h.processor = NewProcessor(
 		h.ctx,
 		"test-pool",
 		h,

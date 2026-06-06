@@ -19,7 +19,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-router/pkg/metrics"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
@@ -103,6 +103,12 @@ func (l *legacyDisaggProfileHandlerParameters) toDisaggParams(logger logr.Logger
 //	if parameters.deciders.prefill is set - P disaggregation will be supported
 //	if parameters.deciders.encode is set - E disaggregation will be supported
 func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
+	if handle == nil {
+		return nil, errors.New("plugin handle is required")
+	}
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
+	}
 	logger := log.FromContext(handle.Context())
 
 	parameters := disaggProfileHandlerParameters{}
@@ -232,8 +238,13 @@ func (h *Handler) WithName(name string) *Handler {
 }
 
 // Consumes defines data types consumed by this plugin (through the PD decider).
-func (*Handler) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{}}
+func (*Handler) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{
+			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedPrompt{},
+		},
+	}
 }
 
 func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeProfile string, pdDecider, encodeDecider deciderPlugin) *Handler {
@@ -250,7 +261,7 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 // Pick implements scheduling.ProfileHandler.
 // Stages run in order: decode → encode (optional) → prefill (optional).
 // Returns the next profile to execute, or an empty map when all stages are done.
-func (h *Handler) Pick(ctx context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
+func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
 	tracer := telemetry.Tracer()
 	ctx, span := tracer.Start(ctx, "llm_d.epp.disagg.profile_handler.pick",
@@ -318,8 +329,8 @@ func (h *Handler) Pick(ctx context.Context, _ *scheduling.CycleState, request *s
 	encodeUsed := profileResults[h.encodeProfile] != nil
 	prefillUsed := profileResults[h.prefillProfile] != nil
 
-	decision := metrics.DisaggDecisionType(encodeUsed, prefillUsed)
-	metrics.RecordDisaggDecision(request.TargetModel, decision)
+	decision := DisaggDecisionType(encodeUsed, prefillUsed)
+	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
 	span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "complete_"+decision))
 
 	return map[string]scheduling.SchedulerProfile{}
@@ -329,7 +340,6 @@ func (h *Handler) Pick(ctx context.Context, _ *scheduling.CycleState, request *s
 // Builds the final SchedulingResult from whichever stages ran successfully.
 func (h *Handler) ProcessResults(
 	_ context.Context,
-	_ *scheduling.CycleState,
 	request *scheduling.InferenceRequest,
 	profileResults map[string]*scheduling.ProfileRunResult,
 ) (*scheduling.SchedulingResult, error) {

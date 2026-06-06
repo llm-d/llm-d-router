@@ -26,14 +26,14 @@ import (
 	"google.golang.org/grpc/codes"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
-	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 type appProtocolSupporter interface {
-	SupportedAppProtocols() []v1.AppProtocol
+	Claims() fwkrh.Claims
 }
 
 type healthServer struct {
@@ -41,7 +41,7 @@ type healthServer struct {
 	datastore             datastore.Datastore
 	isLeader              *atomic.Bool
 	leaderElectionEnabled bool
-	supporter             appProtocolSupporter
+	supporters            []appProtocolSupporter
 }
 
 const (
@@ -103,30 +103,41 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 
 func (s *healthServer) checkProtocolSupport(isLive bool) bool {
 	if !isLive {
-		// If the pool is not synced, we should skip checking the protocol support.
 		return true
 	}
 	pool, err := s.datastore.PoolGet()
 	if err != nil {
 		return true
 	}
-	if s.supporter == nil {
+	// An unset AppProtocol means the operator did not declare a protocol on the
+	// pool. Treat that as "no protocol constraint" rather than silently
+	// defaulting to HTTP, which would lock out file-discovery deployments and
+	// any K8s pool that uses a non-HTTP parser without setting AppProtocol.
+	if pool.AppProtocol == "" {
 		return true
 	}
-	supported := s.supporter.SupportedAppProtocols()
-	if len(supported) == 0 {
-		return true
-	}
-	appProtocol := pool.AppProtocol
-	if appProtocol == "" {
-		appProtocol = v1.AppProtocolHTTP
-	}
-	for _, p := range supported {
-		if p == appProtocol {
-			return true
+	for _, supporter := range s.supporters {
+		if supporter == nil {
+			continue
+		}
+		supported := supporter.Claims().Protocols
+		if len(supported) == 0 {
+			continue
+		}
+		match := false
+		for _, p := range supported {
+			if p == pool.AppProtocol {
+				match = true
+				break
+			}
+		}
+		if !match {
+			s.logger.Error(nil, "parser does not support pool protocol",
+				"supported", supported, "poolProtocol", pool.AppProtocol)
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func (s *healthServer) List(ctx context.Context, _ *healthPb.HealthListRequest) (*healthPb.HealthListResponse, error) {

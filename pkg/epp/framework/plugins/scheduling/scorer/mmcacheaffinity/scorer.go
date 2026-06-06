@@ -85,13 +85,15 @@ func (s *Scorer) Category() scheduling.ScorerCategory {
 }
 
 // Consumes returns the endpoint data consumed by this scorer.
-func (s *Scorer) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{s.mmMatchDataKey: attrmm.EncoderCacheMatchInfo{}}
+func (s *Scorer) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{s.mmMatchDataKey: attrmm.EncoderCacheMatchInfo{}},
+	}
 }
 
 // Score scores endpoints by matched multimodal encoder-cache item size divided
 // by total multimodal request item size.
-func (s *Scorer) Score(ctx context.Context, _ *scheduling.CycleState, req *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *Scorer) Score(ctx context.Context, req *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	traceLogger := log.FromContext(ctx).V(logging.TRACE)
 	requestID := ""
 	if req != nil {

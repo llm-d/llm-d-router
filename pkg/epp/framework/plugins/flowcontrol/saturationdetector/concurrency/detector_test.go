@@ -182,14 +182,14 @@ func TestDetector_Configuration(t *testing.T) {
 		endpointName := "test-endpoint"
 
 		driveLoad(ctx, reg, detector, endpointName, int(tc.effectiveHeadroomBurst-1))
-		kept := detector.Filter(ctx, nil, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
+		kept := detector.Filter(ctx, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
 		require.Len(t, kept, 1, "Endpoint should be retained when operating below burst capacity")
 
 		driveLoad(ctx, reg, detector, endpointName, 1)
 
 		t.Run("fallback to clean endpoint", func(t *testing.T) {
 			cleanEndpoint := "clean-endpoint"
-			kept = detector.Filter(ctx, nil, nil, []fwksched.Endpoint{
+			kept = detector.Filter(ctx, nil, []fwksched.Endpoint{
 				newStubSchedulingEndpoint(reg, endpointName),
 				newStubSchedulingEndpoint(reg, cleanEndpoint),
 			})
@@ -349,7 +349,7 @@ func TestDetector_TokenSaturation(t *testing.T) {
 		{
 			name: "single_endpoint_partial_tokens",
 			requests: []*fwksched.InferenceRequest{
-				makeTokenRequest("r1", "1234"), // 3 tokens with default estimator
+				makeTokenRequest("r1", 1), // 1 input -> 3 total tokens
 			},
 			candidateEndpoints: []string{"endpoint-a"},
 			wantSaturation:     0.03, // 3/100
@@ -357,11 +357,10 @@ func TestDetector_TokenSaturation(t *testing.T) {
 		{
 			name: "single_endpoint_half_full",
 			requests: func() []*fwksched.InferenceRequest {
-				// "1234567890123456" (16 chars) = 10 tokens. 5 requests = 50 tokens.
-				prompt := "1234567890123456"
+				// 4 input -> 10 total tokens per request * 5 requests = 50 tokens.
 				reqs := make([]*fwksched.InferenceRequest, 0, 5)
 				for i := range 5 {
-					reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), prompt))
+					reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), 4))
 				}
 				return reqs
 			}(),
@@ -371,11 +370,10 @@ func TestDetector_TokenSaturation(t *testing.T) {
 		{
 			name: "single_endpoint_full",
 			requests: func() []*fwksched.InferenceRequest {
-				// 10 tokens per request * 10 requests = 100 tokens.
-				prompt := "1234567890123456"
+				// 4 input -> 10 total tokens per request * 10 requests = 100 tokens.
 				reqs := make([]*fwksched.InferenceRequest, 0, 10)
 				for i := range 10 {
-					reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), prompt))
+					reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), 4))
 				}
 				return reqs
 			}(),
@@ -386,10 +384,9 @@ func TestDetector_TokenSaturation(t *testing.T) {
 			name: "multiple_endpoints_mixed_token_load",
 			requests: func() []*fwksched.InferenceRequest {
 				// endpoint-a: 50 tokens, endpoint-b: 0 (driveTokenLoad targets endpoint-a only)
-				prompt := "1234567890123456"
 				reqs := make([]*fwksched.InferenceRequest, 0, 5)
 				for i := range 5 {
-					reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), prompt))
+					reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), 4))
 				}
 				return reqs
 			}(),
@@ -434,23 +431,22 @@ func TestDetector_TokenFilter(t *testing.T) {
 	endpointName := "token-filter-endpoint"
 	endpoints := []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)}
 
-	// Drive 110 tokens (just below 120 burst limit) -> endpoint should pass filter
-	// "1234567890123456" = 10 tokens. 11 requests = 110 tokens.
-	prompt := "1234567890123456"
+	// Drive 110 tokens (just below 120 burst limit) -> endpoint should pass filter.
+	// 4 input -> 10 total tokens per request * 11 requests = 110 tokens.
 	reqs := make([]*fwksched.InferenceRequest, 0, 11)
 	for i := range 11 {
-		reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), prompt))
+		reqs = append(reqs, makeTokenRequest(fmt.Sprintf("r%d", i+1), 4))
 	}
 	driveTokenLoad(ctx, reg, detector, endpointName, reqs)
 
-	kept := detector.Filter(ctx, nil, nil, endpoints)
+	kept := detector.Filter(ctx, nil, endpoints)
 	require.Len(t, kept, 1, "endpoint should pass filter below burst limit")
 
 	// Add one more request to reach 120 tokens -> filtered out
 	driveTokenLoad(ctx, reg, detector, endpointName, []*fwksched.InferenceRequest{
-		makeTokenRequest("r12", prompt),
+		makeTokenRequest("r12", 4),
 	})
-	kept = detector.Filter(ctx, nil, nil, endpoints)
+	kept = detector.Filter(ctx, nil, endpoints)
 	require.Len(t, kept, 0, "endpoint should be filtered at burst limit")
 }
 
@@ -466,7 +462,7 @@ func TestDetector_TokenLifecycle(t *testing.T) {
 	candidates := []datalayer.Endpoint{newFakeEndpoint(reg, endpointName)}
 	targetEndpoint := newStubSchedulingEndpoint(reg, endpointName)
 
-	req1 := makeTokenRequest("req1", "1234567890123456") // 10 tokens
+	req1 := makeTokenRequest("req1", 4) // 4 input -> 10 total tokens
 	simulatePreRequest(ctx, reg, req1, makeSchedulingResult(reg, endpointName))
 	require.InDelta(t, 0.1, detector.Saturation(ctx, candidates), 1e-6)
 
@@ -486,7 +482,7 @@ func TestDetector_TokenDeleteEndpoint(t *testing.T) {
 	endpointName := "token-delete-endpoint"
 	candidates := []datalayer.Endpoint{newFakeEndpoint(reg, endpointName)}
 
-	req := makeTokenRequest("req1", "1234567890123456")
+	req := makeTokenRequest("req1", 4) // 4 input -> 10 total tokens
 	simulatePreRequest(ctx, reg, req, makeSchedulingResult(reg, endpointName))
 	require.InDelta(t, 0.1, detector.Saturation(ctx, candidates), 1e-6)
 
@@ -667,11 +663,13 @@ func (f *liveSchedulingEndpoint) Keys() []string {
 func (f *liveSchedulingEndpoint) String() string                { return f.id }
 func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
 
-func makeTokenRequest(requestID, prompt string) *fwksched.InferenceRequest {
+// makeTokenRequest builds a request with inputTokens tokenized input tokens.
+// The estimator then derives total tokens as inputTokens * (1 + OutputRatio).
+func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,
 		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, inputTokens)},
 		},
 	}
 }

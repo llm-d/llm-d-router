@@ -115,7 +115,7 @@ func TestPickWeightedRandomPicker(t *testing.T) {
 
 			// Run multiple iterations to gather statistical data
 			for range testIterations {
-				result := picker.Pick(context.Background(), fwksched.NewCycleState(), test.input)
+				result := picker.Pick(context.Background(), test.input)
 
 				// Count selections for probability analysis
 				selectedEndpointName := result.TargetEndpoints[0].GetMetadata().NamespacedName.Name

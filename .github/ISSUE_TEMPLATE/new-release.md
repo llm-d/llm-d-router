@@ -102,7 +102,7 @@ This document defines the process for releasing llm-d-router.
     git push ${REMOTE} v${MAJOR}.${MINOR}.${PATCH}
     ```
 
-1. Pushing the tag triggers CI action to build and publish the container image to the [ghcr registry].
+1. Pushing the tag triggers CI action to build and publish the [EPP image] and [sidecar image] to the [ghcr registry].
 1. Test the steps in the tagged quickstart guide after the PR merges. TODO add e2e tests! <!-- link to an e2e tests once we have such one -->
 
 ### Create the release!
@@ -130,6 +130,8 @@ Use the following steps to announce the release.
 1. Close this issue.
 
 [repo]: https://github.com/llm-d/llm-d-router
-[ghcr registry]: https://github.com/llm-d/llm-d-router/pkgs/container/llm-d-inference-scheduler # TODO: we need udpate this once image are pushed with new name
+[ghcr registry]: https://github.com/orgs/llm-d/packages?repo_name=llm-d-router
+[EPP image]: https://github.com/llm-d/llm-d-router/pkgs/container/llm-d-router-endpoint-picker
+[sidecar image]: https://github.com/llm-d/llm-d-router/pkgs/container/llm-d-router-disagg-sidecar
 [new release]: https://github.com/llm-d/llm-d-router/releases/new
 [issue]: https://github.com/llm-d/llm-d-router/issues/new/choose

@@ -122,9 +122,9 @@ func (s *NoHitLRU) Category() scheduling.ScorerCategory {
 	return scheduling.Distribution
 }
 
-func (s *NoHitLRU) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{
-		s.dk: attrprefix.PrefixCacheMatchInfo{},
+func (s *NoHitLRU) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{s.dk: attrprefix.PrefixCacheMatchInfo{}},
 	}
 }
 
@@ -249,7 +249,7 @@ func (s *NoHitLRU) scoreColdRequestByLRU(endpoints []scheduling.Endpoint) map[sc
 // - LRU ordering is with respect to when a endpoint last received a cold request.
 // - Least recently used (or never used) endpoints get highest score (1.0)
 // - Most recently used endpoints get lowest score (approaching 0.0)
-func (s *NoHitLRU) Score(ctx context.Context, cycleState *scheduling.CycleState, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *NoHitLRU) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	logger := log.FromContext(ctx).V(logging.DEBUG)
 
 	isCold := s.isColdRequest(ctx, endpoints)

@@ -17,18 +17,20 @@ limitations under the License.
 package multimodal
 
 import (
-	"maps"
-
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
+// cacheSnapshot returns a hash→pod-set view of the per-endpoint caches for assertions.
 func (p *Producer) cacheSnapshot() map[string]map[string]struct{} {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
-	snapshot := make(map[string]map[string]struct{}, p.cache.Len())
-	for _, hash := range p.cache.Keys() {
-		if pods, ok := p.cache.Get(hash); ok {
-			snapshot[hash] = maps.Clone(pods)
+	snapshot := map[string]map[string]struct{}{}
+	for pod, podCache := range p.caches {
+		for _, hash := range podCache.Keys() {
+			if snapshot[hash] == nil {
+				snapshot[hash] = map[string]struct{}{}
+			}
+			snapshot[hash][pod] = struct{}{}
 		}
 	}
 	return snapshot
@@ -37,12 +39,7 @@ func (p *Producer) cacheSnapshot() map[string]map[string]struct{} {
 func (p *Producer) putCacheEntry(hash string, pods ...k8stypes.NamespacedName) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
-	podSet := map[string]struct{}{}
-	if existing, ok := p.cache.Get(hash); ok {
-		podSet = maps.Clone(existing)
-	}
 	for _, pod := range pods {
-		podSet[pod.String()] = struct{}{}
+		p.getOrCreatePodCache(pod.String()).Add(hash, struct{}{})
 	}
-	p.cache.Add(hash, podSet)
 }

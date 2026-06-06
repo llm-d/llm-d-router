@@ -42,6 +42,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -58,11 +59,11 @@ type EvictChannelLookup interface {
 	Deregister(requestID string)
 }
 
-func NewStreamingServer(datastore Datastore, director Director, parser fwkrh.Parser, maxPoolBufferSize int) *StreamingServer {
+func NewStreamingServer(datastore Datastore, director Director, parserRegistry *ParserRegistry, maxPoolBufferSize int) *StreamingServer {
 	return &StreamingServer{
 		director:          director,
 		datastore:         datastore,
-		parser:            parser,
+		parserRegistry:    parserRegistry,
 		maxPoolBufferSize: maxPoolBufferSize,
 		bufferPool: sync.Pool{
 			New: func() any {
@@ -93,7 +94,7 @@ type Datastore interface {
 type StreamingServer struct {
 	datastore         Datastore
 	director          Director
-	parser            fwkrh.Parser
+	parserRegistry    *ParserRegistry
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
@@ -109,7 +110,6 @@ type RequestContext struct {
 	TargetEndpoint            string
 	IncomingModelName         string
 	TargetModelName           string
-	FairnessID                string
 	ObjectiveKey              string
 	Priority                  int
 	RequestReceivedTimestamp  time.Time
@@ -122,6 +122,7 @@ type RequestContext struct {
 	ResponseStatusCode        string
 	RequestRunning            bool
 	Request                   *Request
+	Parser                    fwkrh.Parser
 
 	SchedulingRequest *fwksched.InferenceRequest
 
@@ -161,17 +162,39 @@ const (
 	BodyResponseResponsesComplete    StreamRequestState = 6
 	TrailerResponseResponsesComplete StreamRequestState = 7
 	// RequestEvicted indicates the request was evicted by flow control.
-	// The state machine sends an ImmediateResponse(429) to Envoy.
+	// The state machine sends an ImmediateResponse(429) to the proxy.
 	RequestEvicted StreamRequestState = 8
-	// RequestSkipped indicates the request parsing was skipped.
-	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with fallback routing(randomly pick an endpoint from inferencePool) to Envoy.
-	RequestSkipped StreamRequestState = 9
+	// RequestResponseProcessingSkipped indicates that EPP response-phase stream interception was skipped for this request.
+	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
+	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
+	RequestResponseProcessingSkipped StreamRequestState = 9
 )
 
 // recvResult holds the result of a srv.Recv() call from the reader goroutine.
 type recvResult struct {
 	req *extProcPb.ProcessingRequest
 	err error
+}
+
+func (s *StreamingServer) getOrResolveParser(ctx context.Context, reqCtx *RequestContext) (fwkrh.Parser, error) {
+	if reqCtx.Parser != nil {
+		return reqCtx.Parser, nil
+	}
+
+	logger := log.FromContext(ctx)
+	var headers map[string]string
+	if reqCtx.Request != nil {
+		headers = reqCtx.Request.Headers
+	}
+	path := fwkrequest.GetRequestPath(headers)
+	parser, err := s.parserRegistry.Resolve(path)
+	if err != nil {
+		logger.Error(err, "Error resolving parser for path", "path", path)
+		return nil, err
+	}
+
+	reqCtx.Parser = parser
+	return parser, nil
 }
 
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
@@ -343,19 +366,16 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.RequestSize = buf.Len()
 				buf.Reset()
 
-				parseResult, parseErr := s.parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
+				parser, resolveErr := s.getOrResolveParser(ctx, reqCtx)
+				if resolveErr != nil {
+					err = errcommon.Error{Code: errcommon.BadRequest, Msg: resolveErr.Error()}
+					logger.Error(err, "Error resolving parser for request body")
+					break
+				}
+				parseResult, parseErr := parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				if parseErr != nil {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: parseErr.Error()}
 					logger.Error(err, "Error parsing request")
-					break
-				}
-
-				if parseResult.Skip {
-					if err = s.fallbackToRandomEndpoint(ctx, reqCtx, reqCtx.RequestSize); err != nil {
-						logger.Error(err, "Error falling back to random endpoint")
-						break
-					}
-					reqCtx.RequestState = RequestSkipped
 					break
 				}
 
@@ -381,6 +401,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
 				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.Priority)
 				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestSize)
+
+				if parseResult.SkipResponseProcessing {
+					reqCtx.RequestState = RequestResponseProcessingSkipped
+				}
 			}
 		case *extProcPb.ProcessingRequest_RequestTrailers:
 			// This is currently unused.
@@ -452,8 +476,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		if err := reqCtx.updateStateAndSendIfNeeded(srv, logger); err != nil {
 			return err
 		}
-		if reqCtx.RequestState == RequestSkipped {
-			logger.V(logutil.DEFAULT).Info("EPP skipped the request")
+		if reqCtx.RequestState == RequestResponseProcessingSkipped {
+			logger.V(logutil.DEFAULT).Info("EPP skipped response interception, routed request",
+				"targetEndpoint", reqCtx.TargetEndpoint,
+				"targetModel", reqCtx.TargetModelName)
 			// Gracefully close the gRPC stream to stop external processing for this request.
 			// This ensures Envoy continues with the request without calling further phases.
 			// See: https://github.com/envoyproxy/envoy/blob/0533de0acca281110945e5726bbb306fbb12bde5/api/envoy/service/ext_proc/v3/external_processor.proto#L40-L41
@@ -535,8 +561,8 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		})
 	}
 
-	// Handle skip — send response with fallback routing to the proxy.
-	if r.RequestState == RequestSkipped {
+	// Handle skip — send response with the director's routing decision to the proxy.
+	if r.RequestState == RequestResponseProcessingSkipped {
 		if r.reqHeaderResp != nil {
 			if err := srv.Send(r.reqHeaderResp); err != nil {
 				logger.Error(err, "error sending response")

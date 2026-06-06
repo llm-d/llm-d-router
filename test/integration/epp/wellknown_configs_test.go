@@ -57,6 +57,8 @@ schedulingProfiles:
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
+			// Auto created transitively: the approx producer consumes TokenizedPrompt.
+			{Name: "token-producer", Type: "token-producer"},
 		},
 	},
 	"tiered-prefix-cache-cpu": {
@@ -64,6 +66,7 @@ schedulingProfiles:
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
 - type: approx-prefix-cache-producer
   name: cpu-prefix-cache-producer
   parameters:
@@ -90,6 +93,7 @@ schedulingProfiles:
     weight: 1.0
 `,
 		expectedPlugins: []configapi.PluginSpec{
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"}, // this one is auto configured.
 			{Name: "cpu-prefix-cache-producer", Type: "approx-prefix-cache-producer"},    // this one is configured manually.
 			{Name: "queue-scorer", Type: "queue-scorer"},
@@ -144,6 +148,8 @@ schedulingProfiles:
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
+			// Auto created transitively: the approx producer consumes TokenizedPrompt.
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "queue-scorer", Type: "queue-scorer"},
 			{Name: "kv-cache-utilization-scorer", Type: "kv-cache-utilization-scorer"},
 			{Name: "active-request-scorer", Type: "active-request-scorer"},
@@ -195,6 +201,8 @@ schedulingProfiles:
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
+			// Auto created transitively: the approx producer consumes TokenizedPrompt.
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "queue-scorer", Type: "queue-scorer"},
 			{Name: "kv-cache-utilization-scorer", Type: "kv-cache-utilization-scorer"},
 			{Name: "active-request-scorer", Type: "active-request-scorer"},
@@ -206,6 +214,7 @@ schedulingProfiles:
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
 - type: prefix-based-pd-decider
 - type: prefill-header-handler
 - type: prefill-filter
@@ -233,6 +242,7 @@ schedulingProfiles:
     weight: 1
 `,
 		expectedPlugins: []configapi.PluginSpec{
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "prefill-header-handler", Type: "disagg-headers-handler"},
 			{Name: "prefill-filter", Type: "by-label"},
 			{Name: "decode-filter", Type: "by-label"},
@@ -270,9 +280,9 @@ schedulingProfiles:
     weight: 2
   - pluginRef: prefix-cache-scorer
     weight: 3
-saturationDetector:
-  pluginRef: concurrency-detector
 flowControl:
+  saturationDetector:
+    pluginRef: concurrency-detector
   maxBytes: "10Gi"
   maxRequests: "1k"
   defaultRequestTTL: "60s"
@@ -296,6 +306,8 @@ flowControl:
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
+			// Auto created transitively: the approx producer consumes TokenizedPrompt.
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "round-robin-fairness-policy", Type: "round-robin-fairness-policy"},
 			{Name: "fcfs-ordering-policy", Type: "fcfs-ordering-policy"},
 			{Name: "concurrency-detector", Type: "concurrency-detector"},
@@ -346,6 +358,8 @@ schedulingProfiles:
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
+			// Auto created transitively: the approx producer consumes TokenizedPrompt.
+			{Name: "token-producer", Type: "token-producer"},
 			{Name: "metrics-data-source", Type: "metrics-data-source"},
 			{Name: "core-metrics-extractor", Type: "core-metrics-extractor"},
 			{Name: "predicted-latency-producer", Type: "predicted-latency-producer"},

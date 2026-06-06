@@ -79,7 +79,7 @@ var (
 			Name:      "inference_request_metric",
 			Help:      metricsutil.HelpMsgWithStability("Consolidated gauge for various inference request metrics including TTFT, TPOT, SLOs, and prediction durations.", compbasemetrics.ALPHA),
 		},
-		modelTypeLabels,
+		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name", "type"},
 	)
 
 	requestTTFT = prometheus.NewHistogramVec(
@@ -99,7 +99,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference model TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   generalLatencyBuckets,
 		},
-		modelLabels,
+		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name"},
 	)
 
 	requestPredictedTTFT = prometheus.NewHistogramVec(
@@ -119,7 +119,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference model Predicted TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   generalLatencyBuckets,
 		},
-		modelLabels,
+		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name"},
 	)
 
 	requestTTFTPredictionDuration = prometheus.NewHistogramVec(
@@ -139,7 +139,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Duration taken to generate TTFT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   predictionLatencyBuckets,
 		},
-		modelLabels,
+		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name"},
 	)
 
 	requestTPOT = prometheus.NewHistogramVec(
@@ -159,7 +159,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference model TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   tpotBuckets,
 		},
-		modelLabels,
+		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name"},
 	)
 
 	requestPredictedTPOT = prometheus.NewHistogramVec(
@@ -179,7 +179,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference model Predicted TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   tpotBuckets,
 		},
-		modelLabels,
+		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name"},
 	)
 
 	requestTPOTPredictionDuration = prometheus.NewHistogramVec(
@@ -199,7 +199,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Duration taken to generate TPOT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   predictionLatencyBuckets,
 		},
-		modelLabels,
+		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name"},
 	)
 
 	sloViolationCounter = prometheus.NewCounterVec(
@@ -217,7 +217,7 @@ var (
 			Name:      "request_slo_violation_total",
 			Help:      metricsutil.HelpMsgWithStability("Counter of SLO violations for each model, target model, and violation type.", compbasemetrics.ALPHA),
 		},
-		modelTypeLabels,
+		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name", "type"},
 	)
 )
 
@@ -254,20 +254,20 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	return nil
 }
 
-func recordRequestTPOT(ctx context.Context, modelName, targetModelName string, tpot float64) bool {
+func recordRequestTPOT(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, tpot float64) bool {
 	if tpot < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TPOT value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot)
 		return false
 	}
 	requestTPOT.WithLabelValues(modelName, targetModelName).Observe(tpot)
-	llmdRequestTPOT.WithLabelValues(modelName, targetModelName).Observe(tpot)
+	llmdRequestTPOT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(tpot)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOT).Set(tpot)
-	llmdInferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOT).Set(tpot)
+	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOT).Set(tpot)
 	return true
 }
 
-func recordRequestTPOTWithSLO(ctx context.Context, modelName, targetModelName string, tpot float64, sloThreshold float64) bool {
+func recordRequestTPOTWithSLO(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, tpot float64, sloThreshold float64) bool {
 	if tpot < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TPOT value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot)
@@ -276,59 +276,59 @@ func recordRequestTPOTWithSLO(ctx context.Context, modelName, targetModelName st
 
 	if tpot > sloThreshold {
 		inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTSLOViolation).Set(1)
-		llmdInferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTSLOViolation).Set(1)
+		llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOTSLOViolation).Set(1)
 		sloViolationCounter.WithLabelValues(modelName, targetModelName, typeTPOT).Inc()
-		llmdSloViolationCounter.WithLabelValues(modelName, targetModelName, typeTPOT).Inc()
+		llmdSloViolationCounter.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOT).Inc()
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("TPOT SLO violation detected",
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot, "threshold", sloThreshold)
 	} else {
 		inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTSLOViolation).Set(0)
-		llmdInferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTSLOViolation).Set(0)
+		llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOTSLOViolation).Set(0)
 	}
 
 	return true
 }
 
-func recordRequestPredictedTPOT(ctx context.Context, modelName, targetModelName string, predictedTPOT float64) bool {
+func recordRequestPredictedTPOT(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, predictedTPOT float64) bool {
 	if predictedTPOT < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "Predicted TPOT value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", predictedTPOT)
 		return false
 	}
 	requestPredictedTPOT.WithLabelValues(modelName, targetModelName).Observe(predictedTPOT)
-	llmdRequestPredictedTPOT.WithLabelValues(modelName, targetModelName).Observe(predictedTPOT)
+	llmdRequestPredictedTPOT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(predictedTPOT)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typePredictedTPOT).Set(predictedTPOT)
-	llmdInferenceGauges.WithLabelValues(modelName, targetModelName, typePredictedTPOT).Set(predictedTPOT)
+	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typePredictedTPOT).Set(predictedTPOT)
 	return true
 }
 
-func recordRequestTPOTPredictionDuration(ctx context.Context, modelName, targetModelName string, duration float64) bool {
+func recordRequestTPOTPredictionDuration(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, duration float64) bool {
 	if duration < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TPOT prediction duration must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "duration", duration)
 		return false
 	}
 	requestTPOTPredictionDuration.WithLabelValues(modelName, targetModelName).Observe(duration)
-	llmdRequestTPOTPredictionDuration.WithLabelValues(modelName, targetModelName).Observe(duration)
+	llmdRequestTPOTPredictionDuration.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(duration)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTPredictionDuration).Set(duration)
-	llmdInferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOTPredictionDuration).Set(duration)
+	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOTPredictionDuration).Set(duration)
 	return true
 }
 
-func recordRequestTTFT(ctx context.Context, modelName, targetModelName string, ttft float64) bool {
+func recordRequestTTFT(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, ttft float64) bool {
 	if ttft < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TTFT value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft)
 		return false
 	}
 	requestTTFT.WithLabelValues(modelName, targetModelName).Observe(ttft)
-	llmdRequestTTFT.WithLabelValues(modelName, targetModelName).Observe(ttft)
+	llmdRequestTTFT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(ttft)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFT).Set(ttft)
-	llmdInferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFT).Set(ttft)
+	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFT).Set(ttft)
 	return true
 }
 
-func recordRequestTTFTWithSLO(ctx context.Context, modelName, targetModelName string, ttft float64, sloThreshold float64) bool {
+func recordRequestTTFTWithSLO(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, ttft float64, sloThreshold float64) bool {
 	if ttft < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TTFT value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft)
@@ -337,41 +337,41 @@ func recordRequestTTFTWithSLO(ctx context.Context, modelName, targetModelName st
 
 	if ttft > sloThreshold {
 		inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTSLOViolation).Set(1)
-		llmdInferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTSLOViolation).Set(1)
+		llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFTSLOViolation).Set(1)
 		sloViolationCounter.WithLabelValues(modelName, targetModelName, typeTTFT).Inc()
-		llmdSloViolationCounter.WithLabelValues(modelName, targetModelName, typeTTFT).Inc()
+		llmdSloViolationCounter.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFT).Inc()
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("TTFT SLO violation detected",
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft, "threshold", sloThreshold)
 	} else {
 		inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTSLOViolation).Set(0)
-		llmdInferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTSLOViolation).Set(0)
+		llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFTSLOViolation).Set(0)
 	}
 
 	return true
 }
 
-func recordRequestPredictedTTFT(ctx context.Context, modelName, targetModelName string, predictedTTFT float64) bool {
+func recordRequestPredictedTTFT(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, predictedTTFT float64) bool {
 	if predictedTTFT < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "Predicted TTFT value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", predictedTTFT)
 		return false
 	}
 	requestPredictedTTFT.WithLabelValues(modelName, targetModelName).Observe(predictedTTFT)
-	llmdRequestPredictedTTFT.WithLabelValues(modelName, targetModelName).Observe(predictedTTFT)
+	llmdRequestPredictedTTFT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(predictedTTFT)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typePredictedTTFT).Set(predictedTTFT)
-	llmdInferenceGauges.WithLabelValues(modelName, targetModelName, typePredictedTTFT).Set(predictedTTFT)
+	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typePredictedTTFT).Set(predictedTTFT)
 	return true
 }
 
-func recordRequestTTFTPredictionDuration(ctx context.Context, modelName, targetModelName string, duration float64) bool {
+func recordRequestTTFTPredictionDuration(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, duration float64) bool {
 	if duration < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TTFT prediction duration must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "duration", duration)
 		return false
 	}
 	requestTTFTPredictionDuration.WithLabelValues(modelName, targetModelName).Observe(duration)
-	llmdRequestTTFTPredictionDuration.WithLabelValues(modelName, targetModelName).Observe(duration)
+	llmdRequestTTFTPredictionDuration.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(duration)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTPredictionDuration).Set(duration)
-	llmdInferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFTPredictionDuration).Set(duration)
+	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFTPredictionDuration).Set(duration)
 	return true
 }

@@ -94,12 +94,14 @@ func (p *Plugin) Produces() map[plugin.DataKey]any {
 }
 
 // Consumes returns the data consumed by the plugin.
-func (p *Plugin) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}}
+func (p *Plugin) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}},
+	}
 }
 
 // Score returns the scoring result for the given list of pods based on prefix cache match info.
-func (p *Plugin) Score(ctx context.Context, _ *fwksched.CycleState, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	logger := log.FromContext(ctx)
 

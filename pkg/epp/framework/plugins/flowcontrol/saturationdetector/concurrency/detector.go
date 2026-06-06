@@ -103,9 +103,9 @@ func (d *detector) TypedName() fwkplugin.TypedName {
 	return d.typedName
 }
 
-func (d *detector) Consumes() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{
-		d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{},
+func (d *detector) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
 	}
 }
 
@@ -154,7 +154,6 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 // It applies a relaxed limit (MaxConcurrency * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
 func (d *detector) Filter(
 	_ context.Context,
-	_ *fwksched.CycleState,
 	_ *fwksched.InferenceRequest,
 	endpoints []fwksched.Endpoint,
 ) []fwksched.Endpoint {

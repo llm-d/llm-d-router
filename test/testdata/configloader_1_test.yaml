@@ -28,5 +28,6 @@ dataLayer:
     - pluginRef: test-extractor
 featureGates:
 - dataLayer
-saturationDetector:
-  metricsStalenessThreshold: 150ms
+flowControl:
+  saturationDetector:
+    metricsStalenessThreshold: 150ms

@@ -66,6 +66,21 @@ func (epm *EndpointMetadata) Clone() *EndpointMetadata {
 	}
 }
 
+// Equal reports whether two EndpointMetadata values describe the same endpoint
+// metadata. A nil Labels map and an empty Labels map are treated as equal.
+func (epm *EndpointMetadata) Equal(other *EndpointMetadata) bool {
+	if epm == nil || other == nil {
+		return epm == other
+	}
+	return epm.NamespacedName == other.NamespacedName &&
+		epm.PodName == other.PodName &&
+		epm.Address == other.Address &&
+		epm.Port == other.Port &&
+		epm.MetricsHost == other.MetricsHost &&
+		epm.RankIndex == other.RankIndex &&
+		maps.Equal(epm.Labels, other.Labels)
+}
+
 // GetRankIndex returns the rank index of this endpoint within the pool's
 // TargetPorts list.
 func (epm *EndpointMetadata) GetRankIndex() int {

@@ -67,7 +67,7 @@ func (f *HeaderBasedTestingFilter) WithName(name string) *HeaderBasedTestingFilt
 // Filter selects endpoints whose IP or IP:port matches any value in the
 // "test-epp-endpoint-selection" header. Values may be "IP" or "IP:port".
 // If a port is provided, only an exact IP:port match is accepted.
-func (f *HeaderBasedTestingFilter) Filter(_ context.Context, _ *fwksched.CycleState, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+func (f *HeaderBasedTestingFilter) Filter(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	hv, ok := request.Headers[test.HeaderTestEppEndPointSelectionKey]
 	if !ok || strings.TrimSpace(hv) == "" {
 		return []fwksched.Endpoint{}

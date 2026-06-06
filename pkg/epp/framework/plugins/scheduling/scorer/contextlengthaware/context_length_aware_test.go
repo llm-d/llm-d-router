@@ -108,7 +108,7 @@ func TestContextLengthAwareFilter(t *testing.T) {
 	request := createRequest()
 
 	// With empty request body, context length is 0, matches 0-100 and 0-2000 ranges
-	filteredEndpoints := plugin.Filter(ctx, nil, request, endpoints)
+	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 
 	gotNames := make([]string, len(filteredEndpoints))
 	for i, endpoint := range filteredEndpoints {
@@ -144,7 +144,7 @@ func TestContextLengthAwareScore(t *testing.T) {
 	plugin := NewContextLengthAware("test-scorer", params)
 	request := createRequest()
 
-	scores := plugin.Score(ctx, nil, request, endpoints)
+	scores := plugin.Score(ctx, request, endpoints)
 
 	// With context length 0:
 	// - tight-range (0-20): in-range, should score high (> 0.3)
@@ -273,24 +273,19 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 		RequestID:   "test-request",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: "some prompt text"},
-			},
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs},
 		},
 	}
 
-	filteredEndpoints := plugin.Filter(ctx, scheduling.NewCycleState(), request, endpoints)
+	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
 	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
 }
 
-func TestContextLengthAwareFallbackWithoutTokenizedPrompt(t *testing.T) {
+func TestContextLengthAwareNilTokenizedPromptIsZero(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
-	// Without TokenizedPrompt, falls back to char estimation (len * 0.25)
-	prompt := "Hello, how are you?" // 19 chars => ~4 tokens estimated
-
+	// Without TokenizedPrompt the context length is 0 (unknown); no protocol structs are read.
 	endpoints := []scheduling.Endpoint{
 		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "matching-range"},
 			"10.0.0.1",
@@ -304,19 +299,15 @@ func TestContextLengthAwareFallbackWithoutTokenizedPrompt(t *testing.T) {
 		Label:           DefaultContextLengthLabel,
 		EnableFiltering: true,
 	}
-	plugin := NewContextLengthAware("test-fallback", params)
+	plugin := NewContextLengthAware("test-no-tokens", params)
 
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-request",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: prompt},
-			},
-		},
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
 
-	filteredEndpoints := plugin.Filter(ctx, nil, request, endpoints)
+	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
 	assert.Equal(t, "matching-range", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
 }

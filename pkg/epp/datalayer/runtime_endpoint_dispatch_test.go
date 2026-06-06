@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	extmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
@@ -43,18 +44,18 @@ func TestNewEndpointDispatchesEventWithNoPollers(t *testing.T) {
 		Sources: []DataSourceConfig{
 			{
 				Plugin:     epSrc,
-				Extractors: []fwkdl.ExtractorBase{extractor},
+				Extractors: []fwkplugin.Plugin{extractor},
 			},
 		},
 	}
-	assert.NoError(t, r.Configure(cfg, false, "", logger))
+	assert.NoError(t, r.Configure(cfg, logger))
 
 	pod := &fwkdl.EndpointMetadata{
 		NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
 		Address:        "1.2.3.4:5678",
 	}
 
-	endpoint := r.NewEndpoint(context.Background(), pod, nil)
+	endpoint := r.NewEndpoint(context.Background(), pod)
 	assert.NotNil(t, endpoint, "NewEndpoint should return a valid endpoint")
 
 	events := extractor.GetEvents()
@@ -66,4 +67,37 @@ func TestNewEndpointDispatchesEventWithNoPollers(t *testing.T) {
 	events = extractor.GetEvents()
 	require.Len(t, events, 2, "EndpointExtractor should receive EventDelete from ReleaseEndpoint")
 	assert.Equal(t, fwkdl.EventDelete, events[1].Type)
+}
+
+func TestUpdateEndpointDispatchesEvent(t *testing.T) {
+	extractor := extmocks.NewEndpointExtractor("test-extractor")
+	epSrc := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-source")
+
+	r := NewRuntime(1)
+	logger := newTestLogger(t)
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{
+				Plugin:     epSrc,
+				Extractors: []fwkplugin.Plugin{extractor},
+			},
+		},
+	}
+	require.NoError(t, r.Configure(cfg, logger))
+
+	endpoint := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
+		Address:        "1.2.3.4",
+	}, nil)
+	endpoint.UpdateMetadata(&fwkdl.EndpointMetadata{
+		NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
+		Address:        "5.6.7.8",
+	})
+
+	r.UpdateEndpoint(context.Background(), endpoint)
+
+	events := extractor.GetEvents()
+	require.Len(t, events, 1, "EndpointExtractor should receive EventAddOrUpdate from UpdateEndpoint")
+	assert.Equal(t, fwkdl.EventAddOrUpdate, events[0].Type)
+	assert.Equal(t, "5.6.7.8", events[0].Endpoint.GetMetadata().Address)
 }

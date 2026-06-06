@@ -59,7 +59,7 @@ func makeNonSheddableRequest(ttftSLO, tpotSLO string) *fwksched.InferenceRequest
 	}
 }
 
-func TestAdmitRequest(t *testing.T) {
+func TestAdmit(t *testing.T) {
 	plugin := NewLatencyAdmission(LatencyAdmissionDefaultConfig)
 
 	tests := []struct {
@@ -209,9 +209,9 @@ func TestAdmitRequest(t *testing.T) {
 			if tt.setupFn != nil {
 				tt.setupFn(tt.endpoints)
 			}
-			err := plugin.AdmitRequest(context.Background(), tt.request, tt.endpoints)
+			err := plugin.Admit(context.Background(), tt.request, tt.endpoints)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("AdmitRequest() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("Admit() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}

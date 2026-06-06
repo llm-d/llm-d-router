@@ -42,7 +42,7 @@ func TestScorerConsumesMatchInfo(t *testing.T) {
 	scorer := New(testName, "")
 
 	consumes := scorer.Consumes()
-	assert.Contains(t, consumes, attrmm.EncoderCacheMatchInfoKey)
+	assert.Contains(t, consumes.Required, attrmm.EncoderCacheMatchInfoKey)
 	assert.Equal(t, scheduling.Affinity, scorer.Category())
 	assert.Equal(t, Type, scorer.TypedName().Type)
 }
@@ -57,7 +57,7 @@ func TestScoreFromProducedMatchInfo(t *testing.T) {
 	endpointB.Put(attrmm.EncoderCacheMatchInfoKey.String(), attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "icon", Size: 20}}, requestItems))
 	endpointC.Put(attrmm.EncoderCacheMatchInfoKey.String(), attrmm.NewEncoderCacheMatchInfo(nil, requestItems))
 
-	scores := scorer.Score(context.Background(), scheduling.NewCycleState(), nil, []scheduling.Endpoint{endpointA, endpointB, endpointC})
+	scores := scorer.Score(context.Background(), nil, []scheduling.Endpoint{endpointA, endpointB, endpointC})
 
 	assert.Equal(t, 0.8, scores[endpointA])
 	assert.Equal(t, 0.2, scores[endpointB])
@@ -70,7 +70,7 @@ func TestScoreMissingOrInvalidMatchInfoReturnsZero(t *testing.T) {
 	endpointB := newEndpoint("pod-b")
 	endpointB.Put(attrmm.EncoderCacheMatchInfoKey.String(), attrmm.NewEncoderCacheMatchInfo([]attrmm.MatchItem{{Hash: "image", Size: 1}}, nil))
 
-	scores := scorer.Score(context.Background(), scheduling.NewCycleState(), nil, []scheduling.Endpoint{endpointA, endpointB})
+	scores := scorer.Score(context.Background(), nil, []scheduling.Endpoint{endpointA, endpointB})
 
 	assert.Equal(t, 0.0, scores[endpointA])
 	assert.Equal(t, 0.0, scores[endpointB])

@@ -21,17 +21,16 @@ func TestDatasource(t *testing.T) {
 	srcPlugin, err := ModelDataSourceFactory("models-data-source",
 		fwkplugin.StrictDecoder(json.RawMessage(`{"scheme":"https","path":"/models","insecureSkipVerify":true}`)), nil)
 	assert.Nil(t, err, "failed to create http datasource")
-	source := srcPlugin.(fwkdl.PollingDataSource)
+	source := srcPlugin.(fwkdl.PollingDispatcher)
 
 	extPlugin, err := extmodels.ModelServerExtractorFactory("models-data-extractor", nil, nil)
 	assert.Nil(t, err, "failed to create extractor")
-	extractor := extPlugin.(fwkdl.Extractor)
 
 	cfg := &datalayer.Config{
 		Sources: []datalayer.DataSourceConfig{
 			{
 				Plugin:     source,
-				Extractors: []fwkdl.ExtractorBase{extractor},
+				Extractors: []fwkplugin.Plugin{extPlugin},
 			},
 		},
 	}
@@ -39,7 +38,7 @@ func TestDatasource(t *testing.T) {
 	pollingInterval := 50 * time.Millisecond
 	runtime := datalayer.NewRuntime(pollingInterval)
 
-	err = runtime.Configure(cfg, true, "", logr.Logger{})
+	err = runtime.Configure(cfg, logr.Logger{})
 	assert.Nil(t, err, "failed to configure runtime")
 
 	ctx := context.Background()
@@ -51,10 +50,9 @@ func TestDatasource(t *testing.T) {
 		Address: "1.2.3.4:5678",
 	}
 
-	endpoint := runtime.NewEndpoint(ctx, pod, nil)
+	endpoint := runtime.NewEndpoint(ctx, pod)
 	assert.NotNil(t, endpoint, "failed to create endpoint")
 
-	data, err := source.Poll(ctx, endpoint)
-	assert.NotNil(t, err, "expected to fail to collect metrics")
-	assert.Nil(t, data)
+	err = source.Dispatch(ctx, endpoint)
+	assert.NotNil(t, err, "expected dispatch to fail (no real HTTP target)")
 }

@@ -28,7 +28,7 @@ import (
 
 type fakeSchedulerProfile struct{}
 
-func (f *fakeSchedulerProfile) Run(_ context.Context, _ *fwksched.InferenceRequest, _ *fwksched.CycleState, _ []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+func (f *fakeSchedulerProfile) Run(_ context.Context, _ *fwksched.InferenceRequest, _ []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	return &fwksched.ProfileRunResult{}, nil
 }
 
@@ -109,7 +109,7 @@ func TestPick(t *testing.T) {
 	handler := NewSingleProfileHandler()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := handler.Pick(context.Background(), fwksched.NewCycleState(), nil, tt.profiles, tt.profileResults)
+			got := handler.Pick(context.Background(), nil, tt.profiles, tt.profileResults)
 			if len(got) != tt.wantCount {
 				t.Errorf("Pick() returned %d profiles, want %d", len(got), tt.wantCount)
 			}
@@ -165,7 +165,7 @@ func TestProcessResults(t *testing.T) {
 	handler := NewSingleProfileHandler()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := handler.ProcessResults(context.Background(), fwksched.NewCycleState(), nil, tt.profileResults)
+			got, err := handler.ProcessResults(context.Background(), nil, tt.profileResults)
 
 			if tt.wantErr {
 				if err == nil {

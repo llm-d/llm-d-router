@@ -26,9 +26,9 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 )
 
 const (
@@ -83,8 +83,17 @@ func (p *OpenAIParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *OpenAIParser) SupportedAppProtocols() []v1.AppProtocol {
-	return []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP}
+func (p *OpenAIParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
+		Paths: []string{
+			chatCompletionsAPI,
+			completionsAPI,
+			embeddingsAPI,
+			responsesAPI,
+			conversationsAPI,
+		},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
+	}
 }
 
 func OpenAIParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -110,7 +119,7 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		extractedBody.Stream = true
 	}
-	return &fwkrh.ParseResult{Body: extractedBody, Skip: false}, nil
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 }
 
 // ParseResponse extracts usage metadata from the provider's response.
@@ -147,26 +156,6 @@ func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse,
 	}, nil
 }
 
-// getRequestPath extracts the request path from headers with fallback priority
-func getRequestPath(headers map[string]string) string {
-	// Try primary path header
-	if path := headers[parsers.MethodPathKey]; path != "" {
-		return path
-	}
-
-	// Try fallback headers
-	if path := headers["x-original-path"]; path != "" {
-		return path
-	}
-
-	if path := headers["x-forwarded-path"]; path != "" {
-		return path
-	}
-
-	// Default to completions API for backward compatibility with existing clients and integration tests
-	return "/v1/completions"
-}
-
 // determineAPITypeFromPath determines the API type based on the request path.
 // Note: path strings have already been cleaned and normalized by the gateway/proxy layer
 // (no trailing slashes, query parameters, or additional suffix strings at this point).
@@ -196,7 +185,7 @@ func determineAPITypeFromPath(path string) string {
 // extractRequestBody extracts the InferenceRequestBody from the given request body map using path-based detection.
 func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.InferenceRequestBody, error) {
 	// Determine API type from request path
-	path := getRequestPath(headers)
+	path := request.GetRequestPath(headers)
 	apiType := determineAPITypeFromPath(path)
 
 	switch apiType {

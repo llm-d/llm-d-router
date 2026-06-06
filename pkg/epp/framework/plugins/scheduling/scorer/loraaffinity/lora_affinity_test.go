@@ -149,7 +149,7 @@ func TestLoraAffinityScorer(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			scorer := &LoraAffinityScorer{}
-			scores := scorer.Score(context.Background(), fwksched.NewCycleState(), test.request, test.endpoints)
+			scores := scorer.Score(context.Background(), test.request, test.endpoints)
 
 			for _, endpoint := range test.endpoints {
 				expectedScore, ok := test.expectedScoresEndpoint[endpoint.GetMetadata().NamespacedName.Name]

@@ -62,7 +62,7 @@ func TestLoadBasedScorer(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := test.scorer.Score(context.Background(), nil, nil, test.input)
+			got := test.scorer.Score(context.Background(), nil, test.input)
 
 			if diff := cmp.Diff(test.wantScores, got); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)

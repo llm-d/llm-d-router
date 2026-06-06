@@ -42,6 +42,7 @@ plugins:
   - type: prefix-cache-scorer
   - type: lora-affinity-scorer
   - type: vllmgrpc-parser
+  - type: mock-metrics-source
 schedulingProfiles:
   - name: default
     plugins:
@@ -49,10 +50,12 @@ schedulingProfiles:
       - pluginRef: kv-cache-utilization-scorer
       - pluginRef: prefix-cache-scorer
       - pluginRef: lora-affinity-scorer
-parser:
-  pluginRef: vllmgrpc-parser
-featureGates:
-  - enableLegacyMetrics
+requestHandler:
+  parsers:
+  - pluginRef: vllmgrpc-parser
+dataLayer:
+  sources:
+  - pluginRef: mock-metrics-source
 `
 )
 
@@ -217,7 +220,8 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 					},
 				}
 				gRPCPayload, _ := integration.CreateGrpcPayload(resp)
-				return ReqResponseGRPCWithTailer(
+				return ReqRequestHeadersAndResponseGRPC(
+					map[string]string{":path": integration.GenerateGRPCMethodName},
 					map[string]string{"content-type": "application/grpc"},
 					gRPCPayload[:len(gRPCPayload)/2],
 					gRPCPayload[len(gRPCPayload)/2:],
@@ -238,7 +242,8 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 		},
 		{
 			name: "response buffering: invalid gRPC",
-			requests: ReqResponseGRPCWithTailer(
+			requests: ReqRequestHeadersAndResponseGRPC(
+				map[string]string{":path": integration.GenerateGRPCMethodName},
 				map[string]string{"content-type": "application/grpc"},
 				[]byte("no healthy upstream"),
 			),
@@ -257,7 +262,8 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 					},
 				}
 				gRPCPayload, _ := integration.CreateGrpcPayload(resp)
-				return ReqResponseGRPCWithTailer(
+				return ReqRequestHeadersAndResponseGRPC(
+					map[string]string{":path": integration.GenerateGRPCMethodName},
 					map[string]string{"content-type": "application/grpc"},
 					gRPCPayload[:len(gRPCPayload)/2],
 					gRPCPayload[len(gRPCPayload)/2:],

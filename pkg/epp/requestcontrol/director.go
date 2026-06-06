@@ -21,6 +21,7 @@ package requestcontrol
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -28,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -37,6 +39,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
@@ -44,17 +47,63 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
-	// TODO(https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2081):
-	// Make this timeout configurable per-plugin or globally via the Director configuration to support plugins with
-	// varying latency profiles.
+	// dataProducerTimeout is the default per-producer execution timeout. A
+	// producer overrides it by implementing requestcontrol.TimeoutAwareProducer.
 	dataProducerTimeout       = 400 * time.Millisecond
 	responseBodyQueueCapacity = 100
 )
+
+// primaryEndpointHasCachedPrefix reports whether the primary profile's chosen
+// endpoint has at least one matching prefix block in its KV cache, as observed
+// by a precise/approximate-prefix scorer during the decode profile run. It
+// returns false when the result is missing, the primary profile produced no
+// endpoint, the endpoint carries no PrefixCacheMatchInfo attribute, or the
+// recorded match has zero blocks. False-return reasons are logged at
+// V(logutil.DEBUG) to disambiguate misconfiguration (no scorer attached) from
+// a real cache miss.
+func primaryEndpointHasCachedPrefix(logger logr.Logger, result *fwksched.SchedulingResult) bool {
+	debug := logger.V(logutil.DEBUG)
+	if result == nil {
+		debug.Info("conditional-decode: scheduling result is nil")
+		return false
+	}
+	primary, ok := result.ProfileResults[result.PrimaryProfileName]
+	if !ok || primary == nil {
+		debug.Info("conditional-decode: primary profile result missing", "primary", result.PrimaryProfileName)
+		return false
+	}
+	if len(primary.TargetEndpoints) == 0 {
+		debug.Info("conditional-decode: primary profile produced no endpoints", "primary", result.PrimaryProfileName)
+		return false
+	}
+	endpoint := primary.TargetEndpoints[0]
+	if endpoint == nil {
+		debug.Info("conditional-decode: primary endpoint is nil")
+		return false
+	}
+	raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String())
+	if !ok || raw == nil {
+		debug.Info("conditional-decode: endpoint has no prefix-cache match attribute (no scorer attached?)")
+		return false
+	}
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	if !ok {
+		debug.Info("conditional-decode: prefix-cache attribute has unexpected type", "type", fmt.Sprintf("%T", raw))
+		return false
+	}
+	if info.MatchBlocks() == 0 {
+		debug.Info("conditional-decode: prefix-cache match has zero blocks")
+		return false
+	}
+	return true
+}
 
 // Datastore defines the interface required by the Director.
 type Datastore interface {
@@ -186,7 +235,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	logger := log.FromContext(ctx)
 
-	err := d.modelRewriteIfNeeded(reqCtx, inferenceRequestBody)
+	err := d.modelRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody)
 	if err != nil {
 		return reqCtx, err
 	}
@@ -201,12 +250,15 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		attribute.Int("request_prio", priority),
 	)
 
+	fairnessID, _ := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
+
 	// Prepare InferenceRequest (needed for both saturation detection and Scheduler)
 	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{
 		RequestID:        reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
 		TargetModel:      reqCtx.TargetModelName,
 		Body:             inferenceRequestBody,
 		Headers:          reqCtx.Request.Headers,
+		FairnessID:       fairnessID,
 		Objectives:       requestObjectives,
 		RequestSizeBytes: reqCtx.RequestSize,
 	}
@@ -215,6 +267,14 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
+	if err := d.runPreAdmissionPlugins(ctx, reqCtx.SchedulingRequest); err != nil {
+		return reqCtx, err
+	}
+	if reqCtx.SchedulingRequest.FairnessID == "" {
+		reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
+	}
+
+	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
 	}
@@ -236,13 +296,39 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 
 	// Run admit request plugins
-	if !d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods) {
-		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: "request cannot be admitted"}
+	if denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
+		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("request cannot be admitted: %w", denyReason).Error()}
 	}
 
 	result, err := d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if err != nil {
+		// Preserve typed errcommon.Error from the scheduler so its status code
+		// (e.g. PreconditionFailed) reaches Envoy intact, even if the error
+		// has been wrapped (fmt.Errorf("...: %w", err)) on its way up. Other
+		// errors fall through to ResourceExhausted, the legacy "no endpoint"
+		// status.
+		var e errcommon.Error
+		if errors.As(err, &e) {
+			return reqCtx, e
+		}
 		return reqCtx, errcommon.Error{Code: errcommon.ResourceExhausted, Msg: fmt.Errorf("failed to find target endpoint: %w", err).Error()}
+	}
+
+	// Conditional-decode gate (RFC 7240 "Prefer: if-available"). The coordinator
+	// uses this header to mark a speculative early-decode attempt: forward to a
+	// decode worker only if its KV cache already covers the prompt, otherwise
+	// surface 412 Precondition Failed so the coordinator restarts the pipeline
+	// at encode/prefill/decode. Lives in the director (not in a profile handler)
+	// so it fires regardless of which profile handler is configured.
+	if routing.IsConditionalDecode(reqCtx.Request.Headers) {
+		if !primaryEndpointHasCachedPrefix(logger, result) {
+			logger.V(logutil.DEBUG).Info("conditional-decode: chosen decode worker has no cached prefix, returning 412")
+			return reqCtx, errcommon.Error{
+				Code: errcommon.PreconditionFailed,
+				Msg:  "no decode worker has the requested KV cache",
+			}
+		}
+		logger.V(logutil.DEBUG).Info("conditional-decode: chosen decode worker has cached prefix, forwarding")
 	}
 
 	reqCtx.SchedulingRequest.SchedulingResult = result
@@ -260,10 +346,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	return reqCtx, nil
 }
 
-func (d *Director) modelRewriteIfNeeded(reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
 	if v, ok := inferenceRequestBody.Payload.(fwkrh.PayloadMap); ok {
 		// Mutate the model name inside the map, this is currently only supported if the payload is a PayloadMap.
-		_, err := d.mutateModel(reqCtx, v)
+		_, err := d.mutateModel(ctx, reqCtx, v)
 		if err != nil {
 			return err
 		}
@@ -271,7 +357,7 @@ func (d *Director) modelRewriteIfNeeded(reqCtx *handlers.RequestContext, inferen
 	return nil
 }
 
-func (d *Director) mutateModel(reqCtx *handlers.RequestContext, bodyMap map[string]any) (*handlers.RequestContext, error) {
+func (d *Director) mutateModel(ctx context.Context, reqCtx *handlers.RequestContext, bodyMap map[string]any) (*handlers.RequestContext, error) {
 	var ok bool
 	reqCtx.IncomingModelName, ok = bodyMap["model"].(string)
 	if !ok {
@@ -281,7 +367,7 @@ func (d *Director) mutateModel(reqCtx *handlers.RequestContext, bodyMap map[stri
 		// Default to incoming model name
 		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
-	d.applyWeightedModelRewrite(reqCtx)
+	d.applyWeightedModelRewrite(ctx, reqCtx)
 	bodyMap["model"] = reqCtx.TargetModelName
 	return reqCtx, nil
 }
@@ -305,23 +391,33 @@ func (d *Director) repackage(ctx context.Context, reqCtx *handlers.RequestContex
 	return nil
 }
 
-func (d *Director) applyWeightedModelRewrite(reqCtx *handlers.RequestContext) {
+func (d *Director) applyWeightedModelRewrite(ctx context.Context, reqCtx *handlers.RequestContext) {
 	rewriteRule, modelRewriteName := d.datastore.ModelRewriteGet(reqCtx.IncomingModelName)
 	if rewriteRule == nil {
 		return
 	}
-	reqCtx.TargetModelName = d.selectWeightedModel(rewriteRule.Targets)
+	reqCtx.TargetModelName = d.selectWeightedModel(ctx, rewriteRule.Targets)
 	metrics.RecordInferenceModelRewriteDecision(modelRewriteName, reqCtx.IncomingModelName, reqCtx.TargetModelName)
 }
 
-func (d *Director) selectWeightedModel(models []v1alpha2.TargetModel) string {
+func (d *Director) selectWeightedModel(ctx context.Context, models []v1alpha2.TargetModel) string {
 	if len(models) == 0 {
 		return ""
 	}
 
 	var totalWeight int32
+	var weightedTargets int
 	for _, model := range models {
-		totalWeight += model.Weight
+		if model.Weight != nil {
+			weightedTargets++
+			totalWeight += *model.Weight
+		}
+	}
+	if weightedTargets > 0 && weightedTargets < len(models) {
+		log.FromContext(ctx).Info("Warning: model rewrite target weights are mixed; targets without weights will not be selected",
+			"weightedTargets", weightedTargets,
+			"unweightedTargets", len(models)-weightedTargets,
+		)
 	}
 
 	if totalWeight == 0 {
@@ -332,7 +428,9 @@ func (d *Director) selectWeightedModel(models []v1alpha2.TargetModel) string {
 	randomNum := rand.Intn(int(totalWeight))
 	var currentWeight int32
 	for _, model := range models {
-		currentWeight += model.Weight
+		if model.Weight != nil {
+			currentWeight += *model.Weight
+		}
 		if randomNum < int(currentWeight) {
 			return model.ModelRewrite
 		}
@@ -485,26 +583,51 @@ func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.I
 	}
 }
 
-func (d *Director) runDataProducerPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	if len(d.requestControlPlugins.dataProducerPlugins) == 0 {
+func (d *Director) runPreAdmissionPlugins(ctx context.Context, request *fwksched.InferenceRequest) error {
+	if len(d.requestControlPlugins.preAdmissionPlugins) == 0 {
 		return nil
 	}
-	return dataProducerPluginsWithTimeout(ctx, dataProducerTimeout, d.requestControlPlugins.dataProducerPlugins, request, endpoints)
+	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	for _, plugin := range d.requestControlPlugins.preAdmissionPlugins {
+		loggerDebug.Info("Running PreAdmitter plugin", "plugin", plugin.TypedName())
+		before := time.Now()
+		if err := plugin.PreAdmit(ctx, request); err != nil {
+			return err
+		}
+		metrics.RecordPluginProcessingLatency(fwkrc.PreAdmissionExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		loggerDebug.Info("Completed running PreAdmitter plugin successfully", "plugin", plugin.TypedName())
+	}
+	return nil
+}
+
+func (d *Director) runDataProducerPlugins(ctx context.Context,
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	plugins := d.requestControlPlugins.dataProducerPlugins
+	if len(plugins) == 0 {
+		return nil
+	}
+	// Each producer runs under its own timeout so a slow one does not extend the
+	// budget of the others.
+	for _, p := range plugins {
+		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *Director) runAdmissionPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) bool {
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	for _, plugin := range d.requestControlPlugins.admissionPlugins {
-		loggerDebug.Info("Running AdmitRequest plugin", "plugin", plugin.TypedName())
-		if denyReason := plugin.AdmitRequest(ctx, request, endpoints); denyReason != nil {
-			loggerDebug.Info("AdmitRequest plugin denied the request", "plugin", plugin.TypedName(), "reason", denyReason.Error())
-			return false
+		loggerDebug.Info("Running Admit plugin", "plugin", plugin.TypedName())
+		if denyReason := plugin.Admit(ctx, request, endpoints); denyReason != nil {
+			loggerDebug.Info("Admit plugin denied the request", "plugin", plugin.TypedName(), "reason", denyReason.Error())
+			return denyReason
 		}
-		loggerDebug.Info("Completed running AdmitRequest plugin successfully", "plugin", plugin.TypedName())
+		loggerDebug.Info("Completed running Admit plugin successfully", "plugin", plugin.TypedName())
 	}
-	return true
+	return nil
 }
 
 func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {

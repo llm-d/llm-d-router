@@ -13,7 +13,6 @@ schedulingProfiles:
       - pluginRef: kv-cache-utilization-scorer
       - pluginRef: prefix-cache-scorer
       - pluginRef: lora-affinity-scorer
-parser:
-  pluginRef: openai-parser
-featureGates:
-  - enableLegacyMetrics
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser

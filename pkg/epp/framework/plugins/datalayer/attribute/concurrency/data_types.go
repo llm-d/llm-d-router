@@ -22,20 +22,63 @@ import (
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 )
 
+// InFlightLoadDataKey carries the per-endpoint in-flight load snapshot used by
+// load-aware scorers. Populated by InFlightLoadProducer.Produce on each
+// candidate endpoint at the start of every scheduling cycle.
+//
+// Represents the live, real-time load on the endpoint (tokens and requests),
+// injected dynamically and never overwritten during a scheduling cycle.
 var InFlightLoadDataKey = plugin.NewDataKey("InFlightLoadDataKey", inflightloadconstants.InFlightLoadProducerType)
 
-// InFlightLoad captures the current real-time load of an endpoint as tracked by the EPP.
+// UncachedRequestTokensDataKey carries the projected impact of the current request
+// on a specific endpoint. Populated statically during scheduling.
+var UncachedRequestTokensDataKey = plugin.NewDataKey("UncachedRequestTokensDataKey", inflightloadconstants.InFlightLoadProducerType)
+
+// InFlightLoad captures the current real-time load of an endpoint as tracked
+// by the EPP.
 type InFlightLoad struct {
-	Tokens   int64
+	// Tokens is the in-flight token count this endpoint has committed to,
+	// accumulated from past scheduling decisions. Updated by PreRequest (when
+	// an endpoint is chosen) and OnEvicted (when its request stream ends);
+	// snapshotted into this struct each cycle by InFlightLoadProducer.Produce.
+	Tokens int64
+
+	// Requests is the in-flight request count this endpoint has committed to,
+	// maintained with the same lifecycle as Tokens.
 	Requests int64
 }
 
+// Clone returns an independent copy of the InFlightLoad. The value-copy
+// idiom (cp := *l) covers every field automatically; new fields added to
+// InFlightLoad do not require updating Clone, as long as they remain value
+// types (no slices, maps, or pointers requiring deep copy).
 func (l *InFlightLoad) Clone() fwkdl.Cloneable {
 	if l == nil {
 		return nil
 	}
-	return &InFlightLoad{
-		Tokens:   l.Tokens,
-		Requests: l.Requests,
+	cp := *l
+	return &cp
+}
+
+// UncachedRequestTokens represents the projected impact of the current request
+// on a specific endpoint, populated statically during scheduling.
+type UncachedRequestTokens struct {
+	// Tokens is a speculative projection: the work the request currently being
+	// scheduled would add to this endpoint if it landed here. Includes the
+	// uncached input portion (accounting for prefix-cache hits) plus the
+	// estimated output when the producer is configured with
+	// AddEstimatedOutputTokens=true. Computed fresh by Produce on every cycle
+	// from the request being scored and this endpoint's prefix-cache state;
+	// never committed to endpoint state and not decremented on stream end.
+	// Zero when no request is in scope (e.g., background snapshots).
+	Tokens int64
+}
+
+// Clone returns an independent copy of the UncachedRequestTokens.
+func (u *UncachedRequestTokens) Clone() fwkdl.Cloneable {
+	if u == nil {
+		return nil
 	}
+	cp := *u
+	return &cp
 }

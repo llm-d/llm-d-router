@@ -17,18 +17,21 @@ limitations under the License.
 package datalayer
 
 import (
+	"fmt"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // sourceHit identifies a matched source by its variant, registered name, and value.
+// src is plugin.Plugin because PollingDispatcher is not a DataSource.
 type sourceHit struct {
 	variant sourceVariant
 	name    string
-	src     fwkdl.DataSource
+	src     fwkplugin.Plugin
 }
 
 // variantSourceMap stores DataSources of one variant, keyed by TypedName.Name.
@@ -110,7 +113,9 @@ func (m *variantSourceMap[T]) ForEach(f func(name string, src T) error) error {
 }
 
 // findFirst returns the first source for which matches returns true.
-func (m *variantSourceMap[T]) findFirst(matches func(fwkdl.DataSource) bool) sourceHit {
+// matches takes plugin.Plugin so the same predicate works across all variants
+// (including PollingDispatcher, which is not a DataSource).
+func (m *variantSourceMap[T]) findFirst(matches func(fwkplugin.Plugin) bool) sourceHit {
 	var found sourceHit
 	m.m.Range(func(k, raw any) bool {
 		src := raw.(T)
@@ -123,14 +128,52 @@ func (m *variantSourceMap[T]) findFirst(matches func(fwkdl.DataSource) bool) sou
 	return found
 }
 
-// pollingManager owns the registered PollingDataSources.
-type pollingManager struct {
-	*variantSourceMap[fwkdl.PollingDataSource]
+// pollingDispatchers stores PollingDispatchers keyed by source name. Each
+// dispatcher owns its own extractors internally; the framework treats them
+// as opaque dispatch units.
+type pollingDispatchers struct {
+	mu sync.RWMutex
+	m  map[string]fwkdl.PollingDispatcher
 }
 
-func newPollingManager() *pollingManager {
-	return &pollingManager{variantSourceMap: newVariantSourceMap[fwkdl.PollingDataSource](variantPolling)}
+func newPollingDispatchers() *pollingDispatchers {
+	return &pollingDispatchers{m: make(map[string]fwkdl.PollingDispatcher)}
 }
+
+// Register installs disp under its TypedName.Name. Duplicate names fail loudly
+// so a config error surfaces at startup instead of silently shadowing telemetry.
+func (p *pollingDispatchers) Register(disp fwkdl.PollingDispatcher) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	name := disp.TypedName().Name
+	if _, exists := p.m[name]; exists {
+		return fmt.Errorf("duplicate %s source name %q", variantPolling, name)
+	}
+	p.m[name] = disp
+	return nil
+}
+
+// Get returns the dispatcher registered under name, if any.
+func (p *pollingDispatchers) Get(name string) (fwkdl.PollingDispatcher, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	d, ok := p.m[name]
+	return d, ok
+}
+
+// Dispatchers returns a snapshot of all dispatchers.
+func (p *pollingDispatchers) Dispatchers() map[string]fwkdl.PollingDispatcher {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[string]fwkdl.PollingDispatcher, len(p.m))
+	for k, v := range p.m {
+		out[k] = v
+	}
+	return out
+}
+
+func (p *pollingDispatchers) Count() int    { p.mu.RLock(); defer p.mu.RUnlock(); return len(p.m) }
+func (p *pollingDispatchers) IsEmpty() bool { return p.Count() == 0 }
 
 // notificationManager owns the registered NotificationSources.
 // GVK uniqueness is enforced per-Configure-call by a caller-owned gvk tracker
@@ -190,37 +233,31 @@ func (cm *collectorManager) StopAll() {
 	})
 }
 
-// extractorMap is a name-keyed map of extractor slices.
+// extractorMap is a name-keyed map of extractor slices. Populated by Runtime.Configure
+// (single-threaded) and read-only thereafter; mutations after Configure returns are
+// not supported. Duplicate-Type detection is the caller's responsibility (see
+// runtime.Configure).
 type extractorMap struct {
-	// RWMutex (not sync.Map) so Append's read-then-write is atomic.
-	mu sync.RWMutex
-	m  map[string][]fwkdl.ExtractorBase
+	m map[string][]fwkplugin.Plugin
 }
 
 func newExtractorMap() *extractorMap {
-	return &extractorMap{m: make(map[string][]fwkdl.ExtractorBase)}
+	return &extractorMap{m: make(map[string][]fwkplugin.Plugin)}
 }
 
 // Get returns the extractors stored under srcName, if any.
-func (e *extractorMap) Get(srcName string) ([]fwkdl.ExtractorBase, bool) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+func (e *extractorMap) Get(srcName string) ([]fwkplugin.Plugin, bool) {
 	exts, ok := e.m[srcName]
 	return exts, ok
 }
 
 // Count returns the number of stored entries.
 func (e *extractorMap) Count() int {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
 	return len(e.m)
 }
 
 // Range invokes f for every entry; f returning false stops iteration.
-// f runs under RLock — must not block or call back into write methods.
-func (e *extractorMap) Range(f func(name string, exts []fwkdl.ExtractorBase) bool) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+func (e *extractorMap) Range(f func(name string, exts []fwkplugin.Plugin) bool) {
 	for k, v := range e.m {
 		if !f(k, v) {
 			return
@@ -228,16 +265,7 @@ func (e *extractorMap) Range(f func(name string, exts []fwkdl.ExtractorBase) boo
 	}
 }
 
-// Append adds ext to srcName's slice, deduping by Type. Safe for concurrent use.
-func (e *extractorMap) Append(srcName string, ext fwkdl.ExtractorBase) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	existing := e.m[srcName]
-	extType := ext.TypedName().Type
-	for _, p := range existing {
-		if p.TypedName().Type == extType {
-			return
-		}
-	}
-	e.m[srcName] = append(existing, ext)
+// Append adds ext to srcName's slice. Pure append; callers must dedup upstream.
+func (e *extractorMap) Append(srcName string, ext fwkplugin.Plugin) {
+	e.m[srcName] = append(e.m[srcName], ext)
 }

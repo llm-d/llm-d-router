@@ -12,6 +12,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	configloader "github.com/llm-d/llm-d-router/pkg/epp/config/loader"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -21,7 +23,6 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${MODEL_NAME}":              simModelName,
 		"${POOL_NAME}":               poolName,
 		"${VLLM_IMAGE}":              vllmSimImage,
-		"${UDS_TOKENIZER_IMAGE}":     udsTokenizerImage,
 		"${VLLM_RENDER_IMAGE}":       vllmRenderImage,
 		"${SIDECAR_IMAGE}":           sideCarImage,
 		"${VLLM_DATA_PARALLEL_SIZE}": "1",
@@ -38,11 +39,16 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 	for k, v := range extra {
 		subs[k] = v
 	}
+
 	manifests := runKustomize(kustomizeDir)
 	manifests = substituteMany(manifests, subs)
 	// Remove labels with empty values (produced when ${DECODE_ROLE} is empty)
 	manifests = removeEmptyLabels(manifests)
 	manifests = removeEmptyArgs(manifests)
+	// remove render sidecar if model is simulated
+	if !isModelReal(subs["${MODEL_NAME}"]) {
+		manifests = removeRenderSidecar(manifests)
+	}
 	objects := testutils.CreateObjsFromYaml(testConfig, manifests)
 	podsInDeploymentsReady(objects)
 	return objects
@@ -148,6 +154,9 @@ func createEndPointPicker(eppConfig string) []string {
 			"${POOL_NAME}":             simModelName + "-inference-pool",
 			"${METRICS_ENDPOINT_AUTH}": "false",
 		})
+	if !usesTokenProducer(eppConfig) {
+		eppYamls = removeRenderSidecar(eppYamls)
+	}
 
 	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls)...)
 	podsInDeploymentsReady(objects)
@@ -167,4 +176,15 @@ func createEndPointPicker(eppConfig string) []string {
 	}, readyTimeout, 2*time.Second).Should(gomega.BeTrue(), "gateway should be ready within the ready timeout")
 
 	return objects
+}
+
+func usesTokenProducer(eppConfig string) bool {
+	cfg, _, err := configloader.LoadRawConfig([]byte(eppConfig), ginkgo.GinkgoLogr)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	for _, plugin := range cfg.Plugins {
+		if plugin.Type == tokenizer.PluginType {
+			return true
+		}
+	}
+	return false
 }

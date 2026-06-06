@@ -108,11 +108,11 @@ func (p *WeightedRandomPicker) TypedName() fwkplugin.TypedName {
 
 // Pick selects the endpoint(s) randomly from the list of candidates, where the probability of the endpoint to get picked is derived
 // from its weighted score.
-func (p *WeightedRandomPicker) Pick(ctx context.Context, cycleState *fwksched.CycleState, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
+func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
 	// Check if there is at least one endpoint with Score > 0, if not let random picker run
 	if slices.IndexFunc(scoredEndpoints, func(scoredEndpoint *fwksched.ScoredEndpoint) bool { return scoredEndpoint.Score > 0 }) == -1 {
 		log.FromContext(ctx).V(logutil.DEBUG).Info("All scores are zero, delegating to RandomPicker for uniform selection")
-		return p.randomPicker.Pick(ctx, cycleState, scoredEndpoints)
+		return p.randomPicker.Pick(ctx, scoredEndpoints)
 	}
 
 	log.FromContext(ctx).V(logutil.DEBUG).Info("Selecting endpoints from candidates by random weighted picker", "max-num-of-endpoints", p.maxNumOfEndpoints,

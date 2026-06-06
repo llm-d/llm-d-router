@@ -22,20 +22,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
-
-// TODO:
-// currently the data store is expected to manage the state of multiple
-// Collectors (e.g., using sync.Map mapping pod to its Collector). Alternatively,
-// this can be encapsulated in this file, providing the data store with an interface
-// to only update on endpoint addition/change and deletion. This can also be used
-// to centrally track statistics such errors, active routines, etc.
 
 const (
 	defaultCollectionTimeout = time.Second
@@ -84,32 +76,19 @@ func NewCollector() *Collector {
 }
 
 // Start launches the collection goroutine.
-func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, pollers []fwkdl.PollingDataSource, extractors *extractorMap) error {
-	if len(pollers) == 0 {
-		return errors.New("cannot start collector with empty sources")
+// Each PollingDispatcher owns its extractors; the Collector calls Dispatch per tick.
+func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, dispatchers []fwkdl.PollingDispatcher) error {
+	if len(dispatchers) == 0 {
+		return errors.New("cannot start collector with empty dispatchers")
 	}
-	for _, src := range pollers {
-		if src == nil {
-			return errors.New("cannot add nil data source")
+	for _, d := range dispatchers {
+		if d == nil {
+			return errors.New("cannot add nil dispatcher")
 		}
-	}
-	if extractors == nil {
-		extractors = newExtractorMap()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
-	// Filter to poll-capable extractors up front so the hot loop avoids per-tick type assertions.
-	pollingExtractors := make(map[string][]fwkdl.Extractor, extractors.Count())
-	extractors.Range(func(name string, exts []fwkdl.ExtractorBase) bool {
-		for _, ext := range exts {
-			if e, ok := ext.(fwkdl.Extractor); ok {
-				pollingExtractors[name] = append(pollingExtractors[name], e)
-			}
-		}
-		return true
-	})
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -118,7 +97,7 @@ func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
-	go c.run(ctx, ticker, ep, pollers, pollingExtractors)
+	go c.run(ctx, ticker, ep, dispatchers)
 	return nil
 }
 
@@ -133,7 +112,7 @@ func (c *Collector) Stop() {
 	}
 }
 
-func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, pollers []fwkdl.PollingDataSource, extractors map[string][]fwkdl.Extractor) {
+func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, dispatchers []fwkdl.PollingDispatcher) {
 	defer func() {
 		close(c.done)
 		ticker.Stop()
@@ -145,46 +124,18 @@ func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, p
 		case <-ctx.Done():
 			return
 		case <-ticker.Channel():
-			for _, src := range pollers {
+			for _, disp := range dispatchers {
 				if ctx.Err() != nil {
 					return
 				}
-				c.pollOne(ctx, src, ep, extractors, logger)
+				dispCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
+				if err := disp.Dispatch(dispCtx, ep); err != nil {
+					tn := disp.TypedName()
+					metrics.RecordDataLayerPollError(tn.Type)
+					logger.V(logging.DEBUG).Info("dispatch failed", "source", tn, "err", err)
+				}
+				cancel()
 			}
-		}
-	}
-}
-
-func (c *Collector) pollOne(ctx context.Context, src fwkdl.PollingDataSource, ep fwkdl.Endpoint, extractors map[string][]fwkdl.Extractor, logger logr.Logger) {
-	tn := src.TypedName()
-
-	pollCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
-	defer cancel()
-	data, err := src.Poll(pollCtx, ep)
-	if err != nil {
-		//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
-		metrics.DataLayerPollErrorsTotal.WithLabelValues(tn.Type).Inc()
-		metrics.LlmdDataLayerPollErrorsTotal.WithLabelValues(tn.Type).Inc()
-		logger.V(logging.DEBUG).Info("poll failed", "source", tn, "err", err)
-		return
-	}
-	if data == nil {
-		return
-	}
-
-	for _, ext := range extractors[tn.Name] {
-		if ctx.Err() != nil {
-			return
-		}
-		extCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
-		err := ext.Extract(extCtx, data, ep)
-		cancel()
-		if err != nil {
-			extName := ext.TypedName()
-			//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
-			metrics.DataLayerExtractErrorsTotal.WithLabelValues(tn.Type, extName.Type).Inc()
-			metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(tn.Type, extName.Type).Inc()
-			logger.V(logging.DEBUG).Info("extract failed", "source", tn, "extractor", extName, "err", err)
 		}
 	}
 }

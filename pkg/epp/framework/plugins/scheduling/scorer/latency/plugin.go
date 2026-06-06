@@ -150,7 +150,7 @@ type epData struct {
 }
 
 // Score returns a float64 score in [0,1] for each endpoint.
-func (s *Plugin) Score(ctx context.Context, _ *fwksched.CycleState, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+func (s *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	logger := log.FromContext(ctx)
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, ep := range endpoints {
@@ -375,10 +375,12 @@ func (s *Plugin) compositeScores(ctx context.Context, endpoints []fwksched.Endpo
 	return scores
 }
 
-func (s *Plugin) Consumes() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{
-		s.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
-		s.prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfo{},
+func (s *Plugin) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			s.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
+			s.prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfo{},
+		},
 	}
 }
 

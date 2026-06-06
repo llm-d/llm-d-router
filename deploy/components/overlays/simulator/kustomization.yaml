@@ -5,7 +5,7 @@
 #   - --mode=${VLLM_SIM_MODE} arg on Decode (vllm-d) only — controls simulator
 #     response mode (echo: returns input, random: returns random sentences)
 #   - --zmq-endpoint on Decode only — publishes KV cache events to the EPP
-#   - UDS tokenizer sidecar on all deployments (Decode, Prefill, Encode)
+#   - vLLM Render sidecar on all deployments (Decode, Prefill, Encode)
 #   - KV cache args on Decode for cache-aware scheduling tests
 #
 # Uses JSON patches (op: add) to INSERT into args arrays without replacing
@@ -43,91 +43,96 @@ patches:
     - op: add
       path: /spec/template/spec/initContainers/0
       value:
-        name: uds-tokenizer
-        image: ${UDS_TOKENIZER_IMAGE}
+        name: vllm-render
+        image: ${VLLM_RENDER_IMAGE}
         imagePullPolicy: IfNotPresent
         restartPolicy: Always
+        command: ["vllm"]
+        args: ["launch", "render", "${MODEL_NAME}", "--port=8082"]
         env:
-        - name: LOG_LEVEL
-          value: "DEBUG"
-        - name: PROBE_PORT
-          value: "8082"
         - name: HF_TOKEN
           value: "${HF_TOKEN}"
         ports:
-        - name: health
+        - name: http
           containerPort: 8082
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 2
+          periodSeconds: 1
+          failureThreshold: 600
+          timeoutSeconds: 1
         livenessProbe:
           httpGet:
-            path: /healthz
+            path: /health
             port: 8082
-          initialDelaySeconds: 5
           periodSeconds: 10
+          failureThreshold: 5
+          timeoutSeconds: 1
         readinessProbe:
           httpGet:
-            path: /healthz
+            path: /health
             port: 8082
-          initialDelaySeconds: 5
           periodSeconds: 5
+          failureThreshold: 1
+          timeoutSeconds: 1
         volumeMounts:
-        - name: uds-socket
-          mountPath: /tmp/tokenizer
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
     - op: add
-      path: /spec/template/spec/containers/0/volumeMounts
+      path: /spec/template/spec/volumes/-
       value:
-      - name: uds-socket
-        mountPath: /tmp/tokenizer
-    - op: add
-      path: /spec/template/spec/volumes
-      value:
-      - name: uds-socket
+        name: model-cache
         emptyDir: {}
-
 # --- Prefill and Encode deployments (vllm-p, vllm-e) ---
-# No initContainers in base, so create the array
+# initContainers: [] in base, so append with /-
 - target:
     kind: Deployment
     name: "vllm-[pe]"
   patch: |
     - op: add
-      path: /spec/template/spec/initContainers
+      path: /spec/template/spec/initContainers/-
       value:
-      - name: uds-tokenizer
-        image: ${UDS_TOKENIZER_IMAGE}
+        name: vllm-render
+        image: ${VLLM_RENDER_IMAGE}
         imagePullPolicy: IfNotPresent
         restartPolicy: Always
+        command: ["vllm"]
+        args: ["launch", "render", "${MODEL_NAME}", "--port=8082"]
         env:
-        - name: LOG_LEVEL
-          value: "DEBUG"
-        - name: PROBE_PORT
-          value: "8082"
         - name: HF_TOKEN
           value: "${HF_TOKEN}"
         ports:
-        - name: health
+        - name: http
           containerPort: 8082
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 2
+          periodSeconds: 1
+          failureThreshold: 600
+          timeoutSeconds: 1
         livenessProbe:
           httpGet:
-            path: /healthz
+            path: /health
             port: 8082
-          initialDelaySeconds: 5
           periodSeconds: 10
+          failureThreshold: 5
+          timeoutSeconds: 1
         readinessProbe:
           httpGet:
-            path: /healthz
+            path: /health
             port: 8082
-          initialDelaySeconds: 5
           periodSeconds: 5
+          failureThreshold: 1
+          timeoutSeconds: 1
         volumeMounts:
-        - name: uds-socket
-          mountPath: /tmp/tokenizer
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
     - op: add
-      path: /spec/template/spec/containers/0/volumeMounts
+      path: /spec/template/spec/volumes/-
       value:
-      - name: uds-socket
-        mountPath: /tmp/tokenizer
-    - op: add
-      path: /spec/template/spec/volumes
-      value:
-      - name: uds-socket
+        name: model-cache
         emptyDir: {}

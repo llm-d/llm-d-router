@@ -169,10 +169,9 @@ func BenchmarkFlowController_TopologyChurn(b *testing.B) {
 	ctx := b.Context()
 
 	cfg := &controller.Config{
-		DefaultRequestTTL:               5 * time.Minute,
-		ProcessorReconciliationInterval: 1 * time.Hour, // Effectively disabled
-		ExpiryCleanupInterval:           1 * time.Hour, // Effectively disabled
-		EnqueueChannelBufferSize:        100,
+		DefaultRequestTTL:        5 * time.Minute,
+		ExpiryCleanupInterval:    1 * time.Hour, // Effectively disabled
+		EnqueueChannelBufferSize: 100,
 	}
 
 	fc, detector := setupBenchmarkHarness(ctx, b, 1, 100, nil, cfg)
@@ -226,10 +225,9 @@ func BenchmarkFlowController_MassCancellation(b *testing.B) {
 	ctx := b.Context()
 
 	cfg := &controller.Config{
-		DefaultRequestTTL:               5 * time.Minute,
-		ProcessorReconciliationInterval: 1 * time.Hour,         // Effectively disabled
-		ExpiryCleanupInterval:           10 * time.Millisecond, // Hyper-aggressive sweep for benchmark
-		EnqueueChannelBufferSize:        100,
+		DefaultRequestTTL:        5 * time.Minute,
+		ExpiryCleanupInterval:    10 * time.Millisecond, // Hyper-aggressive sweep for benchmark
+		EnqueueChannelBufferSize: 100,
 	}
 
 	// Use the permanently saturated detector to guarantee all requests queue and definitively rot.

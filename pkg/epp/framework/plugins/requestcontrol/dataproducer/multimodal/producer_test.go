@@ -33,8 +33,14 @@ import (
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 )
 
+func TestLRUCapacityFromCacheSizeMB(t *testing.T) {
+	assert.Equal(t, 2, lruCapacityFromCacheSizeMB(4))
+	assert.Equal(t, 1024, lruCapacityFromCacheSizeMB(2048))
+	assert.Equal(t, 2048, lruCapacityFromCacheSizeMB(0))
+}
+
 func TestFactory(t *testing.T) {
-	raw, err := json.Marshal(map[string]any{"cacheSize": 4})
+	raw, err := json.Marshal(map[string]any{"cacheSizeInMBPerServer": 4})
 	require.NoError(t, err)
 
 	created, err := Factory("mm-producer", plugin.StrictDecoder(raw), &testHandle{ctx: context.Background()})
@@ -43,7 +49,7 @@ func TestFactory(t *testing.T) {
 	assert.Equal(t, "mm-producer", created.TypedName().Name)
 	assert.Equal(t, ProducerType, created.TypedName().Type)
 
-	_, err = Factory("bad", plugin.StrictDecoder(json.RawMessage(`{"cacheSize":"bad"}`)), &testHandle{ctx: context.Background()})
+	_, err = Factory("bad", plugin.StrictDecoder(json.RawMessage(`{"cacheSizeInMBPerServer":"bad"}`)), &testHandle{ctx: context.Background()})
 	require.Error(t, err)
 }
 
@@ -63,109 +69,39 @@ func TestExtractMMItemsFromTokenizedPrompt(t *testing.T) {
 	assert.ElementsMatch(t, []attrmm.MatchItem{{Hash: "image-a", Size: 1}, {Hash: "image-b", Size: 1}}, items)
 }
 
-func TestExtractMMItemsFromStructuredChat(t *testing.T) {
-	request := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{{
-					Role: "user",
-					Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
-						{Type: "text", Text: "describe"},
-						{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/cat.png"}},
-						{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/cat.png"}},
-						{Type: "video_url", VideoURL: fwkrh.VideoBlock{URL: "https://example.com/cat.mp4"}},
-					}},
-				}},
-			},
-		},
-	}
-
-	items := ExtractMMItems(request)
-	assert.ElementsMatch(t, []attrmm.MatchItem{
-		{Hash: contentHash("video_url", "https://example.com/cat.mp4"), Size: 1},
-		{Hash: contentHash("image_url", "https://example.com/cat.png"), Size: 1},
-	}, items)
+func TestExtractMMItemsNilTokenizedPromptReturnsNil(t *testing.T) {
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{},
+	})
+	assert.Nil(t, items)
 }
 
-func TestExtractMMItemsFromStructuredChatAudio(t *testing.T) {
+func TestExtractMMItemsEmptyMultiModalFeaturesReturnsNil(t *testing.T) {
 	items := ExtractMMItems(&scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{{
-					Role: "user",
-					Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
-						{Type: "input_audio", InputAudio: fwkrh.AudioBlock{Format: "wav", Data: "base64-audio"}},
-					}},
-				}},
-			},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{},
 		},
 	})
-
-	assert.Equal(t, []attrmm.MatchItem{{
-		Hash: contentHash("input_audio", "wav:base64-audio"),
-		Size: 1,
-	}}, items)
+	assert.Nil(t, items)
 }
 
-func TestExtractMMItemsIgnoresGenericPayload(t *testing.T) {
+func TestExtractMMItemsIgnoresProtocolStructs(t *testing.T) {
+	// Protocol structs carry multimodal content but are never read; only the
+	// tokenized prompt's features count.
 	items := ExtractMMItems(&scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			Payload: fwkrh.PayloadMap{
-				"messages": []any{
-					map[string]any{
-						"content": []any{
-							map[string]any{
-								"type":      "image_url",
-								"image_url": map[string]any{"url": "https://example.com/cat.png"},
-							},
-						},
-					},
-				},
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{{
+					Role: "user",
+					Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+						{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/cat.png"}},
+					}},
+				}},
 			},
 		},
 	})
 
 	assert.Nil(t, items)
-}
-
-func TestExtractMMItemsIgnoresGenericResponsesAndConversationsContent(t *testing.T) {
-	responseItems := ExtractMMItems(&scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			Responses: &fwkrh.ResponsesRequest{
-				Input: []any{
-					map[string]any{
-						"type": "message",
-						"content": []any{
-							map[string]any{
-								"type":      "image_url",
-								"image_url": map[string]any{"url": "https://example.com/cat.png"},
-							},
-						},
-					},
-				},
-			},
-		},
-	})
-
-	conversationItems := ExtractMMItems(&scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			Conversations: &fwkrh.ConversationsRequest{
-				Items: []fwkrh.ConversationItem{{
-					Type: "message",
-					Role: "user",
-					Content: []any{
-						map[string]any{
-							"type":      "image_url",
-							"image_url": map[string]any{"url": "https://example.com/cat.png"},
-						},
-					},
-				}},
-			},
-		},
-	})
-
-	assert.Nil(t, responseItems)
-	assert.Nil(t, conversationItems)
 }
 
 func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
@@ -203,7 +139,7 @@ func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
 }
 
 func TestLRUEviction(t *testing.T) {
-	producer := newTestProducer(t, &Parameters{CacheSize: 2}, nil)
+	producer := newTestProducer(t, &Parameters{CacheSizeInMBPerServer: 4}, nil)
 	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
 
 	for _, hash := range []string{"hash-1", "hash-2", "hash-3"} {
@@ -245,8 +181,6 @@ func TestStalePodCleanup(t *testing.T) {
 
 func TestProducerEndpointExtractorInterfaceContract(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
-
-	assert.Equal(t, fwkdl.EndpointEventReflectType, producer.ExpectedInputType())
 	var _ fwkdl.EndpointExtractor = producer
 	assert.True(t, reflect.TypeOf(producer).Implements(reflect.TypeFor[fwkdl.EndpointExtractor]()))
 }
@@ -257,7 +191,7 @@ func TestExtractEndpointRemovesDeletedPod(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
 	producer.putCacheEntry("hash-a", podA, podB)
 
-	err := producer.ExtractEndpoint(context.Background(), fwkdl.EndpointEvent{
+	err := producer.Extract(context.Background(), fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
 		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: podB}, nil),
 	})

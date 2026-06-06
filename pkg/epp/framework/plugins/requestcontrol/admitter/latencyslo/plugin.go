@@ -89,19 +89,19 @@ func (p *LatencyAdmission) TypedName() fwkplugin.TypedName {
 }
 
 // Consumes declares that this plugin reads latency prediction data from endpoints.
-func (p *LatencyAdmission) Consumes() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{
-		p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{},
+func (p *LatencyAdmission) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{p.latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfo{}},
 	}
 }
 
-// AdmitRequest rejects sheddable requests if no endpoint can serve them within SLO.
+// Admit rejects sheddable requests if no endpoint can serve them within SLO.
 //
 // Reject only when ALL of:
 //   - No endpoint has a valid prediction (all violate SLO)
 //   - No endpoint is idle (all have running requests)
 //   - No cold pod exists (predictions are reliable)
-func (p *LatencyAdmission) AdmitRequest(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+func (p *LatencyAdmission) Admit(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	logger := log.FromContext(ctx)
 	if request == nil {
 		return nil

@@ -164,15 +164,18 @@ plugins:
   - type: queue-scorer
   - type: kv-cache-utilization-scorer
   - type: passthrough-parser
+  - type: mock-metrics-source
 schedulingProfiles:
   - name: default
     plugins:
       - pluginRef: queue-scorer
       - pluginRef: kv-cache-utilization-scorer
-parser:
-  pluginRef: passthrough-parser
-featureGates:
-  - enableLegacyMetrics
+requestHandler:
+  parsers:
+  - pluginRef: passthrough-parser
+dataLayer:
+  sources:
+  - pluginRef: mock-metrics-source
 `,
 					requests: integration.ReqRaw(
 						map[string]string{

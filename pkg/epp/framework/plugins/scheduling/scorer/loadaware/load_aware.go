@@ -81,7 +81,7 @@ func (s *LoadAware) Category() scheduling.ScorerCategory {
 // Pod with requests in the queue will get score between 0.5 and 0.
 // Score 0 will get pod with number of requests in the queue equal to the threshold used in load-based filter
 // In the future, pods with additional capacity will get score higher than 0.5
-func (s *LoadAware) Score(_ context.Context, _ *scheduling.CycleState, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *LoadAware) Score(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
 
 	for _, endpoint := range endpoints {
