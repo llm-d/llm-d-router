@@ -35,7 +35,7 @@
 /pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo/            @kaushikmitr @llm-d/router-maintainers
 /pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/  @kaushikmitr @llm-d/router-maintainers
 
-# Prefix scoring
+# Prefix cache
 /pkg/epp/framework/plugins/scheduling/scorer/prefix/                      @liu-cong @vMaroon @llm-d/router-maintainers
 /pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/ @liu-cong @vMaroon @llm-d/router-maintainers
 /pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/ @bongwoo-bak @vMaroon @llm-d/router-maintainers
