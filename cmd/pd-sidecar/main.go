@@ -20,9 +20,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/version"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 func main() {
@@ -39,20 +39,6 @@ func main() {
 	ctx := ctrl.SetupSignalHandler()
 	log.IntoContext(ctx, logger)
 
-	// Initialize tracing before creating any spans
-	shutdownTracing, err := telemetry.InitTracing(ctx)
-	if err != nil {
-		// Log error but don't fail - tracing is optional
-		logger.Error(err, "Failed to initialize tracing")
-	}
-	if shutdownTracing != nil {
-		defer func() {
-			if err := shutdownTracing(ctx); err != nil {
-				logger.Error(err, "Failed to shutdown tracing")
-			}
-		}()
-	}
-
 	// Complete options (handles migration from deprecated flags, populates Config)
 	if err := opts.Complete(); err != nil {
 		logger.Error(err, "Failed to complete configuration")
@@ -63,6 +49,14 @@ func main() {
 	if err := opts.Validate(); err != nil {
 		logger.Error(err, "Invalid configuration")
 		return
+	}
+
+	// Initialize tracing conditionally using config
+	if opts.Tracing {
+		if err := tracing.InitTracing(ctx, logger, "pd-sidecar"); err != nil {
+			// Log error but don't fail - tracing is optional
+			logger.Error(err, "Failed to initialize tracing")
+		}
 	}
 
 	logger.Info("Proxy starting", "Built on", version.BuildRef, "From Git SHA", version.CommitSHA)
