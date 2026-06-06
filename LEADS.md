@@ -24,7 +24,7 @@ approve changes across the repository.
 - @liu-cong
 
 Per-component ownership is defined in
-[.github/CODEOWNERS](.github/CODEOWNERS) and enforced by GitHub branch
+[CODEOWNERS](CODEOWNERS) and enforced by GitHub branch
 protection.
 
 ## Release managers
@@ -33,7 +33,7 @@ Members of the [`@llm-d/router-release-managers`](https://github.com/orgs/llm-d/
 team. Tag protection on `refs/tags/v*` restricts who can push release tags to
 this team.
 
-- @llm-d/router-maintainers
+- @llm-d/router-release-managers
 
 ...to be expanded.
 

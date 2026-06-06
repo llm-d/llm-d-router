@@ -8,14 +8,14 @@
 #
 # Project leadership and team membership are recorded in /LEADS.md.
 
-# Default — every path falls back to the maintainers team. Single-owner paths
-# below also list the team, so a maintainer can approve alongside the named
-# owner; paths with multiple named owners are gated to those owners alone.
+# Default — every path falls back to the maintainers team. Each component below
+# also lists the team so a maintainer can approve, while named owners are
+# auto-requested for review on their paths.
 *                                                                         @llm-d/router-maintainers
 
 # Flow control framework + plugins
-/pkg/epp/flowcontrol/                                                     @LukeAVanDrie @shmuelk
-/pkg/epp/framework/plugins/flowcontrol/                                   @LukeAVanDrie @shmuelk
+/pkg/epp/flowcontrol/                                                     @LukeAVanDrie @shmuelk @llm-d/router-maintainers
+/pkg/epp/framework/plugins/flowcontrol/                                   @LukeAVanDrie @shmuelk @llm-d/router-maintainers
 
 # Envoy ext_proc message layer
 /pkg/common/envoy/                                                        @shmuelk @llm-d/router-maintainers
@@ -36,9 +36,9 @@
 /pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/  @kaushikmitr @llm-d/router-maintainers
 
 # Prefix scoring
-/pkg/epp/framework/plugins/scheduling/scorer/prefix/                         @liu-cong @vMaroon
-/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/ @liu-cong @vMaroon
-/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache @bongwoo-bak @vMaroon
+/pkg/epp/framework/plugins/scheduling/scorer/prefix/                      @liu-cong @vMaroon @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/ @liu-cong @vMaroon @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/ @bongwoo-bak @vMaroon @llm-d/router-maintainers
 
 # Tokenization
-/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer 		@vMaroon @liu-cong @sagearc
+/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/          @vMaroon @liu-cong @sagearc @llm-d/router-maintainers
