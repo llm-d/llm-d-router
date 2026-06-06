@@ -34,12 +34,14 @@ import (
 
 const testProducerName = "test-session-producer"
 
-func newTestEndpoint(name, address, port string) scheduling.Endpoint {
+const testEndpointPort = "8080"
+
+func newTestEndpoint(name, address string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
 			NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: "default"},
 			Address:        address,
-			Port:           port,
+			Port:           testEndpointPort,
 		},
 		&fwkdl.Metrics{},
 		nil,
@@ -58,14 +60,14 @@ func bindingKey() string {
 	return attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(testProducerName).String()
 }
 
-func boundTo(address, port string) attrsession.BoundEndpoint {
-	return attrsession.BoundEndpoint(net.JoinHostPort(address, port))
+func boundTo(address string) attrsession.BoundEndpoint {
+	return attrsession.BoundEndpoint(net.JoinHostPort(address, testEndpointPort))
 }
 
 func TestFilter(t *testing.T) {
-	ep1 := newTestEndpoint("pod-1", "10.0.0.1", "8080")
-	ep2 := newTestEndpoint("pod-2", "10.0.0.2", "8080")
-	ep3 := newTestEndpoint("pod-3", "10.0.0.3", "8080")
+	ep1 := newTestEndpoint("pod-1", "10.0.0.1")
+	ep2 := newTestEndpoint("pod-2", "10.0.0.2")
+	ep3 := newTestEndpoint("pod-3", "10.0.0.3")
 	endpoints := []scheduling.Endpoint{ep1, ep2, ep3}
 
 	tests := []struct {
@@ -80,17 +82,17 @@ func TestFilter(t *testing.T) {
 		},
 		{
 			name:          "binding to ep1 keeps only pod-1",
-			bound:         boundTo("10.0.0.1", "8080"),
+			bound:         boundTo("10.0.0.1"),
 			expectedNames: []string{"pod-1"},
 		},
 		{
 			name:          "binding to ep2 keeps only pod-2",
-			bound:         boundTo("10.0.0.2", "8080"),
+			bound:         boundTo("10.0.0.2"),
 			expectedNames: []string{"pod-2"},
 		},
 		{
 			name:          "binding to absent endpoint keeps all",
-			bound:         boundTo("10.0.0.99", "8080"),
+			bound:         boundTo("10.0.0.99"),
 			expectedNames: []string{"pod-1", "pod-2", "pod-3"},
 		},
 	}
@@ -117,11 +119,11 @@ func TestFilter(t *testing.T) {
 func TestFilterSingleEndpointShortcut(t *testing.T) {
 	filter := newFilter(t)
 
-	ep1 := newTestEndpoint("pod-1", "10.0.0.1", "8080")
+	ep1 := newTestEndpoint("pod-1", "10.0.0.1")
 	endpoints := []scheduling.Endpoint{ep1}
 
 	request := &scheduling.InferenceRequest{}
-	request.PutAttribute(bindingKey(), boundTo("10.0.0.99", "8080"))
+	request.PutAttribute(bindingKey(), boundTo("10.0.0.99"))
 
 	result := filter.Filter(context.Background(), request, endpoints)
 	require.Len(t, result, 1)
@@ -132,8 +134,8 @@ func TestFilterNilRequest(t *testing.T) {
 	filter := newFilter(t)
 
 	endpoints := []scheduling.Endpoint{
-		newTestEndpoint("pod-1", "10.0.0.1", "8080"),
-		newTestEndpoint("pod-2", "10.0.0.2", "8080"),
+		newTestEndpoint("pod-1", "10.0.0.1"),
+		newTestEndpoint("pod-2", "10.0.0.2"),
 	}
 	result := filter.Filter(context.Background(), nil, endpoints)
 

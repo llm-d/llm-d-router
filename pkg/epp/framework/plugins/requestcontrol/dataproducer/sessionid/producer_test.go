@@ -240,27 +240,31 @@ func requestWithSession(id string) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{Headers: map[string]string{"x-session-id": id}}
 }
 
-func endpointFor(name, address, port string) fwksched.Endpoint {
+const testEndpointPort = "8080"
+
+func endpointFor(name, address string) fwksched.Endpoint {
 	return fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{
 			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: name},
 			Address:        address,
-			Port:           port,
+			Port:           testEndpointPort,
 		},
 		&fwkdl.Metrics{},
 		nil,
 	)
 }
 
-func boundTo(address, port string) attrsession.BoundEndpoint {
-	return attrsession.BoundEndpoint(net.JoinHostPort(address, port))
+func boundTo(address string) attrsession.BoundEndpoint {
+	return attrsession.BoundEndpoint(net.JoinHostPort(address, testEndpointPort))
 }
 
-func schedulingResultFor(profile string, endpoint fwksched.Endpoint) *fwksched.SchedulingResult {
+const testProfileName = "default"
+
+func schedulingResultFor(endpoint fwksched.Endpoint) *fwksched.SchedulingResult {
 	return &fwksched.SchedulingResult{
-		PrimaryProfileName: profile,
+		PrimaryProfileName: testProfileName,
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			profile: {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+			testProfileName: {TargetEndpoints: []fwksched.Endpoint{endpoint}},
 		},
 	}
 }
@@ -270,7 +274,7 @@ func TestPreRequestThenProducePublishesBinding(t *testing.T) {
 
 	producer := mustFactory(t, `{"headerName":"x-session-id"}`)
 	bindReq := requestWithSession("session-A")
-	producer.PreRequest(context.Background(), bindReq, schedulingResultFor("default", endpointFor("pod-1", "10.0.0.1", "8080")))
+	producer.PreRequest(context.Background(), bindReq, schedulingResultFor(endpointFor("pod-1", "10.0.0.1")))
 
 	lookup := requestWithSession("session-A")
 	require.NoError(t, producer.Produce(context.Background(), lookup, nil))
@@ -280,7 +284,7 @@ func TestPreRequestThenProducePublishesBinding(t *testing.T) {
 		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName("session-id-producer").String(),
 	)
 	require.True(t, ok)
-	assert.Equal(t, boundTo("10.0.0.1", "8080"), got)
+	assert.Equal(t, boundTo("10.0.0.1"), got)
 }
 
 func TestPreRequestIgnoresMissingSession(t *testing.T) {
@@ -290,7 +294,7 @@ func TestPreRequestIgnoresMissingSession(t *testing.T) {
 	producer.PreRequest(
 		context.Background(),
 		&fwksched.InferenceRequest{}, // no session header
-		schedulingResultFor("default", endpointFor("pod-1", "10.0.0.1", "8080")),
+		schedulingResultFor(endpointFor("pod-1", "10.0.0.1")),
 	)
 
 	// A subsequent Produce on a different session must not see the (non-existent) binding.
@@ -327,7 +331,7 @@ func TestBindingExpiresAfterTTL(t *testing.T) {
 
 	producer := mustFactory(t, `{"headerName":"x-session-id","ttl":"50ms"}`)
 	bind := requestWithSession("session-A")
-	producer.PreRequest(context.Background(), bind, schedulingResultFor("default", endpointFor("pod-1", "10.0.0.1", "8080")))
+	producer.PreRequest(context.Background(), bind, schedulingResultFor(endpointFor("pod-1", "10.0.0.1")))
 
 	time.Sleep(120 * time.Millisecond)
 
@@ -349,7 +353,7 @@ func TestBindingsEvictedAtCapacity(t *testing.T) {
 		producer.PreRequest(
 			context.Background(),
 			requestWithSession(session),
-			schedulingResultFor("default", endpointFor(endpoint, address, "8080")),
+			schedulingResultFor(endpointFor(endpoint, address)),
 		)
 	}
 	bind("session-0", "pod-1", "10.0.0.1")
