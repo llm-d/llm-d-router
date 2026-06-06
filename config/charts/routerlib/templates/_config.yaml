@@ -80,31 +80,26 @@ data:
       parser:
         pluginRef: {{ $parserType }}
     {{- end }}
-  passthrough-plugins.yaml: |
+  payload-agnostic.yaml: |
     # Request-format agnostic routing. Use this when the request format is
     # unknown or unsupported, so the EPP cannot rely on scorers that read the
     # request body (e.g. the prefix-cache scorer). The passthrough parser does
     # not parse the body, and routing falls back to backend-state scorers:
     #   - active-request-scorer  : prefers the least busy endpoint
     #   - session-affinity-scorer: keeps a session pinned to the same endpoint
-    # Select it by setting router.epp.pluginsConfigFile: passthrough-plugins.yaml
+    # Select it by setting router.epp.pluginsConfigFile: payload-agnostic.yaml
     apiVersion: llm-d.ai/v1alpha1
     kind: EndpointPickerConfig
     plugins:
     - type: passthrough-parser
     - type: active-request-scorer
     - type: session-affinity-scorer
-    - type: decode-filter
-    - type: max-score-picker
-    - type: single-profile-handler
     requestHandler:
       parsers:
       - pluginRef: passthrough-parser
     schedulingProfiles:
     - name: default
       plugins:
-      - pluginRef: decode-filter
-      - pluginRef: max-score-picker
       - pluginRef: active-request-scorer
         weight: 1
       - pluginRef: session-affinity-scorer
