@@ -108,60 +108,7 @@ const (
 	// token is about 128KB in size, so we can cache 500K tokens. Using the default block size of 16
 	// in vLLM, we will have 250K / 16 = 31.25K blocks.
 	defaultLRUCapacityPerServer = 31250
-
-	// averageCharactersPerToken is an estimated average characters per token.
-	averageCharactersPerToken = 4
 )
-
-const (
-	ModeFixed   mode = "fixed"
-	ModeDynamic mode = "dynamic"
-)
-
-// mode defines the mode for image processing.
-type mode string
-
-// resolution defines the Width and height of an image.
-type resolution struct {
-	Width  int `json:"width"`
-	Height int `json:"height"`
-}
-
-type fixedTokenEstimatorConfig struct {
-	FixedToken int `json:"fixedToken"`
-}
-
-type dynamicTokenEstimatorConfig struct {
-	Factor int `json:"factor"`
-}
-
-// imageTokenEstimatorConfig defines the configuration for image modality.
-type imageTokenEstimatorConfig struct {
-	Mode              mode                         `json:"mode"`
-	DefaultResolution resolution                   `json:"defaultResolution"`
-	DynamicCfg        *dynamicTokenEstimatorConfig `json:"dynamic,omitempty"`
-	FixedCfg          *fixedTokenEstimatorConfig   `json:"fixed,omitempty"`
-}
-
-// multiModalTokenEstimatorConfig defines the configuration for multimodal inputs.
-type multiModalTokenEstimatorConfig struct {
-	Image *imageTokenEstimatorConfig `json:"image,omitempty"`
-}
-
-// defaultMultimodalConfig provides default configuration for multimodal inputs.
-var defaultMultimodalConfig = multiModalTokenEstimatorConfig{
-	Image: &imageTokenEstimatorConfig{
-		Mode: ModeDynamic,
-		//  Default is 360p image
-		DefaultResolution: resolution{
-			Width:  640,
-			Height: 360,
-		},
-		DynamicCfg: &dynamicTokenEstimatorConfig{
-			Factor: 1024,
-		},
-	},
-}
 
 // config defines the configuration for the prefix cache plugins.
 type config struct {
@@ -180,16 +127,13 @@ type config struct {
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
 	// Max capacity size of the LRU indexer in number of entries per server (pod).
 	LRUCapacityPerServer int `json:"lruCapacityPerServer"`
-	// MultimodalTokenEstimator configuration for the plugin.
-	MultimodalTokenEstimator *multiModalTokenEstimatorConfig `json:"multiModalTokenEstimator,omitempty"`
 }
 
 // defaultConfig provides sensible defaults for the prefix cache plugins.
 var defaultConfig = config{
-	AutoTune:                 true,
-	BlockSize:                0,
-	BlockSizeTokens:          defaultBlockSizeTokens,
-	MaxPrefixBlocksToMatch:   defaultMaxPrefixBlocks,
-	LRUCapacityPerServer:     defaultLRUCapacityPerServer,
-	MultimodalTokenEstimator: &defaultMultimodalConfig,
+	AutoTune:               true,
+	BlockSize:              0,
+	BlockSizeTokens:        defaultBlockSizeTokens,
+	MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+	LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 }

@@ -49,7 +49,7 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 	// Prepare inputs for bulk prediction
 	metricsStates := make([]*fwkdl.Metrics, len(candidateEndpoints))
 	targetEndpointsMetadatas := make([]*fwkdl.EndpointMetadata, len(candidateEndpoints))
-	prompts := make([]string, len(candidateEndpoints))
+	inputTokenLengths := make([]int, len(candidateEndpoints))
 	generatedTokenCounts := make([]int, len(candidateEndpoints))
 	prefixCacheScores := make([]float64, len(candidateEndpoints))
 	prefillTokensInFlights := make([]int64, len(candidateEndpoints))
@@ -64,7 +64,7 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 
 		metricsStates[i] = endpoint.GetMetrics()
 		targetEndpointsMetadatas[i] = endpoint.GetMetadata()
-		prompts[i] = predictedLatencyCtx.promptText
+		inputTokenLengths[i] = predictedLatencyCtx.inputTokenCount
 		generatedTokenCounts[i] = 1
 		prefixCacheScores[i] = prefixCacheScore
 
@@ -73,7 +73,7 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 	}
 
 	// Bulk predict
-	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, prompts, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights)
+	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, inputTokenLengths, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights)
 	if err != nil {
 		logger.V(logutil.DEBUG).Error(err, "Bulk prediction failed")
 		return nil, err

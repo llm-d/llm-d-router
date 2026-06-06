@@ -38,8 +38,8 @@ This plugin produces:
 
 The producer supports the following runtime parameters:
 
-- `cacheSize` (integer, default: `10000`): maximum number of multimodal hash entries
-  retained in the best-effort pod-affinity cache.
+- `cacheSizeInMBPerServer` (integer, default: `2048`, 2 GiB): per-endpoint memory budget in
+  mebibytes (MiB) for the best-effort pod-affinity LRU.
 
 **Configuration Examples:**
 
@@ -47,7 +47,7 @@ The producer supports the following runtime parameters:
 plugins:
   - type: mm-embeddings-cache-producer
     parameters:
-      cacheSize: 10000
+      cacheSizeInMBPerServer: 2048
   - type: mm-embeddings-cache-scorer
 schedulingProfiles:
   - name: encoder-cache-aware
@@ -69,7 +69,7 @@ plugins:
         http: http://localhost:8000
   - type: mm-embeddings-cache-producer
     parameters:
-      cacheSize: 10000
+      cacheSizeInMBPerServer: 2048
   - type: mm-embeddings-cache-scorer
 schedulingProfiles:
   - name: decode

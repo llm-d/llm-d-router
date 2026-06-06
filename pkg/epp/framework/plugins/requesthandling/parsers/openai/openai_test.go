@@ -163,6 +163,74 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name:    "chat completions request body with assistant tool calls",
+			headers: map[string]string{":path": "/v1/chat/completions"},
+			body: map[string]any{
+				"model": "test",
+				"messages": []any{
+					map[string]any{
+						"role":    "user",
+						"content": "List files",
+					},
+					map[string]any{
+						"role":    "assistant",
+						"content": "Reflection.",
+						"tool_calls": []any{
+							map[string]any{
+								"id":   "chatcmpl-tool-1",
+								"type": "function",
+								"function": map[string]any{
+									"name":      "bash",
+									"arguments": `{"command":"ls -la"}`,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				ChatCompletions: &fwkrh.ChatCompletionsRequest{
+					Messages: []fwkrh.Message{
+						{Role: "user", Content: fwkrh.Content{Raw: "List files"}},
+						{
+							Role:    "assistant",
+							Content: fwkrh.Content{Raw: "Reflection."},
+							ToolCalls: []any{
+								map[string]any{
+									"id":   "chatcmpl-tool-1",
+									"type": "function",
+									"function": map[string]any{
+										"name":      "bash",
+										"arguments": `{"command":"ls -la"}`,
+									},
+								},
+							},
+						},
+					},
+				},
+				Payload: fwkrh.PayloadMap{
+					"model": "test",
+					"messages": []any{
+						map[string]any{"role": "user", "content": "List files"},
+						map[string]any{
+							"role":    "assistant",
+							"content": "Reflection.",
+							"tool_calls": []any{
+								map[string]any{
+									"id":   "chatcmpl-tool-1",
+									"type": "function",
+									"function": map[string]any{
+										"name":      "bash",
+										"arguments": `{"command":"ls -la"}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name:    "chat completions request body with multi-modal content",
 			headers: map[string]string{":path": "/v1/chat/completions"},
 			body: map[string]any{
@@ -1057,13 +1125,22 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 	}
 }
 
-func TestOpenAIParser_SupportedAppProtocols(t *testing.T) {
+func TestOpenAIParser_Claims(t *testing.T) {
 	parser := NewOpenAIParser()
-	supported := parser.SupportedAppProtocols()
-	want := []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP}
+	got := parser.Claims()
+	want := fwkrh.Claims{
+		Paths: []string{
+			chatCompletionsAPI,
+			completionsAPI,
+			embeddingsAPI,
+			responsesAPI,
+			conversationsAPI,
+		},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
+	}
 
-	if diff := cmp.Diff(want, supported); diff != "" {
-		t.Errorf("SupportedAppProtocols() mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }
 

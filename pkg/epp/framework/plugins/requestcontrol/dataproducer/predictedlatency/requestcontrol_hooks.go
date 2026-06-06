@@ -186,7 +186,7 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 					pl.config.EndpointRoleLabel,
 					targetMetadata,
 					m,
-					predictedLatencyCtx.promptText,
+					predictedLatencyCtx.inputTokenCount,
 					0,
 					predictedLatencyCtx.avgTPOT,
 					now,
@@ -362,7 +362,7 @@ func processTokenForLatencyPrediction(
 			endpointRoleLabel,
 			targetEndpointMetadata,
 			m,
-			predictedLatencyCtx.promptText,
+			predictedLatencyCtx.inputTokenCount,
 			predictedLatencyCtx.generatedTokenCount,
 			0,
 		)

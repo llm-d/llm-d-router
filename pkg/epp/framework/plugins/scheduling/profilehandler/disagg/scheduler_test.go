@@ -28,7 +28,21 @@ import (
 const (
 	prefill = "prefill"
 	decode  = "decode"
+
+	// averageCharactersPerToken derives token counts from character-length
+	// prompt fixtures in tests.
+	averageCharactersPerToken = 4
 )
+
+// completionsBody builds a completions request body whose tokenized prompt carries
+// len(prompt)/averageCharactersPerToken token IDs, which the decider reads as
+// the input token count.
+func completionsBody(prompt string) *fwkrh.InferenceRequestBody {
+	return &fwkrh.InferenceRequestBody{
+		Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+		TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)},
+	}
+}
 
 // Tests the scheduler expected behavior.
 func TestPDSchedule(t *testing.T) {
@@ -106,11 +120,7 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "any-model",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345678901"},
-					},
-				},
+				Body:        completionsBody("12345678901"),
 			},
 			input: []fwksched.Endpoint{},
 			err:   true,
@@ -120,11 +130,7 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345678901"},
-					},
-				},
+				Body:        completionsBody("12345678901"),
 			},
 			// endpoint2 will be picked because it is the only endpoint with Decode role
 			input:   []fwksched.Endpoint{endpoint2},
@@ -135,11 +141,7 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345678901"},
-					},
-				},
+				Body:        completionsBody("12345678901"),
 			},
 			// no Decode endpoint
 			input: []fwksched.Endpoint{endpoint1},
@@ -150,11 +152,7 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345678906"},
-					},
-				},
+				Body:        completionsBody("12345678906"),
 			},
 			// endpoint2 will be picked in the decode profile result, endpoint1 will be in the prefill profile result
 			input:    []fwksched.Endpoint{endpoint1, endpoint2},
@@ -166,11 +164,7 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345"},
-					},
-				},
+				Body:        completionsBody("12345"),
 			},
 			// endpoint2 will be picked because it is the decode endpoint, endpoint1 shouldn't be picked,
 			// because the prompt is too short
@@ -183,11 +177,7 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "12345678901"},
-					},
-				},
+				Body:        completionsBody("12345678901"),
 			},
 			input: []fwksched.Endpoint{endpoint1, noRoleEndpoint1},
 			wantRes: &fwksched.SchedulingResult{
@@ -215,11 +205,7 @@ func TestPDSchedule(t *testing.T) {
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "1234567890123456789012345678901234567890"},
-					},
-				},
+				Body:        completionsBody("1234567890123456789012345678901234567890"),
 			},
 			// endpoint2 will be picked in the decode profile result cause it has higher score than noRoleEndpoint1
 			// endpoint1 will be in the prefill profile result
@@ -264,7 +250,7 @@ func TestPDSchedule(t *testing.T) {
 			})
 			scheduler := scheduling.NewSchedulerWithConfig(schedulerConfig)
 
-			inputTokens := len(test.req.Body.Completions.Prompt.Raw) / disagg.AverageCharactersPerToken
+			inputTokens := len(test.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 			for _, pod := range test.input {
 				pod.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(0, inputTokens, 1))
 			}

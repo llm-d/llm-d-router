@@ -126,6 +126,45 @@ func TestVLLMHTTPRenderer_RenderChat_Multimodal(t *testing.T) {
 	assert.Equal(t, "text", parts[1].(map[string]any)["type"])
 }
 
+func TestVLLMHTTPRenderer_RenderChat_ToolCalls(t *testing.T) {
+	srv, cap := httpFixture(t, nil, renderResponse{TokenIDs: []uint32{1, 2, 3}})
+	defer srv.Close()
+
+	toolCalls := []any{
+		map[string]any{
+			"id":   "chatcmpl-tool-1",
+			"type": "function",
+			"function": map[string]any{
+				"name":      "bash",
+				"arguments": `{"command":"ls -la"}`,
+			},
+		},
+	}
+	r := newHTTPRenderer(t, srv)
+	req := &tokenizerTypes.RenderChatRequest{
+		Conversation: []tokenizerTypes.Conversation{
+			{Role: "user", Content: tokenizerTypes.Content{Raw: "list files"}},
+			{
+				Role:      "assistant",
+				Content:   tokenizerTypes.Content{Raw: ""},
+				ToolCalls: toolCalls,
+			},
+		},
+		AddGenerationPrompt: true,
+	}
+	_, _, err := r.RenderChat(context.Background(), req)
+	require.NoError(t, err)
+
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal(cap.chat, &sent))
+	msgs, ok := sent["messages"].([]any)
+	require.True(t, ok)
+	require.Len(t, msgs, 2)
+	assistant, ok := msgs[1].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, toolCalls, assistant["tool_calls"])
+}
+
 func TestVLLMHTTPRenderer_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)

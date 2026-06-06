@@ -19,6 +19,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
@@ -239,7 +240,10 @@ func (h *Handler) WithName(name string) *Handler {
 // Consumes defines data types consumed by this plugin (through the PD decider).
 func (*Handler) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{}},
+		Required: map[plugin.DataKey]any{
+			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedPrompt{},
+		},
 	}
 }
 

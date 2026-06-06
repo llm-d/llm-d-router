@@ -25,6 +25,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
+	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -253,22 +254,32 @@ func TestVllmHTTPParser_ParseRequest_GenerateErrorPaths(t *testing.T) {
 	}
 }
 
-// TestVllmHTTPParser_DelegatesToOpenAI confirms that non-generate paths flow
-// through the embedded OpenAI parser.
-func TestVllmHTTPParser_DelegatesToOpenAI(t *testing.T) {
+// TestVllmHTTPParser_RejectsNonGeneratePaths confirms that non-generate paths
+// are rejected with an error.
+func TestVllmHTTPParser_RejectsNonGeneratePaths(t *testing.T) {
 	parser := NewVllmHTTPParser()
 
 	body, _ := json.Marshal(map[string]any{
 		"prompt": "hello world",
 	})
-	got, err := parser.ParseRequest(context.Background(), body, map[string]string{":path": "/v1/completions"})
-	if err != nil {
-		t.Fatalf("ParseRequest() unexpected error: %v", err)
+	_, err := parser.ParseRequest(context.Background(), body, map[string]string{":path": "/v1/completions"})
+	if err == nil {
+		t.Fatal("ParseRequest() expected error for non-generate path, got nil")
 	}
-	if got.Body == nil || got.Body.Completions == nil {
-		t.Fatalf("expected Completions body via OpenAI delegation, got %+v", got)
+	if !strings.Contains(err.Error(), "unsupported path") {
+		t.Errorf("expected error to contain 'unsupported path', got: %v", err)
 	}
-	if got.Body.Completions.Prompt.Raw != "hello world" {
-		t.Errorf("Completions.Prompt.Raw = %q, want %q", got.Body.Completions.Prompt.Raw, "hello world")
+}
+
+func TestVllmHTTPParser_Claims(t *testing.T) {
+	parser := NewVllmHTTPParser()
+	got := parser.Claims()
+	want := fwkrh.Claims{
+		Paths:     []string{generatePathSuffix},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }
