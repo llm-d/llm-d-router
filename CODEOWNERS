@@ -8,9 +8,9 @@
 #
 # Project leadership and team membership are recorded in /LEADS.md.
 
-# Default — every path falls back to the maintainers team.
-# The maintainers team can also bypass requirements in a sense that is equivalent to being
-# present in every path below.
+# Default — every path falls back to the maintainers team. Single-owner paths
+# below also list the team, so a maintainer can approve alongside the named
+# owner; paths with multiple named owners are gated to those owners alone.
 *                                                                         @llm-d/router-maintainers
 
 # Flow control framework + plugins
@@ -18,22 +18,22 @@
 /pkg/epp/framework/plugins/flowcontrol/                                   @LukeAVanDrie @shmuelk
 
 # Envoy ext_proc message layer
-/pkg/common/envoy/                                                        @shmuelk
+/pkg/common/envoy/                                                        @shmuelk @llm-d/router-maintainers
 
 # EPP configuration: loading logic and API types
-/pkg/epp/config/                                                          @shmuelk
-/apix/config/                                                             @shmuelk
+/pkg/epp/config/                                                          @shmuelk @llm-d/router-maintainers
+/apix/config/                                                             @shmuelk @llm-d/router-maintainers
 
 # Proxy sidecar
-/cmd/pd-sidecar/                                                          @shmuelk
-/pkg/sidecar/                                                             @shmuelk
+/cmd/pd-sidecar/                                                          @shmuelk @llm-d/router-maintainers
+/pkg/sidecar/                                                             @shmuelk @llm-d/router-maintainers
 
 # SLO + latency-prediction subsystem
-/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier/             @kaushikmitr
-/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity/         @kaushikmitr
-/pkg/epp/framework/plugins/scheduling/scorer/latency/                     @kaushikmitr
-/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo/            @kaushikmitr
-/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/  @kaushikmitr
+/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier/             @kaushikmitr @llm-d/router-maintainers
+/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity/         @kaushikmitr @llm-d/router-maintainers
+/pkg/epp/framework/plugins/scheduling/scorer/latency/                     @kaushikmitr @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo/            @kaushikmitr @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/  @kaushikmitr @llm-d/router-maintainers
 
 # Prefix scoring
 /pkg/epp/framework/plugins/scheduling/scorer/prefix/                         @liu-cong @vMaroon
