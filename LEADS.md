@@ -35,9 +35,6 @@ this team.
 
 - @llm-d/router-release-managers
 
-...to be expanded.
-
-
 ## Emeritus
 
 Former maintainers, with thanks for their contributions.
