@@ -15,13 +15,19 @@ Holds the session identifier extracted from a request. Stored on the
 
 ## `BoundEndpoint`
 
-Identifies the endpoint that a session has been pinned to by a previous
-request. The same `session-id-producer` that publishes `SessionID` also
-maintains the binding cache and writes `BoundEndpoint` on subsequent
-requests for a known session.
+Identifies the network destination a session is pinned to. Stored in
+canonical `host:port` form (the result of `net.JoinHostPort` over the
+endpoint's `Address` and `Port`). The same `session-id-producer` that
+publishes `SessionID` also maintains the binding cache and writes
+`BoundEndpoint` on subsequent requests for a known session.
+
+Tying the binding to `host:port` rather than the K8s namespaced name means
+a restarted pod with a fresh IP no longer matches a stale binding, which is
+the desired behavior since the KV cache the binding existed to preserve
+died with the previous process.
 
 - **Key**: `BoundEndpointDataKey` (default producer: `session-id-producer`)
-- **Type**: `BoundEndpoint` (alias of `types.NamespacedName`)
+- **Type**: `BoundEndpoint` (string alias)
 
 ## Producers
 

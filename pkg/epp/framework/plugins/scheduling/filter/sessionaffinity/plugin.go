@@ -23,8 +23,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 
-	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -89,30 +89,43 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 		return endpoints
 	}
 
-	target := k8stypes.NamespacedName(bound)
 	for _, ep := range endpoints {
-		if ep.GetMetadata().NamespacedName == target {
+		if endpointHostPort(ep) == string(bound) {
 			logger.Info("session-affinity-filter: binding matches a candidate, returning single endpoint",
-				"endpoint", target)
+				"endpoint", string(bound))
 			return []fwksched.Endpoint{ep}
 		}
 	}
 
 	logger.Info("session-affinity-filter: bound endpoint not in candidates, keeping all",
-		"endpoint", target, "total", len(endpoints))
+		"endpoint", string(bound), "total", len(endpoints))
 	return endpoints
 }
 
 // Consumes declares the BoundEndpoint attribute key read by this filter.
 func (p *Plugin) Consumes() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
-		p.bindingDK: attrsession.BoundEndpoint{},
+		p.bindingDK: attrsession.BoundEndpoint(""),
 	}
 }
 
 func (p *Plugin) readBinding(request *fwksched.InferenceRequest) (attrsession.BoundEndpoint, bool) {
 	if request == nil {
-		return attrsession.BoundEndpoint{}, false
+		return "", false
 	}
-	return fwksched.ReadRequestAttribute[attrsession.BoundEndpoint](request, p.bindingDK.String())
+	bound, ok := fwksched.ReadRequestAttribute[attrsession.BoundEndpoint](request, p.bindingDK.String())
+	if !ok || bound == "" {
+		return "", false
+	}
+	return bound, true
+}
+
+// endpointHostPort returns the canonical host:port form of an endpoint, or
+// the empty string when either coordinate is missing.
+func endpointHostPort(ep fwksched.Endpoint) string {
+	meta := ep.GetMetadata()
+	if meta.Address == "" || meta.Port == "" {
+		return ""
+	}
+	return net.JoinHostPort(meta.Address, meta.Port)
 }

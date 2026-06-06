@@ -18,6 +18,7 @@ package sessionaffinity_test
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -33,10 +34,12 @@ import (
 
 const testProducerName = "test-session-producer"
 
-func newTestEndpoint(name string) scheduling.Endpoint {
+func newTestEndpoint(name, address, port string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
 			NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: "default"},
+			Address:        address,
+			Port:           port,
 		},
 		&fwkdl.Metrics{},
 		nil,
@@ -55,35 +58,39 @@ func bindingKey() string {
 	return attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(testProducerName).String()
 }
 
+func boundTo(address, port string) attrsession.BoundEndpoint {
+	return attrsession.BoundEndpoint(net.JoinHostPort(address, port))
+}
+
 func TestFilter(t *testing.T) {
-	ep1 := newTestEndpoint("pod-1")
-	ep2 := newTestEndpoint("pod-2")
-	ep3 := newTestEndpoint("pod-3")
+	ep1 := newTestEndpoint("pod-1", "10.0.0.1", "8080")
+	ep2 := newTestEndpoint("pod-2", "10.0.0.2", "8080")
+	ep3 := newTestEndpoint("pod-3", "10.0.0.3", "8080")
 	endpoints := []scheduling.Endpoint{ep1, ep2, ep3}
 
 	tests := []struct {
 		name          string
-		bound         *attrsession.BoundEndpoint
+		bound         attrsession.BoundEndpoint
 		expectedNames []string
 	}{
 		{
 			name:          "no binding keeps all endpoints",
-			bound:         nil,
+			bound:         "",
 			expectedNames: []string{"pod-1", "pod-2", "pod-3"},
 		},
 		{
-			name:          "binding to pod-1 keeps only pod-1",
-			bound:         boundTo("default", "pod-1"),
+			name:          "binding to ep1 keeps only pod-1",
+			bound:         boundTo("10.0.0.1", "8080"),
 			expectedNames: []string{"pod-1"},
 		},
 		{
-			name:          "binding to pod-2 keeps only pod-2",
-			bound:         boundTo("default", "pod-2"),
+			name:          "binding to ep2 keeps only pod-2",
+			bound:         boundTo("10.0.0.2", "8080"),
 			expectedNames: []string{"pod-2"},
 		},
 		{
 			name:          "binding to absent endpoint keeps all",
-			bound:         boundTo("default", "pod-99"),
+			bound:         boundTo("10.0.0.99", "8080"),
 			expectedNames: []string{"pod-1", "pod-2", "pod-3"},
 		},
 	}
@@ -93,8 +100,8 @@ func TestFilter(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			request := &scheduling.InferenceRequest{}
-			if tt.bound != nil {
-				request.PutAttribute(bindingKey(), *tt.bound)
+			if tt.bound != "" {
+				request.PutAttribute(bindingKey(), tt.bound)
 			}
 			result := filter.Filter(context.Background(), request, endpoints)
 
@@ -110,11 +117,11 @@ func TestFilter(t *testing.T) {
 func TestFilterSingleEndpointShortcut(t *testing.T) {
 	filter := newFilter(t)
 
-	ep1 := newTestEndpoint("pod-1")
+	ep1 := newTestEndpoint("pod-1", "10.0.0.1", "8080")
 	endpoints := []scheduling.Endpoint{ep1}
 
 	request := &scheduling.InferenceRequest{}
-	request.PutAttribute(bindingKey(), *boundTo("default", "pod-2"))
+	request.PutAttribute(bindingKey(), boundTo("10.0.0.99", "8080"))
 
 	result := filter.Filter(context.Background(), request, endpoints)
 	require.Len(t, result, 1)
@@ -124,13 +131,11 @@ func TestFilterSingleEndpointShortcut(t *testing.T) {
 func TestFilterNilRequest(t *testing.T) {
 	filter := newFilter(t)
 
-	endpoints := []scheduling.Endpoint{newTestEndpoint("pod-1"), newTestEndpoint("pod-2")}
+	endpoints := []scheduling.Endpoint{
+		newTestEndpoint("pod-1", "10.0.0.1", "8080"),
+		newTestEndpoint("pod-2", "10.0.0.2", "8080"),
+	}
 	result := filter.Filter(context.Background(), nil, endpoints)
 
 	assert.Len(t, result, 2)
-}
-
-func boundTo(namespace, name string) *attrsession.BoundEndpoint {
-	b := attrsession.BoundEndpoint{Namespace: namespace, Name: name}
-	return &b
 }

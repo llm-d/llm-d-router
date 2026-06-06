@@ -18,6 +18,7 @@ package sessionaffinity_test
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,10 +32,12 @@ import (
 
 const testProducerName = "test-session-producer"
 
-func newTestEndpoint(name, namespace string) scheduling.Endpoint {
+func newTestEndpoint(name, namespace, address, port string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
 			NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: namespace},
+			Address:        address,
+			Port:           port,
 		},
 		&fwkdl.Metrics{},
 		nil,
@@ -45,34 +48,43 @@ func bindingKey() string {
 	return attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(testProducerName).String()
 }
 
+func boundTo(address, port string) attrsession.BoundEndpoint {
+	return attrsession.BoundEndpoint(net.JoinHostPort(address, port))
+}
+
 func TestScore(t *testing.T) {
-	ep1 := newTestEndpoint("pod-1", "default")
-	ep2 := newTestEndpoint("pod-2", "default")
+	ep1 := newTestEndpoint("pod-1", "default", "10.0.0.1", "8080")
+	ep2 := newTestEndpoint("pod-2", "default", "10.0.0.2", "8080")
 	endpoints := []scheduling.Endpoint{ep1, ep2}
 
 	tests := []struct {
 		name     string
-		bound    *attrsession.BoundEndpoint
+		bound    attrsession.BoundEndpoint
 		expected map[scheduling.Endpoint]float64
 	}{
 		{
 			name:     "no binding scores all zero",
-			bound:    nil,
+			bound:    "",
 			expected: map[scheduling.Endpoint]float64{ep1: 0.0, ep2: 0.0},
 		},
 		{
-			name:     "binding to pod-1 scores it 1.0",
-			bound:    boundTo("default", "pod-1"),
+			name:     "binding to ep1 scores it 1.0",
+			bound:    boundTo("10.0.0.1", "8080"),
 			expected: map[scheduling.Endpoint]float64{ep1: 1.0, ep2: 0.0},
 		},
 		{
-			name:     "binding to pod-2 scores it 1.0",
-			bound:    boundTo("default", "pod-2"),
+			name:     "binding to ep2 scores it 1.0",
+			bound:    boundTo("10.0.0.2", "8080"),
 			expected: map[scheduling.Endpoint]float64{ep1: 0.0, ep2: 1.0},
 		},
 		{
 			name:     "binding to absent endpoint scores all zero",
-			bound:    boundTo("default", "pod-99"),
+			bound:    boundTo("10.0.0.99", "8080"),
+			expected: map[scheduling.Endpoint]float64{ep1: 0.0, ep2: 0.0},
+		},
+		{
+			name:     "binding with different port scores all zero",
+			bound:    boundTo("10.0.0.1", "9090"),
 			expected: map[scheduling.Endpoint]float64{ep1: 0.0, ep2: 0.0},
 		},
 	}
@@ -82,8 +94,8 @@ func TestScore(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			request := &scheduling.InferenceRequest{}
-			if tt.bound != nil {
-				request.PutAttribute(bindingKey(), *tt.bound)
+			if tt.bound != "" {
+				request.PutAttribute(bindingKey(), tt.bound)
 			}
 			scores := scorer.Score(context.Background(), request, endpoints)
 			assert.Equal(t, tt.expected, scores)
@@ -92,16 +104,11 @@ func TestScore(t *testing.T) {
 }
 
 func TestScoreNilRequest(t *testing.T) {
-	ep1 := newTestEndpoint("pod-1", "default")
+	ep1 := newTestEndpoint("pod-1", "default", "10.0.0.1", "8080")
 	endpoints := []scheduling.Endpoint{ep1}
 
 	scorer := sessionaffinity.NewSessionAffinity(testProducerName)
 	scores := scorer.Score(context.Background(), nil, endpoints)
 
 	assert.Equal(t, map[scheduling.Endpoint]float64{ep1: 0.0}, scores)
-}
-
-func boundTo(namespace, name string) *attrsession.BoundEndpoint {
-	b := attrsession.BoundEndpoint{Namespace: namespace, Name: name}
-	return &b
 }

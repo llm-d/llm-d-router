@@ -23,8 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-
-	k8stypes "k8s.io/apimachinery/pkg/types"
+	"net"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -97,7 +96,7 @@ func (s *SessionAffinity) Score(_ context.Context, request *scheduling.Inference
 
 	for _, endpoint := range endpoints {
 		scoredEndpoints[endpoint] = 0.0
-		if hasTarget && endpoint.GetMetadata().NamespacedName == target {
+		if hasTarget && endpointHostPort(endpoint) == string(target) {
 			scoredEndpoints[endpoint] = 1.0
 		}
 	}
@@ -107,17 +106,27 @@ func (s *SessionAffinity) Score(_ context.Context, request *scheduling.Inference
 // Consumes declares the BoundEndpoint attribute key read by this scorer.
 func (s *SessionAffinity) Consumes() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{
-		s.bindingDK: attrsession.BoundEndpoint{},
+		s.bindingDK: attrsession.BoundEndpoint(""),
 	}
 }
 
-func (s *SessionAffinity) readBinding(request *scheduling.InferenceRequest) (k8stypes.NamespacedName, bool) {
+func (s *SessionAffinity) readBinding(request *scheduling.InferenceRequest) (attrsession.BoundEndpoint, bool) {
 	if request == nil {
-		return k8stypes.NamespacedName{}, false
+		return "", false
 	}
 	bound, ok := scheduling.ReadRequestAttribute[attrsession.BoundEndpoint](request, s.bindingDK.String())
-	if !ok {
-		return k8stypes.NamespacedName{}, false
+	if !ok || bound == "" {
+		return "", false
 	}
-	return k8stypes.NamespacedName(bound), true
+	return bound, true
+}
+
+// endpointHostPort returns the canonical host:port form of an endpoint, or
+// the empty string when either coordinate is missing.
+func endpointHostPort(ep scheduling.Endpoint) string {
+	meta := ep.GetMetadata()
+	if meta.Address == "" || meta.Port == "" {
+		return ""
+	}
+	return net.JoinHostPort(meta.Address, meta.Port)
 }

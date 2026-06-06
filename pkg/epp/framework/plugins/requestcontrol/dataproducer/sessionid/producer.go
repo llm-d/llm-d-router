@@ -28,11 +28,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2/expirable"
-	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -90,7 +90,7 @@ type Producer struct {
 	bindingDK  fwkplugin.DataKey
 	headerName string
 	cookieName string
-	bindings   *lru.LRU[attrsession.SessionID, k8stypes.NamespacedName]
+	bindings   *lru.LRU[attrsession.SessionID, attrsession.BoundEndpoint]
 }
 
 // Factory builds a Producer from raw plugin parameters.
@@ -138,7 +138,7 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 		bindingDK:  attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(name),
 		headerName: header,
 		cookieName: cookie,
-		bindings:   lru.NewLRU[attrsession.SessionID, k8stypes.NamespacedName](size, nil, ttl),
+		bindings:   lru.NewLRU[attrsession.SessionID, attrsession.BoundEndpoint](size, nil, ttl),
 	}, nil
 }
 
@@ -152,7 +152,7 @@ func (p *Producer) TypedName() fwkplugin.TypedName {
 func (p *Producer) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
 		p.sessionDK: attrsession.SessionID(""),
-		p.bindingDK: attrsession.BoundEndpoint{},
+		p.bindingDK: attrsession.BoundEndpoint(""),
 	}
 }
 
@@ -171,7 +171,7 @@ func (p *Producer) Produce(_ context.Context, request *fwksched.InferenceRequest
 	sessionID := attrsession.SessionID(id)
 	request.PutAttribute(p.sessionDK.String(), sessionID)
 	if bound, ok := p.bindings.Get(sessionID); ok {
-		request.PutAttribute(p.bindingDK.String(), attrsession.BoundEndpoint(bound))
+		request.PutAttribute(p.bindingDK.String(), bound)
 	}
 	return nil
 }
@@ -229,19 +229,24 @@ func cookieValue(header, name string) string {
 	return ""
 }
 
-// primaryTarget returns the namespaced name of the first endpoint chosen by
-// the primary profile, if any.
-func primaryTarget(result *fwksched.SchedulingResult) (k8stypes.NamespacedName, bool) {
+// primaryTarget returns the network identity (host:port) of the first
+// endpoint chosen by the primary profile, if any. Returns false when the
+// result is empty or the chosen endpoint has no Address/Port.
+func primaryTarget(result *fwksched.SchedulingResult) (attrsession.BoundEndpoint, bool) {
 	if result == nil {
-		return k8stypes.NamespacedName{}, false
+		return "", false
 	}
 	profile, ok := result.ProfileResults[result.PrimaryProfileName]
 	if !ok || profile == nil || len(profile.TargetEndpoints) == 0 {
-		return k8stypes.NamespacedName{}, false
+		return "", false
 	}
 	endpoint := profile.TargetEndpoints[0]
 	if endpoint == nil {
-		return k8stypes.NamespacedName{}, false
+		return "", false
 	}
-	return endpoint.GetMetadata().NamespacedName, true
+	meta := endpoint.GetMetadata()
+	if meta.Address == "" || meta.Port == "" {
+		return "", false
+	}
+	return attrsession.BoundEndpoint(net.JoinHostPort(meta.Address, meta.Port)), true
 }

@@ -19,6 +19,7 @@ package sessionid_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"testing"
 	"time"
 
@@ -63,7 +64,7 @@ func TestFactory_Validation(t *testing.T) {
 		{name: "negative lru size", params: json.RawMessage(`{"headerName":"x","lruSize":-1}`), wantErr: true, errSubstr: "lruSize"},
 		{name: "zero ttl", params: json.RawMessage(`{"headerName":"x","ttl":"0s"}`), wantErr: true, errSubstr: "ttl"},
 		{name: "negative ttl", params: json.RawMessage(`{"headerName":"x","ttl":"-1m"}`), wantErr: true, errSubstr: "ttl"},
-		{name: "unparseable ttl", params: json.RawMessage(`{"headerName":"x","ttl":"not-a-duration"}`), wantErr: true, errSubstr: "invalid ttl"},
+		{name: "unparsable ttl", params: json.RawMessage(`{"headerName":"x","ttl":"not-a-duration"}`), wantErr: true, errSubstr: "invalid ttl"},
 		{name: "invalid json", params: json.RawMessage(`not-json`), wantErr: true, errSubstr: "failed to parse"},
 		{name: "unknown field", params: json.RawMessage(`{"headerName":"x","other":"y"}`), wantErr: true, errSubstr: "failed to parse"},
 		{name: "nil raw message", params: nil, wantErr: true, errSubstr: validationErr},
@@ -239,12 +240,20 @@ func requestWithSession(id string) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{Headers: map[string]string{"x-session-id": id}}
 }
 
-func endpointFor(name string) fwksched.Endpoint {
+func endpointFor(name, address, port string) fwksched.Endpoint {
 	return fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: name}},
+		&fwkdl.EndpointMetadata{
+			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: name},
+			Address:        address,
+			Port:           port,
+		},
 		&fwkdl.Metrics{},
 		nil,
 	)
+}
+
+func boundTo(address, port string) attrsession.BoundEndpoint {
+	return attrsession.BoundEndpoint(net.JoinHostPort(address, port))
 }
 
 func schedulingResultFor(profile string, endpoint fwksched.Endpoint) *fwksched.SchedulingResult {
@@ -261,7 +270,7 @@ func TestPreRequestThenProducePublishesBinding(t *testing.T) {
 
 	producer := mustFactory(t, `{"headerName":"x-session-id"}`)
 	bindReq := requestWithSession("session-A")
-	producer.PreRequest(context.Background(), bindReq, schedulingResultFor("default", endpointFor("pod-1")))
+	producer.PreRequest(context.Background(), bindReq, schedulingResultFor("default", endpointFor("pod-1", "10.0.0.1", "8080")))
 
 	lookup := requestWithSession("session-A")
 	require.NoError(t, producer.Produce(context.Background(), lookup, nil))
@@ -271,7 +280,7 @@ func TestPreRequestThenProducePublishesBinding(t *testing.T) {
 		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName("session-id-producer").String(),
 	)
 	require.True(t, ok)
-	assert.Equal(t, attrsession.BoundEndpoint{Namespace: "default", Name: "pod-1"}, got)
+	assert.Equal(t, boundTo("10.0.0.1", "8080"), got)
 }
 
 func TestPreRequestIgnoresMissingSession(t *testing.T) {
@@ -281,7 +290,7 @@ func TestPreRequestIgnoresMissingSession(t *testing.T) {
 	producer.PreRequest(
 		context.Background(),
 		&fwksched.InferenceRequest{}, // no session header
-		schedulingResultFor("default", endpointFor("pod-1")),
+		schedulingResultFor("default", endpointFor("pod-1", "10.0.0.1", "8080")),
 	)
 
 	// A subsequent Produce on a different session must not see the (non-existent) binding.
@@ -318,7 +327,7 @@ func TestBindingExpiresAfterTTL(t *testing.T) {
 
 	producer := mustFactory(t, `{"headerName":"x-session-id","ttl":"50ms"}`)
 	bind := requestWithSession("session-A")
-	producer.PreRequest(context.Background(), bind, schedulingResultFor("default", endpointFor("pod-1")))
+	producer.PreRequest(context.Background(), bind, schedulingResultFor("default", endpointFor("pod-1", "10.0.0.1", "8080")))
 
 	time.Sleep(120 * time.Millisecond)
 
@@ -336,16 +345,16 @@ func TestBindingsEvictedAtCapacity(t *testing.T) {
 
 	producer := mustFactory(t, `{"headerName":"x-session-id","lruSize":2}`)
 
-	bind := func(session, endpoint string) {
+	bind := func(session, endpoint, address string) {
 		producer.PreRequest(
 			context.Background(),
 			requestWithSession(session),
-			schedulingResultFor("default", endpointFor(endpoint)),
+			schedulingResultFor("default", endpointFor(endpoint, address, "8080")),
 		)
 	}
-	bind("session-0", "pod-1")
-	bind("session-1", "pod-2")
-	bind("session-2", "pod-3") // evicts session-0
+	bind("session-0", "pod-1", "10.0.0.1")
+	bind("session-1", "pod-2", "10.0.0.2")
+	bind("session-2", "pod-3", "10.0.0.3") // evicts session-0
 
 	for i, session := range []string{"session-0", "session-1", "session-2"} {
 		lookup := requestWithSession(session)

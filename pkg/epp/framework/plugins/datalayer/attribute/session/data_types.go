@@ -21,8 +21,6 @@ limitations under the License.
 package session
 
 import (
-	"k8s.io/apimachinery/pkg/types"
-
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sessionidconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid/constants"
@@ -40,16 +38,15 @@ var BoundEndpointDataKey = plugin.NewDataKey("BoundEndpointDataKey", sessionidco
 // SessionID is the session identifier extracted from a request.
 type SessionID string
 
-// BoundEndpoint is the namespaced name of the endpoint that a session has
-// been pinned to in a prior request. Affinity plugins compare this against
-// candidate endpoints to enforce stickiness.
-type BoundEndpoint types.NamespacedName
-
-// String returns the canonical "namespace/name" form, matching
-// types.NamespacedName.String().
-func (b BoundEndpoint) String() string {
-	return types.NamespacedName(b).String()
-}
+// BoundEndpoint identifies the network destination a session is pinned to.
+// It is the canonical "host:port" form returned by net.JoinHostPort over the
+// endpoint's Address and Port. Affinity plugins compare this against
+// candidate endpoints to enforce stickiness; using the network identity
+// (rather than the K8s namespaced name) means a restarted pod with a fresh
+// IP no longer matches a stale binding, which is the desired behavior since
+// the KV cache the binding existed to preserve died with the previous
+// process.
+type BoundEndpoint string
 
 // ReadSessionID returns the SessionID published by the default producer on the
 // request attribute store, or "" and false if absent.
