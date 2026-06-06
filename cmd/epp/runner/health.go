@@ -26,14 +26,14 @@ import (
 	"google.golang.org/grpc/codes"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
-	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 type appProtocolSupporter interface {
-	SupportedAppProtocols() []v1.AppProtocol
+	Claims() fwkrh.Claims
 }
 
 type healthServer struct {
@@ -120,7 +120,7 @@ func (s *healthServer) checkProtocolSupport(isLive bool) bool {
 		if supporter == nil {
 			continue
 		}
-		supported := supporter.SupportedAppProtocols()
+		supported := supporter.Claims().Protocols
 		if len(supported) == 0 {
 			continue
 		}

@@ -46,7 +46,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
@@ -503,21 +506,27 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			configText: successParserConfigText,
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.NotNil(t, cfg.ParserConfig, "Parser config should be loaded")
-				require.Len(t, cfg.ParserConfig.Parsers, 1, "Should have one parser")
-				require.Equal(t, "openai-parser", cfg.ParserConfig.Parsers[0].TypedName().Name, "Should have openai parser name")
-				require.Equal(t, openai.OpenAIParserType, cfg.ParserConfig.Parsers[0].TypedName().Type, "Should contain openai parser type")
+				require.NotNil(t, cfg.ParserRegistry, "Parser registry should be loaded")
+				parsers := cfg.ParserRegistry.Parsers()
+				require.Len(t, parsers, 1, "Should have one parser")
+				require.Equal(t, "openai-parser", parsers[0].TypedName().Name, "Should have openai parser name")
+				require.Equal(t, openai.OpenAIParserType, parsers[0].TypedName().Type, "Should contain openai parser type")
 			},
 		},
 		{
-			name:       "Success - Config without parser and a default openai parser is injected",
+			name:       "Success - Config without parser and default parsers are injected",
 			configText: successWithNoParserConfigText,
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.NotNil(t, cfg.ParserConfig, "Parser config should be loaded")
-				require.Len(t, cfg.ParserConfig.Parsers, 1, "Should have one parser")
-				require.Equal(t, "openai-parser", cfg.ParserConfig.Parsers[0].TypedName().Name, "Should have openai parser name")
-				require.Equal(t, openai.OpenAIParserType, cfg.ParserConfig.Parsers[0].TypedName().Type, "Should contain openai parser type")
+				require.NotNil(t, cfg.ParserRegistry, "Parser registry should be loaded")
+				parsers := cfg.ParserRegistry.Parsers()
+				require.Len(t, parsers, 3, "Should have three default parsers")
+				require.Equal(t, "openai-parser", parsers[0].TypedName().Name)
+				require.Equal(t, openai.OpenAIParserType, parsers[0].TypedName().Type)
+				require.Equal(t, "anthropic-parser", parsers[1].TypedName().Name)
+				require.Equal(t, anthropic.AnthropicParserType, parsers[1].TypedName().Type)
+				require.Equal(t, "vllmhttp-parser", parsers[2].TypedName().Name)
+				require.Equal(t, vllmhttp.VllmHTTPParserType, parsers[2].TypedName().Type)
 			},
 		},
 		{
@@ -525,10 +534,11 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			configText: successParserWithNameConfigText,
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.NotNil(t, cfg.ParserConfig, "Parser config should be loaded")
-				require.Len(t, cfg.ParserConfig.Parsers, 1, "Should have one parser")
-				require.Equal(t, "openaiParser", cfg.ParserConfig.Parsers[0].TypedName().Name, "Should have openai parser name")
-				require.Equal(t, openai.OpenAIParserType, cfg.ParserConfig.Parsers[0].TypedName().Type, "Should contain openai parser type")
+				require.NotNil(t, cfg.ParserRegistry, "Parser registry should be loaded")
+				parsers := cfg.ParserRegistry.Parsers()
+				require.Len(t, parsers, 1, "Should have one parser")
+				require.Equal(t, "openaiParser", parsers[0].TypedName().Name, "Should have openai parser name")
+				require.Equal(t, openai.OpenAIParserType, parsers[0].TypedName().Type, "Should contain openai parser type")
 			},
 		},
 		{
@@ -536,10 +546,11 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			configText: successMultipleParsersConfigText,
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.NotNil(t, cfg.ParserConfig, "Parser config should be loaded")
-				require.Len(t, cfg.ParserConfig.Parsers, 2, "Should have two parsers")
-				require.Equal(t, "openai-parser", cfg.ParserConfig.Parsers[0].TypedName().Name, "First parser should be openai-parser")
-				require.Equal(t, "secondParser", cfg.ParserConfig.Parsers[1].TypedName().Name, "Second parser should be secondParser")
+				require.NotNil(t, cfg.ParserRegistry, "Parser registry should be loaded")
+				parsers := cfg.ParserRegistry.Parsers()
+				require.Len(t, parsers, 2, "Should have two parsers")
+				require.Equal(t, "openai-parser", parsers[0].TypedName().Name, "First parser should be openai-parser")
+				require.Equal(t, "secondParser", parsers[1].TypedName().Name, "Second parser should be secondParser")
 			},
 		},
 
@@ -557,9 +568,10 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			configText: successDeprecatedTopLevelParserText,
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.NotNil(t, cfg.ParserConfig, "ParserConfig should be loaded")
-				require.Len(t, cfg.ParserConfig.Parsers, 1, "Should have one parser")
-				require.Equal(t, "openai-parser", cfg.ParserConfig.Parsers[0].TypedName().Name)
+				require.NotNil(t, cfg.ParserRegistry, "ParserRegistry should be loaded")
+				parsers := cfg.ParserRegistry.Parsers()
+				require.Len(t, parsers, 1, "Should have one parser")
+				require.Equal(t, "openai-parser", parsers[0].TypedName().Name)
 			},
 		},
 		// --- Instantiation Errors ---
@@ -913,6 +925,9 @@ func registerTestPlugins(t *testing.T) {
 	fwkplugin.Register(maxscore.MaxScorePickerType, maxscore.MaxScorePickerFactory)
 	fwkplugin.Register(single.SingleProfileHandlerType, single.SingleProfileHandlerFactory)
 	fwkplugin.Register(openai.OpenAIParserType, openai.OpenAIParserPluginFactory)
+	fwkplugin.Register(vertexai.VertexAIParserType, vertexai.VertexAIParserPluginFactory)
+	fwkplugin.Register(anthropic.AnthropicParserType, anthropic.AnthropicParserPluginFactory)
+	fwkplugin.Register(vllmhttp.VllmHTTPParserType, vllmhttp.VllmHTTPParserPluginFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, usagelimits.StaticPolicyFactory)
 	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, prefix.PrefixCachePluginFactory)
 	fwkplugin.Register(reqdataprodprefix.ApproxPrefixCachePluginType, reqdataprodprefix.ApproxPrefixCacheFactory)

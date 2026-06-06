@@ -23,6 +23,7 @@ import (
 // InferenceModelRewrite is the Schema for the InferenceModelRewrite API.
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Inference Pool",type=string,JSONPath=`.spec.poolRef.name`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +genclient
@@ -114,7 +115,7 @@ type TargetModel struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1000000
-	Weight int32 `json:"weight"`
+	Weight *int32 `json:"weight,omitempty"`
 
 	// --- Destination Types ---
 	// ModelRewrite specifies a static model name destination.

@@ -21,8 +21,6 @@ package multimodal
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -35,9 +33,9 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
@@ -179,6 +177,15 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrmm.EncoderCacheMatchInfo{}}
 }
 
+// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// the token-producer before this producer runs and auto-creates one when none
+// is configured; multimodal features come from the tokenizer output.
+func (p *Producer) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+	}
+}
+
 // PluginState returns request-scoped state shared between producer extension points.
 func (p *Producer) PluginState() *plugin.PluginState {
 	return p.pluginState
@@ -214,76 +221,20 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 }
 
 // ExtractMMItems returns deterministic, unique multimodal encoder-cache items
-// for a request. Parser-provided multimodal features are preferred; if
-// unavailable, typed structured media blocks are hashed from stable identifiers.
+// derived from the tokenized prompt's multimodal features.
 func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
-	if request == nil || request.Body == nil {
+	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
 		return nil
 	}
 
-	if request.Body.TokenizedPrompt != nil && len(request.Body.TokenizedPrompt.MultiModalFeatures) > 0 {
-		return itemsFromTokenizedPrompt(request.Body.TokenizedPrompt.MultiModalFeatures)
-	}
-
-	if g := request.Body.Generate; g != nil && g.Features != nil && len(g.Features.MMHashes) > 0 {
-		return itemsFromGenerateFeatures(g.Features.MMHashes)
-	}
-
-	if request.Body.ChatCompletions != nil {
-		return itemsFromChat(request.Body.ChatCompletions)
-	}
-
-	return nil
-}
-
-func itemsFromGenerateFeatures(mmHashes map[string][]string) []attrmm.MatchItem {
 	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, hashes := range mmHashes {
-		for _, hash := range hashes {
-			if hash == "" {
-				continue
-			}
-			addItem(itemsByHash, hash)
-		}
-	}
-	return itemSlice(itemsByHash)
-}
-
-func itemsFromTokenizedPrompt(features []fwkrh.MultiModalFeature) []attrmm.MatchItem {
-	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, feature := range features {
+	for _, feature := range request.Body.TokenizedPrompt.MultiModalFeatures {
 		if feature.Hash == "" {
 			continue
 		}
 		addItem(itemsByHash, feature.Hash)
 	}
 	return itemSlice(itemsByHash)
-}
-
-func itemsFromChat(request *fwkrh.ChatCompletionsRequest) []attrmm.MatchItem {
-	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, message := range request.Messages {
-		for _, block := range message.Content.Structured {
-			addBlockItem(itemsByHash, block)
-		}
-	}
-	return itemSlice(itemsByHash)
-}
-
-func addBlockItem(itemsByHash map[string]attrmm.MatchItem, block fwkrh.ContentBlock) {
-	switch {
-	case block.ImageURL.URL != "":
-		addItem(itemsByHash, contentHash("image_url", block.ImageURL.URL))
-	case block.VideoURL.URL != "":
-		addItem(itemsByHash, contentHash("video_url", block.VideoURL.URL))
-	case block.InputAudio.Data != "":
-		addItem(itemsByHash, contentHash("input_audio", block.InputAudio.Format+":"+block.InputAudio.Data))
-	}
-}
-
-func contentHash(kind, identifier string) string {
-	sum := sha256.Sum256([]byte(kind + "\x00" + identifier))
-	return hex.EncodeToString(sum[:])
 }
 
 func addItem(itemsByHash map[string]attrmm.MatchItem, hash string) {

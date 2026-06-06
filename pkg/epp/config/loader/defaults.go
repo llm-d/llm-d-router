@@ -28,7 +28,9 @@ import (
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
@@ -248,6 +250,8 @@ func ensureParsers(
 	if len(cfg.RequestHandler.Parsers) == 0 {
 		cfg.RequestHandler.Parsers = []configapi.ParserConfig{
 			{PluginRef: openai.OpenAIParserType},
+			{PluginRef: anthropic.AnthropicParserType},
+			{PluginRef: vllmhttp.VllmHTTPParserType},
 		}
 	}
 	for _, pc := range cfg.RequestHandler.Parsers {

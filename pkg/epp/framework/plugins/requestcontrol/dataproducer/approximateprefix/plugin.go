@@ -32,6 +32,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 const (
@@ -55,13 +56,12 @@ var (
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
 type dataProducer struct {
-	typedName      plugin.TypedName
-	config         config
-	indexerInst    indexerInterface
-	pluginState    *plugin.PluginState
-	tokenEstimator TokenEstimator
-	wg             sync.WaitGroup // Used for waiting on async cache updates in tests.
-	dk             plugin.DataKey
+	typedName   plugin.TypedName
+	config      config
+	indexerInst indexerInterface
+	pluginState *plugin.PluginState
+	wg          sync.WaitGroup // Used for waiting on async cache updates in tests.
+	dk          plugin.DataKey
 }
 
 // TypedName returns the type and name of the plugin.
@@ -72,6 +72,15 @@ func (p *dataProducer) TypedName() plugin.TypedName {
 // Produces returns the data produced by the plugin.
 func (p *dataProducer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
+}
+
+// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// the token-producer before this producer runs and auto-creates one when none
+// is configured.
+func (p *dataProducer) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{}},
+	}
 }
 
 // newDataProducer returns a new DataProducer plugin.
@@ -114,11 +123,10 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 			Type: ApproxPrefixCachePluginType,
 			Name: name,
 		},
-		config:         config,
-		indexerInst:    indexer,
-		pluginState:    plugin.NewPluginState(ctx),
-		tokenEstimator: NewApproximatePrefixCacheTokenEstimator(ctx, config.MultimodalTokenEstimator),
-		dk:             attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		config:      config,
+		indexerInst: indexer,
+		pluginState: plugin.NewPluginState(ctx),
+		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
 	if handle != nil {
@@ -171,7 +179,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
 		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
 	}
-	hashes := getBlockHashes(ctx, request, blockSize, maxBlocks, p.tokenEstimator)
+	hashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
 	total := len(hashes)
 	prefixCacheServers := p.matchLongestPrefix(ctx, hashes)
 
@@ -224,12 +232,12 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		}
 	})
 
-	// Record metrics.
+	// Record metrics. Lengths are reported as a byte estimate (~averageCharactersPerToken bytes/token).
 	total := len(state.PrefixHashes)
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
-	avgChars := averageCharactersPerToken
-	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*avgChars, total*blockSize*avgChars)
+	const averageCharactersPerToken = 4
+	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {

@@ -288,7 +288,7 @@ plugins:
   type: max-score-picker
 - type: openai-parser
 - name: secondParser
-  type: openai-parser
+  type: anthropic-parser
 schedulingProfiles:
 - name: default
   plugins:

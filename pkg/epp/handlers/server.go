@@ -42,6 +42,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -58,11 +59,11 @@ type EvictChannelLookup interface {
 	Deregister(requestID string)
 }
 
-func NewStreamingServer(datastore Datastore, director Director, parsers []fwkrh.Parser, maxPoolBufferSize int) *StreamingServer {
+func NewStreamingServer(datastore Datastore, director Director, parserRegistry *ParserRegistry, maxPoolBufferSize int) *StreamingServer {
 	return &StreamingServer{
 		director:          director,
 		datastore:         datastore,
-		parsers:           parsers,
+		parserRegistry:    parserRegistry,
 		maxPoolBufferSize: maxPoolBufferSize,
 		bufferPool: sync.Pool{
 			New: func() any {
@@ -93,7 +94,7 @@ type Datastore interface {
 type StreamingServer struct {
 	datastore         Datastore
 	director          Director
-	parsers           []fwkrh.Parser
+	parserRegistry    *ParserRegistry
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
@@ -121,6 +122,7 @@ type RequestContext struct {
 	ResponseStatusCode        string
 	RequestRunning            bool
 	Request                   *Request
+	Parser                    fwkrh.Parser
 
 	SchedulingRequest *fwksched.InferenceRequest
 
@@ -172,6 +174,27 @@ const (
 type recvResult struct {
 	req *extProcPb.ProcessingRequest
 	err error
+}
+
+func (s *StreamingServer) getOrResolveParser(ctx context.Context, reqCtx *RequestContext) (fwkrh.Parser, error) {
+	if reqCtx.Parser != nil {
+		return reqCtx.Parser, nil
+	}
+
+	logger := log.FromContext(ctx)
+	var headers map[string]string
+	if reqCtx.Request != nil {
+		headers = reqCtx.Request.Headers
+	}
+	path := fwkrequest.GetRequestPath(headers)
+	parser, err := s.parserRegistry.Resolve(path)
+	if err != nil {
+		logger.Error(err, "Error resolving parser for path", "path", path)
+		return nil, err
+	}
+
+	reqCtx.Parser = parser
+	return parser, nil
 }
 
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
@@ -343,7 +366,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.RequestSize = buf.Len()
 				buf.Reset()
 
-				parseResult, parseErr := s.parsers[0].ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
+				parser, resolveErr := s.getOrResolveParser(ctx, reqCtx)
+				if resolveErr != nil {
+					err = errcommon.Error{Code: errcommon.BadRequest, Msg: resolveErr.Error()}
+					logger.Error(err, "Error resolving parser for request body")
+					break
+				}
+				parseResult, parseErr := parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				if parseErr != nil {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: parseErr.Error()}
 					logger.Error(err, "Error parsing request")

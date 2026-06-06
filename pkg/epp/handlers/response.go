@@ -26,6 +26,7 @@ import (
 
 	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
@@ -48,10 +49,17 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 
 	reqCtx.ResponseSize += len(responseBytes)
 
-	parsedResp, err := s.parsers[0].ParseResponse(ctx, responseBytes, reqCtx.Response.Headers, endOfStream)
+	var parsedResp *fwkrh.ParsedResponse
+	parser, err := s.getOrResolveParser(ctx, reqCtx)
 	if err != nil {
-		logger.Error(err, "parsing response")
-	} else if parsedResp != nil && parsedResp.Usage != nil {
+		logger.Error(err, "parsing response: failed to resolve parser")
+	} else {
+		parsedResp, err = parser.ParseResponse(ctx, responseBytes, reqCtx.Response.Headers, endOfStream)
+		if err != nil {
+			logger.Error(err, "parsing response")
+		}
+	}
+	if parsedResp != nil && parsedResp.Usage != nil {
 		reqCtx.Usage = *parsedResp.Usage
 		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.Usage.PromptTokens)
 		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.Usage.CompletionTokens)
