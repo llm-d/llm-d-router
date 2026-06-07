@@ -154,8 +154,8 @@ var (
 	llmdRequestTPOT = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "service_level_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Service-level average time per output token in seconds, computed as (e2e - TTFT) / (output_tokens - 1).", compbasemetrics.ALPHA),
+			Name:      "service_level_streaming_tpot_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Service-level average time per output token in seconds for streaming requests, computed as (e2e - TTFT) / (output_tokens - 1).", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.125, 0.15, 0.2,
 				0.3, 0.4, 0.5, 0.6, 0.8, 1, 2,
