@@ -9,11 +9,15 @@ exclude = [
 # spurious timeouts on otherwise-reachable links.
 timeout = 60
 
-# Retry failed links (helpful for flaky sites). Combined with the longer
-# timeout, this covers both transient connection failures and slow
-# responses without ballooning total runtime: worst-case per-link wait
-# is roughly timeout * (max_retries + 1) + max_retries * retry_wait_time.
-max_retries = 5
+# Retry settings. Lychee retries on connection errors and timeouts.
+# Worst-case per dead link with these values:
+#   timeout * (max_retries + 1) + max_retries * retry_wait_time
+#   = 60 * 3 + 2 * 2 = 184s.
+# Lychee runs link checks concurrently (default 128 parallel), so total
+# wall-clock is bounded by the slowest single link, not the sum across
+# all links. Two retries is enough to ride out brief connection resets
+# or 503s without piling extra waits on a truly-dead host.
+max_retries = 2
 retry_wait_time = 2
 
 # Accept non-200 status codes (429: rate limits)
