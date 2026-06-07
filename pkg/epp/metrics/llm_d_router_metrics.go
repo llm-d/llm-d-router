@@ -158,8 +158,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Service-level average time per output token in seconds, computed as (e2e - TTFT) / (output_tokens - 1).", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.125, 0.15, 0.2,
-				0.3, 0.4, 0.5, 0.6, 0.8, 1, 1.5, 2, 3, 4.5, 6, 12, 18, 24, 30, 36, 48, 60,
-				90, 120, 180, 270, 360,
+				0.3, 0.4, 0.5, 0.6, 0.8, 1, 2,
 			},
 		},
 		modelLabels,
