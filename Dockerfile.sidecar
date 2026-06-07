@@ -21,6 +21,7 @@ RUN go mod download
 COPY cmd/pd-sidecar/main.go cmd/cmd.go
 COPY pkg/sidecar pkg/sidecar
 COPY pkg/common pkg/common
+COPY version version
 
 # Build
 # the GOARCH has not a default value to allow the binary be built according to the host where the command

@@ -44,7 +44,7 @@ func (h *errorHandler) Handle(err error) {
 	h.logger.V(logging.DEFAULT).Error(err, "trace error occurred")
 }
 
-func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName string) error {
+func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName string) (func(context.Context) error, error) {
 	logger = logger.WithName("trace")
 	loggerWrap := &errorHandler{logger: logger}
 
@@ -61,7 +61,7 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 	traceExporter, err := initTraceExporter(ctx, logger)
 	if err != nil {
 		loggerWrap.Handle(fmt.Errorf("%s: %v", "init trace exporter failed", err))
-		return err
+		return nil, err
 	}
 
 	// Go SDK doesn't have an automatic sampler, handle manually
@@ -100,17 +100,7 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	otel.SetErrorHandler(loggerWrap)
 
-	go func() {
-		<-ctx.Done()
-		err := tracerProvider.Shutdown(context.Background())
-		if err != nil {
-			loggerWrap.Handle(fmt.Errorf("%s: %v", "failed to shutdown TraceProvider", err))
-		}
-
-		logger.V(logging.DEFAULT).Info("trace provider shutting down")
-	}()
-
-	return nil
+	return tracerProvider.Shutdown, nil
 }
 
 // initTraceExporter create a SpanExporter

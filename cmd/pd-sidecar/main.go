@@ -16,6 +16,8 @@ limitations under the License.
 package main
 
 import (
+	"context"
+
 	"github.com/spf13/pflag"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -53,9 +55,16 @@ func main() {
 
 	// Initialize tracing conditionally using config
 	if opts.Tracing {
-		if err := tracing.InitTracing(ctx, logger, "pd-sidecar"); err != nil {
+		shutdown, err := tracing.InitTracing(ctx, logger, "pd-sidecar")
+		if err != nil {
 			// Log error but don't fail - tracing is optional
 			logger.Error(err, "Failed to initialize tracing")
+		} else if shutdown != nil {
+			defer func() {
+				if err := shutdown(context.Background()); err != nil {
+					logger.Error(err, "Failed to shutdown tracing")
+				}
+			}()
 		}
 	}
 
