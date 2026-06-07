@@ -142,7 +142,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "service_level_ttft_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Service-level time to first token in seconds, measured from request received to first response byte.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Service-level time to first token in seconds, measured from request received to first response byte. For non-streaming requests, this equals total request duration.", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.005, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2, 3, 4, 5, 6,
 				8, 10, 15, 20, 30, 45, 60, 120,
