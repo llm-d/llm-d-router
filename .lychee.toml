@@ -4,10 +4,15 @@ exclude = [
   "^https://www.envoyproxy.io/"
 ]
 
-# Timeout in seconds
-timeout = 20
+# Per-request timeout in seconds. Sized for slow upstream docs sites
+# (e.g. sigs.k8s.io subdomains under load); 20s was tight enough to fire
+# spurious timeouts on otherwise-reachable links.
+timeout = 60
 
-# Retry failed links (helpful for flaky sites)
+# Retry failed links (helpful for flaky sites). Combined with the longer
+# timeout, this covers both transient connection failures and slow
+# responses without ballooning total runtime: worst-case per-link wait
+# is roughly timeout * (max_retries + 1) + max_retries * retry_wait_time.
 max_retries = 5
 retry_wait_time = 2
 
