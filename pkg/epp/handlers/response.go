@@ -18,6 +18,7 @@ package handlers
 
 import (
 	"context"
+	"strconv"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -27,7 +28,6 @@ import (
 	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
@@ -69,11 +69,11 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		}
 	}
 	if endOfStream {
-		fairnessID := metadata.DefaultFairnessID
-		if reqCtx.SchedulingRequest != nil && reqCtx.SchedulingRequest.FairnessID != "" {
+		fairnessID := ""
+		if reqCtx.SchedulingRequest != nil {
 			fairnessID = reqCtx.SchedulingRequest.FairnessID
 		}
-		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, reqCtx.ObjectiveKey, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
+		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, strconv.Itoa(reqCtx.Priority), reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
 		metrics.RecordRequestLatencies(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp)
 		metrics.RecordResponseSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.ResponseSize)
 	}
