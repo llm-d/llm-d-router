@@ -127,7 +127,7 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
 	var totalInflight, totalCapacity int64
 	for _, e := range endpoints {
-		if e.GetMetadata() == nil {
+		if e == nil || e.GetMetadata() == nil {
 			continue
 		}
 
@@ -168,6 +168,9 @@ func (d *detector) Filter(
 	}
 
 	for _, e := range endpoints {
+		if e == nil {
+			continue
+		}
 		load := d.getLoad(e)
 
 		if d.config.mode == modeTokens {

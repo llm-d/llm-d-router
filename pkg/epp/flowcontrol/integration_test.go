@@ -1729,15 +1729,10 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 		"counter must be exactly 0 after new request completes -- negative value indicates old OnEvicted corrupted the new tracker")
 }
 
-// TestDetectorPanicsOnNilEndpoint documents a known bug: the concurrency
-// detector does not guard against nil endpoints in the candidate list.
-// It checks e.GetMetadata() == nil but not e == nil, causing a nil pointer
-// dereference. This can occur if EndpointCandidates.Locate() returns a list
-// with nil entries during endpoint churn.
-//
-// When the fix lands (add `e == nil` guard in detector.go), change
-// require.Panics to require.NotPanics.
-func TestDetectorPanicsOnNilEndpoint(t *testing.T) {
+// TestDetectorSkipsNilEndpoint verifies that the concurrency detector skips
+// nil endpoints in the candidate list without panicking. A nil entry can occur
+// if EndpointCandidates.Locate() returns a sparse list during endpoint churn.
+func TestDetectorSkipsNilEndpoint(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	handle := igwtestutils.NewTestHandle(ctx)
@@ -1748,18 +1743,16 @@ func TestDetectorPanicsOnNilEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	detector := detectorPlugin.(flowcontrol.SaturationDetector)
 
-	require.Panics(t, func() {
-		detector.Saturation(ctx, []datalayer.Endpoint{nil})
-	}, "KNOWN BUG: nil endpoint in candidate list causes panic")
+	require.NotPanics(t, func() {
+		sat := detector.Saturation(ctx, []datalayer.Endpoint{nil})
+		require.InDelta(t, 1.0, sat, 1e-9,
+			"nil endpoint should be skipped, leaving 0 capacity (fail closed)")
+	})
 }
 
-// TestEndpointIdentityCollisionDuringPodReplacement documents a known bug:
-// when a pod is replaced (delete old + add new with same NamespacedName), the
-// stale delete event clears the new pod's tracker, causing saturation to read 0
-// and flooding the replacement pod with traffic.
-//
-// This test asserts the BROKEN behavior. When the fix lands (tracking endpoint
-// identity in Extract), flip the final assertion to require.Greater.
+// TestEndpointIdentityCollisionDuringPodReplacement verifies that when a pod is
+// replaced (delete old + add new with same NamespacedName), the stale delete
+// event for the old pod does not clear the new pod's tracker.
 func TestEndpointIdentityCollisionDuringPodReplacement(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -1812,16 +1805,14 @@ func TestEndpointIdentityCollisionDuringPodReplacement(t *testing.T) {
 	require.Greater(t, detector.Saturation(ctx, []datalayer.Endpoint{newEp}), 0.0,
 		"new endpoint should show in-flight load before stale delete")
 
-	// Stale delete for old pod clears the new pod's tracker (BUG).
+	// Stale delete for old pod must not clear the new pod's tracker.
 	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{
 		Type: datalayer.EventDelete, Endpoint: oldEp,
 	}))
 
-	// BUG: saturation reads 0 because the stale delete cleared the tracker.
-	// When fixed, this should be require.Greater(t, sat, 0.0, ...).
 	sat := detector.Saturation(ctx, []datalayer.Endpoint{newEp})
-	require.InDelta(t, 0.0, sat, 1e-9,
-		"KNOWN BUG: stale delete clears new pod's tracker, saturation drops to 0")
+	require.Greater(t, sat, 0.0,
+		"stale delete for old pod must not clear new pod's tracker")
 }
 
 // TestPluginStateDeleteTriggersCounterCleanup verifies that when PluginState
