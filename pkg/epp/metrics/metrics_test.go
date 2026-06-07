@@ -392,12 +392,22 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metric labels
+			// Verify llm_d_router_epp metric
+			wantLatencyPerTokenNew, err := os.Open("testdata/llm_d_normalized_time_per_output_token_seconds_metric")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer wantLatencyPerTokenNew.Close()
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantLatencyPerTokenNew, "llm_d_router_epp_normalized_time_per_output_token_seconds"); err != nil {
+				t.Error(err)
+			}
+
+			// Verify llm_d_router_epp metric labels directly.
 			if !scenario.invalid {
 				observed, err := getHistogramVecLabelValues(t, llmdNormalizedTimePerOutputToken, "m10", "t10", "tenant-a", "latency")
 				require.NoError(t, err)
 				require.Equal(t, uint64(2), observed.GetSampleCount())
-				require.Equal(t, 0.03, observed.GetSampleSum())
+				require.InEpsilon(t, 0.03, observed.GetSampleSum(), 0.000001)
 			}
 		})
 	}

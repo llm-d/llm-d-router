@@ -30,7 +30,8 @@ const (
 
 var (
 	// llmdEndpointLabels replaces the deprecated endpointLabels that used "pod_name".
-	llmdEndpointLabels = []string{"endpoint_name", "namespace", "port"}
+	llmdEndpointLabels                   = []string{"endpoint_name", "namespace", "port"}
+	llmdModelWithFairnessObjectiveLabels = append(append([]string{}, modelLabels...), "fairness_id", "objective")
 )
 
 // --- llm-d Inference Objective Metrics ---
@@ -135,7 +136,7 @@ var (
 				0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
 			},
 		},
-		append(modelLabels, "fairness_id", "objective"),
+		llmdModelWithFairnessObjectiveLabels,
 	)
 )
 
