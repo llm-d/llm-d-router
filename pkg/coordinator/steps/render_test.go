@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/gateway"
@@ -195,6 +196,155 @@ func TestRenderStep_CompletionsTextPrompt_CallsRender(t *testing.T) {
 	}
 	if len(promptTokens) != 3 || promptTokens[0] != 1 {
 		t.Fatalf("unexpected prompt tokens: %v", promptTokens)
+	}
+}
+
+func TestRenderStep_RejectsTooManyTotalTokens_ChatCompletions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+			"features": map[string]any{
+				"mm_hashes":       map[string][]string{ModalityImage: {}},
+				"mm_placeholders": map[string][]any{ModalityImage: {}},
+				"kwargs_data":     map[string][]string{ModalityImage: {}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(map[string]any{"max_total_tokens": 5})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.PathChatCompletions,
+		Body:         map[string]any{"model": "test"},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for exceeding max_total_tokens")
+	}
+	if !strings.Contains(err.Error(), "too many total tokens") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "got 10") || !strings.Contains(err.Error(), "max 5") {
+		t.Fatalf("error should include counts: %v", err)
+	}
+}
+
+func TestRenderStep_RejectsTooManyTotalTokens_CompletionsString(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"token_ids": []int{1, 2, 3, 4, 5, 6, 7}},
+		})
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(map[string]any{"max_total_tokens": 4})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.PathCompletions,
+		Body:         map[string]any{"model": "test", "prompt": "some text"},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for exceeding max_total_tokens")
+	}
+	if !strings.Contains(err.Error(), "too many total tokens") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRenderStep_RejectsTooManyTotalTokens_CompletionsTokenArray(t *testing.T) {
+	step, _ := NewRenderStep(map[string]any{"max_total_tokens": 2})
+	step.(*RenderStep).SetServiceAddress("http://unused")
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.PathCompletions,
+		Body:         map[string]any{"model": "test", "prompt": []any{float64(1), float64(2), float64(3)}},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for exceeding max_total_tokens on token-array prompt")
+	}
+	if !strings.Contains(err.Error(), "too many total tokens") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRenderStep_RejectsTooManyPlaceholderTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 100, 100, 100, 100, 100, 100, 100, 200},
+			"features": map[string]any{
+				"mm_hashes":       map[string][]string{ModalityImage: {"h0", "h1"}},
+				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": 4}, map[string]any{"offset": 5, "length": 3}}},
+				"kwargs_data":     map[string][]string{ModalityImage: {"AAAA", "AAAA"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(map[string]any{"max_total_placeholder_tokens": 5})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.PathChatCompletions,
+		Body:         map[string]any{"model": "test"},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0},
+			{Index: 1},
+		},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for exceeding max_total_placeholder_tokens")
+	}
+	if !strings.Contains(err.Error(), "too many placeholder tokens") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "got 7") || !strings.Contains(err.Error(), "max 5") {
+		t.Fatalf("error should include counts: %v", err)
+	}
+}
+
+func TestRenderStep_AllowsAtPlaceholderLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 100, 100, 100, 200},
+			"features": map[string]any{
+				"mm_hashes":       map[string][]string{ModalityImage: {"h0"}},
+				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
+				"kwargs_data":     map[string][]string{ModalityImage: {"AAAA"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(map[string]any{"max_total_placeholder_tokens": 3})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath:      gateway.PathChatCompletions,
+		Body:              map[string]any{"model": "test"},
+		MultimodalEntries: []pipeline.MultimodalEntry{{Index: 0}},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error at limit: %v", err)
+	}
+}
+
+func TestRenderStep_RejectsNegativeLimits(t *testing.T) {
+	if _, err := NewRenderStep(map[string]any{"max_total_tokens": -1}); err == nil {
+		t.Fatal("expected error for negative max_total_tokens")
+	}
+	if _, err := NewRenderStep(map[string]any{"max_total_placeholder_tokens": -1}); err == nil {
+		t.Fatal("expected error for negative max_total_placeholder_tokens")
 	}
 }
 

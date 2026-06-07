@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/pipeline"
@@ -54,7 +56,6 @@ func TestReplaceMediaURLsStep_DownloadsAndInlines(t *testing.T) {
 		t.Fatal("expected Base64Data to be set")
 	}
 
-	// Verify URL was replaced with data URI
 	msgs := reqCtx.Body["messages"].([]any)
 	content := msgs[0].(map[string]any)["content"].([]any)
 	imgPart := content[1].(map[string]any)["image_url"].(map[string]any)
@@ -150,7 +151,6 @@ func TestReplaceMediaURLsStep_DataURIInput(t *testing.T) {
 		t.Fatalf("expected base64 payload preserved, got %q", got.Base64Data)
 	}
 
-	// Existing data URI must be left in place; nothing rewrites it.
 	msgs := reqCtx.Body["messages"].([]any)
 	content := msgs[0].(map[string]any)["content"].([]any)
 	imgPart := content[1].(map[string]any)["image_url"].(map[string]any)
@@ -298,6 +298,91 @@ func TestParseDataURI(t *testing.T) {
 				t.Fatalf("payload: want %q, got %q", tt.wantPayload, b64)
 			}
 		})
+	}
+}
+
+func TestReplaceMediaURLsStep_RejectsTooManyEntries(t *testing.T) {
+	var hits atomic.Int32
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-data"))
+	}))
+	defer imageServer.Close()
+
+	step, err := NewReplaceMediaURLsStep(map[string]any{"max_multimodal_entries": 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageServer.URL + "/a.png"}},
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageServer.URL + "/b.png"}},
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageServer.URL + "/c.png"}},
+					},
+				},
+			},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for exceeding max_multimodal_entries")
+	}
+	if !strings.Contains(err.Error(), "too many multimodal entries") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "got 3") || !strings.Contains(err.Error(), "max 2") {
+		t.Fatalf("error should include counts: %v", err)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("expected no downloads on rejection, got %d hits", hits.Load())
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected no entries populated on rejection, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
+func TestReplaceMediaURLsStep_RejectsNegativeMaxEntries(t *testing.T) {
+	_, err := NewReplaceMediaURLsStep(map[string]any{"max_multimodal_entries": -1})
+	if err == nil {
+		t.Fatal("expected error for negative max_multimodal_entries")
+	}
+}
+
+func TestReplaceMediaURLsStep_AllowsAtLimit(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-data"))
+	}))
+	defer imageServer.Close()
+
+	step, _ := NewReplaceMediaURLsStep(map[string]any{"max_multimodal_entries": 2})
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageServer.URL + "/a.png"}},
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageServer.URL + "/b.png"}},
+					},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error at limit: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(reqCtx.MultimodalEntries))
 	}
 }
 

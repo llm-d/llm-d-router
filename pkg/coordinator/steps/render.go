@@ -26,8 +26,10 @@ func init() {
 }
 
 type RenderStep struct {
-	serviceAddress string
-	client         *http.Client
+	serviceAddress            string
+	maxTotalTokens            int
+	maxTotalPlaceholderTokens int
+	client                    *http.Client
 }
 
 func NewRenderStep(params map[string]any) (pipeline.Step, error) {
@@ -40,9 +42,27 @@ func NewRenderStep(params map[string]any) (pipeline.Step, error) {
 
 	address, _ := params["address"].(string)
 
+	maxTokens := 0
+	if v, ok := params["max_total_tokens"].(int); ok {
+		if v < 0 {
+			return nil, fmt.Errorf("max_total_tokens must be non-negative, got %d", v)
+		}
+		maxTokens = v
+	}
+
+	maxPlaceholders := 0
+	if v, ok := params["max_total_placeholder_tokens"].(int); ok {
+		if v < 0 {
+			return nil, fmt.Errorf("max_total_placeholder_tokens must be non-negative, got %d", v)
+		}
+		maxPlaceholders = v
+	}
+
 	return &RenderStep{
-		serviceAddress: address,
-		client:         &http.Client{Timeout: timeout},
+		serviceAddress:            address,
+		maxTotalTokens:            maxTokens,
+		maxTotalPlaceholderTokens: maxPlaceholders,
+		client:                    &http.Client{Timeout: timeout},
 	}, nil
 }
 
@@ -83,6 +103,9 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 		}
 		tokenIDs := renderResp[0].TokenIDs
 		reqCtx.TokenIDs = tokenIDs
+		if err := s.checkTokenLimit(len(reqCtx.TokenIDs)); err != nil {
+			return err
+		}
 		reqCtx.Body["prompt"] = tokenIDs
 		logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(tokenIDs))
 		return nil
@@ -99,6 +122,12 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 		}
 		switch p[0].(type) {
 		case float64, json.Number:
+			// Reject oversized arrays before iterating: toIntSlice does an
+			// O(n) type-assert per element, so for a runaway prompt the
+			// length check saves real work.
+			if err := s.checkTokenLimit(len(p)); err != nil {
+				return err
+			}
 			// Convert to []int for downstream steps and validate every element
 			// is numeric; a heterogeneous array fails fast here rather than
 			// reaching vLLM as garbage tokens.
@@ -131,6 +160,9 @@ func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipelin
 	}
 
 	reqCtx.TokenIDs = renderResp.TokenIDs
+	if err := s.checkTokenLimit(len(reqCtx.TokenIDs)); err != nil {
+		return err
+	}
 
 	imageHashes := renderResp.Features.MMHashes[ModalityImage]
 	imagePlaceholders := renderResp.Features.MMPlaceholders[ModalityImage]
@@ -151,6 +183,10 @@ func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipelin
 		reqCtx.MultimodalEntries[i].Hash = imageHashes[i]
 		reqCtx.MultimodalEntries[i].KwargsData = imageKwargs[i]
 		reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
+	}
+
+	if err := s.checkPlaceholderLimit(reqCtx.MultimodalEntries); err != nil {
+		return err
 	}
 
 	logger.V(logutil.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs))
@@ -217,6 +253,27 @@ type renderFeatures struct {
 // (request_id, sampling_params, model, etc.) are ignored.
 type completionsRenderResponse struct {
 	TokenIDs []int `json:"token_ids"`
+}
+
+func (s *RenderStep) checkTokenLimit(tokenCount int) error {
+	if s.maxTotalTokens > 0 && tokenCount > s.maxTotalTokens {
+		return fmt.Errorf("too many total tokens: got %d, max %d", tokenCount, s.maxTotalTokens)
+	}
+	return nil
+}
+
+func (s *RenderStep) checkPlaceholderLimit(entries []pipeline.MultimodalEntry) error {
+	if s.maxTotalPlaceholderTokens <= 0 {
+		return nil
+	}
+	total := 0
+	for _, e := range entries {
+		total += e.Placeholder.Length
+	}
+	if total > s.maxTotalPlaceholderTokens {
+		return fmt.Errorf("too many placeholder tokens: got %d, max %d", total, s.maxTotalPlaceholderTokens)
+	}
+	return nil
 }
 
 func toIntSlice(values []any) ([]int, error) {

@@ -29,6 +29,7 @@ func init() {
 type ReplaceMediaURLsStep struct {
 	downloadTimeout        time.Duration
 	maxConcurrentDownloads int
+	maxMultimodalEntries   int
 	client                 *http.Client
 }
 
@@ -49,9 +50,18 @@ func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
 		maxConcurrent = v
 	}
 
+	maxEntries := 0
+	if v, ok := params["max_multimodal_entries"].(int); ok {
+		if v < 0 {
+			return nil, fmt.Errorf("max_multimodal_entries must be non-negative, got %d", v)
+		}
+		maxEntries = v
+	}
+
 	return &ReplaceMediaURLsStep{
 		downloadTimeout:        timeout,
 		maxConcurrentDownloads: maxConcurrent,
+		maxMultimodalEntries:   maxEntries,
 		client:                 &http.Client{Timeout: timeout},
 	}, nil
 }
@@ -102,6 +112,10 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 
 	if len(imageURLs) == 0 {
 		return nil
+	}
+
+	if s.maxMultimodalEntries > 0 && len(imageURLs) > s.maxMultimodalEntries {
+		return fmt.Errorf("too many multimodal entries: got %d, max %d", len(imageURLs), s.maxMultimodalEntries)
 	}
 
 	g, gCtx := errgroup.WithContext(ctx)

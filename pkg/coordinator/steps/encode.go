@@ -81,7 +81,9 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 			bodyBytes, err := json.Marshal(body)
 			if err != nil {
-				return fmt.Errorf("encode[%d]: marshal: %w", i, err)
+				err = fmt.Errorf("encode[%d]: marshal: %w", i, err)
+				logger.Error(err, "encode fanout marshal", "index", i)
+				return err
 			}
 
 			path := gateway.PathForFormat(format)
@@ -91,22 +93,30 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 			headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
 			headers[gateway.EPPPhaseHeader] = gateway.PhaseEncode
 
-			logger.V(logutil.DEBUG).Info("sub-request body", "index", i, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", redactedHeaders(headers))
+			if v := logger.V(logutil.DEBUG); v.Enabled() {
+				v.Info("sub-request body", "index", i, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", redactedHeaders(headers))
+			}
 
 			resp, err := s.gwClient.Post(gCtx, path, bodyBytes, headers)
 			if err != nil {
-				return fmt.Errorf("encode[%d]: request: %w", i, err)
+				err = fmt.Errorf("encode[%d]: request: %w", i, err)
+				logger.Error(err, "encode fanout request", "index", i, "path", path)
+				return err
 			}
 			defer resp.Body.Close()
 
 			if resp.StatusCode/100 != 2 {
 				respBody, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("encode[%d]: HTTP %d: %s", i, resp.StatusCode, string(respBody))
+				err := fmt.Errorf("encode[%d]: HTTP %d: %s", i, resp.StatusCode, string(respBody))
+				logger.Error(err, "encode fanout status", "index", i, "status", resp.StatusCode)
+				return err
 			}
 
 			var encResp encodeResponse
 			if err := json.NewDecoder(resp.Body).Decode(&encResp); err != nil {
-				return fmt.Errorf("encode[%d]: decode response: %w", i, err)
+				err = fmt.Errorf("encode[%d]: decode response: %w", i, err)
+				logger.Error(err, "encode fanout decode", "index", i)
+				return err
 			}
 
 			results[i] = encResp.ECTransferParams
