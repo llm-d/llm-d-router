@@ -231,6 +231,95 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name:    "chat completions render sub-path",
+			headers: map[string]string{":path": "/v1/chat/completions/render"},
+			body: map[string]any{
+				"model":    "test",
+				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				ChatCompletions: &fwkrh.ChatCompletionsRequest{
+					Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":    "test",
+					"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+				},
+			},
+		},
+		{
+			name:    "chat completions render sub-path with trailing slash",
+			headers: map[string]string{":path": "/v1/chat/completions/render/"},
+			body: map[string]any{
+				"model":    "test",
+				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				ChatCompletions: &fwkrh.ChatCompletionsRequest{
+					Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":    "test",
+					"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+				},
+			},
+		},
+		{
+			name:    "completions render sub-path",
+			headers: map[string]string{":path": "/v1/completions/render"},
+			body: map[string]any{
+				"model":  "test",
+				"prompt": "render this",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Completions: &fwkrh.CompletionsRequest{
+					Prompt: fwkrh.Prompt{Raw: "render this"},
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":  "test",
+					"prompt": "render this",
+				},
+			},
+		},
+		{
+			name:    "chat completions render sub-path with multimodal content",
+			headers: map[string]string{":path": "/v1/chat/completions/render"},
+			body: map[string]any{
+				"model": "test",
+				"messages": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,abc"}},
+							map[string]any{"type": "text", "text": "describe"},
+						},
+					},
+				},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				ChatCompletions: &fwkrh.ChatCompletionsRequest{
+					Messages: []fwkrh.Message{
+						{Role: "user", Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+							{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "data:image/png;base64,abc"}},
+							{Type: "text", Text: "describe"},
+						}}},
+					},
+				},
+				Payload: fwkrh.PayloadMap{
+					"model": "test",
+					"messages": []any{
+						map[string]any{
+							"role": "user",
+							"content": []any{
+								map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,abc"}},
+								map[string]any{"type": "text", "text": "describe"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name:    "chat completions request body with multi-modal content",
 			headers: map[string]string{":path": "/v1/chat/completions"},
 			body: map[string]any{
@@ -1135,6 +1224,8 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			embeddingsAPI,
 			responsesAPI,
 			conversationsAPI,
+			chatCompletionsAPI + "/render",
+			completionsAPI + "/render",
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
