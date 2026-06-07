@@ -28,14 +28,29 @@ The scorer never observes responses or sets cookies; persistence of `sessionID -
 |------|------|----------|---------|-------------|
 | `sessionIDProducerName` | `string` | No | `""` (uses default producer) | Name of the `session-id-producer` instance whose `BoundEndpoint` this scorer consumes. |
 
-### Example
+### Examples
+
+**Custom session header.** A `session-id-producer` is configured explicitly with a non-default header; the scorer consumes from the default producer.
 
 ```yaml
 plugins:
   - type: session-id-producer
     parameters:
-      headerName: x-session-id
+      headerName: x-my-session-id
 
+  - type: session-affinity-scorer
+
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: session-affinity-scorer
+        weight: 1
+```
+
+**Defaults only.** No `session-id-producer` is declared. The framework auto-instantiates one as the default producer for `BoundEndpointDataKey`, with `headerName` defaulting to `x-session-id`. Clients must send their session identifier in that header for affinity to take effect.
+
+```yaml
+plugins:
   - type: session-affinity-scorer
 
 schedulingProfiles:
@@ -55,6 +70,8 @@ Both plugins consume the same `BoundEndpoint` attribute but differ in how strict
 | **On endpoint unavailability** | Other scorers determine the winner | Falls back to the full candidate set |
 
 Use the scorer when a best-effort preference is sufficient and other scorers should still get a vote. Use the filter when strict stickiness is required for correctness. Configuring both at once is redundant: the filter dominates the scorer in every case, so the extra scoring work changes no outcomes.
+
+Pairing the scorer and filter with *different* `session-id-producer` instances (different `sessionIDProducerName` values) makes things worse: each producer maintains its own private binding cache, so the scorer and filter can pin different endpoints for the same session, and bindings get written twice per request. If both are configured, point them at the same producer.
 
 ## Related Documentation
 

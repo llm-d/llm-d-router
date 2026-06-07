@@ -23,7 +23,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -64,6 +63,13 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		}
 	}
 
+	// Production paths (auto-instantiation in
+	// pkg/epp/datalayer/data_graph.go and explicit configloader) always
+	// supply a non-nil handle; the nil branch is the test-only path that
+	// constructs a plugin without registering metrics. In production,
+	// handle.Metrics() may itself be nil when no recorder is configured,
+	// in which case RegisterAffinityMetrics returns an error and factory
+	// construction fails fast.
 	if handle != nil {
 		if err := attrsession.RegisterAffinityMetrics(handle.Metrics()); err != nil {
 			return nil, err
@@ -103,7 +109,7 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	}
 
 	for _, ep := range endpoints {
-		if endpointHostPort(ep) == string(bound) {
+		if attrsession.EndpointBoundForm(ep) == bound {
 			debug.Info("session-affinity-filter: binding matches a candidate, returning single endpoint",
 				"endpoint", string(bound))
 			return []fwksched.Endpoint{ep}
@@ -136,14 +142,4 @@ func (p *Plugin) readBinding(request *fwksched.InferenceRequest) (attrsession.Bo
 		return "", false
 	}
 	return bound, true
-}
-
-// endpointHostPort returns the canonical host:port form of an endpoint, or
-// the empty string when metadata is missing or either coordinate is empty.
-func endpointHostPort(ep fwksched.Endpoint) string {
-	meta := ep.GetMetadata()
-	if meta == nil || meta.Address == "" || meta.Port == "" {
-		return ""
-	}
-	return net.JoinHostPort(meta.Address, meta.Port)
 }

@@ -520,8 +520,13 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(latencyproducer.LatencyDataProviderPluginType, latencyproducer.PredictedLatencyFactory, attrlatency.LatencyPredictionInfoDataKey)
 	fwkplugin.RegisterAsDefaultProducer(tokenizer.PluginType, tokenizer.PluginFactory, tokenizer.TokenizedPromptDataKey)
 	fwkplugin.Register(tokenizer.LegacyPluginType, tokenizer.LegacyPluginFactory) //nolint:staticcheck // intentional: keep backward compatibility
+	// session-id-producer is the default for both SessionIDDataKey and
+	// BoundEndpointDataKey. Two RegisterAsDefaultProducer calls record both
+	// key->type mappings; the framework's auto-instantiation
+	// (pkg/epp/datalayer/data_graph.go) dedupes by plugin name so a single
+	// Producer instance backs both keys. See sessionid_test.go in this
+	// package for the test that pins this behavior.
 	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, sessionid.Factory, attrsession.SessionIDDataKey)
-	// The session-id-producer also publishes BoundEndpoint, so register it as the default for that key too.
 	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, sessionid.Factory, attrsession.BoundEndpointDataKey)
 
 	// Latency predictor plugins

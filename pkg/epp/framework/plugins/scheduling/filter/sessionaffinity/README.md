@@ -31,14 +31,28 @@ The `session-id-producer` keeps an in-memory, time-expiring map of session ident
 |------|------|----------|---------|-------------|
 | `sessionIDProducerName` | `string` | No | `""` (uses default producer) | Name of the `session-id-producer` instance whose `BoundEndpoint` this filter consumes. |
 
-### Example
+### Examples
+
+**Custom session header.** A `session-id-producer` is configured explicitly with a non-default header; the filter consumes from the default producer.
 
 ```yaml
 plugins:
   - type: session-id-producer
     parameters:
-      headerName: x-session-id
+      headerName: x-my-session-id
 
+  - type: session-affinity-filter
+
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: session-affinity-filter
+```
+
+**Defaults only.** No `session-id-producer` is declared. The framework auto-instantiates one as the default producer for `BoundEndpointDataKey`, with `headerName` defaulting to `x-session-id`. Clients must send their session identifier in that header for affinity to take effect.
+
+```yaml
+plugins:
   - type: session-affinity-filter
 
 schedulingProfiles:
@@ -57,6 +71,8 @@ Both plugins consume the same `BoundEndpoint` attribute but differ in how strict
 | **On endpoint unavailability** | Falls back to the full candidate set | Other scorers determine the winner |
 
 Use the filter when strict stickiness is required for correctness. Use the scorer when a best-effort preference is sufficient and other scorers should still get a vote. Configuring both at once is redundant: the filter dominates the scorer in every case, so the extra scoring work changes no outcomes.
+
+Pairing the filter and scorer with *different* `session-id-producer` instances (different `sessionIDProducerName` values) makes things worse: each producer maintains its own private binding cache, so the filter and scorer can pin different endpoints for the same session, and bindings get written twice per request. If both are configured, point them at the same producer.
 
 ## Related Documentation
 

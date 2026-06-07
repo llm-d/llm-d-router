@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -350,6 +351,9 @@ func TestPreRequestIgnoresEmptyResult(t *testing.T) {
 
 func TestBindingExpiresAfterTTL(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("uses real sleeps; expirable LRU exposes no clock injector")
+	}
 
 	// Use a 10x margin between TTL and the wait so CI scheduler jitter or
 	// a GC pause cannot keep the binding alive past the test's check.
@@ -375,6 +379,9 @@ func TestBindingExpiresAfterTTL(t *testing.T) {
 
 func TestBindingRefreshedOnProduce(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("uses real sleeps; expirable LRU exposes no clock injector")
+	}
 
 	// Each sleep is well inside the TTL (single-step margin = 400ms), but
 	// the two sleeps together exceed the TTL by 200ms — so the lookup
@@ -427,5 +434,66 @@ func TestBindingsEvictedAtCapacity(t *testing.T) {
 		} else {
 			assert.True(t, ok, "expected %s to be present", session)
 		}
+	}
+}
+
+// stubConsumer is a minimal ConsumerPlugin used to drive
+// CreateMissingDataProducers in TestAutoInstantiation_SingleInstanceForBothKeys.
+// Each instance declares one Required data key.
+type stubConsumer struct {
+	name string
+	key  fwkplugin.DataKey
+}
+
+func (s *stubConsumer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: s.name, Type: "test-stub-consumer"}
+}
+
+func (s *stubConsumer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: map[fwkplugin.DataKey]any{s.key: nil}}
+}
+
+// TestAutoInstantiation_SingleInstanceForBothKeys pins the framework's
+// dedup contract for our default-producer wiring: registering
+// session-id-producer twice (once per data key) must auto-instantiate
+// exactly one Producer and route reads of either key through it. If this
+// fails, the runner-level RegisterAsDefaultProducer pair would silently
+// create two caches and the scorer/filter could pin different endpoints.
+func TestAutoInstantiation_SingleInstanceForBothKeys(t *testing.T) {
+	const producerType = sessionid.SessionIDProducerType
+
+	handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+	handle.AddPlugin("consumer-session-id", &stubConsumer{
+		name: "consumer-session-id",
+		key:  attrsession.SessionIDDataKey.WithNonEmptyProducerName(producerType),
+	})
+	handle.AddPlugin("consumer-bound-endpoint", &stubConsumer{
+		name: "consumer-bound-endpoint",
+		key:  attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(producerType),
+	})
+
+	defaults := map[string]string{
+		attrsession.SessionIDDataKey.WithNonEmptyProducerName(producerType).String():     producerType,
+		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(producerType).String(): producerType,
+	}
+	factories := map[string]fwkplugin.FactoryFunc{producerType: sessionid.Factory}
+
+	require.NoError(t, datalayer.CreateMissingDataProducers(context.Background(), defaults, factories, handle))
+
+	// Exactly one producer was instantiated under the canonical name.
+	got := handle.Plugin(producerType)
+	require.NotNil(t, got, "expected session-id-producer to be auto-instantiated")
+	producer, ok := got.(*sessionid.Producer)
+	require.True(t, ok, "auto-instantiated plugin should be *sessionid.Producer")
+
+	// Both data keys are produced by that single instance, so consumers of
+	// either key route to the same binding cache.
+	produces := producer.Produces()
+	for _, key := range []fwkplugin.DataKey{
+		attrsession.SessionIDDataKey.WithNonEmptyProducerName(producerType),
+		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(producerType),
+	} {
+		_, declared := produces[key]
+		assert.True(t, declared, "auto-instantiated producer must declare %s", key.String())
 	}
 }

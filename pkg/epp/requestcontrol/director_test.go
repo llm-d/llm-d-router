@@ -189,10 +189,16 @@ func (m mockProducedDataType) Clone() fwkdl.Cloneable {
 
 func (ds *mockDatastore) ModelRewriteGet(modelName string) (*v1alpha2.InferenceModelRewriteRule, string) {
 	// This mock implementation simulates the precedence logic for simplicity.
-	// It finds the oldest rewrite that has a rule matching the modelName.
+	// It finds the oldest rewrite that has a rule matching the modelName,
+	// prioritizing exact matches over generic (empty Matches) rules.
 	var matchingRewrites []*v1alpha2.InferenceModelRewrite
+	var genericRewrites []*v1alpha2.InferenceModelRewrite
 	for _, r := range ds.rewrites {
 		for _, rule := range r.Spec.Rules {
+			if len(rule.Matches) == 0 {
+				genericRewrites = append(genericRewrites, r)
+				continue
+			}
 			for _, match := range rule.Matches {
 				if match.Model != nil && match.Model.Value == modelName {
 					matchingRewrites = append(matchingRewrites, r)
@@ -202,17 +208,23 @@ func (ds *mockDatastore) ModelRewriteGet(modelName string) (*v1alpha2.InferenceM
 		}
 	}
 
-	if len(matchingRewrites) == 0 {
+	if len(matchingRewrites) == 0 && len(genericRewrites) == 0 {
 		return nil, ""
 	}
 
+	// Exact matches take precedence; fall back to generic rules.
+	candidates := matchingRewrites
+	if len(candidates) == 0 {
+		candidates = genericRewrites
+	}
+
 	// Sort by timestamp to find the oldest.
-	sort.Slice(matchingRewrites, func(i, j int) bool {
-		return matchingRewrites[i].CreationTimestamp.Before(&matchingRewrites[j].CreationTimestamp)
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].CreationTimestamp.Before(&candidates[j].CreationTimestamp)
 	})
 
 	// Return the first rule from the oldest rewrite.
-	return &matchingRewrites[0].Spec.Rules[0], matchingRewrites[0].Name
+	return &candidates[0].Spec.Rules[0], candidates[0].Name
 }
 
 func TestDirector_HandleRequest(t *testing.T) {
@@ -260,6 +272,26 @@ func TestDirector_HandleRequest(t *testing.T) {
 					Targets: []v1alpha2.TargetModel{
 						{
 							ModelRewrite: modelRewritten,
+							Weight:       ptr.To[int32](100),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	genericRewriteTarget := "generic-target-model"
+	genericRewrite := &v1alpha2.InferenceModelRewrite{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "generic-rewrite-rule",
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: v1alpha2.InferenceModelRewriteSpec{
+			Rules: []v1alpha2.InferenceModelRewriteRule{
+				{
+					Targets: []v1alpha2.TargetModel{
+						{
+							ModelRewrite: genericRewriteTarget,
 							Weight:       ptr.To[int32](100),
 						},
 					},
@@ -331,6 +363,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		wantMutatedBody         map[string]any
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
+		rewrites                []*v1alpha2.InferenceModelRewrite
 	}{
 		{
 			name: "successful completions request",
@@ -452,6 +485,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"prompt": "some prompt",
 			},
 			inferenceObjectiveName: model,
+			rewrites:               []*v1alpha2.InferenceModelRewrite{rewrite},
 		}, {
 			name: "successful chat completions request",
 			reqBodyMap: map[string]any{
@@ -697,6 +731,29 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantErrCode:             errcommon.BadRequest,
 		},
 		{
+			name:                    "missing model field resolved by generic rewrite",
+			reqBodyMap:              map[string]any{"prompt": "p"},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			wantReqCtx: &handlers.RequestContext{
+				TargetModelName: genericRewriteTarget,
+				TargetPod: &fwkdl.EndpointMetadata{
+					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:        "192.168.1.100",
+					Port:           "8000",
+					MetricsHost:    "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantMutatedBody: map[string]any{
+				"model":  genericRewriteTarget,
+				"prompt": "p",
+			},
+			rewrites: []*v1alpha2.InferenceModelRewrite{genericRewrite},
+		},
+		{
 			name:        "prompt or messages not found, expect err",
 			reqBodyMap:  map[string]any{"model": model},
 			wantErrCode: errcommon.BadRequest,
@@ -792,10 +849,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 
 				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
-				if test.name == "successful request with model rewrite" {
+				if len(test.rewrites) > 0 {
 					mockDs := &mockDatastore{
 						pods:     ds.PodList(datastore.AllPodsPredicate),
-						rewrites: []*v1alpha2.InferenceModelRewrite{rewrite},
+						rewrites: test.rewrites,
 					}
 					director.datastore = mockDs
 					director.endpointCandidates = NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(mockDs), time.Minute)

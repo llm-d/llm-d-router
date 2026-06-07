@@ -28,7 +28,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
@@ -67,7 +66,11 @@ const (
 
 // Parameters configures the session-id producer.
 //
-// Source selection (exactly one required):
+// Source selection: exactly one of HeaderName or CookieName must be set when
+// the producer is configured explicitly. When the producer is
+// auto-instantiated as the default for SessionIDDataKey or
+// BoundEndpointDataKey (i.e. invoked without a parameters block), HeaderName
+// defaults to "x-session-id".
 //   - HeaderName: read the value of the named request header verbatim.
 //   - CookieName: parse the standard "cookie" request header and read the
 //     value of the named cookie.
@@ -185,6 +188,15 @@ func (p *Producer) Produce(_ context.Context, request *fwksched.InferenceRequest
 	if bound, ok := p.bindings.Get(sessionID); ok {
 		// Re-Add to refresh the TTL: an active session that keeps reading
 		// its binding should not expire under a write-only refresh policy.
+		//
+		// Get-then-Add is not atomic, and the expirable LRU exposes no
+		// atomic refresh-on-read. A concurrent PreRequest for the same
+		// session can interleave between Get and Add, after which the Add
+		// here overwrites the freshly-bound endpoint with the value just
+		// read. That causes at most one stale read on the next request;
+		// the next PreRequest on the same session restores the correct
+		// binding. We accept the bounded flap rather than introduce
+		// per-session locking for self-healing behavior.
 		p.bindings.Add(sessionID, bound)
 		request.PutAttribute(p.bindingDK.String(), bound)
 	}
@@ -255,13 +267,9 @@ func primaryTarget(result *fwksched.SchedulingResult) (attrsession.BoundEndpoint
 	if !ok || profile == nil || len(profile.TargetEndpoints) == 0 {
 		return "", false
 	}
-	endpoint := profile.TargetEndpoints[0]
-	if endpoint == nil {
+	form := attrsession.EndpointBoundForm(profile.TargetEndpoints[0])
+	if form == "" {
 		return "", false
 	}
-	meta := endpoint.GetMetadata()
-	if meta == nil || meta.Address == "" || meta.Port == "" {
-		return "", false
-	}
-	return attrsession.BoundEndpoint(net.JoinHostPort(meta.Address, meta.Port)), true
+	return form, true
 }

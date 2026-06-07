@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -51,6 +50,13 @@ func Factory(name string, parameters *json.Decoder, handle plugin.Handle) (plugi
 			return nil, fmt.Errorf("invalid session affinity config: %w", err)
 		}
 	}
+	// Production paths (auto-instantiation in
+	// pkg/epp/datalayer/data_graph.go and explicit configloader) always
+	// supply a non-nil handle; the nil branch is the test-only path that
+	// constructs a plugin without registering metrics. In production,
+	// handle.Metrics() may itself be nil when no recorder is configured,
+	// in which case RegisterAffinityMetrics returns an error and factory
+	// construction fails fast.
 	if handle != nil {
 		if err := attrsession.RegisterAffinityMetrics(handle.Metrics()); err != nil {
 			return nil, err
@@ -100,11 +106,12 @@ func (s *SessionAffinity) Score(_ context.Context, request *scheduling.Inference
 
 	matched := false
 	for _, endpoint := range endpoints {
-		scoredEndpoints[endpoint] = 0.0
-		if hasTarget && endpointHostPort(endpoint) == string(target) {
-			scoredEndpoints[endpoint] = 1.0
+		score := 0.0
+		if hasTarget && attrsession.EndpointBoundForm(endpoint) == target {
+			score = 1.0
 			matched = true
 		}
+		scoredEndpoints[endpoint] = score
 	}
 	if hasTarget && !matched && len(endpoints) > 0 {
 		attrsession.RecordStaleBinding(s.typedName.Name, s.typedName.Type)
@@ -133,14 +140,4 @@ func (s *SessionAffinity) readBinding(request *scheduling.InferenceRequest) (att
 		return "", false
 	}
 	return bound, true
-}
-
-// endpointHostPort returns the canonical host:port form of an endpoint, or
-// the empty string when metadata is missing or either coordinate is empty.
-func endpointHostPort(ep scheduling.Endpoint) string {
-	meta := ep.GetMetadata()
-	if meta == nil || meta.Address == "" || meta.Port == "" {
-		return ""
-	}
-	return net.JoinHostPort(meta.Address, meta.Port)
 }

@@ -110,7 +110,9 @@ type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
 	ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective
 	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
-	// ModelRewriteGet returns the rewrite rule for a given model name and the name of the InferenceModelRewrite object.
+	// ModelRewriteGet returns the highest-precedence rewrite rule for a given
+	// model name (prioritizing exact matches over generic wildcard rules) and
+	// the name of the InferenceModelRewrite object.
 	ModelRewriteGet(modelName string) (*v1alpha2.InferenceModelRewriteRule, string)
 }
 
@@ -358,16 +360,14 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 }
 
 func (d *Director) mutateModel(ctx context.Context, reqCtx *handlers.RequestContext, bodyMap map[string]any) (*handlers.RequestContext, error) {
-	var ok bool
-	reqCtx.IncomingModelName, ok = bodyMap["model"].(string)
-	if !ok {
-		return reqCtx, errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
-	}
+	reqCtx.IncomingModelName, _ = bodyMap["model"].(string)
 	if reqCtx.TargetModelName == "" {
-		// Default to incoming model name
 		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
 	d.applyWeightedModelRewrite(ctx, reqCtx)
+	if reqCtx.TargetModelName == "" {
+		return reqCtx, errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
+	}
 	bodyMap["model"] = reqCtx.TargetModelName
 	return reqCtx, nil
 }

@@ -21,6 +21,8 @@ limitations under the License.
 package session
 
 import (
+	"net"
+
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sessionidconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid/constants"
@@ -47,6 +49,26 @@ type SessionID string
 // the KV cache the binding existed to preserve died with the previous
 // process.
 type BoundEndpoint string
+
+// EndpointBoundForm returns the canonical BoundEndpoint value for an
+// endpoint, i.e. net.JoinHostPort(Address, Port). It returns the empty
+// BoundEndpoint when metadata is missing or either coordinate is empty.
+//
+// This is the single definition of "the same endpoint" shared by the
+// session-id-producer (when recording a binding) and the session-affinity
+// scorer/filter (when comparing candidates). Callers that need to test
+// equality against a stored BoundEndpoint should use this helper rather
+// than constructing the host:port string themselves.
+func EndpointBoundForm(ep fwksched.Endpoint) BoundEndpoint {
+	if ep == nil {
+		return ""
+	}
+	meta := ep.GetMetadata()
+	if meta == nil || meta.Address == "" || meta.Port == "" {
+		return ""
+	}
+	return BoundEndpoint(net.JoinHostPort(meta.Address, meta.Port))
+}
 
 // ReadSessionID returns the SessionID published by the default producer on the
 // request attribute store, or "" and false if absent.
