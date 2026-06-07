@@ -42,10 +42,15 @@ const (
 
 // ChatCompletionHandler is a simple chat completion mock handler
 type ChatCompletionHandler struct {
-	Connector           string
-	Role                Role
-	RawResponse         string
-	RawResponseType     string
+	Connector       string
+	Role            Role
+	RawResponse     string
+	RawResponseType string
+	// MoRIIOWriteMode loosens the NIXLv2 prefill-side validation to allow
+	// non-nil remote_host / remote_notify_port / transfer_id fields that the
+	// sidecar populates when --moriio-write-mode is enabled.  Standard NIXLv2
+	// READ-mode validation (everything nil) still applies when this is false.
+	MoRIIOWriteMode     bool
 	RequestCount        atomic.Int32
 	CompletionRequests  []map[string]any
 	CompletionResponses []map[string]any
@@ -125,10 +130,37 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 				w.Write([]byte("expected remote_block_ids:null")) //nolint:all
 				return
 			}
-			if v, ok := kvTransferParamsMap["remote_host"]; !ok || v != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_host:null")) //nolint:all
-				return
+			if cc.MoRIIOWriteMode {
+				// WRITE-mode expectations: remote_host is a non-empty string
+				// (decode pod hostname), remote_notify_port is a number
+				// matching the sidecar config, and a transfer_id is present.
+				v, ok := kvTransferParamsMap["remote_host"]
+				if !ok {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected remote_host:<host>")) //nolint:all
+					return
+				}
+				if s, isStr := v.(string); !isStr || s == "" {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected remote_host to be a non-empty string in WRITE mode")) //nolint:all
+					return
+				}
+				if _, ok := kvTransferParamsMap["remote_notify_port"]; !ok {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected remote_notify_port:<int> in WRITE mode")) //nolint:all
+					return
+				}
+				if _, ok := kvTransferParamsMap["transfer_id"]; !ok {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected transfer_id:<uuid> in WRITE mode")) //nolint:all
+					return
+				}
+			} else {
+				if v, ok := kvTransferParamsMap["remote_host"]; !ok || v != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected remote_host:null")) //nolint:all
+					return
+				}
 			}
 			if v, ok := kvTransferParamsMap["remote_port"]; !ok || v != nil {
 				w.WriteHeader(http.StatusBadRequest)
