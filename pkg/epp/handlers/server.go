@@ -31,6 +31,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -197,6 +198,24 @@ func (s *StreamingServer) getOrResolveParser(ctx context.Context, reqCtx *Reques
 	return parser, nil
 }
 
+// extractTraceContext returns ctx augmented with the upstream trace context
+// carried in the incoming Envoy request headers (e.g. the traceparent set by the
+// client or the Gateway), using the globally configured text map propagator.
+//
+// The header wire format is the W3C Trace Context spec:
+// https://www.w3.org/TR/trace-context/
+// Extraction uses OpenTelemetry context propagation:
+// https://opentelemetry.io/docs/concepts/context-propagation/
+func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_RequestHeaders) context.Context {
+	carrier := make(propagation.MapCarrier)
+	if req != nil && req.RequestHeaders != nil && req.RequestHeaders.Headers != nil {
+		for _, header := range req.RequestHeaders.Headers.Headers {
+			carrier[strings.ToLower(header.Key)] = envoy.GetHeaderValue(header)
+		}
+	}
+	return otel.GetTextMapPropagator().Extract(ctx, carrier)
+}
+
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 	ctx := srv.Context()
 
@@ -208,8 +227,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			attribute.String("commit-sha", version.CommitSHA),
 		),
 	)
-	ctx, span := tracer.Start(ctx, "gateway.request", trace.WithSpanKind(trace.SpanKindServer))
-	defer span.End()
+	// The server span is started in the RequestHeaders branch, once the upstream
+	// trace context carried in the incoming headers is available, so the EPP span
+	// joins the caller's trace instead of starting a disconnected root.
+	var span trace.Span
+	defer func() {
+		if span != nil {
+			span.End()
+		}
+	}()
 
 	logger := log.FromContext(ctx)
 	loggerTrace := logger.V(logutil.TRACE)
@@ -349,6 +375,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			logger.V(logutil.DEFAULT).Info("EPP received request") // Request ID will be logged too as part of logger context values.
 			loggerTrace = logger.V(logutil.TRACE)
 			ctx = log.IntoContext(ctx, logger)
+
+			// Re-parent the server span to the upstream trace context (e.g. the
+			// traceparent set by the client or the Gateway) carried in the incoming
+			// headers, then start it. The headers are only available here, so the span
+			// cannot be started at the top of Process without orphaning the trace.
+			ctx = extractTraceContext(ctx, v)
+			ctx, span = tracer.Start(ctx, "gateway.request", trace.WithSpanKind(trace.SpanKindServer))
 
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
 		case *extProcPb.ProcessingRequest_RequestBody:
