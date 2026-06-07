@@ -39,7 +39,7 @@ func TestRecordRequestLatencyMetrics(t *testing.T) {
 	t.Cleanup(resetMetrics)
 	ctx := t.Context()
 
-	require.True(t, recordRequestTTFT(ctx, "test-plugin", "test-type", "model", "target", 0.5))
+	require.True(t, recordRequestTTFT(ctx, "test-plugin", "test-type", "model", "target", "tenant-a", "latency", 0.5))
 	require.True(t, recordRequestPredictedTTFT(ctx, "test-plugin", "test-type", "model", "target", 0.4))
 	require.True(t, recordRequestTTFTPredictionDuration(ctx, "test-plugin", "test-type", "model", "target", 0.1))
 	require.True(t, recordRequestTTFTWithSLO(ctx, "test-plugin", "test-type", "model", "target", 2, 1))
@@ -53,7 +53,7 @@ func TestRecordRequestLatencyMetrics(t *testing.T) {
 	require.Equal(t, uint64(1), ttft.GetSampleCount())
 	require.Equal(t, 0.5, ttft.GetSampleSum())
 
-	llmdTtft, err := getHistogram(llmdRequestTTFT, "test-plugin", "test-type", "model", "target")
+	llmdTtft, err := getHistogram(llmdRequestTTFT, "test-plugin", "test-type", "model", "target", "tenant-a", "latency")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), llmdTtft.GetSampleCount())
 	require.Equal(t, 0.5, llmdTtft.GetSampleSum())
@@ -108,7 +108,7 @@ func TestRecordRequestLatencyMetricsRejectNegativeValues(t *testing.T) {
 	t.Cleanup(resetMetrics)
 	ctx := t.Context()
 
-	require.False(t, recordRequestTTFT(ctx, "test-plugin", "test-type", "model", "target", -1))
+	require.False(t, recordRequestTTFT(ctx, "test-plugin", "test-type", "model", "target", "tenant-a", "latency", -1))
 	require.False(t, recordRequestPredictedTTFT(ctx, "test-plugin", "test-type", "model", "target", -1))
 	require.False(t, recordRequestTTFTPredictionDuration(ctx, "test-plugin", "test-type", "model", "target", -1))
 	require.False(t, recordRequestTTFTWithSLO(ctx, "test-plugin", "test-type", "model", "target", -1, 1))

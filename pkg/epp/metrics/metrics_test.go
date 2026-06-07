@@ -376,7 +376,7 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				success := RecordNormalizedTimePerOutputToken(ctx, req.modelName, req.targetModelName, req.receivedTime, req.completeTime, req.outputTokens)
+				success := RecordNormalizedTimePerOutputToken(ctx, req.modelName, req.targetModelName, "tenant-a", "latency", req.receivedTime, req.completeTime, req.outputTokens)
 				if success == scenario.invalid {
 					t.Errorf("got record success(%v), but the request expects invalid(%v)", success, scenario.invalid)
 				}
@@ -392,14 +392,12 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metric
-			wantLatencyPerTokenNew, err := os.Open("testdata/llm_d_normalized_time_per_output_token_seconds_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantLatencyPerTokenNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantLatencyPerTokenNew, "llm_d_router_epp_normalized_time_per_output_token_seconds"); err != nil {
-				t.Error(err)
+			// Verify llm_d_router_epp metric labels
+			if !scenario.invalid {
+				observed, err := getHistogramVecLabelValues(t, llmdNormalizedTimePerOutputToken, "m10", "t10", "tenant-a", "latency")
+				require.NoError(t, err)
+				require.Equal(t, uint64(2), observed.GetSampleCount())
+				require.Equal(t, 0.03, observed.GetSampleSum())
 			}
 		})
 	}

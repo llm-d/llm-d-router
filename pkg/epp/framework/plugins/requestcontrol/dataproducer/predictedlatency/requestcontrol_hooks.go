@@ -31,6 +31,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 var _ requestcontrol.PreRequest = &PredictedLatency{}
@@ -160,8 +161,9 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 
 		if predictedLatencyCtx.ttft > 0 {
 			// In non-streaming mode, TTFT represents full e2e latency.
+			fairnessID, objective := requestMetricLabels(request)
 			logger.V(logutil.TRACE).Info("Averages calculated", "avgActualTTFT", predictedLatencyCtx.ttft, "avgPredictedTTFT", predictedLatencyCtx.predictedTTFT)
-			recordRequestTTFT(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft/1000)
+			recordRequestTTFT(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, fairnessID, objective, predictedLatencyCtx.ttft/1000)
 			recordRequestPredictedTTFT(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.predictedTTFT/1000)
 			if predictedLatencyCtx.ttftSLO > 0 {
 				recordRequestTTFTWithSLO(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft, predictedLatencyCtx.ttftSLO)
@@ -218,6 +220,18 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 		pl.removeRequestFromQueue(id, predictedLatencyCtx)
 		pl.deletePredictedLatencyContextForRequest(request)
 	}
+}
+
+func requestMetricLabels(request *fwksched.InferenceRequest) (string, string) {
+	if request == nil {
+		return metadata.DefaultFairnessID, ""
+	}
+	fairnessID := request.FairnessID
+	if fairnessID == "" {
+		fairnessID = metadata.DefaultFairnessID
+	}
+	objective, _ := metadata.GetLowerCaseHeaderValue(request.Headers, metadata.ObjectiveKey)
+	return fairnessID, objective
 }
 
 func (pl *PredictedLatency) checkPredictor(logger logr.Logger, metadata *fwkdl.EndpointMetadata) bool {

@@ -30,6 +30,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
@@ -598,7 +599,7 @@ func RecordPromptCachedTokens(modelName, targetModelName string, size int) {
 }
 
 // RecordNormalizedTimePerOutputToken (NTPOT) records the normalized time per output token.
-func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetModelName string, received time.Time, complete time.Time, outputTokenCount int) bool {
+func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetModelName, fairnessID, objective string, received time.Time, complete time.Time, outputTokenCount int) bool {
 	if outputTokenCount <= 0 {
 		return false
 	}
@@ -611,9 +612,12 @@ func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetMo
 
 	elapsedSeconds := complete.Sub(received).Seconds()
 	secondsPerToken := elapsedSeconds / float64(outputTokenCount)
+	if fairnessID == "" {
+		fairnessID = metadata.DefaultFairnessID
+	}
 
 	normalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName).Observe(secondsPerToken)
-	llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName).Observe(secondsPerToken)
+	llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName, fairnessID, objective).Observe(secondsPerToken)
 	return true
 }
 
