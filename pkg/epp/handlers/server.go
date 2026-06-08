@@ -30,7 +30,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
@@ -41,6 +40,7 @@ import (
 	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -48,7 +48,6 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
-	"github.com/llm-d/llm-d-router/version"
 )
 
 // EvictChannelLookup is an optional interface for looking up eviction channels by request ID.
@@ -220,13 +219,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 	ctx := srv.Context()
 
 	// Start tracing span for the request
-	tracer := otel.Tracer(
-		"llm-d-router/epp/extproc",
-		trace.WithInstrumentationVersion(version.BuildRef),
-		trace.WithInstrumentationAttributes(
-			attribute.String("commit-sha", version.CommitSHA),
-		),
-	)
+	tracer := tracing.Tracer("llm-d-router/epp/extproc")
 	// The server span is started in the RequestHeaders branch, once the upstream
 	// trace context carried in the incoming headers is available, so the EPP span
 	// joins the caller's trace instead of starting a disconnected root.
