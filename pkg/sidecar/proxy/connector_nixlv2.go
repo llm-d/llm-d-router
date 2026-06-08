@@ -19,6 +19,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -131,6 +132,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// under load. Retrying the same host avoids expensive local prefill on
 	// decode. Non-transient errors (500/501) fail immediately.
 	var pw *bufferedResponseWriter
+retryLoop:
 	for attempt := 0; ; attempt++ {
 		pw = &bufferedResponseWriter{}
 		preq.Body = io.NopCloser(bytes.NewReader(pbody))
@@ -152,7 +154,12 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			"target", prefillPodHostPort,
 			"request_id", uuidStr,
 			"previous_code", pw.statusCode)
-		time.Sleep(s.config.PrefillRetryBackoff)
+
+		select {
+		case <-time.After(s.config.PrefillRetryBackoff):
+		case <-preq.Context().Done():
+			break retryLoop
+		}
 	}
 
 	prefillDuration := time.Since(prefillStart)
@@ -162,8 +169,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	)
 
 	if isHTTPError(pw.statusCode) {
-		s.logger.Error(err, "prefill request failed",
-			"code", pw.statusCode,
+		s.logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
 			"request_id", uuidStr,
 			"body", pw.buffer.String())
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")

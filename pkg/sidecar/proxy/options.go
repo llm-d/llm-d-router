@@ -358,6 +358,11 @@ func (opts *Options) Validate() error {
 		}
 	}
 
+	// Validate prefill retry configuration
+	if opts.PrefillMaxRetries > 0 && opts.PrefillRetryBackoff <= 0 {
+		return fmt.Errorf("--prefill-retry-backoff must be positive when --prefill-max-retries > 0, got %v", opts.PrefillRetryBackoff)
+	}
+
 	// Validate chunked decode
 	if opts.DecodeChunkSize < 0 {
 		return fmt.Errorf("--decode-chunk-size must be a non-negative integer (0 disables chunked decode), got %d", opts.DecodeChunkSize)
@@ -519,7 +524,11 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 		opts.PrefillMaxRetries = *cfg.PrefillMaxRetries
 	}
 	if cfg.PrefillRetryBackoff != "" && !opts.isFlagSet(prefillRetryBackoff) {
-		if d, err := time.ParseDuration(cfg.PrefillRetryBackoff); err == nil {
+		d, err := time.ParseDuration(cfg.PrefillRetryBackoff)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: ignoring invalid %s value %q: %v; using default %v\n",
+				prefillRetryBackoff, cfg.PrefillRetryBackoff, err, opts.PrefillRetryBackoff)
+		} else {
 			opts.PrefillRetryBackoff = d
 		}
 	}

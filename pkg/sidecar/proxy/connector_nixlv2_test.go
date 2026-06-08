@@ -465,31 +465,36 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should retry prefill on 502 and succeed when retries are enabled", func() {
-		testInfo.prefillHandler.FailForFirstN = 1
-		testInfo.prefillHandler.FailStatusCode = http.StatusBadGateway
-		testInfo.proxy.config.PrefillMaxRetries = 2
-		testInfo.proxy.config.PrefillRetryBackoff = time.Millisecond
+	DescribeTable("should retry prefill on retryable status and succeed",
+		func(statusCode int) {
+			testInfo.prefillHandler.FailForFirstN = 1
+			testInfo.prefillHandler.FailStatusCode = statusCode
+			testInfo.proxy.config.PrefillMaxRetries = 2
+			testInfo.proxy.config.PrefillRetryBackoff = time.Millisecond
 
-		proxyBaseAddr := startProxy()
+			proxyBaseAddr := startProxy()
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
-		Expect(err).ToNot(HaveOccurred())
-		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+			Expect(err).ToNot(HaveOccurred())
+			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
-		rp, err := http.DefaultClient.Do(req)
-		Expect(err).ToNot(HaveOccurred())
-		defer rp.Body.Close()
-		Expect(rp.StatusCode).To(Equal(http.StatusOK))
+			rp, err := http.DefaultClient.Do(req)
+			Expect(err).ToNot(HaveOccurred())
+			defer rp.Body.Close()
+			Expect(rp.StatusCode).To(Equal(http.StatusOK))
 
-		By("verifying prefill was called twice (1 fail + 1 success)")
-		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 2))
+			By("verifying prefill was called twice (1 fail + 1 success)")
+			Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 2))
 
-		By("verifying decode received kv_transfer_params from the successful prefill")
-		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
-		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
-		Expect(decodeReq).To(HaveKey(requestFieldKVTransferParams))
-	})
+			By("verifying decode received kv_transfer_params from the successful prefill")
+			Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+			decodeReq := testInfo.decodeHandler.CompletionRequests[0]
+			Expect(decodeReq).To(HaveKey(requestFieldKVTransferParams))
+		},
+		Entry("502 Bad Gateway", http.StatusBadGateway),
+		Entry("503 Service Unavailable", http.StatusServiceUnavailable),
+		Entry("504 Gateway Timeout", http.StatusGatewayTimeout),
+	)
 
 	It("should return error to client when retries are disabled and prefill fails", func() {
 		testInfo.prefillHandler.FailForFirstN = 1
