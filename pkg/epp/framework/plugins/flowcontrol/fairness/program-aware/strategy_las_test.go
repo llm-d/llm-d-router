@@ -42,8 +42,8 @@ func TestLAS_Pick_PrefersLowerService(t *testing.T) {
 	now := time.Now()
 
 	// Seed alpha with high attained service, beta with low.
-	s.getState("alpha").AddService(1000)
-	s.getState("beta").AddService(10)
+	s.getOrCreateState("alpha").AddService(1000)
+	s.getOrCreateState("beta").AddService(10)
 
 	idA, qA := makeInfo("alpha", now)
 	idB, qB := makeInfo("beta", now)
@@ -70,7 +70,7 @@ func TestLAS_Pick_ColdStartUsesHeadWait(t *testing.T) {
 
 func TestLAS_Pick_DecaysInactiveService(t *testing.T) {
 	s := &LASStrategy{weightService: 1.0, weightHeadWait: 0.0, decayFactor: 0.5}
-	s.getState("idle").AddService(100)
+	s.getOrCreateState("idle").AddService(100)
 
 	// Empty queue and no in-flight: decay applies.
 	queues := map[string]QueueInfo{
@@ -78,12 +78,12 @@ func TestLAS_Pick_DecaysInactiveService(t *testing.T) {
 	}
 	s.Pick(0, queues)
 
-	assert.InDelta(t, 50.0, s.getState("idle").Service(), 0.001)
+	assert.InDelta(t, 50.0, s.getOrCreateState("idle").Service(), 0.001)
 }
 
 func TestLAS_Pick_NoDecayWhenInFlight(t *testing.T) {
 	s := &LASStrategy{weightService: 1.0, weightHeadWait: 0.0, decayFactor: 0.5}
-	s.getState("busy").AddService(100)
+	s.getOrCreateState("busy").AddService(100)
 
 	m := &ProgramMetrics{}
 	m.RecordDispatched(time.Time{}) // inFlight = 1
@@ -92,7 +92,7 @@ func TestLAS_Pick_NoDecayWhenInFlight(t *testing.T) {
 	}
 	s.Pick(0, queues)
 
-	assert.Equal(t, 100.0, s.getState("busy").Service(), "in-flight gates decay")
+	assert.Equal(t, 100.0, s.getOrCreateState("busy").Service(), "in-flight gates decay")
 }
 
 func TestLAS_OnCompleted_AccumulatesWeightedCost(t *testing.T) {
@@ -105,7 +105,7 @@ func TestLAS_OnCompleted_AccumulatesWeightedCost(t *testing.T) {
 	s.OnCompleted(nil, req, resp)
 
 	// cost = 1*100 + 2*50 = 200
-	assert.Equal(t, 200.0, s.getState("alpha").Service())
+	assert.Equal(t, 200.0, s.getOrCreateState("alpha").Service())
 }
 
 func TestLAS_OnCompleted_NilSafe(t *testing.T) {
@@ -134,12 +134,12 @@ func TestLAS_FactorDecay_AppliesPerCall(t *testing.T) {
 
 func TestLAS_EvictProgram_DropsState(t *testing.T) {
 	s := &LASStrategy{}
-	s.getState("alpha").AddService(100)
+	s.getOrCreateState("alpha").AddService(100)
 
 	s.EvictProgram("alpha")
 
-	// A subsequent getState returns a fresh zero entry.
-	assert.Equal(t, 0.0, s.getState("alpha").Service())
+	// A subsequent getOrCreateState returns a fresh zero entry.
+	assert.Equal(t, 0.0, s.getOrCreateState("alpha").Service())
 }
 
 func TestRangeNormalize(t *testing.T) {

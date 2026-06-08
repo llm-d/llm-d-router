@@ -81,7 +81,12 @@ type LASStrategy struct {
 	state sync.Map // key: program ID (string), value: *lasState
 }
 
-func (s *LASStrategy) getState(id string) *lasState {
+func (s *LASStrategy) getOrCreateState(id string) *lasState {
+	if a, ok := s.state.Load(id); ok {
+		if st, ok := a.(*lasState); ok {
+			return st
+		}
+	}
 	fresh := &lasState{}
 	actual, _ := s.state.LoadOrStore(id, fresh)
 	if st, ok := actual.(*lasState); ok {
@@ -110,7 +115,7 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) flowcontrol.FlowQ
 			continue
 		}
 
-		st := s.getState(id)
+		st := s.getOrCreateState(id)
 
 		if qi.Len == 0 {
 			// Skip decay while a request is in flight to preserve the
@@ -171,8 +176,8 @@ func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 	promptTokens := int64(response.Usage.PromptTokens)
 	completionTokens := int64(response.Usage.CompletionTokens)
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
-	id := programIDFromRequest(request)
-	service := s.getState(id).AddService(cost)
+	id := programIDFor(request)
+	service := s.getOrCreateState(id).AddService(cost)
 	attainedServiceTokens.WithLabelValues(id).Set(service)
 }
 

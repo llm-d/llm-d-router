@@ -8,7 +8,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // Strategy is the fairness scheduling policy. All methods must be safe for
@@ -47,11 +46,4 @@ func rangeNormalize(v, min, max float64) float64 {
 		return 0.5
 	}
 	return (v - min) / (max - min)
-}
-
-func programIDFromRequest(req *fwksched.InferenceRequest) string {
-	if req == nil || req.FairnessID == "" {
-		return metadata.DefaultFairnessID
-	}
-	return req.FairnessID
 }

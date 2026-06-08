@@ -131,6 +131,11 @@ func (p *ProgramAwarePlugin) getStrategy() Strategy {
 }
 
 func (p *ProgramAwarePlugin) getOrCreateMetrics(programID string) *ProgramMetrics {
+	if a, ok := p.programMetrics.Load(programID); ok {
+		if m, ok := a.(*ProgramMetrics); ok {
+			return m
+		}
+	}
 	// Seed lastCompletionTime so a program seen but never completing still
 	// becomes evictable after ttl.
 	fresh := &ProgramMetrics{lastCompletionTime: time.Now()}
