@@ -189,6 +189,7 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 		return body
 	default:
 		return map[string]any{
+			"model":     reqCtx.Model,
 			"token_ids": tokenIDs,
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},

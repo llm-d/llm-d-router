@@ -159,38 +159,92 @@ Body is the full `reqCtx.Body` (with data: URIs from stage 1):
 
 #### Response (single object)
 
+The renderer echoes the request shape back with three load-bearing fields populated: `token_ids`, `features`, and `request_id`. It also fills in `sampling_params` defaults and several status fields used downstream (`priority`, `stream`, `stream_options`, `cache_salt`, `kv_transfer_params: null`). The coordinator only consumes `token_ids` and `features`; everything else is ignored at this stage.
+
 ```json
 {
-  "token_ids": [1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789],
+  "token_ids": [
+    151644, 872, 198, 74785, 419, 2168, 13,
+    151652,
+    151655, 151655, 151655, "...(70 placeholder tokens total)...", 151655,
+    151653, 151645, 198, 151644, 77091, 198
+  ],
   "features": {
     "mm_hashes": {
-      "image": ["abc123hash", "def456hash"]
+      "image": ["2b622017706939546ca39ffbc7b610fe1fcbd4f9154d33b4ef13aaf5860c473e"]
     },
     "mm_placeholders": {
       "image": [
-        {"offset": 1, "length": 3},
-        {"offset": 4, "length": 3}
+        {"offset": 8, "length": 70}
       ]
     },
     "kwargs_data": {
-      "image": ["<base64-encoded-pixel-tensor-1>", "<base64-encoded-pixel-tensor-2>"]
+      "image": ["<base64-encoded-msgpack: pixel_values + image_grid_thw>"]
     }
+  },
+  "request_id": "chatcmpl-97b08c103dc4558e",
+  "model": "Qwen/Qwen3-VL-2B-Instruct",
+  "stream": false,
+  "stream_options": null,
+  "priority": 0,
+  "cache_salt": null,
+  "kv_transfer_params": null,
+  "sampling_params": {
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20,
+    "min_p": 0,
+    "presence_penalty": 0,
+    "frequency_penalty": 0,
+    "repetition_penalty": 1,
+    "max_tokens": 262060,
+    "stop": [],
+    "stop_token_ids": [],
+    "bad_words": [],
+    "output_kind": 2,
+    "skip_clone": true,
+    "skip_reading_prefix_cache": false
   }
 }
 ```
+
+##### `features` field
+
+Three per-modality maps, each keyed by modality name (`"image"`, `"video"`, `"audio"`):
+
+| Field                       | Element type                       | Length     | Meaning                                                                                               |
+|-----------------------------|------------------------------------|------------|-------------------------------------------------------------------------------------------------------|
+| `features.mm_hashes`        | `string` (hex digest)              | one per image | Stable content hash of each image. Used as the routing key for EC handoff and decode-side affinity. |
+| `features.mm_placeholders`  | `{offset: int, length: int}`       | one per image | Position of each image's placeholder span inside the full `token_ids` array.                       |
+| `features.kwargs_data`      | `string` (base64 of msgpack blob)  | one per image | Serialized `MultiModalKwargsItem` containing `pixel_values` and `image_grid_thw`. Encoder consumes this directly so it can skip the image preprocessor. Dominates response size (~1 MB per HD image). |
+
+Wire-size example (the test payload above, single 200×300 JPG against Qwen3-VL-2B):
+
+| Field                                     | Size                       |
+|-------------------------------------------|----------------------------|
+| `len(token_ids)`                          | 84 (7 prefix + 70 image + 7 suffix) |
+| `features.mm_hashes["image"]`             | 1 entry, 64-char hex       |
+| `features.mm_placeholders["image"]`       | 1 entry: `{offset: 8, length: 70}` |
+| `features.kwargs_data["image"][0]`        | 1,147,128 bytes (base64)   |
+| **Total response size**                   | ~1.15 MB                   |
 
 For text-only chat completions (no `image_url` parts), `features.mm_hashes.image`, `features.mm_placeholders.image`, and `features.kwargs_data.image` are empty arrays.
 
 #### Output (mutates RequestContext)
 
-- `reqCtx.TokenIDs` = `[1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789]`
-- `reqCtx.MultimodalEntries` enriched with:
-  - `entries[0].Hash = "abc123hash"`
-  - `entries[0].KwargsData = "<base64-encoded-pixel-tensor-1>"`
-  - `entries[0].Placeholder = {Offset: 1, Length: 3}`
-  - `entries[1].Hash = "def456hash"`
-  - `entries[1].KwargsData = "<base64-encoded-pixel-tensor-2>"`
-  - `entries[1].Placeholder = {Offset: 4, Length: 3}`
+For the single-image example above:
+
+- `reqCtx.TokenIDs` = the full 84-element token sequence from the response
+- `reqCtx.MultimodalEntries` enriched per image:
+  - `entries[0].Hash = "2b622017706939546ca39ffbc7b610fe1fcbd4f9154d33b4ef13aaf5860c473e"`
+  - `entries[0].KwargsData = "<base64-encoded-msgpack blob, ~1.1 MB>"`
+  - `entries[0].Placeholder = {Offset: 8, Length: 70}`
+
+For a multi-image request the slices line up positionally:
+
+- `entries[i].Hash = features.mm_hashes.image[i]`
+- `entries[i].KwargsData = features.kwargs_data.image[i]`
+- `entries[i].Placeholder = features.mm_placeholders.image[i]`
 
 The coordinator validates that `mm_hashes.image`, `mm_placeholders.image`, and `kwargs_data.image` all have length `len(reqCtx.MultimodalEntries)`; a mismatch fails the request.
 
@@ -381,6 +435,7 @@ For image 0 (given `token_ids[0]=1` as BOS, `token_ids[1]=32000` as placeholder 
 
 ```json
 {
+  "model": "llava-v1.5-7b",
   "token_ids": [1, 32000, 32000, 32000],
   "features": {
     "mm_hashes": {"image": ["abc123hash"]},
@@ -390,6 +445,8 @@ For image 0 (given `token_ids[0]=1` as BOS, `token_ids[1]=32000` as placeholder 
   "sampling_params": {"max_tokens": 1}
 }
 ```
+
+`model` is required by the `/inference/v1/generate` request validator and must match the served model name. Coordinator sources it from `reqCtx.Model` (populated from the inbound request body's `model` field).
 
 #### Response
 
@@ -523,8 +580,8 @@ EPP-Phase: prefill
 ```json
 {
   "request_id": "req-abc-123",
-  "token_ids": [1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789],
   "model": "llava-v1.5-7b",
+  "token_ids": [1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789],
   "features": {
     "mm_hashes": {"image": ["abc123hash", "def456hash"]},
     "mm_placeholders": {"image": [
@@ -542,6 +599,8 @@ EPP-Phase: prefill
 }
 ```
 
+`model` is required by the `/inference/v1/generate` request validator and must match the served model name. Coordinator sources it from `reqCtx.Model` (populated from the inbound request body's `model` field).
+
 `kwargs_data` carries the same per-image base64 tensors from the render step (same values sent to the encode stage). Each blob is a msgpack-serialized `MultiModalKwargsItem` containing both `pixel_values` and `image_grid_thw` (and any other model-specific keys). The prefill worker needs `image_grid_thw` to compute mRoPE (multimodal Rotary Position Embedding) positional encodings for the visual tokens.
 
 > [!NOTE]
@@ -557,8 +616,8 @@ EPP-Phase: prefill
 ```json
 {
   "request_id": "req-abc-123",
-  "token_ids": [1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789],
   "model": "llava-v1.5-7b",
+  "token_ids": [1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789],
   "features": {
     "mm_hashes": {"image": ["abc123hash", "def456hash"]},
     "mm_placeholders": {"image": [
@@ -916,8 +975,8 @@ When `use_openai_format: false`:
 
 | Stage | Format |
 |-------|--------|
-| Encode | `{"token_ids": [...], "features": {..., "kwargs_data": ...}, "sampling_params": {...}}` |
-| Prefill | `{"request_id": "...", "token_ids": [...], "model": "...", "features": {..., "kwargs_data": ...}, ...}` |
+| Encode | `{"model": "...", "token_ids": [...], "features": {..., "kwargs_data": ...}, "sampling_params": {...}}` |
+| Prefill | `{"request_id": "...", "model": "...", "token_ids": [...], "features": {..., "kwargs_data": ...}, ...}` |
 
 Note: Encode is never called for `/v1/completions` requests because completions do not support images.
 
