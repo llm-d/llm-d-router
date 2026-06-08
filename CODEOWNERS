@@ -15,6 +15,7 @@
 
 # Flow control framework + plugins
 /pkg/epp/flowcontrol/                                                     @LukeAVanDrie @shmuelk @llm-d/router-maintainers
+/pkg/epp/framework/interface/flowcontrol/                                 @LukeAVanDrie @shmuelk @llm-d/router-maintainers
 /pkg/epp/framework/plugins/flowcontrol/                                   @LukeAVanDrie @shmuelk @llm-d/router-maintainers
 
 # Envoy ext_proc message layer
