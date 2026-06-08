@@ -145,6 +145,35 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
     weight: 2
 `,
+	// Regression test for #1471: a precise-prefix-cache-producer paired with
+	// an explicit vllm-backed token-producer must load cleanly. The mirror
+	// case (no token-producer or estimate-backed) is covered by the unit
+	// test TestPluginFactory_RejectsMissingRealTokenProducer in the
+	// preciseprefixcache package; this smoke test confirms the harness still
+	// accepts a well-configured precise pipeline end-to-end.
+	"preciseConfigWithVLLMTokenProducer": `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: token-producer
+  parameters:
+    modelName: test-model
+    vllm:
+      url: http://localhost:9999
+- type: precise-prefix-cache-producer
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
+`,
 	"decodeOnlyConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
