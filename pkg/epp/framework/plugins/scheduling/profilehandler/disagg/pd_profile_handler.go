@@ -13,11 +13,12 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 const (
@@ -134,7 +135,10 @@ type PdProfileHandler struct {
 // Consumes defines data types consumed by this plugin (through the PD decider).
 func (h *PdProfileHandler) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{h.dk: attrprefix.PrefixCacheMatchInfo{}},
+		Required: map[plugin.DataKey]any{
+			h.dk:                                 attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{},
+		},
 	}
 }
 
@@ -154,7 +158,7 @@ func (h *PdProfileHandler) WithName(name string) *PdProfileHandler {
 func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
 	// Start tracing span for profile picking operation
-	tracer := telemetry.Tracer()
+	tracer := tracing.Tracer()
 	ctx, span := tracer.Start(ctx, "llm_d.epp.pd.profile_handler.pick",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)

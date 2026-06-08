@@ -33,9 +33,10 @@ func TestTokenLoadScorer(t *testing.T) {
 	threshold := 1000.0
 
 	scorer := &TokenLoadScorer{
-		typedName:            fwkplugin.TypedName{Type: TokenLoadScorerType, Name: TokenLoadScorerType},
-		queueThresholdTokens: threshold,
-		inFlightLoadDataKey:  attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(""),
+		typedName:                    fwkplugin.TypedName{Type: TokenLoadScorerType, Name: TokenLoadScorerType},
+		queueThresholdTokens:         threshold,
+		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(""),
+		uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(""),
 	}
 
 	t.Run("in-flight load only", func(t *testing.T) {
@@ -74,20 +75,16 @@ func TestTokenLoadScorer(t *testing.T) {
 		}
 
 		// pod1: 0 in-flight + 250 current = 250. Score = 1 - 250/1000 = 0.75
-		endpoints[0].Put(scorer.inFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{
-			Tokens:                0,
-			UncachedRequestTokens: 250,
-		})
+		endpoints[0].Put(scorer.inFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 0})
+		endpoints[0].Put(scorer.uncachedRequestTokensDataKey.String(), &attrconcurrency.UncachedRequestTokens{Tokens: 250})
+
 		// pod2: 250 in-flight + 250 current = 500. Score = 1 - 500/1000 = 0.5
-		endpoints[1].Put(scorer.inFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{
-			Tokens:                250,
-			UncachedRequestTokens: 250,
-		})
+		endpoints[1].Put(scorer.inFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 250})
+		endpoints[1].Put(scorer.uncachedRequestTokensDataKey.String(), &attrconcurrency.UncachedRequestTokens{Tokens: 250})
+
 		// pod3: 750 in-flight + 250 current = 1000. Score = 1 - 1000/1000 = 0.0
-		endpoints[2].Put(scorer.inFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{
-			Tokens:                750,
-			UncachedRequestTokens: 250,
-		})
+		endpoints[2].Put(scorer.inFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 750})
+		endpoints[2].Put(scorer.uncachedRequestTokensDataKey.String(), &attrconcurrency.UncachedRequestTokens{Tokens: 250})
 
 		scores := scorer.Score(context.Background(), &fwksched.InferenceRequest{}, endpoints)
 
@@ -115,6 +112,8 @@ func TestTokenLoadScorer(t *testing.T) {
 
 		var nilLoad *attrconcurrency.InFlightLoad
 		endpoints[0].Put(scorer.inFlightLoadDataKey.String(), nilLoad)
+		var nilUncached *attrconcurrency.UncachedRequestTokens
+		endpoints[0].Put(scorer.uncachedRequestTokensDataKey.String(), nilUncached)
 
 		// Typed nil; should score as if 0 token load (no panic)
 		scores := scorer.Score(context.Background(), &fwksched.InferenceRequest{}, endpoints)

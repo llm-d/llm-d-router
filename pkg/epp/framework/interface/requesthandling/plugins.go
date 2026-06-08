@@ -43,9 +43,14 @@ type Parser interface {
 	// buffered response body and 'endOfStream' set to true.
 	ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*ParsedResponse, error)
 
-	// SupportedAppProtocols returns the list of supported protocols.
-	// Returning an empty list means it supports all protocols.
-	SupportedAppProtocols() []v1.AppProtocol
+	// Claims returns the paths and protocols claimed by this parser.
+	Claims() Claims
+}
+
+// Claims defines the matching criteria for a parser.
+type Claims struct {
+	Paths     []string         // path patterns this parser claims (e.g., "chat/completions")
+	Protocols []v1.AppProtocol // protocols this parser supports (e.g., "h2c")
 }
 
 // ParseResult contains the result of parsing the request.

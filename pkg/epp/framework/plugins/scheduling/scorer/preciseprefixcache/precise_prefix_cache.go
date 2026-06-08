@@ -31,13 +31,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
 	prefixscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 // PrecisePrefixCachePluginType is the registered plugin type name.
@@ -166,7 +166,7 @@ func (p *Plugin) Category() scheduling.ScorerCategory { return p.scorer.Category
 func (p *Plugin) Score(ctx context.Context,
 	req *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 ) map[scheduling.Endpoint]float64 {
-	ctx, span := telemetry.Tracer().Start(ctx, "llm_d.epp.scorer.prefix_cache",
+	ctx, span := tracing.Tracer().Start(ctx, "llm_d.epp.scorer.prefix_cache",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

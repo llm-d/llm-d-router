@@ -17,7 +17,6 @@ limitations under the License.
 package metrics
 
 import (
-	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -338,19 +337,22 @@ func TestGetLoRAMetric(t *testing.T) {
 		metricFamilies   sourcemetrics.PrometheusMetricMap
 		expectedAdapters map[string]int
 		expectedMax      int
-		expectedErr      error
 		spec             *LoRASpec
 	}{
 		{
-			name: "no lora metrics",
+			// vLLM only emits vllm:lora_requests_info once at least one LoRA
+			// adapter has been loaded. A vanilla deployment with no LoRA must
+			// be treated as "no adapters" rather than a scrape error so the
+			// EPP doesn't spam DataLayerExtractErrorsTotal on every poll
+			// (#926).
+			name: "missing family treated as no adapters",
 			metricFamilies: sourcemetrics.PrometheusMetricMap{
 				"some_other_metric": makeMetricFamily("some_other_metric",
 					makeMetric(nil, 1.0, 1000),
 				),
 			},
-			expectedAdapters: map[string]int{},
+			expectedAdapters: nil,
 			expectedMax:      0,
-			expectedErr:      errors.New("metric family \"vllm:lora_requests_info\" not found"), // Expect an error because the family is missing
 			spec:             loraSpec,
 		},
 		{
@@ -364,7 +366,6 @@ func TestGetLoRAMetric(t *testing.T) {
 			},
 			expectedAdapters: map[string]int{"lora1": 0},
 			expectedMax:      2,
-			expectedErr:      nil,
 			spec:             loraSpec,
 		},
 		{
@@ -376,22 +377,13 @@ func TestGetLoRAMetric(t *testing.T) {
 			},
 			expectedAdapters: map[string]int{},
 			expectedMax:      0,
-			expectedErr:      nil, // Expect *no* error; just no adapters found
 			spec:             loraSpec,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			metric, err := tc.spec.getLatestMetric(tc.metricFamilies)
-
-			if tc.expectedErr != nil {
-				assert.Error(t, err)
-				assert.EqualError(t, err, tc.expectedErr.Error())
-				return
-			}
-
-			require.NoError(t, err)
+			metric := tc.spec.getLatestMetric(tc.metricFamilies)
 
 			if tc.spec == nil {
 				assert.Nil(t, metric)

@@ -349,3 +349,43 @@ func TestExecutePluginsAsDAG(t *testing.T) {
 		})
 	}
 }
+
+var _ fwkrc.TimeoutAwareProducer = &timeoutAwareMockPlugin{}
+
+// timeoutAwareMockPlugin is a DataProducer that declares its own timeout.
+type timeoutAwareMockPlugin struct {
+	executorMockDataProducerPlugin
+	timeout time.Duration
+}
+
+func (p *timeoutAwareMockPlugin) ProduceTimeout() time.Duration { return p.timeout }
+
+func TestProducerTimeout(t *testing.T) {
+	testCases := []struct {
+		name string
+		p    fwkrc.DataProducer
+		want time.Duration
+	}{
+		{
+			name: "producer without timeout awareness uses default",
+			p:    &executorMockDataProducerPlugin{name: "p1"},
+			want: dataProducerTimeout,
+		},
+		{
+			name: "declared timeout overrides the default",
+			p:    &timeoutAwareMockPlugin{executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "tok"}, timeout: 30 * time.Second},
+			want: 30 * time.Second,
+		},
+		{
+			name: "non-positive declared timeout uses default",
+			p:    &timeoutAwareMockPlugin{executorMockDataProducerPlugin: executorMockDataProducerPlugin{name: "zero"}, timeout: 0},
+			want: dataProducerTimeout,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, producerTimeout(tc.p))
+		})
+	}
+}

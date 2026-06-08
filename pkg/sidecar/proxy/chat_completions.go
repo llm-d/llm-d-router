@@ -26,8 +26,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -55,7 +55,7 @@ func openAIAPIAttr(apiType APIType) attribute.KeyValue {
 func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
-		tracer := telemetry.Tracer()
+		tracer := tracing.Tracer()
 		ctx, span := tracer.Start(r.Context(), "llm_d.pd_proxy.request",
 			trace.WithSpanKind(trace.SpanKindServer),
 		)
