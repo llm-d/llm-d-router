@@ -148,8 +148,16 @@ func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest
 func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fwkrh.MultiModalFeature) {
 	var out []byte
 	var features []fwkrh.MultiModalFeature
-	if s := req.System.PlainText(); s != "" {
-		out = append(out, []byte(s)...)
+	// The system field accepts only text -- a string or an array of text blocks.
+	// See https://docs.anthropic.com/en/api/messages#body-system.
+	if req.System.Raw != "" {
+		out = append(out, []byte(req.System.Raw)...)
+	} else {
+		for _, block := range req.System.Structured {
+			if block.Type == blockTypeText {
+				out = append(out, []byte(block.Text)...)
+			}
+		}
 	}
 	for _, msg := range req.Messages {
 		if msg.Role != "" {

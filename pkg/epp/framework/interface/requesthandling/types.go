@@ -572,7 +572,7 @@ func (r *MessagesRequest) String() string {
 	}
 	messagesLen := 0
 	for _, msg := range r.Messages {
-		messagesLen += len(msg.Content.PlainText())
+		messagesLen += msg.Content.textLen()
 	}
 	return fmt.Sprintf("{MessagesLength: %d}", messagesLen)
 }
@@ -615,18 +615,17 @@ func (ac AnthropicContent) MarshalJSON() ([]byte, error) {
 	return json.Marshal("")
 }
 
-func (ac AnthropicContent) PlainText() string {
+func (ac AnthropicContent) textLen() int {
 	if ac.Raw != "" {
-		return ac.Raw
+		return len(ac.Raw)
 	}
-	var sb strings.Builder
+	n := 0
 	for _, block := range ac.Structured {
 		if block.Type == "text" {
-			sb.WriteString(block.Text)
-			sb.WriteString(" ")
+			n += len(block.Text)
 		}
 	}
-	return sb.String()
+	return n
 }
 
 type AnthropicContentBlock struct {
