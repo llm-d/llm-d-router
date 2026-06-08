@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -111,4 +112,23 @@ func TestScoreNilRequest(t *testing.T) {
 	scores := scorer.Score(context.Background(), nil, endpoints)
 
 	assert.Equal(t, map[scheduling.Endpoint]float64{ep1: 0.0}, scores)
+}
+
+// TestConsumes verifies the scorer declares BoundEndpointDataKey, scoped
+// to its configured producer name, as a Required dependency. The
+// framework uses Consumes() at startup to wire producers and to fail
+// fast when a required producer is missing; a regression here would
+// silently break auto-instantiation.
+func TestConsumes(t *testing.T) {
+	scorer := sessionaffinity.NewSessionAffinity(testProducerName)
+
+	deps := scorer.Consumes()
+	wantKey := attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(testProducerName)
+	require.Contains(t, deps.Required, wantKey, "scorer must declare BoundEndpointDataKey as Required")
+	assert.Empty(t, deps.Optional, "scorer should not declare optional dependencies")
+
+	value, ok := deps.Required[wantKey]
+	require.True(t, ok)
+	_, isBoundEndpoint := value.(attrsession.BoundEndpoint)
+	assert.True(t, isBoundEndpoint, "Required value type must be BoundEndpoint")
 }

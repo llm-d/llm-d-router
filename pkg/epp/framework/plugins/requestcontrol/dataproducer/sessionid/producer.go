@@ -26,6 +26,8 @@ package sessionid
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -62,6 +64,16 @@ const (
 	// auto-instantiated as the default for SessionIDDataKey or
 	// BoundEndpointDataKey, i.e. invoked without explicit parameters.
 	defaultAutoHeaderName = "x-session-id"
+
+	// maxSessionIDBytes caps the length of a session identifier the
+	// producer is willing to accept. Values longer than this are treated
+	// as if the session was absent: the EPP must not stash arbitrarily
+	// large client-supplied strings in the in-memory binding cache, and
+	// the gateway is expected to reject pathological cookies/headers
+	// upstream. 1024 bytes comfortably fits any reasonable opaque session
+	// token (UUIDs, signed tokens, hashes) and is well below typical
+	// gateway header-size limits.
+	maxSessionIDBytes = 1024
 )
 
 // Parameters configures the session-id producer.
@@ -76,13 +88,15 @@ const (
 //     value of the named cookie.
 //
 // Binding store (optional, applies to the BoundEndpoint attribute):
-//   - LRUSize: maximum number of sessions retained, default 1024.
+//   - LRUSize: maximum number of sessions retained. Pointer so an unset
+//     value (nil) means "use the default 1024" while an explicit zero is
+//     rejected as invalid configuration. Must be > 0 when set.
 //   - TTL: idle lifetime of a binding as a Go duration ("30m", "1h"),
 //     default "30m". Must be > 0 when set.
 type Parameters struct {
 	HeaderName string `json:"headerName,omitempty"`
 	CookieName string `json:"cookieName,omitempty"`
-	LRUSize    int    `json:"lruSize,omitempty"`
+	LRUSize    *int   `json:"lruSize,omitempty"`
 	TTL        string `json:"ttl,omitempty"`
 }
 
@@ -128,11 +142,11 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 	}
 
 	size := defaultLRUSize
-	if params.LRUSize != 0 {
-		if params.LRUSize < 0 {
-			return nil, fmt.Errorf("'%s': lruSize must be > 0, got %d", SessionIDProducerType, params.LRUSize)
+	if params.LRUSize != nil {
+		if *params.LRUSize <= 0 {
+			return nil, fmt.Errorf("'%s': lruSize must be > 0, got %d", SessionIDProducerType, *params.LRUSize)
 		}
-		size = params.LRUSize
+		size = *params.LRUSize
 	}
 
 	ttl := defaultTTL
@@ -218,21 +232,44 @@ func (p *Producer) PreRequest(ctx context.Context, request *fwksched.InferenceRe
 	}
 	target, ok := primaryTarget(schedulingResult)
 	if !ok {
-		logger.Info("session-id-producer: no primary target endpoint to bind", "sessionID", id)
+		logger.Info("session-id-producer: no primary target endpoint to bind", "sessionIDHash", hashSessionIDForLog(id))
 		return
 	}
 	p.bindings.Add(attrsession.SessionID(id), target)
-	logger.Info("session-id-producer: bound session", "sessionID", id, "endpoint", target)
+	logger.Info("session-id-producer: bound session", "sessionIDHash", hashSessionIDForLog(id), "endpoint", target)
+}
+
+// hashSessionIDForLog returns a short fixed-length hex prefix of the
+// SHA-256 hash of the session id, suitable for log correlation without
+// leaking the original value. Session identifiers are client-supplied and
+// can carry signed claims, opaque tokens, or other sensitive material;
+// log aggregators must not retain them in plaintext. 8 hex chars (32
+// bits) is enough to distinguish the active sessions of a single
+// deployment for debugging.
+func hashSessionIDForLog(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:4])
 }
 
 func (p *Producer) extract(request *fwksched.InferenceRequest) string {
 	if request == nil || request.Headers == nil {
 		return ""
 	}
+	var raw string
 	if p.headerName != "" {
-		return strings.TrimSpace(request.Headers[p.headerName])
+		raw = request.Headers[p.headerName]
+	} else {
+		raw = cookieValue(request.Headers[cookieHeader], p.cookieName)
 	}
-	return strings.TrimSpace(cookieValue(request.Headers[cookieHeader], p.cookieName))
+	id := strings.TrimSpace(raw)
+	// Treat oversized values as absent. Caching arbitrarily large
+	// client-supplied strings in the in-memory binding cache is a memory
+	// hazard; the gateway is expected to enforce header-size limits, and
+	// real session identifiers comfortably fit under maxSessionIDBytes.
+	if len(id) > maxSessionIDBytes {
+		return ""
+	}
+	return id
 }
 
 // cookieValue returns the value of the named cookie within an HTTP Cookie

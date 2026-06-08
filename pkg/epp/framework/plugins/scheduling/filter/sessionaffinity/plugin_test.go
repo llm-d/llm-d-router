@@ -141,3 +141,22 @@ func TestFilterNilRequest(t *testing.T) {
 
 	assert.Len(t, result, 2)
 }
+
+// TestConsumes verifies the filter declares BoundEndpointDataKey, scoped to
+// its configured producer name, as a Required dependency. The framework
+// uses Consumes() at startup to wire producers and to fail fast when a
+// required producer is missing; a regression here would silently break
+// auto-instantiation.
+func TestConsumes(t *testing.T) {
+	filter := newFilter(t)
+
+	deps := filter.Consumes()
+	wantKey := attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(testProducerName)
+	require.Contains(t, deps.Required, wantKey, "filter must declare BoundEndpointDataKey as Required")
+	assert.Empty(t, deps.Optional, "filter should not declare optional dependencies")
+
+	value, ok := deps.Required[wantKey]
+	require.True(t, ok)
+	_, isBoundEndpoint := value.(attrsession.BoundEndpoint)
+	assert.True(t, isBoundEndpoint, "Required value type must be BoundEndpoint")
+}

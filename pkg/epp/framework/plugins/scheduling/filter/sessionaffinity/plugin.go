@@ -82,7 +82,6 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 	}, nil
 }
 
-// TypedName returns the typed name of the plugin.
 func (p *Plugin) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }

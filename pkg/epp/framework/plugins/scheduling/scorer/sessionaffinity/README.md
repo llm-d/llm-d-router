@@ -62,16 +62,9 @@ schedulingProfiles:
 
 ## Difference from session-affinity-filter
 
-Both plugins consume the same `BoundEndpoint` attribute but differ in how strictly they enforce stickiness:
+Use the scorer when a best-effort preference is sufficient and other scorers should still get a vote.
 
-| | `session-affinity-scorer` | `session-affinity-filter` |
-|---|---|---|
-| **Guarantee** | Soft, bound endpoint gets the highest score, others remain candidates | Hard, only the bound endpoint is returned when present |
-| **On endpoint unavailability** | Other scorers determine the winner | Falls back to the full candidate set |
-
-Use the scorer when a best-effort preference is sufficient and other scorers should still get a vote. Use the filter when strict stickiness is required for correctness. Configuring both at once is redundant: the filter dominates the scorer in every case, so the extra scoring work changes no outcomes.
-
-Pairing the scorer and filter with *different* `session-id-producer` instances (different `sessionIDProducerName` values) makes things worse: each producer maintains its own private binding cache, so the scorer and filter can pin different endpoints for the same session, and bindings get written twice per request. If both are configured, point them at the same producer.
+See [Session Affinity Filter](../../filter/sessionaffinity/README.md#difference-from-session-affinity-scorer) for the side-by-side comparison and guidance on pairing both plugins.
 
 ## Related Documentation
 

@@ -70,7 +70,7 @@ Both plugins consume the same `BoundEndpoint` attribute but differ in how strict
 | **Guarantee** | Hard, only the bound endpoint is returned when present | Soft, bound endpoint gets the highest score, others remain |
 | **On endpoint unavailability** | Falls back to the full candidate set | Other scorers determine the winner |
 
-Use the filter when strict stickiness is required for correctness. Use the scorer when a best-effort preference is sufficient and other scorers should still get a vote. Configuring both at once is redundant: the filter dominates the scorer in every case, so the extra scoring work changes no outcomes.
+Use the filter for preferred / sticky routing when the bound pod is available. The filter is not a stickiness *guarantee*: when the bound pod has been scaled down or evicted from the candidate set, it falls back to passthrough and the picker chooses any healthy pod. Use the scorer when a best-effort preference is sufficient and other scorers should still get a vote. Configuring both at once is redundant: the filter dominates the scorer in every case, so the extra scoring work changes no outcomes.
 
 Pairing the filter and scorer with *different* `session-id-producer` instances (different `sessionIDProducerName` values) makes things worse: each producer maintains its own private binding cache, so the filter and scorer can pin different endpoints for the same session, and bindings get written twice per request. If both are configured, point them at the same producer.
 

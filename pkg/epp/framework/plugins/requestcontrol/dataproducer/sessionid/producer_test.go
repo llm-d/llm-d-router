@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,6 +64,7 @@ func TestFactory_Validation(t *testing.T) {
 		{name: "both set", params: json.RawMessage(`{"headerName":"x","cookieName":"y"}`), wantErr: true, errSubstr: validationErr},
 		{name: "empty strings", params: json.RawMessage(`{"headerName":"","cookieName":""}`), wantErr: true, errSubstr: validationErr},
 		{name: "negative lru size", params: json.RawMessage(`{"headerName":"x","lruSize":-1}`), wantErr: true, errSubstr: "lruSize"},
+		{name: "zero lru size", params: json.RawMessage(`{"headerName":"x","lruSize":0}`), wantErr: true, errSubstr: "lruSize"},
 		{name: "zero ttl", params: json.RawMessage(`{"headerName":"x","ttl":"0s"}`), wantErr: true, errSubstr: "ttl"},
 		{name: "negative ttl", params: json.RawMessage(`{"headerName":"x","ttl":"-1m"}`), wantErr: true, errSubstr: "ttl"},
 		{name: "unparsable ttl", params: json.RawMessage(`{"headerName":"x","ttl":"not-a-duration"}`), wantErr: true, errSubstr: "invalid ttl"},
@@ -158,6 +160,27 @@ func TestProduce_HeaderMode(t *testing.T) {
 			assert.Equal(t, tc.want, string(got))
 		})
 	}
+}
+
+func TestProduce_OversizedSessionIDIsTreatedAsAbsent(t *testing.T) {
+	t.Parallel()
+
+	producer := mustFactory(t, `{"headerName":"x-session-id"}`)
+
+	// Within the cap: published normally.
+	atCap := strings.Repeat("a", 1024)
+	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-session-id": atCap}}
+	require.NoError(t, producer.Produce(context.Background(), req, nil))
+	got, ok := attrsession.ReadSessionID(req)
+	require.True(t, ok)
+	assert.Equal(t, atCap, string(got))
+
+	// One byte over the cap: dropped silently.
+	overCap := strings.Repeat("a", 1025)
+	req = &fwksched.InferenceRequest{Headers: map[string]string{"x-session-id": overCap}}
+	require.NoError(t, producer.Produce(context.Background(), req, nil))
+	_, ok = attrsession.ReadSessionID(req)
+	assert.False(t, ok, "oversized session id should be ignored")
 }
 
 func TestProduce_CookieMode(t *testing.T) {
