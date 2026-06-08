@@ -27,9 +27,24 @@ import (
 	"testing"
 	"time"
 
+	k8stypes "k8s.io/apimachinery/pkg/types"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	requesthandling "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
 // BenchmarkFlowController_PerformanceMatrix evaluates throughput across a matrix of variables.
@@ -266,3 +281,182 @@ func BenchmarkFlowController_MassCancellation(b *testing.B) {
 		b.ReportMetric(math.Round(float64(timeoutCount.Load())/elapsed), "zombies/s")
 	}
 }
+
+// fullPathBenchHarness holds shared setup state for full-path benchmarks that
+// wire a real InFlightLoadProducer, real concurrency detector, and real
+// persistent endpoints into the FlowController.
+type fullPathBenchHarness struct {
+	fc       *controller.FlowController
+	producer *inflightload.InFlightLoadProducer
+	epMeta   *fwkdl.EndpointMetadata
+	schedEp  scheduling.Endpoint
+}
+
+// setupFullPathBenchmark creates the shared harness for benchmarks that exercise
+// the complete flow control data path: producer -> detector -> controller -> cleanup.
+func setupFullPathBenchmark(ctx context.Context, b *testing.B, name string, numPriorities int) *fullPathBenchHarness {
+	b.Helper()
+	if numPriorities < 1 {
+		numPriorities = 1
+	}
+	handle := igwtestutils.NewTestHandle(ctx)
+
+	producerName := name + "-producer"
+	producerPlugin, err := inflightload.InFlightLoadProducerFactory(
+		producerName, fwkplugin.StrictDecoder([]byte(`{}`)), handle,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	producer := producerPlugin.(*inflightload.InFlightLoadProducer)
+
+	detectorPlugin, err := concurrency.ConcurrencyDetectorFactory(
+		name+"-detector",
+		fwkplugin.StrictDecoder([]byte(fmt.Sprintf(
+			`{"maxConcurrency": 100, "inFlightLoadProducerName": %q}`, producerName,
+		))),
+		handle,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	realDetector := detectorPlugin.(flowcontrol.SaturationDetector)
+
+	epMeta := &fwkdl.EndpointMetadata{
+		NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "default"},
+	}
+	ep := fwkdl.NewEndpoint(epMeta, fwkdl.NewMetrics())
+	if err := producer.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: ep,
+	}); err != nil {
+		b.Fatal(err)
+	}
+
+	fPolicy, err := globalstrict.GlobalStrictFairnessPolicyFactory(registry.DefaultFairnessPolicyRef, nil, handle)
+	if err != nil {
+		b.Fatal(err)
+	}
+	handle.AddPlugin(registry.DefaultFairnessPolicyRef, fPolicy)
+
+	oPolicy, err := fcfs.FCFSOrderingPolicyFactory(registry.DefaultOrderingPolicyRef, nil, handle)
+	if err != nil {
+		b.Fatal(err)
+	}
+	handle.AddPlugin(registry.DefaultOrderingPolicyRef, oPolicy)
+
+	defaults := registry.PriorityBandPolicyDefaults{
+		OrderingPolicy: oPolicy.(flowcontrol.OrderingPolicy),
+		FairnessPolicy: fPolicy.(flowcontrol.FairnessPolicy),
+	}
+	reg := setupRegistry(ctx, b, defaults, priorityLevels(numPriorities))
+
+	fc := controller.NewFlowController(ctx, name+"-bench", &controller.Config{
+		DefaultRequestTTL:        5 * time.Minute,
+		ExpiryCleanupInterval:    1 * time.Hour,
+		EnqueueChannelBufferSize: 2000,
+	}, controller.Deps{
+		Registry:           reg,
+		SaturationDetector: realDetector,
+		EndpointCandidates: &mocks.MockEndpointCandidates{Candidates: []fwkdl.Endpoint{ep}},
+		UsageLimitPolicy:   usagelimits.DefaultPolicy(),
+	})
+
+	time.Sleep(10 * time.Millisecond)
+
+	schedEp := scheduling.NewEndpoint(epMeta, fwkdl.NewMetrics(), nil)
+
+	return &fullPathBenchHarness{
+		fc:       fc,
+		producer: producer,
+		epMeta:   epMeta,
+		schedEp:  schedEp,
+	}
+}
+
+// BenchmarkFlowController_FullPathStress exercises the complete flow control
+// data path under realistic production conditions: real InFlightLoadProducer,
+// real concurrency detector reading DynamicAttributes from persistent endpoints,
+// real FlowController with backpressure from a concurrency-gated detector,
+// multiple priority bands, concurrent workers creating unique flows (agentic
+// churn), and the full PreRequest -> dispatch -> StartOfStream -> EndOfStream
+// lifecycle per request.
+//
+// What it catches:
+//   - PluginState entry leaks (addedTokensEntry not cleaned up by OnEvicted)
+//   - DynamicAttribute closure leaks (producer tracker never decremented)
+//   - Cross-band counter drift (stats routed to wrong priority band)
+//   - Registry flow infrastructure leaks under concurrent churn
+//   - Contention-induced allocation growth (lock convoy, sync.Map thrashing)
+//
+// Run with:
+//
+//	go test -bench=FullPathStress -benchtime=5000x -count=3 -run=^$ ./pkg/epp/flowcontrol/benchmark/
+//
+// Stable B/op across runs = no leak. Counter assertion at the end catches
+// tracker drift that B/op alone would miss.
+func BenchmarkFlowController_FullPathStress(b *testing.B) {
+	const numPriorities = 4
+
+	ctx := b.Context()
+	h := setupFullPathBenchmark(ctx, b, "stress", numPriorities)
+
+	sosResp := &requestcontrol.Response{StartOfStream: true}
+	eosResp := &requestcontrol.Response{EndOfStream: true}
+	profileResults := map[string]*scheduling.ProfileRunResult{
+		"decode": {TargetEndpoints: []scheduling.Endpoint{h.schedEp}},
+	}
+
+	// Concurrency-gated: each dispatched request consumes a slot. Workers
+	// release immediately after ResponseBody, creating sustained backpressure
+	// (W workers > L limit). This forces real queuing in the dispatch cycle.
+	var globalReqID atomic.Uint64
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.SetParallelism(max(100/runtime.GOMAXPROCS(0), 1))
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			id := globalReqID.Add(1)
+			reqID := fmt.Sprintf("req-%d", id)
+			priority := int(id) % numPriorities
+
+			// 1. Admission: FlowController gates the request.
+			fcReq := &benchRequest{
+				key:      flowcontrol.FlowKey{ID: reqID, Priority: priority},
+				byteSize: 512,
+			}
+			outcome, _ := h.fc.EnqueueAndWait(ctx, fcReq)
+
+			if outcome != types.QueueOutcomeDispatched {
+				b.Fatalf("request %s was not dispatched: %v", reqID, outcome)
+			}
+
+			// 2. Post-scheduling: producer tracks the request on the endpoint.
+			infReq := &scheduling.InferenceRequest{
+				RequestID: reqID,
+				Body:      &requesthandling.InferenceRequestBody{TokenizedPrompt: &requesthandling.TokenizedPrompt{TokenIDs: benchTokenIDs}},
+			}
+			schedResult := &scheduling.SchedulingResult{ProfileResults: profileResults}
+			h.producer.PreRequest(ctx, infReq, schedResult)
+
+			// 3. Response lifecycle: release counters.
+			infReq.SchedulingResult = schedResult
+			h.producer.ResponseBody(ctx, infReq, sosResp, h.epMeta)
+			h.producer.ResponseBody(ctx, infReq, eosResp, h.epMeta)
+		}
+	})
+
+	b.StopTimer()
+	b.ReportMetric(float64(globalReqID.Load()), "total-requests")
+
+	finalRequests := h.producer.GetRequests(h.epMeta.NamespacedName.String())
+	finalTokens := h.producer.GetTokens(h.epMeta.NamespacedName.String())
+	if finalRequests != 0 || finalTokens != 0 {
+		b.Errorf("counter leak detected after %d requests across %d priorities: requests=%d, tokens=%d",
+			globalReqID.Load(), numPriorities, finalRequests, finalTokens)
+	}
+}
+
+// benchTokenIDs is a pre-allocated token slice to avoid per-iteration allocation noise.
+var benchTokenIDs = make([]uint32, 50)
