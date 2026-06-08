@@ -56,8 +56,9 @@ import (
 const (
 	// dataProducerTimeout is the default per-producer execution timeout. A
 	// producer overrides it by implementing requestcontrol.TimeoutAwareProducer.
-	dataProducerTimeout       = 400 * time.Millisecond
-	responseBodyQueueCapacity = 100
+	dataProducerTimeout         = 400 * time.Millisecond
+	responseBodyQueueCapacity   = 100
+	directorInstrumentationName = "llm-d-router"
 )
 
 // primaryEndpointHasCachedPrefix reports whether the primary profile's chosen
@@ -231,7 +232,7 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 // HandleRequest orchestrates the request lifecycle.
 // It always returns the requestContext even in the error case, as the request context is used in error handling.
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*handlers.RequestContext, error) {
-	tracer := otel.Tracer("llm-d-router")
+	tracer := otel.Tracer(directorInstrumentationName)
 	ctx, span := tracer.Start(ctx, "gateway.request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
 	defer span.End()
 

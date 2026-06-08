@@ -35,6 +35,8 @@ const (
 	scorerExtensionPoint                 = "Scorer"
 	pickerExtensionPoint                 = "Picker"
 	processProfilesResultsExtensionPoint = "ProcessProfilesResults"
+	schedulerInstrumentationName         = "llm-d-router"
+	scheduleSpanName                     = "llm_d.epp.schedule"
 )
 
 // NewSchedulerWithConfig returns a new scheduler with the given scheduler plugins configuration.
