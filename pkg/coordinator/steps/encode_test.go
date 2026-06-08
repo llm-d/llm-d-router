@@ -29,6 +29,11 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 		var parsed map[string]any
 		_ = json.Unmarshal(body, &parsed)
 
+		// Verify model is present (required by /inference/v1/generate validator)
+		if parsed["model"] != testModelName {
+			t.Errorf("expected model=%s in encode request, got %v", testModelName, parsed["model"])
+		}
+
 		// Verify token_ids present
 		tokenIDs, ok := parsed["token_ids"].([]any)
 		if !ok || len(tokenIDs) == 0 {
@@ -80,7 +85,7 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-1",
-		Model:     "test-model",
+		Model:     testModelName,
 		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
@@ -207,10 +212,10 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat",
 		OriginalPath: gateway.PathChatCompletions,
-		Model:        "test-model",
+		Model:        testModelName,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
-			"model":  "test-model",
+			"model":  testModelName,
 			"stream": false,
 			"messages": []any{
 				map[string]any{
@@ -233,7 +238,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	}
 
 	// Verify model present
-	if receivedBody["model"] != "test-model" {
+	if receivedBody["model"] != testModelName {
 		t.Fatalf("expected model from body, got %v", receivedBody["model"])
 	}
 
