@@ -36,7 +36,7 @@ var (
 			Name:      "encoder_cache_queries_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of multimodal item hash lookups made against the encoder-cache affinity LRU.", compbasemetrics.ALPHA),
 		},
-		[]string{"plugin_type", "plugin_name"},
+		[]string{"plugin_type", "plugin_name", "modality"},
 	)
 
 	// encoderCacheHitsTotal counts the subset of encoder_cache_queries_total where
@@ -48,7 +48,7 @@ var (
 			Name:      "encoder_cache_hits_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of multimodal item hash lookups that found a match in the encoder-cache affinity LRU, by endpoint.", compbasemetrics.ALPHA),
 		},
-		[]string{"plugin_type", "plugin_name", "pod"},
+		[]string{"plugin_type", "plugin_name", "pod", "modality"},
 	)
 
 	registerOnce sync.Once
