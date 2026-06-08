@@ -23,6 +23,7 @@ package prefixcacheaffinity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -53,16 +54,21 @@ type Config struct {
 	ExplorationProbability float64 `json:"explorationProbability,omitempty"`
 
 	// MaxTTFTPenaltyMs is the max TTFT penalty (ms) before breaking stickiness.
-	// If the best sticky endpoint's predicted TTFT exceeds the best non-sticky
-	// endpoint's predicted TTFT by more than this value, all endpoints are kept.
-	// Set to 0 to always stick. Default: 5000.
+	// If the best sticky endpoint's TTFT exceeds the best non-sticky endpoint's
+	// TTFT by more than this value, all endpoints are kept. Set to 0 to always
+	// stick. Default: 5000.
 	MaxTTFTPenaltyMs float64 `json:"maxTTFTPenaltyMs,omitempty"`
 
-	// MaxTokensInFlightPenalty is the max in-flight token penalty before breaking
-	// stickiness. If the best sticky endpoint's in-flight tokens exceed the best
-	// non-sticky endpoint's in-flight tokens by more than this value, all endpoints
-	// are kept. Set to 0 to disable this gate. Default: 0 (disabled).
-	MaxTokensInFlightPenalty int64 `json:"maxTokensInFlightPenalty,omitempty"`
+	// UseLatencyPredictor selects the TTFT source for the load gate. When true
+	// (default), per-endpoint TTFT is read from the latency predictor. When
+	// false, TTFT is estimated from in-flight tokens and PeakPrefillThroughput.
+	UseLatencyPredictor bool `json:"useLatencyPredictor,omitempty"`
+
+	// PeakPrefillThroughput is the peak prefill throughput in tokens/sec, used to
+	// estimate TTFT from in-flight tokens when UseLatencyPredictor is false:
+	//   TTFT_ms = inFlightTokens / PeakPrefillThroughput * 1000
+	// (tokens / (tokens/sec) * 1000 = ms). Default: 15928.
+	PeakPrefillThroughput float64 `json:"peakPrefillThroughput,omitempty"`
 
 	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
 	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
@@ -73,6 +79,8 @@ var DefaultConfig = Config{
 	AffinityThreshold:      0.80,
 	ExplorationProbability: 0.01,
 	MaxTTFTPenaltyMs:       5000,
+	UseLatencyPredictor:    true,
+	PeakPrefillThroughput:  15928,
 }
 
 type Plugin struct {
@@ -112,8 +120,11 @@ func (c *Config) validate() error {
 	if c.MaxTTFTPenaltyMs < 0 {
 		return fmt.Errorf("maxTTFTPenaltyMs must be >= 0, got %f", c.MaxTTFTPenaltyMs)
 	}
-	if c.MaxTokensInFlightPenalty < 0 {
-		return fmt.Errorf("maxTokensInFlightPenalty must be >= 0, got %d", c.MaxTokensInFlightPenalty)
+	if c.PeakPrefillThroughput < 0 {
+		return fmt.Errorf("peakPrefillThroughput must be >= 0, got %f", c.PeakPrefillThroughput)
+	}
+	if !c.UseLatencyPredictor && c.MaxTTFTPenaltyMs > 0 && c.PeakPrefillThroughput == 0 {
+		return errors.New("peakPrefillThroughput must be > 0 when useLatencyPredictor is false")
 	}
 	return nil
 }
@@ -165,18 +176,6 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 		}
 	}
 
-	// In-flight tokens load gate: break stickiness if sticky endpoints are too loaded.
-	if p.config.MaxTokensInFlightPenalty > 0 && len(nonSticky) > 0 {
-		bestStickyTokens := p.bestInFlightTokens(sticky)
-		bestNonStickyTokens := p.bestInFlightTokens(nonSticky)
-		if bestStickyTokens-bestNonStickyTokens > p.config.MaxTokensInFlightPenalty {
-			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: in-flight tokens load gate broken",
-				"bestStickyTokens", bestStickyTokens, "bestNonStickyTokens", bestNonStickyTokens,
-				"penalty", bestStickyTokens-bestNonStickyTokens, "maxPenalty", p.config.MaxTokensInFlightPenalty)
-			return endpoints
-		}
-	}
-
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
 		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints))
 	return sticky
@@ -187,10 +186,11 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 		p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{},
 	}
 	if p.config.MaxTTFTPenaltyMs > 0 {
-		required[p.latencyPredictionInfoDataKey] = attrlatency.LatencyPredictionInfo{}
-	}
-	if p.config.MaxTokensInFlightPenalty > 0 {
-		required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
+		if p.config.UseLatencyPredictor {
+			required[p.latencyPredictionInfoDataKey] = attrlatency.LatencyPredictionInfo{}
+		} else {
+			required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
+		}
 	}
 	return fwkplugin.DataDependencies{Required: required}
 }
@@ -208,33 +208,40 @@ func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {
 	return 0
 }
 
+// bestTTFT returns the lowest per-endpoint TTFT (ms) across endpoints.
 func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) float64 {
 	best := math.MaxFloat64
 	for _, ep := range endpoints {
-		if raw, ok := ep.Get(p.latencyPredictionInfoDataKey.String()); ok {
-			info := raw.(*attrlatency.LatencyPredictionInfo)
-			if info.TTFT() < best {
-				best = info.TTFT()
-			}
+		if ttft := p.endpointTTFT(ep); ttft < best {
+			best = ttft
 		}
 	}
 	return best
 }
 
-// bestInFlightTokens returns the lowest in-flight token count across endpoints.
-// Endpoints without the attribute are treated as 0 (no observed load).
-func (p *Plugin) bestInFlightTokens(endpoints []fwksched.Endpoint) int64 {
-	best := int64(math.MaxInt64)
-	for _, ep := range endpoints {
-		var tokens int64
-		if raw, ok := ep.Get(p.inFlightLoadDataKey.String()); ok {
-			if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
-				tokens = load.Tokens
-			}
+// endpointTTFT returns the predicted TTFT (ms) for an endpoint, either from the
+// latency predictor or estimated from in-flight tokens and peak prefill
+// throughput. Endpoints missing the required attribute contribute no signal:
+// MaxFloat64 on the predictor path (never the fastest), 0 in-flight tokens on
+// the throughput path (no observed load).
+func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) float64 {
+	if p.config.UseLatencyPredictor {
+		if raw, ok := ep.Get(p.latencyPredictionInfoDataKey.String()); ok {
+			info := raw.(*attrlatency.LatencyPredictionInfo)
+			return info.TTFT()
 		}
-		if tokens < best {
-			best = tokens
+		return math.MaxFloat64
+	}
+	return float64(p.inFlightTokens(ep)) / p.config.PeakPrefillThroughput * 1000
+}
+
+// inFlightTokens returns an endpoint's in-flight token count, or 0 when the
+// attribute is absent (no observed load).
+func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) int64 {
+	if raw, ok := ep.Get(p.inFlightLoadDataKey.String()); ok {
+		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
+			return load.Tokens
 		}
 	}
-	return best
+	return 0
 }

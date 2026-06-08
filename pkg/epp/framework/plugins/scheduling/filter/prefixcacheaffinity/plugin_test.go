@@ -89,7 +89,7 @@ func TestFilter_NoStickyEndpoints(t *testing.T) {
 }
 
 func TestFilter_NarrowToSticky(t *testing.T) {
-	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 5000})
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 5000, UseLatencyPredictor: true})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 100, 0),
 		makeEndpoint("b", 85, 120, 0),
@@ -100,7 +100,7 @@ func TestFilter_NarrowToSticky(t *testing.T) {
 }
 
 func TestFilter_TTFTPenaltyBreaksStickiness(t *testing.T) {
-	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100})
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100, UseLatencyPredictor: true})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 500, 0),
 		makeEndpoint("b", 10, 50, 0),
@@ -109,35 +109,37 @@ func TestFilter_TTFTPenaltyBreaksStickiness(t *testing.T) {
 	assert.Equal(t, 2, len(result), "TTFT penalty should break stickiness")
 }
 
-func TestFilter_InFlightTokenPenaltyBreaksStickiness(t *testing.T) {
-	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTokensInFlightPenalty: 100})
+// With PeakPrefillThroughput=1000 tokens/sec, in-flight tokens map to TTFT as
+// tokens/1000*1000 = tokens ms: endpoint "a" -> 500ms, "b" -> 50ms.
+func TestFilter_ThroughputTTFTBreaksStickiness(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 10, 500),
 		makeEndpoint("b", 10, 10, 50),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
-	assert.Equal(t, 2, len(result), "In-flight token penalty should break stickiness")
+	assert.Equal(t, 2, len(result), "throughput-derived TTFT penalty should break stickiness")
 }
 
-func TestFilter_InFlightTokenPenaltyWithinThreshold(t *testing.T) {
-	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTokensInFlightPenalty: 1000})
+func TestFilter_ThroughputTTFTWithinThreshold(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 1000, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 10, 500),
 		makeEndpoint("b", 10, 10, 50),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
-	assert.Equal(t, 1, len(result), "In-flight token penalty within threshold should NOT break stickiness")
+	assert.Equal(t, 1, len(result), "throughput-derived TTFT within threshold should NOT break stickiness")
 	assert.Equal(t, "a", result[0].GetMetadata().NamespacedName.Name)
 }
 
-func TestFilter_InFlightTokenPenaltyDisabled(t *testing.T) {
-	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTokensInFlightPenalty: 0})
+func TestFilter_TTFTPenaltyDisabled(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 0, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 10, 5000), // Huge penalty
+		makeEndpoint("a", 90, 10, 5000), // Huge load
 		makeEndpoint("b", 10, 10, 50),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
-	assert.Equal(t, 1, len(result), "In-flight token penalty=0 should NOT break stickiness")
+	assert.Equal(t, 1, len(result), "maxTTFTPenaltyMs=0 should NOT break stickiness")
 	assert.Equal(t, "a", result[0].GetMetadata().NamespacedName.Name)
 }
 
@@ -152,37 +154,29 @@ func TestFilter_ExplorationProbability(t *testing.T) {
 }
 
 func TestConsumes_ConditionalAttributes(t *testing.T) {
-	// Everything disabled
-	p := newTestPlugin(Config{MaxTTFTPenaltyMs: 0, MaxTokensInFlightPenalty: 0})
+	// Gate disabled: neither TTFT source is consumed.
+	p := newTestPlugin(Config{MaxTTFTPenaltyMs: 0})
 	consumed := p.Consumes()
 	_, ok := consumed.Required[p.inFlightLoadDataKey]
-	assert.False(t, ok, "InFlightLoadDataKey should not be consumed when penalty is 0")
+	assert.False(t, ok, "InFlightLoadDataKey should not be consumed when the gate is disabled")
 	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
-	assert.False(t, ok, "LatencyPredictionInfoDataKey should not be consumed when penalty is 0")
+	assert.False(t, ok, "LatencyPredictionInfoDataKey should not be consumed when the gate is disabled")
 
-	// Only TTFT enabled
-	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, MaxTokensInFlightPenalty: 0})
+	// Gate using the latency predictor.
+	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, UseLatencyPredictor: true})
 	consumed = p.Consumes()
+	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
+	assert.True(t, ok)
 	_, ok = consumed.Required[p.inFlightLoadDataKey]
 	assert.False(t, ok)
-	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
-	assert.True(t, ok)
 
-	// Only In-flight enabled
-	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 0, MaxTokensInFlightPenalty: 100})
+	// Gate using peak prefill throughput.
+	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, UseLatencyPredictor: false, PeakPrefillThroughput: 1000})
 	consumed = p.Consumes()
 	_, ok = consumed.Required[p.inFlightLoadDataKey]
 	assert.True(t, ok)
 	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
 	assert.False(t, ok)
-
-	// Both enabled
-	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, MaxTokensInFlightPenalty: 100})
-	consumed = p.Consumes()
-	_, ok = consumed.Required[p.inFlightLoadDataKey]
-	assert.True(t, ok)
-	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
-	assert.True(t, ok)
 }
 
 func TestFactory_ValidConfig(t *testing.T) {
@@ -216,6 +210,8 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultConfig.AffinityThreshold, p.config.AffinityThreshold)
 	assert.Equal(t, DefaultConfig.ExplorationProbability, p.config.ExplorationProbability)
 	assert.Equal(t, float64(10000), p.config.MaxTTFTPenaltyMs)
+	assert.Equal(t, DefaultConfig.UseLatencyPredictor, p.config.UseLatencyPredictor)
+	assert.Equal(t, DefaultConfig.PeakPrefillThroughput, p.config.PeakPrefillThroughput)
 }
 
 func TestFactory_InvalidAffinityThreshold(t *testing.T) {
