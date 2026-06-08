@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -83,7 +83,7 @@ func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) {
 	s.logger.V(4).Info("running chunked decode", "chunkSize", s.config.DecodeChunkSize)
 
-	ctx, span := telemetry.Tracer().Start(r.Context(), "llm_d.pd_proxy.chunked_decode",
+	ctx, span := tracing.Tracer().Start(r.Context(), "llm_d.pd_proxy.chunked_decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

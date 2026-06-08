@@ -91,6 +91,8 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			embeddingsAPI,
 			responsesAPI,
 			conversationsAPI,
+			chatCompletionsAPI + "/render",
+			completionsAPI + "/render",
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -157,24 +159,25 @@ func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse,
 }
 
 // determineAPITypeFromPath determines the API type based on the request path.
-// Note: path strings have already been cleaned and normalized by the gateway/proxy layer
-// (no trailing slashes, query parameters, or additional suffix strings at this point).
 // The suffix-based matching supports both standard OpenAI paths (e.g. /v1/chat/completions)
 // and provider-specific paths (e.g. Vertex AI's /v1/projects/.../chat/completions).
+// Sub-paths /render under chat-completions and completions share the parent's body schema.
 func determineAPITypeFromPath(path string) string {
-	if strings.HasSuffix(path, "/conversations") {
+	if request.MatchPathSuffix(path, "/conversations") {
 		return conversationsAPI
 	}
-	if strings.HasSuffix(path, "/responses") {
+	if request.MatchPathSuffix(path, "/responses") {
 		return responsesAPI
 	}
-	if strings.HasSuffix(path, "/chat/completions") {
+	if request.MatchPathSuffix(path, "/chat/completions") ||
+		request.MatchPathSuffix(path, "/chat/completions/render") {
 		return chatCompletionsAPI
 	}
-	if strings.HasSuffix(path, "/completions") {
+	if request.MatchPathSuffix(path, "/completions") ||
+		request.MatchPathSuffix(path, "/completions/render") {
 		return completionsAPI
 	}
-	if strings.HasSuffix(path, "/embeddings") {
+	if request.MatchPathSuffix(path, "/embeddings") {
 		return embeddingsAPI
 	}
 
