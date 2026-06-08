@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
@@ -184,7 +183,6 @@ func TestPodReconciler(t *testing.T) {
 	for _, test := range tests {
 		period := time.Second
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {

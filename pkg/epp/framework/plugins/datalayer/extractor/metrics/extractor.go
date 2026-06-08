@@ -129,10 +129,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	}
 
 	if spec := mapping.LoraRequestInfo; spec != nil { // extract LoRA-specific metrics
-		metric, err := spec.getLatestMetric(families)
-		if err != nil {
-			errs = append(errs, err)
-		} else if metric != nil {
+		if metric := spec.getLatestMetric(families); metric != nil {
 			populateLoRAMetrics(clone, metric, &errs)
 			updated = true
 		}

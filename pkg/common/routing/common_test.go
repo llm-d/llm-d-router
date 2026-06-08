@@ -88,3 +88,29 @@ func TestStripScheme(t *testing.T) {
 		})
 	}
 }
+
+func TestIsConditionalDecode(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    bool
+	}{
+		{"nil headers", nil, false},
+		{"empty headers", map[string]string{}, false},
+		{"unrelated header", map[string]string{"x-other": "v"}, false},
+		{"prefer return=minimal (not if-available)", map[string]string{PreferHeader: "return=minimal"}, false},
+		{"prefer if-available", map[string]string{PreferHeader: PreferIfAvailable}, true},
+		{"prefer If-Available case insensitive", map[string]string{PreferHeader: "If-Available"}, true},
+		{"prefer with multiple tokens including if-available", map[string]string{PreferHeader: "return=minimal, if-available"}, true},
+		{"prefer if-available with parameter", map[string]string{PreferHeader: "if-available;param=v"}, true},
+		{"prefer if-available with leading whitespace", map[string]string{PreferHeader: "  if-available  "}, true},
+		{"prefer with similar but distinct token", map[string]string{PreferHeader: "if-available-but-different"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsConditionalDecode(tt.headers); got != tt.want {
+				t.Errorf("IsConditionalDecode(%v) = %v, want %v", tt.headers, got, tt.want)
+			}
+		})
+	}
+}

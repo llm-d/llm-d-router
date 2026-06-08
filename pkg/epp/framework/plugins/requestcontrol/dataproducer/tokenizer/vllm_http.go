@@ -184,6 +184,104 @@ func (r *vllmHTTPRenderer) chatTimeout(payload fwkrh.PayloadMap) time.Duration {
 	return r.timeout
 }
 
+// produceTimeout returns the worst-case configured render timeout (multimodal),
+// surfaced so the data-producer executor extends its budget past the default.
+func (r *vllmHTTPRenderer) produceTimeout() time.Duration {
+	if r.mmTimeout > r.timeout {
+		return r.mmTimeout
+	}
+	return r.timeout
+}
+
+// chatRenderRequest is the wire body for POST /v1/chat/completions/render.
+// Used by the non-PayloadMap fallback path (gRPC, warmup).
+type chatRenderRequest struct {
+	Model                string         `json:"model"`
+	Messages             []chatMessage  `json:"messages"`
+	Tools                []any          `json:"tools,omitempty"`
+	Documents            []any          `json:"documents,omitempty"`
+	ChatTemplate         string         `json:"chat_template,omitempty"`
+	AddGenerationPrompt  bool           `json:"add_generation_prompt,omitempty"`
+	ContinueFinalMessage bool           `json:"continue_final_message,omitempty"`
+	ChatTemplateKWArgs   map[string]any `json:"chat_template_kwargs,omitempty"`
+}
+
+// chatMessage is one OpenAI-shaped message. Content is either a plain string
+// or an array of parts; chatContent's MarshalJSON picks the right wire form.
+type chatMessage struct {
+	Role      string      `json:"role"`
+	Content   chatContent `json:"content"`
+	ToolCalls []any       `json:"tool_calls,omitempty"`
+}
+
+// chatContent serializes either Raw (string) or Parts (array of typed parts).
+// When both are empty it serializes as "" (an empty user message).
+type chatContent struct {
+	Raw   string
+	Parts []chatPart
+}
+
+func (c chatContent) MarshalJSON() ([]byte, error) {
+	if len(c.Parts) > 0 {
+		return json.Marshal(c.Parts)
+	}
+	return json.Marshal(c.Raw)
+}
+
+// chatPart is one OpenAI content part. Only the field matching Type is set.
+type chatPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *chatImageURL `json:"image_url,omitempty"`
+}
+
+type chatImageURL struct {
+	URL string `json:"url"`
+}
+
+// buildChatRenderRequest projects the kvcache RenderChatRequest into the
+// OpenAI-shaped wire body expected by vLLM's /v1/chat/completions/render.
+// Unknown content-block types are skipped (mirrors the UDS path's behavior).
+func buildChatRenderRequest(model string, req *tokenizerTypes.RenderChatRequest) chatRenderRequest {
+	msgs := make([]chatMessage, len(req.Conversation))
+	for idx, c := range req.Conversation {
+		msgs[idx] = chatMessage{
+			Role:      c.Role,
+			Content:   toChatContent(c.Content),
+			ToolCalls: c.ToolCalls,
+		}
+	}
+	return chatRenderRequest{
+		Model:                model,
+		Messages:             msgs,
+		Tools:                req.Tools,
+		Documents:            req.Documents,
+		ChatTemplate:         req.ChatTemplate,
+		AddGenerationPrompt:  req.AddGenerationPrompt,
+		ContinueFinalMessage: req.ContinueFinalMessage,
+		ChatTemplateKWArgs:   req.ChatTemplateKWArgs,
+	}
+}
+
+func toChatContent(c tokenizerTypes.Content) chatContent {
+	if len(c.Structured) == 0 {
+		return chatContent{Raw: c.Raw}
+	}
+	parts := make([]chatPart, len(c.Structured))
+	for idx, b := range c.Structured {
+		switch b.Type {
+		case "text":
+			parts[idx] = chatPart{Type: "text", Text: b.Text}
+		case "image_url":
+			parts[idx] = chatPart{Type: "image_url", ImageURL: &chatImageURL{URL: b.ImageURL.URL}}
+		default:
+			// Unsupported by the kvcache ContentBlock schema; skip.
+		}
+	}
+	return chatContent{Parts: parts}
+}
+
+
 // renderResponse is the subset of vLLM's GenerateRequest we consume.
 type renderResponse struct {
 	TokenIDs []uint32          `json:"token_ids"`

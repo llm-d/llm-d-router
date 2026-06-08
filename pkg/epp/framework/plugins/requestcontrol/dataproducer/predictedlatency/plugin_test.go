@@ -121,6 +121,7 @@ func createTestInferenceRequest(reqID string, ttftSLO, tpotSLO float64) *fwksche
 		Completions: &fwkrh.CompletionsRequest{
 			Prompt: fwkrh.Prompt{Raw: "test prompt"},
 		},
+		TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, 2)},
 	})
 }
 
@@ -132,6 +133,7 @@ func createTestChatCompletionsInferenceRequest(reqID string, ttftSLO, tpotSLO fl
 				{Role: "user", Content: fwkrh.Content{Raw: "Tell me a joke."}},
 			},
 		},
+		TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, 8)},
 	})
 }
 

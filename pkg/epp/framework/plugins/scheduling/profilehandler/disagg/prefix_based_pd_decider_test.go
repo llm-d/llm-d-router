@@ -20,6 +20,10 @@ import (
 const (
 	testEndpointAddr = "10.0.0.1"
 	testEndpointPort = "8000"
+
+	// averageCharactersPerToken derives token counts from character-length
+	// prompt fixtures in tests.
+	averageCharactersPerToken = 4
 )
 
 // notPrefixCacheMatchInfo is a Cloneable type that is not *PrefixCacheMatchInfo, used to test type assertion failure.
@@ -51,10 +55,20 @@ func makeTestEndpoint(cachedTokens int) scheduling.Endpoint {
 	return ep
 }
 
-// makeRequestWithTokens creates a completions request whose prompt yields the given token count
-// via getUserInputLenInTokens (len(prompt) / AverageCharactersPerToken).
+// makeRequestWithTokens creates a completions request whose tokenized prompt carries
+// the given token count, which getUserInputLenInTokens reads as the input length.
 func makeRequestWithTokens(tokens int) *scheduling.InferenceRequest {
-	return completionsRequest(strings.Repeat("x", tokens*AverageCharactersPerToken))
+	return completionsRequest(strings.Repeat("x", tokens*averageCharactersPerToken))
+}
+
+// withTokens sets the tokenized prompt to carry n token IDs, which the decider reads
+// as the input token count. Any existing tokenized prompt is preserved.
+func withTokens(req *scheduling.InferenceRequest, n int) *scheduling.InferenceRequest {
+	if req.Body.TokenizedPrompt == nil {
+		req.Body.TokenizedPrompt = &fwkrh.TokenizedPrompt{}
+	}
+	req.Body.TokenizedPrompt.TokenIDs = make([]uint32, n)
+	return req
 }
 
 func completionsRequestWithPrompt(prompt fwkrh.Prompt) *scheduling.InferenceRequest {
@@ -92,7 +106,7 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		},
 		{
 			name:    "chat completions",
-			req:     chatRequest(false, false, false),
+			req:     withTokens(chatRequest(false, false, false), 1),
 			wantMin: 1,
 		},
 		{
@@ -102,39 +116,38 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		},
 		{
 			name: "completions prompt array",
-			req: completionsRequestWithPrompt(fwkrh.Prompt{
+			req: withTokens(completionsRequestWithPrompt(fwkrh.Prompt{
 				Strings: []string{"hello", "world"},
-			}),
+			}), 2),
 			wantMin: 2,
 		},
 		{
 			name: "completions token ids uses exact hint",
-			req: completionsRequestWithPrompt(fwkrh.Prompt{
+			req: withTokens(completionsRequestWithPrompt(fwkrh.Prompt{
 				TokenIDs: []uint32{1, 2, 3, 4},
-			}),
+			}), 4),
 			want: 4,
 		},
 		{
 			name: "embeddings input array",
-			req: embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
+			req: withTokens(embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
 				Strings: []string{"hello", "world"},
-			}),
+			}), 2),
 			wantMin: 2,
 		},
 		{
 			name: "embeddings token ids uses exact hint",
-			req: embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
+			req: withTokens(embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
 				TokenIDs: []uint32{1, 2, 3},
-			}),
+			}), 3),
 			want: 3,
 		},
 		{
 			name: "generate request returns exact token count",
 			req: &scheduling.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					Generate: &fwkrh.GenerateRequest{
-						TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7},
-					},
+					Generate:        &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7}},
+					TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, 7)},
 				},
 			},
 			want: 7,
@@ -380,7 +393,7 @@ func TestConsumes(t *testing.T) {
 	require.NoError(t, err)
 
 	consumed := handler.Consumes()
-	assert.Contains(t, consumed, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+	assert.Contains(t, consumed.Required, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 }
 
 func TestWithName(t *testing.T) {

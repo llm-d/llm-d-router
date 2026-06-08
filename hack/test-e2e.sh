@@ -22,6 +22,7 @@ EPP_IMAGE="${EPP_IMAGE:-ghcr.io/llm-d/llm-d-router-endpoint-picker:dev}"
 SIM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:v0.9.0}"
 MANIFEST_PATH="${MANIFEST_PATH:-${DIR}/../test/testdata/sim-deployment.yaml}"
 USE_KIND="${USE_KIND:-true}"
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-mirror.gcr.io/kindest/node:v1.32.2}"
 
 KIND_CLUSTER_NAME="inference-e2e"
 
@@ -76,7 +77,7 @@ if [ "${USE_KIND}" = "true" ]; then
       kubectl config use-context "kind-${KIND_CLUSTER_NAME}"
     else
       echo "Creating new kind cluster '${KIND_CLUSTER_NAME}' for running the tests..."
-      kind create cluster --name "${KIND_CLUSTER_NAME}"
+      kind create cluster --name "${KIND_CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}"
       CREATED_CLUSTER="${KIND_CLUSTER_NAME}"
     fi
     load_images "${KIND_CLUSTER_NAME}"
@@ -91,5 +92,11 @@ else
 fi
 
 echo "Running Go e2e tests in ./test/e2e/epp/..."
-MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
-  go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast
+if [ -n "${E2E_LABEL_FILTER:-}" ]; then
+  echo "Label filter: ${E2E_LABEL_FILTER}"
+  MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
+    go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
+else
+  MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
+    go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast
+fi

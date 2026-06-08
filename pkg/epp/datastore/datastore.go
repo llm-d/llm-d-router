@@ -79,6 +79,9 @@ type Datastore interface {
 	// InferenceModelRewrite operations
 	ModelRewriteSet(infModelRewrite *v1alpha2.InferenceModelRewrite)
 	ModelRewriteDelete(namespacedName types.NamespacedName)
+	// ModelRewriteGet returns the highest-precedence rewrite rule for a given
+	// model name (prioritizing exact matches over generic wildcard rules) and
+	// the name of the InferenceModelRewrite object.
 	ModelRewriteGet(modelName string) (*v1alpha2.InferenceModelRewriteRule, string)
 	ModelRewriteGetAll() []*v1alpha2.InferenceModelRewrite
 
@@ -340,7 +343,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 	existingEpSet := sets.Set[types.NamespacedName]{}
 	for _, endpointMetadata := range pods {
 		existingEpSet.Insert(endpointMetadata.NamespacedName)
-		if ds.upsertEndpoint(endpointMetadata) {
+		if ds.upsertEndpoint(ctx, endpointMetadata) {
 			result = false
 		}
 	}
@@ -372,8 +375,8 @@ func (ds *datastore) PodDelete(podName string) {
 	})
 }
 
-func (ds *datastore) EndpointUpsert(_ context.Context, meta *fwkdl.EndpointMetadata) {
-	ds.upsertEndpoint(meta)
+func (ds *datastore) EndpointUpsert(ctx context.Context, meta *fwkdl.EndpointMetadata) {
+	ds.upsertEndpoint(ctx, meta)
 }
 
 func (ds *datastore) EndpointDelete(id types.NamespacedName) {
@@ -386,10 +389,10 @@ func (ds *datastore) EndpointDelete(id types.NamespacedName) {
 // Returns true if the endpoint was newly created, false if it already existed
 // or if NewEndpoint returned nil (duplicate-start race).
 // Shared by EndpointUpsert and podUpdateOrAddIfNotExist.
-func (ds *datastore) upsertEndpoint(meta *fwkdl.EndpointMetadata) bool {
+func (ds *datastore) upsertEndpoint(ctx context.Context, meta *fwkdl.EndpointMetadata) bool {
 	existing, ok := ds.pods.Load(meta.NamespacedName)
 	if !ok {
-		ep := ds.epf.NewEndpoint(ds.parentCtx, meta, ds)
+		ep := ds.epf.NewEndpoint(ds.parentCtx, meta)
 		if ep == nil {
 			// NewEndpoint returns nil when a collector is already running for this
 			// endpoint (duplicate reconcile race). The existing entry in ds.pods
@@ -399,7 +402,12 @@ func (ds *datastore) upsertEndpoint(meta *fwkdl.EndpointMetadata) bool {
 		ds.pods.Store(meta.NamespacedName, ep)
 		return true
 	}
-	existing.(fwkdl.Endpoint).UpdateMetadata(meta)
+	ep := existing.(fwkdl.Endpoint)
+	if ep.GetMetadata().Equal(meta) {
+		return false
+	}
+	ep.UpdateMetadata(meta)
+	ds.epf.UpdateEndpoint(ctx, ep)
 	return false
 }
 

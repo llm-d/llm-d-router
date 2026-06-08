@@ -219,30 +219,19 @@ func TestMetricsExtractionLoRADisabledViaConfig(t *testing.T) {
 }
 
 // TestMetricsExtractionMissingMetricFamilyReturnsError verifies the error-path behavior:
-// when the server does not serve a metric that the extractor is configured to collect,
-// Poll returns an error whose message names the missing metric family.
+// when the server does not serve a required metric that the extractor is configured to
+// collect, Poll returns an error whose message names the missing metric family.
+//
+// LoRA is excluded because vLLM only emits vllm:lora_requests_info once an adapter has
+// been loaded, so the absent family is a legitimate "no adapters" signal rather than
+// an error (#926). The LoRA-tolerance case is asserted by
+// TestMetricsExtractionLoRAFamilyAbsentNoError.
 func TestMetricsExtractionMissingMetricFamilyReturnsError(t *testing.T) {
 	tests := []struct {
-		name                   string
-		served                 []MetricMock
-		wantErrContain         string
-		wantWaitingQueueSize   int
-		wantRunningRequestSize int
-		wantKVCachePercent     float64
+		name           string
+		served         []MetricMock
+		wantErrContain string
 	}{
-		{
-			name: "LoRA family absent - other metrics still extracted",
-			served: []MetricMock{
-				{Name: WaitingMetric, Value: 4},
-				{Name: RunningMetric, Value: 1},
-				{Name: KVCacheMetric, Value: 0.2},
-				// LoRA and CacheInfo deliberately not served
-			},
-			wantErrContain:         "lora_requests_info",
-			wantWaitingQueueSize:   4,
-			wantRunningRequestSize: 1,
-			wantKVCachePercent:     0.2,
-		},
 		{
 			name:           "all metric families absent",
 			served:         []MetricMock{},
@@ -274,13 +263,49 @@ func TestMetricsExtractionMissingMetricFamilyReturnsError(t *testing.T) {
 			require.Error(t, pollErr, "expected error for missing metric family")
 			assert.True(t, strings.Contains(pollErr.Error(), tc.wantErrContain),
 				"error %q should contain %q", pollErr.Error(), tc.wantErrContain)
-
-			m := ep.GetMetrics()
-			assert.Equal(t, tc.wantWaitingQueueSize, m.WaitingQueueSize, "WaitingQueueSize")
-			assert.Equal(t, tc.wantRunningRequestSize, m.RunningRequestsSize, "RunningRequestsSize")
-			assert.InDelta(t, tc.wantKVCachePercent, m.KVCacheUsagePercent, 0.001, "KVCacheUsagePercent")
 		})
 	}
+}
+
+// TestMetricsExtractionLoRAFamilyAbsentNoError asserts the #926 fix end-to-end:
+// when vLLM has loaded no LoRA adapters and therefore emits no
+// vllm:lora_requests_info family, Extract returns no error and still populates
+// the other (required) metrics. Before the fix the extractor would return an
+// "lora_requests_info not found" error and the EPP would increment
+// DataLayerExtractErrorsTotal on every poll of any vanilla deployment.
+func TestMetricsExtractionLoRAFamilyAbsentNoError(t *testing.T) {
+	srv := createMockServer([]MetricMock{
+		{Name: WaitingMetric, Value: 4},
+		{Name: RunningMetric, Value: 1},
+		{Name: KVCacheMetric, Value: 0.2},
+		{
+			Name:  CacheConfigMetric,
+			Value: 1,
+			Labels: map[string]string{
+				CacheConfigBlockSizeInfoMetricName: "16",
+				CacheConfigNumGPUBlocksMetricName:  "512",
+			},
+		},
+	})
+	defer srv.Close()
+
+	p, err := buildPipeline(t, srv.URL, nil)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+	})
+
+	data, err := p.source.Poll(ctx, ep)
+	require.NoError(t, err)
+	require.NoError(t, p.ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}),
+		"missing optional LoRA family must not be an extraction error")
+
+	m := ep.GetMetrics()
+	assert.Equal(t, 4, m.WaitingQueueSize, "WaitingQueueSize")
+	assert.Equal(t, 1, m.RunningRequestsSize, "RunningRequestsSize")
+	assert.InDelta(t, 0.2, m.KVCacheUsagePercent, 0.001, "KVCacheUsagePercent")
 }
 
 // TestMetricsExtractionDisabledSpecNoError verifies that when all metric specs are

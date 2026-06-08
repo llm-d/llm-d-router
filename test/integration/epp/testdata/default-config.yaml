@@ -14,7 +14,5 @@ schedulingProfiles:
       - pluginRef: prefix-cache-scorer
       - pluginRef: lora-affinity-scorer
 requestHandler:
-  parser:
-    pluginRef: openai-parser
-featureGates:
-  - enableLegacyMetrics
+  parsers:
+  - pluginRef: openai-parser

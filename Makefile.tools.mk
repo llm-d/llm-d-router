@@ -1,5 +1,9 @@
 ##@ Tool Checks
 
+.PHONY: check-all-tools
+check-all-tools: check-container-tool check-kubectl check-kustomize check-envsubst helm-install yq kubectl-validate ## Check and install all required tools
+	@echo "All tools are available and ready!"
+
 HELM_VERSION ?= v3.17.1
 KUBECTL_VALIDATE_VERSION ?= v0.0.4
 YQ_VERSION ?= v4.45.1

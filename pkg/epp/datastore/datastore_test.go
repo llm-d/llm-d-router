@@ -39,7 +39,6 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
@@ -51,9 +50,11 @@ import (
 // When returnNil is true, NewEndpoint returns nil (simulating a duplicate-start race).
 type mockEndpointFactory struct {
 	returnNil bool
+	mu        sync.Mutex
+	updates   []fwkdl.Endpoint
 }
 
-func (f *mockEndpointFactory) NewEndpoint(_ context.Context, meta *fwkdl.EndpointMetadata, _ datalayer.PoolInfo) fwkdl.Endpoint {
+func (f *mockEndpointFactory) NewEndpoint(_ context.Context, meta *fwkdl.EndpointMetadata) fwkdl.Endpoint {
 	if f.returnNil {
 		return nil
 	}
@@ -61,6 +62,18 @@ func (f *mockEndpointFactory) NewEndpoint(_ context.Context, meta *fwkdl.Endpoin
 }
 
 func (f *mockEndpointFactory) ReleaseEndpoint(_ fwkdl.Endpoint) {}
+
+func (f *mockEndpointFactory) UpdateEndpoint(_ context.Context, ep fwkdl.Endpoint) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updates = append(f.updates, ep)
+}
+
+func (f *mockEndpointFactory) updateEvents() []fwkdl.Endpoint {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fwkdl.Endpoint(nil), f.updates...)
+}
 
 func TestPoolGet_NoDeadlockWithConcurrentWrite(t *testing.T) {
 	pool := &datalayer.EndpointPool{
@@ -131,7 +144,6 @@ func TestPool(t *testing.T) {
 	for _, tt := range tests {
 		period := time.Second
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {
@@ -251,7 +263,6 @@ func TestObjective(t *testing.T) {
 	for _, test := range tests {
 		period := time.Second
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {
@@ -378,49 +389,43 @@ func TestMetrics(t *testing.T) {
 
 	for _, test := range tests {
 		period := time.Millisecond
-		// Create the datalayer factory with config inside t.Run to get access to t
-		var datalayerFactory datalayer.EndpointFactory
 		t.Run(test.name, func(t *testing.T) {
 			mockDS := &mocks.MetricsDataSource{}
 			mockDS.SetMetrics(test.metrics)
 			mockDS.SetErrors(test.err)
-			datalayerFactory = datalayer.NewTestRuntimeWithConfig(t, period, &datalayer.Config{
+			epf := datalayer.NewTestRuntimeWithConfig(t, period, &datalayer.Config{
 				Sources: []datalayer.DataSourceConfig{
 					{Plugin: mockDS},
 				},
 			})
-			backendFactory := backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{Res: test.metrics, Err: test.err}, period)
-			factories := []datalayer.EndpointFactory{backendFactory, datalayerFactory}
 
-			for _, epf := range factories {
-				ctx := t.Context()
-				// Set up the scheme.
-				scheme := runtime.NewScheme()
-				_ = clientgoscheme.AddToScheme(scheme)
-				fakeClient := fake.NewClientBuilder().
-					WithScheme(scheme).
-					Build()
-				ds := NewDatastore(ctx, epf, 0)
-				_ = ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(inferencePool))
-				for _, pod := range test.storePods {
-					ds.PodUpdateOrAddIfNotExist(ctx, pod)
-				}
-				time.Sleep(1 * time.Second) // Give some time for the metrics to be fetched.
-				if test.predict == nil {
-					test.predict = AllPodsPredicate
-				}
-				assert.EventuallyWithT(t, func(t *assert.CollectT) {
-					got := ds.PodList(test.predict)
-					metrics := make([]*fwkdl.Metrics, len(got))
-					for idx, one := range got {
-						metrics[idx] = one.GetMetrics()
-					}
-					diff := cmp.Diff(test.want, metrics, cmpopts.IgnoreFields(fwkdl.Metrics{}, "UpdateTime"), cmpopts.SortSlices(func(a, b *fwkdl.Metrics) bool {
-						return a.String() < b.String()
-					}))
-					assert.Equal(t, "", diff, "Unexpected diff (+got/-want)")
-				}, 5*time.Second, time.Millisecond)
+			ctx := t.Context()
+			// Set up the scheme.
+			scheme := runtime.NewScheme()
+			_ = clientgoscheme.AddToScheme(scheme)
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				Build()
+			ds := NewDatastore(ctx, epf, 0)
+			_ = ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(inferencePool))
+			for _, pod := range test.storePods {
+				ds.PodUpdateOrAddIfNotExist(ctx, pod)
 			}
+			time.Sleep(1 * time.Second) // Give some time for the metrics to be fetched.
+			if test.predict == nil {
+				test.predict = AllPodsPredicate
+			}
+			assert.EventuallyWithT(t, func(t *assert.CollectT) {
+				got := ds.PodList(test.predict)
+				metrics := make([]*fwkdl.Metrics, len(got))
+				for idx, one := range got {
+					metrics[idx] = one.GetMetrics()
+				}
+				diff := cmp.Diff(test.want, metrics, cmpopts.IgnoreFields(fwkdl.Metrics{}, "UpdateTime"), cmpopts.SortSlices(func(a, b *fwkdl.Metrics) bool {
+					return a.String() < b.String()
+				}))
+				assert.Equal(t, "", diff, "Unexpected diff (+got/-want)")
+			}, 5*time.Second, time.Millisecond)
 		})
 	}
 }
@@ -468,7 +473,6 @@ func TestPods(t *testing.T) {
 	for _, test := range tests {
 		period := time.Second
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {
@@ -550,7 +554,6 @@ func TestTargetPortsChange(t *testing.T) {
 	for _, test := range tests {
 		period := time.Second
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {
@@ -778,7 +781,6 @@ func TestEndpointMetadata(t *testing.T) {
 	for _, test := range tests {
 		period := time.Second
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {
@@ -923,7 +925,6 @@ func TestActivePortFiltering(t *testing.T) {
 	for _, test := range tests {
 		period := time.Second
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {
@@ -1076,7 +1077,6 @@ func TestActivePortEndpointRemoval(t *testing.T) {
 	for _, test := range tests {
 		period := time.Second
 		factories := []datalayer.EndpointFactory{
-			backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
 			datalayer.NewTestRuntime(t, period),
 		}
 		for _, epf := range factories {
@@ -1135,8 +1135,7 @@ func TestActivePortEndpointRemoval(t *testing.T) {
 func TestPodUpdateOrAddIfNotExist_ConcurrentPoolSet(t *testing.T) {
 	period := time.Second
 	factories := map[string]datalayer.EndpointFactory{
-		"Legacy PodMetricsFactory": backendmetrics.NewPodMetricsFactory(&backendmetrics.FakePodMetricsClient{}, period),
-		"Datalayer Runtime":        datalayer.NewTestRuntime(t, period),
+		"Datalayer Runtime": datalayer.NewTestRuntime(t, period),
 	}
 
 	for name, epf := range factories {
@@ -1377,6 +1376,39 @@ func TestEndpointUpsert_UpdateExisting(t *testing.T) {
 	eps := ds.PodList(AllPodsPredicate)
 	assert.Len(t, eps, 1)
 	assert.Equal(t, addr2, eps[0].GetMetadata().Address)
+}
+
+func TestEndpointUpsert_UpdateExistingNotifiesEndpointFactory(t *testing.T) {
+	const addr1, addr2 = "10.0.0.1", "10.0.0.2"
+	ctx := context.Background()
+	factory := &mockEndpointFactory{}
+	ds := NewDatastore(ctx, factory, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr1})
+	assert.Empty(t, factory.updateEvents())
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr2})
+
+	updates := factory.updateEvents()
+	assert.Len(t, updates, 1)
+	assert.Equal(t, addr2, updates[0].GetMetadata().Address)
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr2})
+	assert.Len(t, factory.updateEvents(), 1)
+}
+
+func TestEndpointUpsert_SemanticallyEqualMetadataDoesNotNotify(t *testing.T) {
+	const addr = "10.0.0.1"
+	ctx := context.Background()
+	factory := &mockEndpointFactory{}
+	ds := NewDatastore(ctx, factory, 0)
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Labels: nil})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Labels: map[string]string{}})
+
+	assert.Empty(t, factory.updateEvents())
 }
 
 func TestEndpointUpsert_NewEndpointFactoryReturnsNil(t *testing.T) {

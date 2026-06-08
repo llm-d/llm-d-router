@@ -149,7 +149,7 @@ func TestValidatePrediction_PrefillEndpointNeutralizeTPOT(t *testing.T) {
 	plCtx := &predictedLatencyCtx{
 		ttftSLO:                       100,
 		avgTPOTSLO:                    30,
-		promptText:                    "test",
+		inputTokenCount:               1,
 		prefixCacheScoresForEndpoints: map[string]float64{"prefill-pod": 0, "decode-pod": 0, "unlabeled-pod": 0},
 		predictionsForScheduling:      make(map[string]endpointPredictionResult),
 	}

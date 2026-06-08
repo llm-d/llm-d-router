@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"reflect"
 	"runtime/debug"
@@ -34,7 +35,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 var ErrExtractorTypeMismatch = errors.New("extractor type mismatch")
@@ -65,16 +66,22 @@ func NewHTTPDataSource[T any](scheme, path string, skipCertVerification bool,
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
 	}
+	cl := &client{
+		Client: http.Client{
+			Timeout:   timeout,
+			Transport: baseTransport,
+		},
+	}
 	if scheme == "https" {
 		httpsTransport := baseTransport.Clone()
 		httpsTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: skipCertVerification}
-		defaultClient.Transport = httpsTransport
+		cl.Transport = httpsTransport
 	}
 	return &HTTPDataSource[T]{
 		typedName: fwkplugin.TypedName{Type: pluginType, Name: pluginName},
 		scheme:    scheme,
 		path:      path,
-		client:    defaultClient,
+		client:    cl,
 		parser:    parser,
 	}, nil
 }
@@ -137,17 +144,13 @@ func (s *HTTPDataSource[T]) runExtractor(ctx context.Context, ext fwkdl.PollingE
 	extType := ext.TypedName().Type
 	defer func() {
 		if r := recover(); r != nil {
-			//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
-			metrics.DataLayerExtractErrorsTotal.WithLabelValues(srcType, extType).Inc()
-			metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(srcType, extType).Inc()
+			metrics.RecordDataLayerExtractError(srcType, extType)
 			logger.Error(fmt.Errorf("%v", r), "extractor panicked",
 				"source", s.typedName, "extractor", ext.TypedName(), "stack", string(debug.Stack()))
 		}
 	}()
 	if err := ext.Extract(ctx, in); err != nil {
-		//nolint:staticcheck // SA1019: Keep deprecated metric for backwards compatibility
-		metrics.DataLayerExtractErrorsTotal.WithLabelValues(srcType, extType).Inc()
-		metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(srcType, extType).Inc()
+		metrics.RecordDataLayerExtractError(srcType, extType)
 		logger.V(logging.DEBUG).Info("extract failed", "source", s.typedName, "extractor", ext.TypedName(), "err", err)
 	}
 }
