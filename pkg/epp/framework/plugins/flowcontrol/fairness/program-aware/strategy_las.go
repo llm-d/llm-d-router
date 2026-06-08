@@ -70,15 +70,6 @@ var attainedServiceTokens = prometheus.NewGaugeVec(
 	[]string{"program_id"},
 )
 
-var queueScore = prometheus.NewGaugeVec(
-	prometheus.GaugeOpts{
-		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-		Name:      "program_aware_las_queue_score",
-		Help:      metricsutil.HelpMsgWithStability("LAS scheduling score per program queue computed during Pick().", compbasemetrics.ALPHA),
-	},
-	[]string{"program_id"},
-)
-
 var _ Strategy = &LASStrategy{}
 
 type LASStrategy struct {
@@ -162,7 +153,6 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) flowcontrol.FlowQ
 		normService := 1 - rangeNormalize(e.service, minService, maxService)
 		normWait := rangeNormalize(e.headWaitMs, minWait, maxWait)
 		score := s.weightService*normService + s.weightHeadWait*normWait
-		queueScore.WithLabelValues(id).Set(score)
 		if score > bestScore {
 			bestScore = score
 			best = queues[id].Queue
@@ -189,9 +179,8 @@ func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 func (s *LASStrategy) EvictProgram(id string) {
 	s.state.Delete(id)
 	attainedServiceTokens.DeleteLabelValues(id)
-	queueScore.DeleteLabelValues(id)
 }
 
 func (s *LASStrategy) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{attainedServiceTokens, queueScore}
+	return []prometheus.Collector{attainedServiceTokens}
 }
