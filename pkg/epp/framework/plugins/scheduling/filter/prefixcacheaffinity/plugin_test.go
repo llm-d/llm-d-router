@@ -225,3 +225,37 @@ func TestFactory_InvalidExplorationProbability(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "explorationProbability must be in [0, 1]")
 }
+
+func TestFactory_InvalidPeakPrefillThroughput(t *testing.T) {
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"peakPrefillThroughput": -1}`)), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "peakPrefillThroughput must be >= 0")
+}
+
+// The throughput TTFT source needs a non-zero divisor: with the gate enabled
+// (maxTTFTPenaltyMs defaults to 5000) and useLatencyPredictor=false,
+// peakPrefillThroughput=0 must be rejected.
+func TestFactory_ThroughputModeRequiresPeakPrefillThroughput(t *testing.T) {
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"useLatencyPredictor": false, "peakPrefillThroughput": 0}`)), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "peakPrefillThroughput must be > 0 when useLatencyPredictor is false")
+}
+
+func TestFactory_ThroughputModeValid(t *testing.T) {
+	plugin, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"useLatencyPredictor": false, "peakPrefillThroughput": 1000}`)), nil)
+	assert.NoError(t, err)
+	p := plugin.(*Plugin)
+	assert.False(t, p.config.UseLatencyPredictor)
+	assert.Equal(t, float64(1000), p.config.PeakPrefillThroughput)
+}
+
+// peakPrefillThroughput=0 is valid as long as the throughput source is unused:
+// either the gate is disabled (maxTTFTPenaltyMs=0) or the latency predictor
+// supplies TTFT.
+func TestFactory_ZeroPeakPrefillThroughputAllowedWhenUnused(t *testing.T) {
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"maxTTFTPenaltyMs": 0, "useLatencyPredictor": false, "peakPrefillThroughput": 0}`)), nil)
+	assert.NoError(t, err, "throughput source unused when the gate is disabled")
+
+	_, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"useLatencyPredictor": true, "peakPrefillThroughput": 0}`)), nil)
+	assert.NoError(t, err, "throughput source unused when the latency predictor supplies TTFT")
+}
