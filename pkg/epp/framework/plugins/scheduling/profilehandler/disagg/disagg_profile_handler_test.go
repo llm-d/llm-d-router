@@ -800,7 +800,7 @@ func TestHandler_ProcessResults_EPD(t *testing.T) {
 			},
 		},
 		{
-			name: "encode ran but returned 0 endpoints → included in results",
+			name: "encode ran but returned 0 endpoints - included in results",
 			results: map[string]*scheduling.ProfileRunResult{
 				defaultDecodeProfile: makeProfileRunResult("pod1"),
 				defaultEncodeProfile: {TargetEndpoints: []scheduling.Endpoint{}},
