@@ -12,7 +12,7 @@ For each request, the plugin consumes `request.Body.TokenizedPrompt` (token IDs)
 - `autoTune` (bool, optional, default: `true`): Infer block size and LRU capacity from endpoint metrics when available.
 - `blockSizeTokens` (int, optional, default: `0`): Prefix block size in tokens. Used when `autoTune` is false or metrics are unavailable.
 - `maxPrefixBlocksToMatch` (int, optional, default: `0`): Maximum number of prefix blocks considered per request. `0` means unlimited.
-- `maxPrefixTokensToMatch` (int, optional, default: `0`): Alternative cap expressed in tokens instead of blocks. Takes precedence over `maxPrefixBlocksToMatch` when set.
+- `maxPrefixTokensToMatch` (int, optional, default: `131072`): Cap expressed in tokens instead of blocks (`maxBlocks = maxPrefixTokensToMatch / blockSizeTokens`). Takes precedence over `maxPrefixBlocksToMatch` when set (> 0); set to `0` to fall back to the block-based cap. The `131072` default (128K, the context window of large production models such as gpt-oss 120b) is a reasonable upper bound that covers the long-prompt use cases seen in production.
 - `lruCapacityPerServer` (int, optional, default: `0`): Default per-pod LRU index capacity when endpoint metrics are unavailable.
 - `blockSize` (int, optional): Deprecated — character-based block size. Use `blockSizeTokens` instead.
 

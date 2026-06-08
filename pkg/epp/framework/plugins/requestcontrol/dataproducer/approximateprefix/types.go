@@ -98,6 +98,12 @@ const (
 	// matching process. Use a large value if most requests are long to increase the matching accuracy.
 	defaultMaxPrefixBlocks = 256
 
+	// defaultMaxPrefixTokens caps prefix matching at the context window of large
+	// production models (128K tokens, e.g. gpt-oss 120b), a reasonable upper bound
+	// that covers the long-prompt use cases seen in production. It takes precedence
+	// over defaultMaxPrefixBlocks: maxBlocks = defaultMaxPrefixTokens / blockSizeTokens.
+	defaultMaxPrefixTokens = 131072
+
 	// defaultLRUCapacityPerServer is the default capacity of the LRU indexer per server.
 	// The indexer is an approximation to the actual prefix LRU cache state on the model servers per server (pod).
 	// A small capacity ensures a high accuracy of cache hit on the model server, but it will
@@ -135,5 +141,6 @@ var defaultConfig = config{
 	BlockSize:              0,
 	BlockSizeTokens:        defaultBlockSizeTokens,
 	MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+	MaxPrefixTokensToMatch: defaultMaxPrefixTokens,
 	LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 }
