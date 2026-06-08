@@ -421,27 +421,29 @@ func BenchmarkFlowController_FullPathStress(b *testing.B) {
 			reqID := fmt.Sprintf("req-%d", id)
 			priority := int(id) % numPriorities
 
-			infReq := &scheduling.InferenceRequest{
-				RequestID: reqID,
-				Body:      &requesthandling.InferenceRequestBody{TokenizedPrompt: &requesthandling.TokenizedPrompt{TokenIDs: benchTokenIDs}},
-			}
-			schedResult := &scheduling.SchedulingResult{ProfileResults: profileResults}
-
-			h.producer.PreRequest(ctx, infReq, schedResult)
-
+			// 1. Admission: FlowController gates the request.
 			fcReq := &benchRequest{
 				key:      flowcontrol.FlowKey{ID: reqID, Priority: priority},
 				byteSize: 512,
 			}
 			outcome, _ := h.fc.EnqueueAndWait(ctx, fcReq)
 
-			infReq.SchedulingResult = schedResult
-			h.producer.ResponseBody(ctx, infReq, sosResp, h.epMeta)
-			h.producer.ResponseBody(ctx, infReq, eosResp, h.epMeta)
-
 			if outcome != types.QueueOutcomeDispatched {
 				b.Fatalf("request %s was not dispatched: %v", reqID, outcome)
 			}
+
+			// 2. Post-scheduling: producer tracks the request on the endpoint.
+			infReq := &scheduling.InferenceRequest{
+				RequestID: reqID,
+				Body:      &requesthandling.InferenceRequestBody{TokenizedPrompt: &requesthandling.TokenizedPrompt{TokenIDs: benchTokenIDs}},
+			}
+			schedResult := &scheduling.SchedulingResult{ProfileResults: profileResults}
+			h.producer.PreRequest(ctx, infReq, schedResult)
+
+			// 3. Response lifecycle: release counters.
+			infReq.SchedulingResult = schedResult
+			h.producer.ResponseBody(ctx, infReq, sosResp, h.epMeta)
+			h.producer.ResponseBody(ctx, infReq, eosResp, h.epMeta)
 		}
 	})
 
