@@ -14,6 +14,7 @@ import (
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 func decoder(s string) *json.Decoder { return json.NewDecoder(strings.NewReader(s)) }
@@ -131,9 +132,11 @@ func TestPreRequest_NoFairnessID_FallsBackToDefault(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 	p.PreRequest(context.Background(), req, nil)
 
-	// Default ID gets the entry; the explicit "alpha" key should be untouched.
-	_, alphaExists := p.programMetrics.Load("alpha")
-	assert.False(t, alphaExists)
+	got, ok := p.programMetrics.Load(metadata.DefaultFairnessID)
+	require.True(t, ok, "default fairness ID entry should be created")
+	m, ok := got.(*ProgramMetrics)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), m.DispatchedCount())
 }
 
 func TestResponseBody_FinalChunkOnly(t *testing.T) {
