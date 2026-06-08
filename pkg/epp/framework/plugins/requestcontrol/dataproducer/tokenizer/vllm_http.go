@@ -281,7 +281,6 @@ func toChatContent(c tokenizerTypes.Content) chatContent {
 	return chatContent{Parts: parts}
 }
 
-
 // renderResponse is the subset of vLLM's GenerateRequest we consume.
 type renderResponse struct {
 	TokenIDs []uint32          `json:"token_ids"`
