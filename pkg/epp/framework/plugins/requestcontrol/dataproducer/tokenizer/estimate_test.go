@@ -138,9 +138,10 @@ func TestEstimateBackend_CompletionsDeterministic(t *testing.T) {
 	}
 }
 
-// pngBase64DataURL is a 64x32 RGBA PNG, yielding 64*32/imageTokenFactor = 2
-// placeholder tokens under the dynamic estimator.
-const pngBase64DataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAARUlEQVR4nOzP0QnAUAzDwBSy/8zlTSECdxj/a2fmu7x9d5mAmoCagJqAmoCagJqAmoCagJqAmoCagJqAmoCagNofAAD//57WAN8yR4QZAAAAAElFTkSuQmCC"
+// pngBase64Raw is a 64x32 RGBA PNG (bare base64 payload), yielding
+// 64*32/imageTokenFactor = 2 placeholder tokens under the dynamic estimator.
+const pngBase64Raw = "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAARUlEQVR4nOzP0QnAUAzDwBSy/8zlTSECdxj/a2fmu7x9d5mAmoCagJqAmoCagJqAmoCagJqAmoCagJqAmoCagNofAAD//57WAN8yR4QZAAAAAElFTkSuQmCC"
+const pngBase64DataURL = "data:image/png;base64," + pngBase64Raw
 
 // TestEstimateBackend_ChatImageFeature asserts a chat image emits a multimodal
 // feature with the image modality and the URL content hash, occupies more than
@@ -264,6 +265,104 @@ func TestImageEstimator_CustomDefaultResolution(t *testing.T) {
 	}
 	if got, want := tp.MultiModalFeatures[0].Length, (1024*1024)/imageTokenFactor; got != want {
 		t.Errorf("custom default-resolution length: got %d, want %d", got, want)
+	}
+}
+
+// TestEstimateBackend_MessagesImageFeature asserts an Anthropic messages image
+// emits a multimodal feature with image modality, a content-derived hash, and
+// span inside the token stream. The base64 source must hash by its raw payload.
+func TestEstimateBackend_MessagesImageFeature(t *testing.T) {
+	body := &fwkrh.InferenceRequestBody{
+		Messages: &fwkrh.MessagesRequest{
+			Messages: []fwkrh.AnthropicMessage{{
+				Role: "user",
+				Content: fwkrh.AnthropicContent{Structured: []fwkrh.AnthropicContentBlock{
+					{Type: "text", Text: "describe this"},
+					{Type: "image", Source: &fwkrh.AnthropicImageSource{
+						Type: "base64", MediaType: "image/png", Data: pngBase64Raw,
+					}},
+				}},
+			}},
+		},
+	}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if len(tp.MultiModalFeatures) != 1 {
+		t.Fatalf("got %d features, want 1", len(tp.MultiModalFeatures))
+	}
+	f := tp.MultiModalFeatures[0]
+	if f.Modality != fwkrh.ModalityImage {
+		t.Errorf("modality: got %q, want %q", f.Modality, fwkrh.ModalityImage)
+	}
+	if want := strconv.FormatUint(xxhash.Sum64String(pngBase64Raw), 16); f.Hash != want {
+		t.Errorf("hash: got %q, want %q (base64 source must hash by its raw payload)", f.Hash, want)
+	}
+	if f.Length <= 1 {
+		t.Errorf("image length: got %d, want > 1 (placeholder weighting)", f.Length)
+	}
+	if f.Offset < 0 || f.Offset+f.Length > len(tp.TokenIDs) {
+		t.Errorf("feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tp.TokenIDs))
+	}
+}
+
+// TestEstimateBackend_MessagesURLImageKey asserts a url-typed source is hashed
+// by its URL unchanged (no synthesized data-URL prefix).
+func TestEstimateBackend_MessagesURLImageKey(t *testing.T) {
+	const url = "https://example.com/a.png"
+	body := &fwkrh.InferenceRequestBody{
+		Messages: &fwkrh.MessagesRequest{
+			Messages: []fwkrh.AnthropicMessage{{
+				Role: "user",
+				Content: fwkrh.AnthropicContent{Structured: []fwkrh.AnthropicContentBlock{
+					{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "url", URL: url}},
+				}},
+			}},
+		},
+	}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if len(tp.MultiModalFeatures) != 1 {
+		t.Fatalf("got %d features, want 1", len(tp.MultiModalFeatures))
+	}
+	if want := strconv.FormatUint(xxhash.Sum64String(url), 16); tp.MultiModalFeatures[0].Hash != want {
+		t.Errorf("hash: got %q, want %q", tp.MultiModalFeatures[0].Hash, want)
+	}
+}
+
+// TestEstimateBackend_MessagesDeterministic asserts identical requests produce
+// identical tokens and that changing the system prompt changes the stream.
+// CacheSalt is intentionally NOT tested -- the approximateprefix layer mixes it
+// into the seed, not this estimator.
+func TestEstimateBackend_MessagesDeterministic(t *testing.T) {
+	build := func(system, userText string) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{
+			System: fwkrh.AnthropicContent{Raw: system},
+			Messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{Raw: userText}},
+			},
+		}}
+	}
+	a, err := estimateBackend{}.produce(context.Background(), build("you are helpful", "hello world"))
+	if err != nil {
+		t.Fatalf("produce a: %v", err)
+	}
+	b, err := estimateBackend{}.produce(context.Background(), build("you are helpful", "hello world"))
+	if err != nil {
+		t.Fatalf("produce b: %v", err)
+	}
+	if hashTokens(a.TokenIDs) != hashTokens(b.TokenIDs) {
+		t.Error("identical messages requests produced different tokens")
+	}
+	c, err := estimateBackend{}.produce(context.Background(), build("you are concise", "hello world"))
+	if err != nil {
+		t.Fatalf("produce c: %v", err)
+	}
+	if hashTokens(a.TokenIDs) == hashTokens(c.TokenIDs) {
+		t.Error("different system prompts produced identical tokens")
 	}
 }
 
