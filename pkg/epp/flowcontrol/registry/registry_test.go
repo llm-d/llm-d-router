@@ -229,6 +229,22 @@ func TestFlowRegistry_Stats(t *testing.T) {
 	globalStats := h.fr.Stats()
 	assert.Equal(t, uint64(2), globalStats.TotalLen, "Global TotalLen should be the sum of all items")
 	assert.Equal(t, uint64(40), globalStats.TotalByteSize, "Global TotalByteSize should be the sum of all item sizes")
+
+	// Verify per-band stats are correctly propagated, not just global totals.
+	highBandStats, ok := globalStats.PerPriorityBandStats[highPriority]
+	require.True(t, ok, "PerPriorityBandStats should contain the high-priority band")
+	assert.Equal(t, uint64(1), highBandStats.Len,
+		"High-priority band should track 1 item")
+	assert.Equal(t, uint64(10), highBandStats.ByteSize,
+		"High-priority band should track 10 bytes")
+
+	lowBandStats, ok := globalStats.PerPriorityBandStats[lowPriority]
+	require.True(t, ok, "PerPriorityBandStats should contain the low-priority band")
+	assert.Equal(t, uint64(1), lowBandStats.Len,
+		"Low-priority band should track 1 item")
+	assert.Equal(t, uint64(30), lowBandStats.ByteSize,
+		"Low-priority band should track 30 bytes")
+
 }
 
 // --- Garbage Collection Tests ---
