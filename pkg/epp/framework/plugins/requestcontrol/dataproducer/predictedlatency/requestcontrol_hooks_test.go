@@ -32,6 +32,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -80,7 +81,7 @@ func TestNewPredictedLatencyContext(t *testing.T) {
 
 	assert.NotNil(t, ctx)
 	assert.Equal(t, *request, ctx.schedulingRequest)
-	assert.Equal(t, "test prompt", ctx.promptText)
+	assert.Equal(t, 2, ctx.inputTokenCount)
 	assert.NotNil(t, ctx.lastSeenMetrics)
 	assert.NotNil(t, ctx.prefixCacheScoresForEndpoints)
 	assert.NotNil(t, ctx.predictionsForScheduling)
@@ -96,7 +97,7 @@ func TestNewPredictedLatencyContext_NilBody(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
-	assert.Empty(t, ctx.promptText)
+	assert.Equal(t, 0, ctx.inputTokenCount)
 }
 
 func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
@@ -104,7 +105,18 @@ func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
-	assert.Equal(t, "You are a helpful assistant. Tell me a joke. ", ctx.promptText)
+	assert.Equal(t, 8, ctx.inputTokenCount)
+}
+
+func TestNewPredictedLatencyContext_GenerateUsesTokenIDCount(t *testing.T) {
+	request := createTestInferenceRequestWithBody("test-generate", 1.0, 0.05, &fwkrh.InferenceRequestBody{
+		Generate:        &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5}},
+		TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, 5)},
+	})
+	ctx := newPredictedLatencyContext(request)
+
+	assert.NotNil(t, ctx)
+	assert.Equal(t, 5, ctx.inputTokenCount)
 }
 
 func TestPredictedLatency_SetAndGetSLOContext(t *testing.T) {
@@ -911,7 +923,7 @@ func TestPredictedLatencyContext_Fields(t *testing.T) {
 	assert.Nil(t, ctx.targetMetadata)
 	assert.Nil(t, ctx.schedulingResult)
 	assert.Nil(t, ctx.decodeTokenSampler)
-	assert.Equal(t, "test prompt", ctx.promptText)
+	assert.Equal(t, 2, ctx.inputTokenCount)
 }
 
 func TestPredictedLatencyContext_UpdateMetrics(t *testing.T) {

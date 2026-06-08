@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -51,11 +50,11 @@ func TestBulkPredictWithMetrics(t *testing.T) {
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod2"},
 		},
 	}
-	prompts := []string{"prompt1", "prompt2"}
+	inputTokenLengths := []int{1, 1}
 	generatedTokenCounts := []int{1, 1}
 	prefixCacheScores := []float64{0.0, 0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 2)
@@ -78,11 +77,11 @@ func TestBulkPredictWithMetrics_Error(t *testing.T) {
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
-	prompts := []string{"prompt1"}
+	inputTokenLengths := []int{1}
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)
@@ -96,11 +95,11 @@ func TestBulkPredictWithMetrics_InputMismatch(t *testing.T) {
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
-	prompts := []string{"prompt1", "prompt2"} // Mismatch length
+	inputTokenLengths := []int{1, 1} // Mismatch length
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)
@@ -122,7 +121,7 @@ func TestBulkPredictWithMetrics_WithPredictedLatencyCtx(t *testing.T) {
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
-	prompts := []string{"prompt1"}
+	inputTokenLengths := []int{1}
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
@@ -133,7 +132,7 @@ func TestBulkPredictWithMetrics_WithPredictedLatencyCtx(t *testing.T) {
 		incomingModelName: "incoming-model",
 	}
 
-	results, err := bulkPredictWithMetrics(context.Background(), plCtx, mockPredictor, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", plCtx, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 1)
@@ -141,7 +140,7 @@ func TestBulkPredictWithMetrics_WithPredictedLatencyCtx(t *testing.T) {
 	assert.Equal(t, 0.03, results[0].TPOT)
 }
 
-func TestBulkPredictWithMetrics_ChatCompletionsPrompt(t *testing.T) {
+func TestBulkPredictWithMetrics_ChatCompletionsInputTokenLength(t *testing.T) {
 	mp := &mockPredictor{
 		predictions: map[string]*latencypredictor.PredictionResponse{
 			"0.5": {TTFT: 0.5, TPOT: 0.03},
@@ -153,18 +152,11 @@ func TestBulkPredictWithMetrics_ChatCompletionsPrompt(t *testing.T) {
 		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"}},
 	}
 
-	chatBody := &fwkrh.InferenceRequestBody{
-		ChatCompletions: &fwkrh.ChatCompletionsRequest{
-			Messages: []fwkrh.Message{
-				{Role: "user", Content: fwkrh.Content{Raw: "Hello world"}},
-			},
-		},
-	}
-	prompts := []string{chatBody.PromptText()}
+	inputTokenLengths := []int{2}
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), nil, mp, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, []int64{0})
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mp, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, []int64{0})
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 1)
@@ -179,11 +171,11 @@ func TestBulkPredictWithMetrics_NilMetricsState(t *testing.T) {
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
-	prompts := []string{"prompt1"}
+	inputTokenLengths := []int{1}
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), nil, mockPredictor, metricsStates, "", pods, prompts, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)

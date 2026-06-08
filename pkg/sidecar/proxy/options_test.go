@@ -62,6 +62,7 @@ inference-pool: "file-ns/inference-pool-file"
 pool-group: "pool-group-file"
 max-idle-conns-per-host: 300
 decode-chunk-size: 128
+tracing: true
 `, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector))
 }
 
@@ -103,7 +104,8 @@ func TestSidecarConfiguration(t *testing.T) {
 		inference-pool: inline-ns/inference-pool-inline,
 		pool-group: pool-group-inline,
 		max-idle-conns-per-host: 200,
-		decode-chunk-size: 256
+		decode-chunk-size: 256,
+		tracing: true
 	}`, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector)
 	invalidInlineYAML := "{port: 8200, invalid-yaml}"
 
@@ -156,6 +158,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.PoolGroup = "pool-group-inline"
 
 				o.DecodeChunkSize = 256
+				o.Tracing = true
 
 				o.inlineConfiguration = inlineYAML
 				o.fileConfiguration = ""
@@ -198,6 +201,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.PoolGroup = "pool-group-file"
 
 				o.DecodeChunkSize = 128
+				o.Tracing = true
 
 				o.inlineConfiguration = ""
 				o.fileConfiguration = validYAMLPath
@@ -253,6 +257,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.PoolGroup = "pool-group"
 
 				o.DecodeChunkSize = 256
+				o.Tracing = true
 
 				o.inlineConfiguration = inlineYAML
 				o.fileConfiguration = ""
@@ -309,6 +314,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.PoolGroup = "pool-group"
 
 				o.DecodeChunkSize = 128
+				o.Tracing = true
 
 				o.inlineConfiguration = ""
 				o.fileConfiguration = validYAMLPath
@@ -431,11 +437,12 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	assertEqual(secureServing, expected.SecureServing, actual.SecureServing)
 
 	assertEqual(inferencePool, expected.inferencePool, actual.inferencePool)
-	assertEqual(inferencePoolNamespace, expected.InferencePoolNamespace, actual.InferencePoolNamespace)
-	assertEqual(inferencePoolName, expected.InferencePoolName, actual.InferencePoolName)
+	assertEqual("InferencePoolNamespace", expected.InferencePoolNamespace, actual.InferencePoolNamespace)
+	assertEqual("InferencePoolName", expected.InferencePoolName, actual.InferencePoolName)
 	assertEqual(poolGroup, expected.PoolGroup, actual.PoolGroup)
 
 	assertEqual(decodeChunkSize, expected.DecodeChunkSize, actual.DecodeChunkSize)
+	assertEqual(tracingFlag, expected.Tracing, actual.Tracing)
 
 	assertEqual(inlineConfiguration, expected.inlineConfiguration, actual.inlineConfiguration)
 	assertEqual(configurationFile, expected.fileConfiguration, actual.fileConfiguration)
@@ -531,12 +538,13 @@ func compareSlices(expected, got []string) (bool, []string, []string) {
 
 func TestNewOptionsWithEnvVars(t *testing.T) {
 	// Set environment variables - t.Setenv automatically handles cleanup
-	t.Setenv("INFERENCE_POOL_NAMESPACE", "test-namespace")
-	t.Setenv("INFERENCE_POOL_NAME", "test-pool")
+	t.Setenv("INFERENCE_POOL", "test-namespace/test-pool")
 	t.Setenv("ENABLE_PREFILLER_SAMPLING", "true")
 
 	opts := NewOptions()
+	require.NoError(t, opts.Complete())
 
+	require.False(t, opts.Tracing, "Expected Tracing to default to false")
 	if opts.InferencePoolNamespace != "test-namespace" {
 		t.Errorf("Expected InferencePoolNamespace to be 'test-namespace', got '%s'", opts.InferencePoolNamespace)
 	}

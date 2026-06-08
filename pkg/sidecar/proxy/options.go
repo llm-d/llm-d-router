@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"sigs.k8s.io/yaml"
 )
 
@@ -58,6 +59,7 @@ const (
 	decodeChunkSize         = "decode-chunk-size"
 	inlineConfiguration     = "configuration"
 	configurationFile       = "configuration-file"
+	tracingFlag             = "tracing"
 
 	// Deprecated flags
 	connector                      = "connector"
@@ -66,13 +68,9 @@ const (
 	encoderUseTLS                  = "UseTLSForEncoder"
 	prefillerTLSInsecureSkipVerify = "prefiller-tls-insecure-skip-verify"
 	decoderTLSInsecureSkipVerify   = "decoder-tls-insecure-skip-verify"
-	inferencePoolNamespace         = "inference-pool-namespace"
-	inferencePoolName              = "inference-pool-name"
 
 	// Environment variables
 	envInferencePool           = "INFERENCE_POOL"
-	envInferencePoolNamespace  = "INFERENCE_POOL_NAMESPACE"
-	envInferencePoolName       = "INFERENCE_POOL_NAME"
 	envEnablePrefillerSampling = "ENABLE_PREFILLER_SAMPLING"
 
 	// Defaults
@@ -110,6 +108,7 @@ type yamlConfiguration struct {
 	PrefillMaxRetries              *int     `json:"prefill-max-retries,omitempty"`
 	PrefillRetryBackoff            string   `json:"prefill-retry-backoff,omitempty"`
 	DecodeChunkSize                int      `json:"decode-chunk-size,omitempty"`
+	Tracing                        *bool    `json:"tracing,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -184,10 +183,9 @@ func NewOptions() *Options {
 			MaxIdleConnsPerHost:     defaultMaxIdleConnsPerHost,
 			PrefillMaxRetries:       0,
 			PrefillRetryBackoff:     200 * time.Millisecond,
-			PoolGroup:               DefaultPoolGroup,
-			InferencePoolNamespace:  os.Getenv(envInferencePoolNamespace),
-			InferencePoolName:       os.Getenv(envInferencePoolName),
+			PoolGroup:               routing.InferencePoolAPIGroup,
 			DecodeChunkSize:         0,
+			Tracing:                 false,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
@@ -219,6 +217,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&opts.EnablePrefillerSampling, enablePrefillerSampling, opts.EnablePrefillerSampling, "if true, the target prefill instance will be selected randomly from among the provided prefill host values")
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
+	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
 
 	fs.StringSliceVar(&opts.enableTLS, enableTLS, opts.enableTLS, "stages to enable TLS for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
 	fs.StringSliceVar(&opts.tlsInsecureSkipVerify, tlsInsecureSkipVerify, opts.tlsInsecureSkipVerify, "stages to skip TLS verification for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
@@ -237,10 +236,6 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&opts.decoderInsecureSkipVerify, decoderTLSInsecureSkipVerify, opts.decoderInsecureSkipVerify, "Deprecated: use --tls-insecure-skip-verify=decoder instead. Skip TLS verification for requests to decoder.")
 	_ = fs.MarkDeprecated(decoderTLSInsecureSkipVerify, "use --tls-insecure-skip-verify=decoder instead")
 
-	fs.StringVar(&opts.InferencePoolNamespace, inferencePoolNamespace, opts.InferencePoolNamespace, "Deprecated: use --inference-pool instead. The Kubernetes namespace for the InferencePool (defaults to INFERENCE_POOL_NAMESPACE env var)")
-	_ = fs.MarkDeprecated(inferencePoolNamespace, "use --inference-pool instead")
-	fs.StringVar(&opts.InferencePoolName, inferencePoolName, opts.InferencePoolName, "Deprecated: use --inference-pool instead. The specific InferencePool name (defaults to INFERENCE_POOL_NAME env var)")
-	_ = fs.MarkDeprecated(inferencePoolName, "use --inference-pool instead")
 	fs.IntVar(&opts.MaxIdleConnsPerHost, "max-idle-conns-per-host", opts.MaxIdleConnsPerHost, "max idle keep-alive connections per host for reverse proxy transports; set to at least the expected concurrency")
 	fs.IntVar(&opts.PrefillMaxRetries, prefillMaxRetries, opts.PrefillMaxRetries, "max retry attempts when a prefill request fails with a 5xx error; 0 means no retries (default)")
 	fs.DurationVar(&opts.PrefillRetryBackoff, prefillRetryBackoff, opts.PrefillRetryBackoff, "delay between prefill retry attempts")
@@ -272,7 +267,7 @@ func (opts *Options) Complete() error {
 		opts.KVConnector = opts.connector
 	}
 
-	// Parse inferencePool field (namespace/name or just name), overriding deprecated separate flags
+	// Parse inferencePool field (namespace/name or just name) into Config.
 	if opts.inferencePool != "" {
 		parts := strings.SplitN(opts.inferencePool, "/", 2)
 		if len(parts) == 2 {
@@ -370,11 +365,8 @@ func (opts *Options) Validate() error {
 
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
-		if opts.InferencePoolNamespace == "" {
-			return errors.New("--inference-pool, --inference-pool-namespace, INFERENCE_POOL, or INFERENCE_POOL_NAMESPACE environment variable is required when --enable-ssrf-protection is true")
-		}
-		if opts.InferencePoolName == "" {
-			return errors.New("--inference-pool, --inference-pool-name, INFERENCE_POOL, or INFERENCE_POOL_NAME environment variable is required when --enable-ssrf-protection is true")
+		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {
+			return errors.New("--inference-pool flag or INFERENCE_POOL environment variable is required when --enable-ssrf-protection is true")
 		}
 	}
 
@@ -533,6 +525,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.DecodeChunkSize != 0 && !opts.isFlagSet(decodeChunkSize) {
 		opts.DecodeChunkSize = cfg.DecodeChunkSize
+	}
+	if cfg.Tracing != nil && !opts.isFlagSet(tracingFlag) {
+		opts.Tracing = *cfg.Tracing
 	}
 }
 

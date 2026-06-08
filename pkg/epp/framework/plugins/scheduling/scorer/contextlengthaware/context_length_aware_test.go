@@ -273,9 +273,6 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 		RequestID:   "test-request",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: "some prompt text"},
-			},
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs},
 		},
 	}
@@ -285,12 +282,10 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
 }
 
-func TestContextLengthAwareFallbackWithoutTokenizedPrompt(t *testing.T) {
+func TestContextLengthAwareNilTokenizedPromptIsZero(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
-	// Without TokenizedPrompt, falls back to char estimation (len * 0.25)
-	prompt := "Hello, how are you?" // 19 chars => ~4 tokens estimated
-
+	// Without TokenizedPrompt the context length is 0 (unknown); no protocol structs are read.
 	endpoints := []scheduling.Endpoint{
 		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "matching-range"},
 			"10.0.0.1",
@@ -304,16 +299,12 @@ func TestContextLengthAwareFallbackWithoutTokenizedPrompt(t *testing.T) {
 		Label:           DefaultContextLengthLabel,
 		EnableFiltering: true,
 	}
-	plugin := NewContextLengthAware("test-fallback", params)
+	plugin := NewContextLengthAware("test-no-tokens", params)
 
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-request",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: prompt},
-			},
-		},
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
 
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)

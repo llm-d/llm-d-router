@@ -7,6 +7,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
@@ -66,39 +67,56 @@ func profileNames(m map[string]scheduling.SchedulerProfile) []string {
 	return out
 }
 
-// completionsRequest builds a text-only InferenceRequest.
+// completionsRequest builds a text-only InferenceRequest. The tokenized prompt
+// carries len(prompt)/averageCharactersPerToken token IDs, which the decider reads
+// as the input token count.
 func completionsRequest(prompt string) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+			Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)},
 		},
 	}
 }
 
-// chatRequest builds a chat-completions InferenceRequest with optional multimodal blocks.
+// chatRequest builds a chat-completions InferenceRequest, populating the
+// tokenized prompt with one multimodal feature per requested modality so
+// that multimodal detection (which reads TokenizedPrompt) is exercised.
 func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest {
 	blocks := []fwkrh.ContentBlock{{Type: "text", Text: "describe this"}}
+	var features []fwkrh.MultiModalFeature
 	if hasImage {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/img.jpg"}})
+		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
 	}
 	if hasVideo {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "video_url"})
+		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
 	}
 	if hasAudio {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "input_audio"})
+		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
 	}
-	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: blocks}}},
-			},
+	body := &fwkrh.InferenceRequestBody{
+		ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: blocks}}},
 		},
 	}
+	if len(features) > 0 {
+		body.TokenizedPrompt = &fwkrh.TokenizedPrompt{MultiModalFeatures: features}
+	}
+	return &scheduling.InferenceRequest{Body: body}
 }
 
-// withPrompt adds a completions body to a chat request so the PD decider can estimate tokens.
+// withPrompt adds a completions body to a chat request and sets the input token
+// count (len(prompt)/averageCharactersPerToken) on the tokenized prompt, preserving
+// any existing multimodal features.
 func withPrompt(req *scheduling.InferenceRequest, prompt string) *scheduling.InferenceRequest {
 	req.Body.Completions = &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}}
+	if req.Body.TokenizedPrompt == nil {
+		req.Body.TokenizedPrompt = &fwkrh.TokenizedPrompt{}
+	}
+	req.Body.TokenizedPrompt.TokenIDs = make([]uint32, len(prompt)/averageCharactersPerToken)
 	return req
 }
 
@@ -116,7 +134,7 @@ func injectPrefixCache(profileResults map[string]*scheduling.ProfileRunResult, c
 
 // handleWithDeciders creates a plugin handle pre-loaded with all decider types.
 func handleWithDeciders(ctx context.Context) plugin.Handle {
-	h := plugin.NewEppHandle(ctx, nil)
+	h := plugin.NewEppHandle(ctx, nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
 	p1, _ := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 4})
 	h.AddPlugin(PrefixBasedPDDeciderPluginType, p1)
 	h.AddPlugin(AlwaysDisaggPDDeciderPluginType, newAlwaysDisaggPDDecider())
@@ -144,11 +162,21 @@ func TestHasMultimodalContent(t *testing.T) {
 	}{
 		{"nil request", nil, false},
 		{"nil body", &scheduling.InferenceRequest{Body: nil}, false},
-		{"nil chat completions", &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}, false},
+		{"nil tokenized prompt", &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}, false},
+		{"empty multimodal features", &scheduling.InferenceRequest{
+			Body: &fwkrh.InferenceRequestBody{TokenizedPrompt: &fwkrh.TokenizedPrompt{}},
+		}, false},
 		{"text only", chatRequest(false, false, false), false},
 		{"image", chatRequest(true, false, false), true},
 		{"video", chatRequest(false, true, false), true},
 		{"audio", chatRequest(false, false, true), true},
+		{"feature present", &scheduling.InferenceRequest{
+			Body: &fwkrh.InferenceRequestBody{
+				TokenizedPrompt: &fwkrh.TokenizedPrompt{
+					MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage}},
+				},
+			},
+		}, true},
 		{"all types", chatRequest(true, true, true), true},
 	}
 	for _, tt := range tests {
@@ -407,7 +435,7 @@ func TestHandler_Pick_PD(t *testing.T) {
 			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
 				decider, nil)
 
-			inputTokens := len(req.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
+			inputTokens := len(req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 			injectPrefixCache(tt.profileResults, tt.cachedTokens, inputTokens)
 
 			got := h.Pick(ctx, req, profiles, tt.profileResults)
@@ -466,7 +494,7 @@ func TestHandler_Pick_PD_Series(t *testing.T) {
 				want         []string
 			}{
 				{short, 0, []string{defaultPrefillProfile}},
-				{short, len(short.Body.Completions.Prompt.Raw) / AverageCharactersPerToken, []string{}},
+				{short, len(short.Body.Completions.Prompt.Raw) / averageCharactersPerToken, []string{}},
 			},
 		},
 		{
@@ -478,7 +506,7 @@ func TestHandler_Pick_PD_Series(t *testing.T) {
 				want         []string
 			}{
 				{short, 0, []string{defaultPrefillProfile}},
-				{long, len(short.Body.Completions.Prompt.Raw) / AverageCharactersPerToken, []string{defaultPrefillProfile}},
+				{long, len(short.Body.Completions.Prompt.Raw) / averageCharactersPerToken, []string{defaultPrefillProfile}},
 			},
 		},
 	}
@@ -495,7 +523,7 @@ func TestHandler_Pick_PD_Series(t *testing.T) {
 				results := map[string]*scheduling.ProfileRunResult{
 					defaultDecodeProfile: makeProfileRunResult("pod1"),
 				}
-				inputTokens := len(step.req.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
+				inputTokens := len(step.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 				injectPrefixCache(results, step.cachedTokens, inputTokens)
 				got := h.Pick(ctx, step.req, profiles, results)
 				assert.ElementsMatch(t, step.want, profileNames(got))
@@ -913,10 +941,10 @@ func TestHandler_Pick_EPD_Full(t *testing.T) {
 
 			inputTokens := 0
 			if tt.req.Body.Completions != nil {
-				inputTokens = len(tt.req.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
+				inputTokens = len(tt.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 			} else if tt.req.Body.ChatCompletions != nil {
 				b, _ := json.Marshal(tt.req.Body.ChatCompletions.Messages)
-				inputTokens = len(b) / AverageCharactersPerToken
+				inputTokens = len(b) / averageCharactersPerToken
 			}
 			injectPrefixCache(tt.results, tt.cachedTokens, inputTokens)
 
@@ -960,7 +988,7 @@ func TestHandler_Pick_EPD_Full_EncodeDecider(t *testing.T) {
 				defaultDecodeProfile: makeProfileRunResult("pod1"),
 			}
 
-			inputTokens := len(testLongPrompt) / AverageCharactersPerToken
+			inputTokens := len(testLongPrompt) / averageCharactersPerToken
 			injectPrefixCache(results, 0, inputTokens)
 
 			got := h.Pick(ctx, multimodalLong, profiles, results)
@@ -1139,7 +1167,7 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 
 			// Inject prefix cache if needed for PD decider
 			if tt.req.Body.Completions != nil {
-				inputTokens := len(tt.req.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
+				inputTokens := len(tt.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 				injectPrefixCache(tt.results, 0, inputTokens)
 			}
 

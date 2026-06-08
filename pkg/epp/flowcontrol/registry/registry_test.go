@@ -62,7 +62,7 @@ func newRegistryTestHarness(t *testing.T, opts harnessOptions) *registryTestHarn
 		cfg = opts.config.Clone()
 	} else {
 		cfg, err = NewConfig(
-			newTestPluginsHandle(t),
+			newTestPriorityBandPolicyDefaults(),
 			WithFlowGCTimeout(5*time.Minute),
 			WithPriorityBand(&PriorityBandConfig{Priority: highPriority}),
 			WithPriorityBand(&PriorityBandConfig{Priority: lowPriority}),
@@ -157,16 +157,16 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 	t.Run("ShouldFail_WhenJITFails", func(t *testing.T) {
 		t.Parallel()
 
-		handle := newTestPluginsHandle(t)
+		defaults := newTestPriorityBandPolicyDefaults()
 		badQueueName := queue.RegisteredQueueName("non-existent-queue")
-		badBand, err := NewPriorityBandConfig(handle, highPriority, WithQueue(badQueueName))
+		badBand, err := NewPriorityBandConfig(highPriority, defaults, WithQueue(badQueueName))
 		require.NoError(t, err)
 
 		// Create a Config that uses a mock checker to bypass the strict validation.
 		// The default checker would reject "non-existent-policy", but our mock says it's fine.
 		// This allows us to instantiate the Registry with a latent configuration bomb.
 		cfg, err := NewConfig(
-			handle,
+			defaults,
 			WithPriorityBand(badBand),
 			withCapabilityChecker(&mockCapabilityChecker{
 				checkCompatibilityFunc: func(flowcontrol.OrderingPolicy, queue.RegisteredQueueName) error {
@@ -396,10 +396,10 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 
 	t.Run("ShouldUseNegativeBandTemplate_WhenPriorityBelowZero", func(t *testing.T) {
 		t.Parallel()
-		handle := newTestPluginsHandle(t)
+		defaults := newTestPriorityBandPolicyDefaults()
 
 		negativeMaxBytes := uint64(256)
-		cfg, err := NewConfig(handle,
+		cfg, err := NewConfig(defaults,
 			WithDefaultNegativePriorityBand(&PriorityBandConfig{
 				MaxBytes: negativeMaxBytes,
 			}),
@@ -426,9 +426,9 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 
 	t.Run("ShouldFallBackToDefaultBand_WhenNegativeTemplateIsNil", func(t *testing.T) {
 		t.Parallel()
-		handle := newTestPluginsHandle(t)
+		defaults := newTestPriorityBandPolicyDefaults()
 
-		cfg, err := NewConfig(handle)
+		cfg, err := NewConfig(defaults)
 		require.NoError(t, err)
 
 		h := newRegistryTestHarness(t, harnessOptions{config: cfg})
@@ -451,10 +451,10 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 
 	t.Run("ShouldUseDefaultBand_WhenPositivePriorityWithNegativeTemplate", func(t *testing.T) {
 		t.Parallel()
-		handle := newTestPluginsHandle(t)
+		defaults := newTestPriorityBandPolicyDefaults()
 
 		negativeMaxBytes := uint64(100)
-		cfg, err := NewConfig(handle,
+		cfg, err := NewConfig(defaults,
 			WithDefaultNegativePriorityBand(&PriorityBandConfig{
 				MaxBytes: negativeMaxBytes,
 			}),
@@ -1196,7 +1196,7 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 // requests waiting on the same flow initialization.
 func TestFlowRegistry_JITErrorScoping(t *testing.T) {
 	t.Parallel()
-	handle := newTestPluginsHandle(t)
+	defaults := newTestPriorityBandPolicyDefaults()
 
 	// Create a registry with a capability checker that passes validation but using a queue name that doesn't exist.
 	// This ensures NewConfig succeeds, but JIT (ensureFlowInfrastructure) fails when trying to instantiate the queue.
@@ -1209,10 +1209,10 @@ func TestFlowRegistry_JITErrorScoping(t *testing.T) {
 
 	// We create a custom band config that uses this failing queue.
 	// We set it as the default band so that dynamic provisioning is used.
-	failingBand, err := NewPriorityBandConfig(handle, 0, WithQueue(failQueueName))
+	failingBand, err := NewPriorityBandConfig(0, defaults, WithQueue(failQueueName))
 	require.NoError(t, err)
 
-	cfg, err := NewConfig(handle, withCapabilityChecker(mockChecker), WithDefaultPriorityBand(failingBand))
+	cfg, err := NewConfig(defaults, withCapabilityChecker(mockChecker), WithDefaultPriorityBand(failingBand))
 	require.NoError(t, err)
 
 	registry := NewFlowRegistry(cfg, logr.Discard())

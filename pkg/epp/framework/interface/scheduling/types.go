@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -55,10 +56,14 @@ type InferenceRequest struct {
 	// FairnessID is the identity used by the flow control system to group requests into fairness queues.
 	FairnessID string
 	// RequestSizeBytes is the size of the raw request body in bytes when available.
-	// Used for token estimation (e.g. inputTokens ≈ RequestSizeBytes/4) without parsing body or calling PlainText().
 	RequestSizeBytes int
 	// SchedulingResult captures the scheduling decisions made during the cycle.
 	SchedulingResult *SchedulingResult
+
+	// attributes holds per-request data produced and consumed across plugins.
+	// Access via PutAttribute, GetAttribute, AttributeKeys, and ReadRequestAttribute.
+	// A nil pointer is valid; the store is lazily allocated on first write.
+	attributes *sync.Map
 }
 
 func (r *InferenceRequest) String() string {

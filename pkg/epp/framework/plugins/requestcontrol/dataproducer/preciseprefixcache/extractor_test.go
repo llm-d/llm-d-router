@@ -66,8 +66,6 @@ func TestProducer_EndpointExtractor_InterfaceContract(t *testing.T) {
 	p := newExtractorProducer(true)
 	defer p.subscribersManager.Shutdown(ctx)
 
-	assert.Equal(t, fwkdl.EndpointEventReflectType, p.ExpectedInputType())
-
 	var _ fwkdl.EndpointExtractor = p
 	assert.True(t, reflect.TypeOf(p).Implements(reflect.TypeFor[fwkdl.EndpointExtractor]()))
 }
@@ -81,7 +79,7 @@ func TestProducer_ExtractEndpoint_AddAndDelete(t *testing.T) {
 	wantKey := "ns/pod-a"
 	wantEndpoint := "tcp://10.0.0.1:5557"
 
-	require.NoError(t, p.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: ep,
 	}))
@@ -90,14 +88,14 @@ func TestProducer_ExtractEndpoint_AddAndDelete(t *testing.T) {
 	require.Equal(t, []string{wantKey}, ids)
 	require.Equal(t, []string{wantEndpoint}, endpoints)
 
-	require.NoError(t, p.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: ep,
 	}))
 	ids, _ = p.subscribersManager.GetActiveSubscribers()
 	assert.Len(t, ids, 1, "duplicate add must not create a second subscriber")
 
-	require.NoError(t, p.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
 		Endpoint: ep,
 	}))
@@ -111,7 +109,7 @@ func TestProducer_ExtractEndpoint_DiscoverPodsDisabledIsNoOp(t *testing.T) {
 	p := newExtractorProducer(false)
 	defer p.subscribersManager.Shutdown(ctx)
 
-	require.NoError(t, p.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: newEndpoint("pod-a", "10.0.0.1"),
 	}))
@@ -129,7 +127,7 @@ func TestProducer_ExtractEndpoint_IgnoresMissingMetadata(t *testing.T) {
 		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
 	}, nil)
 
-	require.NoError(t, p.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: ep,
 	}))
@@ -174,7 +172,7 @@ func TestProducer_ExtractEndpoint_OffsetsZMQPortByRankIndex(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
-		require.NoError(t, p.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+		require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 			Type: fwkdl.EventAddOrUpdate,
 			Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 				NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: ep.name},
@@ -203,7 +201,7 @@ func TestProducer_ExtractEndpoint_SingleRankUsesBaseSocketPort(t *testing.T) {
 	p := newExtractorProducer(true)
 	defer p.subscribersManager.Shutdown(ctx)
 
-	require.NoError(t, p.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 		Type: fwkdl.EventAddOrUpdate,
 		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 			NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
@@ -224,7 +222,7 @@ func TestProducer_ExtractEndpoint_DeleteWithMissingAddressRemovesExistingSubscri
 	p := newExtractorProducer(true)
 	defer p.subscribersManager.Shutdown(ctx)
 
-	require.NoError(t, p.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: newEndpoint("pod-a", "10.0.0.1"),
 	}))
@@ -236,7 +234,7 @@ func TestProducer_ExtractEndpoint_DeleteWithMissingAddressRemovesExistingSubscri
 		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
 	}, nil)
 
-	require.NoError(t, p.ExtractEndpoint(ctx, fwkdl.EndpointEvent{
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
 		Endpoint: deleteEndpoint,
 	}))

@@ -14,13 +14,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-router/pkg/metrics"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -103,6 +103,12 @@ func (l *legacyDisaggProfileHandlerParameters) toDisaggParams(logger logr.Logger
 //	if parameters.deciders.prefill is set - P disaggregation will be supported
 //	if parameters.deciders.encode is set - E disaggregation will be supported
 func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
+	if handle == nil {
+		return nil, errors.New("plugin handle is required")
+	}
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
+	}
 	logger := log.FromContext(handle.Context())
 
 	parameters := disaggProfileHandlerParameters{}
@@ -232,8 +238,13 @@ func (h *Handler) WithName(name string) *Handler {
 }
 
 // Consumes defines data types consumed by this plugin (through the PD decider).
-func (*Handler) Consumes() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{}}
+func (*Handler) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{
+			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedPrompt{},
+		},
+	}
 }
 
 func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeProfile string, pdDecider, encodeDecider deciderPlugin) *Handler {
@@ -252,7 +263,7 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 // Returns the next profile to execute, or an empty map when all stages are done.
 func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
-	tracer := telemetry.Tracer()
+	tracer := tracing.Tracer()
 	ctx, span := tracer.Start(ctx, "llm_d.epp.disagg.profile_handler.pick",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
@@ -318,8 +329,8 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	encodeUsed := profileResults[h.encodeProfile] != nil
 	prefillUsed := profileResults[h.prefillProfile] != nil
 
-	decision := metrics.DisaggDecisionType(encodeUsed, prefillUsed)
-	metrics.RecordDisaggDecision(request.TargetModel, decision)
+	decision := DisaggDecisionType(encodeUsed, prefillUsed)
+	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
 	span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "complete_"+decision))
 
 	return map[string]scheduling.SchedulerProfile{}
@@ -364,7 +375,7 @@ func (h *Handler) ProcessResults(
 // PreRequest wires prefill and encode SchedulerProfile results into headers
 // so the sidecar knows which pods to contact for disaggregated work.
 func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	tracer := telemetry.Tracer()
+	tracer := tracing.Tracer()
 	_, span := tracer.Start(ctx, "llm_d.epp.prerequest.disaggregation",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)

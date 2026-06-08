@@ -31,3 +31,25 @@ func GetHeader(headers map[string]string, key string) string {
 	}
 	return ""
 }
+
+// GetRequestPath extracts the request path from headers with fallback priority.
+func GetRequestPath(headers map[string]string) string {
+	if path := headers[":path"]; path != "" {
+		return path
+	}
+	if path := headers["x-original-path"]; path != "" {
+		return path
+	}
+	if path := headers["x-forwarded-path"]; path != "" {
+		return path
+	}
+	// Default to completions API for backward compatibility with existing clients and integration tests
+	return "/v1/completions"
+}
+
+// MatchPathSuffix checks if the path matches the suffix.
+func MatchPathSuffix(path, suffix string) bool {
+	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
+	suffix = strings.Trim(strings.TrimSpace(suffix), "/")
+	return strings.HasSuffix(path, suffix)
+}

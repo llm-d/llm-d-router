@@ -19,11 +19,14 @@ set -euox pipefail
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 EPP_IMAGE="${EPP_IMAGE:-ghcr.io/llm-d/llm-d-router-endpoint-picker:dev}"
-SIM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:v0.8.2}"
+SIM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:v0.9.0}"
 MANIFEST_PATH="${MANIFEST_PATH:-${DIR}/../test/testdata/sim-deployment.yaml}"
 USE_KIND="${USE_KIND:-true}"
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-mirror.gcr.io/kindest/node:v1.32.2}"
 
-# Tracks the name of a Kind cluster created by this script so cleanup knows
+KIND_CLUSTER_NAME="inference-e2e"
+
+# Tracks whether this script created the cluster so cleanup knows
 # whether to delete it (we never delete a cluster we didn't create ourselves).
 CREATED_CLUSTER=""
 
@@ -60,16 +63,24 @@ trap cleanup INT TERM
 
 if [ "${USE_KIND}" = "true" ]; then
   install_kind
-  if ! kubectl config current-context >/dev/null 2>&1; then
-    echo "No active kubecontext found. Creating a kind cluster for running the tests..."
-    kind create cluster --name inference-e2e
-    CREATED_CLUSTER=inference-e2e
-    load_images inference-e2e
+  current_context=$(kubectl config current-context 2>/dev/null || true)
+  if [ "${current_context}" = "kind-${KIND_CLUSTER_NAME}" ]; then
+    echo "Found an active kind cluster '${KIND_CLUSTER_NAME}' for running the tests..."
+    load_images "${KIND_CLUSTER_NAME}"
   else
-    current_context=$(kubectl config current-context)
-    current_kind_cluster="${current_context#kind-}"
-    echo "Found an active kind cluster '${current_kind_cluster}' for running the tests..."
-    load_images "${current_kind_cluster}"
+    if [ -n "${current_context}" ]; then
+      echo "WARNING: current kubecontext '${current_context}' is not kind-${KIND_CLUSTER_NAME}, wont use it." >&2
+    fi
+    # if the cluster already exists but isn't the current context
+    if kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
+      echo "Found existing kind cluster '${KIND_CLUSTER_NAME}', switching context..."
+      kubectl config use-context "kind-${KIND_CLUSTER_NAME}"
+    else
+      echo "Creating new kind cluster '${KIND_CLUSTER_NAME}' for running the tests..."
+      kind create cluster --name "${KIND_CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}"
+      CREATED_CLUSTER="${KIND_CLUSTER_NAME}"
+    fi
+    load_images "${KIND_CLUSTER_NAME}"
   fi
 else
   # USE_KIND=false: caller is responsible for loading images into the cluster.
@@ -81,5 +92,11 @@ else
 fi
 
 echo "Running Go e2e tests in ./test/e2e/epp/..."
-MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
-  go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast
+if [ -n "${E2E_LABEL_FILTER:-}" ]; then
+  echo "Label filter: ${E2E_LABEL_FILTER}"
+  MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
+    go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
+else
+  MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
+    go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast
+fi

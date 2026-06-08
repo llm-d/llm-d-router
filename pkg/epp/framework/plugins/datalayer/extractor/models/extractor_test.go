@@ -17,7 +17,7 @@ func TestExtractorExtract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create extractor: %v", err)
 	}
-	extractor := extPlugin.(fwkdl.Extractor)
+	extractor := extPlugin.(*ModelExtractor)
 
 	if exType := extPlugin.TypedName().Type; exType == "" {
 		t.Error("empty extractor type")
@@ -27,10 +27,6 @@ func TestExtractorExtract(t *testing.T) {
 		t.Error("empty extractor name")
 	}
 
-	if inputType := extractor.ExpectedInputType(); inputType != ModelsResponseType {
-		t.Errorf("incorrect expected input type: %v", inputType)
-	}
-
 	ep := fwkdl.NewEndpoint(nil, nil)
 	if ep == nil {
 		t.Fatal("expected non-nil endpoint")
@@ -38,18 +34,14 @@ func TestExtractorExtract(t *testing.T) {
 
 	model := "food-review"
 
+	// Note: nil Payload is the dispatcher's responsibility per the
+	// PollingDispatcher contract; Extract does not guard against it.
 	tests := []struct {
 		name    string
-		data    any
+		data    *ModelResponse
 		wantErr bool
 		updated bool // whether metrics are expected to change
 	}{
-		{
-			name:    "nil data",
-			data:    nil,
-			wantErr: true,
-			updated: false,
-		},
 		{
 			name:    "empty ModelsResponse",
 			data:    &ModelResponse{},
@@ -89,7 +81,7 @@ func TestExtractorExtract(t *testing.T) {
 			if ok && before != nil {
 				t.Error("expected empty attributes")
 			}
-			err := extractor.Extract(ctx, tt.data, ep)
+			err := extractor.Extract(ctx, fwkdl.PollInput[*ModelResponse]{Payload: tt.data, Endpoint: ep})
 			after, ok := attr.Get(key)
 			if !ok && tt.updated {
 				t.Error("expected updated attributes")

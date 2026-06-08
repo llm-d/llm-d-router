@@ -1,4 +1,4 @@
-name: CI - PR Checks
+name: CI - Test
 
 on:
   push:
@@ -35,11 +35,18 @@ jobs:
               - Dockerfile.*
               - Makefile*
               - go.mod
+              - go.sum
               - scripts/**
+              - hack/**
+              - test/**
+              - .github/actions/docker-build-and-push/action.yml
+              - .github/actions/e2e-runner-setup/action.yml
               - .github/workflows/ci-pr-checks.yaml
             helm:
               - 'config/charts/**'
               - 'hack/verify-helm.sh'
+              - '.github/workflows/ci-pr-checks.yaml'
+
   verify-helm-charts:
     needs: check-changes
     if: ${{ needs.check-changes.outputs.helm == 'true' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
@@ -56,52 +63,21 @@ jobs:
       - name: Run make verify-helm-charts
         run: make verify-helm-charts
 
-  lint-and-test:
+  test:
     needs: check-changes
     if: ${{ needs.check-changes.outputs.src == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
 
-      # Custom profile with directory-only removals (run in parallel, no apt).
-      # The cleanup-profile: max is much more aggressive, it cleanups around 41GB,
-      # but runs 3.5 mins
-      - name: Free disk space
-        uses: justinthelaw/maximize-github-runner-space@v0.9.0
-        with:
-          cleanup-profile: custom
-          remove-android: 'true'
-          remove-dotnet: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-cached-tools: 'true'
-          remove-swift: 'true'
-          remove-julia: 'true'
-          remove-rust: 'true'
-          remove-miniconda: 'true'
-          swapfile-size: 0
-
-      - name: Sanity check repo contents
-        run: ls -la
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Verify go.mod and go.sum are tidy
-        run: go mod tidy -diff
-
-      - name: Create and resolve Go cache volumes
+      - name: Create Go cache dirs
         id: go-cache
         run: |
-          docker volume create llm-d-gomodcache
-          docker volume create llm-d-gobuildcache
-          echo "mod=$(docker volume inspect llm-d-gomodcache -f '{{.Mountpoint}}')" >> $GITHUB_OUTPUT
-          echo "build=$(docker volume inspect llm-d-gobuildcache -f '{{.Mountpoint}}')" >> $GITHUB_OUTPUT
+          mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
+          echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
+          echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
 
       - name: Cache Go modules and build cache
         uses: actions/cache@v5
@@ -109,25 +85,12 @@ jobs:
           path: |
             ${{ steps.go-cache.outputs.mod }}
             ${{ steps.go-cache.outputs.build }}
-          key: go-cache-${{ hashFiles('go.sum') }}
+          key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            go-cache-
+            go-cache-${{ runner.os }}-
 
-      - name: Run make lint
-        run: make lint
-
-      - name: Run govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
-          govulncheck ./...
-
-      - name: Run make build
-        shell: bash
-        run: make build
-
-      # Restore the baseline saved from the last main push so the compare step
-      # can diff against it. Missing cache (first PR ever) is not an error;
-      # compare-coverage.sh reports all components as "new" and exits 0.
+      # Missing cache is not an error; compare-coverage.sh reports all
+      # components as new and exits 0.
       - name: Restore main branch coverage baseline
         if: github.event_name == 'pull_request'
         uses: actions/cache/restore@v5
@@ -137,20 +100,25 @@ jobs:
 
       - name: Run unit tests
         shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make test-unit
 
       - name: Run hermetic integration tests
         shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make test-integration-hermetic
 
       - name: Compare coverage against main baseline
+        id: coverage-gate
         if: github.event_name == 'pull_request'
         continue-on-error: true
         shell: bash
         run: make coverage-compare BASELINE_DIR=coverage/baseline
 
-      # Find the latest release-* branch (by SemVer) and download its coverage
-      # artifact so the PR can compare against the most recent release.
       - name: Find latest release branch
         if: github.event_name == 'pull_request'
         id: find-releases
@@ -158,7 +126,7 @@ jobs:
         run: |
           gh api "repos/${{ github.repository }}/branches" \
             --paginate \
-            --jq '[.[] | select(.name | startswith("release-")) | .name][]' \
+            --jq '[.[] | select(.name | test("^release-[0-9]")) | .name][]' \
             | sort -V | tail -1 > /tmp/release_branches.txt
           echo "Release branches found:"
           cat /tmp/release_branches.txt
@@ -179,7 +147,7 @@ jobs:
             run_id=$(gh run list \
               --repo "${{ github.repository }}" \
               --branch "$branch" \
-              --workflow "CI - PR Checks" \
+              --workflow "ci-pr-checks.yaml" \
               --status success \
               --limit 1 \
               --json databaseId \
@@ -202,8 +170,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      # Copy the freshly generated profiles into coverage/baseline so that
-      # the saved path matches the restored path on future PR runs.
       - name: Stage coverage baseline for caching
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         shell: bash
@@ -218,8 +184,6 @@ jobs:
           path: coverage/baseline
           key: coverage-main
 
-      # Upload coverage profiles as a named artifact for release branches.
-      # Retrieved by PRs to compare against the most recent release.
       - name: Upload coverage artifact (release branches)
         if: >-
           github.event_name == 'push' &&
@@ -231,10 +195,259 @@ jobs:
           retention-days: 400
           overwrite: true
 
-      - name: Clean Docker system
-        shell: bash
-        run: docker system prune -af
+      - name: Enforce coverage gate
+        if: github.event_name == 'pull_request' && steps.coverage-gate.outcome == 'failure'
+        run: |
+          echo "::error::Coverage regression detected -- see the coverage report in the job summary above."
+          exit 1
 
-      - name: Run make test-e2e
+  e2e-image-common:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.src == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: builder
+            source: build
+            docker-file: Dockerfile.builder
+            image-name: llm-d-builder
+            archive: llm-d-builder
+          - name: epp
+            source: build
+            docker-file: Dockerfile.epp
+            image-name: llm-d-router-endpoint-picker
+            archive: llm-d-router-endpoint-picker
+          - name: simulator
+            source: pull
+            image: ghcr.io/llm-d/llm-d-inference-sim:v0.9.0
+            archive: llm-d-inference-sim
+    name: e2e-image-common (${{ matrix.image.name }})
+    steps:
+      - name: Checkout source
+        if: ${{ matrix.image.source == 'build' }}
+        uses: actions/checkout@v6
+
+      - name: Build ${{ matrix.image.name }} image
+        if: ${{ matrix.image.source == 'build' }}
+        uses: ./.github/actions/docker-build-and-push
+        with:
+          docker-file: ${{ matrix.image.docker-file }}
+          image-name: ${{ matrix.image.image-name }}
+          tag: dev
+          registry: ghcr.io/llm-d
+          push: 'false'
+          buildx-outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image.archive }}.tar
+          commit-sha: ${{ github.sha }}
+
+      - name: Pull ${{ matrix.image.name }} image
+        if: ${{ matrix.image.source == 'pull' }}
+        run: |
+          docker pull --platform linux/amd64 "${{ matrix.image.image }}"
+          docker save "${{ matrix.image.image }}" -o "${{ runner.temp }}/${{ matrix.image.archive }}.tar"
+
+      - name: Upload ${{ matrix.image.name }} image
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-image-${{ matrix.image.name }}
+          path: ${{ runner.temp }}/${{ matrix.image.archive }}.tar
+          retention-days: 1
+          compression-level: 0
+
+  e2e-image-router:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.src == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: sidecar
+            source: build
+            docker-file: Dockerfile.sidecar
+            image-name: llm-d-router-disagg-sidecar
+            archive: llm-d-router-disagg-sidecar
+          - name: renderer
+            source: pull
+            image: vllm/vllm-openai-cpu:v0.21.0
+            archive: vllm-openai-cpu
+    name: e2e-image-router (${{ matrix.image.name }})
+    steps:
+      - name: Checkout source
+        if: ${{ matrix.image.source == 'build' }}
+        uses: actions/checkout@v6
+
+      - name: Build ${{ matrix.image.name }} image
+        if: ${{ matrix.image.source == 'build' }}
+        uses: ./.github/actions/docker-build-and-push
+        with:
+          docker-file: ${{ matrix.image.docker-file }}
+          image-name: ${{ matrix.image.image-name }}
+          tag: dev
+          registry: ghcr.io/llm-d
+          push: 'false'
+          buildx-outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image.archive }}.tar
+          commit-sha: ${{ github.sha }}
+
+      - name: Pull ${{ matrix.image.name }} image
+        if: ${{ matrix.image.source == 'pull' }}
+        run: |
+          docker pull --platform linux/amd64 "${{ matrix.image.image }}"
+          docker save "${{ matrix.image.image }}" -o "${{ runner.temp }}/${{ matrix.image.archive }}.tar"
+
+      - name: Upload ${{ matrix.image.name }} image
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-image-${{ matrix.image.name }}
+          path: ${{ runner.temp }}/${{ matrix.image.archive }}.tar
+          retention-days: 1
+          compression-level: 0
+
+  e2e-gaie:
+    needs:
+      - check-changes
+      - e2e-image-common
+    if: ${{ needs.check-changes.outputs.src == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: traffic
+            label-filter: "!GAIEMetrics && !GAIELeaderElection"
+          - name: metrics
+            label-filter: "GAIEMetrics"
+    name: e2e-gaie (${{ matrix.suite.name }})
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up e2e runner
+        id: e2e-setup
+        uses: ./.github/actions/e2e-runner-setup
+
+      - name: Download builder image
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-image-builder
+          path: ${{ runner.temp }}/e2e-images
+
+      - name: Download EPP image
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-image-epp
+          path: ${{ runner.temp }}/e2e-images
+
+      - name: Download simulator image
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-image-simulator
+          path: ${{ runner.temp }}/e2e-images
+
+      - name: Load e2e images
         shell: bash
-        run: make test-e2e
+        run: |
+          for image in "${RUNNER_TEMP}"/e2e-images/*.tar; do
+            docker load --input "$image"
+          done
+
+      - name: Run e2e-gaie (${{ matrix.suite.name }})
+        shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-mod-cache }}
+          GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
+          E2E_LABEL_FILTER: ${{ matrix.suite.label-filter }}
+          PULL_SIDECAR_IMAGE: "false"
+          PULL_VLLM_RENDER_IMAGE: "false"
+        run: make test-e2e-gaie-run
+
+  e2e-router:
+    needs:
+      - check-changes
+      - e2e-image-common
+      - e2e-image-router
+    if: ${{ needs.check-changes.outputs.src == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: pd
+            label-filter: "!Disruptive && !Extended && !SharedStorage && !Metrics"
+            needs-renderer: "false"
+          - name: pd-shared-storage-deprecated
+            label-filter: "SharedStorage && DeprecatedPD"
+            needs-renderer: "false"
+          - name: pd-shared-storage-disagg
+            label-filter: "SharedStorage && Disagg"
+            needs-renderer: "false"
+          - name: pd-metrics
+            label-filter: "Metrics"
+            needs-renderer: "false"
+          - name: extended
+            label-filter: "Extended"
+            needs-renderer: "true"
+          - name: disruption
+            label-filter: "Disruptive"
+            needs-renderer: "false"
+    name: e2e-router (${{ matrix.suite.name }})
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up e2e runner
+        id: e2e-setup
+        uses: ./.github/actions/e2e-runner-setup
+
+      - name: Download builder image
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-image-builder
+          path: ${{ runner.temp }}/e2e-images
+
+      - name: Download EPP image
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-image-epp
+          path: ${{ runner.temp }}/e2e-images
+
+      - name: Download sidecar image
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-image-sidecar
+          path: ${{ runner.temp }}/e2e-images
+
+      - name: Download simulator image
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-image-simulator
+          path: ${{ runner.temp }}/e2e-images
+
+      - name: Download renderer image
+        if: ${{ matrix.suite.needs-renderer == 'true' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-image-renderer
+          path: ${{ runner.temp }}/e2e-images
+
+      - name: Load e2e images
+        shell: bash
+        run: |
+          for image in "${RUNNER_TEMP}"/e2e-images/*.tar; do
+            docker load --input "$image"
+          done
+
+      - name: Run e2e-router (${{ matrix.suite.name }})
+        shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-mod-cache }}
+          GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
+          E2E_LABEL_FILTER: ${{ matrix.suite.label-filter }}
+          LOAD_VLLM_RENDER_IMAGE: ${{ matrix.suite.needs-renderer }}
+          PULL_VLLM_RENDER_IMAGE: "false"
+        run: make test-e2e-scheduler-run

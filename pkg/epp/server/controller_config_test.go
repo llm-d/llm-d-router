@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -40,48 +41,121 @@ func TestNewControllerConfig(t *testing.T) {
 
 func TestPopulateWithDiscovery(t *testing.T) {
 	tests := []struct {
-		name                      string
-		apiResources              []metav1.APIResource
-		wantInferenceObjective    bool
-		wantInferenceModelRewrite bool
+		name                        string
+		apiResourceLists            []*metav1.APIResourceList
+		wantInferenceObjective      bool
+		wantInferenceModelRewrite   bool
+		wantInferenceObjectiveGV    schema.GroupVersion
+		wantInferenceModelRewriteGV schema.GroupVersion
 	}{
 		{
-			name: "Both resources exist",
-			apiResources: []metav1.APIResource{
-				{Kind: "InferenceObjective"},
-				{Kind: "InferenceModelRewrite"},
+			name: "Both resources exist in llm-d group",
+			apiResourceLists: []*metav1.APIResourceList{
+				{
+					GroupVersion: v1alpha2.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceObjective"},
+						{Kind: "InferenceModelRewrite"},
+					},
+				},
 			},
-			wantInferenceObjective:    true,
-			wantInferenceModelRewrite: true,
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   true,
+			wantInferenceObjectiveGV:    inferenceAPIGV,
+			wantInferenceModelRewriteGV: inferenceAPIGV,
 		},
 		{
-			name:                      "Resources do not exist",
-			apiResources:              []metav1.APIResource{},
-			wantInferenceObjective:    false,
-			wantInferenceModelRewrite: false,
+			name: "Both resources exist in legacy group",
+			apiResourceLists: []*metav1.APIResourceList{
+				{
+					GroupVersion: legacyInferenceAPIGV.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceObjective"},
+						{Kind: "InferenceModelRewrite"},
+					},
+				},
+			},
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   true,
+			wantInferenceObjectiveGV:    legacyInferenceAPIGV,
+			wantInferenceModelRewriteGV: legacyInferenceAPIGV,
 		},
 		{
-			name: "Only InferenceObjective exists",
-			apiResources: []metav1.APIResource{
-				{Kind: "InferenceObjective"},
+			name: "Resources do not exist",
+			apiResourceLists: []*metav1.APIResourceList{
+				{
+					GroupVersion: v1alpha2.GroupVersion.String(),
+					APIResources: []metav1.APIResource{},
+				},
+				{
+					GroupVersion: legacyInferenceAPIGV.String(),
+					APIResources: []metav1.APIResource{},
+				},
 			},
-			wantInferenceObjective:    true,
-			wantInferenceModelRewrite: false,
+			wantInferenceObjective:      false,
+			wantInferenceModelRewrite:   false,
+			wantInferenceObjectiveGV:    schema.GroupVersion{},
+			wantInferenceModelRewriteGV: schema.GroupVersion{},
+		},
+		{
+			name: "Only InferenceObjective exists in llm-d group",
+			apiResourceLists: []*metav1.APIResourceList{
+				{
+					GroupVersion: v1alpha2.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceObjective"},
+					},
+				},
+			},
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   false,
+			wantInferenceObjectiveGV:    inferenceAPIGV,
+			wantInferenceModelRewriteGV: schema.GroupVersion{},
+		},
+		{
+			name: "Resources exist across supported groups",
+			apiResourceLists: []*metav1.APIResourceList{
+				{
+					GroupVersion: v1alpha2.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceObjective"},
+					},
+				},
+				{
+					GroupVersion: legacyInferenceAPIGV.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceModelRewrite"},
+					},
+				},
+			},
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   true,
+			wantInferenceObjectiveGV:    inferenceAPIGV,
+			wantInferenceModelRewriteGV: legacyInferenceAPIGV,
+		},
+		{
+			name: "Only InferenceModelRewrite exists in legacy group",
+			apiResourceLists: []*metav1.APIResourceList{
+				{
+					GroupVersion: legacyInferenceAPIGV.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceModelRewrite"},
+					},
+				},
+			},
+			wantInferenceObjective:      false,
+			wantInferenceModelRewrite:   true,
+			wantInferenceObjectiveGV:    schema.GroupVersion{},
+			wantInferenceModelRewriteGV: legacyInferenceAPIGV,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup fake discovery for this specific test case
 			fakeDiscovery := &fake.FakeDiscovery{
 				Fake: &k8stesting.Fake{},
 			}
-			fakeDiscovery.Resources = []*metav1.APIResourceList{
-				{
-					GroupVersion: v1alpha2.GroupVersion.String(),
-					APIResources: tt.apiResources,
-				},
-			}
+			fakeDiscovery.Resources = tt.apiResourceLists
 
 			cc := &ControllerConfig{}
 			cc.populateWithDiscovery(fakeDiscovery)
@@ -89,8 +163,14 @@ func TestPopulateWithDiscovery(t *testing.T) {
 			if cc.hasInferenceObjective != tt.wantInferenceObjective {
 				t.Errorf("populateWithDiscovery() hasInferenceObjective = %v, want %v", cc.hasInferenceObjective, tt.wantInferenceObjective)
 			}
+			if cc.InferenceObjectiveGV != tt.wantInferenceObjectiveGV {
+				t.Errorf("populateWithDiscovery() InferenceObjectiveGV = %v, want %v", cc.InferenceObjectiveGV, tt.wantInferenceObjectiveGV)
+			}
 			if cc.hasInferenceModelRewrites != tt.wantInferenceModelRewrite {
 				t.Errorf("populateWithDiscovery() hasInferenceModelRewrites = %v, want %v", cc.hasInferenceModelRewrites, tt.wantInferenceModelRewrite)
+			}
+			if cc.InferenceModelRewriteGV != tt.wantInferenceModelRewriteGV {
+				t.Errorf("populateWithDiscovery() InferenceModelRewriteGV = %v, want %v", cc.InferenceModelRewriteGV, tt.wantInferenceModelRewriteGV)
 			}
 		})
 	}

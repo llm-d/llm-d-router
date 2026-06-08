@@ -43,8 +43,6 @@ func TestNewEndpointDataSource(t *testing.T) {
 	src := NewEndpointDataSource("test-type", "test-name")
 	assert.Equal(t, "test-type", src.TypedName().Type)
 	assert.Equal(t, "test-name", src.TypedName().Name)
-	assert.Equal(t, fwkdl.EndpointEventReflectType, src.OutputType())
-	assert.Equal(t, fwkdl.EndpointExtractorType, src.ExtractorType())
 }
 
 func TestEndpointNotifyReturnsEvent(t *testing.T) {

@@ -18,6 +18,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -49,7 +50,6 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/profiling"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
-	backendmetrics "github.com/llm-d/llm-d-router/pkg/epp/backend/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
 	"github.com/llm-d/llm-d-router/pkg/epp/config/loader"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -60,11 +60,11 @@ import (
 	fcregistry "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
@@ -86,14 +86,17 @@ import (
 	mmproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/multimodal"
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
 	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/preadmitter/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
@@ -155,7 +158,7 @@ type Runner struct {
 	requestControlConfig *requestcontrol.Config
 	schedulerConfig      *scheduling.SchedulerConfig
 	customCollectors     []prometheus.Collector
-	parser               fwkrh.Parser
+	parserRegistry       *handlers.ParserRegistry
 	dlRuntime            *datalayer.Runtime
 	PluginHandle         fwkplugin.Handle
 	// rawConfig caches the result of parseConfigurationPhaseOne.
@@ -214,9 +217,16 @@ func (r *Runner) Run(ctx context.Context) error {
 	logutil.InitLogging(&opts.ZapOptions)
 
 	if opts.Tracing {
-		err := tracing.InitTracing(ctx, setupLog, "llm-d-router/epp")
+		shutdown, err := tracing.InitTracing(ctx, setupLog, "llm-d-router/epp")
 		if err != nil {
 			return fmt.Errorf("failed to init tracing %w", err)
+		}
+		if shutdown != nil {
+			defer func() {
+				if err := shutdown(context.Background()); err != nil {
+					setupLog.Error(err, "Failed to shutdown tracing")
+				}
+			}()
 		}
 	}
 
@@ -238,22 +248,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	pmc, err := backendmetrics.NewPodMetricsClientImpl(setupLog, backendmetrics.Config{
-		ModelServerMetricsScheme:        opts.ModelServerMetricsScheme,
-		ModelServerMetricsHTTPSInsecure: opts.ModelServerMetricsHTTPSInsecure,
-		ModelServerMetricsPath:          opts.ModelServerMetricsPath,
-
-		TotalQueuedRequestsMetric:    opts.TotalQueuedRequestsMetric,
-		TotalRunningRequestsMetric:   opts.TotalRunningRequestsMetric,
-		KVCacheUsagePercentageMetric: opts.KVCacheUsagePercentageMetric,
-		LoRAInfoMetric:               opts.LoRAInfoMetric,
-		CacheInfoMetric:              opts.CacheInfoMetric,
-	})
-	if err != nil {
-		return err
-	}
-
-	mgr, _, err := r.setup(ctx, cfg, opts, pmc, nil)
+	mgr, _, err := r.setup(ctx, cfg, opts, nil)
 	if err != nil {
 		return err
 	}
@@ -275,16 +270,15 @@ func (r *Runner) Run(ctx context.Context) error {
 //
 // The returned Datastore is **only** meant to be used in the integration test.
 // Optional managerOverrides are applied to the controller manager options before creation.
-func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, pmc backendmetrics.PodMetricsClient, managerOverrides []func(*ctrl.Options)) (ctrl.Manager, datastore.Datastore, error) {
+func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, managerOverrides []func(*ctrl.Options)) (ctrl.Manager, datastore.Datastore, error) {
 	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
 		return nil, nil, err
 	}
-	setupLog.Info("Raw config after phase one", "config", rawConfig)
+	setupLog.Info("Raw config after phase one", "config", toRawMap(rawConfig))
 
-	useNewMetrics := !r.featureGates[datalayer.EnableLegacyMetricsFeatureGate]
-	epf := r.setupMetricsCollection(useNewMetrics, opts, pmc)
+	epf := r.setupMetricsCollection(opts)
 	gknn, err := extractGKNN(opts.PoolName, opts.PoolGroup, opts.PoolNamespace, opts.EndpointSelector)
 	if err != nil {
 		setupLog.Error(err, "Failed to extract GKNN")
@@ -371,41 +365,14 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
 
-	// Data layer is enabled by default; use the 'enableLegacyMetrics' feature gate to fall back to legacy polling.
-	datalayerMetricsEnabled := !r.featureGates[datalayer.EnableLegacyMetricsFeatureGate]
-	if err := r.configureAndStartDatalayer(ctx, datalayerMetricsEnabled, eppConfig.DataConfig, mgr); err != nil {
+	if err := r.configureAndStartDatalayer(ctx, eppConfig.DataConfig, mgr); err != nil {
 		setupLog.Error(err, "failed to initialize data layer")
 		return nil, nil, err
 	}
 
-	// --- Admission Control Initialization ---
-	var admissionController requestcontrol.AdmissionController
-	var endpointCandidates contracts.EndpointCandidates
-	endpointCandidates = requestcontrol.NewDatastoreEndpointCandidates(ds, requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter))
-	if r.featureGates[flowcontrol.FeatureGate] {
-		endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, time.Millisecond*50)
-		setupLog.Info("Initializing experimental Flow Control layer")
-		registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
-		fc, err := fccontroller.NewFlowController(
-			ctx,
-			opts.PoolName,
-			eppConfig.FlowControlConfig.Controller,
-			fccontroller.Deps{
-				Registry:           registry,
-				SaturationDetector: eppConfig.SaturationDetector,
-				EndpointCandidates: endpointCandidates,
-				UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
-			},
-		)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to initialize Flow Controller: %w", err)
-		}
-		go registry.Run(ctx)
-		admissionController = requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
-	} else {
-		setupLog.Info("Experimental Flow Control layer is disabled, using legacy admission control")
-		admissionController = requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
-	}
+	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
+		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
+	endpointCandidates, admissionController := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
@@ -421,9 +388,8 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
 		Director:                         director,
-		Parser:                           r.parser,
+		ParserRegistry:                   r.parserRegistry,
 		SaturationDetector:               eppConfig.SaturationDetector,
-		UseExperimentalDatalayerV2:       r.featureGates[datalayer.ExperimentalDatalayerFeatureGate] || !r.featureGates[datalayer.EnableLegacyMetricsFeatureGate],
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 	}
@@ -435,7 +401,12 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	// --- Add Runnables to Manager ---
 	// Register health server.
-	if err := registerHealthServer(mgr, ctrl.Log.WithName("health"), ds, opts.GRPCHealthPort, isLeader, opts.EnableLeaderElection, r.parser); err != nil {
+	parsers := r.parserRegistry.Parsers()
+	supporters := make([]appProtocolSupporter, len(parsers))
+	for i, p := range parsers {
+		supporters[i] = p
+	}
+	if err := registerHealthServer(mgr, ctrl.Log.WithName("health"), ds, opts.GRPCHealthPort, isLeader, opts.EnableLeaderElection, supporters); err != nil {
 		return nil, nil, err
 	}
 
@@ -553,8 +524,9 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(inflightload.InFlightLoadProducerType, inflightload.InFlightLoadProducerFactory, attrconcurrency.InFlightLoadDataKey)
 	fwkplugin.RegisterAsDefaultProducer(mmproducer.ProducerType, mmproducer.Factory, mmproducer.ProducedKey)
 	fwkplugin.RegisterAsDefaultProducer(latencyproducer.LatencyDataProviderPluginType, latencyproducer.PredictedLatencyFactory, attrlatency.LatencyPredictionInfoDataKey)
-	fwkplugin.Register(tokenizer.PluginType, tokenizer.PluginFactory)
+	fwkplugin.RegisterAsDefaultProducer(tokenizer.PluginType, tokenizer.PluginFactory, tokenizer.TokenizedPromptDataKey)
 	fwkplugin.Register(tokenizer.LegacyPluginType, tokenizer.LegacyPluginFactory) //nolint:staticcheck // intentional: keep backward compatibility
+	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, sessionid.Factory, attrsession.SessionIDDataKey)
 
 	// Latency predictor plugins
 	fwkplugin.Register(latencyslo.LatencyAdmissionPluginType, latencyslo.LatencyAdmissionFactory)
@@ -579,8 +551,10 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointSourceFactory)
 	// register request control plugins
 	fwkplugin.Register(requestattributereporter.RequestAttributeReporterType, requestattributereporter.RequestAttributeReporterPluginFactory)
+	fwkplugin.Register(anthropic.AnthropicParserType, anthropic.AnthropicParserPluginFactory)
 	fwkplugin.Register(openai.OpenAIParserType, openai.OpenAIParserPluginFactory)
 	fwkplugin.Register(vllmgrpc.VllmGRPCParserType, vllmgrpc.VllmGRPCParserPluginFactory)
+	fwkplugin.Register(vllmhttp.VllmHTTPParserType, vllmhttp.VllmHTTPParserPluginFactory)
 	fwkplugin.Register(passthrough.PassthroughParserType, passthrough.PassthroughParserPluginFactory)
 	fwkplugin.Register(vertexai.VertexAIParserType, vertexai.VertexAIParserPluginFactory)
 	// register saturation detector plugins
@@ -616,7 +590,6 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 	}
 
 	loader.RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	loader.RegisterFeatureGate(datalayer.EnableLegacyMetricsFeatureGate)
 	loader.RegisterFeatureGate(flowcontrol.FeatureGate)
 
 	r.registerInTreePlugins()
@@ -630,15 +603,10 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 
 	if r.featureGates[datalayer.ExperimentalDatalayerFeatureGate] {
 		setupLog.Info("The data layer is now enabled by default. " +
-			"Please remove the 'dataLayer' feature gate from your config. " +
-			"To fall back to legacy metrics polling, use the 'enableLegacyMetrics' feature gate.")
+			"Please remove the 'dataLayer' feature gate from your config.")
 	}
 
-	if r.featureGates[datalayer.EnableLegacyMetricsFeatureGate] {
-		setupLog.Info("Data layer: using legacy metrics polling (opt-in via 'enableLegacyMetrics' feature gate)")
-	} else {
-		setupLog.Info("Data layer: ENABLED (default)")
-	}
+	setupLog.Info("Data layer: ENABLED")
 
 	r.rawConfig = rawConfig
 	return rawConfig, nil
@@ -700,7 +668,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	// The plugins will be executed in topologically sorted order to ensure that data is produced before it is consumed.
 	r.requestControlConfig.OrderDataProducerPlugins(dag)
 
-	r.parser = handlers.NewParser(cfg.ParserConfig)
+	r.parserRegistry = cfg.ParserRegistry
 	logger.Info("loaded configuration from file/text successfully")
 
 	return cfg, nil
@@ -718,25 +686,17 @@ func applyDeprecatedEnvFeatureGate(envVar, featureName, featureGate string, rawC
 	}
 }
 
-func (r *Runner) configureAndStartDatalayer(ctx context.Context, enableNewMetrics bool, cfg *datalayer.Config, mgr ctrl.Manager) error {
-	disallowedExtractorType := ""
-	if !enableNewMetrics {
-		disallowedExtractorType = extractormetrics.MetricsExtractorType
-	}
-
-	if err := r.dlRuntime.Configure(cfg, enableNewMetrics, disallowedExtractorType, setupLog); err != nil {
+func (r *Runner) configureAndStartDatalayer(ctx context.Context, cfg *datalayer.Config, mgr ctrl.Manager) error {
+	if err := r.dlRuntime.Configure(cfg, setupLog); err != nil {
 		return err
 	}
 
 	return r.dlRuntime.Start(ctx, mgr)
 }
 
-func (r *Runner) setupMetricsCollection(enableNewMetrics bool, opts *runserver.Options, pmc backendmetrics.PodMetricsClient) datalayer.EndpointFactory {
+func (r *Runner) setupMetricsCollection(opts *runserver.Options) datalayer.EndpointFactory {
 	r.dlRuntime = datalayer.NewRuntime(opts.RefreshMetricsInterval)
-	if enableNewMetrics {
-		return r.dlRuntime
-	}
-	return backendmetrics.NewPodMetricsFactory(pmc, opts.RefreshMetricsInterval)
+	return r.dlRuntime
 }
 
 // registerExtProcServer adds the ExtProcServerRunner as a Runnable to the manager.
@@ -750,14 +710,14 @@ func registerExtProcServer(mgr manager.Manager, runner *runserver.ExtProcServerR
 }
 
 // registerHealthServer adds the Health gRPC server as a Runnable to the given manager.
-func registerHealthServer(mgr manager.Manager, logger logr.Logger, ds datastore.Datastore, port int, isLeader *atomic.Bool, leaderElectionEnabled bool, supporter appProtocolSupporter) error {
+func registerHealthServer(mgr manager.Manager, logger logr.Logger, ds datastore.Datastore, port int, isLeader *atomic.Bool, leaderElectionEnabled bool, supporters []appProtocolSupporter) error {
 	srv := grpc.NewServer()
 	healthPb.RegisterHealthServer(srv, &healthServer{
 		logger:                logger,
 		datastore:             ds,
 		isLeader:              isLeader,
 		leaderElectionEnabled: leaderElectionEnabled,
-		supporter:             supporter,
+		supporters:            supporters,
 	})
 	if err := mgr.Add(
 		runnable.NoLeaderElection(runnable.GRPCServer("health", srv, port))); err != nil {
@@ -845,29 +805,44 @@ func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fw
 	return disc, nil
 }
 
+// initAdmissionControl builds the request admission controller, gated by the
+// FlowControl feature gate. With FC on it constructs the FlowRegistry and
+// FlowController and wraps endpointCandidates in a short-lived cache; with FC
+// off it returns the legacy saturation-only controller. Shared by the K8s and
+// file-discovery startup paths so the two cannot drift.
+func (r *Runner) initAdmissionControl(
+	ctx context.Context,
+	opts *runserver.Options,
+	eppConfig *config.Config,
+	endpointCandidates contracts.EndpointCandidates,
+) (contracts.EndpointCandidates, requestcontrol.AdmissionController) {
+	if !r.featureGates[flowcontrol.FeatureGate] {
+		setupLog.Info("Experimental Flow Control layer is disabled, using legacy admission control")
+		return endpointCandidates,
+			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
+	}
+	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
+	setupLog.Info("Initializing experimental Flow Control layer")
+	registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
+	fc := fccontroller.NewFlowController(
+		ctx,
+		opts.PoolName,
+		eppConfig.FlowControlConfig.Controller,
+		fccontroller.Deps{
+			Registry:           registry,
+			SaturationDetector: eppConfig.SaturationDetector,
+			EndpointCandidates: endpointCandidates,
+			UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
+		},
+	)
+	go registry.Run(ctx)
+	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
+}
+
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
 // It builds the EPP server stack without a Kubernetes cluster or controller manager.
 func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapi.EndpointPickerConfig) error {
-	useNewMetrics := !r.featureGates[datalayer.EnableLegacyMetricsFeatureGate]
-
-	var pmc backendmetrics.PodMetricsClient
-	if !useNewMetrics {
-		var err error
-		pmc, err = backendmetrics.NewPodMetricsClientImpl(setupLog, backendmetrics.Config{
-			ModelServerMetricsScheme:        opts.ModelServerMetricsScheme,
-			ModelServerMetricsHTTPSInsecure: opts.ModelServerMetricsHTTPSInsecure,
-			ModelServerMetricsPath:          opts.ModelServerMetricsPath,
-			TotalQueuedRequestsMetric:       opts.TotalQueuedRequestsMetric,
-			TotalRunningRequestsMetric:      opts.TotalRunningRequestsMetric,
-			KVCacheUsagePercentageMetric:    opts.KVCacheUsagePercentageMetric,
-			LoRAInfoMetric:                  opts.LoRAInfoMetric,
-			CacheInfoMetric:                 opts.CacheInfoMetric,
-		})
-		if err != nil {
-			return err
-		}
-	}
-	epf := r.setupMetricsCollection(useNewMetrics, opts, pmc)
+	epf := r.setupMetricsCollection(opts)
 
 	namespace := resolvePoolNamespace(opts.PoolNamespace)
 	poolName := opts.PoolName
@@ -897,8 +872,14 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// notification sources into the manager, is intentionally skipped below).
 	// Surface this once at startup so operators porting a K8s config see why
 	// related behavior differs.
+	//
+	// Note on InferenceObjective: with no objective CRDs to consult, per-request
+	// priority falls back to Director.defaultPriority (see
+	// pkg/epp/requestcontrol/director.go). Static priority bands configured in
+	// EndpointPickerConfig.flowControl are honored and applied via the FlowControl
+	// layer when the feature gate is enabled.
 	setupLog.Info("file-discovery mode: Kubernetes-only features are inactive " +
-		"(InferenceModelRewrite, InferenceObjective, and any " +
+		"(InferenceModelRewrite, InferenceObjective reconciler, and any " +
 		"k8s-notification-source data layer plugins); see docs/discovery.md")
 
 	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
@@ -913,11 +894,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return err
 	}
 
-	disallowedExtractorType := ""
-	if !useNewMetrics {
-		disallowedExtractorType = extractormetrics.MetricsExtractorType
-	}
-	if err := r.dlRuntime.Configure(eppConfig.DataConfig, useNewMetrics, disallowedExtractorType, setupLog); err != nil {
+	if err := r.dlRuntime.Configure(eppConfig.DataConfig, setupLog); err != nil {
 		return fmt.Errorf("failed to configure datalayer: %w", err)
 	}
 
@@ -927,9 +904,14 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
-	endpointCandidates := requestcontrol.NewDatastoreEndpointCandidates(ds,
-		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter))
-	admissionController := requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
+
+	// Outside Kubernetes there is no InferenceObjective CRD, so per-request
+	// priority falls back to Director.defaultPriority (see
+	// pkg/epp/requestcontrol/director.go); static bands defined in
+	// EndpointPickerConfig.flowControl still apply.
+	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
+		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
+	endpointCandidates, admissionController := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
 	gknn := common.GKNN{
@@ -947,9 +929,10 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
 		Director:                         director,
-		Parser:                           r.parser,
+		ParserRegistry:                   r.parserRegistry,
 		SaturationDetector:               eppConfig.SaturationDetector,
-		UseExperimentalDatalayerV2:       useNewMetrics,
+		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
+		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
@@ -966,12 +949,17 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	isLeader.Store(true)
 
 	healthSrv := grpc.NewServer()
+	parsers := r.parserRegistry.Parsers()
+	ps := make([]appProtocolSupporter, len(parsers))
+	for i, p := range parsers {
+		ps[i] = p
+	}
 	healthPb.RegisterHealthServer(healthSrv, &healthServer{
 		logger:                ctrl.Log.WithName("health"),
 		datastore:             ds,
 		isLeader:              isLeader,
 		leaderElectionEnabled: false,
-		supporter:             r.parser,
+		supporters:            ps,
 	})
 
 	g := newRunnableGroup()
@@ -1032,4 +1020,23 @@ func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
 		return fmt.Errorf("metrics server: %w", err)
 	}
 	return nil
+}
+
+func toRawMap(cfg *configapi.EndpointPickerConfig) map[string]any {
+	if cfg == nil {
+		return nil
+	}
+	var rawMap map[string]any
+	bytes, err := json.Marshal(cfg)
+	if err != nil {
+		return map[string]any{
+			"error": fmt.Sprintf("failed to marshal raw config: %v", err),
+		}
+	}
+	if err := json.Unmarshal(bytes, &rawMap); err != nil {
+		return map[string]any{
+			"error": fmt.Sprintf("failed to unmarshal raw config map: %v", err),
+		}
+	}
+	return rawMap
 }

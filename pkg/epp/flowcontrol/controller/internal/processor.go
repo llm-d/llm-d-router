@@ -43,14 +43,14 @@ const maxCleanupWorkers = 4
 // internal buffer is momentarily full and cannot accept new work.
 var ErrProcessorBusy = errors.New("shard processor is busy")
 
-// ShardProcessor is the core worker of the FlowController.
+// Processor is the core worker of the FlowController.
 //
 // It is paired one-to-one with a RegistryShard instance and is responsible for all request lifecycle operations on that
 // shard, from the point an item is successfully submitted to it.
 //
 // # Request Lifecycle Management & Ownership
 //
-// The ShardProcessor takes ownership of a FlowItem only after it has been successfully sent to its internal enqueueChan
+// The Processor takes ownership of a FlowItem only after it has been successfully sent to its internal enqueueChan
 // via Submit or SubmitOrBlock (i.e., when these methods return nil).
 // Once the Processor takes ownership, it is solely responsible for ensuring that item.Finalize() or
 // item.FinalizeWithOutcome() is called exactly once for that item, under all circumstances (dispatch, rejection, sweep,
@@ -64,7 +64,7 @@ var ErrProcessorBusy = errors.New("shard processor is busy")
 // To ensure correctness and high performance, the processor uses a single-goroutine, actor-based model. The main run
 // loop is the sole writer for all state-mutating operations. This makes complex transactions (like capacity checks)
 // inherently atomic without coarse-grained locks.
-type ShardProcessor struct {
+type Processor struct {
 	poolName             string
 	registry             contracts.FlowRegistry
 	saturationDetector   flowcontrol.SaturationDetector
@@ -86,8 +86,8 @@ type ShardProcessor struct {
 	shutdownOnce   sync.Once
 }
 
-// NewShardProcessor creates a new ShardProcessor instance.
-func NewShardProcessor(
+// NewProcessor creates a new Processor instance.
+func NewProcessor(
 	ctx context.Context,
 	poolName string,
 	registry contracts.FlowRegistry,
@@ -98,8 +98,8 @@ func NewShardProcessor(
 	cleanupSweepInterval time.Duration,
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
-) *ShardProcessor {
-	return &ShardProcessor{
+) *Processor {
+	return &Processor{
 		registry:             registry,
 		poolName:             poolName,
 		saturationDetector:   saturationDetector,
@@ -124,7 +124,7 @@ func NewShardProcessor(
 // Possible errors:
 //   - ErrProcessorBusy: The processor's input channel is full.
 //   - types.ErrFlowControllerNotRunning: The processor is shutting down.
-func (sp *ShardProcessor) Submit(item *FlowItem) error {
+func (sp *Processor) Submit(item *FlowItem) error {
 	if sp.isShuttingDown.Load() {
 		return types.ErrFlowControllerNotRunning
 	}
@@ -150,7 +150,7 @@ func (sp *ShardProcessor) Submit(item *FlowItem) error {
 // Possible errors:
 //   - ctx.Err(): The provided context was cancelled or its deadline exceeded.
 //   - types.ErrFlowControllerNotRunning: The processor is shutting down.
-func (sp *ShardProcessor) SubmitOrBlock(ctx context.Context, item *FlowItem) error {
+func (sp *Processor) SubmitOrBlock(ctx context.Context, item *FlowItem) error {
 	if sp.isShuttingDown.Load() {
 		return types.ErrFlowControllerNotRunning
 	}
@@ -168,7 +168,7 @@ func (sp *ShardProcessor) SubmitOrBlock(ctx context.Context, item *FlowItem) err
 // Run is the main operational loop for the shard processor. It must be run as a goroutine.
 // It uses a `select` statement to interleave accepting new requests with dispatching existing ones, balancing
 // responsiveness with throughput.
-func (sp *ShardProcessor) Run(ctx context.Context) {
+func (sp *Processor) Run(ctx context.Context) {
 	sp.logger.V(logutil.DEFAULT).Info("Shard processor run loop starting.")
 	defer sp.logger.V(logutil.DEFAULT).Info("Shard processor run loop stopped.")
 
@@ -215,7 +215,7 @@ func (sp *ShardProcessor) Run(ctx context.Context) {
 
 // enqueue processes an item received from the enqueueChan.
 // It handles capacity checks, checks for external finalization, and either admits the item to a queue or rejects it.
-func (sp *ShardProcessor) enqueue(item *FlowItem) {
+func (sp *Processor) enqueue(item *FlowItem) {
 
 	req := item.OriginalRequest()
 	key := req.FlowKey()
@@ -285,7 +285,7 @@ func (sp *ShardProcessor) enqueue(item *FlowItem) {
 // hasCapacity checks if the shard and the specific priority band have enough capacity.
 // This check reflects actual resource utilization, including "zombie" items (finalized but unswept), to prevent
 // physical resource overcommitment.
-func (sp *ShardProcessor) hasCapacity(priority int, itemByteSize uint64) bool {
+func (sp *Processor) hasCapacity(priority int, itemByteSize uint64) bool {
 	stats := sp.registry.Stats()
 	if stats.TotalCapacityBytes > 0 && stats.TotalByteSize+itemByteSize > stats.TotalCapacityBytes {
 		return false
@@ -319,7 +319,7 @@ func (sp *ShardProcessor) hasCapacity(priority int, itemByteSize uint64) bool {
 // However, if a selected item is saturated (cannot be scheduled), the cycle stops immediately. This enforces HoL
 // blocking to respect the policy's decision and prevent priority inversion, where dispatching lower-priority work might
 // exacerbate the saturation affecting the high-priority item.
-func (sp *ShardProcessor) dispatchCycle(ctx context.Context) bool {
+func (sp *Processor) dispatchCycle(ctx context.Context) bool {
 	dispatchCycleStart := time.Now()
 	defer func() {
 		metrics.RecordFlowControlDispatchCycleDuration(time.Since(dispatchCycleStart))
@@ -375,7 +375,7 @@ func (sp *ShardProcessor) dispatchCycle(ctx context.Context) bool {
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.
-func (sp *ShardProcessor) selectItem(
+func (sp *Processor) selectItem(
 	ctx context.Context,
 	flowGroup flowcontrol.PriorityBandAccessor,
 ) (flowcontrol.QueueItemAccessor, error) {
@@ -397,7 +397,7 @@ func (sp *ShardProcessor) selectItem(
 }
 
 // dispatchItem handles the final steps of dispatching an item: removing it from the queue and finalizing its outcome.
-func (sp *ShardProcessor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
+func (sp *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 	req := itemAcc.OriginalRequest()
 	key := req.FlowKey()
 	managedQ, err := sp.registry.ManagedQueue(key)
@@ -422,7 +422,7 @@ func (sp *ShardProcessor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) er
 
 // runCleanupSweep starts a background goroutine that periodically scans all queues for externally finalized items
 // ("zombie" items) and removes them in batches.
-func (sp *ShardProcessor) runCleanupSweep(ctx context.Context) {
+func (sp *Processor) runCleanupSweep(ctx context.Context) {
 	defer sp.wg.Done()
 	logger := sp.logger.WithName("runCleanupSweep")
 	logger.V(logutil.DEFAULT).Info("Shard cleanup sweep goroutine starting.")
@@ -443,7 +443,7 @@ func (sp *ShardProcessor) runCleanupSweep(ctx context.Context) {
 
 // sweepFinalizedItems performs a single scan of all queues, removing finalized items in batch and releasing their
 // memory.
-func (sp *ShardProcessor) sweepFinalizedItems() {
+func (sp *Processor) sweepFinalizedItems() {
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
 			return itemAcc.(*FlowItem).FinalState() != nil
@@ -457,7 +457,7 @@ func (sp *ShardProcessor) sweepFinalizedItems() {
 
 // shutdown handles the graceful termination of the processor, ensuring all pending items (in channel and queues) are
 // Finalized.
-func (sp *ShardProcessor) shutdown() {
+func (sp *Processor) shutdown() {
 	sp.shutdownOnce.Do(func() {
 		sp.isShuttingDown.Store(true)
 		sp.logger.V(logutil.DEFAULT).Info("Shard processor shutting down.")
@@ -483,7 +483,7 @@ func (sp *ShardProcessor) shutdown() {
 }
 
 // evictAll drains all queues on the shard, finalizes every item, and releases their memory.
-func (sp *ShardProcessor) evictAll() {
+func (sp *Processor) evictAll() {
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		key := managedQ.FlowQueueAccessor().FlowKey()
 		removedItems := managedQ.Drain()
@@ -509,7 +509,7 @@ func (sp *ShardProcessor) evictAll() {
 
 // processAllQueuesConcurrently iterates over all queues in all priority bands on the shard and executes the given
 // `processFn` for each queue using a dynamically sized worker pool.
-func (sp *ShardProcessor) processAllQueuesConcurrently(
+func (sp *Processor) processAllQueuesConcurrently(
 	ctxName string,
 	processFn func(mq contracts.ManagedQueue, logger logr.Logger),
 ) {
