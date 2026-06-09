@@ -158,8 +158,8 @@ func (h *PdProfileHandler) WithName(name string) *PdProfileHandler {
 func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
 	// Start tracing span for profile picking operation
-	tracer := tracing.Tracer()
-	ctx, span := tracer.Start(ctx, "llm_d.epp.pd.profile_handler.pick",
+	tracer := tracing.Tracer("llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg")
+	ctx, span := tracer.Start(ctx, "pick_pd_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

@@ -83,7 +83,7 @@ func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) {
 	s.logger.V(4).Info("running chunked decode", "chunkSize", s.config.DecodeChunkSize)
 
-	ctx, span := tracing.Tracer().Start(r.Context(), "llm_d.pd_proxy.chunked_decode",
+	ctx, span := tracing.Tracer("llm-d-router/pkg/sidecar/proxy").Start(r.Context(), "chunked_decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

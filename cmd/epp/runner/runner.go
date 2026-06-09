@@ -217,7 +217,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	logutil.InitLogging(&opts.ZapOptions)
 
 	if opts.Tracing {
-		shutdown, err := tracing.InitTracing(ctx, setupLog, "llm-d-router/epp")
+		shutdown, err := tracing.InitTracing(ctx, setupLog, "llm-d-epp")
 		if err != nil {
 			return fmt.Errorf("failed to init tracing %w", err)
 		}

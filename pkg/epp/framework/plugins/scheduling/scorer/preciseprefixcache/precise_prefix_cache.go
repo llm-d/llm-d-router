@@ -160,13 +160,12 @@ func (p *Plugin) TypedName() plugin.TypedName { return p.typedName }
 
 func (p *Plugin) Category() scheduling.ScorerCategory { return p.scorer.Category() }
 
-// Score traces under the historical span name "llm_d.epp.scorer.prefix_cache"
-// with the original attribute schema so dashboards built against the heavy
-// scorer keep working, then delegates to the inner prefix-cache-scorer.
+// Score emits a span with the prefix-cache attribute schema, then delegates to
+// the inner prefix-cache-scorer.
 func (p *Plugin) Score(ctx context.Context,
 	req *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 ) map[scheduling.Endpoint]float64 {
-	ctx, span := tracing.Tracer().Start(ctx, "llm_d.epp.scorer.prefix_cache",
+	ctx, span := tracing.Tracer("llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache").Start(ctx, "score_prefix_cache",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

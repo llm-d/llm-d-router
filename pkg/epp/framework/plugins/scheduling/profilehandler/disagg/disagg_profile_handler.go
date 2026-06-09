@@ -263,8 +263,8 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 // Returns the next profile to execute, or an empty map when all stages are done.
 func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
-	tracer := tracing.Tracer()
-	ctx, span := tracer.Start(ctx, "llm_d.epp.disagg.profile_handler.pick",
+	tracer := tracing.Tracer("llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg")
+	ctx, span := tracer.Start(ctx, "pick_disagg_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
@@ -375,8 +375,8 @@ func (h *Handler) ProcessResults(
 // PreRequest wires prefill and encode SchedulerProfile results into headers
 // so the sidecar knows which pods to contact for disaggregated work.
 func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	tracer := tracing.Tracer()
-	_, span := tracer.Start(ctx, "llm_d.epp.prerequest.disaggregation",
+	tracer := tracing.Tracer("llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg")
+	_, span := tracer.Start(ctx, "prepare_disaggregation",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
