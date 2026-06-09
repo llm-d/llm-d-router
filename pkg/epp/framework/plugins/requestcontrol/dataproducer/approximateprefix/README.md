@@ -10,8 +10,6 @@ For each request, the plugin consumes `request.Body.TokenizedPrompt` (token IDs)
 
 **Parameters:**
 
-Defaults come from `defaultConfig` in `types.go` (the factory decodes supplied parameters over it), not from each field's zero value. With `autoTune` enabled (the default), `blockSizeTokens` and `lruCapacityPerServer` are taken from endpoint metrics; the configured values apply only as fallbacks when metrics are unavailable. `maxPrefixBlocksToMatch` and `maxPrefixTokensToMatch` are never auto-tuned and always apply.
-
 - `autoTune` (bool, optional, default: `true`): Infer `blockSizeTokens` and `lruCapacityPerServer` from endpoint metrics when available.
 - `blockSizeTokens` (int, optional, default: `16`): Prefix block size in tokens. Used when `autoTune` is false or endpoint metrics are unavailable; ignored when auto-tuned from metrics. Values below the minimum of `64` are clamped up at request time (see #1158), so the `16` default is effectively `64` absent a larger metric/configured value.
 - `maxPrefixBlocksToMatch` (int, optional, default: `256`): Maximum number of prefix blocks hashed and matched per request. Not auto-tuned. `0` disables matching (zero blocks hashed).
