@@ -105,7 +105,12 @@ DOCKER_SOCK_GID := $(shell stat -f '%g' $(CONTAINER_SOCK) 2>/dev/null)
 else
 DOCKER_SOCK_GID := $(shell stat -c '%g' $(CONTAINER_SOCK) 2>/dev/null)
 endif
-BUILDER_SOCK_FLAGS = --group-add $(DOCKER_SOCK_GID) \
+ifneq ($(DOCKER_SOCK_GID),)
+DOCKER_GROUP_PARAM := --group-add $(DOCKER_SOCK_GID)
+else
+DOCKER_GROUP_PARAM :=
+endif
+BUILDER_SOCK_FLAGS = $(DOCKER_GROUP_PARAM) \
 	-v $(CONTAINER_SOCK):$(CONTAINER_SOCK) \
 	-e DOCKER_HOST=unix://$(CONTAINER_SOCK) \
 	-e CONTAINER_RUNTIME=docker
