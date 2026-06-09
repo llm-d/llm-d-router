@@ -36,7 +36,7 @@ import (
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
-	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 func newTestProducer(t testing.TB) *InFlightLoadProducer {
@@ -46,7 +46,7 @@ func newTestProducer(t testing.TB) *InFlightLoadProducer {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	p, err := InFlightLoadProducerFactory("inflight-load-producer", decoder, igwtestutils.NewTestHandle(ctx))
+	p, err := InFlightLoadProducerFactory("inflight-load-producer", decoder, testutils.NewTestHandle(ctx))
 	require.NoError(t, err)
 	return p.(*InFlightLoadProducer)
 }
@@ -79,7 +79,7 @@ func TestInFlightLoadProducer_PrefixMatchInfoProducerName(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	p, err := InFlightLoadProducerFactory("inflight-load-producer",
-		json.NewDecoder(bytes.NewReader(raw)), igwtestutils.NewTestHandle(ctx))
+		json.NewDecoder(bytes.NewReader(raw)), testutils.NewTestHandle(ctx))
 	require.NoError(t, err)
 	producer := p.(*InFlightLoadProducer)
 
