@@ -270,6 +270,23 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 	}
 }
 
+func TestHandleResponseBodyWithoutSchedulingRequest(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+	}
+	server.director = &mockDirector{}
+	reqCtx := &RequestContext{
+		Response: &Response{
+			Headers: map[string]string{},
+		},
+	}
+
+	require.NotPanics(t, func() {
+		server.HandleResponseBody(ctx, reqCtx, []byte(body), true)
+	})
+}
+
 func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	t.Parallel()
 
