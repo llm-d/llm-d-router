@@ -41,27 +41,32 @@ const ModalityImage Modality = "image"
 type RequestPayload interface {
 	isRequestPayload()
 	IsParsed() bool
+	// AsMap returns the parsed JSON map
+	AsMap() (PayloadMap, bool)
 }
 
 // PayloadMap represents a JSON request body unmarshaled into a map.
 type PayloadMap map[string]any
 
-func (PayloadMap) isRequestPayload() {}
-func (PayloadMap) IsParsed() bool    { return true }
+func (p PayloadMap) isRequestPayload()         {}
+func (p PayloadMap) IsParsed() bool            { return true }
+func (p PayloadMap) AsMap() (PayloadMap, bool) { return p, p != nil }
 
 // PayloadProto represents a gRPC request body unmarshaled into a proto.Message.
 type PayloadProto struct {
 	proto.Message
 }
 
-func (PayloadProto) isRequestPayload() {}
-func (PayloadProto) IsParsed() bool    { return true }
+func (PayloadProto) isRequestPayload()         {}
+func (PayloadProto) IsParsed() bool            { return true }
+func (PayloadProto) AsMap() (PayloadMap, bool) { return nil, false }
 
 // RawPayload represents an unparsed request body kept as raw bytes.
 type RawPayload []byte
 
-func (RawPayload) isRequestPayload() {}
-func (RawPayload) IsParsed() bool    { return false }
+func (RawPayload) isRequestPayload()         {}
+func (RawPayload) IsParsed() bool            { return false }
+func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
