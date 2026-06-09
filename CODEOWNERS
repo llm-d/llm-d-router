@@ -43,3 +43,7 @@
 
 # Tokenization
 /pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/          @vMaroon @liu-cong @sagearc @llm-d/router-maintainers
+
+# Request handling
+/pkg/epp/framework/interface/requesthandling/                             @zetxqx @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requesthandling/                               @zetxqx @llm-d/router-maintainers
