@@ -1,4 +1,4 @@
-{{- define "inference-extension.inferenceobjective-resource" -}}
+{{- define "llm-d-router.inferenceobjective-resource" -}}
 {{- range .Values.router.inferenceObjectives }}
 ---
 apiVersion: llm-d.ai/v1alpha2

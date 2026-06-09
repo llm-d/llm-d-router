@@ -1,4 +1,4 @@
-{{- define "inference-extension.service" -}}
+{{- define "llm-d-router.service" -}}
 apiVersion: v1
 kind: Service
 metadata:

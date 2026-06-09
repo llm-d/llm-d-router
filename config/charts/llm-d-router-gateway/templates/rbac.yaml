@@ -30,4 +30,4 @@ roleRef:
   kind: Role
   name: {{ printf "%s-non-sa" (include "llm-d-router.name" .) }}
 ---
-{{- include "inference-extension.rbac" . -}}
+{{- include "llm-d-router.rbac" . -}}
