@@ -518,8 +518,7 @@ func TestProduce_StringArrayPromptDoesNotPublishEmptyTokenResult(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, [][]uint32{nil, nil}, req.Body.TokenizedPrompt.PerPromptTokens)
+	assert.Nil(t, req.Body.TokenizedPrompt)
 }
 
 func TestProduce_SinglePromptSetsPerPromptTokens(t *testing.T) {
