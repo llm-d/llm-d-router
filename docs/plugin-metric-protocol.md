@@ -14,10 +14,6 @@ metric types and semantics MUST follow this doc.
 
 Each metric below lists the plugins that need it under **Required by**. You only need to expose metrics for plugins you are using.
 
-Note the requirements here are aligned with the
-[model server metrics standardization](https://docs.google.com/document/d/1SpSp1E6moa4HSrJnS4x3NpLuj88sMXr2tbofKlzTZpk)
-effort.
-
 ### TotalQueuedRequests
 
 The current total number of requests in the queue.
