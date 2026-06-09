@@ -447,6 +447,20 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		"tp_size":                        s.config.MoRIIOTPSize,
 		"remote_dp_size":                 s.config.MoRIIODPSize,
 	}
+	// Wide-EP fan-out (prefill leg): remote_hosts must be the DECODE-side pod
+	// IPs so prefill handshakes the right pods. Omitted when unset, falling back
+	// to the single-host remote_host path.
+	if len(s.config.MoRIIODecodeHosts) > 0 {
+		pkv := completionRequest[requestFieldKVTransferParams].(map[string]any)
+		hosts := make([]any, len(s.config.MoRIIODecodeHosts))
+		for i, h := range s.config.MoRIIODecodeHosts {
+			hosts[i] = h
+		}
+		pkv["remote_hosts"] = hosts
+		if s.config.MoRIIODPSizeLocal > 0 {
+			pkv["remote_dp_size_local"] = s.config.MoRIIODPSizeLocal
+		}
+	}
 	completionRequest[requestFieldStream] = false
 	delete(completionRequest, requestFieldStreamOptions)
 	completionRequest[requestFieldMaxTokens] = 1
@@ -501,6 +515,19 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		requestFieldTransferID:           transferID,
 		"tp_size":                        s.config.MoRIIOTPSize,
 		"remote_dp_size":                 s.config.MoRIIODPSize,
+	}
+	// Wide-EP fan-out (decode leg): the opposite host list, the PREFILL-side
+	// pod IPs. A multi-pod deployment must set both host flags.
+	if len(s.config.MoRIIORemoteHosts) > 0 {
+		dkv := completionRequest[requestFieldKVTransferParams].(map[string]any)
+		hosts := make([]any, len(s.config.MoRIIORemoteHosts))
+		for i, h := range s.config.MoRIIORemoteHosts {
+			hosts[i] = h
+		}
+		dkv["remote_hosts"] = hosts
+		if s.config.MoRIIODPSizeLocal > 0 {
+			dkv["remote_dp_size_local"] = s.config.MoRIIODPSizeLocal
+		}
 	}
 
 	dbody, err := json.Marshal(completionRequest)

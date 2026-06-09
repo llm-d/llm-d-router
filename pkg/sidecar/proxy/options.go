@@ -212,6 +212,10 @@ func NewOptions() *Options {
 			MoRIIOPrefillNotifyPort:    61005,
 			MoRIIOTPSize:               1,
 			MoRIIODPSize:               1,
+			// Wide-EP multi-pod: empty disables fan-out (single-pod fallback).
+			MoRIIORemoteHosts: nil,
+			MoRIIODPSizeLocal: 0,
+			MoRIIODecodeHosts: nil,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
@@ -272,6 +276,20 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MoRIIODPSize, "moriio-dp-size", opts.MoRIIODPSize,
 		"Data-parallel world size, emitted as kv_transfer_params[remote_dp_size] on both legs. "+
 			"Set to the engine DP size for Wide-EP (TP=1, DP>1); default 1 leaves the wire unchanged.")
+
+	// Wide-EP multi-pod fan-out. Optional: empty preserves single-pod behaviour.
+	// remote_hosts carries the opposite side's pod IPs (decode IPs on the prefill
+	// leg and vice versa); dp-size-local maps a global DP rank to a pod via
+	// pod_idx = dp_rank / dp_size_local.
+	fs.StringSliceVar(&opts.MoRIIORemoteHosts, "moriio-remote-hosts", opts.MoRIIORemoteHosts,
+		"Wide-EP: comma-separated remote (prefill-side) pod IPs for per-DP-rank fan-out. "+
+			"Pair with --moriio-dp-size-local.")
+	fs.IntVar(&opts.MoRIIODPSizeLocal, "moriio-dp-size-local", opts.MoRIIODPSizeLocal,
+		"Wide-EP: per-pod DP size used to map a global DP rank to a pod index. "+
+			"Must satisfy --moriio-dp-size = dp-size-local * len(hosts).")
+	fs.StringSliceVar(&opts.MoRIIODecodeHosts, "moriio-decode-hosts", opts.MoRIIODecodeHosts,
+		"Wide-EP: comma-separated decode-side pod IPs, emitted as the prefill leg's "+
+			"remote_hosts. Pair with --moriio-dp-size-local.")
 
 	fs.StringSliceVar(&opts.enableTLS, enableTLS, opts.enableTLS, "stages to enable TLS for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
 	fs.StringSliceVar(&opts.tlsInsecureSkipVerify, tlsInsecureSkipVerify, opts.tlsInsecureSkipVerify, "stages to skip TLS verification for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
@@ -379,6 +397,51 @@ func (opts *Options) Complete() error {
 		return errors.New("--moriio-parallel-dispatch requires --moriio-write-mode")
 	}
 
+	// Both legs share the same dp_size / dp_size_local contract; only the host
+	// list differs.
+	if err := validateWideEPHosts(
+		"--moriio-remote-hosts", opts.MoRIIORemoteHosts,
+		opts.MoRIIODPSize, opts.MoRIIODPSizeLocal); err != nil {
+		return err
+	}
+	if err := validateWideEPHosts(
+		"--moriio-decode-hosts", opts.MoRIIODecodeHosts,
+		opts.MoRIIODPSize, opts.MoRIIODPSizeLocal); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateWideEPHosts checks the multi-pod fan-out invariants for one host
+// list: dpLocal must divide dpSize and the host count must equal the pod count
+// (dpSize / dpLocal), since vLLM indexes hosts[dp_rank / dpLocal]. A misconfig
+// otherwise surfaces only as a cross-pod handshake that hangs, so it fails fast.
+// Lists of 0 or 1 host are the single-pod case and pass unchecked.
+func validateWideEPHosts(flag string, hosts []string, dpSize, dpLocal int) error {
+	if len(hosts) <= 1 {
+		return nil
+	}
+	if dpLocal <= 0 {
+		return fmt.Errorf(
+			"%s has %d entries but --moriio-dp-size-local is %d; "+
+				"Wide-EP multi-pod requires dp-size-local > 0 so vLLM "+
+				"can compute pod_idx = dp_rank / dp_size_local",
+			flag, len(hosts), dpLocal)
+	}
+	if dpSize%dpLocal != 0 {
+		return fmt.Errorf(
+			"--moriio-dp-size (%d) must be divisible by "+
+				"--moriio-dp-size-local (%d) for Wide-EP multi-pod (%s)",
+			dpSize, dpLocal, flag)
+	}
+	if dpSize/dpLocal != len(hosts) {
+		return fmt.Errorf(
+			"%s has %d entries but dp-size/dp-size-local = %d; the "+
+				"count of hosts must match the number of pods so the "+
+				"per-rank pod_idx mapping covers every DP rank",
+			flag, len(hosts), dpSize/dpLocal)
+	}
 	return nil
 }
 

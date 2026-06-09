@@ -239,6 +239,19 @@ type Config struct {
 	// both legs. Wide-EP (TP=1, DP>1) must set this so the decode connector
 	// registers RDMA notifies against every DP rank; 1 leaves the wire unchanged.
 	MoRIIODPSize int
+
+	// MoRIIORemoteHosts is the ordered list of prefill-side pod IPs across which
+	// vLLM fans out its per-DP-rank handshake, emitted as the decode leg's
+	// remote_hosts. host[i] serves DP ranks [i*MoRIIODPSizeLocal, (i+1)*...).
+	// Empty disables fan-out (single-host fallback).
+	MoRIIORemoteHosts []string
+	// MoRIIODPSizeLocal is the per-pod DP size, mapping a global DP rank to a pod
+	// via pod_idx = dp_rank / MoRIIODPSizeLocal. 0 means single-pod.
+	MoRIIODPSizeLocal int
+	// MoRIIODecodeHosts is the decode-side counterpart of MoRIIORemoteHosts,
+	// emitted as the prefill leg's remote_hosts. A multi-pod deployment sets
+	// both; the lists must use opposite sides or every cross-pod handshake hangs.
+	MoRIIODecodeHosts []string
 }
 
 // MarshalJSON implements json.Marshaler for Config.
