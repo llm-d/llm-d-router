@@ -242,6 +242,33 @@ schedulingProfiles:
     weight: 10
 `
 
+// EPP configuration for multimodal cache-affinity routing. Pairs the
+// mm-embeddings-cache producer+scorer with token-producer at loopback; the sim
+// sidecar (swapped in by usesSimRender) provides mm_features.
+const mmCacheAffinityConfig = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: token-producer
+  parameters:
+    modelName: food-review
+    vllm:
+      url: http://localhost:8000
+- type: mm-embeddings-cache-producer
+  parameters:
+    cacheSizeInMBPerServer: 64
+- type: mm-embeddings-cache-scorer
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: mm-embeddings-cache-scorer
+    weight: 10
+  - pluginRef: max-score-picker
+`
+
 // EPP configuration for running scale model server test
 const scaleConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig

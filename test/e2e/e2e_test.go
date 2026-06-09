@@ -698,6 +698,41 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 		})
 	})
 
+	ginkgo.When("Running multimodal cache-affinity configuration", ginkgo.Label(extendedTestLabel), func() {
+		ginkgo.It("should route identical multimodal content to the same decode pod", func() {
+			infPoolObjects = createInferencePool(1, true)
+
+			decodeReplicas := 2
+			modelServers := createModelServersDecode(decodeReplicas)
+			epp := createEndPointPicker(mmCacheAffinityConfig)
+
+			_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
+
+			for _, tc := range []struct {
+				name string
+				send func() (string, string)
+			}{
+				{"image", func() (string, string) { return runChatCompletionWithImages(testImageURL) }},
+				{"audio", runChatCompletionWithAudio},
+				{"video", runChatCompletionWithVideo},
+			} {
+				ginkgo.By("modality=" + tc.name)
+
+				ns1, pod1 := tc.send()
+				gomega.Expect(ns1).Should(gomega.Equal(nsName))
+				gomega.Expect(pod1).Should(gomega.BeElementOf(decodePods))
+
+				ns2, pod2 := tc.send()
+				gomega.Expect(ns2).Should(gomega.Equal(nsName))
+				gomega.Expect(pod2).Should(gomega.Equal(pod1))
+			}
+
+			testutils.DeleteObjects(testConfig, epp)
+			testutils.DeleteObjects(testConfig, modelServers)
+		})
+	})
+
 	ginkgo.When("Running simple non-PD KV enabled configuration", ginkgo.Label(extendedTestLabel), func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects = createInferencePool(1, true)
