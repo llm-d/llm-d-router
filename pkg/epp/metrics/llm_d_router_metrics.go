@@ -148,7 +148,7 @@ var (
 				8, 10, 15, 20, 30, 45, 60, 120,
 			},
 		},
-		modelLabels,
+		append(append([]string{}, modelLabels...), "fairness_id", "priority"),
 	)
 
 	llmdRequestTPOT = prometheus.NewHistogramVec(
@@ -161,7 +161,7 @@ var (
 				0.3, 0.4, 0.5, 0.6, 0.8, 1, 2,
 			},
 		},
-		modelLabels,
+		append(append([]string{}, modelLabels...), "fairness_id", "priority"),
 	)
 )
 

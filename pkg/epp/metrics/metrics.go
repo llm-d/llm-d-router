@@ -622,7 +622,7 @@ func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetMo
 }
 
 // RecordRequestTTFT records the time to first token.
-func RecordRequestTTFT(ctx context.Context, modelName, targetModelName string, received time.Time, firstToken time.Time) bool {
+func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, firstToken time.Time) bool {
 	if firstToken.IsZero() {
 		return false
 	}
@@ -632,12 +632,12 @@ func RecordRequestTTFT(ctx context.Context, modelName, targetModelName string, r
 		return false
 	}
 	ttftSeconds := firstToken.Sub(received).Seconds()
-	llmdRequestTTFT.WithLabelValues(modelName, targetModelName).Observe(ttftSeconds)
+	llmdRequestTTFT.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(ttftSeconds)
 	return true
 }
 
 // RecordRequestTPOT records the average time per output token.
-func RecordRequestTPOT(ctx context.Context, modelName, targetModelName string, received time.Time, firstToken time.Time, complete time.Time, outputTokenCount int) bool {
+func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, firstToken time.Time, complete time.Time, outputTokenCount int) bool {
 	if firstToken.IsZero() || outputTokenCount <= 1 {
 		return false
 	}
@@ -650,7 +650,7 @@ func RecordRequestTPOT(ctx context.Context, modelName, targetModelName string, r
 	e2eSeconds := complete.Sub(received).Seconds()
 	ttftSeconds := firstToken.Sub(received).Seconds()
 	tpotSeconds := (e2eSeconds - ttftSeconds) / float64(outputTokenCount-1)
-	llmdRequestTPOT.WithLabelValues(modelName, targetModelName).Observe(tpotSeconds)
+	llmdRequestTPOT.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(tpotSeconds)
 	return true
 }
 
