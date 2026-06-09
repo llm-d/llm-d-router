@@ -168,13 +168,6 @@ if eval "${unsupported_agentgateway_llm_d_router_gateway_command}"; then
   exit 1
 fi
 
-unsupported_agentgateway_selector_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set inferenceExtension.sidecar.proxyType=agentgateway --set inferenceExtension.sidecar.agentgateway.service.name=llm-instance-gateway --set 'inferenceExtension.sidecar.agentgateway.service.ports[0]=8000' --set inferenceExtension.endpointsServer.endpointSelector='app in (llm-instance-gateway)' --set inferenceExtension.endpointsServer.createInferencePool=false --set 'inferenceExtension.endpointsServer.targetPorts[0].number=8000' >/dev/null"
-echo "Executing: ${unsupported_agentgateway_selector_command}"
-if eval "${unsupported_agentgateway_selector_command}"; then
-  echo "Helm template unexpectedly succeeded for unsupported agentgateway model Service selector"
-  exit 1
-fi
-
 mismatched_agentgateway_ports_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8001' --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
 echo "Executing: ${mismatched_agentgateway_ports_command}"
 if eval "${mismatched_agentgateway_ports_command}"; then
@@ -236,6 +229,12 @@ agentgateway_service_block="${TEMP_DIR}/llm-d-router-standalone-agentgateway-ser
 sed -n '/^# Source: llm-d-router-standalone\/templates\/agentgateway-service.yaml/,/^---/p' "${agentgateway_render_output}" > "${agentgateway_service_block}"
 if ! grep -q -- 'app.kubernetes.io/component: agentgateway-model-service' "${agentgateway_service_block}"; then
   echo "Agentgateway model Service did not render its component label"
+  exit 1
+fi
+agentgateway_selector_block="${TEMP_DIR}/llm-d-router-standalone-agentgateway-service-selector.yaml"
+sed -n '/^  selector:$/,/^  ports:$/p' "${agentgateway_service_block}" > "${agentgateway_selector_block}"
+if ! grep -Eq -- '^[[:space:]]+"?app"?:[[:space:]]+"?llm-instance-gateway"?[[:space:]]*$' "${agentgateway_selector_block}"; then
+  echo "Agentgateway model Service did not render selector labels from router.modelServers.matchLabels"
   exit 1
 fi
 if grep -q -- 'app.kubernetes.io/name:' "${agentgateway_service_block}"; then
