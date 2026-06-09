@@ -1,4 +1,4 @@
-{{- define "llm-d-router.deployment" -}}
+{{- define "llm-d-epp.deployment" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -1,8 +1,8 @@
 {{ include "llm-d-router.validations.epp" $ }}
-{{ include "llm-d-router.config" . }}
-{{ include "llm-d-router.deployment" . }}
-{{ include "llm-d-router.lead-election-rbac" . }}
-{{ include "llm-d-router.sa-token-secret" . }}
-{{ include "llm-d-router.service" . }}
-{{ include "llm-d-router.service-monitor" . }}
 {{ include "llm-d-router.inferencepool-resource" . }}
+{{ include "llm-d-epp.config" . }}
+{{ include "llm-d-epp.deployment" . }}
+{{ include "llm-d-epp.leader-election-rbac" . }}
+{{ include "llm-d-epp.sa-token-secret" . }}
+{{ include "llm-d-epp.service" . }}
+{{ include "llm-d-epp.service-monitor" . }}
