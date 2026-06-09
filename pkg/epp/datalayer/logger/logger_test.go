@@ -19,7 +19,7 @@ package logger
 import (
 	"bytes"
 	"context"
-	"string"
+	"strings"
 	"sync"
 	"testing"
 	"time"
