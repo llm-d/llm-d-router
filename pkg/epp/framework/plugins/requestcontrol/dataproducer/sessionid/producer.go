@@ -64,16 +64,6 @@ const (
 	// auto-instantiated as the default for SessionIDDataKey or
 	// BoundEndpointDataKey, i.e. invoked without explicit parameters.
 	defaultAutoHeaderName = "x-session-id"
-
-	// maxSessionIDBytes caps the length of a session identifier the
-	// producer is willing to accept. Values longer than this are treated
-	// as if the session was absent: the EPP must not stash arbitrarily
-	// large client-supplied strings in the in-memory binding cache, and
-	// the gateway is expected to reject pathological cookies/headers
-	// upstream. 1024 bytes comfortably fits any reasonable opaque session
-	// token (UUIDs, signed tokens, hashes) and is well below typical
-	// gateway header-size limits.
-	maxSessionIDBytes = 1024
 )
 
 // Parameters configures the session-id producer.
@@ -114,7 +104,7 @@ type Producer struct {
 	bindingDK  fwkplugin.DataKey
 	headerName string
 	cookieName string
-	bindings   *lru.LRU[attrsession.SessionID, attrsession.BoundEndpoint]
+	bindings   *lru.LRU[string, attrsession.BoundEndpoint]
 }
 
 // Factory builds a Producer from raw plugin parameters. When rawParameters
@@ -167,7 +157,7 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 		bindingDK:  attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(name),
 		headerName: header,
 		cookieName: cookie,
-		bindings:   lru.NewLRU[attrsession.SessionID, attrsession.BoundEndpoint](size, nil, ttl),
+		bindings:   lru.NewLRU[string, attrsession.BoundEndpoint](size, nil, ttl),
 	}, nil
 }
 
@@ -197,9 +187,9 @@ func (p *Producer) Produce(_ context.Context, request *fwksched.InferenceRequest
 	if id == "" {
 		return nil
 	}
-	sessionID := attrsession.SessionID(id)
-	request.PutAttribute(p.sessionDK.String(), sessionID)
-	if bound, ok := p.bindings.Get(sessionID); ok {
+	request.PutAttribute(p.sessionDK.String(), attrsession.SessionID(id))
+	key := hashSessionID(id)
+	if bound, ok := p.bindings.Get(key); ok {
 		// Re-Add to refresh the TTL: an active session that keeps reading
 		// its binding should not expire under a write-only refresh policy.
 		//
@@ -211,7 +201,7 @@ func (p *Producer) Produce(_ context.Context, request *fwksched.InferenceRequest
 		// the next PreRequest on the same session restores the correct
 		// binding. We accept the bounded flap rather than introduce
 		// per-session locking for self-healing behavior.
-		p.bindings.Add(sessionID, bound)
+		p.bindings.Add(key, bound)
 		request.PutAttribute(p.bindingDK.String(), bound)
 	}
 	return nil
@@ -231,45 +221,43 @@ func (p *Producer) PreRequest(ctx context.Context, request *fwksched.InferenceRe
 		return
 	}
 	target, ok := primaryTarget(schedulingResult)
+	key := hashSessionID(id)
 	if !ok {
-		logger.Info("session-id-producer: no primary target endpoint to bind", "sessionIDHash", hashSessionIDForLog(id))
+		logger.Info("session-id-producer: no primary target endpoint to bind", "sessionIDHash", key[:logHashChars])
 		return
 	}
-	p.bindings.Add(attrsession.SessionID(id), target)
-	logger.Info("session-id-producer: bound session", "sessionIDHash", hashSessionIDForLog(id), "endpoint", target)
+	p.bindings.Add(key, target)
+	logger.Info("session-id-producer: bound session", "sessionIDHash", key[:logHashChars], "endpoint", target)
 }
 
-// hashSessionIDForLog returns a short fixed-length hex prefix of the
-// SHA-256 hash of the session id, suitable for log correlation without
-// leaking the original value. Session identifiers are client-supplied and
-// can carry signed claims, opaque tokens, or other sensitive material;
-// log aggregators must not retain them in plaintext. 8 hex chars (32
-// bits) is enough to distinguish the active sessions of a single
-// deployment for debugging.
-func hashSessionIDForLog(id string) string {
+// hashSessionID returns the full SHA-256 hex of the session identifier.
+// The producer uses this fixed-size value as the LRU key (rather than
+// the raw id) so cache memory is bounded regardless of input length and
+// arbitrarily long client-supplied tokens never sit in the cache.
+// 256 bits is collision-free for any realistic concurrent session count.
+//
+// Log correlation slices the first logHashChars hex digits off the
+// returned value: that prefix is opaque to operators (so signed-token
+// claims and other sensitive material stay out of log aggregators)
+// while still distinguishing the active sessions of a single deployment.
+func hashSessionID(id string) string {
 	sum := sha256.Sum256([]byte(id))
-	return hex.EncodeToString(sum[:4])
+	return hex.EncodeToString(sum[:])
 }
+
+// logHashChars is the number of hex digits of hashSessionID used in log
+// fields. 32 bits is enough to disambiguate active sessions within a
+// deployment without leaking enough of the hash to brute-force a token.
+const logHashChars = 8
 
 func (p *Producer) extract(request *fwksched.InferenceRequest) string {
 	if request == nil || request.Headers == nil {
 		return ""
 	}
-	var raw string
 	if p.headerName != "" {
-		raw = request.Headers[p.headerName]
-	} else {
-		raw = cookieValue(request.Headers[cookieHeader], p.cookieName)
+		return strings.TrimSpace(request.Headers[p.headerName])
 	}
-	id := strings.TrimSpace(raw)
-	// Treat oversized values as absent. Caching arbitrarily large
-	// client-supplied strings in the in-memory binding cache is a memory
-	// hazard; the gateway is expected to enforce header-size limits, and
-	// real session identifiers comfortably fit under maxSessionIDBytes.
-	if len(id) > maxSessionIDBytes {
-		return ""
-	}
-	return id
+	return strings.TrimSpace(cookieValue(request.Headers[cookieHeader], p.cookieName))
 }
 
 // cookieValue returns the value of the named cookie within an HTTP Cookie

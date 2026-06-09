@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -160,27 +159,6 @@ func TestProduce_HeaderMode(t *testing.T) {
 			assert.Equal(t, tc.want, string(got))
 		})
 	}
-}
-
-func TestProduce_OversizedSessionIDIsTreatedAsAbsent(t *testing.T) {
-	t.Parallel()
-
-	producer := mustFactory(t, `{"headerName":"x-session-id"}`)
-
-	// Within the cap: published normally.
-	atCap := strings.Repeat("a", 1024)
-	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-session-id": atCap}}
-	require.NoError(t, producer.Produce(context.Background(), req, nil))
-	got, ok := attrsession.ReadSessionID(req)
-	require.True(t, ok)
-	assert.Equal(t, atCap, string(got))
-
-	// One byte over the cap: dropped silently.
-	overCap := strings.Repeat("a", 1025)
-	req = &fwksched.InferenceRequest{Headers: map[string]string{"x-session-id": overCap}}
-	require.NoError(t, producer.Produce(context.Background(), req, nil))
-	_, ok = attrsession.ReadSessionID(req)
-	assert.False(t, ok, "oversized session id should be ignored")
 }
 
 func TestProduce_CookieMode(t *testing.T) {
