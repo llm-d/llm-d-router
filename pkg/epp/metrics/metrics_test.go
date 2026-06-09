@@ -1249,27 +1249,27 @@ func TestRecordRequestTTFT(t *testing.T) {
 	timeBaseline := time.Now()
 
 	t.Run("valid requests", func(t *testing.T) {
-		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", timeBaseline, timeBaseline.Add(10*time.Millisecond)))
-		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", timeBaseline, timeBaseline.Add(1600*time.Millisecond)))
-		require.True(t, RecordRequestTTFT(ctx, "m20", "t20", timeBaseline, timeBaseline.Add(120*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(10*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(1600*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m20", "t20", "tenant-b", "5", timeBaseline, timeBaseline.Add(120*time.Millisecond)))
 
-		h, err := getHistogramVecLabelValues(t, llmdRequestTTFT, "m10", "t10")
+		h, err := getHistogramVecLabelValues(t, llmdRequestTTFT, "m10", "t10", "tenant-a", "3")
 		require.NoError(t, err)
 		require.Equal(t, uint64(2), h.GetSampleCount())
 		require.InDelta(t, 1.61, h.GetSampleSum(), 0.001)
 
-		h, err = getHistogramVecLabelValues(t, llmdRequestTTFT, "m20", "t20")
+		h, err = getHistogramVecLabelValues(t, llmdRequestTTFT, "m20", "t20", "tenant-b", "5")
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), h.GetSampleCount())
 		require.InDelta(t, 0.12, h.GetSampleSum(), 0.001)
 	})
 
 	t.Run("zero first token timestamp", func(t *testing.T) {
-		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", timeBaseline, time.Time{}))
+		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, time.Time{}))
 	})
 
 	t.Run("first token before received", func(t *testing.T) {
-		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", timeBaseline.Add(10*time.Millisecond), timeBaseline))
+		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline.Add(10*time.Millisecond), timeBaseline))
 	})
 }
 
@@ -1283,32 +1283,32 @@ func TestRecordRequestTPOT(t *testing.T) {
 		received := timeBaseline
 		firstToken := timeBaseline.Add(500 * time.Millisecond)
 		complete := timeBaseline.Add(2000 * time.Millisecond)
-		require.True(t, RecordRequestTPOT(ctx, "m10", "t10", received, firstToken, complete, 11))
+		require.True(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", received, firstToken, complete, 11))
 
-		h, err := getHistogramVecLabelValues(t, llmdRequestTPOT, "m10", "t10")
+		h, err := getHistogramVecLabelValues(t, llmdRequestTPOT, "m10", "t10", "tenant-a", "3")
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), h.GetSampleCount())
 		require.InDelta(t, 0.15, h.GetSampleSum(), 0.001)
 	})
 
 	t.Run("single token skipped", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 1))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 1))
 	})
 
 	t.Run("zero tokens skipped", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 0))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 0))
 	})
 
 	t.Run("zero first token timestamp", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", timeBaseline, time.Time{}, timeBaseline.Add(200*time.Millisecond), 10))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, time.Time{}, timeBaseline.Add(200*time.Millisecond), 10))
 	})
 
 	t.Run("first token before received", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", timeBaseline.Add(100*time.Millisecond), timeBaseline, timeBaseline.Add(200*time.Millisecond), 10))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline.Add(100*time.Millisecond), timeBaseline, timeBaseline.Add(200*time.Millisecond), 10))
 	})
 
 	t.Run("complete before first token", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", timeBaseline, timeBaseline.Add(200*time.Millisecond), timeBaseline.Add(100*time.Millisecond), 10))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(200*time.Millisecond), timeBaseline.Add(100*time.Millisecond), 10))
 	})
 }
 
