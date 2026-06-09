@@ -1,6 +1,5 @@
 {{- define "llm-d-router.inferenceobjective-resource" -}}
 {{- range .Values.router.inferenceObjectives }}
----
 apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
@@ -13,5 +12,6 @@ spec:
   poolRef:
     group: "inference.networking.k8s.io"
     name: {{ $.Release.Name }}
+---
 {{- end }}
 {{- end }}
