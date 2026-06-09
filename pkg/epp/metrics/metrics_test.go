@@ -1248,28 +1248,28 @@ func TestRecordRequestTTFT(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	timeBaseline := time.Now()
 
-	t.Run("valid requests", func(t *testing.T) {
-		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(10*time.Millisecond)))
-		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(1600*time.Millisecond)))
-		require.True(t, RecordRequestTTFT(ctx, "m20", "t20", "tenant-b", "5", timeBaseline, timeBaseline.Add(120*time.Millisecond)))
+	t.Run("valid streaming requests", func(t *testing.T) {
+		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(10*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(1600*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m20", "t20", "tenant-b", "5", false, timeBaseline, timeBaseline.Add(120*time.Millisecond)))
 
-		h, err := getHistogramVecLabelValues(t, llmdRequestTTFT, "m10", "t10", "tenant-a", "3")
+		h, err := getHistogramVecLabelValues(t, llmdRequestTTFT, "m10", "t10", "tenant-a", "3", "true")
 		require.NoError(t, err)
 		require.Equal(t, uint64(2), h.GetSampleCount())
 		require.InDelta(t, 1.61, h.GetSampleSum(), 0.001)
 
-		h, err = getHistogramVecLabelValues(t, llmdRequestTTFT, "m20", "t20", "tenant-b", "5")
+		h, err = getHistogramVecLabelValues(t, llmdRequestTTFT, "m20", "t20", "tenant-b", "5", "false")
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), h.GetSampleCount())
 		require.InDelta(t, 0.12, h.GetSampleSum(), 0.001)
 	})
 
 	t.Run("zero first token timestamp", func(t *testing.T) {
-		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, time.Time{}))
+		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, time.Time{}))
 	})
 
 	t.Run("first token before received", func(t *testing.T) {
-		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline.Add(10*time.Millisecond), timeBaseline))
+		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline.Add(10*time.Millisecond), timeBaseline))
 	})
 }
 

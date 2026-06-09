@@ -622,7 +622,7 @@ func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetMo
 }
 
 // RecordRequestTTFT records the time to first token.
-func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, firstToken time.Time) bool {
+func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairnessID, priority string, streaming bool, received time.Time, firstToken time.Time) bool {
 	if firstToken.IsZero() {
 		return false
 	}
@@ -632,7 +632,11 @@ func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairness
 		return false
 	}
 	ttftSeconds := firstToken.Sub(received).Seconds()
-	llmdRequestTTFT.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(ttftSeconds)
+	streamingLabel := "false"
+	if streaming {
+		streamingLabel = "true"
+	}
+	llmdRequestTTFT.WithLabelValues(modelName, targetModelName, fairnessID, priority, streamingLabel).Observe(ttftSeconds)
 	return true
 }
 
