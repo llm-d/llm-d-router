@@ -24,13 +24,17 @@ import (
 	"strconv"
 
 	"github.com/cespare/xxhash/v2"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // bytesPerToken matches the scorer's averageCharactersPerToken, so a block of N
 // pseudo-tokens covers the same input bytes as an N-token raw-byte block.
 const bytesPerToken = 4
+
+const blockTypeText = "text"
 
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
 // The IDs suit content-locality hashing only; they never match engine KV blocks,
@@ -39,7 +43,7 @@ type estimateBackend struct {
 	img imageEstimator
 }
 
-func (b estimateBackend) produce(_ context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
+func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
 	// Pre-tokenized inputs are already real tokens; pass them through unchanged
 	// rather than byte-estimating. Token-ID inputs are valid for generate,
 	// /v1/completions, and /v1/embeddings.
@@ -55,11 +59,23 @@ func (b estimateBackend) produce(_ context.Context, body *fwkrh.InferenceRequest
 		return &fwkrh.TokenizedPrompt{TokenIDs: body.Embeddings.Input.TokenIDs}, nil
 	}
 
-	// The chat path folds multimodal placeholders into the stream and reports
-	// them as features; other protocols carry no multimodal content.
+	// Chat and Anthropic messages fold multimodal placeholders into the stream
+	// and report them as features.
 	if body.ChatCompletions != nil {
 		raw, features := b.chatCompletionsBytes(body.ChatCompletions)
 		return &fwkrh.TokenizedPrompt{TokenIDs: packBytes(raw), MultiModalFeatures: features}, nil
+	}
+	if body.Messages != nil {
+		raw, features := b.messagesBytes(body.Messages)
+		tokens := packBytes(raw)
+		log.FromContext(ctx).V(logutil.DEBUG).Info("Anthropic messages prefix-cache estimation",
+			"messageCount", len(body.Messages.Messages),
+			"rawBytes", len(raw),
+			"tokenCount", len(tokens),
+			"mmFeatureCount", len(features),
+			"mmFeatures", features,
+		)
+		return &fwkrh.TokenizedPrompt{TokenIDs: tokens, MultiModalFeatures: features}, nil
 	}
 
 	raw, err := estimateBytes(body)
@@ -112,7 +128,7 @@ func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest
 		}
 		for _, block := range msg.Content.Structured {
 			switch block.Type {
-			case "text":
+			case blockTypeText:
 				out = append(out, []byte(block.Text)...)
 			case "image_url":
 				out, features = appendMMAsset(out, features, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
@@ -121,6 +137,44 @@ func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest
 			case "input_audio", "audio_url":
 				data := block.InputAudio.Data + block.InputAudio.Format
 				out, features = appendMMAsset(out, features, data, assetPlaceholderCount(len(data)))
+			}
+		}
+	}
+	return out, features
+}
+
+// messagesBytes flattens an Anthropic /v1/messages request into pseudo-token
+// bytes.
+func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fwkrh.MultiModalFeature) {
+	var out []byte
+	var features []fwkrh.MultiModalFeature
+	// The system field accepts only text -- a string or an array of text blocks.
+	// See https://docs.anthropic.com/en/api/messages#body-system.
+	if req.System.Raw != "" {
+		out = append(out, []byte(req.System.Raw)...)
+	} else {
+		for _, block := range req.System.Structured {
+			if block.Type == blockTypeText {
+				out = append(out, []byte(block.Text)...)
+			}
+		}
+	}
+	for _, msg := range req.Messages {
+		if msg.Role != "" {
+			out = append(out, []byte(msg.Role)...)
+		}
+		if msg.Content.Raw != "" {
+			out = append(out, []byte(msg.Content.Raw)...)
+			continue
+		}
+		for _, block := range msg.Content.Structured {
+			switch block.Type {
+			case blockTypeText:
+				out = append(out, []byte(block.Text)...)
+			case "image":
+				if content, count := b.img.placeholderForAnthropicImage(block.Source); content != "" {
+					out, features = appendMMAsset(out, features, content, count)
+				}
 			}
 		}
 	}

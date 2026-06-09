@@ -29,7 +29,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
 // tokenLimitMap returns the map holding the token-limit fields: sampling_params
@@ -68,7 +68,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	uuidStr := uuid.String()
 
 	// Prefill Stage
-	tracer := telemetry.Tracer()
+	tracer := tracing.Tracer()
 	ctx := r.Context()
 
 	ctx, prefillSpan := tracer.Start(ctx, "llm_d.pd_proxy.prefill",

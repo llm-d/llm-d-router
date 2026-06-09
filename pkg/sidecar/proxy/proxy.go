@@ -179,6 +179,9 @@ type Config struct {
 	// DecodeChunkSize is the token budget per decode chunk.
 	// Chunked decode is enabled when this value is > 0.
 	DecodeChunkSize int
+
+	// Tracing enables OpenTelemetry tracing.
+	Tracing bool
 }
 
 // MarshalJSON implements json.Marshaler for Config.
@@ -196,6 +199,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	}{
 		alias:      alias(c),
 		DecoderURL: decoderURL,
+		// Tracing is serialized automatically as it is part of alias
 	})
 }
 
