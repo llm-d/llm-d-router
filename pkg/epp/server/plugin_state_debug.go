@@ -73,13 +73,7 @@ func NewPluginStateDebugHandler(plugins fwkplugin.HandlePlugins) http.Handler {
 			return
 		}
 
-		state, err := collectPluginState(plugins)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to collect plugin state: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		payload, err := json.Marshal(state)
+		payload, err := json.Marshal(collectPluginState(plugins))
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to encode plugin state: %v", err), http.StatusInternalServerError)
 			return
@@ -91,7 +85,7 @@ func NewPluginStateDebugHandler(plugins fwkplugin.HandlePlugins) http.Handler {
 	})
 }
 
-func collectPluginState(plugins fwkplugin.HandlePlugins) (pluginStateDebugResponse, error) {
+func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugResponse {
 	allPlugins := plugins.GetAllPluginsWithNames()
 	response := pluginStateDebugResponse{
 		Timestamp: nowFunc().UTC().Format(time.RFC3339Nano),
@@ -132,5 +126,5 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) (pluginStateDebugRespon
 			State: state,
 		}
 	}
-	return response, nil
+	return response
 }
