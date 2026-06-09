@@ -39,7 +39,7 @@
 # Prefix cache
 /pkg/epp/framework/plugins/scheduling/scorer/prefix/                      @liu-cong @vMaroon @llm-d/router-maintainers
 /pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/ @liu-cong @vMaroon @llm-d/router-maintainers
-/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/ @bongwoo-bak @vMaroon @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/ @bongwoobak @vMaroon @llm-d/router-maintainers
 
 # Tokenization
 /pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/          @vMaroon @liu-cong @sagearc @llm-d/router-maintainers
