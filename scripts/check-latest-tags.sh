@@ -58,14 +58,15 @@ for dir in "${SCAN_DIRS[@]}"; do
   # Find YAML files, pruning .git and vendor trees for speed.
   # Use grep -Hn (force filenames, no recursion) since find already
   # supplies explicit paths. Match "image:" as a YAML key (leading
-  # whitespace) to avoid substring hits in unrelated fields.
+  # whitespace, or column 0 after the grep line-number prefix) to
+  # avoid substring hits in unrelated fields.
   matches="$(find "$dir" \
     -path '*/.git' -prune -o \
     -path '*/vendor' -prune -o \
     -path '*/node_modules' -prune -o \
     -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
     | xargs -0 grep -Hn ':latest' \
-    | grep '[[:space:]]image:' \
+    | grep -E '([[:space:]]image:|:[0-9]+:image:)' \
     | grep -v ':latest-' \
     | grep -v 'description:' \
     | grep -v '<your-registry>' \
