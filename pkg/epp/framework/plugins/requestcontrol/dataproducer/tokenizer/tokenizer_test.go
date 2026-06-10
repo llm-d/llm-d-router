@@ -67,6 +67,11 @@ func TestProduceTimeout(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 45*time.Second, vp2.ProduceTimeout())
 
+	// Explicit backend selection can use vLLM's default config block.
+	vp3, err := NewPlugin(ctx, "tok", &tokenizerPluginConfig{Backend: tokenizerBackendVLLM, ModelName: "m"})
+	require.NoError(t, err)
+	assert.Equal(t, defaultHTTPRenderMMTimeout, vp3.ProduceTimeout())
+
 	// Estimate backend declares none, so the director keeps its default.
 	ep, err := NewPlugin(ctx, "tok", &tokenizerPluginConfig{Estimate: &estimateConfig{}})
 	require.NoError(t, err)
@@ -106,6 +111,29 @@ func TestPluginFactory_Validation(t *testing.T) {
 			name:      "estimate image static mode parses",
 			params:    `{"estimate":{"image":{"mode":"static","static":{"staticToken":8}}}}`,
 			expectErr: false,
+		},
+		{
+			name:      "explicit estimate backend overrides legacy vllm inference",
+			params:    `{"backend":"estimate","modelName":"m","vllm":{}}`,
+			expectErr: false,
+		},
+		{
+			name:       "explicit vllm backend requires modelName",
+			params:     `{"backend":"vllm","vllm":{}}`,
+			expectErr:  true,
+			errContain: "'modelName' must be specified",
+		},
+		{
+			name:       "explicit uds backend requires tokenizer config",
+			params:     `{"backend":"uds","modelName":"m"}`,
+			expectErr:  true,
+			errContain: "'udsTokenizerConfig' must be specified",
+		},
+		{
+			name:       "invalid backend selector",
+			params:     `{"backend":"unknown"}`,
+			expectErr:  true,
+			errContain: "backend must be one of",
 		},
 		{
 			name:       "invalid estimate image mode",

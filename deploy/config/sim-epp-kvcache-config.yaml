@@ -5,6 +5,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: token-producer
   parameters:
+    backend: vllm
     modelName: TinyLlama/TinyLlama-1.1B-Chat-v1.0  # replace to use a different model
     vllm:
       url: http://localhost:8000
