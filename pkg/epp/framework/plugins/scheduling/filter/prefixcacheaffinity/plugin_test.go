@@ -89,7 +89,7 @@ func TestFilter_NoStickyEndpoints(t *testing.T) {
 }
 
 func TestFilter_NarrowToSticky(t *testing.T) {
-	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 5000, UseLatencyPredictor: true})
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourceLatencyPredictor})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 100, 0),
 		makeEndpoint("b", 85, 120, 0),
@@ -100,7 +100,7 @@ func TestFilter_NarrowToSticky(t *testing.T) {
 }
 
 func TestFilter_TTFTPenaltyBreaksStickiness(t *testing.T) {
-	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100, UseLatencyPredictor: true})
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 500, 0),
 		makeEndpoint("b", 10, 50, 0),
@@ -112,7 +112,7 @@ func TestFilter_TTFTPenaltyBreaksStickiness(t *testing.T) {
 // With PeakPrefillThroughput=1000 tokens/sec, in-flight tokens map to TTFT as
 // tokens/1000*1000 = tokens ms: endpoint "a" -> 500ms, "b" -> 50ms.
 func TestFilter_ThroughputTTFTBreaksStickiness(t *testing.T) {
-	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100, PeakPrefillThroughput: 1000})
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 10, 500),
 		makeEndpoint("b", 10, 10, 50),
@@ -122,7 +122,7 @@ func TestFilter_ThroughputTTFTBreaksStickiness(t *testing.T) {
 }
 
 func TestFilter_ThroughputTTFTWithinThreshold(t *testing.T) {
-	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 1000, PeakPrefillThroughput: 1000})
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 1000, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 10, 500),
 		makeEndpoint("b", 10, 10, 50),
@@ -133,7 +133,7 @@ func TestFilter_ThroughputTTFTWithinThreshold(t *testing.T) {
 }
 
 func TestFilter_TTFTPenaltyDisabled(t *testing.T) {
-	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 0, PeakPrefillThroughput: 1000})
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 0, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
 		makeEndpoint("a", 90, 10, 5000), // Huge load
 		makeEndpoint("b", 10, 10, 50),
@@ -163,7 +163,7 @@ func TestConsumes_ConditionalAttributes(t *testing.T) {
 	assert.False(t, ok, "LatencyPredictionInfoDataKey should not be consumed when the gate is disabled")
 
 	// Gate using the latency predictor.
-	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, UseLatencyPredictor: true})
+	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourceLatencyPredictor})
 	consumed = p.Consumes()
 	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
 	assert.True(t, ok)
@@ -171,7 +171,7 @@ func TestConsumes_ConditionalAttributes(t *testing.T) {
 	assert.False(t, ok)
 
 	// Gate using peak prefill throughput.
-	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, UseLatencyPredictor: false, PeakPrefillThroughput: 1000})
+	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
 	consumed = p.Consumes()
 	_, ok = consumed.Required[p.inFlightLoadDataKey]
 	assert.True(t, ok)
@@ -210,7 +210,7 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultConfig.AffinityThreshold, p.config.AffinityThreshold)
 	assert.Equal(t, DefaultConfig.ExplorationProbability, p.config.ExplorationProbability)
 	assert.Equal(t, float64(10000), p.config.MaxTTFTPenaltyMs)
-	assert.Equal(t, DefaultConfig.UseLatencyPredictor, p.config.UseLatencyPredictor)
+	assert.Equal(t, DefaultConfig.TTFTSource, p.config.TTFTSource)
 	assert.Equal(t, DefaultConfig.PeakPrefillThroughput, p.config.PeakPrefillThroughput)
 }
 
@@ -233,29 +233,37 @@ func TestFactory_InvalidPeakPrefillThroughput(t *testing.T) {
 }
 
 // The throughput TTFT source needs a non-zero divisor: with the gate enabled
-// (maxTTFTPenaltyMs defaults to 5000) and useLatencyPredictor=false,
+// (maxTTFTPenaltyMs defaults to 5000) and ttftSource=prefillThroughput,
 // peakPrefillThroughput=0 must be rejected.
 func TestFactory_ThroughputModeRequiresPeakPrefillThroughput(t *testing.T) {
-	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"useLatencyPredictor": false, "peakPrefillThroughput": 0}`)), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"ttftSource": "prefillThroughput", "peakPrefillThroughput": 0}`)), nil)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "peakPrefillThroughput must be > 0 when useLatencyPredictor is false")
+	assert.Contains(t, err.Error(), "peakPrefillThroughput must be > 0 when ttftSource is prefillThroughput")
 }
 
 func TestFactory_ThroughputModeValid(t *testing.T) {
-	plugin, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"useLatencyPredictor": false, "peakPrefillThroughput": 1000}`)), nil)
+	plugin, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"ttftSource": "prefillThroughput", "peakPrefillThroughput": 1000}`)), nil)
 	assert.NoError(t, err)
 	p := plugin.(*Plugin)
-	assert.False(t, p.config.UseLatencyPredictor)
+	assert.Equal(t, TTFTSourcePrefillThroughput, p.config.TTFTSource)
 	assert.Equal(t, float64(1000), p.config.PeakPrefillThroughput)
+}
+
+// An unrecognized ttftSource value is rejected rather than silently treated as
+// the default.
+func TestFactory_InvalidTTFTSource(t *testing.T) {
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"ttftSource": "bogus"}`)), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ttftSource must be")
 }
 
 // peakPrefillThroughput=0 is valid as long as the throughput source is unused:
 // either the gate is disabled (maxTTFTPenaltyMs=0) or the latency predictor
 // supplies TTFT.
 func TestFactory_ZeroPeakPrefillThroughputAllowedWhenUnused(t *testing.T) {
-	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"maxTTFTPenaltyMs": 0, "useLatencyPredictor": false, "peakPrefillThroughput": 0}`)), nil)
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"maxTTFTPenaltyMs": 0, "ttftSource": "prefillThroughput", "peakPrefillThroughput": 0}`)), nil)
 	assert.NoError(t, err, "throughput source unused when the gate is disabled")
 
-	_, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"useLatencyPredictor": true, "peakPrefillThroughput": 0}`)), nil)
+	_, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"ttftSource": "latencyPredictor", "peakPrefillThroughput": 0}`)), nil)
 	assert.NoError(t, err, "throughput source unused when the latency predictor supplies TTFT")
 }

@@ -44,6 +44,20 @@ const (
 
 var _ fwksched.Filter = &Plugin{}
 
+// TTFTSource selects the per-endpoint TTFT signal used by the load gate. The
+// choice also determines which producer attribute the filter consumes.
+type TTFTSource string
+
+const (
+	// TTFTSourceLatencyPredictor reads predicted TTFT from LatencyPredictionInfo
+	// (produced by the predicted-latency-producer).
+	TTFTSourceLatencyPredictor TTFTSource = "latencyPredictor"
+	// TTFTSourcePrefillThroughput estimates TTFT from in-flight tokens and
+	// PeakPrefillThroughput, reading InFlightLoad (produced by the
+	// in-flight-load-producer).
+	TTFTSourcePrefillThroughput TTFTSource = "prefillThroughput"
+)
+
 type Config struct {
 	// AffinityThreshold is the prefix cache score threshold. Endpoints with
 	// score >= this value are considered "sticky" (prompt is cached). Default: 0.80.
@@ -59,13 +73,14 @@ type Config struct {
 	// stick. Default: 5000.
 	MaxTTFTPenaltyMs float64 `json:"maxTTFTPenaltyMs,omitempty"`
 
-	// UseLatencyPredictor selects the TTFT source for the load gate. When true
-	// (default), per-endpoint TTFT is read from the latency predictor. When
-	// false, TTFT is estimated from in-flight tokens and PeakPrefillThroughput.
-	UseLatencyPredictor bool `json:"useLatencyPredictor,omitempty"`
+	// TTFTSource selects where the load gate reads per-endpoint TTFT from.
+	// TTFTSourceLatencyPredictor (default) reads predicted TTFT from the latency
+	// predictor; TTFTSourcePrefillThroughput estimates it from in-flight tokens
+	// and PeakPrefillThroughput.
+	TTFTSource TTFTSource `json:"ttftSource,omitempty"`
 
 	// PeakPrefillThroughput is the peak prefill throughput in tokens/sec, used to
-	// estimate TTFT from in-flight tokens when UseLatencyPredictor is false:
+	// estimate TTFT from in-flight tokens when TTFTSource is prefillThroughput:
 	//   TTFT_ms = inFlightTokens / PeakPrefillThroughput * 1000
 	// (tokens / (tokens/sec) * 1000 = ms). Default: 15928.
 	PeakPrefillThroughput float64 `json:"peakPrefillThroughput,omitempty"`
@@ -79,8 +94,10 @@ var DefaultConfig = Config{
 	AffinityThreshold:      0.80,
 	ExplorationProbability: 0.01,
 	MaxTTFTPenaltyMs:       5000,
-	UseLatencyPredictor:    true,
-	PeakPrefillThroughput:  15928,
+	TTFTSource:             TTFTSourceLatencyPredictor,
+
+	// Calibrated for Qwen 32B on 2x H100 80GB (TP=2), vLLM 0.19; see README.
+	PeakPrefillThroughput: 15928,
 }
 
 type Plugin struct {
@@ -123,10 +140,22 @@ func (c *Config) validate() error {
 	if c.PeakPrefillThroughput < 0 {
 		return fmt.Errorf("peakPrefillThroughput must be >= 0, got %f", c.PeakPrefillThroughput)
 	}
-	if !c.UseLatencyPredictor && c.MaxTTFTPenaltyMs > 0 && c.PeakPrefillThroughput == 0 {
-		return errors.New("peakPrefillThroughput must be > 0 when useLatencyPredictor is false")
+	switch c.TTFTSource {
+	case "", TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput:
+	default:
+		return fmt.Errorf("ttftSource must be %q or %q, got %q", TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput, c.TTFTSource)
+	}
+	if !c.usesLatencyPredictor() && c.MaxTTFTPenaltyMs > 0 && c.PeakPrefillThroughput == 0 {
+		return errors.New("peakPrefillThroughput must be > 0 when ttftSource is prefillThroughput")
 	}
 	return nil
+}
+
+// usesLatencyPredictor reports whether the load gate sources TTFT from the
+// latency predictor. The predictor is the default; only an explicit
+// prefillThroughput selects the in-flight-token estimate.
+func (c *Config) usesLatencyPredictor() bool {
+	return c.TTFTSource != TTFTSourcePrefillThroughput
 }
 
 func (p *Plugin) TypedName() fwkplugin.TypedName {
@@ -186,7 +215,7 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 		p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{},
 	}
 	if p.config.MaxTTFTPenaltyMs > 0 {
-		if p.config.UseLatencyPredictor {
+		if p.config.usesLatencyPredictor() {
 			required[p.latencyPredictionInfoDataKey] = attrlatency.LatencyPredictionInfo{}
 		} else {
 			required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
@@ -225,7 +254,7 @@ func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) float64 {
 // MaxFloat64 on the predictor path (never the fastest), 0 in-flight tokens on
 // the throughput path (no observed load).
 func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) float64 {
-	if p.config.UseLatencyPredictor {
+	if p.config.usesLatencyPredictor() {
 		if raw, ok := ep.Get(p.latencyPredictionInfoDataKey.String()); ok {
 			info := raw.(*attrlatency.LatencyPredictionInfo)
 			return info.TTFT()
