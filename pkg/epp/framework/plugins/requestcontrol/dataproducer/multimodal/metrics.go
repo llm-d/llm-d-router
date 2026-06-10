@@ -24,15 +24,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
-
-const llmdSubsystem = "llm_d_router_epp"
 
 var (
 	// encoderCacheQueriesTotal counts every multimodal item hash lookup against the LRU.
 	encoderCacheQueriesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Subsystem: llmdSubsystem,
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "encoder_cache_queries_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of multimodal item hash lookups made against the encoder-cache affinity LRU.", compbasemetrics.ALPHA),
 		},
@@ -44,7 +43,7 @@ var (
 	// Divide by queries_total for hit rate.
 	encoderCacheHitsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Subsystem: llmdSubsystem,
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "encoder_cache_hits_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of multimodal item hash lookups that found a match in the encoder-cache affinity LRU, by endpoint.", compbasemetrics.ALPHA),
 		},
