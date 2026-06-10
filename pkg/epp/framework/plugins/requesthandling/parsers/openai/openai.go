@@ -48,7 +48,6 @@ const (
 	// to account for optional parameters like "; charset=utf-8" often appended by proxies.
 	eventStreamType = "text/event-stream"
 
-	usageField               = "usage"
 	promptTokensField        = "prompt_tokens"
 	inputTokensField         = "input_tokens"
 	completionTokensField    = "completion_tokens"
@@ -260,14 +259,14 @@ func toInt(v any) int {
 }
 
 func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
-	var responseErr error
-	var responseBody map[string]any
-	responseErr = json.Unmarshal(responseBytes, &responseBody)
-	if responseErr != nil {
-		return nil, responseErr
+	var responseBody struct {
+		Usage map[string]any `json:"usage"`
 	}
-	usg, ok := responseBody[usageField].(map[string]any)
-	if !ok {
+	err := json.Unmarshal(responseBytes, &responseBody)
+	if err != nil {
+		return nil, err
+	}
+	if responseBody.Usage == nil {
 		return nil, nil //nolint:nilnil
 	}
 
@@ -275,7 +274,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 
 	// Chat/Completions APIs use prompt_tokens. Responses/Conversations APIs use input_tokens.
 	for _, inputTokens := range []string{promptTokensField, inputTokensField} {
-		if v, ok := usg[inputTokens]; ok && v != nil {
+		if v, ok := responseBody.Usage[inputTokens]; ok && v != nil {
 			usage.PromptTokens = toInt(v)
 			break
 		}
@@ -283,7 +282,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 
 	// Chat/Completions APIs use completion_tokens. Responses/Conversations APIs use output_tokens.
 	for _, outputTokens := range []string{completionTokensField, outputTokensField} {
-		if v, ok := usg[outputTokens]; ok && v != nil {
+		if v, ok := responseBody.Usage[outputTokens]; ok && v != nil {
 			usage.CompletionTokens = toInt(v)
 			break
 		}
@@ -291,7 +290,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 
 	// Chat/Completions APIs use prompt_tokens_details. Responses/Conversations APIs use input_tokens_details.
 	for _, details := range []string{promptTokensDetailsField, inputTokensDetailsField} {
-		if detailsMap, ok := usg[details].(map[string]any); ok {
+		if detailsMap, ok := responseBody.Usage[details].(map[string]any); ok {
 			if cachedTokens, ok := detailsMap[cachedTokensField]; ok {
 				usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
 					CachedTokens: toInt(cachedTokens),
@@ -301,7 +300,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	}
 
 	// total_tokens field name is consistent across all API types.
-	if v, ok := usg[totalTokensField]; ok && v != nil {
+	if v, ok := responseBody.Usage[totalTokensField]; ok && v != nil {
 		usage.TotalTokens = toInt(v)
 	}
 
@@ -331,22 +330,21 @@ func extractUsageStreaming(responseText string) *fwkrh.Usage {
 	var streamResponse struct {
 		Usage    *fwkrh.Usage `json:"usage"`
 		Response struct {
-			Usage  map[string]any `json:"usage"`
-			Object string         `json:"object"`
+			Usage json.RawMessage `json:"usage"` // Delay JSON decoding until we know we have usage data
 		} `json:"response"`
 		Type string `json:"type"`
 	}
 
 	lines := strings.SplitSeq(responseText, "\n")
 	for line := range lines {
-		if !strings.HasPrefix(line, streamingRespPrefix) {
+		content, ok := strings.CutPrefix(line, streamingRespPrefix)
+		if !ok {
 			continue
 		}
-		content := strings.TrimPrefix(line, streamingRespPrefix)
-		if content == "[DONE]" {
+		// When the stream is terminated with [DONE] or there's not usage data, skip the line
+		if content == "[DONE]" || !strings.Contains(content, "usage") {
 			continue
 		}
-
 		byteSlice := []byte(content)
 		if err := json.Unmarshal(byteSlice, &streamResponse); err != nil {
 			continue
@@ -356,11 +354,9 @@ func extractUsageStreaming(responseText string) *fwkrh.Usage {
 			return streamResponse.Usage
 		}
 		// Responses API streaming format
-		if streamResponse.Response.Usage != nil && streamResponse.Type == "response.completed" {
-			// Convert map[string]any to JSON and parse
+		if len(streamResponse.Response.Usage) > 0 && streamResponse.Type == "response.completed" {
 			jsonBytes, _ := json.Marshal(map[string]any{
-				"usage":  streamResponse.Response.Usage,
-				"object": streamResponse.Response.Object,
+				"usage": streamResponse.Response.Usage,
 			})
 			if usage, err := extractUsage(jsonBytes); err == nil && usage != nil {
 				return usage
