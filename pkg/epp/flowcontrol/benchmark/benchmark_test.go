@@ -44,7 +44,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
-	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
+	igwtestutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 // BenchmarkFlowController_PerformanceMatrix evaluates throughput across a matrix of variables.
