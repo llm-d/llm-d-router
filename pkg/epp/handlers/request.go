@@ -50,6 +50,9 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 	for _, header := range req.RequestHeaders.Headers.Headers {
 		key := strings.ToLower(header.Key)
 		value := envoy.GetHeaderValue(header)
+		// The HTTP/2 :path pseudo-header includes query parameters (e.g.
+		// /v1/messages?beta=true). Strip them so parser suffix matching and
+		// per-parser endpoint validation see only the path component.
 		if key == ":path" {
 			value, _, _ = strings.Cut(value, "?")
 		}
