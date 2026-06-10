@@ -2,6 +2,9 @@
 
 Data producer plugins run in the `PrepareRequestData` phase of the request-control pipeline, before filters and scorers execute. Each plugin implements `requestcontrol.DataProducer` and writes typed attributes onto endpoints or the `InferenceRequest` itself. Downstream plugins (scorers, filters, admission controllers) read these attributes without re-doing the computation.
 
+The following diagram shows how producers are connected to the request control and scheduling plugins:
+![alt text](image.png)
+
 Producers may also implement additional lifecycle hooks:
 
 - `PreRequest` — called after a routing decision is made; used to persist bookkeeping state (e.g., update a cache index, increment an in-flight counter).
