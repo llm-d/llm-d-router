@@ -265,6 +265,95 @@ func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 	require.NotNil(t, captured)
 }
 
+// Cache salt is folded into the first block's extra keys, isolating salted
+// prompts. Mirrors engine-side ingestion, which folds vLLM's block-0 cache_salt
+// into the same per-block hash list.
+func TestProduce_FoldsCacheSalt(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	tokens := make([]uint32, 16)
+	for i := range tokens {
+		tokens[i] = uint32(i)
+	}
+
+	tests := []struct {
+		name string
+		mm   []fwkrh.MultiModalFeature
+		want []kvblock.MMHash
+	}{
+		{
+			name: "salt only",
+			want: []kvblock.MMHash{{Hash: "s3cr3t"}},
+		},
+		{
+			name: "salt appended after mm hash",
+			mm:   []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "abc", Offset: 2, Length: 4}},
+			want: []kvblock.MMHash{{Hash: "abc"}, {Hash: "s3cr3t"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured []*kvblock.BlockExtraFeatures
+			idx := &fakeKVCacheIndexer{
+				computeFromTokens: func(_ context.Context, _ []uint32, _ string, extra []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+					captured = extra
+					return []kvblock.BlockHash{0xAA}, nil
+				},
+				index: &fakeKVBlockIndex{},
+			}
+			p := newProducerWithIndexer(ctx, idx, &fakeKVBlockScorer{})
+
+			req := &scheduling.InferenceRequest{
+				RequestID:   "req-salt",
+				TargetModel: "test-model",
+				Body: &fwkrh.InferenceRequestBody{
+					TokenizedPrompt: &fwkrh.TokenizedPrompt{
+						TokenIDs:           tokens,
+						MultiModalFeatures: tc.mm,
+						CacheSalt:          "s3cr3t",
+					},
+				},
+			}
+
+			require.NoError(t, p.Produce(ctx, req, testEndpoints))
+			require.Len(t, captured, 1)
+			require.NotNil(t, captured[0])
+			require.Equal(t, tc.want, captured[0].MMHashes)
+		})
+	}
+}
+
+// No salt → extra features stay untouched (nil for a text-only prompt).
+func TestProduce_NoCacheSalt_NoExtraFeatures(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	tokens := make([]uint32, 16)
+	for i := range tokens {
+		tokens[i] = uint32(i)
+	}
+	captured := []*kvblock.BlockExtraFeatures{{}} // sentinel; expect overwrite to nil
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, extra []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			captured = extra
+			return []kvblock.BlockHash{0xAA}, nil
+		},
+		index: &fakeKVBlockIndex{},
+	}
+	p := newProducerWithIndexer(ctx, idx, &fakeKVBlockScorer{})
+
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-nosalt",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: tokens},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, testEndpoints))
+	require.Nil(t, captured)
+}
+
 // nil request / empty body → don't touch the indexer.
 func TestProduce_NoOpPaths(t *testing.T) {
 	ctx := utils.NewTestContext(t)

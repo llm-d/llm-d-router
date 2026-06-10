@@ -34,12 +34,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 // PluginType is the registered type name of the precise-prefix-cache-producer.
@@ -223,7 +223,7 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 func (p *Producer) Produce(ctx context.Context,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 ) error {
-	ctx, span := telemetry.Tracer().Start(ctx, "llm_d.epp.producer.precise_prefix_cache",
+	ctx, span := tracing.Tracer().Start(ctx, "llm_d.epp.producer.precise_prefix_cache",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
@@ -276,8 +276,9 @@ func (p *Producer) Produce(ctx context.Context,
 		if matchLen > maxMatch {
 			maxMatch = matchLen
 		}
+		cachedBlocks := matchedBlockCount(blockKeys, keyToPods, addr)
 		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens))
+			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).WithCachedBlockCount(cachedBlocks))
 	}
 
 	if p.speculativeEnabled {

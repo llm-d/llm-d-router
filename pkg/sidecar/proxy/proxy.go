@@ -45,9 +45,12 @@ const (
 	requestHeaderRequestID = "x-request-id"
 
 	requestFieldKVTransferParams     = "kv_transfer_params"
+	requestFieldECTransferParams     = "ec_transfer_params"
 	requestFieldMaxTokens            = "max_tokens"
 	requestFieldMaxCompletionTokens  = "max_completion_tokens"
 	requestFieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
+	requestFieldMinTokens            = "min_tokens"
+	requestFieldSamplingParams       = "sampling_params"
 	requestFieldDoRemotePrefill      = "do_remote_prefill"
 	requestFieldDoRemoteDecode       = "do_remote_decode"
 	requestFieldRemoteBlockIDs       = "remote_block_ids"
@@ -69,11 +72,16 @@ const (
 	requestFieldBootstrapHost = "bootstrap_host"
 	requestFieldBootstrapPort = "bootstrap_port"
 	requestFieldBootstrapRoom = "bootstrap_room"
+	// Mooncake transfer fields
+	requestFieldTransferID          = "transfer_id"
+	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
 	KVConnectorSGLang        = constants.KVConnectorSGLang
+	KVConnectorMooncake      = constants.KVConnectorMooncake
 	ECExampleConnector       = constants.ECExampleConnector
+	ECConnectorNIXL          = constants.ECConnectorNIXL
 )
 
 // APIType represents the type of OpenAI API being used.
@@ -84,6 +92,8 @@ const (
 	APITypeChatCompletions APIType = iota
 	// APITypeResponses is the Responses API (/v1/responses)
 	APITypeResponses
+	// APITypeGenerate is vLLM's token-in generate API (/inference/v1/generate)
+	APITypeGenerate
 )
 
 // String implements fmt.Stringer so structured logs show readable API names.
@@ -93,6 +103,8 @@ func (a APIType) String() string {
 		return "chat_completions"
 	case APITypeResponses:
 		return "responses"
+	case APITypeGenerate:
+		return "generate"
 	default:
 		return fmt.Sprintf("APIType(%d)", int(a))
 	}
@@ -103,6 +115,7 @@ func (a APIType) String() string {
 var (
 	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens}
 	responsesStyleTokenLimitFields = []string{requestFieldMaxOutputTokens}
+	generateStyleTokenLimitFields  = []string{requestFieldMaxTokens, requestFieldMinTokens}
 )
 
 // tokenLimitFieldsForAPIType returns token limit field names for the given API.
@@ -111,6 +124,8 @@ func tokenLimitFieldsForAPIType(api APIType) []string {
 	switch api {
 	case APITypeResponses:
 		return responsesStyleTokenLimitFields
+	case APITypeGenerate:
+		return generateStyleTokenLimitFields
 	default:
 		return chatCompletionTokenLimitFields
 	}
@@ -158,6 +173,9 @@ type Config struct {
 	// CertPath is the path to TLS certificates for the sidecar server.
 	CertPath string
 
+	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
+	MooncakeBootstrapPort int
+
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
 	// InferencePoolNamespace is the Kubernetes namespace of the InferencePool to watch.
@@ -170,6 +188,9 @@ type Config struct {
 	// DecodeChunkSize is the token budget per decode chunk.
 	// Chunked decode is enabled when this value is > 0.
 	DecodeChunkSize int
+
+	// Tracing enables OpenTelemetry tracing.
+	Tracing bool
 }
 
 // MarshalJSON implements json.Marshaler for Config.
@@ -187,6 +208,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	}{
 		alias:      alias(c),
 		DecoderURL: decoderURL,
+		// Tracing is serialized automatically as it is part of alias
 	})
 }
 
@@ -201,7 +223,7 @@ func (c Config) String() string {
 // connector decide internally which JSON fields (if any) need special handling.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, APIType)
 
-type epdConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)
+type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)
 
 // Server is the reverse proxy server
 type Server struct {
@@ -210,16 +232,17 @@ type Server struct {
 	readyCh            chan struct{} // closed once addr is set and server is listening
 	handler            http.Handler  // the handler function. either a Mux or a proxy
 	allowlistValidator *AllowlistValidator
-	handlePDConnector  pdConnectorHandler  // handles the Prefiller-Decoder connector request
-	handleEPDConnector epdConnectorHandler // handles the Encoder-Prefiller-Decoder connector request
+	handlePDConnector  pdConnectorHandler // handles the Prefiller-Decoder connector request
+	handleECConnector  ecConnectorHandler // handles the Encoder disaggregation connector request.
 	prefillerURLPrefix string
 	encoderURLPrefix   string
 
-	decoderProxy        http.Handler                     // decoder proxy handler
-	prefillerProxies    *lru.Cache[string, http.Handler] // cached prefiller proxy handlers
-	encoderProxies      *lru.Cache[string, http.Handler] // cached encoder proxy handlers
-	dataParallelProxies map[string]http.Handler          // Proxies to other vLLM servers
-	forwardDataParallel bool                             // Use special Data Parallel work around
+	decoderProxy        http.Handler                          // decoder proxy handler
+	prefillerProxies    *lru.Cache[string, http.Handler]      // cached prefiller proxy handlers
+	encoderProxies      *lru.Cache[string, http.Handler]      // cached encoder proxy handlers
+	mooncakeEngineIDs   *lru.Cache[string, map[string]string] // cached mooncake dp_rank->engine_id per prefill host:port
+	dataParallelProxies map[string]http.Handler               // Proxies to other vLLM servers
+	forwardDataParallel bool                                  // Use special Data Parallel work around
 
 	prefillSamplerFn func(n int) int // allow test override
 
@@ -228,13 +251,15 @@ type Server struct {
 
 // NewProxy creates a new routing reverse proxy from the given Config.
 func NewProxy(config Config) *Server {
-	prefillerCache, _ := lru.New[string, http.Handler](1024) // nolint:errcheck
-	encoderCache, _ := lru.New[string, http.Handler](1024)   // nolint:errcheck
+	prefillerCache, _ := lru.New[string, http.Handler](1024)         // nolint:errcheck
+	encoderCache, _ := lru.New[string, http.Handler](1024)           // nolint:errcheck
+	mooncakeEngineIDs, _ := lru.New[string, map[string]string](1024) // nolint:errcheck
 
 	server := &Server{
 		readyCh:             make(chan struct{}),
 		prefillerProxies:    prefillerCache,
 		encoderProxies:      encoderCache,
+		mooncakeEngineIDs:   mooncakeEngineIDs,
 		prefillerURLPrefix:  "http://",
 		encoderURLPrefix:    "http://",
 		config:              config,
@@ -301,11 +326,12 @@ func (s *Server) Clone() *Server {
 		handler:             s.handler,
 		allowlistValidator:  s.allowlistValidator,
 		handlePDConnector:   s.handlePDConnector,
-		handleEPDConnector:  s.handleEPDConnector,
+		handleECConnector:   s.handleECConnector,
 		prefillerURLPrefix:  s.prefillerURLPrefix,
 		encoderURLPrefix:    s.encoderURLPrefix,
 		prefillerProxies:    s.prefillerProxies,
 		encoderProxies:      s.encoderProxies,
+		mooncakeEngineIDs:   s.mooncakeEngineIDs,
 		dataParallelProxies: s.dataParallelProxies,
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,
@@ -354,6 +380,10 @@ func (s *Server) setKVConnector() {
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
 			s.handleSGLang(w, r, host)
 		}
+	case KVConnectorMooncake:
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+			s.handleMooncake(w, r, host)
+		}
 	case KVConnectorNIXLV2:
 		fallthrough
 	default:
@@ -371,9 +401,15 @@ func (s *Server) setECConnector() {
 
 	switch ecConnector {
 	case ECExampleConnector:
-		s.handleEPDConnector = s.handleEPD
+		s.handleECConnector = s.handleECSharedStorage
+	case ECConnectorNIXL:
+		s.handleECConnector = s.handleECNIXL
 	default:
-		// Unknown EC connector value, skip encoder stage
+		// Unknown EC connector value, skip encoder stage. Validate() should
+		// have rejected this earlier; reaching here means the validation was
+		// bypassed (e.g., programmatic config) and the binary degrades.
+		s.logger.Info("warning: unknown ec-connector; encoder stage will be skipped",
+			"ecConnector", ecConnector, "supported", supportedECConnectorNamesStr)
 		return
 	}
 }
@@ -389,6 +425,7 @@ func (s *Server) createRoutes() *http.ServeMux {
 	mux.HandleFunc("POST "+ChatCompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+CompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+ResponsesPath, s.disaggregatedPrefillHandler(APITypeResponses))
+	mux.HandleFunc("POST "+GeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 

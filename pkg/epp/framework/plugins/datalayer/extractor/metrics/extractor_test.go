@@ -39,6 +39,7 @@ const (
 	defaultKvCacheUsagePercentageMetric = "vllm:kv_cache_usage_perc"
 	defaultLoraInfoMetric               = "vllm:lora_requests_info"
 	defaultCacheInfoMetric              = "vllm:cache_config_info"
+	customMetricsConfigKey              = "customMetrics"
 )
 
 func TestExtractorExtract(t *testing.T) {
@@ -500,6 +501,59 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 			},
 			wantErr:      false,
 			checkDefault: "custom",
+		},
+		{
+			name: "custom engineConfigs with custom metrics",
+			params: map[string]any{
+				"defaultEngine": "custom",
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "custom.queue_depth",
+								"metricSpec":   "custom_queue_depth{tier=gold}",
+							},
+						},
+					},
+				},
+			},
+			wantErr:      false,
+			checkDefault: "custom",
+		},
+		{
+			name: "custom metric attributeKey is required",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"metricSpec": "custom_queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: "attributeKey cannot be empty",
+		},
+		{
+			name: "custom metric spec is required",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "custom.queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: "spec cannot be empty",
 		},
 		{
 			name: "custom engineConfigs auto-appends vllm sglang trtllm-serve and triton-tensorrt-llm",

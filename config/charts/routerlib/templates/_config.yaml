@@ -1,4 +1,4 @@
-{{- define "inference-extension.config" -}}
+{{- define "llm-d-epp.config" -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,7 +16,7 @@ data:
     {{- else if eq (lower $modelServerType) "triton" }}
       {{- $parserType = "passthrough-parser" }}
     {{- end }}
-    apiVersion: inference.networking.x-k8s.io/v1alpha1
+    apiVersion: llm-d.ai/v1alpha1
     kind: EndpointPickerConfig
     plugins:
     - type: queue-scorer
@@ -80,6 +80,30 @@ data:
       parser:
         pluginRef: {{ $parserType }}
     {{- end }}
+  payload-agnostic.yaml: |
+    # Request-format agnostic routing. Use this when the request format is
+    # unknown or unsupported, so the EPP cannot rely on scorers that read the
+    # request body (e.g. the prefix-cache scorer). The passthrough parser does
+    # not parse the body, and routing falls back to backend-state scorers:
+    #   - active-request-scorer  : prefers the least busy endpoint
+    #   - session-affinity-scorer: keeps a session pinned to the same endpoint
+    # Select it by setting router.epp.pluginsConfigFile: payload-agnostic.yaml
+    apiVersion: llm-d.ai/v1alpha1
+    kind: EndpointPickerConfig
+    plugins:
+    - type: passthrough-parser
+    - type: active-request-scorer
+    - type: session-affinity-scorer
+    requestHandler:
+      parsers:
+      - pluginRef: passthrough-parser
+    schedulingProfiles:
+    - name: default
+      plugins:
+      - pluginRef: active-request-scorer
+        weight: 1
+      - pluginRef: session-affinity-scorer
+        weight: 1
   {{- if .Values.router.epp.pluginsCustomConfig }}
   {{- .Values.router.epp.pluginsCustomConfig | toYaml | nindent 2 }}
   {{- end }}

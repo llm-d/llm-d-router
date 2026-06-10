@@ -1,4 +1,4 @@
-{{- define "inference-extension.inferencepool" -}}
+{{- define "llm-d-router.inferencepool" -}}
 apiVersion: "inference.networking.k8s.io/v1"
 kind: InferencePool
 metadata:
@@ -30,12 +30,13 @@ spec:
     port:
       number: {{ .Values.router.epp.extProcPort | default 9002 }}
     failureMode: {{ .Values.router.inferencePool.failureMode | default "FailOpen" }}
+---
 {{- end }}
 
-{{- define "inference-extension.inferencepool-resource" -}}
+{{- define "llm-d-router.inferencepool-resource" -}}
 {{- if ne .Values.router.inferencePool.create false }}
 {{- include "llm-d-router.validations.gateway.common" . }}
-{{- include "inference-extension.inferencepool" . }}
-{{- include "inference-extension.inferenceobjective-resource" . }}
+{{- include "llm-d-router.inferencepool" . }}
+{{- include "llm-d-router.inferenceobjective-resource" . }}
 {{- end }}
 {{- end }}

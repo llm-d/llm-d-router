@@ -62,6 +62,7 @@ inference-pool: "file-ns/inference-pool-file"
 pool-group: "pool-group-file"
 max-idle-conns-per-host: 300
 decode-chunk-size: 128
+tracing: true
 `, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector))
 }
 
@@ -103,7 +104,8 @@ func TestSidecarConfiguration(t *testing.T) {
 		inference-pool: inline-ns/inference-pool-inline,
 		pool-group: pool-group-inline,
 		max-idle-conns-per-host: 200,
-		decode-chunk-size: 256
+		decode-chunk-size: 256,
+		tracing: true
 	}`, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector)
 	invalidInlineYAML := "{port: 8200, invalid-yaml}"
 
@@ -156,6 +158,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.PoolGroup = "pool-group-inline"
 
 				o.DecodeChunkSize = 256
+				o.Tracing = true
 
 				o.inlineConfiguration = inlineYAML
 				o.fileConfiguration = ""
@@ -198,6 +201,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.PoolGroup = "pool-group-file"
 
 				o.DecodeChunkSize = 128
+				o.Tracing = true
 
 				o.inlineConfiguration = ""
 				o.fileConfiguration = validYAMLPath
@@ -253,9 +257,22 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.PoolGroup = "pool-group"
 
 				o.DecodeChunkSize = 256
+				o.Tracing = true
 
 				o.inlineConfiguration = inlineYAML
 				o.fileConfiguration = ""
+			},
+			expectedError: nil,
+		},
+		{
+			name: "flags set ECConnectorNIXL",
+			inputFlags: map[string]any{
+				ecConnector: ECConnectorNIXL,
+			},
+			expected: func(o *Options) {
+				// Complete() migrates the default connector (KVConnectorNIXLV2) into KVConnector.
+				o.KVConnector = KVConnectorNIXLV2
+				o.ECConnector = ECConnectorNIXL
 			},
 			expectedError: nil,
 		},
@@ -309,6 +326,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.PoolGroup = "pool-group"
 
 				o.DecodeChunkSize = 128
+				o.Tracing = true
 
 				o.inlineConfiguration = ""
 				o.fileConfiguration = validYAMLPath
@@ -436,6 +454,7 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	assertEqual(poolGroup, expected.PoolGroup, actual.PoolGroup)
 
 	assertEqual(decodeChunkSize, expected.DecodeChunkSize, actual.DecodeChunkSize)
+	assertEqual(tracingFlag, expected.Tracing, actual.Tracing)
 
 	assertEqual(inlineConfiguration, expected.inlineConfiguration, actual.inlineConfiguration)
 	assertEqual(configurationFile, expected.fileConfiguration, actual.fileConfiguration)
@@ -537,6 +556,7 @@ func TestNewOptionsWithEnvVars(t *testing.T) {
 	opts := NewOptions()
 	require.NoError(t, opts.Complete())
 
+	require.False(t, opts.Tracing, "Expected Tracing to default to false")
 	if opts.InferencePoolNamespace != "test-namespace" {
 		t.Errorf("Expected InferencePoolNamespace to be 'test-namespace', got '%s'", opts.InferencePoolNamespace)
 	}
@@ -557,6 +577,7 @@ func TestValidateConnector(t *testing.T) {
 		{"valid nixlv2", KVConnectorNIXLV2, false},
 		{"valid shared-storage", KVConnectorSharedStorage, false},
 		{"valid sglang", KVConnectorSGLang, false},
+		{"valid mooncake", KVConnectorMooncake, false},
 		{"invalid connector", "invalid", true},
 	}
 

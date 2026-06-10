@@ -30,6 +30,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
@@ -169,6 +170,16 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			clone.CacheNumBlocks = int(extractValue(metric))
 			updated = true
 		}
+	}
+
+	for _, custom := range mapping.CustomMetrics {
+		metric, err := custom.Spec.getLatestMetric(families)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
+			continue
+		}
+		ep.GetAttributes().Put(custom.AttributeKey, attrmetrics.ScalarMetricValue(extractValue(metric)))
+		updated = true
 	}
 
 	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().NamespacedName)

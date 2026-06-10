@@ -24,13 +24,17 @@ import (
 	"strconv"
 
 	"github.com/cespare/xxhash/v2"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // bytesPerToken matches the scorer's averageCharactersPerToken, so a block of N
 // pseudo-tokens covers the same input bytes as an N-token raw-byte block.
 const bytesPerToken = 4
+
+const blockTypeText = "text"
 
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
 // The IDs suit content-locality hashing only; they never match engine KV blocks,
@@ -39,7 +43,7 @@ type estimateBackend struct {
 	img imageEstimator
 }
 
-func (b estimateBackend) produce(_ context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
+func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
 	// Pre-tokenized inputs are already real tokens; pass them through unchanged
 	// rather than byte-estimating. Token-ID inputs are valid for generate,
 	// /v1/completions, and /v1/embeddings.
@@ -55,27 +59,34 @@ func (b estimateBackend) produce(_ context.Context, body *fwkrh.InferenceRequest
 		return &fwkrh.TokenizedPrompt{TokenIDs: body.Embeddings.Input.TokenIDs}, nil
 	}
 
-	// The chat path folds multimodal placeholders into the stream and reports
-	// them as features; other protocols carry no multimodal content.
-	if body.ChatCompletions != nil {
-		raw, features := b.chatCompletionsBytes(body.ChatCompletions)
-		return &fwkrh.TokenizedPrompt{TokenIDs: packBytes(raw), MultiModalFeatures: features}, nil
-	}
-
-	raw, err := estimateBytes(body)
+	raw, features, err := b.estimateBytes(ctx, body)
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrh.TokenizedPrompt{TokenIDs: packBytes(raw)}, nil
+	return &fwkrh.TokenizedPrompt{TokenIDs: packBytes(raw), MultiModalFeatures: features}, nil
 }
 
-// estimateBytes serializes the user input of a non-chat request body to a byte
-// stream. Coverage matches the protocols the approximate prefix-cache scorer
-// handles. The chat path is handled separately to emit multimodal features.
-func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
+// estimateBytes serializes a non-pre-tokenized request body to a byte stream
+// and, for protocols that carry multimodal assets, the features that describe
+// them. Coverage matches the protocols the approximate prefix-cache scorer
+// handles.
+func (b estimateBackend) estimateBytes(ctx context.Context, body *fwkrh.InferenceRequestBody) ([]byte, []fwkrh.MultiModalFeature, error) {
 	switch {
+	case body.ChatCompletions != nil:
+		raw, features := b.chatCompletionsBytes(body.ChatCompletions)
+		return raw, features, nil
+	case body.Messages != nil:
+		raw, features := b.messagesBytes(body.Messages)
+		log.FromContext(ctx).V(logutil.DEBUG).Info("Anthropic messages prefix-cache estimation",
+			"messageCount", len(body.Messages.Messages),
+			"rawBytes", len(raw),
+			"mmFeatureCount", len(features),
+			"mmFeatures", features,
+		)
+		return raw, features, nil
 	case body.Conversations != nil:
-		return json.Marshal(body.Conversations.Items)
+		raw, err := json.Marshal(body.Conversations.Items)
+		return raw, nil, err
 	case body.Responses != nil:
 		var combined []map[string]any
 		if body.Responses.Instructions != nil {
@@ -85,13 +96,15 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 			combined = append(combined, map[string]any{"tools": body.Responses.Tools})
 		}
 		combined = append(combined, map[string]any{"input": body.Responses.Input})
-		return json.Marshal(combined)
+		raw, err := json.Marshal(combined)
+		return raw, nil, err
 	case body.Completions != nil:
-		return []byte(body.Completions.Prompt.PlainText()), nil
+		return []byte(body.Completions.Prompt.PlainText()), nil, nil
 	case body.Embeddings != nil:
-		return json.Marshal(body.Embeddings.Input)
+		raw, err := json.Marshal(body.Embeddings.Input)
+		return raw, nil, err
 	default:
-		return nil, errors.New("unsupported request body type, skipping estimation")
+		return nil, nil, errors.New("unsupported request body type, skipping estimation")
 	}
 }
 
@@ -102,7 +115,65 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest) ([]byte, []fwkrh.MultiModalFeature) {
 	var out []byte
 	var features []fwkrh.MultiModalFeature
+	if len(chat.Tools) > 0 {
+		if raw, err := json.Marshal(chat.Tools); err == nil {
+			out = append(out, raw...)
+		}
+	}
 	for _, msg := range chat.Messages {
+		out, features = b.appendChatMessage(out, features, msg)
+	}
+	return out, features
+}
+
+// appendChatMessage flattens a single chat-completions message into the byte
+// stream, recording multimodal placeholders on aligned boundaries.
+func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiModalFeature, msg fwkrh.Message) ([]byte, []fwkrh.MultiModalFeature) {
+	if msg.Role != "" {
+		out = append(out, []byte(msg.Role)...)
+	}
+	if msg.Content.Raw != "" {
+		out = append(out, []byte(msg.Content.Raw)...)
+		return out, features
+	}
+	for _, block := range msg.Content.Structured {
+		switch block.Type {
+		case blockTypeText:
+			out = append(out, []byte(block.Text)...)
+		case "image_url":
+			out, features = appendMMAsset(out, features, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
+		case "video_url":
+			out, features = appendMMAsset(out, features, block.VideoURL.URL, assetPlaceholderCount(len(block.VideoURL.URL)))
+		case "input_audio", "audio_url":
+			data := block.InputAudio.Data + block.InputAudio.Format
+			out, features = appendMMAsset(out, features, data, assetPlaceholderCount(len(data)))
+		}
+	}
+	return out, features
+}
+
+// messagesBytes flattens an Anthropic /v1/messages request into pseudo-token
+// bytes.
+func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fwkrh.MultiModalFeature) {
+	var out []byte
+	var features []fwkrh.MultiModalFeature
+	if len(req.Tools) > 0 {
+		if raw, err := json.Marshal(req.Tools); err == nil {
+			out = append(out, raw...)
+		}
+	}
+	// The system field accepts only text -- a string or an array of text blocks.
+	// See https://docs.anthropic.com/en/api/messages#body-system.
+	if req.System.Raw != "" {
+		out = append(out, []byte(req.System.Raw)...)
+	} else {
+		for _, block := range req.System.Structured {
+			if block.Type == blockTypeText {
+				out = append(out, []byte(block.Text)...)
+			}
+		}
+	}
+	for _, msg := range req.Messages {
 		if msg.Role != "" {
 			out = append(out, []byte(msg.Role)...)
 		}
@@ -112,15 +183,12 @@ func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest
 		}
 		for _, block := range msg.Content.Structured {
 			switch block.Type {
-			case "text":
+			case blockTypeText:
 				out = append(out, []byte(block.Text)...)
-			case "image_url":
-				out, features = appendMMAsset(out, features, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
-			case "video_url":
-				out, features = appendMMAsset(out, features, block.VideoURL.URL, assetPlaceholderCount(len(block.VideoURL.URL)))
-			case "input_audio", "audio_url":
-				data := block.InputAudio.Data + block.InputAudio.Format
-				out, features = appendMMAsset(out, features, data, assetPlaceholderCount(len(data)))
+			case "image":
+				if content, count := b.img.placeholderForAnthropicImage(block.Source); content != "" {
+					out, features = appendMMAsset(out, features, content, count)
+				}
 			}
 		}
 	}

@@ -26,8 +26,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -44,6 +44,9 @@ const (
 
 	// ResponsesPath is the OpenAI Responses API path
 	ResponsesPath = "/v1/responses"
+
+	// GeneratePath is vLLM's token-in generate endpoint
+	GeneratePath = "/inference/v1/generate"
 )
 
 func openAIAPIAttr(apiType APIType) attribute.KeyValue {
@@ -55,7 +58,7 @@ func openAIAPIAttr(apiType APIType) attribute.KeyValue {
 func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
-		tracer := telemetry.Tracer()
+		tracer := tracing.Tracer()
 		ctx, span := tracer.Start(r.Context(), "llm_d.pd_proxy.request",
 			trace.WithSpanKind(trace.SpanKindServer),
 		)
@@ -149,26 +152,26 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 			}
 		}
 
-		if len(allowedEncoders) > 0 && s.handleEPDConnector != nil {
-			s.logger.V(4).Info("encoder headers detected, using EPD protocol",
+		if len(allowedEncoders) > 0 && s.handleECConnector != nil {
+			s.logger.V(4).Info("encoder headers detected, using EC connector",
 				"encoderCount", len(allowedEncoders),
 				"encoderCandidates", len(encoderHostPorts),
 				"hasPrefiller", len(prefillHostPort) > 0)
 			span.SetAttributes(
-				attribute.Bool("llm_d.epd_proxy.encode_disaggregation_used", true),
-				attribute.Int("llm_d.epd_proxy.encoder_count", len(allowedEncoders)),
-				attribute.Int("llm_d.epd_proxy.encoder_candidates", len(encoderHostPorts)),
+				attribute.Bool("llm_d.ec_proxy.encode_disaggregation_used", true),
+				attribute.Int("llm_d.ec_proxy.encoder_count", len(allowedEncoders)),
+				attribute.Int("llm_d.ec_proxy.encoder_candidates", len(encoderHostPorts)),
 			)
-			s.handleEPDConnector(w, r, prefillHostPort, allowedEncoders)
+			s.handleECConnector(w, r, prefillHostPort, allowedEncoders)
 			return
 		}
 
 		if len(encoderHostPorts) > 0 && len(allowedEncoders) == 0 {
 			s.logger.Info("SSRF protection: all encoder targets filtered out, falling back to P/D or decoder-only")
 			span.SetAttributes(
-				attribute.Bool("llm_d.epd_proxy.encode_disaggregation_used", false),
-				attribute.Int("llm_d.epd_proxy.encoder_allowed", len(allowedEncoders)),
-				attribute.Int("llm_d.epd_proxy.encoder_candidates", len(encoderHostPorts)),
+				attribute.Bool("llm_d.ec_proxy.encode_disaggregation_used", false),
+				attribute.Int("llm_d.ec_proxy.encoder_allowed", len(allowedEncoders)),
+				attribute.Int("llm_d.ec_proxy.encoder_candidates", len(encoderHostPorts)),
 			)
 		}
 

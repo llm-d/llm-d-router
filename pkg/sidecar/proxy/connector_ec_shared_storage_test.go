@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -340,7 +341,7 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			requestCount.Store(0)
-			err := srv.fanoutEncoderPrimer(tt.request, []string{encoderHostPort}, "test-req-id")
+			err := srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderHostPort}, "test-req-id")
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedCalls, requestCount.Load())
 		})

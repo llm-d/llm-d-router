@@ -18,6 +18,7 @@ package tokenizer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -109,13 +110,13 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 		if ids := body.Completions.Prompt.TokenIDs; len(ids) > 0 {
 			return &fwkrh.TokenizedPrompt{TokenIDs: ids}, nil
 		}
-		tokenIDs, _, err := b.tk.Render(ctx, body.Completions.Prompt.PlainText())
+		tokenIDs, _, err := b.tk.Render(ctx, completionsPayload(body))
 		if err != nil {
 			return nil, fmt.Errorf("tokenization failed: %w", err)
 		}
 		return &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs}, nil
 	case body.ChatCompletions != nil:
-		tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, ChatCompletionsToRenderChatRequest(body.ChatCompletions))
+		tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, chatPayload(body))
 		if err != nil {
 			return nil, fmt.Errorf("tokenization failed: %w", err)
 		}
@@ -130,10 +131,37 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 	}
 }
 
-// cacheSaltFromBody returns the cache salt from whichever protocol is populated.
-// The protocol switch lives in the producer so consumers read only
-// TokenizedPrompt.CacheSalt.
-func cacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
+// completionsPayload returns the payload for a completions request. Falls back
+// to a minimal PayloadMap when the body carries a non-map payload (gRPC, nil).
+func completionsPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
+	if body.Payload != nil {
+		if _, ok := body.Payload.AsMap(); ok {
+			return body.Payload
+		}
+	}
+	return fwkrh.PayloadMap{"prompt": body.Completions.Prompt.PlainText()}
+}
+
+// chatPayload returns the payload for a chat completions request. Falls back
+// to an OpenAI-shaped PayloadMap constructed from the typed struct when the body
+// carries a non-map payload (gRPC, warmup).
+func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
+	if body.Payload != nil {
+		if _, ok := body.Payload.AsMap(); ok {
+			return body.Payload
+		}
+	}
+	rcr := ChatCompletionsToRenderChatRequest(body.ChatCompletions)
+	data, _ := json.Marshal(buildChatRenderRequest("", rcr))
+	var pm fwkrh.PayloadMap
+	_ = json.Unmarshal(data, &pm)
+	return pm
+}
+
+// CacheSaltFromBody returns the cache salt from whichever protocol is populated.
+// The protocol switch lives here so producers populate TokenizedPrompt.CacheSalt
+// from one place and consumers read only that field.
+func CacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
 	switch {
 	case body.Conversations != nil:
 		return body.Conversations.CacheSalt

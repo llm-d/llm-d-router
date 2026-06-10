@@ -32,6 +32,8 @@ var (
 type MatchItem struct {
 	Hash string
 	Size int
+	// Modality is emitted as a metric label.
+	Modality string
 }
 
 // EncoderCacheMatchInfo carries endpoint-local multimodal cache match data.

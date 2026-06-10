@@ -371,6 +371,31 @@ schedulingProfiles:
 			{Name: "latency-slo-admitter", Type: "latency-slo-admitter"},
 		},
 	},
+	"payload-agnostic": {
+		yaml: `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: passthrough-parser
+- type: active-request-scorer
+- type: session-affinity-scorer
+requestHandler:
+  parsers:
+  - pluginRef: passthrough-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: active-request-scorer
+    weight: 1
+  - pluginRef: session-affinity-scorer
+    weight: 1
+`,
+		expectedPlugins: []configapi.PluginSpec{
+			{Name: "passthrough-parser", Type: "passthrough-parser"},
+			{Name: "active-request-scorer", Type: "active-request-scorer"},
+			{Name: "session-affinity-scorer", Type: "session-affinity-scorer"},
+		},
+	},
 }
 
 func TestWellKnownConfigs(t *testing.T) {
