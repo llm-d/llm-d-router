@@ -26,6 +26,9 @@ const (
 	// KVConnectorSGLang enables SGLang the P/D KV disaggregation protocol
 	KVConnectorSGLang = "sglang"
 
+	// KVConnectorMooncake enables mooncake the P/D KV disaggregation protocol
+	KVConnectorMooncake = "mooncake"
+
 	// ECExampleConnector enables the Encoder disaggregation protocol (E/PD, E/P/D)
 	ECExampleConnector = "ec-example"
 

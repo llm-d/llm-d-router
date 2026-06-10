@@ -29,16 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
-const (
-	chatCompletionsRequestBody = `{
-				"model": "Qwen/Qwen2-0.5B",
-				"messages": [
-				  {"role": "user", "content": "Hello"}
-				],
-				"max_tokens": 50
-			}`
-	eventStreamContentType = "text/event-stream"
-)
+const eventStreamContentType = "text/event-stream"
 
 var _ = Describe("NIXL Connector (v2)", func() {
 

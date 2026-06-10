@@ -72,10 +72,14 @@ const (
 	requestFieldBootstrapHost = "bootstrap_host"
 	requestFieldBootstrapPort = "bootstrap_port"
 	requestFieldBootstrapRoom = "bootstrap_room"
+	// Mooncake transfer fields
+	requestFieldTransferID          = "transfer_id"
+	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
 	KVConnectorSGLang        = constants.KVConnectorSGLang
+	KVConnectorMooncake      = constants.KVConnectorMooncake
 	ECExampleConnector       = constants.ECExampleConnector
 	ECConnectorNIXL          = constants.ECConnectorNIXL
 )
@@ -169,6 +173,9 @@ type Config struct {
 	// CertPath is the path to TLS certificates for the sidecar server.
 	CertPath string
 
+	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
+	MooncakeBootstrapPort int
+
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
 	// InferencePoolNamespace is the Kubernetes namespace of the InferencePool to watch.
@@ -230,11 +237,12 @@ type Server struct {
 	prefillerURLPrefix string
 	encoderURLPrefix   string
 
-	decoderProxy        http.Handler                     // decoder proxy handler
-	prefillerProxies    *lru.Cache[string, http.Handler] // cached prefiller proxy handlers
-	encoderProxies      *lru.Cache[string, http.Handler] // cached encoder proxy handlers
-	dataParallelProxies map[string]http.Handler          // Proxies to other vLLM servers
-	forwardDataParallel bool                             // Use special Data Parallel work around
+	decoderProxy        http.Handler                          // decoder proxy handler
+	prefillerProxies    *lru.Cache[string, http.Handler]      // cached prefiller proxy handlers
+	encoderProxies      *lru.Cache[string, http.Handler]      // cached encoder proxy handlers
+	mooncakeEngineIDs   *lru.Cache[string, map[string]string] // cached mooncake dp_rank->engine_id per prefill host:port
+	dataParallelProxies map[string]http.Handler               // Proxies to other vLLM servers
+	forwardDataParallel bool                                  // Use special Data Parallel work around
 
 	prefillSamplerFn func(n int) int // allow test override
 
@@ -243,13 +251,15 @@ type Server struct {
 
 // NewProxy creates a new routing reverse proxy from the given Config.
 func NewProxy(config Config) *Server {
-	prefillerCache, _ := lru.New[string, http.Handler](1024) // nolint:errcheck
-	encoderCache, _ := lru.New[string, http.Handler](1024)   // nolint:errcheck
+	prefillerCache, _ := lru.New[string, http.Handler](1024)         // nolint:errcheck
+	encoderCache, _ := lru.New[string, http.Handler](1024)           // nolint:errcheck
+	mooncakeEngineIDs, _ := lru.New[string, map[string]string](1024) // nolint:errcheck
 
 	server := &Server{
 		readyCh:             make(chan struct{}),
 		prefillerProxies:    prefillerCache,
 		encoderProxies:      encoderCache,
+		mooncakeEngineIDs:   mooncakeEngineIDs,
 		prefillerURLPrefix:  "http://",
 		encoderURLPrefix:    "http://",
 		config:              config,
@@ -321,6 +331,7 @@ func (s *Server) Clone() *Server {
 		encoderURLPrefix:    s.encoderURLPrefix,
 		prefillerProxies:    s.prefillerProxies,
 		encoderProxies:      s.encoderProxies,
+		mooncakeEngineIDs:   s.mooncakeEngineIDs,
 		dataParallelProxies: s.dataParallelProxies,
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,
@@ -368,6 +379,10 @@ func (s *Server) setKVConnector() {
 	case KVConnectorSGLang:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
 			s.handleSGLang(w, r, host)
+		}
+	case KVConnectorMooncake:
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+			s.handleMooncake(w, r, host)
 		}
 	case KVConnectorNIXLV2:
 		fallthrough
