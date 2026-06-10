@@ -155,10 +155,9 @@ latencyPredictor:
   # Training Server Configuration
   trainingServer:
     image:
-      # TODO: Update this default once llm-d owns and publishes this image.
-      registry: us-central1-docker.pkg.dev/k8s-staging-images
-      repository: gateway-api-inference-extension/latency-training-server
-      tag: main
+      registry: ghcr.io/llm-d
+      repository: llm-d-latency-predictor-training-server
+      tag: v0.1.0-rc.1
       pullPolicy: Always
     port: 8000
     resources:
@@ -197,10 +196,9 @@ latencyPredictor:
     count: 1
     startPort: 8001
     image:
-      # TODO: Update this default once llm-d owns and publishes this image.
-      registry: us-central1-docker.pkg.dev/k8s-staging-images
-      repository: gateway-api-inference-extension/latency-prediction-server
-      tag: main
+      registry: ghcr.io/llm-d
+      repository: llm-d-latency-predictor-prediction-server
+      tag: v0.1.0-rc.1
       pullPolicy: Always
     resources:
       requests:
