@@ -534,6 +534,34 @@ func TestDetector_ConcurrencyStress(t *testing.T) {
 	require.Equal(t, int64(0), reg.get(fullID).Requests)
 }
 
+// TestDetector_NilMetadataEndpoint verifies that endpoints with nil metadata
+// are counted toward pool capacity with zero in-flight load, not skipped.
+func TestDetector_NilMetadataEndpoint(t *testing.T) {
+	t.Parallel()
+
+	detector := newDetector("test-detector", config{mode: modeRequests, maxConcurrency: 10}, logr.Discard())
+	ctx := context.Background()
+
+	t.Run("all_nil_metadata_returns_zero", func(t *testing.T) {
+		t.Parallel()
+		candidates := []datalayer.Endpoint{&nilMetadataEndpoint{}, &nilMetadataEndpoint{}}
+		got := detector.Saturation(ctx, candidates)
+		require.InDelta(t, 0.0, got, 1e-6, "endpoints with nil metadata should report zero saturation")
+	})
+
+	t.Run("mixed_nil_and_loaded", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		driveLoad(ctx, reg, detector, "loaded", 10)
+		candidates := []datalayer.Endpoint{
+			newFakeEndpoint(reg, "loaded"),
+			&nilMetadataEndpoint{},
+		}
+		got := detector.Saturation(ctx, candidates)
+		require.InDelta(t, 0.5, got, 1e-6, "10 inflight / (10+10) capacity = 0.5")
+	})
+}
+
 // --- Test Helpers & Mocks ---
 
 func simulatePreRequest(_ context.Context, reg *localRegistry, req *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
@@ -673,3 +701,18 @@ func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequ
 		},
 	}
 }
+
+// nilMetadataEndpoint simulates a freshly registered endpoint whose metadata
+// has not been populated yet.
+type nilMetadataEndpoint struct{}
+
+func (e *nilMetadataEndpoint) GetMetadata() *datalayer.EndpointMetadata     { return nil }
+func (e *nilMetadataEndpoint) UpdateMetadata(m *datalayer.EndpointMetadata) {}
+func (e *nilMetadataEndpoint) GetAttributes() datalayer.AttributeMap        { return e }
+func (e *nilMetadataEndpoint) GetMetrics() *datalayer.Metrics               { return nil }
+func (e *nilMetadataEndpoint) UpdateMetrics(*datalayer.Metrics)             {}
+func (e *nilMetadataEndpoint) String() string                               { return "nil-metadata" }
+func (e *nilMetadataEndpoint) Get(string) (datalayer.Cloneable, bool)       { return nil, false }
+func (e *nilMetadataEndpoint) Put(string, datalayer.Cloneable)              {}
+func (e *nilMetadataEndpoint) Keys() []string                               { return nil }
+func (e *nilMetadataEndpoint) Clone() datalayer.AttributeMap                { return e }

@@ -125,8 +125,18 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 //
 //	Saturation = Total Inflight Requests / Total MaxConcurrency Capacity.
 func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
+	if len(endpoints) == 0 {
+		return 1.0
+	}
+
 	var totalInflight, totalCapacity int64
 	for _, e := range endpoints {
+		if d.config.mode == modeTokens {
+			totalCapacity += d.config.maxTokenConcurrency
+		} else {
+			totalCapacity += d.config.maxConcurrency
+		}
+
 		if e.GetMetadata() == nil {
 			continue
 		}
@@ -135,15 +145,9 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 
 		if d.config.mode == modeTokens {
 			totalInflight += load.Tokens
-			totalCapacity += d.config.maxTokenConcurrency
 		} else {
 			totalInflight += load.Requests
-			totalCapacity += d.config.maxConcurrency
 		}
-	}
-
-	if totalCapacity == 0 {
-		return 1.0
 	}
 
 	return float64(totalInflight) / float64(totalCapacity)
