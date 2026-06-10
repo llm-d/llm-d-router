@@ -115,18 +115,12 @@ func (b estimateBackend) estimateBytes(ctx context.Context, body *fwkrh.Inferenc
 func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest) ([]byte, []fwkrh.MultiModalFeature) {
 	var out []byte
 	var features []fwkrh.MultiModalFeature
-	// Tools render inside the system block after the system content in most templates.
-	start := 0
-	if len(chat.Messages) > 0 && chat.Messages[0].Role == "system" {
-		out, features = b.appendChatMessage(out, features, chat.Messages[0])
-		start = 1
-	}
 	if len(chat.Tools) > 0 {
 		if raw, err := json.Marshal(chat.Tools); err == nil {
 			out = append(out, raw...)
 		}
 	}
-	for _, msg := range chat.Messages[start:] {
+	for _, msg := range chat.Messages {
 		out, features = b.appendChatMessage(out, features, msg)
 	}
 	return out, features
@@ -163,6 +157,11 @@ func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiMod
 func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fwkrh.MultiModalFeature) {
 	var out []byte
 	var features []fwkrh.MultiModalFeature
+	if len(req.Tools) > 0 {
+		if raw, err := json.Marshal(req.Tools); err == nil {
+			out = append(out, raw...)
+		}
+	}
 	// The system field accepts only text -- a string or an array of text blocks.
 	// See https://docs.anthropic.com/en/api/messages#body-system.
 	if req.System.Raw != "" {
@@ -172,12 +171,6 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 			if block.Type == blockTypeText {
 				out = append(out, []byte(block.Text)...)
 			}
-		}
-	}
-	// Tools follow the system block, matching chatCompletionsBytes.
-	if len(req.Tools) > 0 {
-		if raw, err := json.Marshal(req.Tools); err == nil {
-			out = append(out, raw...)
 		}
 	}
 	for _, msg := range req.Messages {
