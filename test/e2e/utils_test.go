@@ -28,6 +28,46 @@ const (
 	deploymentKind = "deployment"
 )
 
+// getMetricValue scrapes the EPP /metrics endpoint and returns the sum of all
+// series for metricName whose label set matches every entry in filters.
+// Returns 0 on scrape error or no match.
+func getMetricValue(metricName string, filters map[string]string) float64 {
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%s/metrics", metricsPort))
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0
+	}
+	var total float64
+	for _, line := range strings.Split(string(body), "\n") {
+		if !strings.HasPrefix(line, metricName+"{") && !strings.HasPrefix(line, metricName+" ") {
+			continue
+		}
+		match := true
+		for k, v := range filters {
+			if !strings.Contains(line, fmt.Sprintf("%s=%q", k, v)) {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		f, err := strconv.ParseFloat(parts[len(parts)-1], 64)
+		if err == nil {
+			total += f
+		}
+	}
+	return total
+}
+
 func scaleDeployment(objects []string, increment int) {
 	direction := "up"
 	absIncrement := increment

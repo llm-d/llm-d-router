@@ -149,6 +149,16 @@ func runChatCompletionWithVideo() (string, string) {
 	return runRawChatCompletion(body)
 }
 
+// runChatCompletionWithImageAndAudio sends a chat completion request carrying
+// both an image_url and an input_audio block. Used to probe per-item match
+// accounting in the multimodal cache producer.
+func runChatCompletionWithImageAndAudio(imageURL, audioData string) (string, string) {
+	ginkgo.By("Sending Multimodal Chat Completion Request with image + audio")
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-mixed-0"},{"type":"input_audio","input_audio":{"data":%q,"format":"wav"}},{"type":"text","text":"Describe what you see and hear."}]}],"max_tokens":150}`,
+		simModelName, imageURL, audioData)
+	return runRawChatCompletion(body)
+}
+
 // runChatCompletionWithImageEmbeds sends a chat completion request with an image_embeds content block
 // carrying a pre-encoded tensor. image_embeds is not a recognised multimodal type for encode
 // disaggregation, so the request routes like a text request (decode-only or prefill-decode).

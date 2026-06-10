@@ -728,6 +728,36 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				gomega.Expect(pod2).Should(gomega.Equal(pod1))
 			}
 
+			// A/B symmetry: each content key independently routes back to its
+			// first-served pod. Catches "first request wins forever" bugs that
+			// the same-content loop above can't distinguish.
+			ginkgo.By("A/B image symmetry")
+			_, podA := runChatCompletionWithImages(testImageURL)
+			_, podB := runChatCompletionWithImages(testImageURL2)
+			_, podARe := runChatCompletionWithImages(testImageURL)
+			gomega.Expect(podARe).Should(gomega.Equal(podA))
+			_, podBRe := runChatCompletionWithImages(testImageURL2)
+			gomega.Expect(podBRe).Should(gomega.Equal(podB))
+
+			// Mixed image + audio in one request. Probes per-item match
+			// accounting and the empty-hash short-circuit in ExtractMMItems.
+			ginkgo.By("mixed image+audio cache affinity")
+			_, podMix := runChatCompletionWithImageAndAudio(testImageURL, testAudioData)
+			_, podMixRe := runChatCompletionWithImageAndAudio(testImageURL, testAudioData)
+			gomega.Expect(podMixRe).Should(gomega.Equal(podMix))
+
+			// Producer emits hits + queries on the shared metric registry.
+			// PreRequest is async (wg.Go), so use Eventually to avoid the race.
+			ginkgo.By("metrics: hits_total + queries_total")
+			gomega.Eventually(func() float64 {
+				return getMetricValue("llm_d_router_epp_encoder_cache_queries_total",
+					map[string]string{"modality": "image"})
+			}, 5*time.Second, 250*time.Millisecond).Should(gomega.BeNumerically(">=", 1))
+			gomega.Eventually(func() float64 {
+				return getMetricValue("llm_d_router_epp_encoder_cache_hits_total",
+					map[string]string{"modality": "image"})
+			}, 5*time.Second, 250*time.Millisecond).Should(gomega.BeNumerically(">=", 1))
+
 			testutils.DeleteObjects(testConfig, epp)
 			testutils.DeleteObjects(testConfig, modelServers)
 		})
