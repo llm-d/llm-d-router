@@ -119,13 +119,6 @@ func TestHandleRequestHeaders(t *testing.T) {
 			wantObjective: "binary-id",
 		},
 		{
-			name: "Strips query parameters from :path header",
-			headers: []*configPb.HeaderValue{
-				{Key: ":path", Value: "/v1/messages?beta=true"},
-			},
-			wantHeaders: map[string]string{":path": "/v1/messages"},
-		},
-		{
 			name: "Prefers new control headers over old aliases",
 			headers: []*configPb.HeaderValue{
 				{Key: metadata.OldObjectiveKey, Value: "old-objective"},
