@@ -21,6 +21,10 @@ This document defines the process for releasing llm-d-router.
 
 1. Permissions to push to the llm-d-router repository.
 
+1. Membership in the `@llm-d/router-release-managers` team. Tag protection on
+   `refs/tags/v*` restricts who can push release tags, which is what triggers
+   the release build.
+
 1. Set the required environment variables based on the expected release number:
 
    ```shell

@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
@@ -132,7 +133,19 @@ func initTraceExporter(ctx context.Context, logger logr.Logger) (sdktrace.SpanEx
 
 const instrumentationName = "llm-d-router"
 
-// Tracer returns a tracer for the llm-d router.
-func Tracer() trace.Tracer {
-	return otel.Tracer(instrumentationName)
+// Tracer returns a tracer for the given instrumentation scope, defaulting to
+// "llm-d-router". Build version and commit SHA are attached so every span in a
+// trace carries consistent scope metadata.
+func Tracer(scope ...string) trace.Tracer {
+	name := instrumentationName
+	if len(scope) > 0 && scope[0] != "" {
+		name = scope[0]
+	}
+	return otel.Tracer(
+		name,
+		trace.WithInstrumentationVersion(version.BuildRef),
+		trace.WithInstrumentationAttributes(
+			attribute.String("commit-sha", version.CommitSHA),
+		),
+	)
 }

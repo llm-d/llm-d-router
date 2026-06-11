@@ -252,7 +252,7 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		// A parser (e.g. vLLM gRPC) may pre-populate tokens without a salt;
 		// ensure cache-salt isolation still applies on the skip path.
 		if request.Body.TokenizedPrompt.CacheSalt == "" {
-			request.Body.TokenizedPrompt.CacheSalt = cacheSaltFromBody(request.Body)
+			request.Body.TokenizedPrompt.CacheSalt = CacheSaltFromBody(request.Body)
 		}
 		return nil
 	}
@@ -261,7 +261,7 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	if err != nil {
 		return err
 	}
-	tp.CacheSalt = cacheSaltFromBody(request.Body)
+	tp.CacheSalt = CacheSaltFromBody(request.Body)
 
 	request.Body.TokenizedPrompt = tp
 	return nil

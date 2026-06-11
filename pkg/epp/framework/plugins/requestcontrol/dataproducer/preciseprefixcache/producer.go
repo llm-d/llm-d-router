@@ -276,8 +276,9 @@ func (p *Producer) Produce(ctx context.Context,
 		if matchLen > maxMatch {
 			maxMatch = matchLen
 		}
+		cachedBlocks := matchedBlockCount(blockKeys, keyToPods, addr)
 		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens))
+			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).WithCachedBlockCount(cachedBlocks))
 	}
 
 	if p.speculativeEnabled {

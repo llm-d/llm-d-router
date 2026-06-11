@@ -18,11 +18,14 @@ package tokenizer
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"testing"
 	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
@@ -40,16 +43,10 @@ func hashTokens(t []uint32) uint64 {
 // hashing, so the scorer's cache keys are unchanged.
 func TestPackBytes_KeyPreserving(t *testing.T) {
 	raw := []byte("the quick brown fox jumps over!!") // len 32, 4-byte aligned
-	if len(raw)%bytesPerToken != 0 {
-		t.Fatalf("fixture must be %d-byte aligned, got len %d", bytesPerToken, len(raw))
-	}
+	require.Zero(t, len(raw)%bytesPerToken, "fixture must be %d-byte aligned, got len %d", bytesPerToken, len(raw))
 	tokens := packBytes(raw)
-	if got, want := len(tokens), len(raw)/bytesPerToken; got != want {
-		t.Fatalf("token count: got %d, want %d", got, want)
-	}
-	if hashTokens(tokens) != xxhash.Sum64(raw) {
-		t.Errorf("packed-token hash != raw-byte hash; estimate path is not key-preserving")
-	}
+	require.Len(t, tokens, len(raw)/bytesPerToken)
+	assert.Equal(t, xxhash.Sum64(raw), hashTokens(tokens), "packed-token hash != raw-byte hash; estimate path is not key-preserving")
 }
 
 // TestEstimateBackend_GeneratePassthrough asserts pre-tokenized input is kept
@@ -59,17 +56,8 @@ func TestEstimateBackend_GeneratePassthrough(t *testing.T) {
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
 		Generate: &fwkrh.GenerateRequest{TokenIDs: in},
 	})
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if len(tp.TokenIDs) != len(in) {
-		t.Fatalf("got %d tokens, want %d", len(tp.TokenIDs), len(in))
-	}
-	for i := range in {
-		if tp.TokenIDs[i] != in[i] {
-			t.Errorf("token %d: got %d, want %d", i, tp.TokenIDs[i], in[i])
-		}
-	}
+	require.NoError(t, err)
+	assert.Equal(t, in, tp.TokenIDs)
 }
 
 // TestEstimateBackend_CompletionsTokenIDsPassthrough asserts token-ID completions
@@ -79,17 +67,8 @@ func TestEstimateBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
 		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: in}},
 	})
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if len(tp.TokenIDs) != len(in) {
-		t.Fatalf("got %d tokens, want %d (token IDs must pass through, not be byte-estimated)", len(tp.TokenIDs), len(in))
-	}
-	for i := range in {
-		if tp.TokenIDs[i] != in[i] {
-			t.Errorf("token %d: got %d, want %d", i, tp.TokenIDs[i], in[i])
-		}
-	}
+	require.NoError(t, err)
+	assert.Equal(t, in, tp.TokenIDs, "token IDs must pass through, not be byte-estimated")
 }
 
 // TestEstimateBackend_EmbeddingsTokenIDsPassthrough asserts token-ID embeddings
@@ -99,17 +78,8 @@ func TestEstimateBackend_EmbeddingsTokenIDsPassthrough(t *testing.T) {
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
 		Embeddings: &fwkrh.EmbeddingsRequest{Input: fwkrh.EmbeddingsInput{TokenIDs: in}},
 	})
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if len(tp.TokenIDs) != len(in) {
-		t.Fatalf("got %d tokens, want %d", len(tp.TokenIDs), len(in))
-	}
-	for i := range in {
-		if tp.TokenIDs[i] != in[i] {
-			t.Errorf("token %d: got %d, want %d", i, tp.TokenIDs[i], in[i])
-		}
-	}
+	require.NoError(t, err)
+	assert.Equal(t, in, tp.TokenIDs)
 }
 
 // TestEstimateBackend_CompletionsDeterministic asserts the same prompt produces
@@ -119,28 +89,18 @@ func TestEstimateBackend_CompletionsDeterministic(t *testing.T) {
 		return &fwkrh.InferenceRequestBody{Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: s}}}
 	}
 	a, err := estimateBackend{}.produce(context.Background(), body("hello world"))
-	if err != nil {
-		t.Fatalf("produce a: %v", err)
-	}
+	require.NoError(t, err)
 	b, err := estimateBackend{}.produce(context.Background(), body("hello world"))
-	if err != nil {
-		t.Fatalf("produce b: %v", err)
-	}
-	if hashTokens(a.TokenIDs) != hashTokens(b.TokenIDs) {
-		t.Error("same prompt produced different tokens")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, hashTokens(a.TokenIDs), hashTokens(b.TokenIDs), "same prompt produced different tokens")
 	c, err := estimateBackend{}.produce(context.Background(), body("hello there"))
-	if err != nil {
-		t.Fatalf("produce c: %v", err)
-	}
-	if hashTokens(a.TokenIDs) == hashTokens(c.TokenIDs) {
-		t.Error("distinct prompts produced identical tokens")
-	}
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(a.TokenIDs), hashTokens(c.TokenIDs), "distinct prompts produced identical tokens")
 }
 
 // pngBase64Raw is a 64x32 RGBA PNG (bare base64 payload), yielding
 // 64*32/imageTokenFactor = 2 placeholder tokens under the dynamic estimator.
-const pngBase64Raw = "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAARUlEQVR4nOzP0QnAUAzDwBSy/8zlTSECdxj/a2fmu7x9d5mAmoCagJqAmoCagJqAmoCagJqAmoCagJqAmoCagNofAAD//57WAN8yR4QZAAAAAElFTkSuQmCC"
+const pngBase64Raw = "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAARUlEQVR4nOzP0QnAUAzDwBSy/8zlTSECdxj/a2fmu7x9d5mAmoCagJqAmoCagJqAmoCagJqAmoCagJqAmoCagJqAmoCagNofAAD//57WAN8yR4QZAAAAAElFTkSuQmCC"
 const pngBase64DataURL = "data:image/png;base64," + pngBase64Raw
 
 // TestEstimateBackend_ChatImageFeature asserts a chat image emits a multimodal
@@ -159,30 +119,17 @@ func TestEstimateBackend_ChatImageFeature(t *testing.T) {
 		},
 	}
 	tp, err := estimateBackend{}.produce(context.Background(), body)
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if len(tp.MultiModalFeatures) != 1 {
-		t.Fatalf("got %d features, want 1", len(tp.MultiModalFeatures))
-	}
+	require.NoError(t, err)
+	require.Len(t, tp.MultiModalFeatures, 1)
 	f := tp.MultiModalFeatures[0]
-	if f.Modality != fwkrh.ModalityImage {
-		t.Errorf("modality: got %q, want %q", f.Modality, fwkrh.ModalityImage)
-	}
-	if want := strconv.FormatUint(xxhash.Sum64String(pngBase64DataURL), 16); f.Hash != want {
-		t.Errorf("hash: got %q, want %q", f.Hash, want)
-	}
-	if f.Length <= 1 {
-		t.Errorf("image length: got %d, want > 1 (placeholder weighting)", f.Length)
-	}
-	if f.Offset < 0 || f.Offset+f.Length > len(tp.TokenIDs) {
-		t.Errorf("feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tp.TokenIDs))
-	}
+	assert.Equal(t, fwkrh.ModalityImage, f.Modality)
+	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(pngBase64DataURL), 16), f.Hash)
+	assert.Greater(t, f.Length, 1, "image length must be > 1 (placeholder weighting)")
+	assert.GreaterOrEqual(t, f.Offset, 0)
+	assert.LessOrEqual(t, f.Offset+f.Length, len(tp.TokenIDs), "feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tp.TokenIDs))
 	// Placeholder tokens are the URL hash repeated; verify the span carries weight.
 	for i := f.Offset; i < f.Offset+f.Length; i++ {
-		if tp.TokenIDs[i] != uint32(xxhash.Sum64String(pngBase64DataURL)) {
-			t.Errorf("token %d: got %d, want image placeholder token", i, tp.TokenIDs[i])
-		}
+		assert.Equal(t, uint32(xxhash.Sum64String(pngBase64DataURL)), tp.TokenIDs[i], "token %d: got %d, want image placeholder token", i, tp.TokenIDs[i])
 	}
 }
 
@@ -199,19 +146,11 @@ func TestEstimateBackend_ChatImageWeightingDistinct(t *testing.T) {
 	}
 	// Non-decodable URL falls back to the default 640x360 resolution.
 	def, err := estimateBackend{}.produce(context.Background(), chat("https://example.com/a.png"))
-	if err != nil {
-		t.Fatalf("produce default: %v", err)
-	}
-	if got, want := def.MultiModalFeatures[0].Length, (defaultImageWidth*defaultImageHeight)/imageTokenFactor; got != want {
-		t.Errorf("default image length: got %d, want %d", got, want)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, (defaultImageWidth*defaultImageHeight)/imageTokenFactor, def.MultiModalFeatures[0].Length, "default image length")
 	small, err := estimateBackend{}.produce(context.Background(), chat(pngBase64DataURL))
-	if err != nil {
-		t.Fatalf("produce small: %v", err)
-	}
-	if def.MultiModalFeatures[0].Length == small.MultiModalFeatures[0].Length {
-		t.Error("different images yielded identical placeholder counts")
-	}
+	require.NoError(t, err)
+	assert.NotEqual(t, def.MultiModalFeatures[0].Length, small.MultiModalFeatures[0].Length, "different images yielded identical placeholder counts")
 }
 
 // chatImageBody builds a chat request carrying a single image_url block.
@@ -228,15 +167,9 @@ func chatImageBody(url string) *fwkrh.InferenceRequestBody {
 func TestImageEstimator_StaticMode(t *testing.T) {
 	b := estimateBackend{img: newImageEstimator(&estimateConfig{Image: &imageEstimateConfig{Mode: imageModeStatic, Static: &staticImageConfig{StaticToken: 7}}})}
 	tp, err := b.produce(context.Background(), chatImageBody(pngBase64DataURL))
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if len(tp.MultiModalFeatures) != 1 {
-		t.Fatalf("got %d features, want 1", len(tp.MultiModalFeatures))
-	}
-	if got := tp.MultiModalFeatures[0].Length; got != 7 {
-		t.Errorf("static image length: got %d, want 7", got)
-	}
+	require.NoError(t, err)
+	require.Len(t, tp.MultiModalFeatures, 1)
+	assert.Equal(t, 7, tp.MultiModalFeatures[0].Length, "static image length")
 }
 
 // TestImageEstimator_CustomFactor asserts the dynamic factor knob changes the
@@ -245,12 +178,8 @@ func TestImageEstimator_CustomFactor(t *testing.T) {
 	b := estimateBackend{img: newImageEstimator(&estimateConfig{Image: &imageEstimateConfig{Dynamic: &dynamicImageConfig{Factor: 2048}}})}
 	// Non-decodable URL falls back to the default 640x360 resolution.
 	tp, err := b.produce(context.Background(), chatImageBody("https://example.com/a.png"))
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if got, want := tp.MultiModalFeatures[0].Length, (defaultImageWidth*defaultImageHeight)/2048; got != want {
-		t.Errorf("custom-factor image length: got %d, want %d", got, want)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, (defaultImageWidth*defaultImageHeight)/2048, tp.MultiModalFeatures[0].Length, "custom-factor image length")
 }
 
 // TestImageEstimator_CustomDefaultResolution asserts the default-resolution knob
@@ -260,12 +189,8 @@ func TestImageEstimator_CustomDefaultResolution(t *testing.T) {
 		DefaultResolution: &resolution{Width: 1024, Height: 1024},
 	}})}
 	tp, err := b.produce(context.Background(), chatImageBody("https://example.com/a.png"))
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if got, want := tp.MultiModalFeatures[0].Length, (1024*1024)/imageTokenFactor; got != want {
-		t.Errorf("custom default-resolution length: got %d, want %d", got, want)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, (1024*1024)/imageTokenFactor, tp.MultiModalFeatures[0].Length, "custom default-resolution length")
 }
 
 // TestEstimateBackend_MessagesImageFeature asserts an Anthropic messages image
@@ -286,25 +211,14 @@ func TestEstimateBackend_MessagesImageFeature(t *testing.T) {
 		},
 	}
 	tp, err := estimateBackend{}.produce(context.Background(), body)
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if len(tp.MultiModalFeatures) != 1 {
-		t.Fatalf("got %d features, want 1", len(tp.MultiModalFeatures))
-	}
+	require.NoError(t, err)
+	require.Len(t, tp.MultiModalFeatures, 1)
 	f := tp.MultiModalFeatures[0]
-	if f.Modality != fwkrh.ModalityImage {
-		t.Errorf("modality: got %q, want %q", f.Modality, fwkrh.ModalityImage)
-	}
-	if want := strconv.FormatUint(xxhash.Sum64String(pngBase64Raw), 16); f.Hash != want {
-		t.Errorf("hash: got %q, want %q (base64 source must hash by its raw payload)", f.Hash, want)
-	}
-	if f.Length <= 1 {
-		t.Errorf("image length: got %d, want > 1 (placeholder weighting)", f.Length)
-	}
-	if f.Offset < 0 || f.Offset+f.Length > len(tp.TokenIDs) {
-		t.Errorf("feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tp.TokenIDs))
-	}
+	assert.Equal(t, fwkrh.ModalityImage, f.Modality)
+	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(pngBase64Raw), 16), f.Hash, "base64 source must hash by its raw payload")
+	assert.Greater(t, f.Length, 1, "image length must be > 1 (placeholder weighting)")
+	assert.GreaterOrEqual(t, f.Offset, 0)
+	assert.LessOrEqual(t, f.Offset+f.Length, len(tp.TokenIDs), "feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tp.TokenIDs))
 }
 
 // TestEstimateBackend_MessagesURLImageKey asserts a url-typed source is hashed
@@ -322,15 +236,9 @@ func TestEstimateBackend_MessagesURLImageKey(t *testing.T) {
 		},
 	}
 	tp, err := estimateBackend{}.produce(context.Background(), body)
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if len(tp.MultiModalFeatures) != 1 {
-		t.Fatalf("got %d features, want 1", len(tp.MultiModalFeatures))
-	}
-	if want := strconv.FormatUint(xxhash.Sum64String(url), 16); tp.MultiModalFeatures[0].Hash != want {
-		t.Errorf("hash: got %q, want %q", tp.MultiModalFeatures[0].Hash, want)
-	}
+	require.NoError(t, err)
+	require.Len(t, tp.MultiModalFeatures, 1)
+	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(url), 16), tp.MultiModalFeatures[0].Hash)
 }
 
 // TestEstimateBackend_MessagesDeterministic asserts identical requests produce
@@ -347,23 +255,130 @@ func TestEstimateBackend_MessagesDeterministic(t *testing.T) {
 		}}
 	}
 	a, err := estimateBackend{}.produce(context.Background(), build("you are helpful", "hello world"))
-	if err != nil {
-		t.Fatalf("produce a: %v", err)
-	}
+	require.NoError(t, err)
 	b, err := estimateBackend{}.produce(context.Background(), build("you are helpful", "hello world"))
-	if err != nil {
-		t.Fatalf("produce b: %v", err)
-	}
-	if hashTokens(a.TokenIDs) != hashTokens(b.TokenIDs) {
-		t.Error("identical messages requests produced different tokens")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, hashTokens(a.TokenIDs), hashTokens(b.TokenIDs), "identical messages requests produced different tokens")
 	c, err := estimateBackend{}.produce(context.Background(), build("you are concise", "hello world"))
-	if err != nil {
-		t.Fatalf("produce c: %v", err)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(a.TokenIDs), hashTokens(c.TokenIDs), "different system prompts produced identical tokens")
+}
+
+// TestEstimateBackend_ChatToolsBeforeSystem asserts the tools list is emitted
+// before the system message, so requests sharing tools but differing in system
+// share their leading tokens.
+func TestEstimateBackend_ChatToolsBeforeSystem(t *testing.T) {
+	tools := []any{map[string]any{"name": "search_for_long_enough_byte_segment_for_this_ordering_test"}}
+	toolsJSON, err := json.Marshal(tools)
+	require.NoError(t, err)
+	// -1 skips the token straddling the tools/system byte boundary.
+	sharedTokens := len(toolsJSON)/bytesPerToken - 1
+	chat := func(systemContent string) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{
+				{Role: "system", Content: fwkrh.Content{Raw: systemContent}},
+				{Role: "user", Content: fwkrh.Content{Raw: "hi"}},
+			},
+			Tools: tools,
+		}}
 	}
-	if hashTokens(a.TokenIDs) == hashTokens(c.TokenIDs) {
-		t.Error("different system prompts produced identical tokens")
+	a, err := estimateBackend{}.produce(context.Background(), chat("you are a helpful assistant"))
+	require.NoError(t, err)
+	b, err := estimateBackend{}.produce(context.Background(), chat("you are a concise assistant"))
+	require.NoError(t, err)
+	require.NotEqual(t, hashTokens(a.TokenIDs), hashTokens(b.TokenIDs), "streams identical, system was not applied")
+	for i := 0; i < sharedTokens; i++ {
+		assert.Equal(t, a.TokenIDs[i], b.TokenIDs[i], "token %d differs: tools should seed the prefix before system", i)
 	}
+}
+
+// TestEstimateBackend_MessagesToolsBeforeSystem is the /v1/messages analog of
+// TestEstimateBackend_ChatToolsBeforeSystem.
+func TestEstimateBackend_MessagesToolsBeforeSystem(t *testing.T) {
+	tools := []any{map[string]any{
+		"name":         "search_for_long_enough_byte_segment_for_this_ordering_test",
+		"description":  "ensures stable byte length",
+		"input_schema": map[string]any{"type": "object"},
+	}}
+	toolsJSON, err := json.Marshal(tools)
+	require.NoError(t, err)
+	// -1 skips the token straddling the tools/system byte boundary.
+	sharedTokens := len(toolsJSON)/bytesPerToken - 1
+	build := func(systemContent string) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{
+			System: fwkrh.AnthropicContent{Raw: systemContent},
+			Messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{Raw: "hi"}},
+			},
+			Tools: tools,
+		}}
+	}
+	a, err := estimateBackend{}.produce(context.Background(), build("you are a helpful assistant"))
+	require.NoError(t, err)
+	b, err := estimateBackend{}.produce(context.Background(), build("you are a concise assistant"))
+	require.NoError(t, err)
+	require.NotEqual(t, hashTokens(a.TokenIDs), hashTokens(b.TokenIDs), "streams identical, system was not applied")
+	for i := 0; i < sharedTokens; i++ {
+		assert.Equal(t, a.TokenIDs[i], b.TokenIDs[i], "token %d differs: tools should seed the prefix before system", i)
+	}
+}
+
+// TestEstimateBackend_ChatToolsAffectPrefix asserts the tools list participates
+// in the prefix stream so distinct tool sets do not collide on the same key.
+func TestEstimateBackend_ChatToolsAffectPrefix(t *testing.T) {
+	chat := func(tools []any) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hello world"}}},
+			Tools:    tools,
+		}}
+	}
+	noTools, err := estimateBackend{}.produce(context.Background(), chat(nil))
+	require.NoError(t, err)
+	weather := []any{map[string]any{
+		"type":     "function",
+		"function": map[string]any{"name": "get_weather"},
+	}}
+	withTools, err := estimateBackend{}.produce(context.Background(), chat(weather))
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(noTools.TokenIDs), hashTokens(withTools.TokenIDs), "tools list was ignored by the prefix estimator")
+	stock := []any{map[string]any{
+		"type":     "function",
+		"function": map[string]any{"name": "get_stock_price"},
+	}}
+	otherTools, err := estimateBackend{}.produce(context.Background(), chat(stock))
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(withTools.TokenIDs), hashTokens(otherTools.TokenIDs), "different tools lists produced identical tokens")
+}
+
+// TestEstimateBackend_MessagesToolsAffectPrefix is the /v1/messages analog of
+// TestEstimateBackend_ChatToolsAffectPrefix.
+func TestEstimateBackend_MessagesToolsAffectPrefix(t *testing.T) {
+	build := func(tools []any) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{
+			Messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{Raw: "hello world"}},
+			},
+			Tools: tools,
+		}}
+	}
+	noTools, err := estimateBackend{}.produce(context.Background(), build(nil))
+	require.NoError(t, err)
+	weather := []any{map[string]any{
+		"name":         "get_weather",
+		"description":  "Get the current weather",
+		"input_schema": map[string]any{"type": "object"},
+	}}
+	withTools, err := estimateBackend{}.produce(context.Background(), build(weather))
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(noTools.TokenIDs), hashTokens(withTools.TokenIDs), "tools list was ignored by the messages prefix estimator")
+	stock := []any{map[string]any{
+		"name":         "get_stock_price",
+		"description":  "Get a stock price",
+		"input_schema": map[string]any{"type": "object"},
+	}}
+	otherTools, err := estimateBackend{}.produce(context.Background(), build(stock))
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(withTools.TokenIDs), hashTokens(otherTools.TokenIDs), "different tools lists produced identical tokens")
 }
 
 // TestEstimateBackend_NonChatNoFeatures asserts non-chat protocols carry no
@@ -372,10 +387,6 @@ func TestEstimateBackend_NonChatNoFeatures(t *testing.T) {
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
 		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "hello"}},
 	})
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if tp.MultiModalFeatures != nil {
-		t.Errorf("non-chat features: got %v, want nil", tp.MultiModalFeatures)
-	}
+	require.NoError(t, err)
+	assert.Nil(t, tp.MultiModalFeatures, "non-chat features should be nil")
 }

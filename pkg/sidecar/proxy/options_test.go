@@ -265,6 +265,18 @@ func TestSidecarConfiguration(t *testing.T) {
 			expectedError: nil,
 		},
 		{
+			name: "flags set ECConnectorNIXL",
+			inputFlags: map[string]any{
+				ecConnector: ECConnectorNIXL,
+			},
+			expected: func(o *Options) {
+				// Complete() migrates the default connector (KVConnectorNIXLV2) into KVConnector.
+				o.KVConnector = KVConnectorNIXLV2
+				o.ECConnector = ECConnectorNIXL
+			},
+			expectedError: nil,
+		},
+		{
 			name: "flags override file YAML",
 			inputFlags: map[string]any{
 				port:                    "8111",
@@ -565,6 +577,7 @@ func TestValidateConnector(t *testing.T) {
 		{"valid nixlv2", KVConnectorNIXLV2, false},
 		{"valid shared-storage", KVConnectorSharedStorage, false},
 		{"valid sglang", KVConnectorSGLang, false},
+		{"valid mooncake", KVConnectorMooncake, false},
 		{"invalid connector", "invalid", true},
 	}
 

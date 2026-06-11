@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/llm-d/llm-d-router/pkg/common"
@@ -203,6 +204,10 @@ func extractHost(hostWithPort string) string {
 		return hostWithPort
 	}
 	return host
+}
+
+func newUUID() string {
+	return uuid.New().String()
 }
 
 // isHTTPError returns true if the status code indicates an error (not in the 2xx range).

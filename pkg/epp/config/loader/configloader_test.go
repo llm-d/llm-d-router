@@ -55,7 +55,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
-	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 // Define constants for test plugins.
@@ -746,7 +746,7 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			}
 
 			// 2. Instantiate & Configure
-			handle := igwtestutils.NewTestHandle(context.Background())
+			handle := testutils.NewTestHandle(context.Background())
 			cfg, err := InstantiateAndConfigure(rawConfig, handle, logger)
 
 			if tc.wantErr {
@@ -766,7 +766,7 @@ func TestInstantiateAndConfigure(t *testing.T) {
 // logs a warning but does not return an error.
 func TestBuildDataLayerConfigEmptySourcesWarning(t *testing.T) {
 	t.Parallel()
-	handle := igwtestutils.NewTestHandle(context.Background())
+	handle := testutils.NewTestHandle(context.Background())
 	cfg, err := buildDataLayerConfig(
 		&configapi.DataLayerConfig{Sources: []configapi.DataLayerSource{}},
 		handle,
@@ -1023,7 +1023,7 @@ func TestEnsureSaturationDetector(t *testing.T) {
 				},
 			},
 		}
-		handle := igwtestutils.NewTestHandle(context.Background())
+		handle := testutils.NewTestHandle(context.Background())
 		allPlugins := map[string]fwkplugin.Plugin{
 			"existing-plugin": &mockSaturationDetector{},
 		}
@@ -1041,7 +1041,7 @@ func TestEnsureSaturationDetector(t *testing.T) {
 				},
 			},
 		}
-		handle := igwtestutils.NewTestHandle(context.Background())
+		handle := testutils.NewTestHandle(context.Background())
 		allPlugins := map[string]fwkplugin.Plugin{
 			"utilization-detector": &mockSaturationDetector{},
 		}
