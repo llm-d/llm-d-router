@@ -31,7 +31,7 @@ standalone validations
     {{- fail (printf ".Values.router.proxy.mode=service currently supports only proxyType=envoy, got %q" $proxyType) -}}
   {{- end -}}
   {{- $hasHTTP := false -}}
-  {{- range $servicePort := (.Values.router.extraServicePorts | default list) -}}
+  {{- range $servicePort := (.Values.router.extraServicePorts | default (list)) -}}
     {{- if eq (toString (index $servicePort "name")) "http" -}}
       {{- $hasHTTP = true -}}
     {{- end -}}
