@@ -1070,3 +1070,44 @@ func TestFlowController_Concurrency_Backpressure(t *testing.T) {
 	require.Equal(t, numRequests, successCount,
 		"all concurrent requests should be dispatched successfully even under high contention and zero buffer capacity")
 }
+
+// TestFlowController_EnqueueAndWait_DemotionRewritesItemPriority verifies that when the requested priority band is not
+// provisioned, the request is not only leased at the fallback priority (0) but also enqueued there: the FlowItem handed
+// to the processor must report the demoted flow key, not the original (unprovisioned) priority. Without this, the
+// processor looks up a managed queue at the missing band and rejects the demoted request.
+func TestFlowController_EnqueueAndWait_DemotionRewritesItemPriority(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const originalPriority = 100
+
+	var capturedKey flowcontrol.FlowKey
+	processor := &mockProcessor{
+		SubmitFunc: func(item *internal.FlowItem) error {
+			capturedKey = item.OriginalRequest().FlowKey()
+			go item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+			return nil
+		},
+	}
+
+	registry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
+	registry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(conn contracts.ActiveFlowConnection) error) error {
+		// Only priority 0 is provisioned; any other band is rejected, forcing demotion.
+		if key.Priority != 0 {
+			return fmt.Errorf("band %d: %w", key.Priority, contracts.ErrPriorityBandNotFound)
+		}
+		return fn(&mockActiveFlowConnection{RegistryV: registry, FlowKeyV: key})
+	}
+
+	h := newUnitHarness(ctx, t, &Config{DefaultRequestTTL: time.Minute}, registry, processor)
+
+	outcome, err := h.fc.EnqueueAndWait(ctx, newTestRequest(flowcontrol.FlowKey{ID: "batch", Priority: originalPriority}))
+
+	require.NoError(t, err, "demoted request should be dispatched, not rejected")
+	assert.Equal(t, types.QueueOutcomeDispatched, outcome)
+	assert.Equal(t, 0, capturedKey.Priority,
+		"demoted request must be enqueued at priority 0, not its original unprovisioned priority")
+	assert.Equal(t, "batch", capturedKey.ID, "demotion must preserve the flow ID")
+}

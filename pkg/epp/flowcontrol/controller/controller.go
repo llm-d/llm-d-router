@@ -239,7 +239,7 @@ func (fc *FlowController) EnqueueAndWait(
 
 	// 2. Acquire a lease for the Flow.
 	// We hold this lease for the entire duration of the request (Distribution + Queueing).
-	err := fc.withConnectionWithDemotion(flowKey, func(conn contracts.ActiveFlowConnection) error {
+	err := fc.withConnectionWithDemotion(req, func(conn contracts.ActiveFlowConnection, effectiveReq flowcontrol.FlowControlRequest) error {
 
 		select { // Non-blocking check on controller lifecycle.
 		case <-fc.parentCtx.Done():
@@ -249,7 +249,9 @@ func (fc *FlowController) EnqueueAndWait(
 		}
 
 		// Attempt to distribute the request once, passing the active connection.
-		item, err := fc.tryDistribution(reqCtx, req, enqueueTime, conn)
+		// effectiveReq carries the demoted flow key when the requested band was not provisioned, so the
+		// item is enqueued under the band that was actually leased.
+		item, err := fc.tryDistribution(reqCtx, effectiveReq, enqueueTime, conn)
 		if err != nil {
 			// Distribution failed terminally (e.g., context cancelled during blocking submit).
 			// The item has already been finalized by tryDistribution.
@@ -278,12 +280,26 @@ func (fc *FlowController) EnqueueAndWait(
 	return finalOutcome, err
 }
 
-// withConnectionWithDemotion acquires a flow connection, demoting to priority 0 when the requested band is not yet provisioned.
+// demotedRequest wraps a FlowControlRequest to override its flow key, so a request demoted to a fallback
+// priority is enqueued under the band that was actually leased rather than its original (unprovisioned) band.
+type demotedRequest struct {
+	flowcontrol.FlowControlRequest
+	key flowcontrol.FlowKey
+}
+
+func (d demotedRequest) FlowKey() flowcontrol.FlowKey { return d.key }
+
+// withConnectionWithDemotion acquires a flow connection, demoting to priority 0 when the requested band is not yet
+// provisioned. On demotion, the callback receives a request whose FlowKey reports the demoted priority, ensuring the
+// item is leased, distributed, and enqueued consistently under priority 0; otherwise it receives the original request.
 func (fc *FlowController) withConnectionWithDemotion(
-	key flowcontrol.FlowKey,
-	fn func(conn contracts.ActiveFlowConnection) error,
+	req flowcontrol.FlowControlRequest,
+	fn func(conn contracts.ActiveFlowConnection, effectiveReq flowcontrol.FlowControlRequest) error,
 ) error {
-	err := fc.registry.WithConnection(key, fn)
+	key := req.FlowKey()
+	err := fc.registry.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+		return fn(conn, req)
+	})
 	if err == nil || !errors.Is(err, contracts.ErrPriorityBandNotFound) || key.Priority == 0 {
 		return err
 	}
@@ -295,7 +311,10 @@ func (fc *FlowController) withConnectionWithDemotion(
 	)
 	demotedKey := key
 	demotedKey.Priority = 0
-	return fc.registry.WithConnection(demotedKey, fn)
+	demoted := demotedRequest{FlowControlRequest: req, key: demotedKey}
+	return fc.registry.WithConnection(demotedKey, func(conn contracts.ActiveFlowConnection) error {
+		return fn(conn, demoted)
+	})
 }
 
 // tryDistribution handles a single attempt to select a shard and submit a request.
