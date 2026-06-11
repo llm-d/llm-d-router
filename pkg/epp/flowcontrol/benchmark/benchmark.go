@@ -78,7 +78,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 func init() {
@@ -230,7 +230,7 @@ func setupBenchmarkHarness(
 	customCfg *controller.Config,
 ) (*controller.FlowController, testDetector) {
 	b.Helper()
-	handle := igwtestutils.NewTestHandle(ctx)
+	handle := testutils.NewTestHandle(ctx)
 
 	fPolicy, err := globalstrict.GlobalStrictFairnessPolicyFactory(registry.DefaultFairnessPolicyRef, nil, handle)
 	if err != nil {

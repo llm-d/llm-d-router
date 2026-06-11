@@ -158,10 +158,10 @@ func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 	return pm
 }
 
-// cacheSaltFromBody returns the cache salt from whichever protocol is populated.
-// The protocol switch lives in the producer so consumers read only
-// TokenizedPrompt.CacheSalt.
-func cacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
+// CacheSaltFromBody returns the cache salt from whichever protocol is populated.
+// The protocol switch lives here so producers populate TokenizedPrompt.CacheSalt
+// from one place and consumers read only that field.
+func CacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
 	switch {
 	case body.Conversations != nil:
 		return body.Conversations.CacheSalt

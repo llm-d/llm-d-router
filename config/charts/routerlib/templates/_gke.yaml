@@ -1,4 +1,4 @@
-{{- define "inference-extension.gke" -}}
+{{- define "llm-d-router.gke" -}}
 {{- $monitoringProvider := include "llm-d-router.monitoring.provider" . | fromYaml | default dict -}}
 {{- if and $monitoringProvider (eq (lower (index $monitoringProvider "name" | default "")) "gmp") }}
 {{- if and .Values.router.monitoring.prometheus.enabled .Values.router.monitoring.prometheus.auth.enabled }}

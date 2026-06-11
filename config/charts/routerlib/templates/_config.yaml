@@ -1,4 +1,4 @@
-{{- define "inference-extension.config" -}}
+{{- define "llm-d-epp.config" -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

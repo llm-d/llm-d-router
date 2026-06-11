@@ -77,7 +77,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 		})
 	})
 
-	ginkgo.When("Running a PD configuration (deprecated pd-profile-handler)", ginkgo.Label(metricsTestLabel, deprecatedPDTestLabel), func() {
+	ginkgo.When("Running a PD configuration with nixlv2 connector(deprecated pd-profile-handler)", ginkgo.Label(metricsTestLabel, deprecatedPDTestLabel), func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects = createInferencePool(1, true)
 
@@ -328,7 +328,60 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 		})
 	}
 
+	ginkgo.When("Running a PD configuration with mooncake connector (disagg-profile-handler)", func() {
+		ginkgo.It("should run regular (non-streaming) requests successfully", func() {
+			infPoolObjects = createInferencePool(1, true)
+
+			prefillReplicas := 1
+			decodeReplicas := 2
+			modelServers := createModelServersPDMooncake(decodeReplicas)
+
+			epp := createEndPointPicker(pdConfig)
+
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
+			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
+
+			nsHdr, podHdr, _ := runCompletion(simplePrompt, simModelName)
+			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+			gomega.Expect(podHdr).Should(gomega.BeElementOf(decodePods))
+
+			nsHdr, podHdr, _ = runChatCompletion(simplePrompt, simModelName)
+			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+			gomega.Expect(podHdr).Should(gomega.BeElementOf(decodePods))
+
+			testutils.DeleteObjects(testConfig, epp)
+			testutils.DeleteObjects(testConfig, modelServers)
+		})
+
+		ginkgo.It("should run streaming requests successfully", func() {
+			infPoolObjects = createInferencePool(1, true)
+
+			prefillReplicas := 1
+			decodeReplicas := 2
+			modelServers := createModelServersPDMooncake(decodeReplicas)
+
+			epp := createEndPointPicker(pdConfig)
+
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
+			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
+
+			nsHdr, podHdr := runStreamingCompletion(simplePrompt, simModelName)
+			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+			gomega.Expect(podHdr).Should(gomega.BeElementOf(decodePods))
+
+			nsHdr, podHdr = runStreamingChatCompletion(simplePrompt)
+			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+			gomega.Expect(podHdr).Should(gomega.BeElementOf(decodePods))
+
+			testutils.DeleteObjects(testConfig, epp)
+			testutils.DeleteObjects(testConfig, modelServers)
+		})
+	})
+
 	ginkgo.When("Running a PD configuration with disagg-profile-handler and metrics validation", ginkgo.Label(metricsTestLabel, disaggTestLabel), func() {
+
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects = createInferencePool(1, true)
 

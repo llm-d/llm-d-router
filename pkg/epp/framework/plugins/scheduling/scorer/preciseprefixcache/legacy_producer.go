@@ -133,6 +133,7 @@ func (lp *legacyProducer) tokenizeRequest(request *scheduling.InferenceRequest) 
 	request.Body.TokenizedPrompt = &fwkrh.TokenizedPrompt{
 		TokenIDs:           tokens,
 		MultiModalFeatures: flattenMMFeatures(mmFeatures),
+		CacheSalt:          tokenizer.CacheSaltFromBody(request.Body),
 	}
 }
 
