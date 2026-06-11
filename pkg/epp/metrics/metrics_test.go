@@ -1243,6 +1243,75 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 	require.Equal(t, 0.5, valNew)
 }
 
+func TestRecordRequestTTFT(t *testing.T) {
+	Reset()
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	timeBaseline := time.Now()
+
+	t.Run("valid streaming requests", func(t *testing.T) {
+		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(10*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(1600*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m20", "t20", "tenant-b", "5", false, timeBaseline, timeBaseline.Add(120*time.Millisecond)))
+
+		h, err := getHistogramVecLabelValues(t, llmdRequestTTFT, "m10", "t10", "tenant-a", "3", "true")
+		require.NoError(t, err)
+		require.Equal(t, uint64(2), h.GetSampleCount())
+		require.InDelta(t, 1.61, h.GetSampleSum(), 0.001)
+
+		h, err = getHistogramVecLabelValues(t, llmdRequestTTFT, "m20", "t20", "tenant-b", "5", "false")
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), h.GetSampleCount())
+		require.InDelta(t, 0.12, h.GetSampleSum(), 0.001)
+	})
+
+	t.Run("zero first token timestamp", func(t *testing.T) {
+		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, time.Time{}))
+	})
+
+	t.Run("first token before received", func(t *testing.T) {
+		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline.Add(10*time.Millisecond), timeBaseline))
+	})
+}
+
+func TestRecordRequestTPOT(t *testing.T) {
+	Reset()
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	timeBaseline := time.Now()
+
+	t.Run("valid multi-token request", func(t *testing.T) {
+		// e2e = 2s, ttft = 0.5s, tokens = 11 → tpot = (2 - 0.5) / 10 = 0.15s
+		received := timeBaseline
+		firstToken := timeBaseline.Add(500 * time.Millisecond)
+		complete := timeBaseline.Add(2000 * time.Millisecond)
+		require.True(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", received, firstToken, complete, 11))
+
+		h, err := getHistogramVecLabelValues(t, llmdRequestTPOT, "m10", "t10", "tenant-a", "3")
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), h.GetSampleCount())
+		require.InDelta(t, 0.15, h.GetSampleSum(), 0.001)
+	})
+
+	t.Run("single token skipped", func(t *testing.T) {
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 1))
+	})
+
+	t.Run("zero tokens skipped", func(t *testing.T) {
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 0))
+	})
+
+	t.Run("zero first token timestamp", func(t *testing.T) {
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, time.Time{}, timeBaseline.Add(200*time.Millisecond), 10))
+	})
+
+	t.Run("first token before received", func(t *testing.T) {
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline.Add(100*time.Millisecond), timeBaseline, timeBaseline.Add(200*time.Millisecond), 10))
+	})
+
+	t.Run("complete before first token", func(t *testing.T) {
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(200*time.Millisecond), timeBaseline.Add(100*time.Millisecond), 10))
+	})
+}
+
 func TestInferenceModelRewriteDecisionsTotalMetric(t *testing.T) {
 	Reset()
 

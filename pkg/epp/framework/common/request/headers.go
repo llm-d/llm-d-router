@@ -33,18 +33,24 @@ func GetHeader(headers map[string]string, key string) string {
 }
 
 // GetRequestPath extracts the request path from headers with fallback priority.
+// Query parameters are stripped because the path is used only for parser routing.
 func GetRequestPath(headers map[string]string) string {
 	if path := headers[":path"]; path != "" {
-		return path
+		return stripQuery(path)
 	}
 	if path := headers["x-original-path"]; path != "" {
-		return path
+		return stripQuery(path)
 	}
 	if path := headers["x-forwarded-path"]; path != "" {
-		return path
+		return stripQuery(path)
 	}
 	// Default to completions API for backward compatibility with existing clients and integration tests
 	return "/v1/completions"
+}
+
+func stripQuery(path string) string {
+	clean, _, _ := strings.Cut(path, "?")
+	return clean
 }
 
 // MatchPathSuffix checks if the path matches the suffix.

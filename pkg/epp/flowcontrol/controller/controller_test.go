@@ -213,6 +213,20 @@ func (m *mockRegistryClient) Stats() contracts.AggregateStats {
 	return contracts.AggregateStats{}
 }
 
+func (m *mockRegistryClient) SubmitDesiredPriorities(_ map[int]struct{}) {}
+
+func (m *mockRegistryClient) PriorityBandUpdateChannel() <-chan map[int]struct{} {
+	return nil
+}
+
+func (m *mockRegistryClient) FlowGCTimeout() time.Duration {
+	return time.Minute
+}
+
+func (m *mockRegistryClient) ApplyDesiredPriorities(_ map[int]struct{}) {}
+
+func (m *mockRegistryClient) ExecuteGCCycle() {}
+
 // mockProcessor is a mock for the internal `Processor` interface.
 type mockProcessor struct {
 	SubmitFunc        func(item *internal.FlowItem) error
@@ -265,6 +279,7 @@ type mockProcessorFactory struct {
 func (f *mockProcessorFactory) new(
 	_ context.Context, // The factory does not use the lifecycle context; it's passed to the processor's Run method later.
 	_ contracts.FlowRegistry,
+	_ contracts.FlowRegistryBackground,
 	_ flowcontrol.SaturationDetector,
 	_ contracts.EndpointCandidates,
 	_ flowcontrol.UsageLimitPolicy,

@@ -371,6 +371,11 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--decode-chunk-size must be a non-negative integer (0 disables chunked decode), got %d", opts.DecodeChunkSize)
 	}
 
+	// Validate mooncake bootstrap port
+	if opts.MooncakeBootstrapPort < 1 || opts.MooncakeBootstrapPort > 65535 {
+		return fmt.Errorf("--mooncake-bootstrap-port must be between 1 and 65535, got %d", opts.MooncakeBootstrapPort)
+	}
+
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
 		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {
@@ -458,6 +463,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.VLLMPort != 0 && !opts.isFlagSet(vllmPort) {
 		opts.vllmPort = strconv.Itoa(cfg.VLLMPort)
+	}
+	if cfg.MooncakeBootstrapPort != 0 && !opts.isFlagSet(mooncakeBootstrapPortFlag) {
+		opts.MooncakeBootstrapPort = cfg.MooncakeBootstrapPort
 	}
 	if cfg.DataParallelSize != 0 && !opts.isFlagSet(dataParallelSize) {
 		opts.DataParallelSize = cfg.DataParallelSize

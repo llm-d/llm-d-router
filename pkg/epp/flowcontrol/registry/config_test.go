@@ -144,7 +144,8 @@ func TestNewConfig(t *testing.T) {
 			},
 			defaults: newTestPriorityBandPolicyDefaults(),
 			assertion: func(t *testing.T, cfg *Config) {
-				assert.Empty(t, cfg.PriorityBands, "PriorityBands map should be empty")
+				assert.Len(t, cfg.PriorityBands, 1, "PriorityBands should contain only the always-injected priority 0")
+				assert.Contains(t, cfg.PriorityBands, 0, "PriorityBands should contain priority 0")
 				require.NotNil(t, cfg.DefaultPriorityBand, "DefaultPriorityBand template must be initialized")
 				assert.Equal(t, defaultQueue, cfg.DefaultPriorityBand.Queue)
 				assert.NotNil(t, cfg.DefaultPriorityBand.FairnessPolicy)

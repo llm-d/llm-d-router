@@ -122,7 +122,7 @@ func TestShard_New(t *testing.T) {
 		t.Parallel()
 		h := newTestHarness(t)
 
-		assert.Equal(t, []int{highPriority, lowPriority}, h.registry.AllOrderedPriorityLevels(),
+		assert.Equal(t, []int{highPriority, lowPriority, 0}, h.registry.AllOrderedPriorityLevels(),
 			"Registry must report configured priority levels sorted numerically (highest priority first)")
 
 		val, ok := h.registry.priorityBands.Load(highPriority)
@@ -400,7 +400,7 @@ func TestShard_DynamicProvisioning(t *testing.T) {
 		h.registry.addPriorityBand(dynamicPrio)
 		h.registry.mu.Unlock()
 
-		expectedLevels := []int{highPriority, dynamicPrio, lowPriority} // 20, 15, 10
+		expectedLevels := []int{highPriority, dynamicPrio, lowPriority, 0} // 20, 15, 10, 0
 		assert.Equal(t, expectedLevels, h.registry.AllOrderedPriorityLevels(),
 			"New priority must be inserted into the sorted order correctly")
 
@@ -563,7 +563,8 @@ func TestShard_Concurrency_AllOrderedPriorityLevels_RaceSafety(t *testing.T) {
 			h.registry.addPriorityBand(dynamicPrio)
 			h.registry.mu.Unlock()
 
-			h.registry.deletePriorityBand(dynamicPrio)
+			h.registry.priorityBandStates.Delete(dynamicPrio)
+			h.registry.cleanupPriorityBandResources([]int{dynamicPrio})
 
 			h.registry.mu.Lock()
 			h.registry.config.PriorityBands[dynamicPrio] = newBandCfg
@@ -576,7 +577,7 @@ func TestShard_Concurrency_AllOrderedPriorityLevels_RaceSafety(t *testing.T) {
 	readersWg.Wait()
 
 	// If we reach here without the race detector firing, the implementation is safe.
-	// Final sanity: dynamic band should be removed, only the original two remain.
-	assert.Equal(t, []int{highPriority, lowPriority}, h.registry.AllOrderedPriorityLevels(),
+	// Final sanity: dynamic band should be removed. Priority 0 is always injected as a static band.
+	assert.Equal(t, []int{highPriority, lowPriority, 0}, h.registry.AllOrderedPriorityLevels(),
 		"After all add/delete cycles, only original priority levels should remain")
 }
