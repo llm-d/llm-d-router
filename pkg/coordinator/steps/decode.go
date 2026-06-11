@@ -104,7 +104,9 @@ func (s *DecodeStep) prepareDecodeBody(reqCtx *pipeline.RequestContext) {
 	case gateway.FormatChatCompletions:
 		s.injectTokensField(reqCtx)
 	case gateway.FormatCompletions:
-		reqCtx.Body["prompt"] = reqCtx.TokenIDs
+		if len(reqCtx.TokenIDs) > 0 {
+			reqCtx.Body["prompt"] = reqCtx.TokenIDs
+		}
 	}
 }
 

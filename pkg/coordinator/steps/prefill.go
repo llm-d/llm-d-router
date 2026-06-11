@@ -154,10 +154,14 @@ func (s *PrefillStep) buildPrefillBody(reqCtx *pipeline.RequestContext, features
 		return body
 
 	case gateway.FormatCompletions:
+		prompt := reqCtx.Body["prompt"]
+		if len(reqCtx.TokenIDs) > 0 {
+			prompt = reqCtx.TokenIDs
+		}
 		body := map[string]any{
 			"request_id":         reqCtx.RequestID,
 			"model":              reqCtx.Model,
-			"prompt":             reqCtx.TokenIDs,
+			"prompt":             prompt,
 			"max_tokens":         1,
 			"kv_transfer_params": kvParams,
 		}

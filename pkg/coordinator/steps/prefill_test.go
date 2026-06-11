@@ -231,6 +231,43 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	}
 }
 
+func TestPrefillStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-1", "peer_host": "10.0.0.5", "peer_port": 6001},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.(*PrefillStep).SetGatewayClient(gwClient)
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-compl",
+		OriginalPath:     gateway.PathCompletions,
+		Model:            "test-model",
+		TokenIDs:         nil,
+		Body:             map[string]any{"prompt": "Hello"},
+		KVTransferParams: make(map[string]any),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["prompt"] != "Hello" {
+		t.Fatalf("expected original prompt to pass through, got %v", prefillBody["prompt"])
+	}
+}
+
 func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	var prefillBody map[string]any
 

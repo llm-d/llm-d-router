@@ -141,6 +141,43 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 	}
 }
 
+func TestDecodeStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
+	var parsed map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"text": "ok"}}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.(*DecodeStep).SetGatewayClient(gwClient)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-compl",
+		OriginalPath:     gateway.PathCompletions,
+		Model:            "test-model",
+		TokenIDs:         nil,
+		KVTransferParams: map[string]any{},
+		Body:             map[string]any{"model": "test-model", "prompt": "Hello"},
+		ResponseWriter:   recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if parsed["prompt"] != "Hello" {
+		t.Fatalf("expected original prompt to pass through, got %v", parsed["prompt"])
+	}
+}
+
 func TestDecodeStep_Streaming(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
