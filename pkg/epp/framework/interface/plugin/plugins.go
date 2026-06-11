@@ -16,6 +16,8 @@ limitations under the License.
 
 package plugin
 
+import "encoding/json"
+
 // Plugin defines the interface for a plugin.
 // This interface should be embedded in all plugins across the code.
 type Plugin interface {
@@ -32,6 +34,21 @@ type DataDependencies struct {
 	// Optional keys — the framework logs a warning at init time but does NOT error if no producer exists.
 	// The plugin must handle the case where this data is absent at runtime.
 	Optional map[DataKey]any
+}
+
+// StateDumper is an optional interface for plugins that can expose sanitized,
+// bounded internal state through operational debug endpoints.
+//
+// DumpState is intended for on-demand debugging snapshots of dynamic runtime
+// state that is difficult to understand from metrics alone. Prefer metrics for
+// numeric time series, alerting, dashboards, and aggregation over time. Dumped
+// state should stay reasonably small; large or high-cardinality state should be
+// summarized, capped, or omitted.
+type StateDumper interface {
+	// DumpState returns a JSON-encoded representation of plugin state.
+	// Implementations own serialization and must not include request payloads,
+	// credentials, or other sensitive values.
+	DumpState() (json.RawMessage, error)
 }
 
 // ConsumerPlugin defines the interface for a consumer.

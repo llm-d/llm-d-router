@@ -135,6 +135,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		h.ctx,
 		"test-pool",
 		h,
+		nil,
 		h.saturationDetector,
 		h.endpointCandidates,
 		usagelimits.DefaultPolicy(),

@@ -33,8 +33,9 @@ type kvCacheIndexer interface {
 
 // computeBlockKeys hashes the request's TokenizedPrompt into KV-block keys,
 // passing any multimodal features into the block-extra-features computation
-// so MM tokens land in the right blocks. Returns (nil, nil) when the request
-// carries no tokens.
+// so MM tokens land in the right blocks. A non-empty CacheSalt is folded into
+// the first block's extra keys so salted prompts get isolated keys. Returns
+// (nil, nil) when the request carries no tokens.
 func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	request *scheduling.InferenceRequest, blockSizeTokens int,
 ) ([]kvblock.BlockHash, error) {
@@ -51,5 +52,25 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 		extraFeatures = kvblock.ComputeBlockExtraFeatures(
 			mmHashes, mmPlaceholders, blockSizeTokens, len(tp.TokenIDs))
 	}
+	extraFeatures = foldCacheSalt(extraFeatures, tp.CacheSalt, len(tp.TokenIDs)/blockSizeTokens)
 	return idx.ComputeBlockKeysFromTokens(ctx, tp.TokenIDs, request.TargetModel, extraFeatures)
+}
+
+// foldCacheSalt appends the cache salt to the first block's extra keys, after
+// any multimodal hashes. vLLM puts cache_salt in block 0's extra_keys, and
+// engine-side KV-event ingestion folds that salt string into the same per-block
+// hash list (kvblock.ParseRawExtraKeys); the request side must match for salted
+// keys to correlate. No-op without a salt or a full first block.
+func foldCacheSalt(extraFeatures []*kvblock.BlockExtraFeatures, salt string, numBlocks int) []*kvblock.BlockExtraFeatures {
+	if salt == "" || numBlocks == 0 {
+		return extraFeatures
+	}
+	if extraFeatures == nil {
+		extraFeatures = make([]*kvblock.BlockExtraFeatures, numBlocks)
+	}
+	if extraFeatures[0] == nil {
+		extraFeatures[0] = &kvblock.BlockExtraFeatures{}
+	}
+	extraFeatures[0].MMHashes = append(extraFeatures[0].MMHashes, kvblock.MMHash{Hash: salt})
+	return extraFeatures
 }

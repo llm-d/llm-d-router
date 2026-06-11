@@ -9,7 +9,7 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 
 {{/*
-Inference extension name
+Router deployment name
 */}}
 {{- define "llm-d-router.name" -}}
 {{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
@@ -52,7 +52,7 @@ llm-d.ai/igw-mode: llm-d-router-gateway
 {{/*
 Return the monitoring provider name.
 
-If inferenceExtension.monitoring.provider.name is unset/empty, default to
+If router.monitoring.provider.name is unset/empty, default to
 prometheusoperator. For backwards compatibility, provider.name=gke still maps
 to gmp when no monitoring provider is explicitly set.
 */}}
@@ -74,7 +74,7 @@ prometheusoperator
 {{/*
 Return the monitoring provider config object.
 
-When inferenceExtension.monitoring.provider.name is unset/empty, use defaults.
+When router.monitoring.provider.name is unset/empty, use defaults.
 For backwards compatibility, provider.gke.autopilot is still honored when
 provider.name=gke and no monitoring provider is explicitly set.
 */}}

@@ -54,4 +54,4 @@ spec:
       enabled: true    # log all requests by default
 ---
 {{- end }}
-{{- include "inference-extension.gke" . -}}
+{{- include "llm-d-router.gke" . -}}

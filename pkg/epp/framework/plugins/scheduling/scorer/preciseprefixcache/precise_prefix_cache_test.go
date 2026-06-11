@@ -172,7 +172,10 @@ func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "hello world"}},
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt:    fwkrh.Prompt{Raw: "hello world"},
+				CacheSalt: "leg-salt",
+			},
 		},
 	}
 	require.NoError(t, lp.Produce(ctx, req, nil))
@@ -181,6 +184,9 @@ func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
 	assert.Equal(t, "hello world", stub.lastRaw)
 	require.NotNil(t, req.Body.TokenizedPrompt)
 	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedPrompt.TokenIDs)
+	// Wrapper-owned tokenization must still carry the cache salt so precise
+	// keys stay isolated on this path.
+	assert.Equal(t, "leg-salt", req.Body.TokenizedPrompt.CacheSalt)
 }
 
 // End-to-end: tokens from the pool flow into the embedded producer, get
