@@ -341,7 +341,7 @@ func extractUsageStreaming(responseText string) *fwkrh.Usage {
 		if !ok {
 			continue
 		}
-		// When the stream is terminated with [DONE] or there's not usage data, skip the line
+		// When the stream is terminated with [DONE] or there's not any usage data, skip the line
 		if content == "[DONE]" || !strings.Contains(content, "usage") {
 			continue
 		}
