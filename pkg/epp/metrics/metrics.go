@@ -438,6 +438,8 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdRunningRequests)
 		metrics.Registry.MustRegister(normalizedTimePerOutputToken)
 		metrics.Registry.MustRegister(llmdNormalizedTimePerOutputToken)
+		metrics.Registry.MustRegister(llmdRequestTTFT)
+		metrics.Registry.MustRegister(llmdRequestTPOT)
 		metrics.Registry.MustRegister(inferencePoolAvgKVCache)
 		metrics.Registry.MustRegister(llmdInferencePoolAvgKVCache)
 		metrics.Registry.MustRegister(inferencePoolAvgQueueSize)
@@ -501,6 +503,8 @@ func Reset() {
 	llmdRunningRequests.Reset()
 	normalizedTimePerOutputToken.Reset()
 	llmdNormalizedTimePerOutputToken.Reset()
+	llmdRequestTTFT.Reset()
+	llmdRequestTPOT.Reset()
 	inferencePoolAvgKVCache.Reset()
 	llmdInferencePoolAvgKVCache.Reset()
 	inferencePoolAvgQueueSize.Reset()
@@ -614,6 +618,45 @@ func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetMo
 
 	normalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName).Observe(secondsPerToken)
 	llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(secondsPerToken)
+	return true
+}
+
+// RecordRequestTTFT records the time to first token.
+func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairnessID, priority string, streaming bool, received time.Time, firstToken time.Time) bool {
+	if firstToken.IsZero() {
+		return false
+	}
+	if !firstToken.After(received) {
+		log.FromContext(ctx).Error(nil, "Request latency values are invalid for TTFT calculation",
+			"modelName", modelName, "targetModelName", targetModelName, "firstTokenTime", firstToken, "receivedTime", received)
+		return false
+	}
+
+	streamingLabel := "false"
+	if streaming {
+		streamingLabel = "true"
+	}
+	ttftSeconds := firstToken.Sub(received).Seconds()
+	llmdRequestTTFT.WithLabelValues(modelName, targetModelName, fairnessID, priority, streamingLabel).Observe(ttftSeconds)
+	return true
+}
+
+// RecordRequestTPOT records the average time per output token.
+func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, firstToken time.Time, complete time.Time, outputTokenCount int) bool {
+	if firstToken.IsZero() || outputTokenCount <= 1 {
+		return false
+	}
+	if !firstToken.After(received) || !complete.After(firstToken) {
+		log.FromContext(ctx).Error(nil, "Request latency values are invalid for TPOT calculation",
+			"modelName", modelName, "targetModelName", targetModelName,
+			"receivedTime", received, "firstTokenTime", firstToken, "completeTime", complete)
+		return false
+	}
+
+	e2eSeconds := complete.Sub(received).Seconds()
+	ttftSeconds := firstToken.Sub(received).Seconds()
+	tpotSeconds := (e2eSeconds - ttftSeconds) / float64(outputTokenCount-1)
+	llmdRequestTPOT.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(tpotSeconds)
 	return true
 }
 

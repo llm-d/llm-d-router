@@ -30,8 +30,9 @@ const (
 
 var (
 	// llmdEndpointLabels replaces the deprecated endpointLabels that used "pod_name".
-	llmdEndpointLabels              = []string{"endpoint_name", "namespace", "port"}
-	modelLabelsWithFairnessPriority = append(append([]string{}, modelLabels...), "fairness_id", "priority")
+	llmdEndpointLabels                       = []string{"endpoint_name", "namespace", "port"}
+	modelLabelsWithFairnessPriority          = append(append([]string{}, modelLabels...), "fairness_id", "priority")
+	modelLabelsWithFairnessPriorityStreaming = append(append([]string{}, modelLabelsWithFairnessPriority...), "streaming")
 )
 
 // --- llm-d Inference Objective Metrics ---
@@ -134,6 +135,32 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference objective latency divided by number of output tokens in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
+			},
+		},
+		modelLabelsWithFairnessPriority,
+	)
+
+	llmdRequestTTFT = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "ttft_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Time to first token in seconds, measured from request received to first response byte. For non-streaming requests, this equals total request duration.", compbasemetrics.ALPHA),
+			Buckets: []float64{
+				0.005, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2, 3, 4, 5, 6,
+				8, 10, 15, 20, 30, 45, 60, 120,
+			},
+		},
+		modelLabelsWithFairnessPriorityStreaming,
+	)
+
+	llmdRequestTPOT = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "streaming_tpot_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Average time per output token in seconds for streaming requests, computed as (e2e - TTFT) / (output_tokens - 1).", compbasemetrics.ALPHA),
+			Buckets: []float64{
+				0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.125, 0.15, 0.2,
+				0.3, 0.4, 0.5, 0.6, 0.8, 1, 2,
 			},
 		},
 		modelLabelsWithFairnessPriority,

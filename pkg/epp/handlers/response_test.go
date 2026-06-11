@@ -19,11 +19,14 @@ package handlers
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/go-logr/logr"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -32,6 +35,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -272,11 +276,21 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 
 func TestHandleResponseBodyWithoutSchedulingRequest(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
 	server := &StreamingServer{
 		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
 	}
 	server.director = &mockDirector{}
+	timeBaseline := time.Now()
 	reqCtx := &RequestContext{
+		IncomingModelName:         "incoming-model",
+		TargetModelName:           "target-model",
+		Priority:                  3,
+		RequestReceivedTimestamp:  timeBaseline,
+		ResponseCompleteTimestamp: timeBaseline.Add(time.Second),
 		Response: &Response{
 			Headers: map[string]string{},
 		},
@@ -285,6 +299,46 @@ func TestHandleResponseBodyWithoutSchedulingRequest(t *testing.T) {
 	require.NotPanics(t, func() {
 		server.HandleResponseBody(ctx, reqCtx, []byte(body), true)
 	})
+
+	histogram := findHistogramMetric(t, "llm_d_router_epp_normalized_time_per_output_token_seconds", map[string]string{
+		"model_name":        "incoming-model",
+		"target_model_name": "target-model",
+		"fairness_id":       metadata.DefaultFairnessID,
+		"priority":          "3",
+	})
+	require.Equal(t, uint64(1), histogram.GetSampleCount())
+}
+
+func findHistogramMetric(t *testing.T, name string, labels map[string]string) *dto.Histogram {
+	t.Helper()
+
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metricHasLabels(metric, labels) {
+				return metric.GetHistogram()
+			}
+		}
+	}
+	t.Fatalf("metric %q with labels %v not found", name, labels)
+	return nil
+}
+
+func metricHasLabels(metric *dto.Metric, labels map[string]string) bool {
+	got := make(map[string]string, len(metric.GetLabel()))
+	for _, label := range metric.GetLabel() {
+		got[label.GetName()] = label.GetValue()
+	}
+	for key, want := range labels {
+		if got[key] != want {
+			return false
+		}
+	}
+	return true
 }
 
 func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
