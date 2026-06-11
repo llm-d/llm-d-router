@@ -121,6 +121,11 @@ type FlowRegistry struct {
 	// These are never removed by control-plane sync or garbage collection.
 	initialPriorities map[int]struct{}
 
+	// desiredPriorities tracks the most recent set of priority bands the control plane wants provisioned
+	// (the last value applied via ApplyDesiredPriorities). Bands in this set are protected from garbage
+	// collection: a desired band that is merely idle (no live flows) must not be reaped.
+	desiredPriorities map[int]struct{}
+
 	// priorityBandUpdateCh carries desired priority topology updates from the control plane to the processor loop.
 	priorityBandUpdateCh chan map[int]struct{}
 }
@@ -151,6 +156,7 @@ func NewFlowRegistry(config *Config, logger logr.Logger, opts ...RegistryOption)
 		config:               cfg,
 		logger:               logger.WithName("flow-registry"),
 		initialPriorities:    make(map[int]struct{}),
+		desiredPriorities:    make(map[int]struct{}),
 		priorityBandUpdateCh: make(chan map[int]struct{}, 1),
 	}
 
@@ -224,24 +230,27 @@ func (fr *FlowRegistry) FlowGCTimeout() time.Duration {
 // ApplyDesiredPriorities provisions missing priority bands and removes idle bands no longer desired.
 // It is invoked by the Processor maintenance loop.
 func (fr *FlowRegistry) ApplyDesiredPriorities(desired map[int]struct{}) {
-	if desired == nil {
-		desired = map[int]struct{}{}
-	}
-
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 
+	// Record the desired set so GC (and any other deletion path) does not reap a band the control plane
+	// still wants. Store a defensive copy: SubmitDesiredPriorities crosses goroutine boundaries and direct
+	// callers may retain or mutate their map after the call.
+	desiredCopy := make(map[int]struct{}, len(desired))
 	for priority := range desired {
+		desiredCopy[priority] = struct{}{}
+	}
+	fr.desiredPriorities = desiredCopy
+
+	for priority := range desiredCopy {
 		if _, ok := fr.config.PriorityBands[priority]; !ok {
 			fr.provisionPriorityBandLocked(priority)
 		}
 	}
 
+	// Remove bands that are no longer protected (neither static nor desired) once they are idle.
 	for priority := range fr.config.PriorityBands {
-		if _, static := fr.initialPriorities[priority]; static {
-			continue
-		}
-		if _, wanted := desired[priority]; wanted {
+		if fr.isBandProtectedLocked(priority) {
 			continue
 		}
 		if !fr.isPriorityBandIdle(priority) {
@@ -397,6 +406,18 @@ func (fr *FlowRegistry) isPriorityBandIdle(priority int) bool {
 	return !val.(*priorityBandState).isActive()
 }
 
+// isBandProtectedLocked reports whether a priority band must never be garbage collected.
+// A band is protected if it was provisioned at startup (initialPriorities) or is currently
+// desired by the control plane (desiredPriorities). Protected bands persist even while idle.
+// The caller must hold fr.mu.
+func (fr *FlowRegistry) isBandProtectedLocked(priority int) bool {
+	if _, static := fr.initialPriorities[priority]; static {
+		return true
+	}
+	_, desired := fr.desiredPriorities[priority]
+	return desired
+}
+
 // --- `contracts.FlowRegistryObserver` Implementation ---
 
 // Stats returns globally aggregated statistics for the entire `FlowRegistry`.
@@ -508,9 +529,10 @@ func (fr *FlowRegistry) cleanupPriorityBandResourcesLocked(priority int) {
 		return
 	}
 
-	// Bands provisioned at startup are never collected. The transient band state is already gone,
-	// leaving the band in its startup state.
-	if _, static := fr.initialPriorities[priority]; static {
+	// Protected bands (provisioned at startup or still desired by the control plane) are never collected.
+	// The transient band state is already gone, leaving the band in its provisioned state; a later request
+	// re-pins it. This is the single chokepoint that shields protected bands from every deletion path.
+	if fr.isBandProtectedLocked(priority) {
 		return
 	}
 
