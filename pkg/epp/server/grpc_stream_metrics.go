@@ -5,6 +5,7 @@ import (
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -21,7 +22,12 @@ func streamMetricsInterceptor(srv any, ss grpc.ServerStream, info *grpc.StreamSe
 	var err error
 	// defer: grpc-go does not recover handler panics; keep the gauge balanced.
 	defer func() {
-		metrics.ExtProcStreamFinished(status.Code(err).String(), time.Since(start).Seconds())
+		// Classify bare ctx.Err() so cancel/deadline don't collapse to Unknown.
+		code := status.Code(err)
+		if code == codes.Unknown {
+			code = status.FromContextError(err).Code()
+		}
+		metrics.ExtProcStreamFinished(code.String(), time.Since(start).Seconds())
 	}()
 	err = handler(srv, ss)
 	return err
