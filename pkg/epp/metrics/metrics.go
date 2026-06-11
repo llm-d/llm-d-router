@@ -440,6 +440,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdNormalizedTimePerOutputToken)
 		metrics.Registry.MustRegister(llmdRequestTTFT)
 		metrics.Registry.MustRegister(llmdRequestTPOT)
+		metrics.Registry.MustRegister(llmdInterTokenLatency)
 		metrics.Registry.MustRegister(inferencePoolAvgKVCache)
 		metrics.Registry.MustRegister(llmdInferencePoolAvgKVCache)
 		metrics.Registry.MustRegister(inferencePoolAvgQueueSize)
@@ -505,6 +506,7 @@ func Reset() {
 	llmdNormalizedTimePerOutputToken.Reset()
 	llmdRequestTTFT.Reset()
 	llmdRequestTPOT.Reset()
+	llmdInterTokenLatency.Reset()
 	inferencePoolAvgKVCache.Reset()
 	llmdInferencePoolAvgKVCache.Reset()
 	inferencePoolAvgQueueSize.Reset()
@@ -657,6 +659,14 @@ func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairness
 	ttftSeconds := firstToken.Sub(received).Seconds()
 	tpotSeconds := (e2eSeconds - ttftSeconds) / float64(outputTokenCount-1)
 	llmdRequestTPOT.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(tpotSeconds)
+// RecordInterTokenLatency records the time between consecutive response body chunks for streaming requests.
+func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName string, itlSeconds float64) bool {
+	if itlSeconds < 0 {
+		log.FromContext(ctx).Error(nil, "Inter-token latency value must be non-negative",
+			"modelName", modelName, "targetModelName", targetModelName, "itlSeconds", itlSeconds)
+		return false
+	}
+	llmdInterTokenLatency.WithLabelValues(modelName, targetModelName).Observe(itlSeconds)
 	return true
 }
 
