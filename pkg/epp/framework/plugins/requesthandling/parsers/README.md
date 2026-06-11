@@ -14,13 +14,15 @@ This directory contains parser plugins used to parse and understand the payloads
 
 ### Choosing between `openai-parser` and `vllmhttp-parser`
 
-`vllmhttp-parser` is a superset of `openai-parser`: it embeds an `openai-parser` instance and delegates every path it does not handle natively (currently anything other than `/inference/v1/generate`) to it. Choose `openai-parser` when the route only serves OpenAI-compatible traffic; choose `vllmhttp-parser` when the same route must additionally accept `/inference/v1/generate`. The two are not configured side-by-side on the same route — the `requestHandler.parser` slot is single-valued, and `vllmhttp-parser` already covers both surfaces.
+`vllmhttp-parser` is a superset of `openai-parser`: it embeds an `openai-parser` instance and delegates every path it does not handle natively (currently anything other than `/inference/v1/generate`) to it. Choose `openai-parser` when the route only serves OpenAI-compatible traffic; choose `vllmhttp-parser` when the same route must additionally accept `/inference/v1/generate`.
 
 ## Configuration
 
-Parsers are configured via the `parser` section in the `EndpointPickerConfig` YAML file. You must first instantiate the parser plugin in the `plugins` section, and then reference its name in the `parser` section. 
+Parsers are configured via the `requestHandler.parsers` list in the `EndpointPickerConfig` YAML file. You must first instantiate the parser plugin in the `plugins` section, and then reference its name in the `requestHandler.parsers` list.
 
-If no parser is specified, `openai-parser` is used as the fallback.
+The EPP resolves incoming request paths to the matching parser using suffix matching. Suffixes are defined by each parser plugin's claims, and the first matching parser in the list is selected. If a parser does not define specific paths, it acts as a fallback for any unmatched traffic.
+
+If no parsers are specified, `openai-parser`, `anthropic-parser`, and `vllmhttp-parser` are used by default.
 
 Here is an example configuration using the `vllmgrpc-parser`:
 
@@ -37,8 +39,8 @@ schedulingProfiles:
   plugins:
   - pluginRef: maxScore
 requestHandler:
-  parser:
-    pluginRef: vllmgrpcParser
+  parsers:
+  - pluginRef: vllmgrpcParser
 ```
 
 Equivalent configuration using the `vllmhttp-parser` (enables `/inference/v1/generate` while keeping OpenAI-compatible paths working):
@@ -56,6 +58,28 @@ schedulingProfiles:
   plugins:
   - pluginRef: maxScore
 requestHandler:
-  parser:
-    pluginRef: vllmhttpParser
+  parsers:
+  - pluginRef: vllmhttpParser
+```
+
+Configuration with multiple parsers (e.g. OpenAI and Anthropic API support on the same route):
+
+```yaml
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- name: openaiParser
+  type: openai-parser
+- name: anthropicParser
+  type: anthropic-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+requestHandler:
+  parsers:
+  - pluginRef: openaiParser
+  - pluginRef: anthropicParser
 ```

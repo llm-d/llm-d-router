@@ -77,8 +77,8 @@ data:
     {{- end }}
     {{- if $parserType }}
     requestHandler:
-      parser:
-        pluginRef: {{ $parserType }}
+      parsers:
+      - pluginRef: {{ $parserType }}
     {{- end }}
   payload-agnostic.yaml: |
     # Request-format agnostic routing. Use this when the request format is
