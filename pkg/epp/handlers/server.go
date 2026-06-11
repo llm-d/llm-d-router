@@ -106,24 +106,25 @@ type StreamingServer struct {
 // Refactor this monolithic struct. Fields related to the Envoy ext-proc protocol should be decoupled from the internal
 // request lifecycle state.
 type RequestContext struct {
-	TargetPod                 *fwkdl.EndpointMetadata
-	TargetEndpoint            string
-	IncomingModelName         string
-	TargetModelName           string
-	ObjectiveKey              string
-	Priority                  int
-	RequestReceivedTimestamp  time.Time
-	FirstTokenTimestamp       time.Time
-	ResponseCompleteTimestamp time.Time
-	RequestSize               int
-	Usage                     fwkrh.Usage
-	ResponseSize              int
-	ResponseBodyStarted       bool
-	ResponseComplete          bool
-	ResponseStatusCode        string
-	RequestRunning            bool
-	Request                   *Request
-	Parser                    fwkrh.Parser
+	TargetPod                  *fwkdl.EndpointMetadata
+	TargetEndpoint             string
+	IncomingModelName          string
+	TargetModelName            string
+	ObjectiveKey               string
+	Priority                   int
+	RequestReceivedTimestamp   time.Time
+	FirstTokenTimestamp        time.Time
+	ResponseCompleteTimestamp  time.Time
+	LastChunkReceivedTimestamp time.Time
+	RequestSize                int
+	Usage                      fwkrh.Usage
+	ResponseSize               int
+	ResponseBodyStarted        bool
+	ResponseComplete           bool
+	ResponseStatusCode         string
+	RequestRunning             bool
+	Request                    *Request
+	Parser                     fwkrh.Parser
 
 	SchedulingRequest *fwksched.InferenceRequest
 
