@@ -272,7 +272,13 @@ func (fc *FlowController) EnqueueAndWait(
 	// return a valid rejection outcome.
 	// In the success case (where the closure ran), finalOutcome is set inside the closure.
 	if err != nil && finalOutcome == types.QueueOutcomeNotYetFinalized {
-		return types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, err)
+		finalOutcome = types.QueueOutcomeRejectedOther
+		err = fmt.Errorf("%w: %w", types.ErrRejected, err)
+	}
+
+	if finalOutcome != types.QueueOutcomeDispatched {
+		fc.logger.V(logutil.VERBOSE).Info("Request dropped",
+			"requestID", req.ID(), "flowKey", flowKey, "outcome", finalOutcome, "err", err)
 	}
 
 	return finalOutcome, err
@@ -415,7 +421,7 @@ func (fc *FlowController) distributeRequest(
 	}
 
 	// processor is busy. Attempt a single blocking submission to the candidate.
-	fc.logger.V(logutil.TRACE).Info("Processor is busy, attempting blocking submit", "requestID", reqID)
+	fc.logger.V(logutil.DEBUG).Info("Processor is busy, attempting blocking submit", "requestID", reqID)
 	err := fc.processor.SubmitOrBlock(ctx, item)
 	if err != nil {
 		return types.QueueOutcomeRejectedOther, fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)

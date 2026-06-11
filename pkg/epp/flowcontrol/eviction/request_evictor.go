@@ -166,7 +166,7 @@ func (p *RequestEvictor) EvictN(ctx context.Context, n int) ([]string, error) {
 	}
 
 	if len(evicted) > 0 {
-		logger.Info("Eviction complete", "requested", n, "evicted", len(evicted))
+		logger.Info("Eviction complete", "requested", n, "evicted", len(evicted), "requestIDs", evicted)
 	}
 	return evicted, nil
 }

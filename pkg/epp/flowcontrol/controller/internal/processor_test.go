@@ -879,7 +879,7 @@ func TestShardProcessor(t *testing.T) {
 					t.Parallel()
 					h := newTestHarness(t, testCleanupTick)
 					h.StatsFunc = func() contracts.AggregateStats { return tc.stats }
-					hasCap := h.processor.hasCapacity(testFlow.Priority, tc.itemByteSize)
+					hasCap, _ := h.processor.hasCapacity(testFlow.Priority, tc.itemByteSize)
 					assert.Equal(t, tc.expectHasCap, hasCap, "Capacity check result should match expected value")
 				})
 			}
