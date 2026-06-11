@@ -103,7 +103,7 @@ type Options struct {
 	EnableCertReload        bool   // Enables certificate reloading of the certificates specified in --cert-path.
 	SecureServing           bool   // Enables secure serving.
 	MetricsEndpointAuth     bool   // Enables authentication and authorization of the metrics endpoint.
-	EnableGRPCStreamMetrics bool   // Enables ext_proc gRPC stream metrics (in-flight gauge + hold duration).
+	EnableGRPCStreamMetrics bool   // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
 	//
 	// Configuration.
 	//
@@ -213,7 +213,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&opts.EnableCertReload, "enable-cert-reload", opts.EnableCertReload,
 		"Enables certificate reloading of the certificates specified in --cert-path.")
 	fs.BoolVar(&opts.EnableGRPCStreamMetrics, "enable-grpc-stream-metrics", opts.EnableGRPCStreamMetrics,
-		"Enables ext_proc gRPC stream metrics (in-flight gauge + hold-duration histogram).")
+		"Enables ext_proc gRPC stream metrics (in-flight gauge, hold-duration histogram, completions counter by code).")
 	fs.BoolVar(&opts.SecureServing, "secure-serving", opts.SecureServing, "Enables secure serving.")
 	fs.BoolVar(&opts.MetricsEndpointAuth, "metrics-endpoint-auth", opts.MetricsEndpointAuth,
 		"Enables authentication and authorization of the metrics endpoint.")
