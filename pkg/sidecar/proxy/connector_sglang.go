@@ -81,7 +81,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 }
 
 func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.Request, body []byte, prefillHost string) {
-	tracer := tracing.Tracer("llm-d-router/pkg/sidecar/proxy")
+	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
 	// Prefill Stage - async

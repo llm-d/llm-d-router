@@ -182,7 +182,7 @@ func (s *Server) getMooncakeEngineMap(ctx context.Context, prefillHostPort, boot
 }
 
 func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost, dpRank string) {
-	tracer := tracing.Tracer("llm-d-router/pkg/sidecar/proxy")
+	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
 	// WithoutCancel for prefill so it isn't aborted when the decode response finishes first

@@ -19,6 +19,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
 const (
@@ -158,7 +159,7 @@ func (h *PdProfileHandler) WithName(name string) *PdProfileHandler {
 func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
 	// Start tracing span for profile picking operation
-	tracer := tracing.Tracer(tracerScope)
+	tracer := tracing.Tracer(schedplugins.TracerScope)
 	ctx, span := tracer.Start(ctx, "pick_pd_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)

@@ -21,6 +21,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -32,10 +33,6 @@ const (
 	defaultDecodeProfile  = "decode"
 	defaultPrefillProfile = "prefill"
 	defaultEncodeProfile  = "encode"
-
-	// tracerScope is the OTel instrumentation scope shared by all plugins
-	// under the scheduling framework component.
-	tracerScope = "llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
 // ── Factory & constructor ────────────────────────────────────────────────────
@@ -267,7 +264,7 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 // Returns the next profile to execute, or an empty map when all stages are done.
 func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
-	tracer := tracing.Tracer(tracerScope)
+	tracer := tracing.Tracer(schedplugins.TracerScope)
 	ctx, span := tracer.Start(ctx, "pick_disagg_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
@@ -379,7 +376,7 @@ func (h *Handler) ProcessResults(
 // PreRequest wires prefill and encode SchedulerProfile results into headers
 // so the sidecar knows which pods to contact for disaggregated work.
 func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	tracer := tracing.Tracer(tracerScope)
+	tracer := tracing.Tracer(schedplugins.TracerScope)
 	_, span := tracer.Start(ctx, "prepare_disaggregation",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)

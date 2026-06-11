@@ -68,7 +68,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	uuidStr := uuid.String()
 
 	// Prefill Stage
-	tracer := tracing.Tracer("llm-d-router/pkg/sidecar/proxy")
+	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
 	ctx, prefillSpan := tracer.Start(ctx, "prefill",

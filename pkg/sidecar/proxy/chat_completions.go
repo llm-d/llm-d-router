@@ -58,7 +58,7 @@ func openAIAPIAttr(apiType APIType) attribute.KeyValue {
 func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
-		tracer := tracing.Tracer("llm-d-router/pkg/sidecar/proxy")
+		tracer := tracing.Tracer(tracerScope)
 		ctx, span := tracer.Start(r.Context(), "forward_request",
 			trace.WithSpanKind(trace.SpanKindServer),
 		)
