@@ -46,10 +46,12 @@ data:
       type: prefix-cache-affinity-filter
       parameters:
         affinityThreshold: 0.99
+        ttftSource: latencyPredictor
     - name: loose-affinity-filter
       type: prefix-cache-affinity-filter
       parameters:
         affinityThreshold: 0.80
+        ttftSource: latencyPredictor
     - type: latency-scorer
     - type: weighted-random-picker
     - type: slo-headroom-tier-filter

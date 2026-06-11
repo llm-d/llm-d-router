@@ -74,9 +74,9 @@ type Config struct {
 	MaxTTFTPenaltyMs float64 `json:"maxTTFTPenaltyMs,omitempty"`
 
 	// TTFTSource selects where the load gate reads per-endpoint TTFT from.
-	// TTFTSourceLatencyPredictor (default) reads predicted TTFT from the latency
-	// predictor; TTFTSourcePrefillThroughput estimates it from in-flight tokens
-	// and PeakPrefillThroughput.
+	// TTFTSourcePrefillThroughput (default) estimates it from in-flight tokens and
+	// PeakPrefillThroughput; TTFTSourceLatencyPredictor reads predicted TTFT from
+	// the latency predictor.
 	TTFTSource TTFTSource `json:"ttftSource,omitempty"`
 
 	// PeakPrefillThroughput is the peak prefill throughput in tokens/sec, used to
@@ -94,7 +94,7 @@ var DefaultConfig = Config{
 	AffinityThreshold:      0.80,
 	ExplorationProbability: 0.01,
 	MaxTTFTPenaltyMs:       5000,
-	TTFTSource:             TTFTSourceLatencyPredictor,
+	TTFTSource:             TTFTSourcePrefillThroughput,
 
 	// Calibrated for Qwen 32B on 2x H100 80GB (TP=2), vLLM 0.19; see README.
 	PeakPrefillThroughput: 15928,
@@ -141,7 +141,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("peakPrefillThroughput must be >= 0, got %f", c.PeakPrefillThroughput)
 	}
 	switch c.TTFTSource {
-	case "", TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput:
+	case TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput:
 	default:
 		return fmt.Errorf("ttftSource must be %q or %q, got %q", TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput, c.TTFTSource)
 	}
@@ -152,10 +152,10 @@ func (c *Config) validate() error {
 }
 
 // usesLatencyPredictor reports whether the load gate sources TTFT from the
-// latency predictor. The predictor is the default; only an explicit
-// prefillThroughput selects the in-flight-token estimate.
+// latency predictor. Throughput is the default; only an explicit
+// latencyPredictor selects the predictor.
 func (c *Config) usesLatencyPredictor() bool {
-	return c.TTFTSource != TTFTSourcePrefillThroughput
+	return c.TTFTSource == TTFTSourceLatencyPredictor
 }
 
 func (p *Plugin) TypedName() fwkplugin.TypedName {

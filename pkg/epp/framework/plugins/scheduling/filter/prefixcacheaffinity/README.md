@@ -59,9 +59,10 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 - With probability `explorationProbability` (default 1%), skip the gate entirely for exploration
 - TTFT load gate: if best sticky endpoint's TTFT exceeds best non-sticky by more than
   `maxTTFTPenaltyMs`, break stickiness and keep all endpoints (0 = always stick). The
-  per-endpoint TTFT comes from the latency predictor when `ttftSource` is
-  `latencyPredictor` (default), or is estimated from in-flight tokens as
-  `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is `prefillThroughput`
+  per-endpoint TTFT is estimated from in-flight tokens as
+  `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is
+  `prefillThroughput` (default), or comes from the latency predictor when `ttftSource`
+  is `latencyPredictor`
 - If no endpoints have the TTFT source attribute (`LatencyPredictionInfo` or `InFlightLoad`),
   the TTFT load gate is skipped. If no endpoints have `PrefixCacheMatchInfo`, all prefix
   scores default to 0 and no endpoints pass the affinity threshold, so all are kept (no-op)
@@ -73,7 +74,7 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 | `affinityThreshold` | `float64` | No | `0.80` | Prefix cache score threshold for stickiness |
 | `explorationProbability` | `float64` | No | `0.01` | Probability of skipping the gate |
 | `maxTTFTPenaltyMs` | `float64` | No | `5000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
-| `ttftSource` | `string` | No | `latencyPredictor` | TTFT source for the load gate: `latencyPredictor` or `prefillThroughput` |
+| `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput` or `latencyPredictor` |
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
 
 The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
@@ -85,8 +86,8 @@ to `latencyPredictor` to source TTFT from the latency predictor instead.
 ## Dependencies
 
 - Reads `PrefixCacheMatchInfo` from endpoint attributes (from `prefix-cache-scorer`)
-- Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 - Reads `InFlightLoad` for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer`)
+- Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 
 **Configuration Example:**
 ```yaml
@@ -97,7 +98,7 @@ plugins:
       affinityThreshold: 0.80
       explorationProbability: 0.01
       maxTTFTPenaltyMs: 5000
-      ttftSource: latencyPredictor
+      ttftSource: prefillThroughput
 schedulingProfiles:
   - name: default
     plugins:

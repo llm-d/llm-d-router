@@ -257,6 +257,14 @@ func TestFactory_InvalidTTFTSource(t *testing.T) {
 	assert.Contains(t, err.Error(), "ttftSource must be")
 }
 
+// An empty ttftSource is rejected rather than silently defaulted: the default is
+// supplied by DefaultConfig, so an explicit empty value is a configuration error.
+func TestFactory_EmptyTTFTSourceRejected(t *testing.T) {
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"ttftSource": ""}`)), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ttftSource must be")
+}
+
 // peakPrefillThroughput=0 is valid as long as the throughput source is unused:
 // either the gate is disabled (maxTTFTPenaltyMs=0) or the latency predictor
 // supplies TTFT.
@@ -266,4 +274,20 @@ func TestFactory_ZeroPeakPrefillThroughputAllowedWhenUnused(t *testing.T) {
 
 	_, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"ttftSource": "latencyPredictor", "peakPrefillThroughput": 0}`)), nil)
 	assert.NoError(t, err, "throughput source unused when the latency predictor supplies TTFT")
+}
+
+// The default TTFT source is prefillThroughput, so an unset ttftSource selects
+// the throughput estimate: it consumes InFlightLoad and requires a non-zero
+// peakPrefillThroughput when the gate is enabled.
+func TestFactory_DefaultsToPrefillThroughput(t *testing.T) {
+	assert.Equal(t, TTFTSourcePrefillThroughput, DefaultConfig.TTFTSource)
+
+	plugin, err := Factory("test", fwkplugin.StrictDecoder(nil), nil)
+	assert.NoError(t, err)
+	p := plugin.(*Plugin)
+	assert.Equal(t, TTFTSourcePrefillThroughput, p.config.TTFTSource)
+
+	_, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"peakPrefillThroughput": 0}`)), nil)
+	assert.Error(t, err, "default throughput source needs a non-zero peakPrefillThroughput")
+	assert.Contains(t, err.Error(), "peakPrefillThroughput must be > 0")
 }
