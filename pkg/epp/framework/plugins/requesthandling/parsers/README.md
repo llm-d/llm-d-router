@@ -4,17 +4,17 @@ This directory contains parser plugins used to parse and understand the payloads
 
 ## Supported Parsers
 
-*   **`openai-parser`**: The default parser, supporting the [OpenAI API](https://developers.openai.com/api/reference/overview). This is used when no parser is explicitly specified in the `EndpointPickerConfig`.
+*   **`openai-parser`**: A parser supporting the [OpenAI API](https://developers.openai.com/api/reference/overview). Along with `anthropic-parser` and `vllmhttp-parser`, it is registered by default if no parsers are explicitly specified.
 *   **`anthropic-parser`**: A parser designed to handle requests for the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages). It supports both standard JSON and streaming SSE responses.
 *   **`vllmgrpc-parser`**: A parser designed to handle requests specifically for the [vLLM gRPC API](https://docs.vllm.ai/en/latest/api/vllm/entrypoints/grpc_server/).
-*   **`vllmhttp-parser`**: A parser for vLLM HTTP endpoints that are not part of the OpenAI-compatible API surface — currently `/inference/v1/generate` (the disaggregated Prefill/Decode API). All other paths are delegated to the embedded OpenAI parser, so a single instance covers both vLLM-specific and OpenAI-compatible HTTP traffic served by the same endpoint.
+*   **`vllmhttp-parser`**: A parser for vLLM HTTP endpoints that are not part of the OpenAI-compatible API surface — specifically `/inference/v1/generate` (the disaggregated Prefill/Decode API). Because it only handles this path, you must also configure `openai-parser` if you want to support OpenAI-compatible paths on the same route.
 *   **`vertexai-parser`**: A parser designed to handle requests for the Vertex AI gRPC API, specifically supporting [PredictionService/ChatCompletions](https://github.com/googleapis/googleapis/blob/89c3153888201c9e80bc5ec78d6ffca0debe6b52/google/cloud/aiplatform/v1beta1/prediction_service.proto#L235). For unsupported Vertex AI APIs, it skips parsing and lets the request pass through without interpretation resulting in routing to a random endpoint.
 *   **`passthrough-parser`**: A model-agnostic parser that supports any request format by passing the request body through without interpretation.
     *   **Drawback**: EPP cannot parse the payload, so payload-related scheduling scorers (e.g., `prefix-cache-scorer`) are not supported.
 
-### Choosing between `openai-parser` and `vllmhttp-parser`
+### Serving mixed vLLM disaggregated and OpenAI-compatible traffic
 
-`vllmhttp-parser` is a superset of `openai-parser`: it embeds an `openai-parser` instance and delegates every path it does not handle natively (currently anything other than `/inference/v1/generate`) to it. Choose `openai-parser` when the route only serves OpenAI-compatible traffic; choose `vllmhttp-parser` when the same route must additionally accept `/inference/v1/generate`.
+`vllmhttp-parser` only parses the disaggregated prefill/decode path `/inference/v1/generate`. To serve both disaggregated vLLM traffic and OpenAI-compatible traffic on the same route, configure both `vllmhttp-parser` and `openai-parser` under the `requestHandler.parsers` list.
 
 ## Configuration
 
@@ -43,7 +43,7 @@ requestHandler:
   - pluginRef: vllmgrpcParser
 ```
 
-Equivalent configuration using the `vllmhttp-parser` (enables `/inference/v1/generate` while keeping OpenAI-compatible paths working):
+Configuration using both `vllmhttp-parser` and `openai-parser` (enables `/inference/v1/generate` while keeping OpenAI-compatible paths working):
 
 ```yaml
 apiVersion: llm-d.ai/v1alpha1
@@ -53,6 +53,8 @@ plugins:
   type: max-score-picker
 - name: vllmhttpParser
   type: vllmhttp-parser
+- name: openaiParser
+  type: openai-parser
 schedulingProfiles:
 - name: default
   plugins:
@@ -60,6 +62,7 @@ schedulingProfiles:
 requestHandler:
   parsers:
   - pluginRef: vllmhttpParser
+  - pluginRef: openaiParser
 ```
 
 Configuration with multiple parsers (e.g. OpenAI and Anthropic API support on the same route):
