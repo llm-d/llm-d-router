@@ -896,11 +896,10 @@ We generally follow the [k8s instrumentation logging guidelines](https://github.
 
 To configure logging verbosity, specify the `v` flag such as `--v=2`.
 
-The Helm chart defaults to 1 (Quiet/Performant), while V(2) is our standard tracing level (Opt-In).
-
+If `--v` is not set explicitly, the default verbosity is V(2) (`DEFAULT`).
 ### Add logs
 
-The [k8s instrumentation logging guidelines](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-instrumentation/logging.md) has the following definitions:
+The [k8s instrumentation logging guidelines](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-instrumentation/logging.md) have the following definitions:
 
 - `logger.V(0).Info` = `logger.Info` - Generally useful for this to **always** be visible to a cluster operator
 - `logger.V(1).Info` - A reasonable default log level if you don't want verbosity.
@@ -912,11 +911,11 @@ The [k8s instrumentation logging guidelines](https://github.com/kubernetes/commu
 We choose to simplify to the following 4 common levels.
 
 ```go
-const(
-    DEFAULT=2
-    VERBOSE=3
-    DEBUG=4
-    TRACE=5
+const (
+	DEFAULT = 2
+	VERBOSE = 3
+	DEBUG   = 4
+	TRACE   = 5
 )
 ```
 
