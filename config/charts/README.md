@@ -32,15 +32,14 @@ helm install my-standalone-router ./config/charts/llm-d-router-standalone \
   --set router.modelServers.matchLabels.app=my-vllm-service
 ```
 
-#### Standalone with Agentgateway Proxy (Service-Backed)
-Deploys EPP with an Agentgateway proxy. This mode requires disabling the `InferencePool` resource creation (`create=false`) and routes traffic to an existing Kubernetes Service:
+#### Standalone with Agentgateway Proxy
+Deploys EPP with an Agentgateway proxy. This mode requires disabling the `InferencePool` resource creation (`create=false`) and routes traffic directly to model servers:
 
 ```bash
 helm install my-standalone-router ./config/charts/llm-d-router-standalone \
   --set router.inferencePool.create=false \
   --set router.proxy.proxyType=agentgateway \
-  --set router.proxy.agentgateway.service.name=my-model-service \
-  --set router.proxy.agentgateway.service.ports="8000"
+  --set router.modelServers.matchLabels.app=my-model-service
 ```
 ---
 
@@ -523,19 +522,20 @@ Configures EPP to run with a sidecar proxy container (Envoy proxy or Agentgatewa
 | `router.proxy.volumeMounts` | Sidecar container volume mounts. | `[]` |
 | `router.proxy.volumes` | Sidecar container volumes. | `[]` |
 | `router.proxy.configMapData` | Key-value pairs to include in a ConfigMap created for the sidecar. | `{}` |
-| `router.proxy.agentgateway.service.create` | **Agentgateway only**. Create a dedicated model Service for the Agentgateway proxy. | `true` |
-| `router.proxy.agentgateway.service.name` | **Agentgateway only**. Name of the model Service to route to. | `""` |
-| `router.proxy.agentgateway.service.namespace` | **Agentgateway only**. Namespace of the model Service. Defaults to release namespace. | `""` |
-| `router.proxy.agentgateway.service.ports` | **Agentgateway only**. Port list for the model Service (must match `modelServers.targetPorts`). | `[]` |
+#### Complete Standalone Example with Agentgateway Proxy
 
-#### Complete Proxy Sidecar Example (Agentgateway Service-Backed)
-
-To deploy EPP in standalone mode with an Agentgateway sidecar routing traffic directly to an existing model Service `my-model-service` (bypassing `InferencePool` creation):
+To deploy EPP in standalone mode with an Agentgateway sidecar routing traffic directly to model servers matching the label `app=my-model-service` (bypassing `InferencePool` creation):
 
 ```yaml
 router:
   inferencePool:
     create: false # Disable InferencePool creation
+
+  modelServers:
+    matchLabels:
+      app: "my-model-service"
+    targetPorts:
+      - number: 8000
 
   proxy:
     enabled: true
@@ -546,10 +546,4 @@ router:
         memory: 4Gi
       limits:
         memory: 8Gi
-    agentgateway:
-      service:
-        create: true # Create a Service to route client traffic to EPP
-        name: "my-model-service"
-        ports:
-          - 8000 # Intercept traffic on port 8000
 ```

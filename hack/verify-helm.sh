@@ -114,7 +114,7 @@ test_cases_llm_d_router_standalone["basic"]="--set router.modelServers.matchLabe
 test_cases_llm_d_router_standalone["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["llm-d-router-gateway"]="--set router.inferencePool.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
-test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8000' --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
+test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 
 
@@ -154,35 +154,28 @@ if eval "${invalid_proxy_command}"; then
   exit 1
 fi
 
-missing_agentgateway_service_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.proxyType=agentgateway >/dev/null"
-echo "Executing: ${missing_agentgateway_service_command}"
-if eval "${missing_agentgateway_service_command}"; then
-  echo "Helm template unexpectedly succeeded for missing agentgateway service.name"
+deprecated_agentgateway_service_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=foo >/dev/null"
+echo "Executing: ${deprecated_agentgateway_service_command}"
+if eval "${deprecated_agentgateway_service_command}"; then
+  echo "Helm template unexpectedly succeeded for deprecated agentgateway.service configuration"
   exit 1
 fi
 
-unsupported_agentgateway_llm_d_router_gateway_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8000' --set router.inferencePool.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway >/dev/null"
+unsupported_agentgateway_llm_d_router_gateway_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.inferencePool.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway >/dev/null"
 echo "Executing: ${unsupported_agentgateway_llm_d_router_gateway_command}"
 if eval "${unsupported_agentgateway_llm_d_router_gateway_command}"; then
   echo "Helm template unexpectedly succeeded for unsupported agentgateway createInferencePool=true configuration"
   exit 1
 fi
 
-mismatched_agentgateway_ports_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8001' --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
-echo "Executing: ${mismatched_agentgateway_ports_command}"
-if eval "${mismatched_agentgateway_ports_command}"; then
-  echo "Helm template unexpectedly succeeded for mismatched agentgateway service.ports"
-  exit 1
-fi
-
-unsupported_agentgateway_listener_port_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8000' --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' --set 'router.extraServicePorts[0].name=proxy' --set 'router.extraServicePorts[0].port=9000' --set 'router.extraServicePorts[0].protocol=TCP' --set 'router.extraServicePorts[0].targetPort=9000' >/dev/null"
+unsupported_agentgateway_listener_port_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' --set 'router.extraServicePorts[0].name=proxy' --set 'router.extraServicePorts[0].port=9000' --set 'router.extraServicePorts[0].protocol=TCP' --set 'router.extraServicePorts[0].targetPort=9000' >/dev/null"
 echo "Executing: ${unsupported_agentgateway_listener_port_command}"
 if eval "${unsupported_agentgateway_listener_port_command}"; then
   echo "Helm template unexpectedly succeeded without an agentgateway listener Service port named http"
   exit 1
 fi
 
-mismatched_agentgateway_listener_target_port_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8000' --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' --set 'router.extraServicePorts[0].name=http' --set 'router.extraServicePorts[0].port=9000' --set 'router.extraServicePorts[0].protocol=TCP' --set 'router.extraServicePorts[0].targetPort=9001' >/dev/null"
+mismatched_agentgateway_listener_target_port_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' --set 'router.extraServicePorts[0].name=http' --set 'router.extraServicePorts[0].port=9000' --set 'router.extraServicePorts[0].protocol=TCP' --set 'router.extraServicePorts[0].targetPort=9001' >/dev/null"
 echo "Executing: ${mismatched_agentgateway_listener_target_port_command}"
 if eval "${mismatched_agentgateway_listener_target_port_command}"; then
   echo "Helm template unexpectedly succeeded for an agentgateway listener targetPort that does not match port"
@@ -201,7 +194,7 @@ fi
 
 echo "Verifying llm-d-router-standalone agentgateway renders plaintext EPP and custom listener ports..."
 agentgateway_render_output="${TEMP_DIR}/llm-d-router-standalone-agentgateway-render.yaml"
-agentgateway_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8000' --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' --set 'router.extraServicePorts[0].name=http' --set 'router.extraServicePorts[0].port=9000' --set 'router.extraServicePorts[0].protocol=TCP' --set 'router.extraServicePorts[0].targetPort=http' > ${agentgateway_render_output}"
+agentgateway_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' --set 'router.extraServicePorts[0].name=http' --set 'router.extraServicePorts[0].port=9000' --set 'router.extraServicePorts[0].protocol=TCP' --set 'router.extraServicePorts[0].targetPort=http' > ${agentgateway_render_output}"
 echo "Executing: ${agentgateway_render_command}"
 eval "${agentgateway_render_command}"
 if ! grep -q -- '--secure-serving=false' "${agentgateway_render_output}"; then
@@ -224,20 +217,7 @@ if ! grep -q -- 'destinationMode: passthrough' "${agentgateway_render_output}"; 
   echo "Agentgateway Helm template did not render passthrough destination mode"
   exit 1
 fi
-
-agentgateway_service_block="${TEMP_DIR}/llm-d-router-standalone-agentgateway-service.yaml"
-sed -n '/^# Source: llm-d-router-standalone\/templates\/agentgateway-service.yaml/,/^---/p' "${agentgateway_render_output}" > "${agentgateway_service_block}"
-if ! grep -q -- 'app.kubernetes.io/component: agentgateway-model-service' "${agentgateway_service_block}"; then
-  echo "Agentgateway model Service did not render its component label"
-  exit 1
-fi
-agentgateway_selector_block="${TEMP_DIR}/llm-d-router-standalone-agentgateway-service-selector.yaml"
-sed -n '/^  selector:$/,/^  ports:$/p' "${agentgateway_service_block}" > "${agentgateway_selector_block}"
-if ! grep -Eq -- '^[[:space:]]+"?app"?:[[:space:]]+"?llm-instance-gateway"?[[:space:]]*$' "${agentgateway_selector_block}"; then
-  echo "Agentgateway model Service did not render selector labels from router.modelServers.matchLabels"
-  exit 1
-fi
-if grep -q -- 'app.kubernetes.io/name:' "${agentgateway_service_block}"; then
-  echo "Agentgateway model Service rendered an app.kubernetes.io/name label"
+if grep -q -- '# Source: llm-d-router-standalone/templates/agentgateway-service.yaml' "${agentgateway_render_output}"; then
+  echo "Agentgateway model Service unexpectedly rendered"
   exit 1
 fi
