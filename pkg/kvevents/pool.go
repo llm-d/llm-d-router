@@ -226,7 +226,10 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 // slice of the correct length.
 func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonicalBlockCount int) []*kvblock.BlockExtraFeatures {
 	engineBlockCount := len(engineFeatures)
-	if engineBlockCount == canonicalBlockCount {
+	if canonicalBlockCount == 0 {
+		return nil
+	}
+	if engineBlockCount == 0 || engineBlockCount == canonicalBlockCount {
 		return engineFeatures
 	}
 
@@ -365,7 +368,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			// TokensToKVBlockKeys expects one entry per canonical block.
 			if extraFeatures != nil {
 				canonicalBlockCount := len(ev.Tokens) / p.tokenProcessor.BlockSize()
-				if len(extraFeatures) != canonicalBlockCount {
+				if canonicalBlockCount == 0 {
+					// Tokens don't fill a complete canonical block; no realignment needed
+					// since TokensToKVBlockKeys will produce zero keys anyway.
+					extraFeatures = nil
+				} else if len(extraFeatures) != canonicalBlockCount {
 					extraFeatures = realignExtraFeatures(extraFeatures, canonicalBlockCount)
 				}
 			}

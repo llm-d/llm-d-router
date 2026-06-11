@@ -392,6 +392,16 @@ func TestRealignExtraFeatures(t *testing.T) {
 		assert.Len(t, result[1].MMHashes, 1)
 		assert.Equal(t, "c", result[1].MMHashes[0].Hash)
 	})
+
+	t.Run("zero canonical blocks (engine BS < canonical BS)", func(t *testing.T) {
+		// 1 engine block → 0 canonical blocks: tokens < canonical block size.
+		// realignExtraFeatures returns an empty slice instead of panicking.
+		features := []*kvblock.BlockExtraFeatures{
+			{MMHashes: []kvblock.MMHash{{Hash: "img0"}}},
+		}
+		result := realignExtraFeatures(features, 0)
+		assert.Empty(t, result)
+	})
 }
 
 // TestCanonicalWritePath_ExtraKeysOneToMany verifies that events with ExtraKeys
