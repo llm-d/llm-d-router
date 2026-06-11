@@ -659,6 +659,9 @@ func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairness
 	ttftSeconds := firstToken.Sub(received).Seconds()
 	tpotSeconds := (e2eSeconds - ttftSeconds) / float64(outputTokenCount-1)
 	llmdRequestTPOT.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(tpotSeconds)
+	return true
+}
+
 // RecordInterTokenLatency records the time between consecutive response body chunks for streaming requests.
 func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName string, itlSeconds float64) bool {
 	if itlSeconds < 0 {

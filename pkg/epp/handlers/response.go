@@ -56,6 +56,15 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		reqCtx.FirstTokenTimestamp = time.Now()
 	}
 
+	if reqCtx.modelServerStreaming && len(responseBytes) > 0 {
+		now := time.Now()
+		if !reqCtx.LastChunkReceivedTimestamp.IsZero() {
+			itl := now.Sub(reqCtx.LastChunkReceivedTimestamp).Seconds()
+			metrics.RecordInterTokenLatency(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, itl)
+		}
+		reqCtx.LastChunkReceivedTimestamp = now
+	}
+
 	var parsedResp *fwkrh.ParsedResponse
 	parser, err := s.getOrResolveParser(ctx, reqCtx)
 	if err != nil {
