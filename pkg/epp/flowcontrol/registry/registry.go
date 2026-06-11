@@ -202,9 +202,9 @@ func (fr *FlowRegistry) SubmitDesiredPriorities(desired map[int]struct{}) {
 	if desired == nil {
 		desired = map[int]struct{}{}
 	}
-	copy := make(map[int]struct{}, len(desired))
+	desiredCopy := make(map[int]struct{}, len(desired))
 	for priority := range desired {
-		copy[priority] = struct{}{}
+		desiredCopy[priority] = struct{}{}
 	}
 
 	// Drain any stale pending update so only the latest state is queued.
@@ -214,7 +214,7 @@ func (fr *FlowRegistry) SubmitDesiredPriorities(desired map[int]struct{}) {
 	}
 
 	// After draining, the channel always has capacity; this send never blocks.
-	fr.priorityBandUpdateCh <- copy
+	fr.priorityBandUpdateCh <- desiredCopy
 }
 
 // PriorityBandUpdateChannel returns the channel carrying desired priority topology updates.
@@ -256,8 +256,10 @@ func (fr *FlowRegistry) ApplyDesiredPriorities(desired map[int]struct{}) {
 		if !fr.isPriorityBandIdle(priority) {
 			continue
 		}
-		// Re-verify under the lock: a concurrent request may have pinned the band
-		// in the window between isPriorityBandIdle and this check.
+		// Cheap best-effort guard against tearing down a band that just became active. Holding fr.mu does
+		// not actually exclude a concurrent pin: pinLeasedResource is lock-free and never takes fr.mu. The
+		// removal is safe regardless, since pinLeasedResource's stale-object protection backs off a racing
+		// pin and the priority-0 fallback plus the next reconcile/GC cycle self-heal.
 		if val, ok := fr.priorityBandStates.Load(priority); ok {
 			if val.(*priorityBandState).isActive() {
 				continue
@@ -342,14 +344,8 @@ func (fr *FlowRegistry) WithConnection(key flowcontrol.FlowKey, fn func(conn con
 //
 // NOTE: The caller (WithConnection) must already hold a lease on the priority band to prevent GC during this operation.
 func (fr *FlowRegistry) ensureFlowInfrastructure(key flowcontrol.FlowKey) error {
-	fr.mu.RLock()
-	_, exists := fr.config.PriorityBands[key.Priority]
-	fr.mu.RUnlock()
-
-	if !exists {
-		return fmt.Errorf("priority band %d not found: %w", key.Priority, contracts.ErrPriorityBandNotFound)
-	}
-
+	// buildFlowComponents validates that the priority band exists (returning ErrPriorityBandNotFound if not)
+	// under the same read lock it uses to read the topology, so a single acquisition covers both.
 	fr.mu.RLock()
 	components, err := fr.buildFlowComponents(key)
 	fr.mu.RUnlock()
