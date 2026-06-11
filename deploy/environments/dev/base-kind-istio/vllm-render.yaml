@@ -18,13 +18,10 @@ spec:
       - name: vllm-render
         image: ${VLLM_RENDER_IMAGE}
         imagePullPolicy: IfNotPresent
-        args:
-        - "--model=${MODEL_NAME}"
-        - "--port=8082"
-        - "--mode=echo"
-        - "--force-dummy-tokenizer"
+        command: ["vllm", "launch", "render"]
+        args: ["${MODEL_NAME}", "--port=8082"]
         ports:
-        - name: http
+        - name: render-http
           containerPort: 8082
         startupProbe:
           httpGet:
@@ -48,7 +45,12 @@ spec:
           periodSeconds: 5
           failureThreshold: 1
           timeoutSeconds: 1
-      volumes: []
+        volumeMounts:
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
+      volumes: 
+      - name: model-cache
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

@@ -247,7 +247,7 @@ func setupK8sCluster() {
 	kindLoadImage(vllmSimImage)
 	kindLoadImage(eppImage)
 	kindLoadImage(sideCarImage)
-	if loadRenderImage {
+	if loadRenderImage && vllmRenderImage != vllmSimImage {
 		kindLoadImage(vllmRenderImage)
 	}
 }
