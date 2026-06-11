@@ -33,10 +33,6 @@ standalone validations
   {{- if not $proxy.enabled -}}
     {{- fail ".Values.router.proxy.enabled must be true when .Values.router.proxy.mode=service" -}}
   {{- end -}}
-  {{- $proxyType := default "envoy" ($proxy.proxyType | default "envoy") | lower -}}
-  {{- if ne $proxyType "envoy" -}}
-    {{- fail (printf ".Values.router.proxy.mode=service currently supports only proxyType=envoy, got %q" $proxyType) -}}
-  {{- end -}}
   {{- $hasHTTP := false -}}
   {{- range $servicePort := (.Values.router.extraServicePorts | default (list)) -}}
     {{- if eq (toString (index $servicePort "name")) "http" -}}
@@ -62,7 +58,7 @@ standalone validations
     {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . -}}
     {{- $flags := .Values.router.epp.flags | default dict -}}
     {{- if and (hasKey $flags "secure-serving") (ne (toString (index $flags "secure-serving")) "false") -}}
-      {{- fail ".Values.router.epp.flags.secure-serving must be false when proxyType=agentgateway; standalone agentgateway uses plaintext gRPC to EPP over localhost" -}}
+      {{- fail ".Values.router.epp.flags.secure-serving must be false when proxyType=agentgateway; standalone agentgateway uses plaintext gRPC to EPP (over loopback in sidecar mode, or the EPP Service in service mode)" -}}
     {{- end -}}
   {{- end -}}
 {{- end -}}
