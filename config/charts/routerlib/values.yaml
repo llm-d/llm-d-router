@@ -1,5 +1,8 @@
 extraServicePorts: []
 
+# Kubernetes cluster DNS domain, used to build in-cluster Service FQDNs.
+clusterDomain: cluster.local
+
 epp:
   replicas: 1
   image:

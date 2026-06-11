@@ -22,10 +22,9 @@ router:
     # Replica count for the proxy Deployment when mode=service.
     replicas: 2
 
-    # Whether the proxy passes traffic through when EPP is unreachable. When
-    # unset it defaults to true in service mode (active/passive resiliency) and
-    # false in sidecar mode.
-    # failOpen: true
+    # Whether the proxy passes traffic through (fail-open) when EPP is
+    # unreachable, for active/passive resiliency.
+    failOpen: true
 
     resources:
       requests:

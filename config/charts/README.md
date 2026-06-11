@@ -44,7 +44,7 @@ helm install my-standalone-router ./config/charts/llm-d-router-standalone \
 ```
 
 #### Standalone with a Separate Proxy Service
-Deploys the Envoy proxy as its own horizontally scalable Deployment and Service instead of as a sidecar in the EPP pod. The proxy reaches EPP over the EPP Service and fails open if EPP is unreachable, so the data path stays available across EPP active/passive failover:
+Deploys the proxy as its own horizontally scalable Deployment and Service instead of as a sidecar in the EPP pod. The proxy reaches EPP over the EPP Service and fails open if EPP is unreachable, so the data path stays available across EPP active/passive failover:
 
 ```bash
 helm install my-standalone-router ./config/charts/llm-d-router-standalone \
@@ -126,6 +126,7 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 | `router.epp.env` | Extra environment variables for EPP container. | `[]` |
 | `router.epp.extraContainerPorts` | Extra ports to expose on the EPP container. | `[]` |
 | `router.extraServicePorts` | Extra ports to expose on the EPP Service. | `[]` |
+| `router.clusterDomain` | Kubernetes cluster DNS domain used to build in-cluster Service FQDNs. | `cluster.local` |
 | `router.epp.flags` | Map of command-line flags passed directly to the EPP binary. | `{}` |
 | `router.epp.affinity` | Affinity rules for EPP pods. | `{}` |
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
@@ -520,10 +521,10 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
 | `router.proxy.enabled` | Enable the proxy (Envoy or Agentgateway) in front of EPP. | `false` |
-| `router.proxy.proxyType` | **Standalone only**. Type of proxy. Options: `[envoy, agentgateway]`. | `envoy` |
-| `router.proxy.mode` | **Standalone only**. Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service (Envoy only). | `sidecar` |
-| `router.proxy.replicas` | **Standalone only**. Replica count for the proxy Deployment when `mode=service`. | `2` |
-| `router.proxy.failOpen` | **Standalone only**. Whether the proxy passes traffic through when EPP is unreachable. Defaults to `true` in `service` mode, `false` in `sidecar` mode. | _(mode-derived)_ |
+| `router.proxy.proxyType` | Type of proxy. Options: `[envoy, agentgateway]`. | `envoy` |
+| `router.proxy.mode` | Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service (Envoy only). | `sidecar` |
+| `router.proxy.replicas` | Replica count for the proxy Deployment when `mode=service`. | `2` |
+| `router.proxy.failOpen` | Whether the proxy passes traffic through (fail-open) when EPP is unreachable. | `true` |
 | `router.proxy.name` | Name of the sidecar container. | `""` |
 | `router.proxy.image` | Sidecar container image. | `""` |
 | `router.proxy.imagePullPolicy` | Sidecar container image pull policy. | `IfNotPresent` |

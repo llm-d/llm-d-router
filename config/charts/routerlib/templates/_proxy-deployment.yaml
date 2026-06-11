@@ -17,6 +17,7 @@ spec:
   template:
     metadata:
       labels:
+        {{- include "llm-d-router.labels" . | nindent 8 }}
         {{- include "llm-d-router.proxySelectorLabels" . | nindent 8 }}
     spec:
       containers:

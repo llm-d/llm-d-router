@@ -197,6 +197,13 @@ if eval "${unsupported_proxy_service_agentgateway_command}"; then
   exit 1
 fi
 
+invalid_failopen_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.failOpen=notabool >/dev/null"
+echo "Executing: ${invalid_failopen_command}"
+if eval "${invalid_failopen_command}"; then
+  echo "Helm template unexpectedly succeeded for non-boolean router.proxy.failOpen"
+  exit 1
+fi
+
 echo "Verifying llm-d-router-standalone extra flags render as --flag=value..."
 flag_render_output="${TEMP_DIR}/llm-d-router-standalone-flag-render.yaml"
 flag_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set-string router.epp.flags.secure-serving=false > ${flag_render_output}"

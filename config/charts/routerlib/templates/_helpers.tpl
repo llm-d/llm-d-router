@@ -137,7 +137,8 @@ the EPP Service FQDN in service mode.
 */}}
 {{- define "llm-d-router.proxy.extProcHost" -}}
 {{- if eq (include "llm-d-router.proxyMode" .) "service" -}}
-{{- printf "%s.%s.svc.cluster.local" (include "llm-d-router.name" .) .Release.Namespace -}}
+{{- $domain := .Values.router.clusterDomain | default "cluster.local" -}}
+{{- printf "%s.%s.svc.%s" (include "llm-d-router.name" .) .Release.Namespace $domain -}}
 {{- else -}}
 127.0.0.1
 {{- end -}}
@@ -162,8 +163,9 @@ sidecar mode; overridable via router.proxy.failOpen.
 */}}
 {{- define "llm-d-router.proxy.failOpen" -}}
 {{- $proxy := .Values.router.proxy | default dict -}}
-{{- if hasKey $proxy "failOpen" -}}
-{{- toString $proxy.failOpen -}}
+{{- $failOpen := index $proxy "failOpen" -}}
+{{- if kindIs "bool" $failOpen -}}
+{{- $failOpen -}}
 {{- else if eq (include "llm-d-router.proxyMode" .) "service" -}}
 true
 {{- else -}}
@@ -317,12 +319,11 @@ Return the rendered proxy ConfigMap data.
     {{- $generated := dict "config.yaml" (include "llm-d-router.proxy.agentgatewayConfig" .) -}}
     {{- $data = mergeOverwrite $data $generated -}}
   {{- else if eq $proxyType "envoy" -}}
-    {{- /* Resolve the ext_proc target and fail-open directives embedded in the preset. */ -}}
-    {{- $rendered := dict -}}
-    {{- range $key, $value := $data -}}
-      {{- $_ := set $rendered $key (tpl (toString $value) $) -}}
+    {{- /* Render only the chart-owned envoy.yaml so the ext_proc target and
+           fail-open directives resolve; user-supplied keys stay literal. */ -}}
+    {{- if hasKey $data "envoy.yaml" -}}
+      {{- $_ := set $data "envoy.yaml" (tpl (toString (index $data "envoy.yaml")) $) -}}
     {{- end -}}
-    {{- $data = $rendered -}}
   {{- end -}}
 {{- end -}}
 {{- toYaml $data -}}

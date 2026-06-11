@@ -14,9 +14,13 @@ standalone validations
 */}}
 {{- define "llm-d-router.validations.standalone" -}}
 {{- $proxy := .Values.router.proxy | default dict -}}
-{{- $proxyMode := default "sidecar" ($proxy.mode | default "sidecar") | lower -}}
+{{- $proxyMode := include "llm-d-router.proxyMode" . | trim -}}
 {{- if not (or (eq $proxyMode "sidecar") (eq $proxyMode "service")) -}}
   {{- fail (printf ".Values.router.proxy.mode must be one of [sidecar, service], got %q" $proxyMode) -}}
+{{- end -}}
+{{- $failOpen := index $proxy "failOpen" -}}
+{{- if and (not (kindIs "invalid" $failOpen)) (not (kindIs "bool" $failOpen)) -}}
+  {{- fail (printf ".Values.router.proxy.failOpen must be a boolean, got %q" (toString $failOpen)) -}}
 {{- end -}}
 {{- if eq $proxyMode "service" -}}
   {{- if not $proxy.enabled -}}
