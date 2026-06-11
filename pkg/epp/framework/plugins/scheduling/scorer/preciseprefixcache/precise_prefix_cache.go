@@ -165,7 +165,7 @@ func (p *Plugin) Category() scheduling.ScorerCategory { return p.scorer.Category
 func (p *Plugin) Score(ctx context.Context,
 	req *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 ) map[scheduling.Endpoint]float64 {
-	ctx, span := tracing.Tracer("llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache").Start(ctx, "score_prefix_cache",
+	ctx, span := tracing.Tracer("llm-d-router/pkg/epp/framework/plugins/scheduling").Start(ctx, "score_prefix_cache",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

@@ -223,7 +223,7 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 func (p *Producer) Produce(ctx context.Context,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 ) error {
-	ctx, span := tracing.Tracer("llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache").Start(ctx, "produce_precise_prefix_cache",
+	ctx, span := tracing.Tracer("llm-d-router/pkg/epp/framework/plugins/requestcontrol").Start(ctx, "produce_precise_prefix_cache",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

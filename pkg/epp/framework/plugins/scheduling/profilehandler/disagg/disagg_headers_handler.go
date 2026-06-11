@@ -87,7 +87,7 @@ func (p *HeadersHandler) WithName(name string) *HeadersHandler {
 
 // PreRequest wires prefill and encode SchedulerProfile results into headers to indicate disaggregation workers.
 func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	tracer := tracing.Tracer("llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg")
+	tracer := tracing.Tracer(tracerScope)
 	_, span := tracer.Start(ctx, "prepare_disaggregation",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
