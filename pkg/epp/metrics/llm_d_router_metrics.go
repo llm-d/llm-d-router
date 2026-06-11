@@ -165,6 +165,18 @@ var (
 		},
 		modelLabelsWithFairnessPriority,
 	)
+
+	llmdInterTokenLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "streaming_inter_token_latency_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Inter-token latency in seconds for streaming requests, measured as the time between consecutive response body chunks.", compbasemetrics.ALPHA),
+			Buckets: []float64{
+				0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1, 2,
+			},
+		},
+		modelLabels,
+	)
 )
 
 // --- llm-d Inference Pool Metrics ---
