@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-render
+  labels:
+    app: vllm-render
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-render
+  template:
+    metadata:
+      labels:
+        app: vllm-render
+    spec:
+      containers:
+      - name: vllm-render
+        image: ${VLLM_RENDER_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["vllm", "launch", "render"]
+        args: ["${MODEL_NAME}", "--port=8082"]
+        env:
+        - name: HF_TOKEN
+          value: "${HF_TOKEN}"
+        ports:
+        - name: http
+          containerPort: 8082
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 2
+          periodSeconds: 1
+          failureThreshold: 600
+          timeoutSeconds: 1
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          periodSeconds: 10
+          failureThreshold: 5
+          timeoutSeconds: 1
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          periodSeconds: 5
+          failureThreshold: 1
+          timeoutSeconds: 1
+        volumeMounts:
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
+      volumes:
+      - name: model-cache
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-render
+  labels:
+    app: vllm-render
+spec:
+  selector:
+    app: vllm-render
+  ports:
+  - name: http
+    protocol: TCP
+    port: 8082
+    targetPort: 8082
+  type: ClusterIP

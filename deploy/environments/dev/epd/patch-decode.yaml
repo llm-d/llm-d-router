@@ -22,6 +22,7 @@ spec:
         - "--block-size=16"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
         - "--zmq-endpoint=tcp://${EPP_NAME}.${NAMESPACE}.svc.cluster.local:5557"
+        - "--render-url=http://vllm-render:8082"
         - "${VLLM_EXTRA_ARGS_D}"
         ports:
         - $patch: replace

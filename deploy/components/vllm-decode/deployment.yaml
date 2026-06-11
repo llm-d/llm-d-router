@@ -67,6 +67,7 @@ spec:
         - "--port=8200"
         - "--model=${MODEL_NAME}"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
+        - "--render-url=http://vllm-render:8082"
         - "${VLLM_EXTRA_ARGS_D}"
         ports:
         - name: http

@@ -187,7 +187,7 @@ plugins:
   parameters:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
-      url: http://localhost:8000
+      url: http://vllm-render:8082
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:
@@ -219,7 +219,7 @@ plugins:
   parameters:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
-      url: http://localhost:8000
+      url: http://vllm-render:8082
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:

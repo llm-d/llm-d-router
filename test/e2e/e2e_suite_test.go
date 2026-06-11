@@ -54,6 +54,8 @@ const (
 	serviceAccountManifest = "../../deploy/components/inference-gateway/service-accounts.yaml"
 	// servicesManifest is the manifest for the EPP's service resources.
 	servicesManifest = "../../deploy/environments/dev/e2e-infra/services.yaml"
+	// renderManifest is the manifest for the standalone vLLM render deployment and service.
+	renderManifest = "../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
 
 	// CI shards scheduler e2e specs with label filters.
 	extendedTestLabel      = "Extended"
@@ -95,6 +97,7 @@ var (
 	rbacObjects           []string
 	serviceAccountObjects []string
 	serviceObjects        []string
+	renderObjects         []string
 	infPoolObjects        []string
 	createdNameSpace      bool
 
@@ -133,6 +136,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
 	serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls, nsName)
 	serviceObjects = testutils.ApplyYAMLFile(testConfig, servicesManifest, nsName)
+	renderObjects = createRender(nsName)
 
 	// Prevent failure in tests due to InferencePool not existing before the test
 	infPoolObjects = createInferencePool(1, false)
@@ -190,6 +194,7 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 			nsName := getNamespace()
 			ginkgo.By("Deleting created Kubernetes objects")
 			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, renderObjects, nsName)
 			testutils.DeleteObjects(testConfig, serviceObjects, nsName)
 			testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
 			testutils.DeleteObjects(testConfig, rbacObjects, nsName)
