@@ -348,7 +348,7 @@ func setupFullPathBenchmark(ctx context.Context, b *testing.B, name string, numP
 		OrderingPolicy: oPolicy.(flowcontrol.OrderingPolicy),
 		FairnessPolicy: fPolicy.(flowcontrol.FairnessPolicy),
 	}
-	reg := setupRegistry(ctx, b, defaults, priorityLevels(numPriorities))
+	reg := setupRegistry(b, defaults, priorityLevels(numPriorities))
 
 	fc := controller.NewFlowController(ctx, name+"-bench", &controller.Config{
 		DefaultRequestTTL:        5 * time.Minute,

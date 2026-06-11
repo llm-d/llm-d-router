@@ -117,7 +117,8 @@ type FlowRegistry struct {
 	// It is updated dynamically when new bands are provisioned.
 	orderedPriorityLevels []int
 
-	// initialPriorities tracks priority bands provisioned at startup. These are never removed by control-plane sync.
+	// initialPriorities tracks priority bands provisioned at startup.
+	// These are never removed by control-plane sync or garbage collection.
 	initialPriorities map[int]struct{}
 
 	// priorityBandUpdateCh carries desired priority topology updates from the control plane to the processor loop.
@@ -504,6 +505,12 @@ func (fr *FlowRegistry) cleanupPriorityBandResources(priorities []int) {
 func (fr *FlowRegistry) cleanupPriorityBandResourcesLocked(priority int) {
 	// Zombie protection: verify band was actually deleted from the state map.
 	if _, exists := fr.priorityBandStates.Load(priority); exists {
+		return
+	}
+
+	// Bands provisioned at startup are never collected. The transient band state is already gone,
+	// leaving the band in its startup state.
+	if _, static := fr.initialPriorities[priority]; static {
 		return
 	}
 

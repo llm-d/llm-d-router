@@ -897,6 +897,35 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 		assert.True(t, lowExists, "Static low priority band should never be collected")
 	})
 
+	t.Run("ShouldNotCollectStaticBands_AfterFlowActivity", func(t *testing.T) {
+		t.Parallel()
+		h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
+		staticPriorities := []int{highPriority, 0}
+
+		// Opening a flow at a static priority creates a transient priorityBandState whose lease
+		// drops to zero once the flow idles, making the band a GC candidate.
+		for _, priority := range staticPriorities {
+			h.openConnectionOnFlow(flowcontrol.FlowKey{ID: "static-band-flow", Priority: priority})
+		}
+
+		// Collect the flows, then age the now-idle band states past the band GC timeout.
+		h.fakeClock.Step(h.config.FlowGCTimeout + time.Second)
+		h.fr.ExecuteGCCycle()
+		h.fakeClock.Step(h.config.PriorityBandGCTimeout + time.Second)
+		h.fr.ExecuteGCCycle()
+
+		for _, priority := range staticPriorities {
+			h.fr.mu.RLock()
+			_, exists := h.fr.config.PriorityBands[priority]
+			h.fr.mu.RUnlock()
+			assert.True(t, exists, "Static band %d should survive GC after its flows are collected", priority)
+
+			key := flowcontrol.FlowKey{ID: "follow-up-flow", Priority: priority}
+			err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error { return nil })
+			assert.NoError(t, err, "Request at static priority %d should succeed after GC", priority)
+		}
+	})
+
 	t.Run("ShouldCollectMultipleBands_InOneCycle", func(t *testing.T) {
 		t.Parallel()
 		h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
