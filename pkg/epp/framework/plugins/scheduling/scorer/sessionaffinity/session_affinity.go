@@ -23,7 +23,7 @@ const (
 
 // compile-time type assertion
 var _ scheduling.Scorer = &SessionAffinity{}
-var _ requestcontrol.ResponseBodyProcessor = &SessionAffinity{}
+var _ requestcontrol.ResponseHeaderProcessor = &SessionAffinity{}
 
 // Factory defines the factory function for SessionAffinity scorer.
 func Factory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
@@ -85,20 +85,17 @@ func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.Inferen
 	return scoredEndpoints
 }
 
-// ResponseBody sets the session header on the response sent to the client
+// ResponseHeader sets the session header on the response sent to the client.
 // TODO: this should be using a cookie and ensure not overriding any other
 // cookie values if present.
 // Tracked in https://github.com/llm-d/llm-d-router/issues/28
-func (s *SessionAffinity) ResponseBody(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	if !response.EndOfStream {
-		return
-	}
+func (s *SessionAffinity) ResponseHeader(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
 	if response == nil || targetPod == nil {
 		reqID := "undefined"
 		if response != nil {
 			reqID = response.RequestID
 		}
-		log.FromContext(ctx).V(logutil.DEBUG).Info("Session affinity scorer - skip post response because one of response, targetPod is nil", "req id", reqID)
+		log.FromContext(ctx).V(logutil.DEBUG).Info("Session affinity scorer - skip response header because response or targetPod is nil", "req id", reqID)
 		return
 	}
 
