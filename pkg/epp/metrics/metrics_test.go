@@ -1324,28 +1324,28 @@ func TestRecordInterTokenLatency(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 
 	t.Run("valid observations", func(t *testing.T) {
-		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", 0.05))
-		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", 0.08))
-		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", 0.12))
-		require.True(t, RecordInterTokenLatency(ctx, "m20", "t20", 0.03))
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0.05))
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0.08))
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0.12))
+		require.True(t, RecordInterTokenLatency(ctx, "m20", "t20", "tenant-b", "5", 0.03))
 
-		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10")
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3")
 		require.NoError(t, err)
 		require.Equal(t, uint64(3), h.GetSampleCount())
 		require.InDelta(t, 0.25, h.GetSampleSum(), 0.001)
 
-		h, err = getHistogramVecLabelValues(t, llmdInterTokenLatency, "m20", "t20")
+		h, err = getHistogramVecLabelValues(t, llmdInterTokenLatency, "m20", "t20", "tenant-b", "5")
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), h.GetSampleCount())
 		require.InDelta(t, 0.03, h.GetSampleSum(), 0.001)
 	})
 
 	t.Run("zero latency accepted", func(t *testing.T) {
-		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", 0))
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0))
 	})
 
 	t.Run("negative latency rejected", func(t *testing.T) {
-		require.False(t, RecordInterTokenLatency(ctx, "m10", "t10", -0.01))
+		require.False(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", -0.01))
 	})
 }
 
