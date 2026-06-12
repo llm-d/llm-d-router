@@ -937,10 +937,16 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 	// MoRI-IO Wide-EP DP-rank pinning and multi-pod fan-out coverage for the
 	// 1P1D DP=8 and 2P2D DP=16 topologies, plus the flags-off legacy path.
+	//
+	// NOTE: When MoRIIOFeatureEnabled is false (dormant), these tests are skipped
+	// because the feature cannot be enabled. Only the flags-off legacy test runs.
 
 	// 1P1D DP=8, concurrent dispatch: both legs pinned to one DP rank, decode
 	// flips do_remote_prefill, remote_dp_size carries the DP world size.
 	It("parallel-dispatch 1P1D DP=8 pins both legs to one DP rank and emits remote_dp_size", func() {
+		if !MoRIIOFeatureEnabled {
+			Skip("MoRI-IO feature is dormant (MoRIIOFeatureEnabled=false)")
+		}
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIOParallelDispatch = true
 			c.MoRIIODPSize = 8
@@ -982,6 +988,9 @@ var _ = Describe("NIXL Connector (v2)", func() {
 	// 2P2D DP=16 multi-pod fan-out: each leg's remote_hosts is the opposite
 	// side's pod IPs (prefill leg -> decode IPs, decode leg -> prefill IPs).
 	It("parallel-dispatch 2P2D DP=EP=16 fans out remote_hosts with opposite host lists per leg", func() {
+		if !MoRIIOFeatureEnabled {
+			Skip("MoRI-IO feature is dormant (MoRIIOFeatureEnabled=false)")
+		}
 		prefillHosts := []string{"10.0.0.1", "10.0.0.2"}
 		decodeHosts := []string{"10.0.1.1", "10.0.1.2"}
 		env := startMoRIProxy(func(c *Config) {
@@ -1018,6 +1027,9 @@ var _ = Describe("NIXL Connector (v2)", func() {
 	// 1P1D DP=8, serial dispatch: the prefill leg sets the DP-rank header and
 	// the decode leg's kv_transfer_params are backfilled with the same rank.
 	It("serial WRITE-mode DP=8 pins prefill and decode HTTP legs to the same DP rank", func() {
+		if !MoRIIOFeatureEnabled {
+			Skip("MoRI-IO feature is dormant (MoRIIOFeatureEnabled=false)")
+		}
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIODPSize = 8 // ParallelDispatch stays false -> strictly-serial path
 		})
@@ -1151,7 +1163,7 @@ func (env *moriProxyEnv) send() {
 }
 
 // kvParams returns the kv_transfer_params map of the i-th request captured by h.
-func kvParams(h *mock.ChatCompletionHandler, i int) map[string]any {
+func kvParams(h *mock.ChatCompletionHandler, i int) map[string]any { //nolint:unparam // i kept for future multi-request tests
 	reqs := h.GetCompletionRequests()
 	ExpectWithOffset(1, len(reqs)).To(BeNumerically(">", i))
 	kv, ok := reqs[i][requestFieldKVTransferParams].(map[string]any)
@@ -1161,7 +1173,7 @@ func kvParams(h *mock.ChatCompletionHandler, i int) map[string]any {
 
 // dpRankHeader returns the X-Data-Parallel-Rank header of the i-th request
 // captured by h (empty string when unset).
-func dpRankHeader(h *mock.ChatCompletionHandler, i int) string {
+func dpRankHeader(h *mock.ChatCompletionHandler, i int) string { //nolint:unparam // i kept for future multi-request tests
 	hdrs := h.GetCompletionHeaders()
 	ExpectWithOffset(1, len(hdrs)).To(BeNumerically(">", i))
 	return hdrs[i].Get(requestHeaderDataParallelRank)

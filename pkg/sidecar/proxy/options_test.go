@@ -878,6 +878,20 @@ func TestCompleteWideEPValidation(t *testing.T) {
 // preconditions added by the WRITE-mode sidecar commit: WRITE mode needs a
 // routable decode pod IP, and concurrent dispatch is WRITE-mode-only.
 func TestCompleteMoRIIOWriteModeGuards(t *testing.T) {
+	// When MoRIIOFeatureEnabled is false (dormant), all MoRI-IO flags should
+	// be rejected with the dormant feature message.
+	if !MoRIIOFeatureEnabled {
+		t.Run("dormant feature rejects write-mode", func(t *testing.T) {
+			opts := NewOptions()
+			opts.MoRIIOWriteMode = true
+			opts.MoRIIODecodePodIP = "10.0.1.1"
+			err := opts.Complete()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "not yet enabled")
+		})
+		t.Skip("MoRI-IO feature is dormant; skipping enabled-mode tests")
+	}
+
 	t.Run("write-mode without pod IP errors", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true

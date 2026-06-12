@@ -165,10 +165,10 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 					return
 				}
 				if s, isStr := v.(string); !isStr || s == "" {
-					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte("expected remote_host to be a non-empty string in WRITE mode")) //nolint:all
-					return
-				}
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte("expected remote_host to be a non-empty string in WRITE mode")) //nolint:all
+				return
+			}
 			if v, ok := kvTransferParamsMap["remote_notify_port"]; !ok {
 				w.WriteHeader(http.StatusBadRequest)
 				w.Write([]byte("expected remote_notify_port:<int> in WRITE mode")) //nolint:all

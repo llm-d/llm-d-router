@@ -39,6 +39,18 @@ import (
 )
 
 const (
+	// MoRIIOFeatureEnabled controls whether MoRI-IO WRITE-mode and Wide-EP
+	// features are available. Set to false to keep the feature dormant until
+	// full validation and CI integration is complete in a future RC.
+	//
+	// When false, any attempt to use --moriio-write-mode or related flags will
+	// fail with a clear error message directing users to wait for the feature
+	// to be officially released.
+	//
+	// TODO(AMD-MoRI-IO): Set to true once CI tests and production validation
+	// are complete in a future release candidate.
+	MoRIIOFeatureEnabled = false
+
 	// Flags
 	port                      = "port"
 	vllmPort                  = "vllm-port"
@@ -382,6 +394,17 @@ func (opts *Options) Complete() error {
 	opts.DecoderURL, err = url.Parse(scheme + "://localhost:" + opts.vllmPort)
 	if err != nil {
 		return fmt.Errorf("failed to parse target URL: %w", err)
+	}
+
+	// MoRI-IO feature gate: when MoRIIOFeatureEnabled is false, reject any
+	// attempt to use MoRI-IO flags. This keeps the feature dormant until full
+	// CI and production validation is complete.
+	if !MoRIIOFeatureEnabled && opts.MoRIIOWriteMode {
+		return errors.New(
+			"MoRI-IO WRITE-mode and Wide-EP features are not yet enabled in this release. " +
+				"The --moriio-* flags are reserved for a future release candidate. " +
+				"Please remove --moriio-write-mode and related flags, or wait for the " +
+				"official feature release. See pkg/sidecar/proxy/MORIIO_README.md for details")
 	}
 
 	// WRITE mode without a routable decode pod IP makes prefill handshake with
