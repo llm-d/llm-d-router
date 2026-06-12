@@ -239,7 +239,7 @@ func (p *Producer) Produce(ctx context.Context,
 		}
 	}
 
-	perPromptKeys, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, p.blockSizeTokens)
+	perPromptKeys, mmBlockIndices, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, p.blockSizeTokens)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("failed to compute block keys: %w", err)
@@ -249,12 +249,12 @@ func (p *Producer) Produce(ctx context.Context,
 		return nil
 	}
 
-	return p.produceFromBlockKeys(ctx, span, request, endpoints, perPromptKeys)
+	return p.produceFromBlockKeys(ctx, span, request, endpoints, perPromptKeys, mmBlockIndices)
 }
 
 func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
-	perPromptKeys [][]kvblock.BlockHash,
+	perPromptKeys [][]kvblock.BlockHash, mmBlockIndices []int,
 ) error {
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	endpointSet := extractEndpointSet(endpoints)
@@ -300,8 +300,12 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		for _, lu := range lookups {
 			cachedBlocks += matchedBlockCount(lu.keys, lu.keyToPods, addr)
 		}
+		// mmBlockIndices is nil for multi-prompt; mmMatch=0 in that case.
+		mmMatch := countMMMatchedBlocks(mmBlockIndices, cachedBlocks)
 		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).WithCachedBlockCount(cachedBlocks))
+			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
+				WithCachedBlockCount(cachedBlocks).
+				WithMM(attrprefix.MMMatchInfo{MatchBlocks: mmMatch}))
 	}
 
 	if p.speculativeEnabled {

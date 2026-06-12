@@ -17,6 +17,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
@@ -179,6 +180,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 		if request.RequestID != "" {
 			span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
 		}
+		span.SetAttributes(mmobs.SpanAttributes(request)...)
 	}
 
 	if _, executed := profileResults[h.decodeProfile]; !executed {
