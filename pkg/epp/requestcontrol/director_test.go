@@ -1328,8 +1328,8 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 }
 
 // TestDirector_HandleResponseHeader_SessionAffinity validates that the
-// session-affinity scorer and filter, wired into the director as
-// response-received plugins, set the session token header on the response.
+// session-affinity scorer and filter, registered as response-received plugins,
+// set the session token header when the director runs the response-header hook.
 func TestDirector_HandleResponseHeader_SessionAffinity(t *testing.T) {
 	targetPod := &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}}
 	wantToken := base64.StdEncoding.EncodeToString([]byte(targetPod.NamespacedName.String()))
