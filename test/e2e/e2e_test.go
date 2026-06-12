@@ -761,6 +761,34 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			testutils.DeleteObjects(testConfig, epp)
 			testutils.DeleteObjects(testConfig, modelServers)
 		})
+
+		// Estimate token-producer: encoder-cache metrics must be labelled per
+		// modality, not folded into "image" (#1617). Depends on the fix in #1618.
+		ginkgo.It("should label per-modality metrics with the estimate token-producer", func() {
+			infPoolObjects = createInferencePool(1, true)
+
+			decodeReplicas := 2
+			modelServers := createModelServersDecode(decodeReplicas)
+			epp := createEndPointPicker(mmCacheAffinityEstimateConfig)
+
+			_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
+
+			// One request per modality so each is recorded by the producer.
+			runChatCompletionWithImages(testImageURL)
+			runChatCompletionWithAudio()
+			runChatCompletionWithVideo()
+
+			for _, modality := range []string{"image", "audio", "video"} {
+				gomega.Eventually(func() float64 {
+					return getMetricValue("llm_d_router_epp_encoder_cache_queries_total",
+						map[string]string{"modality": modality})
+				}, 5*time.Second, 250*time.Millisecond).Should(gomega.BeNumerically(">=", 1), "modality=%s", modality)
+			}
+
+			testutils.DeleteObjects(testConfig, epp)
+			testutils.DeleteObjects(testConfig, modelServers)
+		})
 	})
 
 	ginkgo.When("Running simple non-PD KV enabled configuration", ginkgo.Label(extendedTestLabel), func() {

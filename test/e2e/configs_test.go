@@ -269,6 +269,30 @@ schedulingProfiles:
   - pluginRef: max-score-picker
 `
 
+// Same as mmCacheAffinityConfig but the token-producer uses the estimate
+// backend, which derives mm_features in-EPP and never calls the render endpoint.
+const mmCacheAffinityEstimateConfig = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: token-producer
+  parameters:
+    estimate: {}
+- type: mm-embeddings-cache-producer
+  parameters:
+    cacheSizeInMBPerServer: 64
+- type: mm-embeddings-cache-scorer
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: mm-embeddings-cache-scorer
+    weight: 10
+  - pluginRef: max-score-picker
+`
+
 // EPP configuration for running scale model server test
 const scaleConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
