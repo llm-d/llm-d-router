@@ -326,6 +326,11 @@ func (opts *Options) Complete() error {
 // Validate checks the Options for invalid or conflicting values.
 // Complete must be called before Validate.
 func (opts *Options) Validate() error {
+	// Validate data parallel size
+	if opts.DataParallelSize < 1 {
+		return fmt.Errorf("--data-parallel-size must be a positive integer, got %d", opts.DataParallelSize)
+	}
+
 	// Validate KV connector
 	if _, ok := supportedKVConnectors[opts.KVConnector]; !ok {
 		return fmt.Errorf("--kv-connector must be one of: %s", supportedKVConnectorNamesStr)

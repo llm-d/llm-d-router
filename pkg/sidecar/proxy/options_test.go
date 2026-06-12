@@ -657,6 +657,31 @@ func TestValidateSSRFProtection(t *testing.T) {
 	}
 }
 
+func TestValidateDataParallelSize(t *testing.T) {
+	tests := []struct {
+		name             string
+		dataParallelSize int
+		wantErr          bool
+	}{
+		{"default valid", 1, false},
+		{"positive valid", 2, false},
+		{"zero invalid", 0, true},
+		{"negative invalid", -5, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.DataParallelSize = tt.dataParallelSize
+			_ = opts.Complete()
+			err := opts.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCompleteInferencePoolParsing(t *testing.T) {
 	tests := []struct {
 		name              string
