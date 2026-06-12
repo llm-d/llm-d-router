@@ -429,13 +429,9 @@ func (opts *Options) Complete() error {
 		opts.MoRIIODPSize, opts.MoRIIODPSizeLocal); err != nil {
 		return err
 	}
-	if err := validateWideEPHosts(
+	return validateWideEPHosts(
 		"--moriio-decode-hosts", opts.MoRIIODecodeHosts,
-		opts.MoRIIODPSize, opts.MoRIIODPSizeLocal); err != nil {
-		return err
-	}
-
-	return nil
+		opts.MoRIIODPSize, opts.MoRIIODPSizeLocal)
 }
 
 // hasMoRIIOFlagsSet returns true if any --moriio-* flag is set to a non-default

@@ -165,28 +165,28 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 					return
 				}
 				if s, isStr := v.(string); !isStr || s == "" {
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_host to be a non-empty string in WRITE mode")) //nolint:all
-				return
-			}
-			if v, ok := kvTransferParamsMap["remote_notify_port"]; !ok {
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_notify_port:<int> in WRITE mode")) //nolint:all
-				return
-			} else if _, isNum := v.(float64); !isNum {
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_notify_port to be a number in WRITE mode")) //nolint:all
-				return
-			}
-			if v, ok := kvTransferParamsMap["transfer_id"]; !ok {
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected transfer_id:<uuid> in WRITE mode")) //nolint:all
-				return
-			} else if s, isStr := v.(string); !isStr || s == "" {
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected transfer_id to be a non-empty string in WRITE mode")) //nolint:all
-				return
-			}
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected remote_host to be a non-empty string in WRITE mode")) //nolint:all
+					return
+				}
+				if v, ok := kvTransferParamsMap["remote_notify_port"]; !ok {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected remote_notify_port:<int> in WRITE mode")) //nolint:all
+					return
+				} else if _, isNum := v.(float64); !isNum {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected remote_notify_port to be a number in WRITE mode")) //nolint:all
+					return
+				}
+				if v, ok := kvTransferParamsMap["transfer_id"]; !ok {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected transfer_id:<uuid> in WRITE mode")) //nolint:all
+					return
+				} else if s, isStr := v.(string); !isStr || s == "" {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected transfer_id to be a non-empty string in WRITE mode")) //nolint:all
+					return
+				}
 			} else {
 				if v, ok := kvTransferParamsMap["remote_host"]; !ok || v != nil {
 					w.WriteHeader(http.StatusBadRequest)
