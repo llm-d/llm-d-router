@@ -814,6 +814,11 @@ func TestValidateWideEPHosts(t *testing.T) {
 // Options.Complete() to confirm BOTH host-list legs are checked and a valid
 // 2P2D config passes end-to-end.
 func TestCompleteWideEPValidation(t *testing.T) {
+	// Skip when MoRI-IO feature is dormant since all test cases set MoRI-IO
+	// flags that will be rejected by the dormant feature gate.
+	if !MoRIIOFeatureEnabled {
+		t.Skip("MoRI-IO feature is dormant; skipping Wide-EP validation tests")
+	}
 	tests := []struct {
 		name        string
 		remoteHosts []string
