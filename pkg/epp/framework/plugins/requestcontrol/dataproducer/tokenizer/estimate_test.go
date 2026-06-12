@@ -134,6 +134,30 @@ func TestEstimateBackend_ChatImageFeature(t *testing.T) {
 	}
 }
 
+func TestEstimateBackend_ChatModalityLabels(t *testing.T) {
+	chat := func(block fwkrh.ContentBlock) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{block}}}},
+		}}
+	}
+	for _, tc := range []struct {
+		name  string
+		block fwkrh.ContentBlock
+		want  fwkrh.Modality
+	}{
+		{"image", fwkrh.ContentBlock{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/a.png"}}, fwkrh.ModalityImage},
+		{"audio", fwkrh.ContentBlock{Type: "input_audio", InputAudio: fwkrh.AudioBlock{Data: "AAAA", Format: "wav"}}, fwkrh.ModalityAudio},
+		{"video", fwkrh.ContentBlock{Type: "video_url", VideoURL: fwkrh.VideoBlock{URL: "https://example.com/clip.mp4"}}, fwkrh.ModalityVideo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp, err := estimateBackend{}.produce(context.Background(), chat(tc.block))
+			require.NoError(t, err)
+			require.Len(t, tp.MultiModalFeatures, 1)
+			require.Equal(t, tc.want, tp.MultiModalFeatures[0].Modality)
+		})
+	}
+}
+
 // TestEstimateBackend_ChatImageWeightingDistinct asserts two images with
 // different placeholder counts produce different token streams, so image
 // weighting affects locality keys.
