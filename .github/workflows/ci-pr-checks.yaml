@@ -113,6 +113,16 @@ jobs:
           GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make test-unit
 
+      # Anti-rot: execute the benchmark bodies once so runtime breakage (panics,
+      # deadlocks) is caught. `go test` only compiles benchmarks; it never runs
+      # them without -bench.
+      - name: Run benchmark smoke
+        shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
+        run: make bench-smoke
+
       - name: Run hermetic integration tests
         shell: bash
         env:
