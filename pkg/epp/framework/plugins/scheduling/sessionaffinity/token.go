@@ -1,0 +1,67 @@
+// Package sessiontoken provides the session token header helpers shared by the
+// session-affinity scorer and filter plugins.
+package sessiontoken
+
+import (
+	"context"
+	"encoding/base64"
+	"strings"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+)
+
+// DefaultHeader is the default request/response header carrying the session
+// token.
+const DefaultHeader = "x-session-token"
+
+// NormalizeHeader lowercases and trims the configured session header name,
+// falling back to DefaultHeader when empty. Request headers are lowercased at
+// ingestion, so the configured name must be lowercased to match.
+func NormalizeHeader(name string) string {
+	header := strings.ToLower(strings.TrimSpace(name))
+	if header == "" {
+		return DefaultHeader
+	}
+	return header
+}
+
+// DecodePodName decodes a base64-encoded session token into a pod
+// NamespacedName string. It returns "" when the token is empty or cannot be
+// decoded.
+func DecodePodName(ctx context.Context, token string) string {
+	if token == "" {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(token)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "Error decoding session header")
+		return ""
+	}
+	return string(decoded)
+}
+
+// WriteResponseHeader encodes targetPod into sessionHeader on the response sent
+// to the client; pluginType labels the originating plugin in logs.
+// TODO: this should be using a cookie and ensure not overriding any other
+// cookie values if present.
+// Tracked in https://github.com/llm-d/llm-d-router/issues/28
+func WriteResponseHeader(ctx context.Context, pluginType, sessionHeader string, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
+	if response == nil || targetPod == nil {
+		reqID := "undefined"
+		if response != nil {
+			reqID = response.RequestID
+		}
+		log.FromContext(ctx).V(logutil.DEBUG).Info("Session affinity - skip response header because response or targetPod is nil", "plugin", pluginType, "req id", reqID)
+		return
+	}
+
+	if response.Headers == nil { // TODO should always be populated?
+		response.Headers = make(map[string]string)
+	}
+
+	response.Headers[sessionHeader] = base64.StdEncoding.EncodeToString([]byte(targetPod.NamespacedName.String()))
+}

@@ -9,7 +9,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	sessionscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
+	sessiontoken "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/sessionaffinity"
 )
 
 const (
@@ -45,7 +45,7 @@ func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.
 func NewSessionAffinity(sessionHeader string) *SessionAffinity {
 	return &SessionAffinity{
 		typedName:     plugin.TypedName{Type: SessionAffinityType},
-		sessionHeader: sessionscorer.NormalizeHeader(sessionHeader),
+		sessionHeader: sessiontoken.NormalizeHeader(sessionHeader),
 	}
 }
 
@@ -74,7 +74,7 @@ func (s *SessionAffinity) WithName(name string) *SessionAffinity {
 // Filter returns the endpoint running the session when it is among the
 // candidates, otherwise all candidate endpoints.
 func (s *SessionAffinity) Filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
-	podName := sessionscorer.DecodePodName(ctx, request.Headers[s.sessionHeader])
+	podName := sessiontoken.DecodePodName(ctx, request.Headers[s.sessionHeader])
 	if podName == "" {
 		return endpoints
 	}
@@ -90,5 +90,5 @@ func (s *SessionAffinity) Filter(ctx context.Context, request *scheduling.Infere
 
 // ResponseHeader sets the session header on the response sent to the client.
 func (s *SessionAffinity) ResponseHeader(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	sessionscorer.WriteSessionResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, targetPod)
+	sessiontoken.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, targetPod)
 }
