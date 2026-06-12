@@ -43,7 +43,7 @@ func newUDSTokenizer(ctx context.Context, cfg *tokenization.UdsTokenizerConfig, 
 	return &udsTokenizerAdapter{t: uds}, nil
 }
 
-func (a *udsTokenizerAdapter) Render(_ context.Context, payload fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error) {
+func (a *udsTokenizerAdapter) Render(_ context.Context, payload fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
 	pm, ok := payload.AsMap()
 	if !ok {
 		return nil, nil, errors.New("UDS tokenizer requires a parsed PayloadMap")
@@ -52,7 +52,11 @@ func (a *udsTokenizerAdapter) Render(_ context.Context, payload fwkrh.RequestPay
 	if !ok {
 		return nil, nil, errors.New("UDS tokenizer requires string prompt")
 	}
-	return a.t.Render(prompt)
+	tokenIDs, offsets, err := a.t.Render(prompt)
+	if err != nil {
+		return nil, nil, err
+	}
+	return [][]uint32{tokenIDs}, offsets, nil
 }
 
 func (a *udsTokenizerAdapter) RenderChat(_ context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {

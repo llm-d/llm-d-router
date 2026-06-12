@@ -188,9 +188,9 @@ func CacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
 // completionsPayload builds the appropriate payload shape (single string or
 // string array), and the renderer returns the tokenized result.
 func (b renderBackend) renderCompletions(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
-	tokenIDs, _, err := b.tk.Render(ctx, completionsPayload(body))
+	allTokenIDs, _, err := b.tk.Render(ctx, completionsPayload(body))
 	if err != nil {
 		return nil, fmt.Errorf("tokenization failed: %w", err)
 	}
-	return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokenIDs}}, nil
+	return &fwkrh.TokenizedPrompt{PerPromptTokens: allTokenIDs}, nil
 }

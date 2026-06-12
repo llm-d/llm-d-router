@@ -123,7 +123,7 @@ func parseHTTPDuration(s string, def time.Duration) (time.Duration, error) {
 // Render calls /v1/completions/render. The PayloadMap is forwarded verbatim
 // (preserving backend-specific fields such as reasoning) with the configured
 // model name stamped in. Char offsets are not returned by vLLM's render endpoint.
-func (r *vllmHTTPRenderer) Render(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error) {
+func (r *vllmHTTPRenderer) Render(ctx context.Context, payload fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
 	pm, ok := payload.AsMap()
 	if !ok {
 		return nil, nil, errors.New("vLLM HTTP tokenizer requires a parsed PayloadMap")
@@ -134,7 +134,7 @@ func (r *vllmHTTPRenderer) Render(ctx context.Context, payload fwkrh.RequestPayl
 	return r.postCompletionsRender(ctx, body)
 }
 
-func (r *vllmHTTPRenderer) postCompletionsRender(ctx context.Context, body any) ([]uint32, []tokenizerTypes.Offset, error) {
+func (r *vllmHTTPRenderer) postCompletionsRender(ctx context.Context, body any) ([][]uint32, []tokenizerTypes.Offset, error) {
 	var resp []renderResponse
 	if err := r.postJSON(ctx, completionsRenderPath, body, r.timeout, &resp); err != nil {
 		return nil, nil, err
@@ -142,7 +142,11 @@ func (r *vllmHTTPRenderer) postCompletionsRender(ctx context.Context, body any) 
 	if len(resp) == 0 {
 		return nil, nil, errors.New("vLLM render returned empty response")
 	}
-	return resp[0].TokenIDs, nil, nil
+	allTokenIDs := make([][]uint32, len(resp))
+	for i, r := range resp {
+		allTokenIDs[i] = r.TokenIDs
+	}
+	return allTokenIDs, nil, nil
 }
 
 // RenderChat calls /v1/chat/completions/render. The PayloadMap is forwarded
