@@ -287,7 +287,7 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 	inputTokenCount := 0
 	if request.Body != nil {
 		if tp := request.Body.TokenizedPrompt; tp != nil {
-			inputTokenCount = len(tp.TokenIDs)
+			inputTokenCount = tp.TokenCount()
 		}
 	}
 	return &predictedLatencyCtx{

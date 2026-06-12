@@ -30,7 +30,9 @@ const (
 
 var (
 	// llmdEndpointLabels replaces the deprecated endpointLabels that used "pod_name".
-	llmdEndpointLabels = []string{"endpoint_name", "namespace", "port"}
+	llmdEndpointLabels                       = []string{"endpoint_name", "namespace", "port"}
+	modelLabelsWithFairnessPriority          = append(append([]string{}, modelLabels...), "fairness_id", "priority")
+	modelLabelsWithFairnessPriorityStreaming = append(append([]string{}, modelLabelsWithFairnessPriority...), "streaming")
 )
 
 // --- llm-d Inference Objective Metrics ---
@@ -135,7 +137,7 @@ var (
 				0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
 			},
 		},
-		modelLabels,
+		modelLabelsWithFairnessPriority,
 	)
 
 	llmdRequestTTFT = prometheus.NewHistogramVec(
@@ -148,7 +150,7 @@ var (
 				8, 10, 15, 20, 30, 45, 60, 120,
 			},
 		},
-		append(append([]string{}, modelLabels...), "fairness_id", "priority", "streaming"),
+		modelLabelsWithFairnessPriorityStreaming,
 	)
 
 	llmdRequestTPOT = prometheus.NewHistogramVec(
@@ -161,7 +163,7 @@ var (
 				0.3, 0.4, 0.5, 0.6, 0.8, 1, 2,
 			},
 		},
-		append(append([]string{}, modelLabels...), "fairness_id", "priority"),
+		modelLabelsWithFairnessPriority,
 	)
 )
 

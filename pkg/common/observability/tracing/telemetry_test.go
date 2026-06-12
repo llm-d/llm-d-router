@@ -52,7 +52,7 @@ func TestTracer(t *testing.T) {
 		wantScope string
 	}{
 		{name: "default scope", scope: nil, wantScope: instrumentationName},
-		{name: "custom scope", scope: []string{"llm-d-router/epp/extproc"}, wantScope: "llm-d-router/epp/extproc"},
+		{name: "custom scope", scope: []string{"llm-d-router/pkg/epp/handlers"}, wantScope: "llm-d-router/pkg/epp/handlers"},
 		{name: "empty scope falls back to default", scope: []string{""}, wantScope: instrumentationName},
 	}
 

@@ -220,7 +220,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 	ctx := srv.Context()
 
 	// Start tracing span for the request
-	tracer := tracing.Tracer("llm-d-router/epp/extproc")
+	tracer := tracing.Tracer("llm-d-router/pkg/epp/handlers")
 	// The server span is started in the RequestHeaders branch, once the upstream
 	// trace context carried in the incoming headers is available, so the EPP span
 	// joins the caller's trace instead of starting a disconnected root.

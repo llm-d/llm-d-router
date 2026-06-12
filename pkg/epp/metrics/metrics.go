@@ -602,7 +602,7 @@ func RecordPromptCachedTokens(modelName, targetModelName string, size int) {
 }
 
 // RecordNormalizedTimePerOutputToken (NTPOT) records the normalized time per output token.
-func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetModelName string, received time.Time, complete time.Time, outputTokenCount int) bool {
+func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, complete time.Time, outputTokenCount int) bool {
 	if outputTokenCount <= 0 {
 		return false
 	}
@@ -617,7 +617,7 @@ func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetMo
 	secondsPerToken := elapsedSeconds / float64(outputTokenCount)
 
 	normalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName).Observe(secondsPerToken)
-	llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName).Observe(secondsPerToken)
+	llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(secondsPerToken)
 	return true
 }
 
@@ -631,11 +631,12 @@ func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairness
 			"modelName", modelName, "targetModelName", targetModelName, "firstTokenTime", firstToken, "receivedTime", received)
 		return false
 	}
-	ttftSeconds := firstToken.Sub(received).Seconds()
+
 	streamingLabel := "false"
 	if streaming {
 		streamingLabel = "true"
 	}
+	ttftSeconds := firstToken.Sub(received).Seconds()
 	llmdRequestTTFT.WithLabelValues(modelName, targetModelName, fairnessID, priority, streamingLabel).Observe(ttftSeconds)
 	return true
 }
@@ -651,6 +652,7 @@ func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairness
 			"receivedTime", received, "firstTokenTime", firstToken, "completeTime", complete)
 		return false
 	}
+
 	e2eSeconds := complete.Sub(received).Seconds()
 	ttftSeconds := firstToken.Sub(received).Seconds()
 	tpotSeconds := (e2eSeconds - ttftSeconds) / float64(outputTokenCount-1)

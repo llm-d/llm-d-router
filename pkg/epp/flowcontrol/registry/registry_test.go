@@ -116,7 +116,10 @@ func (h *registryTestHarness) openConnectionOnFlow(key flowcontrol.FlowKey) {
 	_, exists := h.fr.config.PriorityBands[key.Priority]
 	h.fr.mu.RUnlock()
 	if !exists {
-		h.fr.ApplyDesiredPriorities(map[int]struct{}{key.Priority: {}})
+		// Provision the band without asserting it into the desired set, so GC tests exercise
+		// collection of idle, undesired bands. Tests that need a band protected from GC mark it
+		// desired explicitly via ApplyDesiredPriorities.
+		require.NoError(h.t, h.fr.ensurePriorityBand(key.Priority), "Provisioning band for flow %s should not fail", key)
 	}
 	err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error { return nil })
 	require.NoError(h.t, err, "Registering flow %s should not fail", key)
@@ -924,6 +927,40 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 			err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error { return nil })
 			assert.NoError(t, err, "Request at static priority %d should succeed after GC", priority)
 		}
+	})
+
+	t.Run("ShouldNotCollectControlPlaneDesiredBand_AfterInactivity", func(t *testing.T) {
+		t.Parallel()
+		h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
+
+		// A dynamically provisioned band (one the control plane desires but that is not in the static
+		// EPP config) must survive GC for as long as it stays desired — even after inactivity has
+		// collected all of its flows and left the band idle. Reaping an idle-but-desired band makes
+		// every request at that priority fail until the next reconcile re-provisions it. Regression: #1354.
+		const desiredPrio = -1
+		h.fr.ApplyDesiredPriorities(map[int]struct{}{desiredPrio: {}})
+
+		// A request arrives, creating then releasing a flow at the desired priority.
+		key := flowcontrol.FlowKey{ID: "batch-A", Priority: desiredPrio}
+		h.openConnectionOnFlow(key)
+
+		// Inactivity: the flow idles and is collected, dropping the band's lease to zero and
+		// making it a GC candidate, despite the control plane still desiring it.
+		h.fakeClock.Step(h.config.FlowGCTimeout + time.Second)
+		h.fr.ExecuteGCCycle()
+		h.fakeClock.Step(h.config.PriorityBandGCTimeout + time.Second)
+		h.fr.ExecuteGCCycle()
+
+		h.fr.mu.RLock()
+		_, exists := h.fr.config.PriorityBands[desiredPrio]
+		h.fr.mu.RUnlock()
+		require.True(t, exists,
+			"Control-plane-desired band %d must survive GC after inactivity", desiredPrio)
+
+		// A follow-up request to the still-desired band must not be rejected with ErrPriorityBandNotFound.
+		err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error { return nil })
+		require.NoError(t, err,
+			"Request to a still-desired band must succeed after inactivity")
 	})
 
 	t.Run("ShouldCollectMultipleBands_InOneCycle", func(t *testing.T) {

@@ -51,6 +51,11 @@ type ChatCompletionHandler struct {
 	CompletionHeaders   []http.Header
 	CompletionResponses []map[string]any
 	mu                  sync.Mutex
+
+	// FailForFirstN makes the handler return FailStatusCode for
+	// the first N requests, then proceed normally. 0 means never fail.
+	FailForFirstN  int32
+	FailStatusCode int
 }
 
 // GetCompletionRequests returns a snapshot of the received requests, safe for concurrent access.
@@ -68,7 +73,16 @@ func (cc *ChatCompletionHandler) GetCompletionHeaders() []http.Header {
 }
 
 func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	cc.RequestCount.Add(1)
+	count := cc.RequestCount.Add(1)
+
+	if cc.FailForFirstN > 0 && count <= cc.FailForFirstN {
+		code := cc.FailStatusCode
+		if code == 0 {
+			code = http.StatusBadGateway
+		}
+		w.WriteHeader(code)
+		return
+	}
 
 	defer r.Body.Close() //nolint:all
 	b, err := io.ReadAll(r.Body)

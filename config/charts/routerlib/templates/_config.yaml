@@ -8,13 +8,13 @@ data:
   default-plugins.yaml: |
     {{- $modelServerProtocol := .Values.router.modelServers.protocol | default "http" }}
     {{- $modelServerType := .Values.router.modelServers.type | default "vllm" }}
-    {{- $parserType := "" }}
+    {{- $parsers := list }}
     {{- if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
-      {{- $parserType = "vllmgrpc-parser" }}
-    {{- else if .Values.router.epp.parser }}
-      {{- $parserType = .Values.router.epp.parser }}
+      {{- $parsers = append $parsers "vllmgrpc-parser" }}
+    {{- else if .Values.router.epp.parsers }}
+      {{- $parsers = .Values.router.epp.parsers }}
     {{- else if eq (lower $modelServerType) "triton" }}
-      {{- $parserType = "passthrough-parser" }}
+      {{- $parsers = append $parsers "passthrough-parser" }}
     {{- end }}
     apiVersion: llm-d.ai/v1alpha1
     kind: EndpointPickerConfig
@@ -33,8 +33,8 @@ data:
       parameters:
         defaultEngine: {{ $modelServerType | quote }}
       {{- end }}
-    {{- if $parserType }}
-    - type: {{ $parserType }}
+    {{- range $p := $parsers }}
+    - type: {{ $p }}
     {{- end }}
     {{- if .Values.router.latencyPredictor.enabled }}
     - type: predicted-latency-producer
@@ -46,10 +46,12 @@ data:
       type: prefix-cache-affinity-filter
       parameters:
         affinityThreshold: 0.99
+        ttftSource: latencyPredictor
     - name: loose-affinity-filter
       type: prefix-cache-affinity-filter
       parameters:
         affinityThreshold: 0.80
+        ttftSource: latencyPredictor
     - type: latency-scorer
     - type: weighted-random-picker
     - type: slo-headroom-tier-filter
@@ -75,10 +77,12 @@ data:
       - pluginRef: prefix-cache-scorer
         weight: 3
     {{- end }}
-    {{- if $parserType }}
+    {{- if $parsers }}
     requestHandler:
-      parser:
-        pluginRef: {{ $parserType }}
+      parsers:
+      {{- range $p := $parsers }}
+      - pluginRef: {{ $p }}
+      {{- end }}
     {{- end }}
   payload-agnostic.yaml: |
     # Request-format agnostic routing. Use this when the request format is

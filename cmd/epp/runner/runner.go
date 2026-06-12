@@ -217,7 +217,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	logutil.InitLogging(&opts.ZapOptions)
 
 	if opts.Tracing {
-		shutdown, err := tracing.InitTracing(ctx, setupLog, "llm-d-router/epp")
+		shutdown, err := tracing.InitTracing(ctx, setupLog, "llm-d-epp")
 		if err != nil {
 			return fmt.Errorf("failed to init tracing %w", err)
 		}
@@ -400,6 +400,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		PriorityBandControlPlane:         priorityBandControlPlane,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
+		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 	}
 
 	if err := serverRunner.SetupWithManager(mgr); err != nil {
@@ -943,6 +944,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		SaturationDetector:               eppConfig.SaturationDetector,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
+		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))

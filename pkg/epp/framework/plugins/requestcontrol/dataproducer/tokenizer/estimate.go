@@ -50,43 +50,61 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	switch {
 	case body.Generate != nil:
 		return &fwkrh.TokenizedPrompt{
-			TokenIDs:           body.Generate.TokenIDs,
+			PerPromptTokens:    [][]uint32{body.Generate.TokenIDs},
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
 		}, nil
 	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
-		return &fwkrh.TokenizedPrompt{TokenIDs: body.Completions.Prompt.TokenIDs}, nil
+		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{body.Completions.Prompt.TokenIDs}}, nil
 	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
-		return &fwkrh.TokenizedPrompt{TokenIDs: body.Embeddings.Input.TokenIDs}, nil
+		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{body.Embeddings.Input.TokenIDs}}, nil
 	}
 
-	raw, features, err := b.estimateBytes(ctx, body)
-	if err != nil {
-		return nil, err
-	}
-	return &fwkrh.TokenizedPrompt{TokenIDs: packBytes(raw), MultiModalFeatures: features}, nil
-}
-
-// estimateBytes serializes a non-pre-tokenized request body to a byte stream
-// and, for protocols that carry multimodal assets, the features that describe
-// them. Coverage matches the protocols the approximate prefix-cache scorer
-// handles.
-func (b estimateBackend) estimateBytes(ctx context.Context, body *fwkrh.InferenceRequestBody) ([]byte, []fwkrh.MultiModalFeature, error) {
-	switch {
-	case body.ChatCompletions != nil:
+	// Chat and Anthropic messages fold multimodal placeholders into the stream
+	// and report them as features.
+	if body.ChatCompletions != nil {
 		raw, features := b.chatCompletionsBytes(body.ChatCompletions)
-		return raw, features, nil
-	case body.Messages != nil:
+		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}, MultiModalFeatures: features}, nil
+	}
+	if body.Messages != nil {
 		raw, features := b.messagesBytes(body.Messages)
+		tokens := packBytes(raw)
 		log.FromContext(ctx).V(logutil.DEBUG).Info("Anthropic messages prefix-cache estimation",
 			"messageCount", len(body.Messages.Messages),
 			"rawBytes", len(raw),
+			"tokenCount", len(tokens),
 			"mmFeatureCount", len(features),
 			"mmFeatures", features,
 		)
-		return raw, features, nil
+		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}, MultiModalFeatures: features}, nil
+	}
+
+	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {
+		return estimateMultiStringCompletions(body.Completions)
+	}
+
+	raw, err := estimateBytes(body)
+	if err != nil {
+		return nil, err
+	}
+	return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}}, nil
+}
+
+func estimateMultiStringCompletions(req *fwkrh.CompletionsRequest) (*fwkrh.TokenizedPrompt, error) {
+	allTokenIDs := make([][]uint32, 0, len(req.Prompt.Strings))
+	for _, s := range req.Prompt.Strings {
+		ids := packBytes([]byte(s))
+		allTokenIDs = append(allTokenIDs, ids)
+	}
+	return &fwkrh.TokenizedPrompt{PerPromptTokens: allTokenIDs}, nil
+}
+
+// estimateBytes serializes the user input of a non-chat request body to a byte
+// stream. Coverage matches the protocols the approximate prefix-cache scorer
+// handles. The chat path is handled separately to emit multimodal features.
+func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
+	switch {
 	case body.Conversations != nil:
-		raw, err := json.Marshal(body.Conversations.Items)
-		return raw, nil, err
+		return json.Marshal(body.Conversations.Items)
 	case body.Responses != nil:
 		var combined []map[string]any
 		if body.Responses.Instructions != nil {
@@ -96,15 +114,13 @@ func (b estimateBackend) estimateBytes(ctx context.Context, body *fwkrh.Inferenc
 			combined = append(combined, map[string]any{"tools": body.Responses.Tools})
 		}
 		combined = append(combined, map[string]any{"input": body.Responses.Input})
-		raw, err := json.Marshal(combined)
-		return raw, nil, err
+		return json.Marshal(combined)
 	case body.Completions != nil:
-		return []byte(body.Completions.Prompt.PlainText()), nil, nil
+		return []byte(body.Completions.Prompt.PlainText()), nil
 	case body.Embeddings != nil:
-		raw, err := json.Marshal(body.Embeddings.Input)
-		return raw, nil, err
+		return json.Marshal(body.Embeddings.Input)
 	default:
-		return nil, nil, errors.New("unsupported request body type, skipping estimation")
+		return nil, errors.New("unsupported request body type, skipping estimation")
 	}
 }
 

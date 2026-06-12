@@ -45,6 +45,9 @@ const (
 	// ResponsesPath is the OpenAI Responses API path
 	ResponsesPath = "/v1/responses"
 
+	// MessagesPath is the Anthropic Messages API path
+	MessagesPath = "/v1/messages"
+
 	// GeneratePath is vLLM's token-in generate endpoint
 	GeneratePath = "/inference/v1/generate"
 )
@@ -58,8 +61,8 @@ func openAIAPIAttr(apiType APIType) attribute.KeyValue {
 func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
-		tracer := tracing.Tracer()
-		ctx, span := tracer.Start(r.Context(), "llm_d.pd_proxy.request",
+		tracer := tracing.Tracer(tracerScope)
+		ctx, span := tracer.Start(r.Context(), "forward_request",
 			trace.WithSpanKind(trace.SpanKindServer),
 		)
 		defer span.End()

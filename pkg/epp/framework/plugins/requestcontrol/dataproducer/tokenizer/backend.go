@@ -108,22 +108,18 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 	switch {
 	case body.Completions != nil:
 		if ids := body.Completions.Prompt.TokenIDs; len(ids) > 0 {
-			return &fwkrh.TokenizedPrompt{TokenIDs: ids}, nil
+			return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{ids}}, nil
 		}
-		tokenIDs, _, err := b.tk.Render(ctx, completionsPayload(body))
-		if err != nil {
-			return nil, fmt.Errorf("tokenization failed: %w", err)
-		}
-		return &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs}, nil
+		return b.renderCompletions(ctx, body)
 	case body.ChatCompletions != nil:
 		tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, chatPayload(body))
 		if err != nil {
 			return nil, fmt.Errorf("tokenization failed: %w", err)
 		}
-		return &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs, MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures)}, nil
+		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokenIDs}, MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures)}, nil
 	case body.Generate != nil:
 		return &fwkrh.TokenizedPrompt{
-			TokenIDs:           body.Generate.TokenIDs,
+			PerPromptTokens:    [][]uint32{body.Generate.TokenIDs},
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
 		}, nil
 	default:
@@ -133,13 +129,19 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 
 // completionsPayload returns the payload for a completions request. Falls back
 // to a minimal PayloadMap when the body carries a non-map payload (gRPC, nil).
+// Multi-string prompts are passed as an array so the renderer sees the full
+// prompt shape.
 func completionsPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 	if body.Payload != nil {
 		if _, ok := body.Payload.AsMap(); ok {
 			return body.Payload
 		}
 	}
-	return fwkrh.PayloadMap{"prompt": body.Completions.Prompt.PlainText()}
+	prompt := body.Completions.Prompt
+	if len(prompt.Strings) > 1 {
+		return fwkrh.PayloadMap{"prompt": prompt.Strings}
+	}
+	return fwkrh.PayloadMap{"prompt": prompt.PlainText()}
 }
 
 // chatPayload returns the payload for a chat completions request. Falls back
@@ -180,4 +182,15 @@ func CacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
 	default:
 		return ""
 	}
+}
+
+// renderCompletions tokenizes a completions prompt via a single Render call.
+// completionsPayload builds the appropriate payload shape (single string or
+// string array), and the renderer returns the tokenized result.
+func (b renderBackend) renderCompletions(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
+	allTokenIDs, _, err := b.tk.Render(ctx, completionsPayload(body))
+	if err != nil {
+		return nil, fmt.Errorf("tokenization failed: %w", err)
+	}
+	return &fwkrh.TokenizedPrompt{PerPromptTokens: allTokenIDs}, nil
 }

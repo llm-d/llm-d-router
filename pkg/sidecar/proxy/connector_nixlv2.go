@@ -19,8 +19,8 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"time"
 
@@ -52,7 +52,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
 	s.logger.V(4).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
 
-	original, completionRequest, ok := s.readJSONBody(r, w)
+	_, completionRequest, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
@@ -68,10 +68,10 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	uuidStr := uuid.String()
 
 	// Prefill Stage
-	tracer := tracing.Tracer()
+	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
-	ctx, prefillSpan := tracer.Start(ctx, "llm_d.pd_proxy.prefill",
+	ctx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -105,10 +105,6 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			savedTokenValues[i] = savedField{field: field}
 		}
 	}
-
-	// Snapshot the original request map before prefill mutations so the
-	// fallback-to-decode path can dispatch with the correct original fields.
-	originalRequest := maps.Clone(completionRequest)
 
 	completionRequest[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemoteDecode:  true,
@@ -147,8 +143,41 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// 2. Forward request to prefiller
 	s.logger.V(4).Info("sending prefill request", "to", prefillPodHostPort)
 	s.logger.V(5).Info("Prefill request", "body", string(pbody))
-	pw := &bufferedResponseWriter{}
-	prefillHandler.ServeHTTP(pw, preq)
+
+	// Retry on transient 5xx (502/503/504): these failures (e.g. connection
+	// reset → 502) are common when the prefill pod's accept queue overflows
+	// under load. Retrying the same host avoids expensive local prefill on
+	// decode. Non-transient errors (500/501) fail immediately.
+	var pw *bufferedResponseWriter
+retryLoop:
+	for attempt := 0; ; attempt++ {
+		pw = &bufferedResponseWriter{}
+		preq.Body = io.NopCloser(bytes.NewReader(pbody))
+		preq.ContentLength = int64(len(pbody))
+		prefillHandler.ServeHTTP(pw, preq)
+
+		if !isHTTPError(pw.statusCode) {
+			break
+		}
+		if !isRetryableStatus(pw.statusCode) {
+			break
+		}
+		if attempt >= s.config.PrefillMaxRetries {
+			break
+		}
+
+		s.logger.Info("retrying prefill request",
+			"attempt", attempt+1,
+			"target", prefillPodHostPort,
+			"request_id", uuidStr,
+			"previous_code", pw.statusCode)
+
+		select {
+		case <-time.After(s.config.PrefillRetryBackoff):
+		case <-preq.Context().Done():
+			break retryLoop
+		}
+	}
 
 	prefillDuration := time.Since(prefillStart)
 	prefillSpan.SetAttributes(
@@ -157,25 +186,20 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	)
 
 	if isHTTPError(pw.statusCode) {
-		s.logger.Error(err, "request failed", "code", pw.statusCode, "body", pw.buffer.String())
+		s.logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
+			"request_id", uuidStr,
+			"body", pw.buffer.String())
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		prefillSpan.End()
 
-		if shouldFallbackToDecode(pw) {
-			s.logger.Info("fallback to decode", "request_id", uuidStr)
-			fallbackReq := cloneRequestWithBody(r.Context(), r, original)
-			s.dispatchDecode(w, fallbackReq, originalRequest)
-		} else {
-			for key, values := range pw.Header() {
-				for _, v := range values {
-					w.Header().Add(key, v)
-				}
+		for key, values := range pw.Header() {
+			for _, v := range values {
+				w.Header().Add(key, v)
 			}
-			w.WriteHeader(pw.statusCode)
-			_, err := w.Write(pw.bodyBytes())
-			if err != nil {
-				s.logger.Error(err, "failed to send error response to client")
-			}
+		}
+		w.WriteHeader(pw.statusCode)
+		if _, writeErr := w.Write(pw.bodyBytes()); writeErr != nil {
+			s.logger.Error(writeErr, "failed to send error response to client")
 		}
 		return
 	}
@@ -207,7 +231,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// Decode Stage
 
-	ctx, decodeSpan := tracer.Start(ctx, "llm_d.pd_proxy.decode",
+	ctx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()

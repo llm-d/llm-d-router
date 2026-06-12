@@ -74,7 +74,7 @@ func completionsRequest(prompt string) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
 			Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, len(prompt)/averageCharactersPerToken)}},
 		},
 	}
 }
@@ -116,7 +116,7 @@ func withPrompt(req *scheduling.InferenceRequest, prompt string) *scheduling.Inf
 	if req.Body.TokenizedPrompt == nil {
 		req.Body.TokenizedPrompt = &fwkrh.TokenizedPrompt{}
 	}
-	req.Body.TokenizedPrompt.TokenIDs = make([]uint32, len(prompt)/averageCharactersPerToken)
+	req.Body.TokenizedPrompt.PerPromptTokens = [][]uint32{make([]uint32, len(prompt)/averageCharactersPerToken)}
 	return req
 }
 

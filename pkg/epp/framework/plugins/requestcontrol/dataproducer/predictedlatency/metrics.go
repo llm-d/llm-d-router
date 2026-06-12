@@ -99,7 +99,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference model TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   generalLatencyBuckets,
 		},
-		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name"},
+		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name", "fairness_id", "priority"},
 	)
 
 	requestPredictedTTFT = prometheus.NewHistogramVec(
@@ -315,14 +315,14 @@ func recordRequestTPOTPredictionDuration(ctx context.Context, pluginName, plugin
 	return true
 }
 
-func recordRequestTTFT(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, ttft float64) bool {
+func recordRequestTTFT(ctx context.Context, pluginName, pluginType, modelName, targetModelName, fairnessID, priority string, ttft float64) bool {
 	if ttft < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TTFT value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft)
 		return false
 	}
 	requestTTFT.WithLabelValues(modelName, targetModelName).Observe(ttft)
-	llmdRequestTTFT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(ttft)
+	llmdRequestTTFT.WithLabelValues(pluginName, pluginType, modelName, targetModelName, fairnessID, priority).Observe(ttft)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFT).Set(ttft)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFT).Set(ttft)
 	return true

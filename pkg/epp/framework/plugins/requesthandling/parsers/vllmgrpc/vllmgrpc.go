@@ -224,7 +224,7 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				TokenIDs:           copiedTokenIDsInt,
+				PerPromptTokens:    [][]uint32{copiedTokenIDsInt},
 				MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
 			},
 		}

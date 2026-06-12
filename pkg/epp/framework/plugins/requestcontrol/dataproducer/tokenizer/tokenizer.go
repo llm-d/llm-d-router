@@ -39,7 +39,7 @@ import (
 )
 
 type tokenizer interface {
-	Render(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, []tokenizerTypes.Offset, error)
+	Render(ctx context.Context, payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error)
 	RenderChat(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
@@ -261,8 +261,10 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	if err != nil {
 		return err
 	}
+	if tp == nil || tp.TokenCount() == 0 {
+		return nil
+	}
 	tp.CacheSalt = CacheSaltFromBody(request.Body)
-
 	request.Body.TokenizedPrompt = tp
 	return nil
 }

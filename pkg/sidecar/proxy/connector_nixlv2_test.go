@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
@@ -243,6 +244,79 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
 	})
 
+	// Messages API tests — verify /v1/messages routes through the disaggregation
+	// handler with the same token-limit fields as chat completions.
+
+	It("should successfully send messages API request to 1. prefill 2. decode with the correct fields", func() {
+		proxyBaseAddr := startProxy()
+
+		By("sending a /v1/messages request with prefill header")
+		body := `{
+				"model": "claude-3-5-sonnet-20241022",
+				"messages": [
+				  {"role": "user", "content": "Hello"}
+				],
+				"max_tokens": 50
+			}`
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+MessagesPath, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		responseBody, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+
+		Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
+		prq1 := testInfo.prefillHandler.CompletionRequests[0]
+
+		Expect(prq1).To(HaveKey(requestFieldKVTransferParams))
+		kvTransferParams, ok := prq1[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+
+		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
+
+		Expect(prq1).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 1)))
+		Expect(prq1).To(HaveKeyWithValue("stream", false))
+
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
+	})
+
+	It("should pass through messages API request when no prefill header is set", func() {
+		proxyBaseAddr := startProxy()
+
+		By("sending a /v1/messages request without prefill header")
+		body := `{
+				"model": "claude-3-5-sonnet-20241022",
+				"messages": [
+				  {"role": "user", "content": "Hello"}
+				],
+				"max_tokens": 50
+			}`
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+MessagesPath, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		responseBody, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+	})
+
 	// Responses API tests — exercise the same NIXL v2 connector with
 	// /v1/responses and the max_output_tokens field instead of max_tokens.
 
@@ -453,6 +527,114 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
+	})
+
+	DescribeTable("should retry prefill on retryable status and succeed",
+		func(statusCode int) {
+			testInfo.prefillHandler.FailForFirstN = 1
+			testInfo.prefillHandler.FailStatusCode = statusCode
+			testInfo.proxy.config.PrefillMaxRetries = 2
+			testInfo.proxy.config.PrefillRetryBackoff = time.Millisecond
+
+			proxyBaseAddr := startProxy()
+
+			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+			Expect(err).ToNot(HaveOccurred())
+			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+			rp, err := http.DefaultClient.Do(req)
+			Expect(err).ToNot(HaveOccurred())
+			defer rp.Body.Close()
+			Expect(rp.StatusCode).To(Equal(http.StatusOK))
+
+			By("verifying prefill was called twice (1 fail + 1 success)")
+			Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 2))
+
+			By("verifying decode received kv_transfer_params from the successful prefill")
+			Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+			decodeReq := testInfo.decodeHandler.CompletionRequests[0]
+			Expect(decodeReq).To(HaveKey(requestFieldKVTransferParams))
+		},
+		Entry("502 Bad Gateway", http.StatusBadGateway),
+		Entry("503 Service Unavailable", http.StatusServiceUnavailable),
+		Entry("504 Gateway Timeout", http.StatusGatewayTimeout),
+	)
+
+	It("should return error to client when retries are disabled and prefill fails", func() {
+		testInfo.prefillHandler.FailForFirstN = 1
+		testInfo.prefillHandler.FailStatusCode = http.StatusBadGateway
+		testInfo.proxy.config.PrefillMaxRetries = 0
+
+		proxyBaseAddr := startProxy()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		By("verifying the error is returned to the client")
+		Expect(rp.StatusCode).To(Equal(http.StatusBadGateway))
+
+		By("verifying prefill was called only once (no retry)")
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+
+		By("verifying decode was NOT called")
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+	})
+
+	It("should return error to client after exhausting all retries", func() {
+		testInfo.prefillHandler.FailForFirstN = 100
+		testInfo.prefillHandler.FailStatusCode = http.StatusBadGateway
+		testInfo.proxy.config.PrefillMaxRetries = 2
+		testInfo.proxy.config.PrefillRetryBackoff = time.Millisecond
+
+		proxyBaseAddr := startProxy()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		By("verifying the error is returned to the client")
+		Expect(rp.StatusCode).To(Equal(http.StatusBadGateway))
+
+		By("verifying prefill was called 3 times (1 initial + 2 retries)")
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 3))
+
+		By("verifying decode was NOT called")
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+	})
+
+	It("should not retry on non-retryable 500 and return error to client", func() {
+		testInfo.prefillHandler.FailForFirstN = 1
+		testInfo.prefillHandler.FailStatusCode = http.StatusInternalServerError
+		testInfo.proxy.config.PrefillMaxRetries = 2
+		testInfo.proxy.config.PrefillRetryBackoff = time.Millisecond
+
+		proxyBaseAddr := startProxy()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		By("verifying the error is returned to the client")
+		Expect(rp.StatusCode).To(Equal(http.StatusInternalServerError))
+
+		By("verifying prefill was called only once (no retry despite PrefillMaxRetries=2)")
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+
+		By("verifying decode was NOT called")
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
 	})
 
 	It("should preserve stream settings in responses API request", func() {

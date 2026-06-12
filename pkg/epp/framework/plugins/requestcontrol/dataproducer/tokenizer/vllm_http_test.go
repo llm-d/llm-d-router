@@ -66,9 +66,9 @@ func TestVLLMHTTPRenderer_Render(t *testing.T) {
 	defer srv.Close()
 
 	r := newHTTPRenderer(t, srv)
-	tokenIDs, offsets, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	allTokenIDs, offsets, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
 	require.NoError(t, err)
-	assert.Equal(t, []uint32{1, 2, 3}, tokenIDs)
+	assert.Equal(t, [][]uint32{{1, 2, 3}}, allTokenIDs)
 	assert.Nil(t, offsets)
 
 	var sent map[string]any
@@ -97,7 +97,7 @@ func TestProduce_CompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 	p := newTestPlugin(newHTTPRenderer(t, srv))
 	require.NoError(t, p.Produce(context.Background(), req, nil))
 	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, []uint32{4, 5}, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Equal(t, []uint32{4, 5}, req.Body.TokenizedPrompt.PerPromptTokens[0])
 
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal(cap.completions, &sent))
@@ -230,13 +230,28 @@ func TestProduce_ChatCompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 	p := newTestPlugin(newHTTPRenderer(t, srv))
 	require.NoError(t, p.Produce(context.Background(), req, nil))
 	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, []uint32{9, 10}, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Equal(t, []uint32{9, 10}, req.Body.TokenizedPrompt.PerPromptTokens[0])
 
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal(cap.chat, &sent))
 	assert.Equal(t, "kept", sent["dummy"])
 	assert.Equal(t, map[string]any{"effort": "high"}, sent["reasoning"])
 	assert.Equal(t, testHTTPModel, sent["model"])
+}
+
+func TestVLLMHTTPRenderer_RenderMultiPrompt(t *testing.T) {
+	srv, _ := httpFixture(t,
+		[]renderResponse{
+			{TokenIDs: []uint32{1, 2, 3}},
+			{TokenIDs: []uint32{4, 5}},
+		}, renderResponse{})
+	defer srv.Close()
+
+	r := newHTTPRenderer(t, srv)
+	allTokenIDs, offsets, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": []string{"alpha", "beta"}})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{1, 2, 3}, {4, 5}}, allTokenIDs)
+	assert.Nil(t, offsets)
 }
 
 func TestVLLMHTTPRenderer_HTTPError(t *testing.T) {

@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/pflag"
@@ -54,6 +55,8 @@ const (
 	inferencePool             = "inference-pool"
 	poolGroup                 = "pool-group"
 	maxIdleConnsPerHost       = "max-idle-conns-per-host"
+	prefillMaxRetries         = "prefill-max-retries"
+	prefillRetryBackoff       = "prefill-retry-backoff"
 	decodeChunkSize           = "decode-chunk-size"
 	inlineConfiguration       = "configuration"
 	configurationFile         = "configuration-file"
@@ -106,6 +109,8 @@ type yamlConfiguration struct {
 	InferencePool                  string   `json:"inference-pool,omitempty"`
 	PoolGroup                      string   `json:"pool-group,omitempty"`
 	MaxIdleConnsPerHost            int      `json:"max-idle-conns-per-host,omitempty"`
+	PrefillMaxRetries              *int     `json:"prefill-max-retries,omitempty"`
+	PrefillRetryBackoff            string   `json:"prefill-retry-backoff,omitempty"`
 	DecodeChunkSize                int      `json:"decode-chunk-size,omitempty"`
 	Tracing                        *bool    `json:"tracing,omitempty"`
 }
@@ -190,6 +195,8 @@ func NewOptions() *Options {
 			SecureServing:           true,
 			EnablePrefillerSampling: enablePrefillerSampling,
 			MaxIdleConnsPerHost:     defaultMaxIdleConnsPerHost,
+			PrefillMaxRetries:       0,
+			PrefillRetryBackoff:     200 * time.Millisecond,
 			MooncakeBootstrapPort:   mooncakeBootstrapPort,
 			PoolGroup:               routing.InferencePoolAPIGroup,
 			DecodeChunkSize:         0,
@@ -247,6 +254,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	_ = fs.MarkDeprecated(decoderTLSInsecureSkipVerify, "use --tls-insecure-skip-verify=decoder instead")
 
 	fs.IntVar(&opts.MaxIdleConnsPerHost, "max-idle-conns-per-host", opts.MaxIdleConnsPerHost, "max idle keep-alive connections per host for reverse proxy transports; set to at least the expected concurrency")
+	fs.IntVar(&opts.PrefillMaxRetries, prefillMaxRetries, opts.PrefillMaxRetries, "max retry attempts when a prefill request fails with a 5xx error; 0 means no retries (default)")
+	fs.DurationVar(&opts.PrefillRetryBackoff, prefillRetryBackoff, opts.PrefillRetryBackoff, "delay between prefill retry attempts")
 	fs.StringVar(&opts.inlineConfiguration, inlineConfiguration, "", "Sidecar configuration in YAML provided as inline specification. Example `--configuration={port: 8085, vllm-port: 8203}. Inline configuration and file configuration are mutually exclusive.`")
 	fs.StringVar(&opts.fileConfiguration, configurationFile, "", "Path to file which contains sidecar configuration in YAML. Example `--configuration-file=/etc/config/sidecar-config.yaml`. Inline configuration and file configuration are mutually exclusive.")
 }
@@ -364,6 +373,11 @@ func (opts *Options) Validate() error {
 				return errors.New("--inference-pool cannot have empty namespace or name")
 			}
 		}
+	}
+
+	// Validate prefill retry configuration
+	if opts.PrefillMaxRetries > 0 && opts.PrefillRetryBackoff <= 0 {
+		return fmt.Errorf("--prefill-retry-backoff must be positive when --prefill-max-retries > 0, got %v", opts.PrefillRetryBackoff)
 	}
 
 	// Validate chunked decode
@@ -530,6 +544,18 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.PoolGroup != "" && !opts.isFlagSet(poolGroup) {
 		opts.PoolGroup = cfg.PoolGroup
+	}
+	if cfg.PrefillMaxRetries != nil && !opts.isFlagSet(prefillMaxRetries) {
+		opts.PrefillMaxRetries = *cfg.PrefillMaxRetries
+	}
+	if cfg.PrefillRetryBackoff != "" && !opts.isFlagSet(prefillRetryBackoff) {
+		d, err := time.ParseDuration(cfg.PrefillRetryBackoff)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: ignoring invalid %s value %q: %v; using default %v\n",
+				prefillRetryBackoff, cfg.PrefillRetryBackoff, err, opts.PrefillRetryBackoff)
+		} else {
+			opts.PrefillRetryBackoff = d
+		}
 	}
 	if cfg.DecodeChunkSize != 0 && !opts.isFlagSet(decodeChunkSize) {
 		opts.DecodeChunkSize = cfg.DecodeChunkSize

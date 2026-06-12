@@ -30,7 +30,7 @@ func tokenizedRequest(n int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				TokenIDs: make([]uint32, n),
+				PerPromptTokens: [][]uint32{make([]uint32, n)},
 			},
 		},
 	}

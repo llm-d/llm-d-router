@@ -57,7 +57,7 @@ func TestEstimateBackend_GeneratePassthrough(t *testing.T) {
 		Generate: &fwkrh.GenerateRequest{TokenIDs: in},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, in, tp.TokenIDs)
+	assert.Equal(t, in, tp.PerPromptTokens[0])
 }
 
 // TestEstimateBackend_CompletionsTokenIDsPassthrough asserts token-ID completions
@@ -68,7 +68,7 @@ func TestEstimateBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: in}},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, in, tp.TokenIDs, "token IDs must pass through, not be byte-estimated")
+	assert.Equal(t, in, tp.PerPromptTokens[0], "token IDs must pass through, not be byte-estimated")
 }
 
 // TestEstimateBackend_EmbeddingsTokenIDsPassthrough asserts token-ID embeddings
@@ -79,7 +79,7 @@ func TestEstimateBackend_EmbeddingsTokenIDsPassthrough(t *testing.T) {
 		Embeddings: &fwkrh.EmbeddingsRequest{Input: fwkrh.EmbeddingsInput{TokenIDs: in}},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, in, tp.TokenIDs)
+	assert.Equal(t, in, tp.PerPromptTokens[0])
 }
 
 // TestEstimateBackend_CompletionsDeterministic asserts the same prompt produces
@@ -92,10 +92,10 @@ func TestEstimateBackend_CompletionsDeterministic(t *testing.T) {
 	require.NoError(t, err)
 	b, err := estimateBackend{}.produce(context.Background(), body("hello world"))
 	require.NoError(t, err)
-	assert.Equal(t, hashTokens(a.TokenIDs), hashTokens(b.TokenIDs), "same prompt produced different tokens")
+	assert.Equal(t, hashTokens(a.PerPromptTokens[0]), hashTokens(b.PerPromptTokens[0]), "same prompt produced different tokens")
 	c, err := estimateBackend{}.produce(context.Background(), body("hello there"))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(a.TokenIDs), hashTokens(c.TokenIDs), "distinct prompts produced identical tokens")
+	assert.NotEqual(t, hashTokens(a.PerPromptTokens[0]), hashTokens(c.PerPromptTokens[0]), "distinct prompts produced identical tokens")
 }
 
 // pngBase64Raw is a 64x32 RGBA PNG (bare base64 payload), yielding
@@ -126,10 +126,11 @@ func TestEstimateBackend_ChatImageFeature(t *testing.T) {
 	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(pngBase64DataURL), 16), f.Hash)
 	assert.Greater(t, f.Length, 1, "image length must be > 1 (placeholder weighting)")
 	assert.GreaterOrEqual(t, f.Offset, 0)
-	assert.LessOrEqual(t, f.Offset+f.Length, len(tp.TokenIDs), "feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tp.TokenIDs))
+	tokens := tp.PerPromptTokens[0]
+	assert.LessOrEqual(t, f.Offset+f.Length, len(tokens), "feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tokens))
 	// Placeholder tokens are the URL hash repeated; verify the span carries weight.
 	for i := f.Offset; i < f.Offset+f.Length; i++ {
-		assert.Equal(t, uint32(xxhash.Sum64String(pngBase64DataURL)), tp.TokenIDs[i], "token %d: got %d, want image placeholder token", i, tp.TokenIDs[i])
+		assert.Equal(t, uint32(xxhash.Sum64String(pngBase64DataURL)), tokens[i], "token %d: got %d, want image placeholder token", i, tokens[i])
 	}
 }
 
@@ -218,7 +219,7 @@ func TestEstimateBackend_MessagesImageFeature(t *testing.T) {
 	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(pngBase64Raw), 16), f.Hash, "base64 source must hash by its raw payload")
 	assert.Greater(t, f.Length, 1, "image length must be > 1 (placeholder weighting)")
 	assert.GreaterOrEqual(t, f.Offset, 0)
-	assert.LessOrEqual(t, f.Offset+f.Length, len(tp.TokenIDs), "feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tp.TokenIDs))
+	assert.LessOrEqual(t, f.Offset+f.Length, tp.TokenCount(), "feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, tp.TokenCount())
 }
 
 // TestEstimateBackend_MessagesURLImageKey asserts a url-typed source is hashed
@@ -258,10 +259,10 @@ func TestEstimateBackend_MessagesDeterministic(t *testing.T) {
 	require.NoError(t, err)
 	b, err := estimateBackend{}.produce(context.Background(), build("you are helpful", "hello world"))
 	require.NoError(t, err)
-	assert.Equal(t, hashTokens(a.TokenIDs), hashTokens(b.TokenIDs), "identical messages requests produced different tokens")
+	assert.Equal(t, hashTokens(a.PerPromptTokens[0]), hashTokens(b.PerPromptTokens[0]), "identical messages requests produced different tokens")
 	c, err := estimateBackend{}.produce(context.Background(), build("you are concise", "hello world"))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(a.TokenIDs), hashTokens(c.TokenIDs), "different system prompts produced identical tokens")
+	assert.NotEqual(t, hashTokens(a.PerPromptTokens[0]), hashTokens(c.PerPromptTokens[0]), "different system prompts produced identical tokens")
 }
 
 // TestEstimateBackend_ChatToolsBeforeSystem asserts the tools list is emitted
@@ -286,9 +287,9 @@ func TestEstimateBackend_ChatToolsBeforeSystem(t *testing.T) {
 	require.NoError(t, err)
 	b, err := estimateBackend{}.produce(context.Background(), chat("you are a concise assistant"))
 	require.NoError(t, err)
-	require.NotEqual(t, hashTokens(a.TokenIDs), hashTokens(b.TokenIDs), "streams identical, system was not applied")
+	require.NotEqual(t, hashTokens(a.PerPromptTokens[0]), hashTokens(b.PerPromptTokens[0]), "streams identical, system was not applied")
 	for i := 0; i < sharedTokens; i++ {
-		assert.Equal(t, a.TokenIDs[i], b.TokenIDs[i], "token %d differs: tools should seed the prefix before system", i)
+		assert.Equal(t, a.PerPromptTokens[0][i], b.PerPromptTokens[0][i], "token %d differs: tools should seed the prefix before system", i)
 	}
 }
 
@@ -317,9 +318,9 @@ func TestEstimateBackend_MessagesToolsBeforeSystem(t *testing.T) {
 	require.NoError(t, err)
 	b, err := estimateBackend{}.produce(context.Background(), build("you are a concise assistant"))
 	require.NoError(t, err)
-	require.NotEqual(t, hashTokens(a.TokenIDs), hashTokens(b.TokenIDs), "streams identical, system was not applied")
+	require.NotEqual(t, hashTokens(a.PerPromptTokens[0]), hashTokens(b.PerPromptTokens[0]), "streams identical, system was not applied")
 	for i := 0; i < sharedTokens; i++ {
-		assert.Equal(t, a.TokenIDs[i], b.TokenIDs[i], "token %d differs: tools should seed the prefix before system", i)
+		assert.Equal(t, a.PerPromptTokens[0][i], b.PerPromptTokens[0][i], "token %d differs: tools should seed the prefix before system", i)
 	}
 }
 
@@ -340,14 +341,14 @@ func TestEstimateBackend_ChatToolsAffectPrefix(t *testing.T) {
 	}}
 	withTools, err := estimateBackend{}.produce(context.Background(), chat(weather))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(noTools.TokenIDs), hashTokens(withTools.TokenIDs), "tools list was ignored by the prefix estimator")
+	assert.NotEqual(t, hashTokens(noTools.PerPromptTokens[0]), hashTokens(withTools.PerPromptTokens[0]), "tools list was ignored by the prefix estimator")
 	stock := []any{map[string]any{
 		"type":     "function",
 		"function": map[string]any{"name": "get_stock_price"},
 	}}
 	otherTools, err := estimateBackend{}.produce(context.Background(), chat(stock))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(withTools.TokenIDs), hashTokens(otherTools.TokenIDs), "different tools lists produced identical tokens")
+	assert.NotEqual(t, hashTokens(withTools.PerPromptTokens[0]), hashTokens(otherTools.PerPromptTokens[0]), "different tools lists produced identical tokens")
 }
 
 // TestEstimateBackend_MessagesToolsAffectPrefix is the /v1/messages analog of
@@ -370,7 +371,7 @@ func TestEstimateBackend_MessagesToolsAffectPrefix(t *testing.T) {
 	}}
 	withTools, err := estimateBackend{}.produce(context.Background(), build(weather))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(noTools.TokenIDs), hashTokens(withTools.TokenIDs), "tools list was ignored by the messages prefix estimator")
+	assert.NotEqual(t, hashTokens(noTools.PerPromptTokens[0]), hashTokens(withTools.PerPromptTokens[0]), "tools list was ignored by the messages prefix estimator")
 	stock := []any{map[string]any{
 		"name":         "get_stock_price",
 		"description":  "Get a stock price",
@@ -378,7 +379,7 @@ func TestEstimateBackend_MessagesToolsAffectPrefix(t *testing.T) {
 	}}
 	otherTools, err := estimateBackend{}.produce(context.Background(), build(stock))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(withTools.TokenIDs), hashTokens(otherTools.TokenIDs), "different tools lists produced identical tokens")
+	assert.NotEqual(t, hashTokens(withTools.PerPromptTokens[0]), hashTokens(otherTools.PerPromptTokens[0]), "different tools lists produced identical tokens")
 }
 
 // TestEstimateBackend_NonChatNoFeatures asserts non-chat protocols carry no
@@ -389,4 +390,41 @@ func TestEstimateBackend_NonChatNoFeatures(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Nil(t, tp.MultiModalFeatures, "non-chat features should be nil")
+}
+
+// TestEstimateBackend_MultiStringCompletionsPopulatesPerPromptTokens asserts
+// that a multi-string completions prompt estimates each string independently
+// and populates PerPromptTokens.
+func TestEstimateBackend_MultiStringCompletionsPopulatesPerPromptTokens(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{
+			Prompt: fwkrh.Prompt{Strings: []string{"hello world", "foo bar"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if len(tp.PerPromptTokens) != 2 {
+		t.Fatalf("PerPromptTokens: got %d prompts, want 2", len(tp.PerPromptTokens))
+	}
+	if tp.TokenCount() != len(tp.PerPromptTokens[0])+len(tp.PerPromptTokens[1]) {
+		t.Errorf("flat TokenIDs length %d != sum of per-prompt lengths %d+%d",
+			tp.TokenCount(), len(tp.PerPromptTokens[0]), len(tp.PerPromptTokens[1]))
+	}
+}
+
+// TestEstimateBackend_SingleStringCompletionsSetsPerPromptTokens asserts that a
+// single-element string array uses a length-1 PerPromptTokens slice.
+func TestEstimateBackend_SingleStringCompletionsSetsPerPromptTokens(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{
+			Prompt: fwkrh.Prompt{Strings: []string{"hello world"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	if len(tp.PerPromptTokens) != 1 {
+		t.Errorf("single-string prompt should set length-1 PerPromptTokens, got %d", len(tp.PerPromptTokens))
+	}
 }

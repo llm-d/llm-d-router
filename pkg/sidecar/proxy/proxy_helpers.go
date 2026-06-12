@@ -215,10 +215,12 @@ func isHTTPError(statusCode int) bool {
 	return statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices
 }
 
-// shouldFallbackToDecode returns false for client error 4xx status codes (400–451). For all other status codes, it returns true.
-func shouldFallbackToDecode(pw *bufferedResponseWriter) bool {
-	if pw.statusCode >= http.StatusBadRequest && pw.statusCode <= http.StatusUnavailableForLegalReasons {
-		return false
-	}
-	return true
+// isRetryableStatus returns true for transient 5xx errors where retrying
+// the same host is likely to succeed (e.g. TCP connection reset, overloaded
+// accept queue). Non-transient errors like 500/501 indicate bugs or
+// unsupported operations and should fail fast.
+func isRetryableStatus(statusCode int) bool {
+	return statusCode == http.StatusBadGateway ||
+		statusCode == http.StatusServiceUnavailable ||
+		statusCode == http.StatusGatewayTimeout
 }

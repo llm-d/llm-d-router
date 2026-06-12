@@ -55,7 +55,7 @@ func main() {
 
 	// Initialize tracing conditionally using config
 	if opts.Tracing {
-		shutdown, err := tracing.InitTracing(ctx, logger, "pd-sidecar")
+		shutdown, err := tracing.InitTracing(ctx, logger, "llm-d-disagg-sidecar")
 		if err != nil {
 			// Log error but don't fail - tracing is optional
 			logger.Error(err, "Failed to initialize tracing")

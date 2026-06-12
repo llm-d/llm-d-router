@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
@@ -61,6 +62,8 @@ cert-path: "/etc/certificates-file"
 inference-pool: "file-ns/inference-pool-file"
 pool-group: "pool-group-file"
 max-idle-conns-per-host: 300
+prefill-max-retries: 3
+prefill-retry-backoff: "500ms"
 decode-chunk-size: 128
 mooncake-bootstrap-port: 9000
 tracing: true
@@ -105,6 +108,8 @@ func TestSidecarConfiguration(t *testing.T) {
 		inference-pool: inline-ns/inference-pool-inline,
 		pool-group: pool-group-inline,
 		max-idle-conns-per-host: 200,
+		prefill-max-retries: 2,
+		prefill-retry-backoff: '300ms',
 		decode-chunk-size: 256,
 		mooncake-bootstrap-port: 9001,
 		tracing: true
@@ -160,6 +165,9 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.InferencePoolName = "inference-pool-inline"
 				o.PoolGroup = "pool-group-inline"
 
+				o.PrefillMaxRetries = 2
+				o.PrefillRetryBackoff = 300 * time.Millisecond
+
 				o.DecodeChunkSize = 256
 				o.Tracing = true
 
@@ -203,6 +211,9 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.InferencePoolNamespace = "file-ns"
 				o.InferencePoolName = "inference-pool-file"
 				o.PoolGroup = "pool-group-file"
+
+				o.PrefillMaxRetries = 3
+				o.PrefillRetryBackoff = 500 * time.Millisecond
 
 				o.DecodeChunkSize = 128
 				o.Tracing = true
@@ -260,6 +271,9 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.InferencePoolNamespace = "ns"
 				o.InferencePoolName = "inference-pool"
 				o.PoolGroup = "pool-group"
+
+				o.PrefillMaxRetries = 2
+				o.PrefillRetryBackoff = 300 * time.Millisecond
 
 				o.DecodeChunkSize = 256
 				o.Tracing = true
@@ -331,6 +345,9 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.InferencePoolNamespace = "ns"
 				o.InferencePoolName = "inference-pool"
 				o.PoolGroup = "pool-group"
+
+				o.PrefillMaxRetries = 3
+				o.PrefillRetryBackoff = 500 * time.Millisecond
 
 				o.DecodeChunkSize = 128
 				o.Tracing = true
@@ -459,6 +476,9 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	assertEqual("InferencePoolNamespace", expected.InferencePoolNamespace, actual.InferencePoolNamespace)
 	assertEqual("InferencePoolName", expected.InferencePoolName, actual.InferencePoolName)
 	assertEqual(poolGroup, expected.PoolGroup, actual.PoolGroup)
+
+	assertEqual(prefillMaxRetries, expected.PrefillMaxRetries, actual.PrefillMaxRetries)
+	assertEqual(prefillRetryBackoff, expected.PrefillRetryBackoff, actual.PrefillRetryBackoff)
 
 	assertEqual(decodeChunkSize, expected.DecodeChunkSize, actual.DecodeChunkSize)
 	assertEqual(tracingFlag, expected.Tracing, actual.Tracing)

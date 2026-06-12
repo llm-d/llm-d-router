@@ -155,6 +155,13 @@ type Config struct {
 	// of provided prefill hosts instead of always using the first one.
 	EnablePrefillerSampling bool
 
+	// PrefillMaxRetries is the number of additional attempts when a prefill
+	// request fails with a 5xx error (e.g. connection reset → 502).
+	// 0 means no retries (original behavior).
+	PrefillMaxRetries int
+	// PrefillRetryBackoff is the delay between prefill retry attempts.
+	PrefillRetryBackoff time.Duration
+
 	// UseTLSForPrefiller indicates whether to use TLS when sending requests to prefillers.
 	UseTLSForPrefiller bool
 	// UseTLSForDecoder indicates whether to use TLS when sending requests to the decoder.
@@ -424,6 +431,7 @@ func (s *Server) createRoutes() *http.ServeMux {
 	})
 	mux.HandleFunc("POST "+ChatCompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+CompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
+	mux.HandleFunc("POST "+MessagesPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+ResponsesPath, s.disaggregatedPrefillHandler(APITypeResponses))
 	mux.HandleFunc("POST "+GeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
 

@@ -39,6 +39,35 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 - State each fact once, in its canonical location. Do not duplicate across struct docs, prose, tables, inline comments, and examples.
 - Do not use Unicode symbols or special characters in general, unless explicitly requested.
 
+### Logging
+
+The codebase uses `go-logr` via controller-runtime. Verbosity constants are defined in `pkg/common/observability/logging` (`DEFAULT=2`, `VERBOSE=3`, `DEBUG=4`, `TRACE=5`).
+
+**Level conventions:**
+
+- `logger.Info(...)` for once-per-request operational signals.
+- `logger.V(logging.DEBUG).Info(...)` for per-item or per-loop signals that fire multiple times per request.
+- `logger.V(logging.TRACE).Info(...)` for detailed state transitions (cache operations, index updates).
+- `logger.Error(err, "msg", ...)` for recoverable errors that carry an underlying `error` value.
+
+**Use named constants, not bare integers:**
+
+```go
+// wrong
+logger.V(4).Info("running protocol", ...)
+
+// correct
+logger.V(logging.DEBUG).Info("running protocol", ...)
+```
+
+**Guard expensive log construction:**
+
+```go
+if v := logger.V(logging.DEBUG); v.Enabled() {
+    v.Info("payload details", "data", expensiveSerialization())
+}
+```
+
 ## Git workflow
 
 - DCO sign-off is required. Use `git commit -s`.

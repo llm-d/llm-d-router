@@ -154,7 +154,7 @@ func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) 
 	}
 
 	if tp := request.Body.TokenizedPrompt; tp != nil {
-		return len(tp.TokenIDs), nil
+		return tp.TokenCount(), nil
 	}
 	return 0, nil
 }
