@@ -435,7 +435,7 @@ func BenchmarkFlowController_FullPathStress(b *testing.B) {
 			// 2. Post-scheduling: producer tracks the request on the endpoint.
 			infReq := &scheduling.InferenceRequest{
 				RequestID: reqID,
-				Body:      &requesthandling.InferenceRequestBody{TokenizedPrompt: &requesthandling.TokenizedPrompt{TokenIDs: benchTokenIDs}},
+				Body:      &requesthandling.InferenceRequestBody{TokenizedPrompt: &requesthandling.TokenizedPrompt{PerPromptTokens: [][]uint32{benchTokenIDs}}},
 			}
 			schedResult := &scheduling.SchedulingResult{ProfileResults: profileResults}
 			h.producer.PreRequest(ctx, infReq, schedResult)
