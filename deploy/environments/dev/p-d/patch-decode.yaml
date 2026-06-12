@@ -14,5 +14,6 @@ spec:
         - "--port=8000"
         - "--vllm-port=8200"
         - "--kv-connector=${CONNECTOR_TYPE}"
+        - "--mooncake-bootstrap-port=8000"
         - "--secure-proxy=false"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"

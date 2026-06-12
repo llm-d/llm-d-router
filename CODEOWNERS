@@ -1,0 +1,49 @@
+# See https://help.github.com/articles/about-codeowners/
+# for more info about the CODEOWNERS file.
+#
+# Order matters: for any path, the last matching pattern wins (its owners
+# fully replace, not extend, the owners of earlier matches). Each path's
+# owners are auto-requested for review on a touching PR and required by
+# branch protection on main and release-* branches.
+#
+# Project leadership and team membership are recorded in /LEADS.md.
+
+# Default — every path falls back to the maintainers team. Each component below
+# also lists the team so a maintainer can approve, while named owners are
+# auto-requested for review on their paths.
+*                                                                         @llm-d/router-maintainers
+
+# Flow control framework + plugins
+/pkg/epp/flowcontrol/                                                     @LukeAVanDrie @shmuelk @llm-d/router-maintainers
+/pkg/epp/framework/interface/flowcontrol/                                 @LukeAVanDrie @shmuelk @llm-d/router-maintainers
+/pkg/epp/framework/plugins/flowcontrol/                                   @LukeAVanDrie @shmuelk @llm-d/router-maintainers
+
+# Envoy ext_proc message layer
+/pkg/common/envoy/                                                        @shmuelk @llm-d/router-maintainers
+
+# EPP configuration: loading logic and API types
+/pkg/epp/config/                                                          @shmuelk @llm-d/router-maintainers
+/apix/config/                                                             @shmuelk @llm-d/router-maintainers
+
+# Proxy sidecar
+/cmd/pd-sidecar/                                                          @shmuelk @llm-d/router-maintainers
+/pkg/sidecar/                                                             @shmuelk @llm-d/router-maintainers
+
+# SLO + latency-prediction subsystem
+/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier/             @kaushikmitr @llm-d/router-maintainers
+/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity/         @kaushikmitr @llm-d/router-maintainers
+/pkg/epp/framework/plugins/scheduling/scorer/latency/                     @kaushikmitr @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo/            @kaushikmitr @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/  @kaushikmitr @llm-d/router-maintainers
+
+# Prefix cache
+/pkg/epp/framework/plugins/scheduling/scorer/prefix/                      @liu-cong @vMaroon @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/ @liu-cong @vMaroon @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/ @bongwoobak @vMaroon @llm-d/router-maintainers
+
+# Tokenization
+/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/          @vMaroon @liu-cong @sagearc @llm-d/router-maintainers
+
+# Request handling
+/pkg/epp/framework/interface/requesthandling/                             @zetxqx @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requesthandling/                               @zetxqx @llm-d/router-maintainers

@@ -95,8 +95,7 @@ func TestSessionAffinity_Score(t *testing.T) {
 	}
 }
 
-func TestSessionAffinity_ResponseBody(t *testing.T) {
-
+func TestSessionAffinity_ResponseHeader(t *testing.T) {
 	targetEndpoint := &fwkdl.EndpointMetadata{
 		NamespacedName: k8stypes.NamespacedName{Name: "pod1"},
 		Address:        "1.2.3.4",
@@ -113,27 +112,26 @@ func TestSessionAffinity_ResponseBody(t *testing.T) {
 	}{
 		{
 			name:            "standard case with existing headers map",
-			initialResponse: &requestcontrol.Response{RequestID: "req-1", Headers: make(map[string]string), EndOfStream: true},
+			initialResponse: &requestcontrol.Response{RequestID: "req-1", Headers: make(map[string]string)},
 			targetPod:       targetEndpoint,
 			wantHeaders:     map[string]string{"x-session-token": wantToken},
 		},
 		{
 			name:            "response with nil headers map",
-			initialResponse: &requestcontrol.Response{RequestID: "req-2", Headers: nil, EndOfStream: true},
+			initialResponse: &requestcontrol.Response{RequestID: "req-2", Headers: nil},
 			targetPod:       targetEndpoint,
 			wantHeaders:     map[string]string{"x-session-token": wantToken},
 		},
 		{
 			name:            "nil targetPod should do nothing",
-			initialResponse: &requestcontrol.Response{RequestID: "req-3", Headers: make(map[string]string), EndOfStream: true},
+			initialResponse: &requestcontrol.Response{RequestID: "req-3", Headers: make(map[string]string)},
 			targetPod:       nil,
 			wantHeaders:     map[string]string{},
 		},
 		{
-			name:            "incomplete response should do nothing (EndOfStream=false)",
-			initialResponse: &requestcontrol.Response{RequestID: "req-4", Headers: make(map[string]string), EndOfStream: false},
+			name:            "nil response should do nothing",
+			initialResponse: nil,
 			targetPod:       targetEndpoint,
-			wantHeaders:     map[string]string{},
 		},
 	}
 
@@ -142,7 +140,11 @@ func TestSessionAffinity_ResponseBody(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s.ResponseBody(ctx, nil, test.initialResponse, test.targetPod)
+			s.ResponseHeader(ctx, nil, test.initialResponse, test.targetPod)
+
+			if test.initialResponse == nil {
+				return
+			}
 
 			if diff := cmp.Diff(test.wantHeaders, test.initialResponse.Headers); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)

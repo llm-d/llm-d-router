@@ -32,6 +32,22 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
+// tokenLimitMap returns the map holding the token-limit fields: sampling_params
+// for the generate API (created if absent), or the request itself otherwise.
+// The second return value reports whether an empty sampling_params map was
+// synthesized; callers must drop it before dispatching downstream if it stays empty.
+func tokenLimitMap(req map[string]any, apiType APIType) (map[string]any, bool) {
+	if apiType != APITypeGenerate {
+		return req, false
+	}
+	if sp, ok := req[requestFieldSamplingParams].(map[string]any); ok {
+		return sp, false
+	}
+	sp := map[string]any{}
+	req[requestFieldSamplingParams] = sp
+	return sp, true
+}
+
 func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType APIType) {
 	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
 	s.logger.V(4).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
@@ -52,10 +68,10 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	uuidStr := uuid.String()
 
 	// Prefill Stage
-	tracer := tracing.Tracer()
+	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
-	ctx, prefillSpan := tracer.Start(ctx, "llm_d.pd_proxy.prefill",
+	ctx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -80,9 +96,10 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		val     any
 		present bool
 	}
+	tokenMap, createdSamplingParams := tokenLimitMap(completionRequest, apiType)
 	var savedTokenValues [2]savedField
 	for i, field := range tokenLimitFields {
-		if v, ok := completionRequest[field]; ok {
+		if v, ok := tokenMap[field]; ok {
 			savedTokenValues[i] = savedField{field: field, val: v, present: true}
 		} else {
 			savedTokenValues[i] = savedField{field: field}
@@ -102,7 +119,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	delete(completionRequest, requestFieldStreamOptions)
 
 	for _, field := range tokenLimitFields {
-		completionRequest[field] = 1
+		tokenMap[field] = 1
 	}
 
 	pbody, err := json.Marshal(completionRequest)
@@ -214,7 +231,7 @@ retryLoop:
 
 	// Decode Stage
 
-	ctx, decodeSpan := tracer.Start(ctx, "llm_d.pd_proxy.decode",
+	ctx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
@@ -245,10 +262,15 @@ retryLoop:
 
 	for i := range savedTokenValues[:len(tokenLimitFields)] {
 		sv := &savedTokenValues[i]
-		delete(completionRequest, sv.field)
+		delete(tokenMap, sv.field)
 		if sv.present {
-			completionRequest[sv.field] = sv.val
+			tokenMap[sv.field] = sv.val
 		}
+	}
+	// Drop the sampling_params map synthesized for prefill capping if it ended up
+	// empty, so the decode request matches the caller's original (which omitted it).
+	if createdSamplingParams && len(tokenMap) == 0 {
+		delete(completionRequest, requestFieldSamplingParams)
 	}
 
 	completionRequest[requestFieldKVTransferParams] = pKVTransferParams

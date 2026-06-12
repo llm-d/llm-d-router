@@ -23,11 +23,76 @@ import (
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/stretchr/testify/assert"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
+
+func TestExtractTraceContext(t *testing.T) {
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	const (
+		traceID = "0af7651916cd43dd8448eb211c80319c"
+		spanID  = "b7ad6b7169203331"
+	)
+
+	tests := []struct {
+		name         string
+		headers      []*configPb.HeaderValue
+		wantTraceID  string
+		wantRemote   bool
+		wantHasTrace bool
+	}{
+		{
+			name: "extracts upstream traceparent",
+			headers: []*configPb.HeaderValue{
+				{Key: "traceparent", Value: "00-" + traceID + "-" + spanID + "-01"},
+			},
+			wantTraceID:  traceID,
+			wantRemote:   true,
+			wantHasTrace: true,
+		},
+		{
+			name: "case-insensitive header key",
+			headers: []*configPb.HeaderValue{
+				{Key: "TraceParent", RawValue: []byte("00-" + traceID + "-" + spanID + "-01")},
+			},
+			wantTraceID:  traceID,
+			wantRemote:   true,
+			wantHasTrace: true,
+		},
+		{
+			name: "no traceparent yields no remote span context",
+			headers: []*configPb.HeaderValue{
+				{Key: "x-test", Value: "val"},
+			},
+			wantHasTrace: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{
+					Headers: &configPb.HeaderMap{Headers: tc.headers},
+				},
+			}
+
+			ctx := extractTraceContext(context.Background(), req)
+			sc := trace.SpanContextFromContext(ctx)
+
+			assert.Equal(t, tc.wantHasTrace, sc.IsValid(), "span context validity should match")
+			if tc.wantHasTrace {
+				assert.Equal(t, tc.wantTraceID, sc.TraceID().String(), "trace ID should match upstream")
+				assert.Equal(t, tc.wantRemote, sc.IsRemote(), "span context should be remote")
+			}
+		})
+	}
+}
 
 func TestHandleRequestHeaders(t *testing.T) {
 	t.Parallel()

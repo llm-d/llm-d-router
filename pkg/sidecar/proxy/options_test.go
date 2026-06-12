@@ -65,6 +65,7 @@ max-idle-conns-per-host: 300
 prefill-max-retries: 3
 prefill-retry-backoff: "500ms"
 decode-chunk-size: 128
+mooncake-bootstrap-port: 9000
 tracing: true
 `, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector))
 }
@@ -110,6 +111,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		prefill-max-retries: 2,
 		prefill-retry-backoff: '300ms',
 		decode-chunk-size: 256,
+		mooncake-bootstrap-port: 9001,
 		tracing: true
 	}`, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector)
 	invalidInlineYAML := "{port: 8200, invalid-yaml}"
@@ -136,6 +138,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.vllmPort = "8021"
 				o.DataParallelSize = 3
 				o.MaxIdleConnsPerHost = 200
+				o.MooncakeBootstrapPort = 9001
 
 				o.KVConnector = KVConnectorSGLang
 				o.connector = KVConnectorNIXLV2
@@ -183,6 +186,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.vllmPort = "8200"
 				o.DataParallelSize = 5
 				o.MaxIdleConnsPerHost = 300
+				o.MooncakeBootstrapPort = 9000
 
 				o.KVConnector = KVConnectorSGLang
 				o.ECConnector = ECExampleConnector
@@ -242,6 +246,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.vllmPort = "8222"
 				o.DataParallelSize = 2
 				o.MaxIdleConnsPerHost = 200
+				o.MooncakeBootstrapPort = 9001
 
 				o.KVConnector = KVConnectorSGLang
 				o.ECConnector = ECExampleConnector
@@ -279,29 +284,43 @@ func TestSidecarConfiguration(t *testing.T) {
 			expectedError: nil,
 		},
 		{
+			name: "flags set ECConnectorNIXL",
+			inputFlags: map[string]any{
+				ecConnector: ECConnectorNIXL,
+			},
+			expected: func(o *Options) {
+				// Complete() migrates the default connector (KVConnectorNIXLV2) into KVConnector.
+				o.KVConnector = KVConnectorNIXLV2
+				o.ECConnector = ECConnectorNIXL
+			},
+			expectedError: nil,
+		},
+		{
 			name: "flags override file YAML",
 			inputFlags: map[string]any{
-				port:                    "8111",
-				vllmPort:                "8222",
-				dataParallelSize:        2,
-				kvConnector:             KVConnectorSGLang,
-				ecConnector:             ECExampleConnector,
-				enableSSRFProtection:    true,
-				enablePrefillerSampling: true,
-				enableTLS:               &[]string{prefillStage},
-				tlsInsecureSkipVerify:   &[]string{prefillStage},
-				secureServing:           false,
-				certPath:                "/etc/certificates",
-				inferencePool:           "ns/inference-pool",
-				poolGroup:               "pool-group",
-				configurationFile:       validYAMLPath,
-				maxIdleConnsPerHost:     400,
+				port:                      "8111",
+				vllmPort:                  "8222",
+				dataParallelSize:          2,
+				kvConnector:               KVConnectorSGLang,
+				ecConnector:               ECExampleConnector,
+				enableSSRFProtection:      true,
+				enablePrefillerSampling:   true,
+				enableTLS:                 &[]string{prefillStage},
+				tlsInsecureSkipVerify:     &[]string{prefillStage},
+				secureServing:             false,
+				certPath:                  "/etc/certificates",
+				inferencePool:             "ns/inference-pool",
+				poolGroup:                 "pool-group",
+				configurationFile:         validYAMLPath,
+				maxIdleConnsPerHost:       400,
+				mooncakeBootstrapPortFlag: 9002,
 			},
 			expected: func(o *Options) {
 				o.Port = "8111"
 				o.vllmPort = "8222"
 				o.DataParallelSize = 2
 				o.MaxIdleConnsPerHost = 400
+				o.MooncakeBootstrapPort = 9002
 
 				o.KVConnector = KVConnectorSGLang
 				o.ECConnector = ECExampleConnector
@@ -585,6 +604,7 @@ func TestValidateConnector(t *testing.T) {
 		{"valid nixlv2", KVConnectorNIXLV2, false},
 		{"valid shared-storage", KVConnectorSharedStorage, false},
 		{"valid sglang", KVConnectorSGLang, false},
+		{"valid mooncake", KVConnectorMooncake, false},
 		{"invalid connector", "invalid", true},
 	}
 

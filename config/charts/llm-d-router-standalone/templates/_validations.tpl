@@ -14,6 +14,32 @@ standalone validations
 */}}
 {{- define "llm-d-router.validations.standalone" -}}
 {{- $proxy := .Values.router.proxy | default dict -}}
+{{- $proxyMode := include "llm-d-router.proxyMode" . | trim -}}
+{{- if not (or (eq $proxyMode "sidecar") (eq $proxyMode "service")) -}}
+  {{- fail (printf ".Values.router.proxy.mode must be one of [sidecar, service], got %q" $proxyMode) -}}
+{{- end -}}
+{{- $failOpen := index $proxy "failOpen" -}}
+{{- if and (not (kindIs "invalid" $failOpen)) (not (kindIs "bool" $failOpen)) -}}
+  {{- fail (printf ".Values.router.proxy.failOpen must be a boolean, got %q" (toString $failOpen)) -}}
+{{- end -}}
+{{- if eq $proxyMode "service" -}}
+  {{- if not $proxy.enabled -}}
+    {{- fail ".Values.router.proxy.enabled must be true when .Values.router.proxy.mode=service" -}}
+  {{- end -}}
+  {{- $proxyType := default "envoy" ($proxy.proxyType | default "envoy") | lower -}}
+  {{- if ne $proxyType "envoy" -}}
+    {{- fail (printf ".Values.router.proxy.mode=service currently supports only proxyType=envoy, got %q" $proxyType) -}}
+  {{- end -}}
+  {{- $hasHTTP := false -}}
+  {{- range $servicePort := (.Values.router.extraServicePorts | default (list)) -}}
+    {{- if eq (toString (index $servicePort "name")) "http" -}}
+      {{- $hasHTTP = true -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if not $hasHTTP -}}
+    {{- fail ".Values.router.extraServicePorts must contain a port named \"http\" for the proxy listener when .Values.router.proxy.mode=service" -}}
+  {{- end -}}
+{{- end -}}
 {{- if $proxy.enabled -}}
   {{- $proxyType := default "envoy" ($proxy.proxyType | default "envoy") | lower -}}
   {{- if not (or (eq $proxyType "envoy") (eq $proxyType "agentgateway")) -}}

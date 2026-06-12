@@ -16,6 +16,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
 const (
@@ -87,8 +88,8 @@ func (p *HeadersHandler) WithName(name string) *HeadersHandler {
 
 // PreRequest wires prefill and encode SchedulerProfile results into headers to indicate disaggregation workers.
 func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	tracer := tracing.Tracer()
-	_, span := tracer.Start(ctx, "llm_d.epp.prerequest.disaggregation",
+	tracer := tracing.Tracer(schedplugins.TracerScope)
+	_, span := tracer.Start(ctx, "prepare_disaggregation",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

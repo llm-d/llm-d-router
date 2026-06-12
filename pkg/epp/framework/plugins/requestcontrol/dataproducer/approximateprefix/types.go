@@ -91,12 +91,19 @@ const (
 	// defaultBlockSizeTokens is the default token block size (vLLM default is 16).
 	defaultBlockSizeTokens = 16
 
-	// defaultMaxPrefixBlocks is the maximum number of blocks to match.
+	// defaultMaxPrefixBlocks is the fallback block cap, consulted only when
+	// MaxPrefixTokensToMatch is 0; the default token cap otherwise supersedes it.
 	// Two long requests with the same prefix up to this limit will be indistinguishable.
 	// This parameter provides a trade-off between cache size, prefix matching speed and matching
 	// accuracy. Use a small value if most requests are short to reduce cache size and speed up the
 	// matching process. Use a large value if most requests are long to increase the matching accuracy.
-	defaultMaxPrefixBlocks = 256
+	defaultMaxPrefixBlocks = 2048
+
+	// defaultMaxPrefixTokens caps prefix matching at the context window of large
+	// production models (128K tokens, e.g. gpt-oss 120b), a reasonable upper bound
+	// that covers the long-prompt use cases seen in production. It takes precedence
+	// over defaultMaxPrefixBlocks: maxBlocks = defaultMaxPrefixTokens / blockSizeTokens.
+	defaultMaxPrefixTokens = 131072
 
 	// defaultLRUCapacityPerServer is the default capacity of the LRU indexer per server.
 	// The indexer is an approximation to the actual prefix LRU cache state on the model servers per server (pod).
@@ -119,7 +126,9 @@ type config struct {
 	BlockSizeTokens int `json:"blockSizeTokens"`
 	// Deprecated: Legacy block size defined in number of characters.
 	BlockSize int `json:"blockSize"`
-	// MaxPrefixBlocksToMatch is the maximum number of prefix blocks to match.
+	// Deprecated: use MaxPrefixTokensToMatch, which caps prefix matching in tokens
+	// independent of BlockSizeTokens. MaxPrefixBlocksToMatch applies only when
+	// MaxPrefixTokensToMatch is 0.
 	MaxPrefixBlocksToMatch int `json:"maxPrefixBlocksToMatch"`
 	// MaxPrefixTokensToMatch is the maximum number of prefix tokens to match.
 	// When set (> 0), it takes precedence over MaxPrefixBlocksToMatch by computing
@@ -135,5 +144,6 @@ var defaultConfig = config{
 	BlockSize:              0,
 	BlockSizeTokens:        defaultBlockSizeTokens,
 	MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+	MaxPrefixTokensToMatch: defaultMaxPrefixTokens,
 	LRUCapacityPerServer:   defaultLRUCapacityPerServer,
 }

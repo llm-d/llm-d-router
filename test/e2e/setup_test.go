@@ -95,6 +95,10 @@ func createModelServersPDSharedStorage(decodeReplicas int) []string {
 	return createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorSharedStorage)
 }
 
+func createModelServersPDMooncake(decodeReplicas int) []string {
+	return createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorMooncake)
+}
+
 // createModelServersEpDDisagg creates model server resources for E/PD (encode + prefill/decode) testing.
 func createModelServersEpDDisagg(encodeReplicas, decodeReplicas int) []string {
 	return createModelServersFromKustomize(ePdDisaggDir, map[string]string{

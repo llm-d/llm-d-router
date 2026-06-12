@@ -115,6 +115,7 @@ test_cases_llm_d_router_standalone["gke-provider"]="--set provider.name=gke --se
 test_cases_llm_d_router_standalone["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["llm-d-router-gateway"]="--set router.inferencePool.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8000' --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
+test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 
 
@@ -168,13 +169,6 @@ if eval "${unsupported_agentgateway_llm_d_router_gateway_command}"; then
   exit 1
 fi
 
-unsupported_agentgateway_selector_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set inferenceExtension.sidecar.proxyType=agentgateway --set inferenceExtension.sidecar.agentgateway.service.name=llm-instance-gateway --set 'inferenceExtension.sidecar.agentgateway.service.ports[0]=8000' --set inferenceExtension.endpointsServer.endpointSelector='app in (llm-instance-gateway)' --set inferenceExtension.endpointsServer.createInferencePool=false --set 'inferenceExtension.endpointsServer.targetPorts[0].number=8000' >/dev/null"
-echo "Executing: ${unsupported_agentgateway_selector_command}"
-if eval "${unsupported_agentgateway_selector_command}"; then
-  echo "Helm template unexpectedly succeeded for unsupported agentgateway model Service selector"
-  exit 1
-fi
-
 mismatched_agentgateway_ports_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8001' --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
 echo "Executing: ${mismatched_agentgateway_ports_command}"
 if eval "${mismatched_agentgateway_ports_command}"; then
@@ -193,6 +187,20 @@ mismatched_agentgateway_listener_target_port_command="${HELM} template ${SCRIPT_
 echo "Executing: ${mismatched_agentgateway_listener_target_port_command}"
 if eval "${mismatched_agentgateway_listener_target_port_command}"; then
   echo "Helm template unexpectedly succeeded for an agentgateway listener targetPort that does not match port"
+  exit 1
+fi
+
+unsupported_proxy_service_agentgateway_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8000' --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
+echo "Executing: ${unsupported_proxy_service_agentgateway_command}"
+if eval "${unsupported_proxy_service_agentgateway_command}"; then
+  echo "Helm template unexpectedly succeeded for proxy mode=service with proxyType=agentgateway"
+  exit 1
+fi
+
+invalid_failopen_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.failOpen=notabool >/dev/null"
+echo "Executing: ${invalid_failopen_command}"
+if eval "${invalid_failopen_command}"; then
+  echo "Helm template unexpectedly succeeded for non-boolean router.proxy.failOpen"
   exit 1
 fi
 
@@ -238,7 +246,56 @@ if ! grep -q -- 'app.kubernetes.io/component: agentgateway-model-service' "${age
   echo "Agentgateway model Service did not render its component label"
   exit 1
 fi
+agentgateway_selector_block="${TEMP_DIR}/llm-d-router-standalone-agentgateway-service-selector.yaml"
+sed -n '/^  selector:$/,/^  ports:$/p' "${agentgateway_service_block}" > "${agentgateway_selector_block}"
+if ! grep -Eq -- '^[[:space:]]+"?app"?:[[:space:]]+"?llm-instance-gateway"?[[:space:]]*$' "${agentgateway_selector_block}"; then
+  echo "Agentgateway model Service did not render selector labels from router.modelServers.matchLabels"
+  exit 1
+fi
 if grep -q -- 'app.kubernetes.io/name:' "${agentgateway_service_block}"; then
   echo "Agentgateway model Service rendered an app.kubernetes.io/name label"
+  exit 1
+fi
+
+echo "Verifying llm-d-router-standalone proxy mode=service renders a separate proxy Deployment and Service..."
+proxy_service_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-service-render.yaml"
+proxy_service_render_command="${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3 > ${proxy_service_render_output}"
+echo "Executing: ${proxy_service_render_command}"
+eval "${proxy_service_render_command}"
+if ! grep -q -- 'name: proxy-svc-proxy' "${proxy_service_render_output}"; then
+  echo "Proxy service mode did not render the separate proxy Deployment/Service named proxy-svc-proxy"
+  exit 1
+fi
+if ! grep -q -- 'replicas: 3' "${proxy_service_render_output}"; then
+  echo "Proxy service mode did not honor router.proxy.replicas"
+  exit 1
+fi
+if ! grep -q -- 'type: STRICT_DNS' "${proxy_service_render_output}"; then
+  echo "Proxy service mode did not switch the ext_proc cluster to STRICT_DNS"
+  exit 1
+fi
+if ! grep -q -- 'address: proxy-svc-epp.proxy-ns.svc.cluster.local' "${proxy_service_render_output}"; then
+  echo "Proxy service mode did not point ext_proc at the EPP Service FQDN"
+  exit 1
+fi
+if ! grep -q -- 'failure_mode_allow: true' "${proxy_service_render_output}"; then
+  echo "Proxy service mode did not enable fail-open on the ext_proc filter"
+  exit 1
+fi
+# The proxy listener must be exposed by the separate proxy Service.
+if ! grep -q -- 'port: 8081' "${proxy_service_render_output}"; then
+  echo "Proxy service mode did not expose the proxy listener Service port"
+  exit 1
+fi
+# In service mode the envoy-proxy container lives only in the standalone proxy
+# Deployment, never as a sidecar in the EPP Deployment, so it appears once.
+proxy_container_count=$(grep -c -- '- name: envoy-proxy$' "${proxy_service_render_output}")
+if [ "${proxy_container_count}" -ne 1 ]; then
+  echo "Proxy service mode rendered ${proxy_container_count} envoy-proxy containers, expected exactly 1 (in the proxy Deployment)"
+  exit 1
+fi
+# The proxy Deployment selector/labels must be distinct from the EPP selector.
+if ! grep -q -- 'llm-d-router-proxy: proxy-svc-proxy' "${proxy_service_render_output}"; then
+  echo "Proxy service mode did not render the dedicated proxy selector label"
   exit 1
 fi

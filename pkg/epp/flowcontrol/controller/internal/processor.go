@@ -67,6 +67,7 @@ var ErrProcessorBusy = errors.New("shard processor is busy")
 type Processor struct {
 	poolName             string
 	registry             contracts.FlowRegistry
+	registryBackground   contracts.FlowRegistryBackground
 	saturationDetector   flowcontrol.SaturationDetector
 	endpointCandidates   contracts.EndpointCandidates
 	usageLimitPolicy     flowcontrol.UsageLimitPolicy
@@ -91,6 +92,7 @@ func NewProcessor(
 	ctx context.Context,
 	poolName string,
 	registry contracts.FlowRegistry,
+	registryBackground contracts.FlowRegistryBackground,
 	saturationDetector flowcontrol.SaturationDetector,
 	endpointCandidates contracts.EndpointCandidates,
 	usageLimitPolicy flowcontrol.UsageLimitPolicy,
@@ -101,6 +103,7 @@ func NewProcessor(
 ) *Processor {
 	return &Processor{
 		registry:             registry,
+		registryBackground:   registryBackground,
 		poolName:             poolName,
 		saturationDetector:   saturationDetector,
 		endpointCandidates:   endpointCandidates,
@@ -179,8 +182,17 @@ func (sp *Processor) Run(ctx context.Context) {
 	dispatchTicker := sp.clock.NewTicker(time.Millisecond)
 	defer dispatchTicker.Stop()
 
+	var gcCh <-chan time.Time
+	var priorityBandUpdateCh <-chan map[int]struct{}
+	if sp.registryBackground != nil {
+		gcTicker := sp.clock.NewTicker(sp.registryBackground.FlowGCTimeout())
+		defer gcTicker.Stop()
+		gcCh = gcTicker.C()
+		priorityBandUpdateCh = sp.registryBackground.PriorityBandUpdateChannel()
+	}
+
 	// This is the main worker loop. It continuously processes incoming requests and dispatches queued requests until the
-	// context is cancelled. The `select` statement has three cases:
+	// context is cancelled. The `select` statement has these cases:
 	//
 	//  1. Context Cancellation: The highest priority is shutting down. If the context's `Done` channel is closed, the
 	//     loop will drain all queues and exit. This is the primary exit condition.
@@ -188,6 +200,8 @@ func (sp *Processor) Run(ctx context.Context) {
 	//     processor is responsive to new work.
 	//  3. Dispatch Ticker: Periodically triggers a dispatch cycle to attempt to dispatch items from existing queues,
 	//     ensuring that queued work is processed even when no new items arrive.
+	//  4. Priority Band Updates: Applies control-plane priority band topology changes.
+	//  5. Registry GC: Periodically garbage-collects idle flows and priority bands.
 	for {
 		select {
 		case <-ctx.Done():
@@ -209,6 +223,10 @@ func (sp *Processor) Run(ctx context.Context) {
 			sp.dispatchCycle(ctx) // Process immediately when an item arrives
 		case <-dispatchTicker.C():
 			sp.dispatchCycle(ctx) // Periodically attempt to dispatch from queues
+		case desired := <-priorityBandUpdateCh:
+			sp.registryBackground.ApplyDesiredPriorities(desired)
+		case <-gcCh:
+			sp.registryBackground.ExecuteGCCycle()
 		}
 	}
 }

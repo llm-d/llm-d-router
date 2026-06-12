@@ -33,7 +33,7 @@ SIDECAR_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(SIDECAR_IMAGE_NAME)
 SIDECAR_TAG ?= dev
 export SIDECAR_IMAGE ?= $(SIDECAR_IMAGE_TAG_BASE):$(SIDECAR_TAG)
 
-VLLM_SIMULATOR_TAG ?= v0.9.0
+VLLM_SIMULATOR_TAG ?= v0.9.2
 VLLM_SIMULATOR_TAG_BASE ?= $(IMAGE_REGISTRY)/$(VLLM_SIMULATOR_IMAGE_NAME)
 export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 
@@ -105,7 +105,12 @@ DOCKER_SOCK_GID := $(shell stat -f '%g' $(CONTAINER_SOCK) 2>/dev/null)
 else
 DOCKER_SOCK_GID := $(shell stat -c '%g' $(CONTAINER_SOCK) 2>/dev/null)
 endif
-BUILDER_SOCK_FLAGS = --group-add $(DOCKER_SOCK_GID) \
+ifneq ($(DOCKER_SOCK_GID),)
+DOCKER_GROUP_PARAM := --group-add $(DOCKER_SOCK_GID)
+else
+DOCKER_GROUP_PARAM :=
+endif
+BUILDER_SOCK_FLAGS = $(DOCKER_GROUP_PARAM) \
 	-v $(CONTAINER_SOCK):$(CONTAINER_SOCK) \
 	-e DOCKER_HOST=unix://$(CONTAINER_SOCK) \
 	-e CONTAINER_RUNTIME=docker
@@ -199,9 +204,17 @@ vulncheck: image-build-builder ## Run govulncheck for known vulnerabilities
 	@printf "\033[33;1m==== Running govulncheck ====\033[0m\n"
 	$(BUILDER_RUN) 'govulncheck ./...'
 
+.PHONY: check-latest-tags
+check-latest-tags: ## Check ':latest' image tags in YAML (warn-only; use check-latest-tags-strict to fail)
+	@./scripts/check-latest-tags.sh --warn
+
+.PHONY: check-latest-tags-strict
+check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails on any violation)
+	@./scripts/check-latest-tags.sh
+
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck
+presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags
 
 .PHONY: git-branch-check
 git-branch-check:

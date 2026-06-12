@@ -30,16 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
-const (
-	chatCompletionsRequestBody = `{
-				"model": "Qwen/Qwen2-0.5B",
-				"messages": [
-				  {"role": "user", "content": "Hello"}
-				],
-				"max_tokens": 50
-			}`
-	eventStreamContentType = "text/event-stream"
-)
+const eventStreamContentType = "text/event-stream"
 
 var _ = Describe("NIXL Connector (v2)", func() {
 
@@ -620,5 +611,131 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
+	})
+
+	// Generate API tests — exercise the same NIXL v2 connector with
+	// /inference/v1/generate, whose token limits live under sampling_params.
+
+	startProxyAndSendGenerate := func(body string, withPrefillHeader bool) {
+		go func() {
+			defer GinkgoRecover()
+
+			testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+			err := testInfo.proxy.Start(testInfo.ctx)
+			Expect(err).ToNot(HaveOccurred())
+
+			testInfo.stoppedCh <- struct{}{}
+		}()
+
+		<-testInfo.proxy.readyCh
+		DeferCleanup(func() {
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		})
+
+		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+GeneratePath, strings.NewReader(body))
+		Expect(err).ToNot(HaveOccurred())
+		if withPrefillHeader {
+			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		}
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		if rp.StatusCode != 200 {
+			bp, readErr := io.ReadAll(rp.Body)
+			Expect(readErr).ToNot(HaveOccurred())
+			Fail(string(bp))
+		}
+	}
+
+	samplingParamsOf := func(req map[string]any) map[string]any {
+		sp, ok := req[requestFieldSamplingParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		return sp
+	}
+
+	It("should successfully send generate API request to 1. prefill 2. decode with the correct fields", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4],
+				"sampling_params": {"max_tokens": 50}
+			}`, true)
+
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
+		prq1 := testInfo.prefillHandler.CompletionRequests[0]
+
+		kvTransferParams, ok := prq1[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
+
+		Expect(samplingParamsOf(prq1)).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(samplingParamsOf(prq1)).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+		Expect(prq1).To(HaveKeyWithValue("stream", false))
+
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
+	})
+
+	It("should cap sampling_params token limits in prefill and restore originals in decode", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4],
+				"sampling_params": {"max_tokens": 100, "min_tokens": 5}
+			}`, true)
+
+		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+
+		decodeSP := samplingParamsOf(testInfo.decodeHandler.CompletionRequests[0])
+		Expect(decodeSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
+		Expect(decodeSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
+	})
+
+	It("should cap prefill and drop the caps in decode when sampling_params omits them", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4],
+				"sampling_params": {"temperature": 0.7}
+			}`, true)
+
+		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+
+		decodeSP := samplingParamsOf(testInfo.decodeHandler.CompletionRequests[0])
+		Expect(decodeSP).ToNot(HaveKey(requestFieldMaxTokens))
+		Expect(decodeSP).ToNot(HaveKey(requestFieldMinTokens))
+		Expect(decodeSP).To(HaveKeyWithValue("temperature", BeNumerically("==", 0.7)))
+	})
+
+	It("should cap prefill and drop synthesized sampling_params in decode when the request omits it", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4]
+			}`, true)
+
+		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+
+		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
+		Expect(decodeReq).ToNot(HaveKey(requestFieldSamplingParams))
+	})
+
+	It("should pass through generate API request when no prefill header is set", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4],
+				"sampling_params": {"max_tokens": 50}
+			}`, false)
+
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 	})
 })
