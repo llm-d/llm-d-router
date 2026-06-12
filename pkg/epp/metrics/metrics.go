@@ -663,13 +663,13 @@ func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairness
 }
 
 // RecordInterTokenLatency records the time between consecutive response body chunks for streaming requests.
-func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName string, itlSeconds float64) bool {
+func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName, fairnessID, priority string, itlSeconds float64) bool {
 	if itlSeconds < 0 {
 		log.FromContext(ctx).Error(nil, "Inter-token latency value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "itlSeconds", itlSeconds)
 		return false
 	}
-	llmdInterTokenLatency.WithLabelValues(modelName, targetModelName).Observe(itlSeconds)
+	llmdInterTokenLatency.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(itlSeconds)
 	return true
 }
 
