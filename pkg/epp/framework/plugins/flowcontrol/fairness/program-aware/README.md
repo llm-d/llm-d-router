@@ -73,6 +73,7 @@ The plugin exports two shared collectors and one strategy-owned collector under 
 
 ## Trade-offs
 
+* **Abandoned requests block eviction**: Requests abandoned after dispatch leave `inFlight` non-zero, and the eviction sweep skips any program with non-zero `inFlight`, so its `ProgramMetrics` entry and Prometheus series persist indefinitely.
 * **Memory and label-series growth**: A new program ID adds a `ProgramMetrics` entry plus per-program Prometheus label series. The eviction sweep bounds growth, but a workload with rapidly churning program IDs (e.g. a fresh ID per request) will see TTL-bounded accumulation. Choose a TTL that matches your churn rate.
 * **Decay tuning depends on workload**: `lasDecayFactor` is per-Pick, so its effective half-life depends on the cluster's pick rate. Use `lasHalfLifeSeconds` for predictable wall-clock decay.
 
