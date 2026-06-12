@@ -282,16 +282,16 @@ func filterDocument(doc string) string {
 
 // swapToSimRenderSidecar rewrites the vllm-render sidecar to run the inference
 // sim, which emits mm_features that text-only vLLM does not.
-func swapToSimRenderSidecar(inputs []string, simImage, modelName string) []string {
-	outputs := make([]string, len(inputs))
-	for idx, input := range inputs {
-		docs := strings.Split(input, "\n---")
-		rendered := make([]string, 0, len(docs))
-		for _, doc := range docs {
-			if strings.TrimSpace(doc) == "" {
+func swapToSimRenderSidecar(eppManifests []string, simImage, modelName string) []string {
+	outputs := make([]string, len(eppManifests))
+	for idx, manifest := range eppManifests {
+		yamlDocs := strings.Split(manifest, "\n---")
+		rendered := make([]string, 0, len(yamlDocs))
+		for _, yamlDoc := range yamlDocs {
+			if strings.TrimSpace(yamlDoc) == "" {
 				continue
 			}
-			rendered = append(rendered, swapRenderSidecarInDoc(doc, simImage, modelName))
+			rendered = append(rendered, swapRenderSidecarInDoc(yamlDoc, simImage, modelName))
 		}
 		outputs[idx] = strings.Join(rendered, "\n---\n")
 	}

@@ -739,15 +739,15 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			_, podBRe := runChatCompletionWithImages(testImageURL2)
 			gomega.Expect(podBRe).Should(gomega.Equal(podB))
 
-			// Mixed image + audio in one request. Probes per-item match
+			// Mixed image + audio + video in one request. Probes per-item match
 			// accounting and the empty-hash short-circuit in ExtractMMItems.
-			ginkgo.By("mixed image+audio cache affinity")
-			_, podMix := runChatCompletionWithImageAndAudio(testImageURL, testAudioData)
-			_, podMixRe := runChatCompletionWithImageAndAudio(testImageURL, testAudioData)
+			ginkgo.By("mixed image+audio+video cache affinity")
+			_, podMix := runChatCompletionWithImageAudioVideo(testImageURL, testAudioData, testVideoURL)
+			_, podMixRe := runChatCompletionWithImageAudioVideo(testImageURL, testAudioData, testVideoURL)
 			gomega.Expect(podMixRe).Should(gomega.Equal(podMix))
 
-			// Producer emits hits + queries on the shared metric registry.
-			// PreRequest is async (wg.Go), so use Eventually to avoid the race.
+			// hits is the matched subset of queries, so hits < queries (never equal).
+			// PreRequest writes the LRU async (wg.Go) → Eventually.
 			ginkgo.By("metrics: hits_total + queries_total")
 			gomega.Eventually(func() float64 {
 				return getMetricValue("llm_d_router_epp_encoder_cache_queries_total",
