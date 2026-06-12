@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"slices"
@@ -510,6 +511,27 @@ func validateWideEPHosts(flag string, hosts []string, dpSize, dpLocal int) error
 // Validate checks the Options for invalid or conflicting values.
 // Complete must be called before Validate.
 func (opts *Options) Validate() error {
+	// Validate data parallel size
+	if opts.DataParallelSize < 1 {
+		return fmt.Errorf("--data-parallel-size must be a positive integer, got %d", opts.DataParallelSize)
+	}
+
+	port, err := strconv.Atoi(opts.Port)
+	if err != nil {
+		return fmt.Errorf("--port must be a valid integer, got %q", opts.Port)
+	}
+	if err := validatePortRange(port, opts.DataParallelSize); err != nil {
+		return fmt.Errorf("--port %w", err)
+	}
+
+	vllmPort, err := strconv.Atoi(opts.vllmPort)
+	if err != nil {
+		return fmt.Errorf("--vllm-port must be a valid integer, got %q", opts.vllmPort)
+	}
+	if err := validatePortRange(vllmPort, opts.DataParallelSize); err != nil {
+		return fmt.Errorf("--vllm-port %w", err)
+	}
+
 	// Validate KV connector
 	if _, ok := supportedKVConnectors[opts.KVConnector]; !ok {
 		return fmt.Errorf("--kv-connector must be one of: %s", supportedKVConnectorNamesStr)
@@ -588,6 +610,25 @@ func (opts *Options) Validate() error {
 		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {
 			return errors.New("--inference-pool flag or INFERENCE_POOL environment variable is required when --enable-ssrf-protection is true")
 		}
+	}
+
+	return nil
+}
+
+func validatePortRange(startPort, rangeSize int) error {
+	const maxPort = math.MaxUint16
+
+	if rangeSize <= 0 || rangeSize >= maxPort {
+		return errors.New("invalid port range")
+	}
+
+	if startPort < 1 || startPort > maxPort {
+		return fmt.Errorf("start port %d is out of valid range [1, %d]", startPort, maxPort)
+	}
+
+	endPort := startPort + rangeSize - 1
+	if endPort > maxPort {
+		return fmt.Errorf("port range [%d, %d] exceeds maximum port value", startPort, endPort)
 	}
 
 	return nil

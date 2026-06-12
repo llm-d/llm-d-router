@@ -754,6 +754,119 @@ func TestValidateSSRFProtection(t *testing.T) {
 	}
 }
 
+func TestValidateDataParallelSize(t *testing.T) {
+	tests := []struct {
+		name             string
+		dataParallelSize int
+		wantErr          bool
+	}{
+		{"default valid", 1, false},
+		{"positive valid", 2, false},
+		{"zero invalid", 0, true},
+		{"negative invalid", -5, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.DataParallelSize = tt.dataParallelSize
+			_ = opts.Complete()
+			err := opts.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateDataParallelPortRange(t *testing.T) {
+	tests := []struct {
+		name             string
+		port             string
+		vllmPort         string
+		dataParallelSize int
+		wantErr          bool
+	}{
+		{"derived ports valid", "65534", "65534", 2, false},
+		{"derived sidecar port too high", "65535", "8000", 2, true},
+		{"derived vLLM port too high", "8000", "65535", 2, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.Port = tt.port
+			opts.vllmPort = tt.vllmPort
+			opts.DataParallelSize = tt.dataParallelSize
+			_ = opts.Complete()
+			err := opts.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidatePorts(t *testing.T) {
+	tests := []struct {
+		name     string
+		port     string
+		vllmPort string
+		wantErr  string
+	}{
+		{"valid ports", "8000", "8001", ""},
+		{"invalid port format", "abc", "8001", `--port must be a valid integer, got "abc"`},
+		{"invalid vllm port format", "8000", "xyz", `--vllm-port must be a valid integer, got "xyz"`},
+		{"port too low", "0", "8001", "--port start port 0 is out of valid range [1, 65535]"},
+		{"port too high", "65536", "8001", "--port start port 65536 is out of valid range [1, 65535]"},
+		{"vllm port too low", "8000", "0", "--vllm-port start port 0 is out of valid range [1, 65535]"},
+		{"vllm port too high", "8000", "65536", "--vllm-port start port 65536 is out of valid range [1, 65535]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.Port = tt.port
+			opts.vllmPort = tt.vllmPort
+			_ = opts.Complete()
+			err := opts.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidatePortRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		startPort int
+		rangeSize int
+		wantErr   string
+	}{
+		{"valid range", 1, 65534, ""},
+		{"zero range size", 1, 0, "invalid port range"},
+		{"range size at maximum", 1, 65535, "invalid port range"},
+		{"range size too large", 1, 65536, "invalid port range"},
+		{"start port too low", 0, 1, "start port 0 is out of valid range [1, 65535]"},
+		{"start port too high", 65536, 1, "start port 65536 is out of valid range [1, 65535]"},
+		{"end port too high", 65535, 2, "port range [65535, 65536] exceeds maximum port value"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePortRange(tt.startPort, tt.rangeSize)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCompleteInferencePoolParsing(t *testing.T) {
 	tests := []struct {
 		name              string
