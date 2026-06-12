@@ -103,7 +103,7 @@ func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest
 		},
 	}
 	if len(features) > 0 {
-		body.TokenizedPrompt = &fwkrh.TokenizedPrompt{MultiModalFeatures: features}
+		body.TokenizedPrompt = &fwkrh.TokenizedPrompt{MultiModalFeatures: [][]fwkrh.MultiModalFeature{features}}
 	}
 	return &scheduling.InferenceRequest{Body: body}
 }
@@ -173,7 +173,7 @@ func TestHasMultimodalContent(t *testing.T) {
 		{"feature present", &scheduling.InferenceRequest{
 			Body: &fwkrh.InferenceRequestBody{
 				TokenizedPrompt: &fwkrh.TokenizedPrompt{
-					MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage}},
+					MultiModalFeatures: [][]fwkrh.MultiModalFeature{{{Modality: fwkrh.ModalityImage}}},
 				},
 			},
 		}, true},
