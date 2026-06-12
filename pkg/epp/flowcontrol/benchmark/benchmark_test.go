@@ -304,9 +304,10 @@ func BenchmarkFlowController_FullPath(b *testing.B) {
 
 	telemetry := newBenchmarkTelemetry()
 
-	// Concurrency-gated: each dispatched request consumes a detector slot and
-	// releases it after ResponseBody, so W workers > L limit sustains backpressure
-	// and forces real queuing in the dispatch cycle.
+	// Concurrency-gated by the real detector: each dispatched request records in-flight load (via
+	// PreRequest) and releases it after ResponseBody. Load is held only briefly, so this measures
+	// free-flowing dispatch plus the detector's per-cycle DynamicAttribute read cost rather than
+	// sustained W>L queuing.
 	var globalReqID atomic.Uint64
 
 	b.ResetTimer()
