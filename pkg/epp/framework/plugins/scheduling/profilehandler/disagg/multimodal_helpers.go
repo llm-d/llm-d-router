@@ -8,7 +8,13 @@ import (
 // multimodal features. Detection is protocol-agnostic: it relies on the
 // token-producer plugin having populated TokenizedPrompt.MultiModalFeatures.
 func hasMultimodalContent(request *scheduling.InferenceRequest) bool {
-	return request != nil && request.Body != nil &&
-		request.Body.TokenizedPrompt != nil &&
-		len(request.Body.TokenizedPrompt.MultiModalFeatures) > 0
+	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
+		return false
+	}
+	for _, perPrompt := range request.Body.TokenizedPrompt.MultiModalFeatures {
+		if len(perPrompt) > 0 {
+			return true
+		}
+	}
+	return false
 }

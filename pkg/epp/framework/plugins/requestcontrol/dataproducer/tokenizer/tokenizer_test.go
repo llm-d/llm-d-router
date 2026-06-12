@@ -167,13 +167,14 @@ func TestProduce_PopulatesTokenizedPrompt(t *testing.T) {
 	require.NoError(t, p.Produce(context.Background(), req, nil))
 	require.NotNil(t, req.Body.TokenizedPrompt)
 	assert.Equal(t, []uint32{1, 2, 3, 4}, req.Body.TokenizedPrompt.PerPromptTokens[0])
-	require.Len(t, req.Body.TokenizedPrompt.MultiModalFeatures, 2)
+	require.Len(t, req.Body.TokenizedPrompt.MultiModalFeatures, 1)
+	require.Len(t, req.Body.TokenizedPrompt.MultiModalFeatures[0], 2)
 
-	assert.Equal(t, 3, req.Body.TokenizedPrompt.MultiModalFeatures[0].Offset)
-	assert.Equal(t, "hash-a", req.Body.TokenizedPrompt.MultiModalFeatures[0].Hash)
-	assert.Equal(t, 20, req.Body.TokenizedPrompt.MultiModalFeatures[1].Offset)
-	assert.Equal(t, "hash-b", req.Body.TokenizedPrompt.MultiModalFeatures[1].Hash)
-	assert.Equal(t, fwkrh.ModalityImage, req.Body.TokenizedPrompt.MultiModalFeatures[0].Modality)
+	assert.Equal(t, 3, req.Body.TokenizedPrompt.MultiModalFeatures[0][0].Offset)
+	assert.Equal(t, "hash-a", req.Body.TokenizedPrompt.MultiModalFeatures[0][0].Hash)
+	assert.Equal(t, 20, req.Body.TokenizedPrompt.MultiModalFeatures[0][1].Offset)
+	assert.Equal(t, "hash-b", req.Body.TokenizedPrompt.MultiModalFeatures[0][1].Hash)
+	assert.Equal(t, fwkrh.ModalityImage, req.Body.TokenizedPrompt.MultiModalFeatures[0][0].Modality)
 }
 
 func TestProduce_SkipsWhenAlreadyPopulated(t *testing.T) {
@@ -367,10 +368,10 @@ func TestProduce_GenerateFlattensFeatures(t *testing.T) {
 	require.NotNil(t, req.Body.TokenizedPrompt)
 	assert.Equal(t, tokenIDs, req.Body.TokenizedPrompt.PerPromptTokens[0])
 	assert.Equal(t,
-		[]fwkrh.MultiModalFeature{
+		[][]fwkrh.MultiModalFeature{{
 			{Modality: fwkrh.ModalityImage, Hash: "abc123hash", Offset: 1, Length: 3},
 			{Modality: fwkrh.ModalityImage, Hash: "def456hash", Offset: 4, Length: 3},
-		},
+		}},
 		req.Body.TokenizedPrompt.MultiModalFeatures,
 	)
 }
@@ -383,9 +384,10 @@ func TestConvertMMFeaturesRoundTrip(t *testing.T) {
 		},
 	}
 	upstream := convertMMFeaturesToUpstream(src)
-	require.Len(t, upstream, 2)
+	require.Len(t, upstream, 1)
+	require.Len(t, upstream[0], 2)
 
-	hashes, ranges := ConvertMMFeaturesFromUpstream(upstream)
+	hashes, ranges := ConvertMMFeaturesFromUpstream(upstream[0])
 	assert.Equal(t, []string{"h1", "h2"}, hashes["image"])
 	assert.Equal(t,
 		[]kvblock.PlaceholderRange{{Offset: 1, Length: 2}, {Offset: 10, Length: 3}},
