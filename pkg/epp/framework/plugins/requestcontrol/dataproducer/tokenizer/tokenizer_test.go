@@ -36,11 +36,11 @@ import (
 )
 
 type mockTokenizer struct {
-	renderFunc     func(payload fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error)
+	renderFunc     func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error)
 	renderChatFunc func(payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
-func (m *mockTokenizer) Render(_ context.Context, payload fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
+func (m *mockTokenizer) Render(_ context.Context, payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 	return m.renderFunc(payload)
 }
 
@@ -209,7 +209,7 @@ func TestProduce_SetsCacheSaltOnSkipPath(t *testing.T) {
 
 func TestRenderBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 	tok := &mockTokenizer{
-		renderFunc: func(fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			t.Fatal("render must not run when token IDs are provided")
 			return nil, nil, nil
 		},
@@ -223,7 +223,7 @@ func TestRenderBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 
 func TestRenderBackend_CompletionsArrayPassesArrayPayload(t *testing.T) {
 	tok := &mockTokenizer{
-		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			pm, ok := payload.AsMap()
 			require.True(t, ok)
 			arr, ok := pm["prompt"].([]string)
@@ -242,7 +242,7 @@ func TestRenderBackend_CompletionsArrayPassesArrayPayload(t *testing.T) {
 func TestRenderBackend_CompletionsSingleArrayUsesPlainText(t *testing.T) {
 	var got string
 	tok := &mockTokenizer{
-		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			pm, ok := payload.AsMap()
 			require.True(t, ok)
 			got, _ = pm["prompt"].(string)
@@ -302,7 +302,7 @@ func TestProduce_UnsupportedBodyType(t *testing.T) {
 func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
 	// Generate requests carry pre-tokenized IDs — the tokenizer must NOT be called.
 	tok := &mockTokenizer{
-		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			t.Error("tokenizer.Render must not be called for generate requests")
 			return nil, nil, nil
 		},
@@ -332,7 +332,7 @@ func TestProduce_GenerateFlattensFeatures(t *testing.T) {
 	// Generate requests with multimodal features must populate TokenizedPrompt.MultiModalFeatures
 	// in offset-sorted prompt order, so downstream prefix-cache scoring picks up image hashes.
 	tok := &mockTokenizer{
-		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			t.Error("tokenizer.Render must not be called for generate requests")
 			return nil, nil, nil
 		},
@@ -444,7 +444,7 @@ func TestChatCompletionsToRenderChatRequest(t *testing.T) {
 
 func TestProduce_StringArrayPrompt(t *testing.T) {
 	tok := &mockTokenizer{
-		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			pm, _ := payload.AsMap()
 			_, ok := pm["prompt"].([]string)
 			require.True(t, ok, "multi-string prompt must be passed as []string")
@@ -469,7 +469,7 @@ func TestProduce_StringArrayPrompt(t *testing.T) {
 
 func TestProduce_StringArrayPromptRenderError(t *testing.T) {
 	tok := &mockTokenizer{
-		renderFunc: func(fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			return nil, nil, errors.New("render failed")
 		},
 	}
@@ -490,7 +490,7 @@ func TestProduce_StringArrayPromptRenderError(t *testing.T) {
 
 func TestProduce_StringArrayPromptDoesNotPublishEmptyTokenResult(t *testing.T) {
 	tok := &mockTokenizer{
-		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			return nil, nil, nil
 		},
 	}
@@ -509,7 +509,7 @@ func TestProduce_StringArrayPromptDoesNotPublishEmptyTokenResult(t *testing.T) {
 
 func TestProduce_SinglePromptSetsPerPromptTokens(t *testing.T) {
 	tok := &mockTokenizer{
-		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			return [][]uint32{{10, 20, 30}}, nil, nil
 		},
 	}

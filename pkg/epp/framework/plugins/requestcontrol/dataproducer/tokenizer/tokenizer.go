@@ -39,7 +39,7 @@ import (
 )
 
 type tokenizer interface {
-	Render(ctx context.Context, payload fwkrh.RequestPayload) ([][]uint32, []tokenizerTypes.Offset, error)
+	Render(ctx context.Context, payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error)
 	RenderChat(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
