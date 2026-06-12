@@ -156,8 +156,8 @@ latencyPredictor:
   trainingServer:
     image:
       registry: ghcr.io/llm-d
-      repository: llm-d-latency-predictor-training-server
-      tag: v0.1.0-rc.1
+      repository: llm-d-latency-predictor-training-server-dev
+      tag: latest
       pullPolicy: Always
     port: 8000
     resources:
@@ -197,8 +197,8 @@ latencyPredictor:
     startPort: 8001
     image:
       registry: ghcr.io/llm-d
-      repository: llm-d-latency-predictor-prediction-server
-      tag: v0.1.0-rc.1
+      repository: llm-d-latency-predictor-prediction-server-dev
+      tag: latest
       pullPolicy: Always
     resources:
       requests:
