@@ -140,7 +140,7 @@ func (lp *legacyProducer) tokenizeRequest(request *scheduling.InferenceRequest) 
 // flattenMMFeatures regroups the kvcache map-shaped multimodal metadata
 // into the upstream flat list expected on TokenizedPrompt, sorted by
 // placeholder offset so consumers see items in prompt order.
-func flattenMMFeatures(src *tokenization.MultiModalFeatures) []fwkrh.MultiModalFeature {
+func flattenMMFeatures(src *tokenization.MultiModalFeatures) [][]fwkrh.MultiModalFeature {
 	if src == nil || len(src.MMHashes) == 0 {
 		return nil
 	}
@@ -167,5 +167,5 @@ func flattenMMFeatures(src *tokenization.MultiModalFeatures) []fwkrh.MultiModalF
 		return nil
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Offset < items[j].Offset })
-	return items
+	return [][]fwkrh.MultiModalFeature{items}
 }

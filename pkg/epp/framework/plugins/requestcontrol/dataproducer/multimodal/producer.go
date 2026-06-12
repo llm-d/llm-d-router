@@ -228,11 +228,13 @@ func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
 	}
 
 	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, feature := range request.Body.TokenizedPrompt.MultiModalFeatures {
-		if feature.Hash == "" {
-			continue
+	for _, perPrompt := range request.Body.TokenizedPrompt.MultiModalFeatures {
+		for _, feature := range perPrompt {
+			if feature.Hash == "" {
+				continue
+			}
+			addItem(itemsByHash, feature.Hash, string(feature.Modality))
 		}
-		addItem(itemsByHash, feature.Hash, string(feature.Modality))
 	}
 	return itemSlice(itemsByHash)
 }

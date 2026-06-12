@@ -51,15 +51,13 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	}
 
 	var result [][]kvblock.BlockHash
-	for _, tokens := range tp.PerPromptTokens {
+	for i, tokens := range tp.PerPromptTokens {
 		if len(tokens) == 0 {
 			continue
 		}
-		// MM features apply only to single-prompt requests (chat); multi-prompt
-		// completions never carry multimodal content.
 		var mmf []fwkrh.MultiModalFeature
-		if len(tp.PerPromptTokens) == 1 {
-			mmf = tp.MultiModalFeatures
+		if i < len(tp.MultiModalFeatures) {
+			mmf = tp.MultiModalFeatures[i]
 		}
 		keys, err := computeBlockKeysForTokens(ctx, idx, tokens, mmf, tp.CacheSalt, request.TargetModel, blockSizeTokens)
 		if err != nil {

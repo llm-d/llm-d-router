@@ -389,9 +389,9 @@ func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 		Body: &fwkrh.InferenceRequestBody{
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
 				PerPromptTokens: [][]uint32{tokens},
-				MultiModalFeatures: []fwkrh.MultiModalFeature{
+				MultiModalFeatures: [][]fwkrh.MultiModalFeature{{
 					{Modality: fwkrh.ModalityImage, Hash: "abc", Offset: 2, Length: 4},
-				},
+				}},
 			},
 		},
 	}
@@ -413,7 +413,7 @@ func TestProduce_FoldsCacheSalt(t *testing.T) {
 
 	tests := []struct {
 		name string
-		mm   []fwkrh.MultiModalFeature
+		mm   [][]fwkrh.MultiModalFeature
 		want []kvblock.MMHash
 	}{
 		{
@@ -422,7 +422,7 @@ func TestProduce_FoldsCacheSalt(t *testing.T) {
 		},
 		{
 			name: "salt appended after mm hash",
-			mm:   []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "abc", Offset: 2, Length: 4}},
+			mm:   [][]fwkrh.MultiModalFeature{{{Modality: fwkrh.ModalityImage, Hash: "abc", Offset: 2, Length: 4}}},
 			want: []kvblock.MMHash{{Hash: "abc"}, {Hash: "s3cr3t"}},
 		},
 	}

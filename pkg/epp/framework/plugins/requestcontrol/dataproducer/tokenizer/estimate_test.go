@@ -121,7 +121,8 @@ func TestEstimateBackend_ChatImageFeature(t *testing.T) {
 	tp, err := estimateBackend{}.produce(context.Background(), body)
 	require.NoError(t, err)
 	require.Len(t, tp.MultiModalFeatures, 1)
-	f := tp.MultiModalFeatures[0]
+	require.Len(t, tp.MultiModalFeatures[0], 1)
+	f := tp.MultiModalFeatures[0][0]
 	assert.Equal(t, fwkrh.ModalityImage, f.Modality)
 	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(pngBase64DataURL), 16), f.Hash)
 	assert.Greater(t, f.Length, 1, "image length must be > 1 (placeholder weighting)")
@@ -148,10 +149,10 @@ func TestEstimateBackend_ChatImageWeightingDistinct(t *testing.T) {
 	// Non-decodable URL falls back to the default 640x360 resolution.
 	def, err := estimateBackend{}.produce(context.Background(), chat("https://example.com/a.png"))
 	require.NoError(t, err)
-	assert.Equal(t, (defaultImageWidth*defaultImageHeight)/imageTokenFactor, def.MultiModalFeatures[0].Length, "default image length")
+	assert.Equal(t, (defaultImageWidth*defaultImageHeight)/imageTokenFactor, def.MultiModalFeatures[0][0].Length, "default image length")
 	small, err := estimateBackend{}.produce(context.Background(), chat(pngBase64DataURL))
 	require.NoError(t, err)
-	assert.NotEqual(t, def.MultiModalFeatures[0].Length, small.MultiModalFeatures[0].Length, "different images yielded identical placeholder counts")
+	assert.NotEqual(t, def.MultiModalFeatures[0][0].Length, small.MultiModalFeatures[0][0].Length, "different images yielded identical placeholder counts")
 }
 
 // chatImageBody builds a chat request carrying a single image_url block.
@@ -170,7 +171,8 @@ func TestImageEstimator_StaticMode(t *testing.T) {
 	tp, err := b.produce(context.Background(), chatImageBody(pngBase64DataURL))
 	require.NoError(t, err)
 	require.Len(t, tp.MultiModalFeatures, 1)
-	assert.Equal(t, 7, tp.MultiModalFeatures[0].Length, "static image length")
+	require.Len(t, tp.MultiModalFeatures[0], 1)
+	assert.Equal(t, 7, tp.MultiModalFeatures[0][0].Length, "static image length")
 }
 
 // TestImageEstimator_CustomFactor asserts the dynamic factor knob changes the
@@ -180,7 +182,7 @@ func TestImageEstimator_CustomFactor(t *testing.T) {
 	// Non-decodable URL falls back to the default 640x360 resolution.
 	tp, err := b.produce(context.Background(), chatImageBody("https://example.com/a.png"))
 	require.NoError(t, err)
-	assert.Equal(t, (defaultImageWidth*defaultImageHeight)/2048, tp.MultiModalFeatures[0].Length, "custom-factor image length")
+	assert.Equal(t, (defaultImageWidth*defaultImageHeight)/2048, tp.MultiModalFeatures[0][0].Length, "custom-factor image length")
 }
 
 // TestImageEstimator_CustomDefaultResolution asserts the default-resolution knob
@@ -191,7 +193,7 @@ func TestImageEstimator_CustomDefaultResolution(t *testing.T) {
 	}})}
 	tp, err := b.produce(context.Background(), chatImageBody("https://example.com/a.png"))
 	require.NoError(t, err)
-	assert.Equal(t, (1024*1024)/imageTokenFactor, tp.MultiModalFeatures[0].Length, "custom default-resolution length")
+	assert.Equal(t, (1024*1024)/imageTokenFactor, tp.MultiModalFeatures[0][0].Length, "custom default-resolution length")
 }
 
 // TestEstimateBackend_MessagesImageFeature asserts an Anthropic messages image
@@ -214,7 +216,8 @@ func TestEstimateBackend_MessagesImageFeature(t *testing.T) {
 	tp, err := estimateBackend{}.produce(context.Background(), body)
 	require.NoError(t, err)
 	require.Len(t, tp.MultiModalFeatures, 1)
-	f := tp.MultiModalFeatures[0]
+	require.Len(t, tp.MultiModalFeatures[0], 1)
+	f := tp.MultiModalFeatures[0][0]
 	assert.Equal(t, fwkrh.ModalityImage, f.Modality)
 	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(pngBase64Raw), 16), f.Hash, "base64 source must hash by its raw payload")
 	assert.Greater(t, f.Length, 1, "image length must be > 1 (placeholder weighting)")
@@ -239,7 +242,8 @@ func TestEstimateBackend_MessagesURLImageKey(t *testing.T) {
 	tp, err := estimateBackend{}.produce(context.Background(), body)
 	require.NoError(t, err)
 	require.Len(t, tp.MultiModalFeatures, 1)
-	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(url), 16), tp.MultiModalFeatures[0].Hash)
+	require.Len(t, tp.MultiModalFeatures[0], 1)
+	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(url), 16), tp.MultiModalFeatures[0][0].Hash)
 }
 
 // TestEstimateBackend_MessagesDeterministic asserts identical requests produce

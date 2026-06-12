@@ -108,11 +108,10 @@ type TokenizedPrompt struct {
 	// length-1 outer slice. Multi-string completions use one inner slice per
 	// prompt string.
 	PerPromptTokens [][]uint32
-	// MultiModalFeatures holds one entry per multimodal item in prompt order.
-	// Nil if the prompt contains no multimodal content. Offsets are relative
-	// to PerPromptTokens[0] (always single-prompt when multimodal content is
-	// present).
-	MultiModalFeatures []MultiModalFeature
+	// MultiModalFeatures holds multimodal items per prompt, indexed in
+	// lockstep with PerPromptTokens. Single-prompt requests use a length-1
+	// outer slice. Nil if the prompt contains no multimodal content.
+	MultiModalFeatures [][]MultiModalFeature
 	// CacheSalt isolates prefix caches across requests. Populated by the token-producer.
 	CacheSalt string
 }
@@ -137,9 +136,10 @@ type MultiModalFeature struct {
 	Modality Modality
 	// Hash is the content hash of the item, used for KV-cache reuse across requests.
 	Hash string
-	// Offset is the index of the first placeholder token for this item in TokenIDs.
+	// Offset is the index of the first placeholder token for this item
+	// in the corresponding PerPromptTokens entry.
 	Offset int
-	// Length is the number of placeholder tokens this item occupies in TokenIDs.
+	// Length is the number of placeholder tokens this item occupies.
 	Length int
 }
 

@@ -63,7 +63,11 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	// and report them as features.
 	if body.ChatCompletions != nil {
 		raw, features := b.chatCompletionsBytes(body.ChatCompletions)
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}, MultiModalFeatures: features}, nil
+		tp := &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}}
+		if features != nil {
+			tp.MultiModalFeatures = [][]fwkrh.MultiModalFeature{features}
+		}
+		return tp, nil
 	}
 	if body.Messages != nil {
 		raw, features := b.messagesBytes(body.Messages)
@@ -75,7 +79,11 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 			"mmFeatureCount", len(features),
 			"mmFeatures", features,
 		)
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}, MultiModalFeatures: features}, nil
+		tp := &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}}
+		if features != nil {
+			tp.MultiModalFeatures = [][]fwkrh.MultiModalFeature{features}
+		}
+		return tp, nil
 	}
 
 	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {

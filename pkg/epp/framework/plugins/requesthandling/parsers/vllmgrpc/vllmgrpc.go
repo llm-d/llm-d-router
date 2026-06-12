@@ -235,7 +235,7 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 	return body, nil
 }
 
-func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModalFeature {
+func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) [][]fwkrh.MultiModalFeature {
 	if mmInputs == nil {
 		return nil
 	}
@@ -265,7 +265,7 @@ func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModal
 		features = append(features, feature)
 	}
 
-	return features
+	return [][]fwkrh.MultiModalFeature{features}
 }
 
 func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.InferenceRequestBody, error) {

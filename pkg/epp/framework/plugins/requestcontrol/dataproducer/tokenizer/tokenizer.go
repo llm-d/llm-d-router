@@ -302,9 +302,10 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 }
 
 // convertMMFeaturesToUpstream flattens the kv-cache map-shaped multimodal
-// metadata into the upstream flat list, sorted by placeholder offset so
-// consumers see items in prompt order. Returns nil when no content is present.
-func convertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) []fwkrh.MultiModalFeature {
+// metadata into a single-prompt per-prompt slice, sorted by placeholder
+// offset so consumers see items in prompt order. Returns nil when no
+// content is present.
+func convertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) [][]fwkrh.MultiModalFeature {
 	if src == nil || len(src.MMHashes) == 0 {
 		return nil
 	}
@@ -332,7 +333,7 @@ func convertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) []fwkrh.M
 		return nil
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Offset < items[j].Offset })
-	return items
+	return [][]fwkrh.MultiModalFeature{items}
 }
 
 // ConvertMMFeaturesFromUpstream regroups the flat list of multimodal features
