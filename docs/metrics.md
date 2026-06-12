@@ -1,8 +1,11 @@
 # Metrics
 
-The `llm-d-router` exposes the following Prometheus metrics to monitor its behavior and performance, particularly concerning Encode/Prefill/Decode disaggregation.
+The `llm-d-router` exposes Prometheus metrics to monitor its behavior and performance. This document covers the core router metrics; plugin-specific metrics (precise prefix cache, predicted latency, multimodal encoder cache, etc.) are documented next to their plugins in [`pkg/epp/framework/plugins/`](../pkg/epp/framework/plugins/).
 
-All metrics are in the `llm_d_inference_scheduler` subsystem.
+All `llm-d-router` metrics are in the `llm_d_router_epp` subsystem.
+
+> [!NOTE]
+> A subset of metrics is also emitted under the deprecated `llm_d_inference_scheduler` subsystem for backwards compatibility with existing scrapers. New deployments should consume the `llm_d_router_epp_*` series; the `llm_d_inference_scheduler_*` aliases will be removed in a future release.
 
 ## Scrape and see the metric
 
@@ -10,7 +13,7 @@ Metrics defined by llm-d Router are in addition to Inference Gateway metrics. Fo
 
 ## Metrics Details
 
-### `disagg_decision_total`
+### `llm_d_router_epp_disagg_decision_total`
 
 *   **Type:** Counter
 *   **Labels:**
@@ -27,9 +30,9 @@ Metrics defined by llm-d Router are in addition to Inference Gateway metrics. Fo
     *   Monitor the distribution across decision types to understand engagement rates for each disaggregation mode.
     *   Sudden changes in ratios might indicate configuration issues, changes in workload patterns, or problems with the decision logic.
 
-### `pd_decision_total` (deprecated)
+### `llm_d_router_epp_pd_decision_total` (deprecated)
 
-> **Deprecated:** Use `disagg_decision_total` instead.
+> **Deprecated:** Use `llm_d_router_epp_disagg_decision_total` instead.
 
 *   **Type:** Counter
 *   **Labels:**
@@ -40,4 +43,4 @@ Metrics defined by llm-d Router are in addition to Inference Gateway metrics. Fo
 
 > [!NOTE]
 > This metric is maintained for backward compatibility with the deprecated
-> `pd-profile-handler`. New deployments should use `disagg_decision_total`.
+> `pd-profile-handler`. New deployments should use `llm_d_router_epp_disagg_decision_total`.
