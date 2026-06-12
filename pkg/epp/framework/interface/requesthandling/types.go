@@ -34,8 +34,13 @@ const nilStr = "<nil>"
 // Modality identifies the type of multimodal content in a prompt.
 type Modality string
 
-// ModalityImage is the only currently supported modality.
-const ModalityImage Modality = "image"
+// Modality values match the model-server's multimodal hash keys so labels agree
+// across backends.
+const (
+	ModalityImage Modality = "image"
+	ModalityAudio Modality = "audio"
+	ModalityVideo Modality = "video"
+)
 
 // RequestPayload represents a strongly-typed unmarshaled request payload or raw bytes.
 type RequestPayload interface {
