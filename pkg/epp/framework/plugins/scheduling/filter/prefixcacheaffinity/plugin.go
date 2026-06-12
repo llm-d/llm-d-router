@@ -70,7 +70,7 @@ type Config struct {
 	// MaxTTFTPenaltyMs is the max TTFT penalty (ms) before breaking stickiness.
 	// If the best sticky endpoint's TTFT exceeds the best non-sticky endpoint's
 	// TTFT by more than this value, all endpoints are kept. Set to 0 to always
-	// stick. Default: 5000.
+	// stick. Default: 18000.
 	MaxTTFTPenaltyMs float64 `json:"maxTTFTPenaltyMs,omitempty"`
 
 	// TTFTSource selects where the load gate reads per-endpoint TTFT from.
@@ -93,7 +93,7 @@ type Config struct {
 var DefaultConfig = Config{
 	AffinityThreshold:      0.80,
 	ExplorationProbability: 0.01,
-	MaxTTFTPenaltyMs:       5000,
+	MaxTTFTPenaltyMs:       18000,
 	TTFTSource:             TTFTSourcePrefillThroughput,
 
 	// Calibrated for Qwen 32B on 2x H100 80GB (TP=2), vLLM 0.19; see README.
