@@ -1,0 +1,22 @@
+{{- define "llm-d-epp.proxy-service" -}}
+{{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
+{{- if and $proxy.enabled (eq (include "llm-d-router.proxyMode" .) "service") -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-d-router.proxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- include "llm-d-router.proxySelectorLabels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "llm-d-router.proxySelectorLabels" . | nindent 4 }}
+  ports:
+    {{- with .Values.router.extraServicePorts }}
+    {{- . | toYaml | nindent 4 }}
+    {{- end }}
+  type: ClusterIP
+---
+{{- end -}}
+{{- end -}}

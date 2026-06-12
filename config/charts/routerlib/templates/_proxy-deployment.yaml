@@ -1,0 +1,75 @@
+{{- define "llm-d-epp.proxy-deployment" -}}
+{{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
+{{- if and $proxy.enabled (eq (include "llm-d-router.proxyMode" .) "service") -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-d-router.proxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- include "llm-d-router.proxySelectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.router.proxy.replicas | default 2 }}
+  selector:
+    matchLabels:
+      {{- include "llm-d-router.proxySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "llm-d-router.labels" . | nindent 8 }}
+        {{- include "llm-d-router.proxySelectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ $proxy.name }}
+          image: {{ $proxy.image }}
+          imagePullPolicy: {{ $proxy.imagePullPolicy | default "IfNotPresent" }}
+        {{- with $proxy.command }}
+          command:
+            - {{ . | quote }}
+        {{- end }}
+        {{- with $proxy.args }}
+          args:
+          {{- range . }}
+            - {{ . | quote }}
+          {{- end }}
+        {{- end }}
+        {{- with $proxy.env }}
+          env:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $proxy.ports }}
+          ports:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $proxy.livenessProbe }}
+          livenessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with $proxy.readinessProbe }}
+          readinessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with $proxy.startupProbe }}
+          startupProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with $proxy.securityContext }}
+          securityContext:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with $proxy.resources }}
+          resources:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with $proxy.volumeMounts }}
+          volumeMounts:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+      {{- with $proxy.volumes }}
+      volumes:
+      {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
+---
+{{- end -}}
+{{- end -}}

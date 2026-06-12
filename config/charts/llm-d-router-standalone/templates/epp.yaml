@@ -2,6 +2,8 @@
 {{ include "llm-d-router.validations.standalone" . }}
 {{ include "llm-d-epp.config" . }}
 {{ include "llm-d-epp.deployment" . }}
+{{ include "llm-d-epp.proxy-deployment" . }}
+{{ include "llm-d-epp.proxy-service" . }}
 {{ include "llm-d-router.gke" . }}
 {{ include "llm-d-epp.leader-election-rbac" . }}
 {{ include "llm-d-epp.sa-token-secret" . }}

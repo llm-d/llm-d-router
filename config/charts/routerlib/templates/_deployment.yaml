@@ -28,6 +28,8 @@ spec:
     spec:
       {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict }}
       {{- $proxyType := include "llm-d-router.proxyType" . | trim }}
+      {{- $proxyMode := include "llm-d-router.proxyMode" . | trim }}
+      {{- $proxySidecar := and $proxy.enabled (eq $proxyMode "sidecar") }}
       {{- $proxyConfigMap := index $proxy "configMap" | default dict }}
       {{- $proxyConfigMapName := index $proxyConfigMap "name" | default "" }}
       {{- $eppFlags := deepCopy (.Values.router.epp.flags | default dict) }}
@@ -38,7 +40,7 @@ spec:
       # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
       terminationGracePeriodSeconds: 130
       containers:
-      {{- if $proxy.enabled }}
+      {{- if $proxySidecar }}
         - name: {{ $proxy.name }}
           image: {{ $proxy.image }}
           imagePullPolicy: {{ $proxy.imagePullPolicy | default "IfNotPresent" }}
@@ -275,7 +277,7 @@ spec:
         - name: model-cache
           emptyDir: {}
       {{- end }}
-      {{- if and $proxy.enabled (eq $proxyType "agentgateway") $proxyConfigMapName }}
+      {{- if and $proxySidecar (eq $proxyType "agentgateway") $proxyConfigMapName }}
         - name: agentgateway-config-template
           configMap:
             name: {{ $proxyConfigMapName }}
@@ -283,8 +285,10 @@ spec:
               - key: config.yaml
                 path: config.yaml
       {{- end }}
+      {{- if $proxySidecar }}
       {{- with $proxy.volumes }}
       {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
       {{- end }}
         - name: plugins-config-volume
           configMap:
