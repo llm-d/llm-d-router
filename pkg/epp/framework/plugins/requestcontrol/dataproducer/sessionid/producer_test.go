@@ -19,11 +19,16 @@ package sessionid_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
@@ -53,13 +58,22 @@ func TestFactory_Validation(t *testing.T) {
 		{name: "header only", params: json.RawMessage(`{"headerName":"x-session-id"}`)},
 		{name: "cookie only", params: json.RawMessage(`{"cookieName":"llm-d-session"}`)},
 		{name: "header normalized", params: json.RawMessage(`{"headerName":" X-Session-ID "}`)},
+		{name: "with binding tuning", params: json.RawMessage(`{"headerName":"x","lruSize":10,"ttl":"5m"}`)},
 		{name: "empty object", params: json.RawMessage(`{}`), wantErr: true, errSubstr: validationErr},
 		{name: "both set", params: json.RawMessage(`{"headerName":"x","cookieName":"y"}`), wantErr: true, errSubstr: validationErr},
 		{name: "empty strings", params: json.RawMessage(`{"headerName":"","cookieName":""}`), wantErr: true, errSubstr: validationErr},
+		{name: "negative lru size", params: json.RawMessage(`{"headerName":"x","lruSize":-1}`), wantErr: true, errSubstr: "lruSize"},
+		{name: "zero lru size", params: json.RawMessage(`{"headerName":"x","lruSize":0}`), wantErr: true, errSubstr: "lruSize"},
+		{name: "zero ttl", params: json.RawMessage(`{"headerName":"x","ttl":"0s"}`), wantErr: true, errSubstr: "ttl"},
+		{name: "negative ttl", params: json.RawMessage(`{"headerName":"x","ttl":"-1m"}`), wantErr: true, errSubstr: "ttl"},
+		{name: "unparsable ttl", params: json.RawMessage(`{"headerName":"x","ttl":"not-a-duration"}`), wantErr: true, errSubstr: "invalid ttl"},
 		{name: "invalid json", params: json.RawMessage(`not-json`), wantErr: true, errSubstr: "failed to parse"},
 		{name: "unknown field", params: json.RawMessage(`{"headerName":"x","other":"y"}`), wantErr: true, errSubstr: "failed to parse"},
-		{name: "nil raw message", params: nil, wantErr: true, errSubstr: validationErr},
-		{name: "zero-length raw message", params: json.RawMessage{}, wantErr: true, errSubstr: validationErr},
+		// Auto-instantiation as the default producer passes a nil decoder; the
+		// factory uses the default header in that case so a sensible producer
+		// comes up without a parameters block.
+		{name: "nil raw message uses default header", params: nil},
+		{name: "zero-length raw message uses default header", params: json.RawMessage{}},
 	}
 
 	for _, tc := range tests {
@@ -74,6 +88,25 @@ func TestFactory_Validation(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+func TestFactory_AutoInstantiationUsesDefaultHeader(t *testing.T) {
+	t.Parallel()
+
+	plg, err := sessionid.Factory("session-id-producer", nil, nil)
+	require.NoError(t, err)
+	producer, ok := plg.(*sessionid.Producer)
+	require.True(t, ok)
+
+	request := &fwksched.InferenceRequest{Headers: map[string]string{"x-session-id": "session-A"}}
+	require.NoError(t, producer.Produce(context.Background(), request, nil))
+
+	id, ok := fwksched.ReadRequestAttribute[attrsession.SessionID](
+		request,
+		attrsession.SessionIDDataKey.WithNonEmptyProducerName("session-id-producer").String(),
+	)
+	require.True(t, ok)
+	assert.Equal(t, attrsession.SessionID("session-A"), id)
 }
 
 func TestProduce_HeaderMode(t *testing.T) {
@@ -216,7 +249,252 @@ func TestProduces_DeclaresKey(t *testing.T) {
 
 	producer := mustFactory(t, `{"headerName":"x"}`)
 	produces := producer.Produces()
-	expectedKey := attrsession.SessionIDDataKey.WithNonEmptyProducerName("session-id-producer")
-	_, ok := produces[expectedKey]
-	assert.True(t, ok, "Produces() must declare %v", expectedKey)
+	for _, key := range []fwkplugin.DataKey{
+		attrsession.SessionIDDataKey.WithNonEmptyProducerName("session-id-producer"),
+		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName("session-id-producer"),
+	} {
+		_, ok := produces[key]
+		assert.True(t, ok, "Produces() must declare %v", key)
+	}
+}
+
+// requestWithSession is a small helper for binding tests; the producer reads
+// session IDs from request headers and never panics on a nil Headers map.
+func requestWithSession(id string) *fwksched.InferenceRequest {
+	return &fwksched.InferenceRequest{Headers: map[string]string{"x-session-id": id}}
+}
+
+const testEndpointPort = "8080"
+
+func endpointFor(name, address string) fwksched.Endpoint {
+	return fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: name},
+			Address:        address,
+			Port:           testEndpointPort,
+		},
+		&fwkdl.Metrics{},
+		nil,
+	)
+}
+
+func boundTo(address string) attrsession.BoundEndpoint {
+	return attrsession.BoundEndpoint(net.JoinHostPort(address, testEndpointPort))
+}
+
+const testProfileName = "default"
+
+func schedulingResultFor(endpoint fwksched.Endpoint) *fwksched.SchedulingResult {
+	return &fwksched.SchedulingResult{
+		PrimaryProfileName: testProfileName,
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			testProfileName: {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	}
+}
+
+func TestPreRequestThenProducePublishesBinding(t *testing.T) {
+	t.Parallel()
+
+	producer := mustFactory(t, `{"headerName":"x-session-id"}`)
+	bindReq := requestWithSession("session-A")
+	producer.PreRequest(context.Background(), bindReq, schedulingResultFor(endpointFor("pod-1", "10.0.0.1")))
+
+	lookup := requestWithSession("session-A")
+	require.NoError(t, producer.Produce(context.Background(), lookup, nil))
+
+	got, ok := fwksched.ReadRequestAttribute[attrsession.BoundEndpoint](
+		lookup,
+		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName("session-id-producer").String(),
+	)
+	require.True(t, ok)
+	assert.Equal(t, boundTo("10.0.0.1"), got)
+}
+
+func TestPreRequestIgnoresMissingSession(t *testing.T) {
+	t.Parallel()
+
+	producer := mustFactory(t, `{"headerName":"x-session-id"}`)
+	producer.PreRequest(
+		context.Background(),
+		&fwksched.InferenceRequest{}, // no session header
+		schedulingResultFor(endpointFor("pod-1", "10.0.0.1")),
+	)
+
+	// A subsequent Produce on a different session must not see the (non-existent) binding.
+	lookup := requestWithSession("session-A")
+	require.NoError(t, producer.Produce(context.Background(), lookup, nil))
+	_, ok := fwksched.ReadRequestAttribute[attrsession.BoundEndpoint](
+		lookup,
+		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName("session-id-producer").String(),
+	)
+	assert.False(t, ok)
+}
+
+func TestPreRequestIgnoresEmptyResult(t *testing.T) {
+	t.Parallel()
+
+	producer := mustFactory(t, `{"headerName":"x-session-id"}`)
+	bindReq := requestWithSession("session-A")
+	producer.PreRequest(context.Background(), bindReq, &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults:     map[string]*fwksched.ProfileRunResult{},
+	})
+
+	lookup := requestWithSession("session-A")
+	require.NoError(t, producer.Produce(context.Background(), lookup, nil))
+	_, ok := fwksched.ReadRequestAttribute[attrsession.BoundEndpoint](
+		lookup,
+		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName("session-id-producer").String(),
+	)
+	assert.False(t, ok)
+}
+
+func TestBindingExpiresAfterTTL(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("uses real sleeps; expirable LRU exposes no clock injector")
+	}
+
+	// Use a 10x margin between TTL and the wait so CI scheduler jitter or
+	// a GC pause cannot keep the binding alive past the test's check.
+	// Eventually-style polling does not work here: Produce refreshes the
+	// TTL on a successful read, so a polling loop would prevent expiration.
+	const ttl = 100 * time.Millisecond
+	const wait = 1 * time.Second
+
+	producer := mustFactory(t, `{"headerName":"x-session-id","ttl":"`+ttl.String()+`"}`)
+	bind := requestWithSession("session-A")
+	producer.PreRequest(context.Background(), bind, schedulingResultFor(endpointFor("pod-1", "10.0.0.1")))
+
+	time.Sleep(wait)
+
+	lookup := requestWithSession("session-A")
+	require.NoError(t, producer.Produce(context.Background(), lookup, nil))
+	_, ok := fwksched.ReadRequestAttribute[attrsession.BoundEndpoint](
+		lookup,
+		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName("session-id-producer").String(),
+	)
+	assert.False(t, ok, "binding should have expired")
+}
+
+func TestBindingRefreshedOnProduce(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("uses real sleeps; expirable LRU exposes no clock injector")
+	}
+
+	// Each sleep is well inside the TTL (single-step margin = 400ms), but
+	// the two sleeps together exceed the TTL by 200ms — so the lookup
+	// passes only if the intermediate Produce refreshed the entry.
+	const ttl = 1 * time.Second
+	const step = 600 * time.Millisecond
+
+	producer := mustFactory(t, `{"headerName":"x-session-id","ttl":"`+ttl.String()+`"}`)
+	bind := requestWithSession("session-A")
+	producer.PreRequest(context.Background(), bind, schedulingResultFor(endpointFor("pod-1", "10.0.0.1")))
+
+	time.Sleep(step)
+	require.NoError(t, producer.Produce(context.Background(), requestWithSession("session-A"), nil))
+
+	time.Sleep(step)
+	lookup := requestWithSession("session-A")
+	require.NoError(t, producer.Produce(context.Background(), lookup, nil))
+	_, ok := fwksched.ReadRequestAttribute[attrsession.BoundEndpoint](
+		lookup,
+		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName("session-id-producer").String(),
+	)
+	assert.True(t, ok, "binding should still be present: read refreshed the TTL")
+}
+
+func TestBindingsEvictedAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	producer := mustFactory(t, `{"headerName":"x-session-id","lruSize":2}`)
+
+	bind := func(session, endpoint, address string) {
+		producer.PreRequest(
+			context.Background(),
+			requestWithSession(session),
+			schedulingResultFor(endpointFor(endpoint, address)),
+		)
+	}
+	bind("session-0", "pod-1", "10.0.0.1")
+	bind("session-1", "pod-2", "10.0.0.2")
+	bind("session-2", "pod-3", "10.0.0.3") // evicts session-0
+
+	for i, session := range []string{"session-0", "session-1", "session-2"} {
+		lookup := requestWithSession(session)
+		require.NoError(t, producer.Produce(context.Background(), lookup, nil))
+		_, ok := fwksched.ReadRequestAttribute[attrsession.BoundEndpoint](
+			lookup,
+			attrsession.BoundEndpointDataKey.WithNonEmptyProducerName("session-id-producer").String(),
+		)
+		if i == 0 {
+			assert.False(t, ok, "expected %s to be evicted", session)
+		} else {
+			assert.True(t, ok, "expected %s to be present", session)
+		}
+	}
+}
+
+// stubConsumer is a minimal ConsumerPlugin used to drive
+// CreateMissingDataProducers in TestAutoInstantiation_SingleInstanceForBothKeys.
+// Each instance declares one Required data key.
+type stubConsumer struct {
+	name string
+	key  fwkplugin.DataKey
+}
+
+func (s *stubConsumer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: s.name, Type: "test-stub-consumer"}
+}
+
+func (s *stubConsumer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: map[fwkplugin.DataKey]any{s.key: nil}}
+}
+
+// TestAutoInstantiation_SingleInstanceForBothKeys pins the framework's
+// dedup contract for our default-producer wiring: registering
+// session-id-producer twice (once per data key) must auto-instantiate
+// exactly one Producer and route reads of either key through it. If this
+// fails, the runner-level RegisterAsDefaultProducer pair would silently
+// create two caches and the scorer/filter could pin different endpoints.
+func TestAutoInstantiation_SingleInstanceForBothKeys(t *testing.T) {
+	const producerType = sessionid.SessionIDProducerType
+
+	handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+	handle.AddPlugin("consumer-session-id", &stubConsumer{
+		name: "consumer-session-id",
+		key:  attrsession.SessionIDDataKey.WithNonEmptyProducerName(producerType),
+	})
+	handle.AddPlugin("consumer-bound-endpoint", &stubConsumer{
+		name: "consumer-bound-endpoint",
+		key:  attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(producerType),
+	})
+
+	defaults := map[string]string{
+		attrsession.SessionIDDataKey.WithNonEmptyProducerName(producerType).String():     producerType,
+		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(producerType).String(): producerType,
+	}
+	factories := map[string]fwkplugin.FactoryFunc{producerType: sessionid.Factory}
+
+	require.NoError(t, datalayer.CreateMissingDataProducers(context.Background(), defaults, factories, handle))
+
+	// Exactly one producer was instantiated under the canonical name.
+	got := handle.Plugin(producerType)
+	require.NotNil(t, got, "expected session-id-producer to be auto-instantiated")
+	producer, ok := got.(*sessionid.Producer)
+	require.True(t, ok, "auto-instantiated plugin should be *sessionid.Producer")
+
+	// Both data keys are produced by that single instance, so consumers of
+	// either key route to the same binding cache.
+	produces := producer.Produces()
+	for _, key := range []fwkplugin.DataKey{
+		attrsession.SessionIDDataKey.WithNonEmptyProducerName(producerType),
+		attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(producerType),
+	} {
+		_, declared := produces[key]
+		assert.True(t, declared, "auto-instantiated producer must declare %s", key.String())
+	}
 }

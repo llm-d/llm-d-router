@@ -1,152 +1,134 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sessionaffinity_test
 
 import (
 	"context"
-	"encoding/base64"
+	"net"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	sessionaffinity "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
-	"github.com/llm-d/llm-d-router/test/utils"
 )
 
-func TestSessionAffinity_Score(t *testing.T) {
-	endpointA := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-a"}},
+const testProducerName = "test-session-producer"
+
+func newTestEndpoint(name, namespace, address, port string) scheduling.Endpoint {
+	return scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: namespace},
+			Address:        address,
+			Port:           port,
+		},
 		&fwkdl.Metrics{},
 		nil,
 	)
-	endpointB := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-b"}},
-		&fwkdl.Metrics{},
-		nil,
-	)
+}
 
-	inputEndpoints := []scheduling.Endpoint{endpointA, endpointB}
+func bindingKey() string {
+	return attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(testProducerName).String()
+}
 
-	// valid session token for endpointB
-	validSessionTokenForEndpointB := base64.StdEncoding.EncodeToString([]byte(endpointB.GetMetadata().NamespacedName.String()))
+func boundTo(address, port string) attrsession.BoundEndpoint {
+	return attrsession.BoundEndpoint(net.JoinHostPort(address, port))
+}
 
-	sessionAffinityScorer := sessionaffinity.NewSessionAffinity()
+func TestScore(t *testing.T) {
+	ep1 := newTestEndpoint("pod-1", "default", "10.0.0.1", "8080")
+	ep2 := newTestEndpoint("pod-2", "default", "10.0.0.2", "8080")
+	endpoints := []scheduling.Endpoint{ep1, ep2}
 
 	tests := []struct {
-		name       string
-		req        *scheduling.InferenceRequest
-		input      []scheduling.Endpoint
-		wantScores map[scheduling.Endpoint]float64
+		name     string
+		bound    attrsession.BoundEndpoint
+		expected map[scheduling.Endpoint]float64
 	}{
 		{
-			name: "selects correct endpoint : endpointB",
-			req: &scheduling.InferenceRequest{
-				Headers: map[string]string{"x-session-token": validSessionTokenForEndpointB},
-			},
-			input: inputEndpoints,
-			wantScores: map[scheduling.Endpoint]float64{
-				endpointA: 0.0,
-				endpointB: 1.0,
-			},
+			name:     "no binding scores all zero",
+			bound:    "",
+			expected: map[scheduling.Endpoint]float64{ep1: 0.0, ep2: 0.0},
 		},
 		{
-			name: "no session token",
-			req: &scheduling.InferenceRequest{
-				Headers: map[string]string{},
-			},
-			// both endpoints get score 0.0
-			input: inputEndpoints,
-			wantScores: map[scheduling.Endpoint]float64{
-				endpointA: 0.0,
-				endpointB: 0.0,
-			},
+			name:     "binding to ep1 scores it 1.0",
+			bound:    boundTo("10.0.0.1", "8080"),
+			expected: map[scheduling.Endpoint]float64{ep1: 1.0, ep2: 0.0},
 		},
 		{
-			name: "invalid session token",
-			req: &scheduling.InferenceRequest{
-				Headers: map[string]string{"x-session-token": "garbage-token"},
-			},
-			// expect same behavior as no session token
-			input: inputEndpoints,
-			wantScores: map[scheduling.Endpoint]float64{
-				endpointA: 0.0,
-				endpointB: 0.0,
-			},
+			name:     "binding to ep2 scores it 1.0",
+			bound:    boundTo("10.0.0.2", "8080"),
+			expected: map[scheduling.Endpoint]float64{ep1: 0.0, ep2: 1.0},
 		},
 		{
-			name:  "no endpoints available",
-			req:   &scheduling.InferenceRequest{},
-			input: []scheduling.Endpoint{},
-			// returns empty score map
-			wantScores: map[scheduling.Endpoint]float64{},
+			name:     "binding to absent endpoint scores all zero",
+			bound:    boundTo("10.0.0.99", "8080"),
+			expected: map[scheduling.Endpoint]float64{ep1: 0.0, ep2: 0.0},
+		},
+		{
+			name:     "binding with different port scores all zero",
+			bound:    boundTo("10.0.0.1", "9090"),
+			expected: map[scheduling.Endpoint]float64{ep1: 0.0, ep2: 0.0},
 		},
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			gotScores := sessionAffinityScorer.Score(context.Background(), test.req, test.input)
+	scorer := sessionaffinity.NewSessionAffinity(testProducerName)
 
-			if diff := cmp.Diff(test.wantScores, gotScores); diff != "" {
-				t.Errorf("Unexpected output (-want +got): %v", diff)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := &scheduling.InferenceRequest{}
+			if tt.bound != "" {
+				request.PutAttribute(bindingKey(), tt.bound)
 			}
+			scores := scorer.Score(context.Background(), request, endpoints)
+			assert.Equal(t, tt.expected, scores)
 		})
 	}
 }
 
-func TestSessionAffinity_ResponseBody(t *testing.T) {
+func TestScoreNilRequest(t *testing.T) {
+	ep1 := newTestEndpoint("pod-1", "default", "10.0.0.1", "8080")
+	endpoints := []scheduling.Endpoint{ep1}
 
-	targetEndpoint := &fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Name: "pod1"},
-		Address:        "1.2.3.4",
-	}
+	scorer := sessionaffinity.NewSessionAffinity(testProducerName)
+	scores := scorer.Score(context.Background(), nil, endpoints)
 
-	// expected token to be set in response header
-	wantToken := base64.StdEncoding.EncodeToString([]byte(targetEndpoint.NamespacedName.String()))
+	assert.Equal(t, map[scheduling.Endpoint]float64{ep1: 0.0}, scores)
+}
 
-	tests := []struct {
-		name            string
-		initialResponse *requestcontrol.Response
-		targetPod       *fwkdl.EndpointMetadata
-		wantHeaders     map[string]string
-	}{
-		{
-			name:            "standard case with existing headers map",
-			initialResponse: &requestcontrol.Response{RequestID: "req-1", Headers: make(map[string]string), EndOfStream: true},
-			targetPod:       targetEndpoint,
-			wantHeaders:     map[string]string{"x-session-token": wantToken},
-		},
-		{
-			name:            "response with nil headers map",
-			initialResponse: &requestcontrol.Response{RequestID: "req-2", Headers: nil, EndOfStream: true},
-			targetPod:       targetEndpoint,
-			wantHeaders:     map[string]string{"x-session-token": wantToken},
-		},
-		{
-			name:            "nil targetPod should do nothing",
-			initialResponse: &requestcontrol.Response{RequestID: "req-3", Headers: make(map[string]string), EndOfStream: true},
-			targetPod:       nil,
-			wantHeaders:     map[string]string{},
-		},
-		{
-			name:            "incomplete response should do nothing (EndOfStream=false)",
-			initialResponse: &requestcontrol.Response{RequestID: "req-4", Headers: make(map[string]string), EndOfStream: false},
-			targetPod:       targetEndpoint,
-			wantHeaders:     map[string]string{},
-		},
-	}
+// TestConsumes verifies the scorer declares BoundEndpointDataKey, scoped
+// to its configured producer name, as a Required dependency. The
+// framework uses Consumes() at startup to wire producers and to fail
+// fast when a required producer is missing; a regression here would
+// silently break auto-instantiation.
+func TestConsumes(t *testing.T) {
+	scorer := sessionaffinity.NewSessionAffinity(testProducerName)
 
-	s := sessionaffinity.NewSessionAffinity()
-	ctx := utils.NewTestContext(t)
+	deps := scorer.Consumes()
+	wantKey := attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(testProducerName)
+	require.Contains(t, deps.Required, wantKey, "scorer must declare BoundEndpointDataKey as Required")
+	assert.Empty(t, deps.Optional, "scorer should not declare optional dependencies")
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			s.ResponseBody(ctx, nil, test.initialResponse, test.targetPod)
-
-			if diff := cmp.Diff(test.wantHeaders, test.initialResponse.Headers); diff != "" {
-				t.Errorf("Unexpected output (-want +got): %v", diff)
-			}
-		})
-	}
+	value, ok := deps.Required[wantKey]
+	require.True(t, ok)
+	_, isBoundEndpoint := value.(attrsession.BoundEndpoint)
+	assert.True(t, isBoundEndpoint, "Required value type must be BoundEndpoint")
 }

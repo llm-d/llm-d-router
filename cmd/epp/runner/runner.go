@@ -99,6 +99,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
+	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/random"
@@ -534,7 +535,14 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(latencyproducer.LatencyDataProviderPluginType, latencyproducer.PredictedLatencyFactory, attrlatency.LatencyPredictionInfoDataKey)
 	fwkplugin.RegisterAsDefaultProducer(tokenizer.PluginType, tokenizer.PluginFactory, tokenizer.TokenizedPromptDataKey)
 	fwkplugin.Register(tokenizer.LegacyPluginType, tokenizer.LegacyPluginFactory) //nolint:staticcheck // intentional: keep backward compatibility
+	// session-id-producer is the default for both SessionIDDataKey and
+	// BoundEndpointDataKey. Two RegisterAsDefaultProducer calls record both
+	// key->type mappings; the framework's auto-instantiation
+	// (pkg/epp/datalayer/data_graph.go) dedupes by plugin name so a single
+	// Producer instance backs both keys. See sessionid_test.go in this
+	// package for the test that pins this behavior.
 	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, sessionid.Factory, attrsession.SessionIDDataKey)
+	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, sessionid.Factory, attrsession.BoundEndpointDataKey)
 
 	// Latency predictor plugins
 	fwkplugin.Register(latencyslo.LatencyAdmissionPluginType, latencyslo.LatencyAdmissionFactory)
@@ -542,6 +550,7 @@ func (r *Runner) registerInTreePlugins() {
 
 	// Latency scoring and filtering plugins
 	fwkplugin.Register(prefixcacheaffinity.PluginType, prefixcacheaffinity.Factory)
+	fwkplugin.Register(sessionaffinityfilter.PluginType, sessionaffinityfilter.Factory)
 	fwkplugin.Register(sloheadroomtier.PluginType, sloheadroomtier.Factory)
 	fwkplugin.Register(latencyscorer.LatencyScorerType, latencyscorer.Factory)
 	fwkplugin.Register(bylabel.PrefillRoleType, bylabel.PrefillRoleFactory)

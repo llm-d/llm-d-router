@@ -1,48 +1,85 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sessionaffinity
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"fmt"
 
-	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 )
 
-const (
-	// SessionAffinityType is the type of the SessionAffinity scorer.
-	SessionAffinityType = "session-affinity-scorer"
+// SessionAffinityType is the type of the SessionAffinity scorer.
+const SessionAffinityType = "session-affinity-scorer"
 
-	sessionTokenHeader = "x-session-token" // name of the session header in request
+var (
+	_ scheduling.Scorer     = &SessionAffinity{}
+	_ plugin.ConsumerPlugin = &SessionAffinity{}
 )
 
-// compile-time type assertion
-var _ scheduling.Scorer = &SessionAffinity{}
-var _ requestcontrol.ResponseBodyProcessor = &SessionAffinity{}
-
-// Factory defines the factory function for SessionAffinity scorer.
-func Factory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
-	return NewSessionAffinity().WithName(name), nil
+// Config holds the scorer's configurable parameters.
+type Config struct {
+	// SessionIDProducerName names the session-id-producer instance whose
+	// BoundEndpoint attribute this scorer consumes. Empty selects the default
+	// producer.
+	SessionIDProducerName string `json:"sessionIDProducerName,omitempty"`
 }
 
-// NewSessionAffinity returns a scorer
-func NewSessionAffinity() *SessionAffinity {
+// Factory builds a SessionAffinity scorer from raw plugin parameters.
+func Factory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
+	config := Config{}
+	if parameters != nil {
+		if err := parameters.Decode(&config); err != nil {
+			return nil, fmt.Errorf("invalid session affinity config: %w", err)
+		}
+	}
+	// Production paths (auto-instantiation in
+	// pkg/epp/datalayer/data_graph.go and explicit configloader) always
+	// supply a non-nil handle; the nil branch is the test-only path that
+	// constructs a plugin without registering metrics. In production,
+	// handle.Metrics() may itself be nil when no recorder is configured,
+	// in which case RegisterAffinityMetrics returns an error and factory
+	// construction fails fast.
+	if handle != nil {
+		if err := attrsession.RegisterAffinityMetrics(handle.Metrics()); err != nil {
+			return nil, err
+		}
+	}
+	return NewSessionAffinity(config.SessionIDProducerName).WithName(name), nil
+}
+
+// NewSessionAffinity returns a scorer that consumes BoundEndpoint from the
+// named session-id-producer (empty for the default).
+func NewSessionAffinity(sessionIDProducerName string) *SessionAffinity {
 	return &SessionAffinity{
 		typedName: plugin.TypedName{Type: SessionAffinityType},
+		bindingDK: attrsession.BoundEndpointDataKey.WithNonEmptyProducerName(sessionIDProducerName),
 	}
 }
 
-// SessionAffinity is a routing scorer that routes subsequent
-// requests in a session to the same pod as the first request in the
-// session was sent to, by giving that pod the specified weight and assigning
-// zero score to the rest of the targets
+// SessionAffinity is a routing scorer that gives the endpoint bound to the
+// request's session a score of 1.0 and assigns 0.0 to every other candidate.
+// When the request has no binding, every candidate receives 0.0.
 type SessionAffinity struct {
 	typedName plugin.TypedName
+	bindingDK plugin.DataKey
 }
 
 // TypedName returns the typed name of the plugin.
@@ -61,50 +98,46 @@ func (s *SessionAffinity) Category() scheduling.ScorerCategory {
 	return scheduling.Affinity
 }
 
-// Score assign a high score to the pod used in previous requests and zero to others
-func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
-	scoredEndpoints := make(map[scheduling.Endpoint]float64)
-	sessionToken := request.Headers[sessionTokenHeader]
-	podName := ""
+// Score gives the bound endpoint 1.0 and every other endpoint 0.0. With no
+// binding present the result is all zeros, which lets other scorers decide.
+func (s *SessionAffinity) Score(_ context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+	scoredEndpoints := make(map[scheduling.Endpoint]float64, len(endpoints))
+	target, hasTarget := s.readBinding(request)
 
-	if sessionToken != "" {
-		decodedBytes, err := base64.StdEncoding.DecodeString(sessionToken)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "Error decoding session header")
-		} else {
-			podName = string(decodedBytes)
-		}
-	}
+	matched := false
 	for _, endpoint := range endpoints {
-		scoredEndpoints[endpoint] = 0.0 // initial value
-		if endpoint.GetMetadata().NamespacedName.String() == podName {
-			scoredEndpoints[endpoint] = 1.0
+		score := 0.0
+		if hasTarget && attrsession.EndpointBoundForm(endpoint) == target {
+			score = 1.0
+			matched = true
 		}
+		scoredEndpoints[endpoint] = score
 	}
-
+	if hasTarget && !matched && len(endpoints) > 0 {
+		attrsession.RecordStaleBinding(s.typedName.Name, s.typedName.Type)
+	}
 	return scoredEndpoints
 }
 
-// ResponseBody sets the session header on the response sent to the client
-// TODO: this should be using a cookie and ensure not overriding any other
-// cookie values if present.
-// Tracked in https://github.com/llm-d/llm-d-router/issues/28
-func (s *SessionAffinity) ResponseBody(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	if !response.EndOfStream {
-		return
+// Consumes declares the BoundEndpoint attribute key read by this scorer.
+// The key is Required: a soft scorer with no producer always returns zeros,
+// which is a silent misconfiguration; the framework fails fast at init
+// time so the operator notices.
+func (s *SessionAffinity) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{
+			s.bindingDK: attrsession.BoundEndpoint(""),
+		},
 	}
-	if response == nil || targetPod == nil {
-		reqID := "undefined"
-		if response != nil {
-			reqID = response.RequestID
-		}
-		log.FromContext(ctx).V(logutil.DEBUG).Info("Session affinity scorer - skip post response because one of response, targetPod is nil", "req id", reqID)
-		return
-	}
+}
 
-	if response.Headers == nil { // TODO should always be populated?
-		response.Headers = make(map[string]string)
+func (s *SessionAffinity) readBinding(request *scheduling.InferenceRequest) (attrsession.BoundEndpoint, bool) {
+	if request == nil {
+		return "", false
 	}
-
-	response.Headers[sessionTokenHeader] = base64.StdEncoding.EncodeToString([]byte(targetPod.NamespacedName.String()))
+	bound, ok := scheduling.ReadRequestAttribute[attrsession.BoundEndpoint](request, s.bindingDK.String())
+	if !ok || bound == "" {
+		return "", false
+	}
+	return bound, true
 }
