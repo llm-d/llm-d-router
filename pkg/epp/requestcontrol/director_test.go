@@ -1341,22 +1341,22 @@ func TestDirector_HandleResponseHeader_SessionAffinity(t *testing.T) {
 	}{
 		{
 			name:       "scorer with default header",
-			plugin:     sessionaffinityscorer.NewSessionAffinity(""),
+			plugin:     sessionaffinityscorer.NewSessionAffinity("test-scorer", ""),
 			wantHeader: "x-session-token",
 		},
 		{
 			name:       "scorer with custom header",
-			plugin:     sessionaffinityscorer.NewSessionAffinity("x-custom-session"),
+			plugin:     sessionaffinityscorer.NewSessionAffinity("test-scorer", "x-custom-session"),
 			wantHeader: "x-custom-session",
 		},
 		{
 			name:       "filter with default header",
-			plugin:     sessionaffinityfilter.NewSessionAffinity(""),
+			plugin:     sessionaffinityfilter.NewSessionAffinity("test-filter", ""),
 			wantHeader: "x-session-token",
 		},
 		{
 			name:       "filter with custom header",
-			plugin:     sessionaffinityfilter.NewSessionAffinity("x-custom-session"),
+			plugin:     sessionaffinityfilter.NewSessionAffinity("test-filter", "x-custom-session"),
 			wantHeader: "x-custom-session",
 		},
 	}

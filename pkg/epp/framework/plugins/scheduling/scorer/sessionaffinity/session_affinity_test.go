@@ -32,8 +32,8 @@ func TestSessionAffinity_Score(t *testing.T) {
 	// valid session token for endpointB
 	validSessionTokenForEndpointB := base64.StdEncoding.EncodeToString([]byte(endpointB.GetMetadata().NamespacedName.String()))
 
-	sessionAffinityScorer := sessionaffinity.NewSessionAffinity("")
-	customHeaderScorer := sessionaffinity.NewSessionAffinity("x-custom-session")
+	sessionAffinityScorer := sessionaffinity.NewSessionAffinity("test-scorer", "")
+	customHeaderScorer := sessionaffinity.NewSessionAffinity("test-scorer", "x-custom-session")
 
 	tests := []struct {
 		name       string
@@ -177,7 +177,7 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := sessionaffinity.NewSessionAffinity(test.sessionHeader)
+			s := sessionaffinity.NewSessionAffinity("test-scorer", test.sessionHeader)
 			s.ResponseHeader(ctx, nil, test.initialResponse, test.targetPod)
 
 			if test.initialResponse == nil {

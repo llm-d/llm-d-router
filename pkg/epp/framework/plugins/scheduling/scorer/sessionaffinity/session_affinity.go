@@ -9,7 +9,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	sessiontoken "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/sessionaffinity"
+	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
 const (
@@ -37,15 +37,15 @@ func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.
 		}
 	}
 
-	return NewSessionAffinity(params.HeaderName).WithName(name), nil
+	return NewSessionAffinity(name, params.HeaderName), nil
 }
 
 // NewSessionAffinity returns a scorer. When sessionHeader is empty the default
 // x-session-token header is used.
-func NewSessionAffinity(sessionHeader string) *SessionAffinity {
+func NewSessionAffinity(name, sessionHeader string) *SessionAffinity {
 	return &SessionAffinity{
-		typedName:     plugin.TypedName{Type: SessionAffinityType},
-		sessionHeader: sessiontoken.NormalizeHeader(sessionHeader),
+		typedName:     plugin.TypedName{Type: SessionAffinityType, Name: name},
+		sessionHeader: sessionutil.NormalizeHeader(sessionHeader),
 	}
 }
 
@@ -64,12 +64,6 @@ func (s *SessionAffinity) TypedName() plugin.TypedName {
 	return s.typedName
 }
 
-// WithName sets the name of the plugin.
-func (s *SessionAffinity) WithName(name string) *SessionAffinity {
-	s.typedName.Name = name
-	return s
-}
-
 // Category returns the preference the scorer applies when scoring candidate endpoints.
 func (s *SessionAffinity) Category() scheduling.ScorerCategory {
 	return scheduling.Affinity
@@ -78,7 +72,7 @@ func (s *SessionAffinity) Category() scheduling.ScorerCategory {
 // Score assign a high score to the pod used in previous requests and zero to others
 func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
-	podName := sessiontoken.DecodePodName(ctx, request.Headers[s.sessionHeader])
+	podName := sessionutil.DecodePodName(ctx, request.Headers[s.sessionHeader])
 
 	for _, endpoint := range endpoints {
 		scoredEndpoints[endpoint] = 0.0 // initial value
@@ -92,5 +86,5 @@ func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.Inferen
 
 // ResponseHeader sets the session header on the response sent to the client.
 func (s *SessionAffinity) ResponseHeader(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	sessiontoken.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, targetPod)
+	sessionutil.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, targetPod)
 }

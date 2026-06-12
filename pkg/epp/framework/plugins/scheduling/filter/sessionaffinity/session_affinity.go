@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sessionaffinity
 
 import (
@@ -9,7 +25,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	sessiontoken "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/sessionaffinity"
+	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
 const (
@@ -37,15 +53,15 @@ func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.
 		}
 	}
 
-	return NewSessionAffinity(params.HeaderName).WithName(name), nil
+	return NewSessionAffinity(name, params.HeaderName), nil
 }
 
 // NewSessionAffinity returns a filter. When sessionHeader is empty the default
 // x-session-token header is used.
-func NewSessionAffinity(sessionHeader string) *SessionAffinity {
+func NewSessionAffinity(name, sessionHeader string) *SessionAffinity {
 	return &SessionAffinity{
-		typedName:     plugin.TypedName{Type: SessionAffinityType},
-		sessionHeader: sessiontoken.NormalizeHeader(sessionHeader),
+		typedName:     plugin.TypedName{Type: SessionAffinityType, Name: name},
+		sessionHeader: sessionutil.NormalizeHeader(sessionHeader),
 	}
 }
 
@@ -65,16 +81,10 @@ func (s *SessionAffinity) TypedName() plugin.TypedName {
 	return s.typedName
 }
 
-// WithName sets the name of the plugin.
-func (s *SessionAffinity) WithName(name string) *SessionAffinity {
-	s.typedName.Name = name
-	return s
-}
-
 // Filter returns the endpoint running the session when it is among the
 // candidates, otherwise all candidate endpoints.
 func (s *SessionAffinity) Filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
-	podName := sessiontoken.DecodePodName(ctx, request.Headers[s.sessionHeader])
+	podName := sessionutil.DecodePodName(ctx, request.Headers[s.sessionHeader])
 	if podName == "" {
 		return endpoints
 	}
@@ -90,5 +100,5 @@ func (s *SessionAffinity) Filter(ctx context.Context, request *scheduling.Infere
 
 // ResponseHeader sets the session header on the response sent to the client.
 func (s *SessionAffinity) ResponseHeader(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	sessiontoken.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, targetPod)
+	sessionutil.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, targetPod)
 }
