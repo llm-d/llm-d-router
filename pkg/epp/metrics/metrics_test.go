@@ -1251,6 +1251,24 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 	require.Equal(t, 0.5, valNew)
 }
 
+func TestFlowControlRequestsTotalMetric(t *testing.T) {
+	Reset()
+
+	const pool = "test-pool"
+
+	IncFlowControlRequestsTotal("Dispatched", "0", pool)
+	IncFlowControlRequestsTotal("Dispatched", "0", pool)
+	IncFlowControlRequestsTotal("RejectedCapacity", "10", pool)
+
+	val, err := testutil.GetCounterMetricValue(llmdFlowControlRequestsTotal.WithLabelValues("Dispatched", "0", pool))
+	require.NoError(t, err)
+	require.Equal(t, float64(2), val)
+
+	val, err = testutil.GetCounterMetricValue(llmdFlowControlRequestsTotal.WithLabelValues("RejectedCapacity", "10", pool))
+	require.NoError(t, err)
+	require.Equal(t, float64(1), val)
+}
+
 func TestRecordRequestTTFT(t *testing.T) {
 	Reset()
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
