@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	extmodels "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/models"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/http"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
 const ModelsDataSourceType = "models-data-source"
@@ -33,17 +33,17 @@ type modelsDatasourceParams struct {
 // NewHTTPModelsDataSource constructs a ModelsDataSource with the given scheme and path.
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
-func NewHTTPModelsDataSource(scheme, path, name string) (*http.HTTPDataSource, error) {
+func NewHTTPModelsDataSource(scheme, path, name string) (*http.HTTPDataSource[*extmodels.ModelResponse], error) {
 	return http.NewHTTPDataSource(scheme, path, defaultModelsInsecureSkipVerify,
-		ModelsDataSourceType, name, parseModels, extmodels.ModelsResponseType)
+		ModelsDataSourceType, name, parseModels)
 }
 
 // ModelDataSourceFactory is a factory function used to instantiate data layer's
 // models data source plugins specified in a configuration.
-func ModelDataSourceFactory(name string, parameters json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func ModelDataSourceFactory(name string, parameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	cfg := defaultDataSourceConfigParams()
 	if parameters != nil { // overlay the defaults with configured values
-		if err := json.Unmarshal(parameters, cfg); err != nil {
+		if err := parameters.Decode(cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -51,8 +51,8 @@ func ModelDataSourceFactory(name string, parameters json.RawMessage, _ plugin.Ha
 		return nil, fmt.Errorf("unsupported scheme: %s", cfg.Scheme)
 	}
 
-	ds, err := http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify, ModelsDataSourceType,
-		name, parseModels, extmodels.ModelsResponseType)
+	ds, err := http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify,
+		ModelsDataSourceType, name, parseModels)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP data source: %w", err)
 	}
@@ -67,12 +67,14 @@ func defaultDataSourceConfigParams() *modelsDatasourceParams {
 	}
 }
 
-func parseModels(data io.Reader) (any, error) {
+func parseModels(data io.Reader) (*extmodels.ModelResponse, error) {
 	body, err := io.ReadAll(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %v", err)
 	}
 	var modelsResponse extmodels.ModelResponse
-	err = json.Unmarshal(body, &modelsResponse)
-	return &modelsResponse, err
+	if err := json.Unmarshal(body, &modelsResponse); err != nil {
+		return nil, err
+	}
+	return &modelsResponse, nil
 }

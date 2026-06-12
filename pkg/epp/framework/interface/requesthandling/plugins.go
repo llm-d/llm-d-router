@@ -21,7 +21,7 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // Parser defines the interface for parsing payload(requests and responses).
@@ -30,10 +30,10 @@ type Parser interface {
 	// ParseRequest parses the request body and headers and returns the parsed result.
 	// There are three outcomes based on the return values:
 	// 1. err != nil: The request is invalid or cannot be parsed. The framework will fail the request early.
-	// 2. err == nil and result.Skip == true: The request is valid but should not be processed by the scheduling
-	//    framework (e.g., non-inference requests). The framework will fall back to routing the request to a random
-	//    endpoint and skip subsequent interception phases.
-	// 3. err == nil and result.Skip == false: The request is valid and will be processed by the scheduling framework.
+	// 2. err == nil and result.SkipResponseProcessing == true: The request is valid but EPP should stop intercepting the stream
+	//    after the request phase. The scheduling director will still route the request, but subsequent
+	//    response interception phases will be skipped.
+	// 3. err == nil and result.SkipResponseProcessing == false: The request is valid and will be processed by the scheduling framework.
 	ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*ParseResult, error)
 
 	// ParseResponse parses the response payload.
@@ -43,25 +43,29 @@ type Parser interface {
 	// buffered response body and 'endOfStream' set to true.
 	ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*ParsedResponse, error)
 
-	// SupportedAppProtocols returns the list of supported protocols.
-	// Returning an empty list means it supports all protocols.
-	SupportedAppProtocols() []v1.AppProtocol
+	// Claims returns the paths and protocols claimed by this parser.
+	Claims() Claims
+}
+
+// Claims defines the matching criteria for a parser.
+type Claims struct {
+	Paths     []string         // path patterns this parser claims (e.g., "chat/completions")
+	Protocols []v1.AppProtocol // protocols this parser supports (e.g., "h2c")
 }
 
 // ParseResult contains the result of parsing the request.
 type ParseResult struct {
 	// Body contains the parsed inference request body.
 	Body *InferenceRequestBody
-	// Skip indicates whether to skip the remaining processing phases in the EPP.
-	// This should only be used for non-inference related requests.
-	// When set to true, the request will bypass the scheduling director and will be
-	// routed to a random endpoint. The EPP will also stop intercepting the stream
-	// for this request (e.g., response headers and body will not be processed).
+	// SkipResponseProcessing indicates whether to skip EPP stream interception for this request.
+	// When set to true, the request will still go through the scheduling director
+	// (allowing routing decisions, profiles, and admission control to run),
+	// but the EPP will stop intercepting the stream after the request phase completes
+	// (e.g., response headers and body will not be processed).
 	//
-	// Example: In a gRPC parser, if the request path does not match any known
-	// methods (e.g., neither Generate nor Embed for vLLM), setting Skip to true
-	// allows the request to proceed to a fallback endpoint without failing.
-	Skip bool
+	// This allows fallback or non-standard requests to be routed using the configured
+	// policies without paying the overhead of response-phase interception.
+	SkipResponseProcessing bool
 }
 
 type ParsedResponse struct {

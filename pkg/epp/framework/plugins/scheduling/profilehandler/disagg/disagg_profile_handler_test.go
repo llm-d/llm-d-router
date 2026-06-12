@@ -7,16 +7,17 @@ import (
 	"net"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	approxprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/test/utils"
 )
 
 // ── Shared test helpers ──────────────────────────────────────────────────────
@@ -54,7 +55,7 @@ func makeProfileRunResult(names ...string) *scheduling.ProfileRunResult {
 
 type mockProfile struct{}
 
-func (p *mockProfile) Run(_ context.Context, _ *scheduling.InferenceRequest, _ *scheduling.CycleState, _ []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
+func (p *mockProfile) Run(_ context.Context, _ *scheduling.InferenceRequest, _ []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
 	return &scheduling.ProfileRunResult{}, nil
 }
 
@@ -66,39 +67,56 @@ func profileNames(m map[string]scheduling.SchedulerProfile) []string {
 	return out
 }
 
-// completionsRequest builds a text-only InferenceRequest.
+// completionsRequest builds a text-only InferenceRequest. The tokenized prompt
+// carries len(prompt)/averageCharactersPerToken token IDs, which the decider reads
+// as the input token count.
 func completionsRequest(prompt string) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+			Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, len(prompt)/averageCharactersPerToken)}},
 		},
 	}
 }
 
-// chatRequest builds a chat-completions InferenceRequest with optional multimodal blocks.
+// chatRequest builds a chat-completions InferenceRequest, populating the
+// tokenized prompt with one multimodal feature per requested modality so
+// that multimodal detection (which reads TokenizedPrompt) is exercised.
 func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest {
 	blocks := []fwkrh.ContentBlock{{Type: "text", Text: "describe this"}}
+	var features []fwkrh.MultiModalFeature
 	if hasImage {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/img.jpg"}})
+		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
 	}
 	if hasVideo {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "video_url"})
+		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
 	}
 	if hasAudio {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "input_audio"})
+		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
 	}
-	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: blocks}}},
-			},
+	body := &fwkrh.InferenceRequestBody{
+		ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: blocks}}},
 		},
 	}
+	if len(features) > 0 {
+		body.TokenizedPrompt = &fwkrh.TokenizedPrompt{MultiModalFeatures: features}
+	}
+	return &scheduling.InferenceRequest{Body: body}
 }
 
-// withPrompt adds a completions body to a chat request so the PD decider can estimate tokens.
+// withPrompt adds a completions body to a chat request and sets the input token
+// count (len(prompt)/averageCharactersPerToken) on the tokenized prompt, preserving
+// any existing multimodal features.
 func withPrompt(req *scheduling.InferenceRequest, prompt string) *scheduling.InferenceRequest {
 	req.Body.Completions = &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}}
+	if req.Body.TokenizedPrompt == nil {
+		req.Body.TokenizedPrompt = &fwkrh.TokenizedPrompt{}
+	}
+	req.Body.TokenizedPrompt.PerPromptTokens = [][]uint32{make([]uint32, len(prompt)/averageCharactersPerToken)}
 	return req
 }
 
@@ -109,14 +127,14 @@ func injectPrefixCache(profileResults map[string]*scheduling.ProfileRunResult, c
 		return
 	}
 	for _, ep := range res.TargetEndpoints {
-		ep.Put(approxprefix.PrefixCacheMatchInfoKey,
-			approxprefix.NewPrefixCacheMatchInfo(cachedTokens, inputTokens, 1))
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+			attrprefix.NewPrefixCacheMatchInfo(cachedTokens, inputTokens, 1))
 	}
 }
 
 // handleWithDeciders creates a plugin handle pre-loaded with all decider types.
 func handleWithDeciders(ctx context.Context) plugin.Handle {
-	h := plugin.NewEppHandle(ctx, nil)
+	h := plugin.NewEppHandle(ctx, nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
 	p1, _ := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 4})
 	h.AddPlugin(PrefixBasedPDDeciderPluginType, p1)
 	h.AddPlugin(AlwaysDisaggPDDeciderPluginType, newAlwaysDisaggPDDecider())
@@ -144,11 +162,21 @@ func TestHasMultimodalContent(t *testing.T) {
 	}{
 		{"nil request", nil, false},
 		{"nil body", &scheduling.InferenceRequest{Body: nil}, false},
-		{"nil chat completions", &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}, false},
+		{"nil tokenized prompt", &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}, false},
+		{"empty multimodal features", &scheduling.InferenceRequest{
+			Body: &fwkrh.InferenceRequestBody{TokenizedPrompt: &fwkrh.TokenizedPrompt{}},
+		}, false},
 		{"text only", chatRequest(false, false, false), false},
 		{"image", chatRequest(true, false, false), true},
 		{"video", chatRequest(false, true, false), true},
 		{"audio", chatRequest(false, false, true), true},
+		{"feature present", &scheduling.InferenceRequest{
+			Body: &fwkrh.InferenceRequestBody{
+				TokenizedPrompt: &fwkrh.TokenizedPrompt{
+					MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage}},
+				},
+			},
+		}, true},
 		{"all types", chatRequest(true, true, true), true},
 	}
 	for _, tt := range tests {
@@ -226,7 +254,7 @@ func TestHandlerFactory(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", b, handle)
+			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
 			if tt.expectErr {
 				assert.Error(t, err)
 				assert.Nil(t, p)
@@ -259,10 +287,10 @@ func TestHandlerFactory_DeprecatedFlatParams(t *testing.T) {
 			"encodeProfile":            "my-encode",
 			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
 		}, false},
-		{"nested format with unknown extra fields is accepted", map[string]any{
+		{"nested format with unknown extra fields is rejected", map[string]any{
 			"profiles":     map[string]any{"decode": "decode"},
 			"unknownField": "ignored",
-		}, false},
+		}, true},
 		{"mixing deprecated and nested fields is an error", map[string]any{
 			"decodeProfile": "my-decode",
 			"profiles":      map[string]any{"decode": "other-decode"},
@@ -275,7 +303,7 @@ func TestHandlerFactory_DeprecatedFlatParams(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", b, handle)
+			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
 			if tt.expectErr {
 				assert.Error(t, err)
 				assert.Nil(t, p)
@@ -305,14 +333,14 @@ func TestHandlerFactory_PdProfileHandlerParams(t *testing.T) {
 			"prefillProfile":    "prefill",
 			"deciderPluginName": PrefixBasedPDDeciderPluginType,
 		}, false},
-		{"pd-profile-handler with all params including ignored fields", map[string]any{
+		{"pd-profile-handler with unknown fields is rejected", map[string]any{
 			"decodeProfile":     "decode",
 			"prefillProfile":    "prefill",
 			"deciderPluginName": PrefixBasedPDDeciderPluginType,
-			"prefixPluginType":  "prefix-cache-scorer", // ignored by Handler
-			"prefixPluginName":  "prefix-cache-scorer", // ignored by Handler
-			"primaryPort":       8080,                  // ignored by Handler
-		}, false},
+			"prefixPluginType":  "prefix-cache-scorer", // unknown to both schemas (#1068)
+			"prefixPluginName":  "prefix-cache-scorer",
+			"primaryPort":       8080,
+		}, true},
 		{"pd-profile-handler unknown deciderPluginName", map[string]any{
 			"deciderPluginName": "INVALID",
 		}, true},
@@ -320,7 +348,7 @@ func TestHandlerFactory_PdProfileHandlerParams(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", b, handle)
+			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
 			if tt.expectErr {
 				assert.Error(t, err)
 				assert.Nil(t, p)
@@ -336,7 +364,7 @@ func TestHandlerFactory_InvalidJSON(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := handleWithDeciders(ctx)
 	for _, raw := range []string{`{"deciders": `} {
-		p, err := HandlerFactory("h", json.RawMessage(raw), handle)
+		p, err := HandlerFactory("h", plugin.StrictDecoder(json.RawMessage(raw)), handle)
 		assert.Error(t, err)
 		assert.Nil(t, p)
 	}
@@ -407,10 +435,10 @@ func TestHandler_Pick_PD(t *testing.T) {
 			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
 				decider, nil)
 
-			inputTokens := len(req.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
+			inputTokens := len(req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 			injectPrefixCache(tt.profileResults, tt.cachedTokens, inputTokens)
 
-			got := h.Pick(ctx, nil, req, profiles, tt.profileResults)
+			got := h.Pick(ctx, req, profiles, tt.profileResults)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
 	}
@@ -435,7 +463,7 @@ func TestHandler_Pick_PD_InputTokenError(t *testing.T) {
 	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
 		decider, nil)
 
-	got := h.Pick(ctx, nil, req, profiles, results)
+	got := h.Pick(ctx, req, profiles, results)
 	assert.Empty(t, got, "should return empty map on input token estimation error")
 }
 
@@ -466,7 +494,7 @@ func TestHandler_Pick_PD_Series(t *testing.T) {
 				want         []string
 			}{
 				{short, 0, []string{defaultPrefillProfile}},
-				{short, len(short.Body.Completions.Prompt.Raw) / AverageCharactersPerToken, []string{}},
+				{short, len(short.Body.Completions.Prompt.Raw) / averageCharactersPerToken, []string{}},
 			},
 		},
 		{
@@ -478,7 +506,7 @@ func TestHandler_Pick_PD_Series(t *testing.T) {
 				want         []string
 			}{
 				{short, 0, []string{defaultPrefillProfile}},
-				{long, len(short.Body.Completions.Prompt.Raw) / AverageCharactersPerToken, []string{defaultPrefillProfile}},
+				{long, len(short.Body.Completions.Prompt.Raw) / averageCharactersPerToken, []string{defaultPrefillProfile}},
 			},
 		},
 	}
@@ -495,9 +523,9 @@ func TestHandler_Pick_PD_Series(t *testing.T) {
 				results := map[string]*scheduling.ProfileRunResult{
 					defaultDecodeProfile: makeProfileRunResult("pod1"),
 				}
-				inputTokens := len(step.req.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
+				inputTokens := len(step.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 				injectPrefixCache(results, step.cachedTokens, inputTokens)
-				got := h.Pick(ctx, &scheduling.CycleState{}, step.req, profiles, results)
+				got := h.Pick(ctx, step.req, profiles, results)
 				assert.ElementsMatch(t, step.want, profileNames(got))
 			}
 		})
@@ -550,7 +578,7 @@ func TestHandler_ProcessResults_PD(t *testing.T) {
 				decider, nil)
 
 			req := &scheduling.InferenceRequest{Headers: map[string]string{}}
-			res, err := h.ProcessResults(context.Background(), nil, req, tt.results)
+			res, err := h.ProcessResults(context.Background(), req, tt.results)
 			if tt.expectErr {
 				assert.Error(t, err)
 				return
@@ -567,7 +595,7 @@ func TestHandler_ProcessResults_NilRequest(t *testing.T) {
 	results := map[string]*scheduling.ProfileRunResult{
 		defaultDecodeProfile: makeProfileRunResult("pod1"),
 	}
-	_, err := h.ProcessResults(context.Background(), nil, nil, results)
+	_, err := h.ProcessResults(context.Background(), nil, results)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "request is nil")
 }
@@ -592,14 +620,14 @@ func TestHandler_Pick_CustomProfiles(t *testing.T) {
 	)
 
 	// Stage 1: decode not run → run decode
-	got := h.Pick(ctx, nil, chatRequest(true, false, false), profiles, map[string]*scheduling.ProfileRunResult{})
+	got := h.Pick(ctx, chatRequest(true, false, false), profiles, map[string]*scheduling.ProfileRunResult{})
 	assert.ElementsMatch(t, []string{customDecodeProfile}, profileNames(got))
 
 	// Stage 2: decode done, multimodal → run encode
 	results := map[string]*scheduling.ProfileRunResult{
 		customDecodeProfile: makeProfileRunResult("pod1"),
 	}
-	got = h.Pick(ctx, nil, chatRequest(true, false, false), profiles, results)
+	got = h.Pick(ctx, chatRequest(true, false, false), profiles, results)
 	assert.ElementsMatch(t, []string{customEncodeProfile}, profileNames(got))
 }
 
@@ -616,7 +644,7 @@ func TestHandler_ProcessResults_CustomProfiles(t *testing.T) {
 	}
 
 	req := &scheduling.InferenceRequest{Headers: map[string]string{}}
-	res, err := h.ProcessResults(context.Background(), nil, req, results)
+	res, err := h.ProcessResults(context.Background(), req, results)
 	assert.NoError(t, err)
 	assert.Equal(t, customDecodeProfile, res.PrimaryProfileName)
 	assert.Contains(t, res.ProfileResults, customDecodeProfile)
@@ -707,7 +735,7 @@ func TestHandler_Pick_EPD(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewDisaggProfileHandler(defaultDecodeProfile, "", defaultEncodeProfile, nil, newAlwaysDisaggEncodeDecider())
-			got := h.Pick(ctx, nil, tt.req, profiles, tt.results)
+			got := h.Pick(ctx, tt.req, profiles, tt.results)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
 	}
@@ -737,7 +765,7 @@ func TestHandler_Pick_EPD_EncodeDecider(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewDisaggProfileHandler(defaultDecodeProfile, "", defaultEncodeProfile,
 				nil, &mockEncodeDecider{allow: tt.allow})
-			got := h.Pick(ctx, nil, chatRequest(true, false, false), profiles, results)
+			got := h.Pick(ctx, chatRequest(true, false, false), profiles, results)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
 	}
@@ -789,12 +817,24 @@ func TestHandler_ProcessResults_EPD(t *testing.T) {
 				assert.NotContains(t, res.ProfileResults, defaultEncodeProfile)
 			},
 		},
+		{
+			name: "encode ran but returned 0 endpoints - included in results",
+			results: map[string]*scheduling.ProfileRunResult{
+				defaultDecodeProfile: makeProfileRunResult("pod1"),
+				defaultEncodeProfile: {TargetEndpoints: []scheduling.Endpoint{}},
+			},
+			check: func(t *testing.T, res *scheduling.SchedulingResult) {
+				assert.Contains(t, res.ProfileResults, defaultDecodeProfile)
+				assert.Contains(t, res.ProfileResults, defaultEncodeProfile)
+				assert.Empty(t, res.ProfileResults[defaultEncodeProfile].TargetEndpoints)
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewDisaggProfileHandler(defaultDecodeProfile, "", defaultEncodeProfile, nil, newAlwaysDisaggEncodeDecider())
-			res, err := h.ProcessResults(context.Background(), nil, &scheduling.InferenceRequest{}, tt.results)
+			res, err := h.ProcessResults(context.Background(), &scheduling.InferenceRequest{}, tt.results)
 			if tt.expectErr {
 				assert.Error(t, err)
 				return
@@ -913,14 +953,14 @@ func TestHandler_Pick_EPD_Full(t *testing.T) {
 
 			inputTokens := 0
 			if tt.req.Body.Completions != nil {
-				inputTokens = len(tt.req.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
+				inputTokens = len(tt.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 			} else if tt.req.Body.ChatCompletions != nil {
 				b, _ := json.Marshal(tt.req.Body.ChatCompletions.Messages)
-				inputTokens = len(b) / AverageCharactersPerToken
+				inputTokens = len(b) / averageCharactersPerToken
 			}
 			injectPrefixCache(tt.results, tt.cachedTokens, inputTokens)
 
-			got := h.Pick(ctx, nil, tt.req, profiles, tt.results)
+			got := h.Pick(ctx, tt.req, profiles, tt.results)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
 	}
@@ -960,10 +1000,10 @@ func TestHandler_Pick_EPD_Full_EncodeDecider(t *testing.T) {
 				defaultDecodeProfile: makeProfileRunResult("pod1"),
 			}
 
-			inputTokens := len(testLongPrompt) / AverageCharactersPerToken
+			inputTokens := len(testLongPrompt) / averageCharactersPerToken
 			injectPrefixCache(results, 0, inputTokens)
 
-			got := h.Pick(ctx, nil, multimodalLong, profiles, results)
+			got := h.Pick(ctx, multimodalLong, profiles, results)
 			assert.ElementsMatch(t, tt.wantNext, profileNames(got))
 		})
 	}
@@ -1029,7 +1069,7 @@ func TestHandler_ProcessResults_EPD_Full(t *testing.T) {
 				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
 				decider, newAlwaysDisaggEncodeDecider(),
 			)
-			res, err := h.ProcessResults(context.Background(), nil, &scheduling.InferenceRequest{}, tt.results)
+			res, err := h.ProcessResults(context.Background(), &scheduling.InferenceRequest{}, tt.results)
 			if tt.expectErr {
 				assert.Error(t, err)
 				return
@@ -1139,11 +1179,11 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 
 			// Inject prefix cache if needed for PD decider
 			if tt.req.Body.Completions != nil {
-				inputTokens := len(tt.req.Body.Completions.Prompt.Raw) / AverageCharactersPerToken
+				inputTokens := len(tt.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 				injectPrefixCache(tt.results, 0, inputTokens)
 			}
 
-			got := h.Pick(ctx, nil, tt.req, profiles, tt.results)
+			got := h.Pick(ctx, tt.req, profiles, tt.results)
 			assert.ElementsMatch(t, tt.want, profileNames(got), tt.description)
 		})
 	}
@@ -1222,7 +1262,7 @@ func TestHandler_ProcessResults_NilDeciders(t *testing.T) {
 				tt.pdDecider, tt.encodeDecider,
 			)
 
-			res, err := h.ProcessResults(context.Background(), nil, &scheduling.InferenceRequest{}, tt.results)
+			res, err := h.ProcessResults(context.Background(), &scheduling.InferenceRequest{}, tt.results)
 			if tt.expectErr {
 				assert.Error(t, err, tt.description)
 				return
@@ -1281,7 +1321,7 @@ func TestHandler_Factory_NilDeciders(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", b, handle)
+			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
 			if tt.expectErr {
 				assert.Error(t, err, tt.description)
 				assert.Nil(t, p)
@@ -1332,4 +1372,26 @@ func TestBothProfileAndHeadersHandlerPreRequest(t *testing.T) {
 	expected := net.JoinHostPort(podAddr, podPort)
 	assert.Equal(t, expected, request.Headers[routing.PrefillEndpointHeader],
 		"both handlers set the same prefill header — redundant but no conflict")
+}
+
+func TestHandler_PreRequest_EncodeMultipleEndpoints(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	h := NewDisaggProfileHandler("decode", "", "encode", nil, nil)
+
+	eps := []scheduling.Endpoint{
+		scheduling.NewEndpoint(&fwkdl.EndpointMetadata{Address: "10.0.0.1", Port: "8000"}, nil, nil),
+		scheduling.NewEndpoint(&fwkdl.EndpointMetadata{Address: "10.0.0.2", Port: "8000"}, nil, nil),
+	}
+	request := &scheduling.InferenceRequest{Headers: map[string]string{}}
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"encode": {TargetEndpoints: eps},
+		},
+	}
+
+	h.PreRequest(ctx, request, result)
+
+	want := net.JoinHostPort("10.0.0.1", "8000") + "," + net.JoinHostPort("10.0.0.2", "8000")
+	assert.Equal(t, want, request.Headers[routing.EncoderEndpointsHeader])
 }

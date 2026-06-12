@@ -19,36 +19,26 @@ package datalayer
 import (
 	"context"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 const (
 	// ExperimentalDatalayerFeatureGate is deprecated. The data layer is now enabled by default.
 	// This gate is a no-op and will be removed in a future version.
 	ExperimentalDatalayerFeatureGate = "dataLayer"
-	// EnableLegacyMetricsFeatureGate falls back to the legacy backend/metrics polling path.
-	// This gate is temporary and will be removed when the legacy path is deleted.
-	// To disable metrics collection without falling back to legacy, provide an empty data section in the config.
-	EnableLegacyMetricsFeatureGate = "enableLegacyMetrics"
 )
 
 // PoolInfo represents the DataStore information needed for endpoints.
-// TODO:
-// Consider if to remove/simplify in follow-ups. This is mostly for backward
-// compatibility with backend.metrics' expectations and allowing a shared
-// implementation during the transition.
-//   - Endpoint metric scraping uses PoolGet to access the pool's Port and Name.
-//   - Global metrics logging uses PoolGet solely for error return and PodList to enumerate
-//     all endpoints for metrics summarization.
 type PoolInfo interface {
 	PoolGet() (*EndpointPool, error)
 	PodList(func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
 }
 
 // EndpointFactory defines an interface for managing Endpoint lifecycle. Specifically,
-// providing methods to allocate and retire endpoints. This can potentially be used for
-// pooled memory or other management chores in the implementation.
+// providing methods to allocate, update, and retire endpoints. This can potentially be
+// used for pooled memory or other management chores in the implementation.
 type EndpointFactory interface {
-	NewEndpoint(parent context.Context, inEndpointMetadata *fwkdl.EndpointMetadata, poolinfo PoolInfo) fwkdl.Endpoint
+	NewEndpoint(parent context.Context, inEndpointMetadata *fwkdl.EndpointMetadata) fwkdl.Endpoint
+	UpdateEndpoint(ctx context.Context, ep fwkdl.Endpoint)
 	ReleaseEndpoint(ep fwkdl.Endpoint)
 }

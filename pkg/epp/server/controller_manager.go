@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -30,21 +31,38 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/pkg/common"
 )
 
-var scheme = runtime.NewScheme()
+// NewScheme creates a new runtime.Scheme and registers the types based on the config.
+func NewScheme(cfg ControllerConfig) *runtime.Scheme {
+	s := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(s))
+	utilruntime.Must(v1.Install(s))
 
-func init() {
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(v1alpha2.Install(scheme))
-	utilruntime.Must(v1.Install(scheme))
+	if cfg.startCrdReconcilers {
+		if cfg.hasInferenceObjective {
+			s.AddKnownTypes(cfg.InferenceObjectiveGV,
+				&v1alpha2.InferenceObjective{},
+				&v1alpha2.InferenceObjectiveList{},
+			)
+			metav1.AddToGroupVersion(s, cfg.InferenceObjectiveGV)
+		}
+		if cfg.hasInferenceModelRewrites {
+			s.AddKnownTypes(cfg.InferenceModelRewriteGV,
+				&v1alpha2.InferenceModelRewrite{},
+				&v1alpha2.InferenceModelRewriteList{},
+			)
+			metav1.AddToGroupVersion(s, cfg.InferenceModelRewriteGV)
+		}
+	}
+	return s
 }
 
 // defaultManagerOptions returns the default options used to create the manager.
-func defaultManagerOptions(cfg ControllerConfig, gknn common.GKNN, metricsServerOptions metricsserver.Options) ctrl.Options {
+func defaultManagerOptions(cfg ControllerConfig, gknn common.GKNN, metricsServerOptions metricsserver.Options, scheme *runtime.Scheme) ctrl.Options {
 	opt := ctrl.Options{
 		Scheme: scheme,
 		Cache: cache.Options{
@@ -63,11 +81,15 @@ func defaultManagerOptions(cfg ControllerConfig, gknn common.GKNN, metricsServer
 			opt.Cache.ByObject[&v1alpha2.InferenceObjective{}] = cache.ByObject{Namespaces: map[string]cache.Config{
 				gknn.Namespace: {},
 			}}
+		} else {
+			ctrl.Log.WithName("controllerManager").Info("Warning: InferenceObjective GVK does not exist on the server. Skipping its reconciler/cache.")
 		}
 		if cfg.hasInferenceModelRewrites {
 			opt.Cache.ByObject[&v1alpha2.InferenceModelRewrite{}] = cache.ByObject{Namespaces: map[string]cache.Config{
 				gknn.Namespace: {},
 			}}
+		} else {
+			ctrl.Log.WithName("controllerManager").Info("Warning: InferenceModelRewrite GVK does not exist on the server. Skipping its reconciler/cache.")
 		}
 
 		opt.Cache.ByObject[&v1.InferencePool{}] = cache.ByObject{
@@ -82,7 +104,8 @@ func defaultManagerOptions(cfg ControllerConfig, gknn common.GKNN, metricsServer
 // NewDefaultManager creates a new controller manager with default configuration.
 // Optional override functions can be passed to customize the manager options (e.g., for testing).
 func NewDefaultManager(controllerCfg ControllerConfig, gknn common.GKNN, restConfig *rest.Config, metricsServerOptions metricsserver.Options, leaderElectionEnabled bool, overrides ...func(*ctrl.Options)) (ctrl.Manager, error) {
-	opt := defaultManagerOptions(controllerCfg, gknn, metricsServerOptions)
+	scheme := NewScheme(controllerCfg)
+	opt := defaultManagerOptions(controllerCfg, gknn, metricsServerOptions, scheme)
 	if leaderElectionEnabled {
 		opt.LeaderElection = true
 		opt.LeaderElectionResourceLock = "leases"

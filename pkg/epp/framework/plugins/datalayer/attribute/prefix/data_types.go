@@ -17,28 +17,44 @@ limitations under the License.
 package prefix
 
 import (
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 )
 
-const (
-	PrefixCacheMatchInfoKey = "PrefixCacheMatchInfoKey"
-)
+var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
 
 type PrefixCacheMatchInfo struct {
-	// matched prefix length in blocks
+	// matched prefix length in blocks. For the precise prefix cache this is the
+	// device-tier-weighted longest-prefix score (e.g. RAM-tier blocks count as
+	// less than 1.0), suitable for relative endpoint ranking.
 	matchBlocks int
 	// total length in blocks
 	totalBlocks int
 	// block length in tokens
 	blockSizeTokens int
+	// unweighted count of contiguous cached prefix blocks on the endpoint.
+	// Unlike matchBlocks this is the literal number of cached blocks regardless
+	// of device tier, so consumers that convert blocks to a token count (e.g.
+	// the prefix-based PD decider) get an accurate cached-token figure rather
+	// than a tier-attenuated one. Defaults to matchBlocks when not set.
+	cachedBlockCount int
 }
 
 func NewPrefixCacheMatchInfo(matchBlocks int, totalBlocks int, blockSizeTokens int) *PrefixCacheMatchInfo {
 	return &PrefixCacheMatchInfo{
-		matchBlocks:     matchBlocks,
-		totalBlocks:     totalBlocks,
-		blockSizeTokens: blockSizeTokens,
+		matchBlocks:      matchBlocks,
+		totalBlocks:      totalBlocks,
+		blockSizeTokens:  blockSizeTokens,
+		cachedBlockCount: matchBlocks,
 	}
+}
+
+// WithCachedBlockCount sets the unweighted contiguous cached-block count and
+// returns the receiver for chaining.
+func (p *PrefixCacheMatchInfo) WithCachedBlockCount(cachedBlockCount int) *PrefixCacheMatchInfo {
+	p.cachedBlockCount = cachedBlockCount
+	return p
 }
 
 func (p *PrefixCacheMatchInfo) MatchBlocks() int {
@@ -53,10 +69,17 @@ func (p *PrefixCacheMatchInfo) BlockSizeTokens() int {
 	return p.blockSizeTokens
 }
 
+// CachedBlockCount returns the unweighted count of contiguous cached prefix
+// blocks on the endpoint.
+func (p *PrefixCacheMatchInfo) CachedBlockCount() int {
+	return p.cachedBlockCount
+}
+
 func (p *PrefixCacheMatchInfo) Clone() fwkdl.Cloneable {
 	return &PrefixCacheMatchInfo{
-		matchBlocks:     p.matchBlocks,
-		totalBlocks:     p.totalBlocks,
-		blockSizeTokens: p.blockSizeTokens,
+		matchBlocks:      p.matchBlocks,
+		totalBlocks:      p.totalBlocks,
+		blockSizeTokens:  p.blockSizeTokens,
+		cachedBlockCount: p.cachedBlockCount,
 	}
 }

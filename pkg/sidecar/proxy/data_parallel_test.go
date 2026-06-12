@@ -11,9 +11,9 @@ import (
 	. "github.com/onsi/gomega"    // nolint:revive
 	"golang.org/x/sync/errgroup"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	sidecarmock "github.com/llm-d/llm-d-inference-scheduler/test/sidecar/mock"
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	sidecarmock "github.com/llm-d/llm-d-router/test/sidecar/mock"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 const (
@@ -60,7 +60,7 @@ var _ = Describe("Data Parallel support", func() {
 				DataParallelSize: testDataParallelSize,
 			}
 			theProxy := NewProxy(cfg)
-			theProxy.allowlistValidator, err = NewAllowlistValidator(false, DefaultPoolGroup, "", "")
+			theProxy.allowlistValidator, err = NewAllowlistValidator(false, routing.InferencePoolAPIGroup, "", "")
 			Expect(err).ToNot(HaveOccurred())
 
 			err = theProxy.startDataParallel(ctx, grp)

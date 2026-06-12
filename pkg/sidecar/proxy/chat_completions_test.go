@@ -25,7 +25,7 @@ import (
 
 	"k8s.io/utils/set"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // testPrefillHeaderRouting is a shared table-driven helper that exercises
@@ -125,17 +125,21 @@ func testPrefillHeaderRouting(t *testing.T, apiType APIType) {
 				s.allowlistValidator = &AllowlistValidator{}
 				s.prefillSamplerFn = func(n int) int { return i % n }
 				var hostPort string
-				s.runPDConnectorProtocol = func(_ http.ResponseWriter, _ *http.Request, selectedHostPort string, _ APIType) {
+				var capturedReq *http.Request
+				s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, selectedHostPort string, _ APIType) {
 					hostPort = selectedHostPort
+					capturedReq = r
 				}
 				var passthrough bool
-				s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+				s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 					passthrough = true
+					capturedReq = r
 				})
 				s.dataParallelProxies = make(map[string]http.Handler)
 				recorder := httptest.NewRecorder()
 				recorder.Code = 0
-				s.disaggregatedPrefillHandler(apiType)(recorder, tt.r)
+				req := tt.r.Clone(tt.r.Context())
+				s.disaggregatedPrefillHandler(apiType)(recorder, req)
 
 				resp := recorder.Result()
 				if passthrough {
@@ -158,6 +162,11 @@ func testPrefillHeaderRouting(t *testing.T, apiType APIType) {
 					expected, actual := tt.expectedPrefillHostPorts[i%len(tt.expectedPrefillHostPorts)], hostPort
 					if expected != actual {
 						t.Errorf("expected=%s actual=%s", expected, actual)
+					}
+				}
+				if capturedReq != nil {
+					if v := capturedReq.Header.Get(routing.PrefillEndpointHeader); v != "" {
+						t.Errorf("PrefillEndpointHeader should be stripped before forwarding, got %q", v)
 					}
 				}
 			})
@@ -301,24 +310,28 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 			var epdCalled bool
 			var epdPrefill string
 			var epdEncoders []string
+			var capturedReq *http.Request
 			if tt.epdConfigured {
-				s.runEPDConnectorProtocol = func(_ http.ResponseWriter, _ *http.Request, prefillHost string, encoders []string) {
+				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string) {
 					epdCalled = true
 					epdPrefill = prefillHost
 					epdEncoders = encoders
+					capturedReq = r
 				}
 			}
 
 			var pdCalled bool
 			var pdHost string
-			s.runPDConnectorProtocol = func(_ http.ResponseWriter, _ *http.Request, host string, _ APIType) {
+			s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, host string, _ APIType) {
 				pdCalled = true
 				pdHost = host
+				capturedReq = r
 			}
 
 			var passthrough bool
-			s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+			s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 				passthrough = true
+				capturedReq = r
 			})
 			s.dataParallelProxies = make(map[string]http.Handler)
 
@@ -372,6 +385,14 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 					t.Error("P/D protocol should not be called during passthrough")
 				}
 
+			}
+			if capturedReq != nil {
+				if v := capturedReq.Header.Get(routing.PrefillEndpointHeader); v != "" {
+					t.Errorf("PrefillEndpointHeader should be stripped before forwarding, got %q", v)
+				}
+				if v := capturedReq.Header.Get(routing.EncoderEndpointsHeader); v != "" {
+					t.Errorf("EncoderEndpointsHeader should be stripped before forwarding, got %q", v)
+				}
 			}
 		})
 	}

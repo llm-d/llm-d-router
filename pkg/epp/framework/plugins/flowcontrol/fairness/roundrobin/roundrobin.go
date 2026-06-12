@@ -28,15 +28,15 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // RoundRobinFairnessPolicyType is the registration type for the round-robin fairness policy.
 const RoundRobinFairnessPolicyType = "round-robin-fairness-policy"
 
 // RoundRobinFairnessPolicyFactory is the factory function for the round-robin fairness policy.
-func RoundRobinFairnessPolicyFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func RoundRobinFairnessPolicyFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return newRoundRobin(name), nil
 }
 

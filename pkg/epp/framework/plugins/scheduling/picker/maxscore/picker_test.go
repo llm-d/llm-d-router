@@ -24,8 +24,8 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 func TestPickMaxScorePicker(t *testing.T) {
@@ -112,7 +112,7 @@ func TestPickMaxScorePicker(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result := test.picker.Pick(context.Background(), fwksched.NewCycleState(), test.input)
+			result := test.picker.Pick(context.Background(), test.input)
 			got := result.TargetEndpoints
 
 			if test.tieBreakCandidates > 0 {

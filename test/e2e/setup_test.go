@@ -12,7 +12,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	configloader "github.com/llm-d/llm-d-router/pkg/epp/config/loader"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 func createModelServersFromKustomize(kustomizeDir string, extra map[string]string) []string {
@@ -20,7 +23,7 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${MODEL_NAME}":              simModelName,
 		"${POOL_NAME}":               poolName,
 		"${VLLM_IMAGE}":              vllmSimImage,
-		"${UDS_TOKENIZER_IMAGE}":     udsTokenizerImage,
+		"${VLLM_RENDER_IMAGE}":       vllmRenderImage,
 		"${SIDECAR_IMAGE}":           sideCarImage,
 		"${VLLM_DATA_PARALLEL_SIZE}": "1",
 		"${VLLM_SIM_MODE}":           "echo",
@@ -36,11 +39,16 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 	for k, v := range extra {
 		subs[k] = v
 	}
+
 	manifests := runKustomize(kustomizeDir)
 	manifests = substituteMany(manifests, subs)
 	// Remove labels with empty values (produced when ${DECODE_ROLE} is empty)
 	manifests = removeEmptyLabels(manifests)
 	manifests = removeEmptyArgs(manifests)
+	// remove render sidecar if model is simulated
+	if !isModelReal(subs["${MODEL_NAME}"]) {
+		manifests = removeRenderSidecar(manifests)
+	}
 	objects := testutils.CreateObjsFromYaml(testConfig, manifests)
 	podsInDeploymentsReady(objects)
 	return objects
@@ -79,18 +87,22 @@ func createModelServersPDWithConnector(prefillReplicas, decodeReplicas int, conn
 	})
 }
 
-func createModelServersPDNixl(prefillReplicas, decodeReplicas int) []string {
-	return createModelServersPDWithConnector(prefillReplicas, decodeReplicas, "nixlv2")
+func createModelServersPDNixlV2(prefillReplicas, decodeReplicas int) []string {
+	return createModelServersPDWithConnector(prefillReplicas, decodeReplicas, proxy.KVConnectorNIXLV2)
 }
 
 func createModelServersPDSharedStorage(decodeReplicas int) []string {
-	return createModelServersPDWithConnector(1, decodeReplicas, "shared-storage")
+	return createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorSharedStorage)
+}
+
+func createModelServersPDMooncake(decodeReplicas int) []string {
+	return createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorMooncake)
 }
 
 // createModelServersEpDDisagg creates model server resources for E/PD (encode + prefill/decode) testing.
 func createModelServersEpDDisagg(encodeReplicas, decodeReplicas int) []string {
 	return createModelServersFromKustomize(ePdDisaggDir, map[string]string{
-		"${EC_CONNECTOR_TYPE}":    "ec-example",
+		"${EC_CONNECTOR_TYPE}":    proxy.ECExampleConnector,
 		"${VLLM_REPLICA_COUNT_E}": strconv.Itoa(encodeReplicas),
 		"${VLLM_REPLICA_COUNT_D}": strconv.Itoa(decodeReplicas),
 	})
@@ -99,8 +111,8 @@ func createModelServersEpDDisagg(encodeReplicas, decodeReplicas int) []string {
 // createModelServersEPDDisagg creates model server resources for E/P/D (encode/prefill/decode) testing.
 func createModelServersEPDDisagg(encodeReplicas, prefillReplicas, decodeReplicas int) []string {
 	return createModelServersFromKustomize(ePDDisaggDir, map[string]string{
-		"${KV_CONNECTOR_TYPE}":    "shared-storage",
-		"${EC_CONNECTOR_TYPE}":    "ec-example",
+		"${KV_CONNECTOR_TYPE}":    proxy.KVConnectorSharedStorage,
+		"${EC_CONNECTOR_TYPE}":    proxy.ECExampleConnector,
 		"${VLLM_REPLICA_COUNT_E}": strconv.Itoa(encodeReplicas),
 		"${VLLM_REPLICA_COUNT_P}": strconv.Itoa(prefillReplicas),
 		"${VLLM_REPLICA_COUNT_D}": strconv.Itoa(decodeReplicas),
@@ -136,13 +148,19 @@ func createEndPointPicker(eppConfig string) []string {
 	eppYamls := testutils.ReadYaml(eppManifest)
 	eppYamls = substituteMany(eppYamls,
 		map[string]string{
-			"${EPP_NAME}":              "e2e-epp",
-			"${EPP_IMAGE}":             eppImage,
-			"${UDS_TOKENIZER_IMAGE}":   udsTokenizerImage,
+			"${EPP_NAME}":          "e2e-epp",
+			"${EPP_IMAGE}":         eppImage,
+			"${VLLM_RENDER_IMAGE}": vllmRenderImage,
+			// The render sidecar needs a real, fetchable model. Sim tests
+			// don't query it; the cost is paying weights-load on every EPP.
+			"${MODEL_NAME}":            kvModelName,
 			"${NAMESPACE}":             nsName,
 			"${POOL_NAME}":             simModelName + "-inference-pool",
 			"${METRICS_ENDPOINT_AUTH}": "false",
 		})
+	if !usesTokenProducer(eppConfig) {
+		eppYamls = removeRenderSidecar(eppYamls)
+	}
 
 	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls)...)
 	podsInDeploymentsReady(objects)
@@ -162,4 +180,15 @@ func createEndPointPicker(eppConfig string) []string {
 	}, readyTimeout, 2*time.Second).Should(gomega.BeTrue(), "gateway should be ready within the ready timeout")
 
 	return objects
+}
+
+func usesTokenProducer(eppConfig string) bool {
+	cfg, _, err := configloader.LoadRawConfig([]byte(eppConfig), ginkgo.GinkgoLogr)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	for _, plugin := range cfg.Plugins {
+		if plugin.Type == tokenizer.PluginType {
+			return true
+		}
+	}
+	return false
 }

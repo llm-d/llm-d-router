@@ -22,7 +22,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	configapi "github.com/llm-d/llm-d-inference-scheduler/apix/config/v1alpha1"
+	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
 )
 
 // validateConfig performs a deep validation of the configuration integrity.
@@ -37,14 +37,36 @@ func validateConfig(cfg *configapi.EndpointPickerConfig) error {
 	if err := validateSaturationDetector(cfg); err != nil {
 		return fmt.Errorf("saturation detector validation failed: %w", err)
 	}
+	if err := validateParsers(cfg); err != nil {
+		return fmt.Errorf("parser validation failed: %w", err)
+	}
+	return nil
+}
+
+func validateParsers(cfg *configapi.EndpointPickerConfig) error {
+	if cfg.RequestHandler == nil || len(cfg.RequestHandler.Parsers) == 0 {
+		return nil
+	}
+
+	definedPlugins := sets.New[string]()
+	for _, p := range cfg.Plugins {
+		definedPlugins.Insert(p.Name)
+	}
+
+	for _, pc := range cfg.RequestHandler.Parsers {
+		if !definedPlugins.Has(pc.PluginRef) {
+			return fmt.Errorf("parser references undefined plugin '%s'", pc.PluginRef)
+		}
+	}
+
 	return nil
 }
 
 func validateSaturationDetector(cfg *configapi.EndpointPickerConfig) error {
-	if cfg.SaturationDetector == nil {
+	if cfg.FlowControl == nil || cfg.FlowControl.SaturationDetector == nil {
 		return nil
 	}
-	if cfg.SaturationDetector.PluginRef == "" {
+	if cfg.FlowControl.SaturationDetector.PluginRef == "" {
 		return errors.New("saturation detector plugin reference is empty")
 	}
 
@@ -53,8 +75,8 @@ func validateSaturationDetector(cfg *configapi.EndpointPickerConfig) error {
 		definedPlugins.Insert(p.Name)
 	}
 
-	if !definedPlugins.Has(cfg.SaturationDetector.PluginRef) {
-		return fmt.Errorf("saturation detector references undefined plugin '%s'", cfg.SaturationDetector.PluginRef)
+	if !definedPlugins.Has(cfg.FlowControl.SaturationDetector.PluginRef) {
+		return fmt.Errorf("saturation detector references undefined plugin '%s'", cfg.FlowControl.SaturationDetector.PluginRef)
 	}
 
 	return nil

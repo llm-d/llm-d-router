@@ -21,24 +21,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers"
-	grpcutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/util"
-	pb "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
+	grpcutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
+	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 )
 
 const (
 	VllmGRPCParserType = "vllmgrpc-parser"
 
-	vllmGeneratePath = "/vllm.grpc.engine.VllmEngine/Generate"
-	vllmEmbedPath    = "/vllm.grpc.engine.VllmEngine/Embed"
+	vllmGeneratePath = "vllm.grpc.engine.VllmEngine/Generate"
+	vllmEmbedPath    = "vllm.grpc.engine.VllmEngine/Embed"
 )
 
 // compile-time type validation
@@ -59,7 +60,7 @@ func NewVllmGRPCParser() *VllmGRPCParser {
 	}
 }
 
-func VllmGRPCParserPluginFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func VllmGRPCParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewVllmGRPCParser().WithName(name), nil
 }
 
@@ -73,8 +74,14 @@ func (p *VllmGRPCParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *VllmGRPCParser) SupportedAppProtocols() []v1.AppProtocol {
-	return []v1.AppProtocol{v1.AppProtocolH2C}
+func (p *VllmGRPCParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
+		Paths: []string{
+			vllmGeneratePath,
+			vllmEmbedPath,
+		},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C},
+	}
 }
 
 // ParseRequest parses the gRPC request body and headers and returns an InferenceRequestBody.
@@ -87,8 +94,8 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 	}
 
 	path := headers[parsers.MethodPathKey]
-	switch path {
-	case vllmEmbedPath:
+	switch {
+	case strings.HasSuffix(path, vllmEmbedPath):
 		var req pb.EmbedRequest
 		if err := proto.Unmarshal(parsedPayload, &req); err != nil {
 			return nil, fmt.Errorf("unmarshaling EmbedRequest: %w", err)
@@ -98,9 +105,9 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 			return nil, err
 		}
 		logger.V(logutil.TRACE).Info("parsed EmbedRequest")
-		return &fwkrh.ParseResult{Body: extractedBody, Skip: false}, nil
+		return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 
-	case vllmGeneratePath:
+	case strings.HasSuffix(path, vllmGeneratePath):
 		var req pb.GenerateRequest
 		if err := proto.Unmarshal(parsedPayload, &req); err != nil {
 			return nil, fmt.Errorf("unmarshaling GenerateRequest: %w", err)
@@ -110,11 +117,16 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 			return nil, err
 		}
 		logger.V(logutil.TRACE).Info("parsed GenerateRequest")
-		return &fwkrh.ParseResult{Body: extractedBody, Skip: false}, nil
+		return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 
 	default:
 		logger.V(logutil.TRACE).Info("unsupported gRPC path, skipping", "path", headers[parsers.MethodPathKey])
-		return &fwkrh.ParseResult{Skip: true}, nil
+		return &fwkrh.ParseResult{
+			Body: &fwkrh.InferenceRequestBody{
+				Payload: fwkrh.RawPayload(body),
+			},
+			SkipResponseProcessing: true,
+		}, nil
 	}
 }
 
@@ -212,7 +224,7 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				TokenIDs:           copiedTokenIDsInt,
+				PerPromptTokens:    [][]uint32{copiedTokenIDsInt},
 				MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
 			},
 		}

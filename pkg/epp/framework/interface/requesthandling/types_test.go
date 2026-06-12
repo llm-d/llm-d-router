@@ -20,144 +20,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
-
-func TestLLMRequestBody_PromptText(t *testing.T) {
-	tests := []struct {
-		name     string
-		body     *InferenceRequestBody
-		expected string
-	}{
-		{
-			name: "completions request returns prompt directly",
-			body: &InferenceRequestBody{
-				Completions: &CompletionsRequest{
-					Prompt: Prompt{Raw: "What is the meaning of life?"},
-				},
-			},
-			expected: "What is the meaning of life?",
-		},
-		{
-			name: "completions request with array of strings prompt",
-			body: &InferenceRequestBody{
-				Completions: &CompletionsRequest{
-					Prompt: Prompt{Strings: []string{"Why is", "the sky blue?"}},
-				},
-			},
-			expected: "Why is the sky blue?",
-		},
-		{
-			name: "chat completions with single raw message",
-			body: &InferenceRequestBody{
-				ChatCompletions: &ChatCompletionsRequest{
-					Messages: []Message{
-						{Role: "user", Content: Content{Raw: "Hello, how are you?"}},
-					},
-				},
-			},
-			expected: "Hello, how are you? ",
-		},
-		{
-			name: "chat completions with multiple messages",
-			body: &InferenceRequestBody{
-				ChatCompletions: &ChatCompletionsRequest{
-					Messages: []Message{
-						{Role: "system", Content: Content{Raw: "You are a helpful assistant."}},
-						{Role: "user", Content: Content{Raw: "Tell me a joke."}},
-					},
-				},
-			},
-			expected: "You are a helpful assistant. Tell me a joke. ",
-		},
-		{
-			name: "chat completions with structured content blocks",
-			body: &InferenceRequestBody{
-				ChatCompletions: &ChatCompletionsRequest{
-					Messages: []Message{
-						{
-							Role: "user",
-							Content: Content{
-								Structured: []ContentBlock{
-									{Type: "text", Text: "Describe this image:"},
-									{Type: "image_url", ImageURL: ImageBlock{URL: "http://example.com/img.png"}},
-								},
-							},
-						},
-					},
-				},
-			},
-			expected: "Describe this image:  ",
-		},
-		{
-			name: "responses request with string input",
-			body: &InferenceRequestBody{
-				Responses: &ResponsesRequest{
-					Input: "Some response input",
-				},
-			},
-			expected: "Some response input",
-		},
-		{
-			name: "responses request with non-string input",
-			body: &InferenceRequestBody{
-				Responses: &ResponsesRequest{
-					Input: map[string]any{"key": "value"},
-				},
-			},
-			expected: `{"key":"value"}`,
-		},
-		{
-			name: "conversations request",
-			body: &InferenceRequestBody{
-				Conversations: &ConversationsRequest{
-					Items: []ConversationItem{
-						{Type: "message", Role: "user", Content: "Hello"},
-					},
-				},
-			},
-			expected: `[{"type":"message","role":"user","content":"Hello"}]`,
-		},
-		{
-			name:     "empty body returns empty string",
-			body:     &InferenceRequestBody{},
-			expected: "",
-		},
-		{
-			name: "chat completions with no messages",
-			body: &InferenceRequestBody{
-				ChatCompletions: &ChatCompletionsRequest{
-					Messages: []Message{},
-				},
-			},
-			expected: "",
-		},
-		{
-			name: "embeddings request with string input",
-			body: &InferenceRequestBody{
-				Embeddings: &EmbeddingsRequest{
-					Input: EmbeddingsInput{Raw: "hello world"},
-				},
-			},
-			expected: "hello world",
-		},
-		{
-			name: "embeddings request with array of strings input",
-			body: &InferenceRequestBody{
-				Embeddings: &EmbeddingsRequest{
-					Input: EmbeddingsInput{Strings: []string{"hello", "world"}},
-				},
-			},
-			expected: "hello world",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := tt.body.PromptText()
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
 
 func TestPrompt_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
@@ -279,62 +143,6 @@ func TestEmbeddingsInput_UnmarshalJSON(t *testing.T) {
 	}
 }
 
-func TestInferenceRequestBody_InputTokenCountHint(t *testing.T) {
-	tests := []struct {
-		name     string
-		body     *InferenceRequestBody
-		wantHint int
-	}{
-		{
-			name: "completions with token IDs returns count",
-			body: &InferenceRequestBody{
-				Completions: &CompletionsRequest{
-					Prompt: Prompt{TokenIDs: []uint32{1, 2, 3}},
-				},
-			},
-			wantHint: 3,
-		},
-		{
-			name: "completions with text returns -1",
-			body: &InferenceRequestBody{
-				Completions: &CompletionsRequest{
-					Prompt: Prompt{Raw: "hello"},
-				},
-			},
-			wantHint: -1,
-		},
-		{
-			name: "embeddings with token IDs returns count",
-			body: &InferenceRequestBody{
-				Embeddings: &EmbeddingsRequest{
-					Input: EmbeddingsInput{TokenIDs: []uint32{1, 2, 3, 4}},
-				},
-			},
-			wantHint: 4,
-		},
-		{
-			name: "embeddings with text returns -1",
-			body: &InferenceRequestBody{
-				Embeddings: &EmbeddingsRequest{
-					Input: EmbeddingsInput{Raw: "hello"},
-				},
-			},
-			wantHint: -1,
-		},
-		{
-			name:     "empty body returns -1",
-			body:     &InferenceRequestBody{},
-			wantHint: -1,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.wantHint, tt.body.InputTokenCountHint())
-		})
-	}
-}
-
 func TestPrompt_PlainText(t *testing.T) {
 	tests := []struct {
 		name string
@@ -370,4 +178,71 @@ func TestPrompt_MarshalJSON(t *testing.T) {
 
 	empty, _ := Prompt{}.MarshalJSON()
 	assert.Equal(t, `""`, string(empty))
+}
+
+func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		want        []uint32
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:  "valid token ids",
+			input: `{"token_ids":[1,2,3]}`,
+			want:  []uint32{1, 2, 3},
+		},
+		{
+			name:  "max uint32 boundary accepted",
+			input: `{"token_ids":[4294967295]}`,
+			want:  []uint32{4294967295},
+		},
+		{
+			name:        "negative token id rejected",
+			input:       `{"token_ids":[1,2,-1]}`,
+			wantErr:     true,
+			errContains: "token_ids[2]: invalid value",
+		},
+		{
+			name:        "non-integer token id rejected",
+			input:       `{"token_ids":[1,2.5,3]}`,
+			wantErr:     true,
+			errContains: "token_ids[1]: invalid value",
+		},
+		{
+			name:        "value above MaxUint32 rejected",
+			input:       `{"token_ids":[4294967296]}`,
+			wantErr:     true,
+			errContains: "token_ids[0]: invalid value",
+		},
+		{
+			name:        "NaN token id rejected",
+			input:       `{"token_ids":[1,NaN]}`,
+			wantErr:     true,
+			errContains: "invalid character",
+		},
+		{
+			name:        "malformed json rejected",
+			input:       `{"token_ids":[`,
+			wantErr:     true,
+			errContains: "unexpected end of JSON",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var g GenerateRequest
+			err := g.UnmarshalJSON([]byte(tt.input))
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, g.TokenIDs)
+		})
+	}
 }

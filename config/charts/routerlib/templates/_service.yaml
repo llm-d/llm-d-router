@@ -1,0 +1,24 @@
+{{- define "llm-d-epp.service" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-d-router.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "llm-d-router.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc-ext-proc
+      protocol: TCP
+      port: {{ .Values.router.epp.extProcPort | default 9002 }}
+    - name: http-metrics
+      protocol: TCP
+      port: {{ .Values.router.metricsPort | default 9090 }}
+    {{- with .Values.router.extraServicePorts }}
+    {{- . | toYaml | nindent 4 }}
+    {{- end }}
+  type: ClusterIP
+---
+{{- end }}

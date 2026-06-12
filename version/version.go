@@ -25,10 +25,10 @@ var (
 )
 
 const (
-	// BundleVersionAnnotation is the annotation key used in the Gateway API inference extension CRDs to specify
-	// the installed Gateway API inference extension version.
-	BundleVersionAnnotation = "inference.networking.k8s.io/bundle-version"
+	// BundleVersionAnnotation is the annotation key used in llm-d CRDs to specify
+	// the installed bundle version.
+	BundleVersionAnnotation = "llm-d.ai/bundle-version"
 
-	// BundleVersion is the value used for labeling the version of the gateway-api-inference-extension.
+	// BundleVersion is the value used for labeling the CRD bundle version.
 	BundleVersion = "main-dev"
 )

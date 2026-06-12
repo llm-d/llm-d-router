@@ -17,7 +17,6 @@ limitations under the License.
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,14 +25,13 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
 var (
@@ -52,7 +50,7 @@ func init() {
 	}
 }
 
-func (s *Server) runSGLangProtocol(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
+func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
 	s.logger.V(4).Info("running SGLang protocol", "url", prefillPodHostPort)
 
 	// Make Request
@@ -79,20 +77,20 @@ func (s *Server) runSGLangProtocol(w http.ResponseWriter, r *http.Request, prefi
 	}
 
 	// Send concurrent prefill and decode requests
-	s.sendSGLangConcurrentRequests(w, r, body, prefillPodHostPort)
+	s.handleSGLangConcurrentRequests(w, r, body, prefillPodHostPort)
 }
 
-func (s *Server) sendSGLangConcurrentRequests(w http.ResponseWriter, r *http.Request, body []byte, prefillHost string) {
-	tracer := telemetry.Tracer()
+func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.Request, body []byte, prefillHost string) {
+	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
 	// Prefill Stage - async
-	ctx, prefillSpan := tracer.Start(ctx, "llm_d.pd_proxy.prefill",
+	ctx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.prefill_target", prefillHost),
-		attribute.String("llm_d.pd_proxy.connector", "sglang"),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
 		attribute.Bool("llm_d.pd_proxy.prefill.async", true),
 	)
 	prefillStart := time.Now()
@@ -100,8 +98,8 @@ func (s *Server) sendSGLangConcurrentRequests(w http.ResponseWriter, r *http.Req
 	// Create separate requests for prefill and decode
 	// Use context.WithoutCancel for prefillReq to prevent it from being aborted
 	// if the main HTTP handler (which serves decodeReq) finishes first.
-	prefillReq := cloneWithJSONBody(context.WithoutCancel(r.Context()), r, body)
-	decodeReq := cloneWithJSONBody(r.Context(), r, body)
+	prefillReq := cloneRequestWithBody(context.WithoutCancel(r.Context()), r, body)
+	decodeReq := cloneRequestWithBody(r.Context(), r, body)
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
 	if err != nil {
@@ -135,13 +133,13 @@ func (s *Server) sendSGLangConcurrentRequests(w http.ResponseWriter, r *http.Req
 	}()
 
 	// Decode Stage - sync
-	ctx, decodeSpan := tracer.Start(ctx, "llm_d.pd_proxy.decode",
+	ctx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
 
 	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.connector", "sglang"),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
 		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", true),
 	)
 	decodeStart := time.Now()
@@ -178,13 +176,6 @@ func (s *Server) sendSGLangConcurrentRequests(w http.ResponseWriter, r *http.Req
 	}
 }
 
-func cloneWithJSONBody(ctx context.Context, r *http.Request, body []byte) *http.Request {
-	req := r.Clone(ctx)
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.ContentLength = int64(len(body))
-	return req
-}
-
 func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
 	modifiedRequest := make(map[string]interface{})
 	for k, v := range requestData {
@@ -192,7 +183,7 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 	}
 
 	// Generate bootstrap host from prefill host
-	bootstrapHost := s.getBootstrapHost(prefillHostPort)
+	bootstrapHost := extractHost(prefillHostPort)
 
 	// Add bootstrap information
 	modifiedRequest[requestFieldBootstrapHost] = bootstrapHost
@@ -223,10 +214,4 @@ func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, er
 
 func (s *Server) generateSGLangRoomID() int64 {
 	return time.Now().UnixNano() + int64(rand.IntN(1000))
-}
-
-func (s *Server) getBootstrapHost(prefillHostPort string) string {
-	// Extract hostname from prefill host
-	parts := strings.Split(prefillHostPort, ":")
-	return parts[0]
 }

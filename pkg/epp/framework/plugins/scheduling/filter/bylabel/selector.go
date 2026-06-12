@@ -10,8 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -31,10 +31,10 @@ var _ scheduling.Filter = &Selector{}
 var LabelSelectorFilterFactory = SelectorFactory
 
 // SelectorFactory defines the factory function for the Selector filter.
-func SelectorFactory(name string, rawParameters json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func SelectorFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	parameters := metav1.LabelSelector{}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' filter - %w", LabelSelectorFilterType, err)
 		}
 	}
@@ -46,7 +46,7 @@ func SelectorFactory(name string, rawParameters json.RawMessage, _ plugin.Handle
 // rather than the canonical "label-selector-filter". It also logs a deprecation warning.
 //
 // Deprecated: Use SelectorFactory instead.
-func DeprecatedSelectorFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func DeprecatedSelectorFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	if handle != nil {
 		log.FromContext(handle.Context()).Info("Deprecated: plugin type 'by-label-selector' is deprecated, use 'label-selector-filter' instead")
 	}
@@ -88,7 +88,7 @@ func (blf *Selector) TypedName() plugin.TypedName {
 }
 
 // Filter filters out all endpoints that do not satisfy the label selector
-func (blf *Selector) Filter(_ context.Context, _ *scheduling.CycleState, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+func (blf *Selector) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	filtered := []scheduling.Endpoint{}
 
 	for _, endpoint := range endpoints {

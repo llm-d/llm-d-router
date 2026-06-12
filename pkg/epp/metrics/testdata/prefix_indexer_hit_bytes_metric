@@ -1,4 +1,4 @@
-# HELP inference_extension_prefix_indexer_hit_bytes [ALPHA] Length of the prefix match in number of bytes in the cache lookup.
+# HELP inference_extension_prefix_indexer_hit_bytes [ALPHA] [Deprecated: Use llm_d_router_epp_prefix_indexer_hit_bytes] Length of the prefix match in number of bytes in the cache lookup.
 # TYPE inference_extension_prefix_indexer_hit_bytes histogram
 inference_extension_prefix_indexer_hit_bytes_bucket{le="0"} 2
 inference_extension_prefix_indexer_hit_bytes_bucket{le="16"} 5

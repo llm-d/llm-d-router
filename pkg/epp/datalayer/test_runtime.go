@@ -23,7 +23,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
 )
 
 // NewTestRuntime creates a Runtime configured with a mocks.MetricsDataSource for testing.
@@ -45,7 +45,7 @@ func NewTestRuntime(t *testing.T, refreshInterval time.Duration) EndpointFactory
 func NewTestRuntimeWithConfig(t *testing.T, refreshInterval time.Duration, cfg *Config) EndpointFactory {
 	r := NewRuntime(refreshInterval)
 	logger := newTestLogger(t)
-	_ = r.Configure(cfg, false, "", logger)
+	_ = r.Configure(cfg, logger)
 	return r
 }
 

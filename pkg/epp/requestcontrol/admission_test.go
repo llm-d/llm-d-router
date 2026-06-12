@@ -24,15 +24,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	errcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/error"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	backendmetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/backend/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts/mocks"
-	fctypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/types"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	schedulingtypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/handlers"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
+	fctypes "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 )
 
 // --- Mocks ---
@@ -69,13 +68,13 @@ func TestLegacyAdmissionController_Admit(t *testing.T) {
 	t.Parallel()
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	reqCtx := &handlers.RequestContext{
-		SchedulingRequest: &schedulingtypes.InferenceRequest{RequestID: "test-req"},
+		SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
 		Request: &handlers.Request{
 			Metadata: map[string]any{},
 		},
 	}
 
-	mockPods := []fwkdl.Endpoint{&backendmetrics.FakePodMetrics{}}
+	mockPods := []fwkdl.Endpoint{fwkdl.NewEndpoint(nil, nil)}
 
 	testCases := []struct {
 		name            string
@@ -180,7 +179,7 @@ func TestFlowControlRequestAdapter(t *testing.T) {
 				fairnessID:       tc.fairnessID,
 				priority:         tc.priority,
 				requestByteSize:  tc.requestByteSize,
-				inferenceRequest: &schedulingtypes.InferenceRequest{RequestID: tc.requestID},
+				inferenceRequest: &fwksched.InferenceRequest{RequestID: tc.requestID},
 			}
 
 			assert.Equal(t, tc.requestID, fcReq.ID(), "ID() mismatch")
@@ -195,7 +194,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 	t.Parallel()
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	reqCtx := &handlers.RequestContext{
-		SchedulingRequest: &schedulingtypes.InferenceRequest{RequestID: "test-req"},
+		SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
 		Request: &handlers.Request{
 			Metadata: map[string]any{},
 		},
@@ -209,6 +208,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 		expectErr       bool
 		expectErrCode   string
 		expectErrSubstr string
+		expectHeaders   map[string]string
 	}{
 		{
 			name:      "sheddable_dispatched",
@@ -229,6 +229,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.ResourceExhausted,
 			expectErrSubstr: "request rejected by flow control",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
 		},
 		{
 			name:            "fc_evict_ttl",
@@ -238,6 +239,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.ServiceUnavailable,
 			expectErrSubstr: "request timed out in queue: timeout",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)},
 		},
 		{
 			name:            "fc_evict_context_cancelled",
@@ -246,6 +248,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.ServiceUnavailable,
 			expectErrSubstr: "client disconnected",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled)},
 		},
 		{
 			name:            "fc_reject_other",
@@ -292,6 +295,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 				if assert.ErrorAs(t, err, &e, "error should be of type errcommon.Error") {
 					assert.Equal(t, tc.expectErrCode, e.Code, "incorrect error code for scenario: %s", tc.name)
 					assert.Contains(t, e.Msg, tc.expectErrSubstr, "incorrect error message substring for scenario: %s", tc.name)
+					assert.Equal(t, tc.expectHeaders, e.Headers, "incorrect headers for scenario: %s", tc.name)
 				}
 			}
 		})

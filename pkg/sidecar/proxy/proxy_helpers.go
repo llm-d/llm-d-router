@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -12,9 +15,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common"
+	"github.com/llm-d/llm-d-router/pkg/common"
 )
 
 // startHTTP starts the HTTP reverse proxy.
@@ -158,15 +162,65 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 	return decoderProxy
 }
 
+func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
+	defer func() { _ = r.Body.Close() }()
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", errInvalidJSON, err)
+	}
+	return raw, parsed, nil
+}
+
+func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
+	raw, parsed, err := bodyAsJSON(r)
+	if err != nil {
+		if !errors.Is(err, errInvalidJSON) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(err.Error()))
+		} else if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+			s.logger.Error(writeErr, "failed to send error response to client")
+		}
+		return nil, nil, false
+	}
+	return raw, parsed, true
+}
+
+func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *http.Request {
+	cloned := r.Clone(ctx)
+	cloned.Body = io.NopCloser(bytes.NewReader(body))
+	cloned.ContentLength = int64(len(body))
+	return cloned
+}
+
+// extractHost returns the host part of a host:port string. If parsing
+// fails (e.g. no port), the input is returned as-is.
+func extractHost(hostWithPort string) string {
+	host, _, err := net.SplitHostPort(hostWithPort)
+	if err != nil {
+		return hostWithPort
+	}
+	return host
+}
+
+func newUUID() string {
+	return uuid.New().String()
+}
+
 // isHTTPError returns true if the status code indicates an error (not in the 2xx range).
 func isHTTPError(statusCode int) bool {
 	return statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices
 }
 
-// shouldFallbackToDecode returns false for client error 4xx status codes (400–451). For all other status codes, it returns true.
-func shouldFallbackToDecode(pw *bufferedResponseWriter) bool {
-	if pw.statusCode >= http.StatusBadRequest && pw.statusCode <= http.StatusUnavailableForLegalReasons {
-		return false
-	}
-	return true
+// isRetryableStatus returns true for transient 5xx errors where retrying
+// the same host is likely to succeed (e.g. TCP connection reset, overloaded
+// accept queue). Non-transient errors like 500/501 indicate bugs or
+// unsupported operations and should fail fast.
+func isRetryableStatus(statusCode int) bool {
+	return statusCode == http.StatusBadGateway ||
+		statusCode == http.StatusServiceUnavailable ||
+		statusCode == http.StatusGatewayTimeout
 }

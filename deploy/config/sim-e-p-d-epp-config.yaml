@@ -1,8 +1,6 @@
 # Sample EPP configuration for running with E/P/D
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
-featureGates:
-- prepareDataPlugins
 plugins:
 - type: queue-scorer
 - type: encode-filter

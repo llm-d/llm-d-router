@@ -18,7 +18,7 @@ limitations under the License.
 //
 // # Testing Philosophy: High-Fidelity Mocks
 //
-// The components that consume these contracts, particularly the `controller.ShardProcessor`, are complex, concurrent
+// The components that consume these contracts, particularly the `controller.Processor`, are complex, concurrent
 // orchestrators. Testing them reliably requires more than simple stubs. It requires high-fidelity mocks that allow for
 // the deterministic simulation of race conditions and specific failure modes.
 //
@@ -34,78 +34,87 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 )
 
-// --- RegistryShard Mocks ---
+// --- RegistryDataPlane Mocks ---
 
-// MockRegistryShard is a simple "stub-style" mock for testing.
+// MockRegistryDataPlane is a simple "stub-style" mock for testing.
 // Its methods are implemented as function fields (e.g., `IDFunc`). A test can inject behavior by setting the desired
 // function field in the test setup. If a func is nil, the method will return a zero value.
-type MockRegistryShard struct {
-	IDFunc                       func() string
-	IsActiveFunc                 func() bool
+type MockRegistryDataPlane struct {
 	ManagedQueueFunc             func(key flowcontrol.FlowKey) (contracts.ManagedQueue, error)
 	FairnessPolicyFunc           func(priority int) (flowcontrol.FairnessPolicy, error)
 	PriorityBandAccessorFunc     func(priority int) (flowcontrol.PriorityBandAccessor, error)
 	AllOrderedPriorityLevelsFunc func() []int
-	StatsFunc                    func() contracts.ShardStats
+	StatsFunc                    func() contracts.AggregateStats
+	WithConnectionFunc           func(key flowcontrol.FlowKey, fn func(conn contracts.ActiveFlowConnection) error) error
 }
 
-func (m *MockRegistryShard) ID() string {
-	if m.IDFunc != nil {
-		return m.IDFunc()
-	}
-	return ""
-}
-
-func (m *MockRegistryShard) IsActive() bool {
-	if m.IsActiveFunc != nil {
-		return m.IsActiveFunc()
-	}
-	return false
-}
-
-func (m *MockRegistryShard) ManagedQueue(key flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
+func (m *MockRegistryDataPlane) ManagedQueue(key flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
 	if m.ManagedQueueFunc != nil {
 		return m.ManagedQueueFunc(key)
 	}
-	return nil, errors.New("sentinel error for mock shard")
+	return &MockManagedQueue{FlowKeyV: key}, nil
 }
 
-func (m *MockRegistryShard) FairnessPolicy(priority int) (flowcontrol.FairnessPolicy, error) {
+func (m *MockRegistryDataPlane) FairnessPolicy(priority int) (flowcontrol.FairnessPolicy, error) {
 	if m.FairnessPolicyFunc != nil {
 		return m.FairnessPolicyFunc(priority)
 	}
-	return nil, errors.New("sentinel error for mock shard")
+	return nil, errors.New("sentinel error for mock data plane")
 }
 
-func (m *MockRegistryShard) PriorityBandAccessor(priority int) (flowcontrol.PriorityBandAccessor, error) {
+func (m *MockRegistryDataPlane) PriorityBandAccessor(priority int) (flowcontrol.PriorityBandAccessor, error) {
 	if m.PriorityBandAccessorFunc != nil {
 		return m.PriorityBandAccessorFunc(priority)
 	}
-	return nil, errors.New("sentinel error for mock shard")
+	return nil, errors.New("sentinel error for mock data plane")
 }
 
-func (m *MockRegistryShard) AllOrderedPriorityLevels() []int {
+func (m *MockRegistryDataPlane) AllOrderedPriorityLevels() []int {
 	if m.AllOrderedPriorityLevelsFunc != nil {
 		return m.AllOrderedPriorityLevelsFunc()
 	}
 	return nil
 }
 
-func (m *MockRegistryShard) Stats() contracts.ShardStats {
+func (m *MockRegistryDataPlane) Stats() contracts.AggregateStats {
 	if m.StatsFunc != nil {
 		return m.StatsFunc()
 	}
-	return contracts.ShardStats{}
+	return contracts.AggregateStats{}
 }
 
-var _ contracts.RegistryShard = &MockRegistryShard{}
+func (m *MockRegistryDataPlane) WithConnection(key flowcontrol.FlowKey, fn func(conn contracts.ActiveFlowConnection) error) error {
+	if m.WithConnectionFunc != nil {
+		return m.WithConnectionFunc(key, fn)
+	}
+	return nil
+}
+
+func (m *MockRegistryDataPlane) SubmitDesiredPriorities(_ map[int]struct{}) {}
+
+func (m *MockRegistryDataPlane) PriorityBandUpdateChannel() <-chan map[int]struct{} {
+	return nil
+}
+
+func (m *MockRegistryDataPlane) FlowGCTimeout() time.Duration {
+	return time.Minute
+}
+
+func (m *MockRegistryDataPlane) ApplyDesiredPriorities(_ map[int]struct{}) {}
+
+func (m *MockRegistryDataPlane) ExecuteGCCycle() {}
+
+var _ contracts.FlowRegistry = &MockRegistryDataPlane{}
+
+var _ contracts.FlowRegistryDataPlane = &MockRegistryDataPlane{}
 
 // --- Dependency Mocks ---
 
@@ -207,7 +216,7 @@ var _ contracts.SafeQueue = &MockSafeQueue{}
 // --- ManagedQueue Mock ---
 
 // MockManagedQueue is a high-fidelity, thread-safe mock of the `contracts.ManagedQueue` interface, designed
-// specifically for testing the concurrent `controller/internal.ShardProcessor`.
+// specifically for testing the concurrent `controller/internal.Processor`.
 //
 // This mock is essential for creating deterministic and focused unit tests. It allows for precise control over queue
 // behavior and enables the testing of critical edge cases (e.g., empty queues, dispatch failures) in complete

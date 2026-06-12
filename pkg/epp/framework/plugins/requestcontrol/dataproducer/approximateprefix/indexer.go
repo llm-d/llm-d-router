@@ -24,8 +24,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // indexer implements the indexerInterface interface.
@@ -34,14 +33,18 @@ type indexer struct {
 	hashToPods     map[blockHash]podSet                         // the lookup data structure to find pods that have the blockHash cached
 	podToLRU       map[ServerID]*lru.Cache[blockHash, struct{}] // key is pod namespacedName, value is an LRU cache
 	defaultLRUSize int
+	pluginName     string
+	pluginType     string
 }
 
 // newIndexer initializes an indexer with size limits and starts cache size reporting.
-func newIndexer(ctx context.Context, defaultLRUSize int) indexerInterface {
+func newIndexer(ctx context.Context, defaultLRUSize int, pluginName, pluginType string) indexerInterface {
 	i := &indexer{
 		hashToPods:     make(map[blockHash]podSet),
 		podToLRU:       make(map[ServerID]*lru.Cache[blockHash, struct{}]),
 		defaultLRUSize: defaultLRUSize,
+		pluginName:     pluginName,
+		pluginType:     pluginType,
 	}
 
 	go i.reportLRUSize(ctx, time.Second)
@@ -151,7 +154,7 @@ func (i *indexer) reportOnce(ctx context.Context) {
 		avg = float64(totalEntries) / float64(numPods)
 	}
 
-	metrics.RecordPrefixCacheSize(int64(totalEntries))
+	recordPrefixCacheSize(i.pluginName, i.pluginType, int64(totalEntries))
 
 	log.FromContext(ctx).V(logutil.TRACE).Info("Prefix cache state",
 		"total entries", totalEntries,

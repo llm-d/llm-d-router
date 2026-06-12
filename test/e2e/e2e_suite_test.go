@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -20,10 +19,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	k8slog "sigs.k8s.io/controller-runtime/pkg/log"
 	infextv1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	infextv1a2 "sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/env"
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	infextv1a2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 const (
@@ -33,8 +32,8 @@ const (
 	defaultReadyTimeout = 3 * time.Minute
 	// defaultInterval is the default interval to check if a resource exists or ready conditions.
 	defaultInterval = time.Millisecond * 250
-	// xInferPoolManifest is the manifest for the inference pool CRD with 'inference.networking.x-k8s.io' group.
-	gieCrdsKustomize = "../../deploy/components/crds-gie"
+	// crdKustomizePath is the kustomize path for all CRDs (upstream GIE + local llm-d.ai).
+	crdKustomizePath = "../../config/crd"
 	// inferExtManifest is the manifest for the inference extension test resources.
 	inferExtManifest = "../../deploy/components/inference-gateway/inference-pools.yaml"
 	// simModelName is the test model name.
@@ -51,6 +50,14 @@ const (
 	serviceAccountManifest = "../../deploy/components/inference-gateway/service-accounts.yaml"
 	// servicesManifest is the manifest for the EPP's service resources.
 	servicesManifest = "../../deploy/environments/dev/e2e-infra/services.yaml"
+
+	// CI shards scheduler e2e specs with label filters.
+	extendedTestLabel      = "Extended"
+	disruptiveTestLabel    = "Disruptive"
+	sharedStorageTestLabel = "SharedStorage"
+	metricsTestLabel       = "Metrics"
+	deprecatedPDTestLabel  = "DeprecatedPD"
+	disaggTestLabel        = "Disagg"
 )
 
 var (
@@ -63,11 +70,12 @@ var (
 	// Set E2E_KEEP_CLUSTER_ON_FAILURE=true to enable.
 	keepClusterOnFailure = env.GetEnvBool("E2E_KEEP_CLUSTER_ON_FAILURE", false, ginkgo.GinkgoLogr)
 
-	containerRuntime  = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
-	eppImage          = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-inference-scheduler:dev", ginkgo.GinkgoLogr)
-	vllmSimImage      = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.8.2", ginkgo.GinkgoLogr)
-	sideCarImage      = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-routing-sidecar:dev", ginkgo.GinkgoLogr)
-	udsTokenizerImage = env.GetEnvString("UDS_TOKENIZER_IMAGE", "ghcr.io/llm-d/llm-d-uds-tokenizer:dev", ginkgo.GinkgoLogr)
+	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
+	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
+	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.2", ginkgo.GinkgoLogr)
+	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
+	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
+	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
 	// nsName is the namespace in which the K8S objects will be created
 	nsName = env.GetEnvString("NAMESPACE", "default", ginkgo.GinkgoLogr)
 
@@ -196,21 +204,12 @@ func setupK8sCluster() {
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 
-	// For Docker: pull with --platform to ensure platform-specific layers are cached
-	// before loading into KIND (avoids "content digest not found" with multi-arch images).
-	if containerRuntime == "docker" {
-		arch := runtime.GOARCH
-		for _, img := range []string{vllmSimImage, eppImage, sideCarImage, udsTokenizerImage} {
-			pull := exec.Command("docker", "pull", "--platform", "linux/"+arch, img)
-			pull.Stderr = ginkgo.GinkgoWriter
-			_ = pull.Run() // ignore failure — image may be local-only
-		}
-	}
-
 	kindLoadImage(vllmSimImage)
 	kindLoadImage(eppImage)
 	kindLoadImage(sideCarImage)
-	kindLoadImage(udsTokenizerImage)
+	if loadRenderImage {
+		kindLoadImage(vllmRenderImage)
+	}
 }
 
 func kindLoadImage(image string) {
@@ -286,7 +285,7 @@ func setupNameSpace() {
 
 // createCRDs creates the Inference Extension CRDs used for testing.
 func createCRDs() {
-	crds := runKustomize(gieCrdsKustomize)
+	crds := runKustomize(crdKustomizePath)
 	crdObjects = testutils.CreateObjsFromYaml(testConfig, crds)
 }
 
@@ -361,7 +360,7 @@ const kindClusterConfig = `
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
-- image: kindest/node:v1.31.2
+- image: kindest/node:v1.31.12
   extraPortMappings:
   - containerPort: 30080
     hostPort: ${PORT}

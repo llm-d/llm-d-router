@@ -28,12 +28,12 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrconcurrency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 )
 
 const (
@@ -43,12 +43,12 @@ const (
 // ConcurrencyDetectorFactory instantiates the detector plugin using the provided JSON parameters.
 func ConcurrencyDetectorFactory(
 	name string,
-	params json.RawMessage,
+	params *json.Decoder,
 	handle fwkplugin.Handle,
 ) (fwkplugin.Plugin, error) {
 	var apiCfg apiConfig
-	if len(params) > 0 {
-		if err := json.Unmarshal(params, &apiCfg); err != nil {
+	if params != nil {
+		if err := params.Decode(&apiCfg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal concurrency detector config: %w", err)
 		}
 	}
@@ -60,14 +60,15 @@ func ConcurrencyDetectorFactory(
 }
 
 var (
-	_ framework.Filter               = &detector{}
+	_ fwksched.Filter                = &detector{}
 	_ flowcontrol.SaturationDetector = &detector{}
 )
 
 // detector implements a saturation detector and scheduling filter based on active request concurrency.
 type detector struct {
-	config    config
-	typedName fwkplugin.TypedName
+	config              config
+	typedName           fwkplugin.TypedName
+	inFlightLoadDataKey fwkplugin.DataKey
 }
 
 // newDetector creates a new instance of the Concurrency Detector.
@@ -91,8 +92,9 @@ func newDetector(name string, cfg config, logger logr.Logger) *detector {
 	}
 
 	return &detector{
-		config:    cfg,
-		typedName: typedName,
+		config:              cfg,
+		typedName:           typedName,
+		inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.inFlightLoadProducerName),
 	}
 }
 
@@ -101,18 +103,19 @@ func (d *detector) TypedName() fwkplugin.TypedName {
 	return d.typedName
 }
 
-func (d *detector) Consumes() map[string]any {
-	return map[string]any{
-		attrconcurrency.InFlightLoadKey: attrconcurrency.InFlightLoad{},
+func (d *detector) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
 	}
 }
 
 func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLoad {
-	if val, ok := m.Get(attrconcurrency.InFlightLoadKey); ok {
+	if val, ok := m.Get(d.inFlightLoadDataKey.String()); ok {
 		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
 			return load
 		}
 	}
+
 	return &attrconcurrency.InFlightLoad{}
 }
 
@@ -122,8 +125,20 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 //
 //	Saturation = Total Inflight Requests / Total MaxConcurrency Capacity.
 func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
+	if len(endpoints) == 0 {
+		return 1.0
+	}
+
 	var totalInflight, totalCapacity int64
 	for _, e := range endpoints {
+		if d.config.mode == modeTokens {
+			totalCapacity += d.config.maxTokenConcurrency
+		} else {
+			totalCapacity += d.config.maxConcurrency
+		}
+
+		// nil metadata = endpoint not yet populated by this EPP instance
+		// (fresh or passive); counts as idle capacity with zero in-flight load.
 		if e.GetMetadata() == nil {
 			continue
 		}
@@ -132,10 +147,8 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 
 		if d.config.mode == modeTokens {
 			totalInflight += load.Tokens
-			totalCapacity += d.config.maxTokenConcurrency
 		} else {
 			totalInflight += load.Requests
-			totalCapacity += d.config.maxConcurrency
 		}
 	}
 
@@ -151,12 +164,11 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 // It applies a relaxed limit (MaxConcurrency * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
 func (d *detector) Filter(
 	_ context.Context,
-	_ *framework.CycleState,
-	_ *framework.InferenceRequest,
-	endpoints []framework.Endpoint,
-) []framework.Endpoint {
+	_ *fwksched.InferenceRequest,
+	endpoints []fwksched.Endpoint,
+) []fwksched.Endpoint {
 	// Pre-allocate assuming most endpoints will pass the filter to minimize allocations.
-	filtered := make([]framework.Endpoint, 0, len(endpoints))
+	filtered := make([]fwksched.Endpoint, 0, len(endpoints))
 
 	var limit int64
 	if d.config.mode == modeTokens {

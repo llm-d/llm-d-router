@@ -6,7 +6,7 @@ This package defines the data structures for tracking real-time concurrency and 
 
 Captures the current real-time load of an endpoint as tracked by the EPP.
 
-- **Key**: `InFlightLoadKey`
+- **Key**: `InFlightLoadDataKey`
 - **Fields**:
   - `Tokens`: Number of tokens currently in-flight.
   - `Requests`: Number of requests currently in-flight.

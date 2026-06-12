@@ -19,15 +19,23 @@ package handlers
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/openai"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
+	"github.com/go-logr/logr"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -108,7 +116,7 @@ const (
 			"prompt_tokens": 11,
 			"total_tokens": 111,
 			"completion_tokens": 100,
-			"prompt_token_details": {
+			"prompt_tokens_details": {
 				"cached_tokens": 10
 			}
 		}
@@ -121,7 +129,7 @@ const (
 	streamingBodyWithUsage = `data: {"id":"cmpl-41764c93-f9d2-4f31-be08-3ba04fa25394","object":"text_completion","created":1740002445,"model":"food-review-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}
 data: [DONE]
 	`
-	streamingBodyWithUsageAndCachedTokens = `data: {"id":"cmpl-41764c93-f9d2-4f31-be08-3ba04fa25394","object":"text_completion","created":1740002445,"model":"food-review-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10,"prompt_token_details":{"cached_tokens":5}}}
+	streamingBodyWithUsageAndCachedTokens = `data: {"id":"cmpl-41764c93-f9d2-4f31-be08-3ba04fa25394","object":"text_completion","created":1740002445,"model":"food-review-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":5}}}
 data: [DONE]
 	`
 )
@@ -186,13 +194,14 @@ func TestHandleResponseBody(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server := &StreamingServer{
-				parser: openai.NewOpenAIParser(),
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
 			}
 			server.director = &mockDirector{}
 			reqCtx := test.reqCtx
 			if reqCtx == nil {
 				reqCtx = &RequestContext{
-					Response: &Response{},
+					Response:          &Response{},
+					SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
 				}
 			}
 			server.HandleResponseBody(ctx, reqCtx, test.body, true)
@@ -245,7 +254,7 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server := &StreamingServer{
-				parser: openai.NewOpenAIParser(),
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
 			}
 			server.director = &mockDirector{}
 			reqCtx := &RequestContext{
@@ -254,6 +263,7 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 						"content-type": "text/event-stream; charset=utf-8",
 					},
 				},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
 			}
 			server.HandleResponseBody(ctx, reqCtx, test.body, true) // Hard coded to true since openAIParser does not endOfStream to switch logic.
 
@@ -262,6 +272,73 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandleResponseBodyWithoutSchedulingRequest(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+	}
+	server.director = &mockDirector{}
+	timeBaseline := time.Now()
+	reqCtx := &RequestContext{
+		IncomingModelName:         "incoming-model",
+		TargetModelName:           "target-model",
+		Priority:                  3,
+		RequestReceivedTimestamp:  timeBaseline,
+		ResponseCompleteTimestamp: timeBaseline.Add(time.Second),
+		Response: &Response{
+			Headers: map[string]string{},
+		},
+	}
+
+	require.NotPanics(t, func() {
+		server.HandleResponseBody(ctx, reqCtx, []byte(body), true)
+	})
+
+	histogram := findHistogramMetric(t, "llm_d_router_epp_normalized_time_per_output_token_seconds", map[string]string{
+		"model_name":        "incoming-model",
+		"target_model_name": "target-model",
+		"fairness_id":       metadata.DefaultFairnessID,
+		"priority":          "3",
+	})
+	require.Equal(t, uint64(1), histogram.GetSampleCount())
+}
+
+func findHistogramMetric(t *testing.T, name string, labels map[string]string) *dto.Histogram {
+	t.Helper()
+
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metricHasLabels(metric, labels) {
+				return metric.GetHistogram()
+			}
+		}
+	}
+	t.Fatalf("metric %q with labels %v not found", name, labels)
+	return nil
+}
+
+func metricHasLabels(metric *dto.Metric, labels map[string]string) bool {
+	got := make(map[string]string, len(metric.GetLabel()))
+	for _, label := range metric.GetLabel() {
+		got[label.GetName()] = label.GetValue()
+	}
+	for key, want := range labels {
+		if got[key] != want {
+			return false
+		}
+	}
+	return true
 }
 
 func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
@@ -316,8 +393,8 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			server := &StreamingServer{
-				parser:   openai.NewOpenAIParser(),
-				director: &mockDirector{},
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+				director:       &mockDirector{},
 			}
 			reqCtx := &RequestContext{
 				Response: &Response{
@@ -325,6 +402,7 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 						"content-type": "text/event-stream",
 					},
 				},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
 			}
 
 			for _, chunk := range tc.chunks {
@@ -341,10 +419,11 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	reqCtx := &RequestContext{
 		Response: &Response{
 			Headers: map[string]string{
-				"x-backend-server":              "vllm-v0.6.3",            // should passthrough
-				metadata.ObjectiveKey:           "sensitive-objective-id", // should be stripped
-				metadata.DestinationEndpointKey: "10.2.0.5:8080",          // should be stripped
-				"content-length":                "500",                    // should be stripped
+				"x-backend-server":              "vllm-v0.6.3",                // should passthrough
+				metadata.ObjectiveKey:           "sensitive-objective-id",     // should be stripped
+				metadata.OldObjectiveKey:        "old-sensitive-objective-id", // should be stripped
+				metadata.DestinationEndpointKey: "10.2.0.5:8080",              // should be stripped
+				"content-length":                "500",                        // should be stripped
 			},
 		},
 	}
@@ -359,6 +438,7 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	assert.Contains(t, gotHeaders, "x-backend-server")
 	assert.Contains(t, gotHeaders, "x-went-into-resp-headers")
 	assert.NotContains(t, gotHeaders, metadata.ObjectiveKey)
+	assert.NotContains(t, gotHeaders, metadata.OldObjectiveKey)
 	assert.NotContains(t, gotHeaders, metadata.DestinationEndpointKey)
 	assert.NotContains(t, gotHeaders, "content-length")
 }
@@ -470,19 +550,79 @@ func TestResponseSizeAccumulation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := &StreamingServer{
-				parser:   openai.NewOpenAIParser(),
-				director: &mockDirector{},
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+				director:       &mockDirector{},
 			}
 			reqCtx := &RequestContext{
 				Response: &Response{
 					Headers: map[string]string{},
 				},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
 			}
 			for i, chunk := range tt.chunks {
 				endOfStream := i == len(tt.chunks)-1
 				server.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 			}
 			assert.Equal(t, tt.wantResponseSize, reqCtx.ResponseSize)
+		})
+	}
+}
+
+// TestGenerateResponseBodyResponses_DynamicMetadata verifies that DynamicMetadata is attached
+// to the last ProcessingResponse chunk and not to earlier chunks. This is a regression test for
+// the bug where the metadata was computed by plugins but silently dropped before reaching Envoy.
+func TestGenerateResponseBodyResponses_DynamicMetadata(t *testing.T) {
+	meta := &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			"envoy.lb": structpb.NewStructValue(&structpb.Struct{
+				Fields: map[string]*structpb.Value{
+					"x-gateway-inference-request-cost": structpb.NewNumberValue(42),
+				},
+			}),
+		},
+	}
+
+	tests := []struct {
+		name            string
+		body            []byte
+		dynamicMetadata *structpb.Struct
+		wantMetaOnLast  bool
+	}{
+		{
+			name:            "metadata attached to last chunk when provided",
+			body:            []byte(`{"result":"ok"}`),
+			dynamicMetadata: meta,
+			wantMetaOnLast:  true,
+		},
+		{
+			name:            "no metadata when nil",
+			body:            []byte(`{"result":"ok"}`),
+			dynamicMetadata: nil,
+			wantMetaOnLast:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			responses := generateResponseBodyResponses(tc.body, true, tc.dynamicMetadata)
+			require.NotEmpty(t, responses, "expected at least one response")
+
+			last := responses[len(responses)-1]
+			if tc.wantMetaOnLast {
+				require.NotNil(t, last.DynamicMetadata, "expected DynamicMetadata on last chunk")
+				envoyLb, ok := last.DynamicMetadata.Fields["envoy.lb"]
+				require.True(t, ok, "expected envoy.lb namespace in DynamicMetadata")
+				cost, ok := envoyLb.GetStructValue().Fields["x-gateway-inference-request-cost"]
+				require.True(t, ok)
+				assert.Equal(t, float64(42), cost.GetNumberValue())
+			} else {
+				assert.Nil(t, last.DynamicMetadata, "expected no DynamicMetadata when none provided")
+			}
+
+			// Earlier chunks must never carry metadata.
+			for i, r := range responses[:len(responses)-1] {
+				assert.Nil(t, r.DynamicMetadata, "chunk %d should not have DynamicMetadata", i)
+			}
 		})
 	}
 }

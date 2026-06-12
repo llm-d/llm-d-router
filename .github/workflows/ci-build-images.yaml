@@ -14,10 +14,11 @@ on:
         type: string
       prerelease:
         required: true
+        type: boolean
+      chart-suffix:
+        required: false
         type: string
-    secrets:
-      GHCR_TOKEN:
-        required: true
+        default: ''
 
 permissions:
   contents: read
@@ -31,20 +32,34 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v6
 
-      - name: Build and push EPP image
+      - name: Build AMD64 EPP image (no push)
         uses: ./.github/actions/docker-build-and-push
         with:
           docker-file: Dockerfile.epp
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.epp-image-name }}
           registry: ghcr.io/llm-d
-          github-token: ${{ secrets.GHCR_TOKEN }}
-          prerelease: ${{ inputs.prerelease }}
+          push: 'false'
+          buildx-outputs: type=docker,dest=/tmp/epp-image.tar
 
-      - name: Run Trivy scan on EPP image
+      # Gate the push on the scan: a HIGH/CRITICAL by default when not set but configurable
+      - name: Run Trivy scan for EPP on AMD64
         uses: ./.github/actions/trivy-scan
         with:
-          image: ghcr.io/llm-d/${{ inputs.epp-image-name }}:${{ inputs.tag }}
+          tarball: /tmp/epp-image.tar
+
+      # Re-run the build with push enabled with: cache-to/cache-from type=gha
+      - name: Push EPP image for both AMD64 and ARM64
+        uses: ./.github/actions/docker-build-and-push
+        with:
+          docker-file: Dockerfile.epp
+          tag: ${{ inputs.tag }}
+          image-name: ${{ inputs.epp-image-name }}
+          registry: ghcr.io/llm-d
+          github-token: ${{ github.token }}
+          prerelease: ${{ inputs.prerelease }}
+          commit-sha: ${{ github.sha }}
+          push: 'true'
 
   build-sidecar:
     runs-on: ubuntu-latest
@@ -52,17 +67,61 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v6
 
-      - name: Build and push sidecar image
+      - name: Build sidecar AMD64 image (no push)
         uses: ./.github/actions/docker-build-and-push
         with:
           docker-file: Dockerfile.sidecar
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.sidecar-image-name }}
           registry: ghcr.io/llm-d
-          github-token: ${{ secrets.GHCR_TOKEN }}
-          prerelease: ${{ inputs.prerelease }}
+          push: 'false'
+          buildx-outputs: type=docker,dest=/tmp/sidecar-image.tar
 
-      - name: Run Trivy scan on sidecar image
+      - name: Run Trivy scan on sidecar image on AMD64
         uses: ./.github/actions/trivy-scan
         with:
-          image: ghcr.io/llm-d/${{ inputs.sidecar-image-name }}:${{ inputs.tag }}
+          tarball: /tmp/sidecar-image.tar
+
+      - name: Push sidecar image for both AMD64 and ARM64
+        uses: ./.github/actions/docker-build-and-push
+        with:
+          docker-file: Dockerfile.sidecar
+          tag: ${{ inputs.tag }}
+          image-name: ${{ inputs.sidecar-image-name }}
+          registry: ghcr.io/llm-d
+          github-token: ${{ github.token }}
+          prerelease: ${{ inputs.prerelease }}
+          commit-sha: ${{ github.sha }}
+          push: 'true'
+
+  push-helm-charts:
+    needs: [build-epp, build-sidecar]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v6
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and Push Standalone Chart
+        uses: ./.github/actions/helm-build-and-push
+        with:
+          chart_name: llm-d-router-standalone
+          extra_tag: ${{ inputs.tag }}
+          chart_suffix: ${{ inputs.chart-suffix }}
+          epp_image_repository: ${{ inputs.epp-image-name }}
+
+      - name: Build and Push Gateway Chart
+        uses: ./.github/actions/helm-build-and-push
+        with:
+          chart_name: llm-d-router-gateway
+          extra_tag: ${{ inputs.tag }}
+          chart_suffix: ${{ inputs.chart-suffix }}
+          epp_image_repository: ${{ inputs.epp-image-name }}
+
+

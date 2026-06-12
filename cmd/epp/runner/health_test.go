@@ -26,8 +26,9 @@ import (
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // Mock Datastore
@@ -51,8 +52,10 @@ type mockSupporter struct {
 	protocols []v1.AppProtocol
 }
 
-func (m *mockSupporter) SupportedAppProtocols() []v1.AppProtocol {
-	return m.protocols
+func (m *mockSupporter) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
+		Protocols: m.protocols,
+	}
 }
 
 func TestHealthServer_Check(t *testing.T) {
@@ -63,7 +66,7 @@ func TestHealthServer_Check(t *testing.T) {
 		hasSynced             bool
 		pool                  *datalayer.EndpointPool
 		poolErr               error
-		supporter             *mockSupporter
+		supporters            []appProtocolSupporter
 		service               string
 		wantStatus            healthPb.HealthCheckResponse_ServingStatus
 	}{
@@ -85,8 +88,19 @@ func TestHealthServer_Check(t *testing.T) {
 			leaderElectionEnabled: false,
 			hasSynced:             true,
 			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolH2C},
-			supporter:             &mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolHTTP}},
+			supporters:            []appProtocolSupporter{&mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolHTTP}}},
 			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
+			// File-discovery pools and K8s pools without an explicit AppProtocol
+			// must not be constrained to HTTP -- a non-HTTP parser would otherwise
+			// lock the EPP out of SERVING permanently.
+			name:                  "LeaderElectionDisabled_EmptyAppProtocol_NoConstraint",
+			leaderElectionEnabled: false,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{},
+			supporters:            []appProtocolSupporter{&mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolH2C}}},
+			wantStatus:            healthPb.HealthCheckResponse_SERVING,
 		},
 		{
 			name:                  "LeaderElectionEnabled_Liveness_AlwaysServing",
@@ -126,7 +140,7 @@ func TestHealthServer_Check(t *testing.T) {
 			isLeader:              true,
 			hasSynced:             true,
 			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolH2C},
-			supporter:             &mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolHTTP}},
+			supporters:            []appProtocolSupporter{&mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolHTTP}}},
 			service:               ReadinessCheckService,
 			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
 		},
@@ -154,6 +168,28 @@ func TestHealthServer_Check(t *testing.T) {
 			service:               "unknown",
 			wantStatus:            healthPb.HealthCheckResponse_SERVICE_UNKNOWN,
 		},
+		{
+			name:                  "MultipleSupporters_AllMatch",
+			leaderElectionEnabled: false,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			supporters: []appProtocolSupporter{
+				&mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolHTTP}},
+				&mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolHTTP}},
+			},
+			wantStatus: healthPb.HealthCheckResponse_SERVING,
+		},
+		{
+			name:                  "MultipleSupporters_OneMismatch",
+			leaderElectionEnabled: false,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			supporters: []appProtocolSupporter{
+				&mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolHTTP}},
+				&mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolH2C}},
+			},
+			wantStatus: healthPb.HealthCheckResponse_NOT_SERVING,
+		},
 	}
 
 	for _, tt := range tests {
@@ -167,17 +203,12 @@ func TestHealthServer_Check(t *testing.T) {
 			var isLeader atomic.Bool
 			isLeader.Store(tt.isLeader)
 
-			var supporter appProtocolSupporter
-			if tt.supporter != nil {
-				supporter = tt.supporter
-			}
-
 			s := &healthServer{
 				logger:                logger,
 				datastore:             ds,
 				isLeader:              &isLeader,
 				leaderElectionEnabled: tt.leaderElectionEnabled,
-				supporter:             supporter,
+				supporters:            tt.supporters,
 			}
 
 			resp, err := s.Check(context.Background(), &healthPb.HealthCheckRequest{Service: tt.service})

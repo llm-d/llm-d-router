@@ -18,13 +18,15 @@ package requestcontrol
 
 import (
 	"context"
+	"time"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	types "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
+	PreAdmissionExtensionPoint      = "PreAdmission"
 	PreRequestExtensionPoint        = "PreRequest"
 	ResponseReceivedExtensionPoint  = "ResponseReceived"
 	ResponseStreamingExtensionPoint = "ResponseStreaming"
@@ -35,7 +37,7 @@ const (
 // before a request is sent to the selected model server.
 type PreRequest interface {
 	plugin.Plugin
-	PreRequest(ctx context.Context, request *types.InferenceRequest, schedulingResult *types.SchedulingResult)
+	PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult)
 }
 
 // ResponseHeaderProcessor is called by the director after the response headers are successfully received
@@ -43,7 +45,7 @@ type PreRequest interface {
 // The given pod argument is the pod that served the request.
 type ResponseHeaderProcessor interface {
 	plugin.Plugin
-	ResponseHeader(ctx context.Context, request *types.InferenceRequest, response *Response, targetEndpoint *datalayer.EndpointMetadata)
+	ResponseHeader(ctx context.Context, request *fwksched.InferenceRequest, response *Response, targetEndpoint *datalayer.EndpointMetadata)
 }
 
 // ResponseBodyProcessor is the primary hook for processing response data.
@@ -61,15 +63,21 @@ type ResponseHeaderProcessor interface {
 // between success, errors, and disconnects.
 type ResponseBodyProcessor interface {
 	plugin.Plugin
-	ResponseBody(ctx context.Context, request *types.InferenceRequest, response *Response, targetEndpoint *datalayer.EndpointMetadata)
+	ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *Response, targetEndpoint *datalayer.EndpointMetadata)
 }
 
 // DataProducer is implemented by data producers which produce data from different sources.
-// PrepareRequestData is called by the director before scheduling requests.
+// Produce is called by the director before scheduling requests.
 type DataProducer interface {
 	plugin.ProducerPlugin
-	plugin.ConsumerPlugin
-	PrepareRequestData(ctx context.Context, request *types.InferenceRequest, pods []types.Endpoint) error
+	Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
+}
+
+// TimeoutAwareProducer is an optional interface a DataProducer may implement to
+// declare its own execution timeout, overriding the default. A non-positive
+// value selects the default.
+type TimeoutAwareProducer interface {
+	ProduceTimeout() time.Duration
 }
 
 // Admitter is called by the director after the data producer and before scheduling.
@@ -77,7 +85,14 @@ type DataProducer interface {
 // the request is admitted only if all plugins say that the request should be admitted.
 type Admitter interface {
 	plugin.Plugin
-	// AdmitRequest returns the denial reason, wrapped as error if the request is denied.
+	// Admit returns the denial reason, wrapped as error if the request is denied.
 	// If the request is allowed, it returns nil.
-	AdmitRequest(ctx context.Context, request *types.InferenceRequest, pods []types.Endpoint) error
+	Admit(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
+}
+
+// PreAdmitter runs after InferenceRequest creation but before admission control.
+// It can mutate InferenceRequest fields such as FairnessID and Headers.
+type PreAdmitter interface {
+	plugin.Plugin
+	PreAdmit(ctx context.Context, request *fwksched.InferenceRequest) error
 }

@@ -1,5 +1,25 @@
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio-llm-d-gateway
+  namespace: llm-d-istio-system
+  labels:
+    istio.io/rev: llm-d-gateway
+    install.operator.istio.io/owning-resource: unknown
+    operator.istio.io/component: "Pilot"
+    release: istiod
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
 data:
+
+  # Configuration file for the mesh networks to be used by the Split Horizon EDS.
+  meshNetworks: |-
+    networks: {}
+
   mesh: |-
     defaultConfig:
       discoveryAddress: istiod-llm-d-gateway.llm-d-istio-system.svc:15012
@@ -9,26 +29,165 @@ data:
     enablePrometheusMerge: true
     rootNamespace: llm-d-istio-system
     trustDomain: cluster.local
-  meshNetworks: 'networks: {}'
-kind: ConfigMap
-metadata:
-  labels:
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.1
-    helm.sh/chart: istiod-1.27.1
-    install.operator.istio.io/owning-resource: unknown
-    istio.io/rev: llm-d-gateway
-    operator.istio.io/component: Pilot
-    release: istio
-  name: istio-llm-d-gateway
-  namespace: llm-d-istio-system
-
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio-sidecar-injector-llm-d-gateway
+  namespace: llm-d-istio-system
+  labels:
+    istio.io/rev: llm-d-gateway
+    install.operator.istio.io/owning-resource: unknown
+    operator.istio.io/component: "Pilot"
+    release: istiod
+    app.kubernetes.io/name: "istiod"
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/instance: "istiod"
+    app.kubernetes.io/part-of: "istio"
+    app.kubernetes.io/version: "1.29.2"
+    helm.sh/chart: istiod-1.29.2
 data:
+
+  values: |-
+    {
+      "gateways": {
+        "seccompProfile": {},
+        "securityContext": {}
+      },
+      "global": {
+        "caAddress": "",
+        "caName": "",
+        "certSigners": [],
+        "configCluster": false,
+        "configValidation": true,
+        "defaultPodDisruptionBudget": {
+          "enabled": true
+        },
+        "defaultResources": {
+          "requests": {
+            "cpu": "10m"
+          }
+        },
+        "externalIstiod": false,
+        "hub": "docker.io/istio",
+        "imagePullPolicy": "",
+        "imagePullSecrets": [],
+        "istioNamespace": "llm-d-istio-system",
+        "istiod": {
+          "enableAnalysis": false
+        },
+        "logAsJson": false,
+        "logging": {
+          "level": "default:info"
+        },
+        "meshID": "",
+        "meshNetworks": {},
+        "mountMtlsCerts": false,
+        "multiCluster": {
+          "clusterName": ""
+        },
+        "nativeNftables": false,
+        "network": "",
+        "networkPolicy": {
+          "enabled": false
+        },
+        "omitSidecarInjectorConfigMap": false,
+        "operatorManageWebhooks": false,
+        "pilotCertProvider": "istiod",
+        "priorityClassName": "",
+        "proxy": {
+          "autoInject": "enabled",
+          "clusterDomain": "cluster.local",
+          "componentLogLevel": "misc:error",
+          "excludeIPRanges": "",
+          "excludeInboundPorts": "",
+          "excludeOutboundPorts": "",
+          "image": "proxyv2",
+          "includeIPRanges": "*",
+          "includeInboundPorts": "*",
+          "includeOutboundPorts": "",
+          "logLevel": "warning",
+          "outlierLogPath": "",
+          "privileged": false,
+          "readinessFailureThreshold": 4,
+          "readinessInitialDelaySeconds": 0,
+          "readinessPeriodSeconds": 15,
+          "resources": {
+            "limits": {
+              "cpu": "2000m",
+              "memory": "1024Mi"
+            },
+            "requests": {
+              "cpu": "100m",
+              "memory": "128Mi"
+            }
+          },
+          "seccompProfile": {},
+          "startupProbe": {
+            "enabled": true,
+            "failureThreshold": 600
+          },
+          "statusPort": 15020,
+          "tracer": "none"
+        },
+        "proxy_init": {
+          "forceApplyIptables": false,
+          "image": "proxyv2"
+        },
+        "remotePilotAddress": "",
+        "resourceScope": "all",
+        "sds": {
+          "token": {
+            "aud": "istio-ca"
+          }
+        },
+        "sts": {
+          "servicePort": 0
+        },
+        "tag": "1.29.2",
+        "variant": "",
+        "waypoint": {
+          "affinity": {},
+          "nodeSelector": {},
+          "resources": {
+            "limits": {
+              "cpu": "2",
+              "memory": "1Gi"
+            },
+            "requests": {
+              "cpu": "100m",
+              "memory": "128Mi"
+            }
+          },
+          "tolerations": [],
+          "topologySpreadConstraints": []
+        }
+      },
+      "pilot": {
+        "cni": {
+          "enabled": false,
+          "provider": "default"
+        },
+        "env": {}
+      },
+      "revision": "llm-d-gateway",
+      "sidecarInjectorWebhook": {
+        "alwaysInjectSelector": [],
+        "defaultTemplates": [],
+        "enableNamespacesByDefault": false,
+        "injectedAnnotations": {},
+        "neverInjectSelector": [],
+        "reinvocationPolicy": "Never",
+        "rewriteAppHTTPProbe": true,
+        "templates": {}
+      }
+    }
+
+  # To disable injection: use omitSidecarInjectorConfigMap, which disables the webhook patching
+  # and istiod webhook functionality.
+  #
+  # New fields should not use Values - it is a 'primary' config object, users should be able
+  # to fine tune it or use it with kube-inject.
   config: |-
     # defaultTemplates defines the default template to use for pods that do not explicitly specify a template
     defaultTemplates: [sidecar]
@@ -46,24 +205,24 @@ data:
             {{- if or (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyCPU`) (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyMemory`) }}
               requests:
                 {{ if (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyCPU`) -}}
-                cpu: "{{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyCPU` }}"
+                cpu: {{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyCPU` | quote }}
                 {{ end }}
                 {{ if (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyMemory`) -}}
-                memory: "{{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyMemory` }}"
+                memory: {{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyMemory` | quote }}
                 {{ end }}
             {{- end }}
             {{- if or (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyCPULimit`) (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyMemoryLimit`) }}
               limits:
                 {{ if (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyCPULimit`) -}}
-                cpu: "{{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyCPULimit` }}"
+                cpu: {{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyCPULimit` | quote }}
                 {{ end }}
                 {{ if (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyMemoryLimit`) -}}
-                memory: "{{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyMemoryLimit` }}"
+                memory: {{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyMemoryLimit` | quote }}
                 {{ end }}
             {{- end }}
           {{- else }}
             {{- if .Values.global.proxy.resources }}
-              {{ toYaml .Values.global.proxy.resources | indent 6 }}
+              {{ toYaml (omitNil .Values.global.proxy.resources) | indent 6 }}
             {{- end }}
           {{- end }}
         {{- end }}
@@ -162,13 +321,12 @@ data:
             - "-o"
             - "{{ annotation .ObjectMeta `traffic.sidecar.istio.io/excludeOutboundPorts` .Values.global.proxy.excludeOutboundPorts }}"
             {{ end -}}
-            {{ if (isset .ObjectMeta.Annotations `traffic.sidecar.istio.io/kubevirtInterfaces`) -}}
-            - "-k"
-            - "{{ index .ObjectMeta.Annotations `traffic.sidecar.istio.io/kubevirtInterfaces` }}"
-            {{ end -}}
             {{ if (isset .ObjectMeta.Annotations `istio.io/reroute-virtual-interfaces`) -}}
             - "-k"
             - "{{ index .ObjectMeta.Annotations `istio.io/reroute-virtual-interfaces` }}"
+            {{ else if (isset .ObjectMeta.Annotations `traffic.sidecar.istio.io/kubevirtInterfaces`) -}}
+            - "-k"
+            - "{{ index .ObjectMeta.Annotations `traffic.sidecar.istio.io/kubevirtInterfaces` }}"
             {{ end -}}
              {{ if (isset .ObjectMeta.Annotations `traffic.sidecar.istio.io/excludeInterfaces`) -}}
             - "-c"
@@ -218,6 +376,10 @@ data:
               runAsGroup: {{ if $tproxy }} 1337 {{ else }} {{ .ProxyGID | default "1337" }} {{ end }}
               runAsUser: {{ if $tproxy }} 1337 {{ else }} {{ .ProxyUID | default "1337" }} {{ end }}
               runAsNonRoot: true
+            {{- end }}
+            {{- if .Values.global.proxy.seccompProfile }}
+              seccompProfile:
+            {{- toYaml .Values.global.proxy.seccompProfile | nindent 8 }}
             {{- end }}
           {{ end -}}
           {{ end -}}
@@ -311,6 +473,7 @@ data:
               valueFrom:
                 resourceFieldRef:
                   resource: limits.cpu
+                  divisor: "1"
             - name: PROXY_CONFIG
               value: |
                      {{ protoToJSON .ProxyConfig }}
@@ -333,10 +496,12 @@ data:
               valueFrom:
                 resourceFieldRef:
                   resource: limits.memory
+                  divisor: "1"
             - name: GOMAXPROCS
               valueFrom:
                 resourceFieldRef:
                   resource: limits.cpu
+                  divisor: "1"
             {{- if .CompliancePolicy }}
             - name: COMPLIANCE_POLICY
               value: "{{ .CompliancePolicy }}"
@@ -446,6 +611,10 @@ data:
               runAsGroup: {{ .ProxyGID | default "1337" }}
               {{- end }}
               {{- end }}
+            {{- if .Values.global.proxy.seccompProfile }}
+              seccompProfile:
+            {{- toYaml .Values.global.proxy.seccompProfile | nindent 8 }}
+            {{- end }}
             resources:
           {{ template "resources" . }}
             volumeMounts:
@@ -552,7 +721,7 @@ data:
           {{- end }}
           - name: istio-ca-crl
             configMap:
-              name: istio-ca-crl
+              name: {{ .Values.pilot.crlConfigMapName | default "istio-ca-crl" }}
               optional: true
           {{- if .Values.global.mountMtlsCerts }}
           # Use the key and cert mounted to /etc/certs/ for the in-cluster mTLS communications.
@@ -674,6 +843,7 @@ data:
               valueFrom:
                 resourceFieldRef:
                   resource: limits.cpu
+                  divisor: "1"
             - name: PROXY_CONFIG
               value: |
                      {{ protoToJSON .ProxyConfig }}
@@ -694,10 +864,12 @@ data:
               valueFrom:
                 resourceFieldRef:
                   resource: limits.memory
+                  divisor: "1"
             - name: GOMAXPROCS
               valueFrom:
                 resourceFieldRef:
                   resource: limits.cpu
+                  divisor: "1"
             {{- if .CompliancePolicy }}
             - name: COMPLIANCE_POLICY
               value: "{{ .CompliancePolicy }}"
@@ -865,7 +1037,7 @@ data:
         spec:
           initContainers:
             - name: grpc-bootstrap-init
-              image: busybox:1.28.1
+              image: busybox:1.28
               volumeMounts:
                 - mountPath: /var/lib/grpc/data/
                   name: grpc-io-proxyless-bootstrap
@@ -930,24 +1102,24 @@ data:
             {{- if or (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyCPU`) (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyMemory`) }}
               requests:
                 {{ if (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyCPU`) -}}
-                cpu: "{{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyCPU` }}"
+                cpu: {{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyCPU` | quote }}
                 {{ end }}
                 {{ if (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyMemory`) -}}
-                memory: "{{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyMemory` }}"
+                memory: {{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyMemory` | quote }}
                 {{ end }}
             {{- end }}
             {{- if or (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyCPULimit`) (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyMemoryLimit`) }}
               limits:
                 {{ if (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyCPULimit`) -}}
-                cpu: "{{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyCPULimit` }}"
+                cpu: {{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyCPULimit` | quote }}
                 {{ end }}
                 {{ if (isset .ObjectMeta.Annotations `sidecar.istio.io/proxyMemoryLimit`) -}}
-                memory: "{{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyMemoryLimit` }}"
+                memory: {{ index .ObjectMeta.Annotations `sidecar.istio.io/proxyMemoryLimit` | quote }}
                 {{ end }}
             {{- end }}
           {{- else }}
             {{- if .Values.global.proxy.resources }}
-              {{ toYaml .Values.global.proxy.resources | indent 6 }}
+              {{ toYaml (omitNil .Values.global.proxy.resources) | indent 6 }}
             {{- end }}
           {{- end }}
         {{- end }}
@@ -1256,11 +1428,12 @@ data:
               .InfrastructureLabels
               (strdict
                 "gateway.networking.k8s.io/gateway-name" .Name
+                "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
               ) | nindent 4 }}
           {{- if ge .KubeVersion 128 }}
           # Safe since 1.28: https://github.com/kubernetes/kubernetes/pull/117412
           ownerReferences:
-          - apiVersion: gateway.networking.k8s.io/v1beta1
+          - apiVersion: gateway.networking.k8s.io/v1
             kind: Gateway
             name: "{{.Name}}"
             uid: "{{.UID}}"
@@ -1278,10 +1451,11 @@ data:
               .InfrastructureLabels
               (strdict
                 "gateway.networking.k8s.io/gateway-name" .Name
+                "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
                 "gateway.istio.io/managed" .ControllerLabel
               ) | nindent 4 }}
           ownerReferences:
-          - apiVersion: gateway.networking.k8s.io/v1beta1
+          - apiVersion: gateway.networking.k8s.io/v1
             kind: Gateway
             name: "{{.Name}}"
             uid: "{{.UID}}"
@@ -1311,6 +1485,7 @@ data:
                   .InfrastructureLabels
                   (strdict
                     "gateway.networking.k8s.io/gateway-name" .Name
+                    "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
                     "gateway.istio.io/managed" .ControllerLabel
                   ) | nindent 8}}
             spec:
@@ -1330,7 +1505,6 @@ data:
               tolerations:
               {{- toYaml .Values.global.waypoint.tolerations | nindent 8 }}
               {{- end }}
-              terminationGracePeriodSeconds: 2
               serviceAccountName: {{.ServiceAccount | quote}}
               containers:
               - name: istio-proxy
@@ -1410,6 +1584,7 @@ data:
                   valueFrom:
                     resourceFieldRef:
                       resource: limits.cpu
+                      divisor: "1"
                 - name: PROXY_CONFIG
                   value: |
                          {{ protoToJSON .ProxyConfig }}
@@ -1423,16 +1598,22 @@ data:
                   valueFrom:
                     resourceFieldRef:
                       resource: limits.memory
+                      divisor: "1"
                 - name: GOMAXPROCS
                   valueFrom:
                     resourceFieldRef:
                       resource: limits.cpu
+                      divisor: "1"
                 - name: ISTIO_META_CLUSTER_ID
                   value: "{{ valueOrDefault .Values.global.multiCluster.clusterName `Kubernetes` }}"
                 {{- $network := valueOrDefault (index .InfrastructureLabels `topology.istio.io/network`) .Values.global.network }}
                 {{- if $network }}
                 - name: ISTIO_META_NETWORK
                   value: "{{ $network }}"
+                {{- if eq .ControllerLabel "istio.io-eastwest-controller" }}
+                - name: ISTIO_META_REQUESTED_NETWORK_VIEW
+                  value: "{{ $network }}"
+                {{- end }}
                 {{- end }}
                 - name: ISTIO_META_INTERCEPTION_MODE
                   value: REDIRECT
@@ -1453,7 +1634,7 @@ data:
                 {{- end }}
                 {{- if .Values.global.waypoint.resources }}
                 resources:
-                {{- toYaml .Values.global.waypoint.resources | nindent 10 }}
+                {{- toYaml (omitNil .Values.global.waypoint.resources) | nindent 10 }}
                 {{- end }}
                 startupProbe:
                   failureThreshold: 30
@@ -1568,11 +1749,12 @@ data:
               .InfrastructureLabels
               (strdict
                 "gateway.networking.k8s.io/gateway-name" .Name
+                "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
               ) | nindent 4 }}
           name: {{.DeploymentName | quote}}
           namespace: {{.Namespace | quote}}
           ownerReferences:
-          - apiVersion: gateway.networking.k8s.io/v1beta1
+          - apiVersion: gateway.networking.k8s.io/v1
             kind: Gateway
             name: "{{.Name}}"
             uid: "{{.UID}}"
@@ -1604,9 +1786,10 @@ data:
                   .InfrastructureLabels
                   (strdict
                   "gateway.networking.k8s.io/gateway-name" .Name
+                  "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
                   ) | nindent 4 }}
           ownerReferences:
-            - apiVersion: gateway.networking.k8s.io/v1beta1
+            - apiVersion: gateway.networking.k8s.io/v1
               kind: Gateway
               name: {{.Name}}
               uid: "{{.UID}}"
@@ -1629,9 +1812,10 @@ data:
                   .InfrastructureLabels
                   (strdict
                   "gateway.networking.k8s.io/gateway-name" .Name
+                  "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
                   ) | nindent 4 }}
           ownerReferences:
-            - apiVersion: gateway.networking.k8s.io/v1beta1
+            - apiVersion: gateway.networking.k8s.io/v1
               kind: Gateway
               name: {{.Name}}
               uid: "{{.UID}}"
@@ -1652,11 +1836,12 @@ data:
               .InfrastructureLabels
               (strdict
                 "gateway.networking.k8s.io/gateway-name" .Name
+                "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
               ) | nindent 4 }}
           {{- if ge .KubeVersion 128 }}
           # Safe since 1.28: https://github.com/kubernetes/kubernetes/pull/117412
           ownerReferences:
-          - apiVersion: gateway.networking.k8s.io/v1beta1
+          - apiVersion: gateway.networking.k8s.io/v1
             kind: Gateway
             name: "{{.Name}}"
             uid: "{{.UID}}"
@@ -1674,10 +1859,11 @@ data:
               .InfrastructureLabels
               (strdict
                 "gateway.networking.k8s.io/gateway-name" .Name
+                "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
                 "gateway.istio.io/managed" "istio.io-gateway-controller"
               ) | nindent 4 }}
           ownerReferences:
-          - apiVersion: gateway.networking.k8s.io/v1beta1
+          - apiVersion: gateway.networking.k8s.io/v1
             kind: Gateway
             name: {{.Name}}
             uid: "{{.UID}}"
@@ -1706,6 +1892,7 @@ data:
                   .InfrastructureLabels
                   (strdict
                     "gateway.networking.k8s.io/gateway-name" .Name
+                    "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
                     "gateway.istio.io/managed" "istio.io-gateway-controller"
                   ) | nindent 8 }}
             spec:
@@ -1731,7 +1918,7 @@ data:
               {{- end }}
                 {{- if .Values.global.proxy.resources }}
                 resources:
-                  {{- toYaml .Values.global.proxy.resources | nindent 10 }}
+                  {{- toYaml (omitNil .Values.global.proxy.resources) | nindent 10 }}
                 {{- end }}
                 {{with .Values.global.imagePullPolicy }}imagePullPolicy: "{{.}}"{{end}}
                 securityContext:
@@ -1808,6 +1995,7 @@ data:
                   valueFrom:
                     resourceFieldRef:
                       resource: limits.cpu
+                      divisor: "1"
                 - name: PROXY_CONFIG
                   value: |
                          {{ protoToJSON .ProxyConfig }}
@@ -1819,10 +2007,12 @@ data:
                   valueFrom:
                     resourceFieldRef:
                       resource: limits.memory
+                      divisor: "1"
                 - name: GOMAXPROCS
                   valueFrom:
                     resourceFieldRef:
                       resource: limits.cpu
+                      divisor: "1"
                 - name: ISTIO_META_CLUSTER_ID
                   value: "{{ valueOrDefault .Values.global.multiCluster.clusterName .ClusterID }}"
                 - name: ISTIO_META_NODE_NAME
@@ -1969,11 +2159,12 @@ data:
               .InfrastructureLabels
               (strdict
                 "gateway.networking.k8s.io/gateway-name" .Name
+                "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
               ) | nindent 4 }}
           name: {{.DeploymentName | quote}}
           namespace: {{.Namespace | quote}}
           ownerReferences:
-          - apiVersion: gateway.networking.k8s.io/v1beta1
+          - apiVersion: gateway.networking.k8s.io/v1
             kind: Gateway
             name: {{.Name}}
             uid: {{.UID}}
@@ -2005,9 +2196,10 @@ data:
                   .InfrastructureLabels
                   (strdict
                   "gateway.networking.k8s.io/gateway-name" .Name
+                  "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
                   ) | nindent 4 }}
           ownerReferences:
-            - apiVersion: gateway.networking.k8s.io/v1beta1
+            - apiVersion: gateway.networking.k8s.io/v1
               kind: Gateway
               name: {{.Name}}
               uid: "{{.UID}}"
@@ -2030,9 +2222,10 @@ data:
                   .InfrastructureLabels
                   (strdict
                   "gateway.networking.k8s.io/gateway-name" .Name
+                  "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
                   ) | nindent 4 }}
           ownerReferences:
-            - apiVersion: gateway.networking.k8s.io/v1beta1
+            - apiVersion: gateway.networking.k8s.io/v1
               kind: Gateway
               name: {{.Name}}
               uid: "{{.UID}}"
@@ -2040,148 +2233,310 @@ data:
           selector:
             matchLabels:
               gateway.networking.k8s.io/gateway-name: {{.Name|quote}}
-  values: |-
-    {
-      "gateways": {
-        "seccompProfile": {},
-        "securityContext": {}
-      },
-      "global": {
-        "caAddress": "",
-        "caName": "",
-        "certSigners": [],
-        "configCluster": false,
-        "configValidation": true,
-        "defaultPodDisruptionBudget": {
-          "enabled": true
-        },
-        "defaultResources": {
-          "requests": {
-            "cpu": "10m"
-          }
-        },
-        "externalIstiod": false,
-        "hub": "docker.io/istio",
-        "imagePullPolicy": "",
-        "imagePullSecrets": [],
-        "istioNamespace": "llm-d-istio-system",
-        "istiod": {
-          "enableAnalysis": false
-        },
-        "logAsJson": false,
-        "logging": {
-          "level": "default:info"
-        },
-        "meshID": "",
-        "meshNetworks": {},
-        "mountMtlsCerts": false,
-        "multiCluster": {
-          "clusterName": ""
-        },
-        "nativeNftables": false,
-        "network": "",
-        "omitSidecarInjectorConfigMap": false,
-        "operatorManageWebhooks": false,
-        "pilotCertProvider": "istiod",
-        "priorityClassName": "",
-        "proxy": {
-          "autoInject": "enabled",
-          "clusterDomain": "cluster.local",
-          "componentLogLevel": "misc:error",
-          "excludeIPRanges": "",
-          "excludeInboundPorts": "",
-          "excludeOutboundPorts": "",
-          "image": "proxyv2",
-          "includeIPRanges": "*",
-          "includeInboundPorts": "*",
-          "includeOutboundPorts": "",
-          "logLevel": "warning",
-          "outlierLogPath": "",
-          "privileged": false,
-          "readinessFailureThreshold": 4,
-          "readinessInitialDelaySeconds": 0,
-          "readinessPeriodSeconds": 15,
-          "resources": {
-            "limits": {
-              "cpu": "2000m",
-              "memory": "1024Mi"
-            },
-            "requests": {
-              "cpu": "100m",
-              "memory": "128Mi"
-            }
-          },
-          "startupProbe": {
-            "enabled": true,
-            "failureThreshold": 600
-          },
-          "statusPort": 15020,
-          "tracer": "none"
-        },
-        "proxy_init": {
-          "forceApplyIptables": false,
-          "image": "proxyv2"
-        },
-        "remotePilotAddress": "",
-        "sds": {
-          "token": {
-            "aud": "istio-ca"
-          }
-        },
-        "sts": {
-          "servicePort": 0
-        },
-        "tag": "1.28.1",
-        "variant": "",
-        "waypoint": {
-          "affinity": {},
-          "nodeSelector": {},
-          "resources": {
-            "limits": {
-              "cpu": "2",
-              "memory": "1Gi"
-            },
-            "requests": {
-              "cpu": "100m",
-              "memory": "128Mi"
-            }
-          },
-          "tolerations": [],
-          "topologySpreadConstraints": []
-        }
-      },
-      "pilot": {
-        "cni": {
-          "enabled": false,
-          "provider": "default"
-        },
-        "env": {}
-      },
-      "revision": "llm-d-gateway",
-      "sidecarInjectorWebhook": {
-        "alwaysInjectSelector": [],
-        "defaultTemplates": [],
-        "enableNamespacesByDefault": false,
-        "injectedAnnotations": {},
-        "neverInjectSelector": [],
-        "reinvocationPolicy": "Never",
-        "rewriteAppHTTPProbe": true,
-        "templates": {}
-      }
-    }
-kind: ConfigMap
-metadata:
-  labels:
-    app.kubernetes.io/instance: istio
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: istiod
-    app.kubernetes.io/part-of: istio
-    app.kubernetes.io/version: 1.28.1
-    helm.sh/chart: istiod-1.27.1
-    install.operator.istio.io/owning-resource: unknown
-    istio.io/rev: llm-d-gateway
-    operator.istio.io/component: Pilot
-    release: istio
-  name: istio-sidecar-injector-llm-d-gateway
-  namespace: llm-d-istio-system
+      agentgateway: |
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: {{.ServiceAccount | quote}}
+          namespace: {{.Namespace | quote}}
+          annotations:
+            {{- toJsonMap (omit .InfrastructureAnnotations "kubectl.kubernetes.io/last-applied-configuration" "gateway.istio.io/name-override" "gateway.istio.io/service-account" "gateway.istio.io/controller-version") | nindent 4 }}
+          labels:
+            {{- toJsonMap
+              .InfrastructureLabels
+              (strdict
+                "gateway.networking.k8s.io/gateway-name" .Name
+                "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
+              ) | nindent 4 }}
+          ownerReferences:
+          - apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            name: "{{.Name}}"
+            uid: "{{.UID}}"
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: {{.DeploymentName | quote}}
+          namespace: {{.Namespace | quote}}
+          annotations:
+            {{- toJsonMap (omit .InfrastructureAnnotations "kubectl.kubernetes.io/last-applied-configuration" "gateway.istio.io/name-override" "gateway.istio.io/service-account" "gateway.istio.io/controller-version") | nindent 4 }}
+          labels:
+            {{- toJsonMap
+              .InfrastructureLabels
+              (strdict
+                "gateway.networking.k8s.io/gateway-name" .Name
+                "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
+                "gateway.istio.io/managed" "istio.io-agentgateway-controller"
+              ) | nindent 4 }}
+          ownerReferences:
+          - apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            name: {{.Name}}
+            uid: "{{.UID}}"
+        spec:
+          selector:
+            matchLabels:
+              "{{.GatewayNameLabel}}": {{.Name}}
+          template:
+            metadata:
+              annotations:
+                {{- toJsonMap
+                  (omit .InfrastructureAnnotations "kubectl.kubernetes.io/last-applied-configuration" "gateway.istio.io/name-override" "gateway.istio.io/service-account" "gateway.istio.io/controller-version")
+                  (strdict "istio.io/rev" (.Revision | default "default"))
+                  (strdict
+                    "prometheus.io/path" "/stats/prometheus"
+                    "prometheus.io/port" "15020"
+                    "prometheus.io/scrape" "true"
+                  ) | nindent 8 }}
+              labels:
+                {{- toJsonMap
+                  (strdict
+                    "sidecar.istio.io/inject" "false"
+                    "service.istio.io/canonical-name" .DeploymentName
+                    "service.istio.io/canonical-revision" "latest"
+                   )
+                  .InfrastructureLabels
+                  (strdict
+                    "gateway.networking.k8s.io/gateway-name" .Name
+                    "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
+                    "gateway.istio.io/managed" "istio.io-agentgateway-controller"
+                  ) | nindent 8 }}
+            spec:
+              securityContext:
+              {{- if .Values.gateways.securityContext }}
+                {{- toYaml .Values.gateways.securityContext | nindent 8 }}
+              {{- else }}
+                sysctls:
+                - name: net.ipv4.ip_unprivileged_port_start # allows binding to 80 and 443 without root
+                  value: "0"
+              {{- if .Values.gateways.seccompProfile }}
+                seccompProfile:
+              {{- toYaml .Values.gateways.seccompProfile | nindent 10 }}
+              {{- end }}
+              {{- end }}
+              serviceAccountName: {{.ServiceAccount | quote}}
+              containers:
+              - name: agentgateway
+              {{- if contains "/" (annotation .ObjectMeta `gateway.istio.io/agentgatewayImage` .Values.global.agentgateway.image) }}
+                image: "{{ annotation .ObjectMeta `gateway.istio.io/agentgatewayImage` .Values.global.agentgateway.image }}"
+              {{- else }}
+                image: "{{ .AgentgatewayImage }}"
+              {{- end }}
+                {{- if .Values.global.proxy.resources }}
+                resources:
+                  {{- toYaml (omitNil .Values.global.proxy.resources) | nindent 10 }}
+                {{- end }}
+                {{with .Values.global.imagePullPolicy }}imagePullPolicy: "{{.}}"{{end}}
+                securityContext:
+                  capabilities:
+                    drop:
+                    - ALL
+                  allowPrivilegeEscalation: false
+                  privileged: false
+                  readOnlyRootFilesystem: true
+                  runAsUser: {{ .ProxyUID | default "10101" }}
+                  runAsGroup: {{ .ProxyGID | default "10101" }}
+                  runAsNonRoot: true
+                ports:
+                - containerPort: 15020
+                  name: metrics
+                  protocol: TCP
+                - containerPort: 15021
+                  name: status-port
+                  protocol: TCP
+                args:
+                - --config
+                - '{}'
+              {{- if .Values.global.proxy.lifecycle }}
+                lifecycle:
+                  {{- toYaml .Values.global.proxy.lifecycle | nindent 10 }}
+              {{- end }}
+                env:
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: INSTANCE_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.podIP
+                - name: SERVICE_ACCOUNT
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.serviceAccountName
+                - name: CPU_LIMIT
+                  valueFrom:
+                    resourceFieldRef:
+                      resource: limits.cpu
+                      divisor: "1"
+                - name: GATEWAY
+                  value: {{.Name|quote}}
+                - name: RUST_BACKTRACE
+                  value: "1"
+                - name: CLUSTER_ID
+                  value: "{{ valueOrDefault .Values.global.multiCluster.clusterName .ClusterID }}"
+                {{- with (valueOrDefault  (index .InfrastructureLabels "topology.istio.io/network") .Values.global.network) }}
+                - name: NETWORK
+                  value: {{.|quote}}
+                {{- end }}
+                {{- with (valueOrDefault .MeshConfig.TrustDomain .Values.global.trustDomain)  }}
+                - name: TRUST_DOMAIN
+                  value: "{{ . }}"
+                {{- end }}
+                {{- range $key, $value := .ProxyConfig.ProxyMetadata }}
+                - name: {{ $key }}
+                  value: "{{ $value }}"
+                {{- end }}
+                - name: XDS_ADDRESS
+                  value: {{ .ProxyConfig.DiscoveryAddress | quote }}
+                startupProbe:
+                  failureThreshold: 30
+                  httpGet:
+                    path: /healthz/ready
+                    port: 15021
+                    scheme: HTTP
+                  initialDelaySeconds: 1
+                  periodSeconds: 1
+                  successThreshold: 1
+                  timeoutSeconds: 1
+                readinessProbe:
+                  failureThreshold: 4
+                  httpGet:
+                    path: /healthz/ready
+                    port: 15021
+                    scheme: HTTP
+                  initialDelaySeconds: 0
+                  periodSeconds: 15
+                  successThreshold: 1
+                  timeoutSeconds: 1
+                volumeMounts:
+                - mountPath: /var/run/secrets/xds
+                  name: istiod-ca-cert
+                - mountPath: /var/run/secrets/xds-tokens
+                  name: istio-token
+                - mountPath: /tmp
+                  name: tmp
+              volumes:
+              - emptyDir: {}
+                name: tmp
+              - name: istio-token
+                projected:
+                  sources:
+                  - serviceAccountToken:
+                      path: xds-token
+                      expirationSeconds: 43200
+                      audience: {{ .Values.global.sds.token.aud }}
+              {{- if eq .Values.global.pilotCertProvider "istiod" }}
+              - name: istiod-ca-cert
+              {{- if eq ((.Values.pilot).env).ENABLE_CLUSTER_TRUST_BUNDLE_API true }}
+                projected:
+                  sources:
+                  - clusterTrustBundle:
+                      name: istio.io:istiod-ca:{{ .Values.global.trustBundleName | default "root-cert" }}
+                      path: root-cert.pem
+              {{- else }}
+                configMap:
+                  name: {{ .Values.global.trustBundleName | default "istio-ca-root-cert" }}
+              {{- end }}
+              {{- end }}
+              {{- if .Values.global.imagePullSecrets }}
+              imagePullSecrets:
+                {{- range .Values.global.imagePullSecrets }}
+                - name: {{ . }}
+                {{- end }}
+              {{- end }}
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          annotations:
+            {{ toJsonMap (omit .InfrastructureAnnotations "kubectl.kubernetes.io/last-applied-configuration" "gateway.istio.io/name-override" "gateway.istio.io/service-account" "gateway.istio.io/controller-version") | nindent 4 }}
+          labels:
+            {{- toJsonMap
+              .InfrastructureLabels
+              (strdict
+                "gateway.networking.k8s.io/gateway-name" .Name
+                "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
+              ) | nindent 4 }}
+          name: {{.DeploymentName | quote}}
+          namespace: {{.Namespace | quote}}
+          ownerReferences:
+          - apiVersion: gateway.networking.k8s.io/v1
+            kind: Gateway
+            name: {{.Name}}
+            uid: {{.UID}}
+        spec:
+          ipFamilyPolicy: PreferDualStack
+          ports:
+          {{- range $key, $val := .Ports }}
+          - name: {{ $val.Name | quote }}
+            port: {{ $val.Port }}
+            protocol: TCP
+            appProtocol: {{ $val.AppProtocol }}
+          {{- end }}
+          selector:
+            "{{.GatewayNameLabel}}": {{.Name}}
+          {{- if and (.Spec.Addresses) (eq .ServiceType "LoadBalancer") }}
+          loadBalancerIP: {{ (index .Spec.Addresses 0).Value | quote}}
+          {{- end }}
+          type: {{ .ServiceType | quote }}
+        ---
+        apiVersion: autoscaling/v2
+        kind: HorizontalPodAutoscaler
+        metadata:
+          name: {{.DeploymentName | quote}}
+          namespace: {{.Namespace | quote}}
+          annotations:
+            {{- toJsonMap (omit .InfrastructureAnnotations "kubectl.kubernetes.io/last-applied-configuration" "gateway.istio.io/name-override" "gateway.istio.io/service-account" "gateway.istio.io/controller-version") | nindent 4 }}
+          labels:
+            {{- toJsonMap
+                  .InfrastructureLabels
+                  (strdict
+                  "gateway.networking.k8s.io/gateway-name" .Name
+                  "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
+                  ) | nindent 4 }}
+          ownerReferences:
+            - apiVersion: gateway.networking.k8s.io/v1
+              kind: Gateway
+              name: {{.Name}}
+              uid: "{{.UID}}"
+        spec:
+          scaleTargetRef:
+            apiVersion: apps/v1
+            kind: Deployment
+            name:  {{.DeploymentName | quote}}
+          maxReplicas: 1
+        ---
+        apiVersion: policy/v1
+        kind: PodDisruptionBudget
+        metadata:
+          name: {{.DeploymentName | quote}}
+          namespace: {{.Namespace | quote}}
+          annotations:
+            {{- toJsonMap (omit .InfrastructureAnnotations "kubectl.kubernetes.io/last-applied-configuration" "gateway.istio.io/name-override" "gateway.istio.io/service-account" "gateway.istio.io/controller-version") | nindent 4 }}
+          labels:
+            {{- toJsonMap
+                  .InfrastructureLabels
+                  (strdict
+                  "gateway.networking.k8s.io/gateway-name" .Name
+                  "gateway.networking.k8s.io/gateway-class-name" .GatewayClass
+                  ) | nindent 4 }}
+          ownerReferences:
+            - apiVersion: gateway.networking.k8s.io/v1
+              kind: Gateway
+              name: {{.Name}}
+              uid: "{{.UID}}"
+        spec:
+          selector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: {{.Name|quote}}
 

@@ -29,25 +29,25 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	configapi "github.com/llm-d/llm-d-inference-scheduler/apix/config/v1alpha1"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/config"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkflowcontrol "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/profilehandler/single"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/handlers"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/scheduling"
+	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	"github.com/llm-d/llm-d-router/pkg/epp/config"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
+	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 )
 
 var (
 	scheme                       = runtime.NewScheme()
 	registeredFeatureGatesMu     sync.RWMutex
 	registeredFeatureGates       = sets.New[string]()
-	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: "v1alpha1"}
+	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: "v1alpha1"} // TODO: deprecated should be clean up
 )
 
 func init() {
@@ -88,6 +88,34 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 		if rawConfig.GroupVersionKind().GroupVersion() == deprecatedSchemeGroupVersion {
 			logger.Info("DEPRECATION: apiVersion inference.networking.x-k8s.io/v1alpha1/EndpointPickerConfig is deprecated",
 				"replacement", "llm-d.ai/v1alpha1/EndpointPickerConfig")
+		}
+
+		//nolint:staticcheck // SA1019: rawConfig.SaturationDetector is deprecated: use flowControl.saturationDetector instead.
+		// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
+		if rawConfig.SaturationDetector != nil {
+			logger.Info("DEPRECATION: top-level saturationDetector is deprecated, use flowControl.saturationDetector instead. If both are set, the new field is used.")
+			if rawConfig.FlowControl == nil {
+				rawConfig.FlowControl = &configapi.FlowControlConfig{}
+			}
+			if rawConfig.FlowControl.SaturationDetector == nil {
+				//nolint:staticcheck // SA1019: rawConfig.SaturationDetector is deprecated: use flowControl.saturationDetector instead.
+				// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
+				rawConfig.FlowControl.SaturationDetector = rawConfig.SaturationDetector
+			}
+		}
+
+		//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.parsers instead.
+		// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
+		if rawConfig.Parser != nil {
+			logger.Info("DEPRECATION: top-level parser is deprecated, use requestHandler.parsers instead. If both are set, the new field is used.")
+			if rawConfig.RequestHandler == nil {
+				rawConfig.RequestHandler = &configapi.RequestHandlerConfig{}
+			}
+			if len(rawConfig.RequestHandler.Parsers) == 0 {
+				//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.parsers instead.
+				// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
+				rawConfig.RequestHandler.Parsers = []configapi.ParserConfig{*rawConfig.Parser}
+			}
 		}
 
 		logger.Info("Loaded raw configuration", "config", rawConfig.String())
@@ -135,39 +163,35 @@ func InstantiateAndConfigure(
 	}
 
 	featureGates := loadFeatureConfig(rawConfig.FeatureGates)
-	var dataConfig *datalayer.Config
-	if !featureGates[datalayer.EnableLegacyMetricsFeatureGate] {
-		var err error
-		dataConfig, err = buildDataLayerConfig(rawConfig.DataLayer, handle)
-		if err != nil {
-			return nil, fmt.Errorf("data layer config build failed: %w", err)
-		}
-		if len(dataConfig.Sources) == 0 {
-			logger.Info("No data sources configured; metrics collection is disabled")
-		}
+	dataConfig, err := buildDataLayerConfig(rawConfig.DataLayer, handle)
+	if err != nil {
+		return nil, fmt.Errorf("data layer config build failed: %w", err)
+	}
+	if len(dataConfig.Sources) == 0 {
+		logger.Info("No data sources configured; metrics collection is disabled")
 	}
 
 	var flowControlConfig *flowcontrol.Config
 	if featureGates[flowcontrol.FeatureGate] {
 		var err error
-		flowControlConfig, err = flowcontrol.NewConfigFromAPI(rawConfig.FlowControl, handle)
+		flowControlConfig, err = buildFlowControlConfig(rawConfig.FlowControl, handle)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load flow control config: %w", err)
 		}
 	}
 
-	parserConfig, err := buildParserConfig(rawConfig.Parser, handle)
+	parserRegistry, err := buildParserRegistry(rawConfig.RequestHandler.Parsers, handle, logger)
 	if err != nil {
-		return nil, fmt.Errorf("parse config build failed: %w", err)
+		return nil, fmt.Errorf("parser registry build failed: %w", err)
 	}
 
-	plugin, ok := handle.GetAllPluginsWithNames()[rawConfig.SaturationDetector.PluginRef]
+	plugin, ok := handle.GetAllPluginsWithNames()[rawConfig.FlowControl.SaturationDetector.PluginRef]
 	if !ok {
-		return nil, fmt.Errorf("saturation detector plugin '%s' not found", rawConfig.SaturationDetector.PluginRef)
+		return nil, fmt.Errorf("saturation detector plugin '%s' not found", rawConfig.FlowControl.SaturationDetector.PluginRef)
 	}
-	saturationDetector, ok := plugin.(fwkflowcontrol.SaturationDetector)
+	saturationDetector, ok := plugin.(fwkfc.SaturationDetector)
 	if !ok {
-		return nil, fmt.Errorf("plugin '%s' is not a fwkflowcontrol.SaturationDetector", rawConfig.SaturationDetector.PluginRef)
+		return nil, fmt.Errorf("plugin '%s' is not a fwkfc.SaturationDetector", rawConfig.FlowControl.SaturationDetector.PluginRef)
 	}
 
 	return &config.Config{
@@ -175,7 +199,7 @@ func InstantiateAndConfigure(
 		SaturationDetector: saturationDetector,
 		DataConfig:         dataConfig,
 		FlowControlConfig:  flowControlConfig,
-		ParserConfig:       parserConfig,
+		ParserRegistry:     parserRegistry,
 	}, nil
 }
 
@@ -203,7 +227,7 @@ func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplug
 		if !ok {
 			return fmt.Errorf("plugin type '%s' is not registered", spec.Type)
 		}
-		plugin, err := factory(spec.Name, spec.Parameters, handle)
+		plugin, err := factory(spec.Name, fwkplugin.StrictDecoder(spec.Parameters), handle)
 		if err != nil {
 			return fmt.Errorf("failed to create plugin '%s' (type: %s): %w", spec.Name, spec.Type, err)
 		}
@@ -219,7 +243,7 @@ func buildSchedulerConfig(
 	handle fwkplugin.Handle,
 ) (*scheduling.SchedulerConfig, error) {
 
-	profiles := make(map[string]framework.SchedulerProfile)
+	profiles := make(map[string]fwksched.SchedulerProfile)
 
 	for _, cfgProfile := range configProfiles {
 		fwProfile := scheduling.NewSchedulerProfile()
@@ -233,7 +257,7 @@ func buildSchedulerConfig(
 			}
 
 			// Wrap Scorers with weights.
-			if scorer, ok := plugin.(framework.Scorer); ok {
+			if scorer, ok := plugin.(fwksched.Scorer); ok {
 				weight := DefaultScorerWeight
 				if pluginRef.Weight != nil {
 					weight = *pluginRef.Weight
@@ -248,9 +272,9 @@ func buildSchedulerConfig(
 		profiles[cfgProfile.Name] = fwProfile
 	}
 
-	var profileHandler framework.ProfileHandler
+	var profileHandler fwksched.ProfileHandler
 	for name, plugin := range handle.GetAllPluginsWithNames() {
-		if ph, ok := plugin.(framework.ProfileHandler); ok {
+		if ph, ok := plugin.(fwksched.ProfileHandler); ok {
 			if profileHandler != nil {
 				return nil, fmt.Errorf("multiple profile handlers found ('%s', '%s'); only one is allowed",
 					profileHandler.TypedName().Name, name)
@@ -283,21 +307,24 @@ func loadFeatureConfig(gates configapi.FeatureGates) map[string]bool {
 	return config
 }
 
-func buildParserConfig(rawParserConfig *configapi.ParserConfig, handle fwkplugin.Handle) (*handlers.Config, error) {
-	if rawParserConfig == nil {
-		return nil, errors.New("parserConfig is not configured")
+func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {
+	if len(rawParserConfigs) == 0 {
+		return nil, errors.New("no parsers configured")
 	}
-	plugin, ok := handle.GetAllPluginsWithNames()[rawParserConfig.PluginRef]
-	if !ok {
-		return nil, errors.New("the configured parser is not loaded")
+	allPlugins := handle.GetAllPluginsWithNames()
+	parsers := make([]fwkrh.Parser, 0, len(rawParserConfigs))
+	for _, pc := range rawParserConfigs {
+		plugin, ok := allPlugins[pc.PluginRef]
+		if !ok {
+			return nil, fmt.Errorf("the configured parser %q is not loaded", pc.PluginRef)
+		}
+		v, ok := plugin.(fwkrh.Parser)
+		if !ok {
+			return nil, fmt.Errorf("the plugin %q is not a parser plugin", pc.PluginRef)
+		}
+		parsers = append(parsers, v)
 	}
-	v, ok := plugin.(fwkrh.Parser)
-	if !ok {
-		return nil, errors.New("the specified plugin is not a parser plugin in the config")
-	}
-	return &handlers.Config{
-		Parser: v,
-	}, nil
+	return handlers.NewParserRegistry(parsers, logger), nil
 }
 
 func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkplugin.Handle) (*datalayer.Config, error) {
@@ -313,14 +340,14 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 		if sourcePlugin, ok := handle.Plugin(source.PluginRef).(fwkdl.DataSource); ok {
 			sourceConfig := datalayer.DataSourceConfig{
 				Plugin:     sourcePlugin,
-				Extractors: []fwkdl.ExtractorBase{},
+				Extractors: []fwkplugin.Plugin{},
 			}
 			for _, extractor := range source.Extractors {
-				if extractorPlugin, ok := handle.Plugin(extractor.PluginRef).(fwkdl.ExtractorBase); ok {
-					sourceConfig.Extractors = append(sourceConfig.Extractors, extractorPlugin)
-				} else {
-					return nil, fmt.Errorf("the plugin %s is not a fwkdl.ExtractorBase", source.PluginRef)
+				extractorPlugin := handle.Plugin(extractor.PluginRef)
+				if extractorPlugin == nil {
+					return nil, fmt.Errorf("the plugin %s is not registered", extractor.PluginRef)
 				}
+				sourceConfig.Extractors = append(sourceConfig.Extractors, extractorPlugin)
 			}
 			cfg.Sources = append(cfg.Sources, sourceConfig)
 		} else {

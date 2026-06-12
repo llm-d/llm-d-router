@@ -8,12 +8,11 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	approxprefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/scheduling/scorer/prefix"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 const (
@@ -33,18 +32,20 @@ const (
 // compile-time type assertions
 var _ scheduling.Scorer = &NoHitLRU{}
 var _ requestcontrol.PreRequest = &NoHitLRU{}
+var _ plugin.ConsumerPlugin = &NoHitLRU{}
 
 // Parameters defines the parameters for the NoHitLRU scorer.
 type Parameters struct {
-	// PrefixPluginType defines the type of the prefix cache plugin to read state from.
-	// Defaults to "prefix-cache-scorer".
+	// Deprecated: This field was never used.
 	PrefixPluginType string `json:"prefixPluginType"`
-	// PrefixPluginName defines the name of the prefix cache plugin to read state from.
-	// Defaults to "prefix-cache-scorer".
+	// Deprecated: This field was never used.
 	PrefixPluginName string `json:"prefixPluginName"`
 
 	// LRUSize defines the maximum number of endpoints to track in the LRU cache.
 	LRUSize int `json:"lruSize"`
+
+	// The name of the data producer that produces PrefixCacheMatchInfo.
+	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
 }
 
 // coldRequestState tracks whether a request triggered a KV cache hit
@@ -59,36 +60,28 @@ func (c *coldRequestState) Clone() plugin.StateData {
 }
 
 // Factory defines the factory function for the NoHitLRU
-func Factory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	parameters := Parameters{}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", NoHitLRUType, err)
 		}
-	}
-
-	if parameters.PrefixPluginName == "" {
-		parameters.PrefixPluginName = prefix.PrefixCacheScorerPluginType
 	}
 
 	// Note: We don't enforce that the prefix plugin exists here
 	// The scorer will gracefully handle missing prefix cache state as an optimization
 
-	return NewNoHitLRU(handle.Context(), &parameters).WithName(name), nil
+	return NewNoHitLRU(handle.Context(), name, &parameters), nil
 }
 
 // NewNoHitLRU creates a new NoHitLRU scorer
-func NewNoHitLRU(ctx context.Context, params *Parameters) *NoHitLRU {
-	prefixPluginType := prefix.PrefixCacheScorerPluginType
-	prefixPluginName := prefix.PrefixCacheScorerPluginType
+func NewNoHitLRU(ctx context.Context, name string, params *Parameters) *NoHitLRU {
 	lruSize := defaultLRUSize
 
+	producerName := ""
 	if params != nil {
-		if params.PrefixPluginType != "" {
-			prefixPluginType = params.PrefixPluginType
-		}
-		if params.PrefixPluginName != "" {
-			prefixPluginName = params.PrefixPluginName
+		if params.PrefixMatchInfoProducerName != "" {
+			producerName = params.PrefixMatchInfoProducerName
 		}
 		if params.LRUSize > 0 {
 			lruSize = params.LRUSize
@@ -102,10 +95,10 @@ func NewNoHitLRU(ctx context.Context, params *Parameters) *NoHitLRU {
 	}
 
 	return &NoHitLRU{
-		typedName:             plugin.TypedName{Type: NoHitLRUType},
-		lruCache:              lruCache,
-		prefixPluginTypedName: plugin.TypedName{Type: prefixPluginType, Name: prefixPluginName},
-		pluginState:           plugin.NewPluginState(ctx),
+		typedName:   plugin.TypedName{Type: NoHitLRUType, Name: name},
+		lruCache:    lruCache,
+		pluginState: plugin.NewPluginState(ctx),
+		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName),
 	}
 }
 
@@ -113,10 +106,10 @@ func NewNoHitLRU(ctx context.Context, params *Parameters) *NoHitLRU {
 // This can help evenly distribute cache growth, since cold requests result in more
 // new KV blocks.
 type NoHitLRU struct {
-	typedName             plugin.TypedName
-	lruCache              *lru.Cache[string, struct{}] // endpoint name -> dummy value (we only care about order)
-	prefixPluginTypedName plugin.TypedName
-	pluginState           *plugin.PluginState
+	typedName   plugin.TypedName
+	lruCache    *lru.Cache[string, struct{}] // endpoint name -> dummy value (we only care about order)
+	pluginState *plugin.PluginState
+	dk          plugin.DataKey
 }
 
 // TypedName returns the typed name of the plugin.
@@ -124,15 +117,15 @@ func (s *NoHitLRU) TypedName() plugin.TypedName {
 	return s.typedName
 }
 
-// WithName sets the name of the plugin.
-func (s *NoHitLRU) WithName(name string) *NoHitLRU {
-	s.typedName.Name = name
-	return s
-}
-
 // Category returns the preference the scorer applies when scoring candidate endpoints.
 func (s *NoHitLRU) Category() scheduling.ScorerCategory {
 	return scheduling.Distribution
+}
+
+func (s *NoHitLRU) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{s.dk: attrprefix.PrefixCacheMatchInfo{}},
+	}
 }
 
 // isColdRequest determines if a request is cold by checking endpoint prefix-cache attributes.
@@ -141,11 +134,11 @@ func (s *NoHitLRU) isColdRequest(ctx context.Context, endpoints []scheduling.End
 	logger := log.FromContext(ctx).V(logging.DEBUG)
 
 	for _, ep := range endpoints {
-		attr, ok := ep.Get(approxprefix.PrefixCacheMatchInfoKey)
+		attr, ok := ep.Get(s.dk.String())
 		if !ok {
 			continue
 		}
-		info, ok := attr.(*approxprefix.PrefixCacheMatchInfo)
+		info, ok := attr.(*attrprefix.PrefixCacheMatchInfo)
 		if ok && info.MatchBlocks() > 0 {
 			logger.Info("Cache hit detected on endpoint", "endpoint", ep.GetMetadata().NamespacedName)
 			return false
@@ -256,7 +249,7 @@ func (s *NoHitLRU) scoreColdRequestByLRU(endpoints []scheduling.Endpoint) map[sc
 // - LRU ordering is with respect to when a endpoint last received a cold request.
 // - Least recently used (or never used) endpoints get highest score (1.0)
 // - Most recently used endpoints get lowest score (approaching 0.0)
-func (s *NoHitLRU) Score(ctx context.Context, cycleState *scheduling.CycleState, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *NoHitLRU) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	logger := log.FromContext(ctx).V(logging.DEBUG)
 
 	isCold := s.isColdRequest(ctx, endpoints)

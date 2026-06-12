@@ -36,9 +36,9 @@ It narrows the candidate set to only the sticky endpoints (those above `affinity
 then passes them to downstream plugins. When paired with `weighted-random-picker`, requests
 are spread across the sticky set — maintaining cache affinity while distributing load. The
 TTFT load gate (`maxTTFTPenaltyMs`) adds automatic back-off: if sticky endpoints become
-overloaded and their predicted TTFT exceeds non-sticky endpoints by more than the configured
-penalty, the filter breaks stickiness and opens up all endpoints, preventing the hot-spotting
-problem. The exploration mechanism (`explorationProbability`) seeds cache state on other
+overloaded and their TTFT exceeds non-sticky endpoints by more than the configured penalty,
+the filter breaks stickiness and opens up all endpoints, preventing the hot-spotting problem.
+The exploration mechanism (`explorationProbability`) seeds cache state on other
 endpoints over time, preventing permanent stickiness to a fixed subset.
 
 ## Overview
@@ -57,11 +57,15 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 - Keep only endpoints with prefix cache score >= `affinityThreshold`
 - If no endpoints pass, all are kept (no-op)
 - With probability `explorationProbability` (default 1%), skip the gate entirely for exploration
-- TTFT load gate: if best sticky endpoint's predicted TTFT exceeds best non-sticky by
-  more than `maxTTFTPenaltyMs`, break stickiness and keep all endpoints
-- If no endpoints have `LatencyPredictionInfo` (predictions absent), the TTFT load gate
-  is skipped. If no endpoints have `PrefixCacheMatchInfo`, all prefix scores default to 0
-  and no endpoints pass the affinity threshold, so all are kept (no-op)
+- TTFT load gate: if best sticky endpoint's TTFT exceeds best non-sticky by more than
+  `maxTTFTPenaltyMs`, break stickiness and keep all endpoints (0 = always stick). The
+  per-endpoint TTFT is estimated from in-flight tokens as
+  `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is
+  `prefillThroughput` (default), or comes from the latency predictor when `ttftSource`
+  is `latencyPredictor`
+- If no endpoints have the TTFT source attribute (`LatencyPredictionInfo` or `InFlightLoad`),
+  the TTFT load gate is skipped. If no endpoints have `PrefixCacheMatchInfo`, all prefix
+  scores default to 0 and no endpoints pass the affinity threshold, so all are kept (no-op)
 
 ## Config
 
@@ -70,11 +74,20 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 | `affinityThreshold` | `float64` | No | `0.80` | Prefix cache score threshold for stickiness |
 | `explorationProbability` | `float64` | No | `0.01` | Probability of skipping the gate |
 | `maxTTFTPenaltyMs` | `float64` | No | `5000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
+| `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput` or `latencyPredictor` |
+| `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
+
+The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
+2x H100 80GB (TP=2) with vLLM 0.19, measured as the prefill throughput of a single
+unloaded chunk of `max_num_batched_tokens` (8192) tokens. It is hardware-, model-, and
+serving-stack-specific; retune it for a different deployment, or set `ttftSource`
+to `latencyPredictor` to source TTFT from the latency predictor instead.
 
 ## Dependencies
 
 - Reads `PrefixCacheMatchInfo` from endpoint attributes (from `prefix-cache-scorer`)
-- Reads `LatencyPredictionInfo` for TTFT load gate (from `predicted-latency-producer`)
+- Reads `InFlightLoad` for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer`)
+- Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 
 **Configuration Example:**
 ```yaml
@@ -85,6 +98,7 @@ plugins:
       affinityThreshold: 0.80
       explorationProbability: 0.01
       maxTTFTPenaltyMs: 5000
+      ttftSource: prefillThroughput
 schedulingProfiles:
   - name: default
     plugins:

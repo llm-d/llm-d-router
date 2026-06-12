@@ -27,8 +27,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"k8s.io/utils/ptr"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	sourcemetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
 const (
@@ -38,6 +39,7 @@ const (
 	defaultKvCacheUsagePercentageMetric = "vllm:kv_cache_usage_perc"
 	defaultLoraInfoMetric               = "vllm:lora_requests_info"
 	defaultCacheInfoMetric              = "vllm:cache_config_info"
+	customMetricsConfigKey              = "customMetrics"
 )
 
 func TestExtractorExtract(t *testing.T) {
@@ -70,10 +72,6 @@ func TestExtractorExtract(t *testing.T) {
 		t.Error("empty extractor name")
 	}
 
-	if inputType := extractor.ExpectedInputType(); inputType != sourcemetrics.PrometheusMetricType {
-		t.Errorf("incorrect expected input type: %v", inputType)
-	}
-
 	ep := fwkdl.NewEndpoint(nil, nil)
 	if ep == nil {
 		t.Fatal("expected non-nil endpoint")
@@ -81,7 +79,7 @@ func TestExtractorExtract(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		data    any
+		data    sourcemetrics.PrometheusMetricMap
 		wantErr bool
 		updated bool // whether metrics are expected to change
 	}{
@@ -193,7 +191,7 @@ func TestExtractorExtract(t *testing.T) {
 			}()
 
 			before := ep.GetMetrics().Clone()
-			err := extractor.Extract(ctx, tt.data, ep)
+			err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: tt.data, Endpoint: ep})
 			after := ep.GetMetrics()
 
 			if tt.wantErr && err == nil {
@@ -253,7 +251,7 @@ func TestExtractorMultiEngine(t *testing.T) {
 	epVllm := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 		Labels: map[string]string{DefaultEngineTypeLabelKey: "vllm"},
 	}, nil)
-	_ = extractor.Extract(ctx, data, epVllm)
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: epVllm})
 	if epVllm.GetMetrics().WaitingQueueSize != 10 {
 		t.Errorf("vllm: expected queue size 10, got %v", epVllm.GetMetrics().WaitingQueueSize)
 	}
@@ -262,7 +260,7 @@ func TestExtractorMultiEngine(t *testing.T) {
 	epSgl := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 		Labels: map[string]string{DefaultEngineTypeLabelKey: "sglang"},
 	}, nil)
-	_ = extractor.Extract(ctx, data, epSgl)
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: epSgl})
 	if epSgl.GetMetrics().WaitingQueueSize != 20 {
 		t.Errorf("sglang: expected queue size 20, got %v", epSgl.GetMetrics().WaitingQueueSize)
 	}
@@ -291,7 +289,7 @@ func TestBackwardCompatibility(t *testing.T) {
 
 	// Case 1: No labels at all
 	epNone := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{Labels: nil}, nil)
-	_ = extractor.Extract(ctx, data, epNone)
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: epNone})
 	if epNone.GetMetrics().WaitingQueueSize != 100 {
 		t.Errorf("no labels: expected 100, got %v", epNone.GetMetrics().WaitingQueueSize)
 	}
@@ -300,7 +298,7 @@ func TestBackwardCompatibility(t *testing.T) {
 	epUnknown := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 		Labels: map[string]string{DefaultEngineTypeLabelKey: "unknown-engine"},
 	}, nil)
-	_ = extractor.Extract(ctx, data, epUnknown)
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: epUnknown})
 	if epUnknown.GetMetrics().WaitingQueueSize != 100 {
 		t.Errorf("unknown label: expected 100, got %v", epUnknown.GetMetrics().WaitingQueueSize)
 	}
@@ -350,7 +348,7 @@ func TestCacheInfoLabelAliasing(t *testing.T) {
 	}
 
 	ep := fwkdl.NewEndpoint(nil, nil)
-	_ = extractor.Extract(ctx, data, ep)
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
 
 	if ep.GetMetrics().CacheBlockSize != 64 {
 		t.Errorf("expected CacheBlockSize 64, got %d", ep.GetMetrics().CacheBlockSize)
@@ -417,7 +415,7 @@ func TestDirectGaugeSpecExtraction(t *testing.T) {
 	}
 
 	ep := fwkdl.NewEndpoint(nil, nil)
-	_ = extractor.Extract(ctx, data, ep)
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
 
 	if ep.GetMetrics().CacheBlockSize != 64 {
 		t.Errorf("expected CacheBlockSize 64, got %d", ep.GetMetrics().CacheBlockSize)
@@ -503,6 +501,59 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 			},
 			wantErr:      false,
 			checkDefault: "custom",
+		},
+		{
+			name: "custom engineConfigs with custom metrics",
+			params: map[string]any{
+				"defaultEngine": "custom",
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "custom.queue_depth",
+								"metricSpec":   "custom_queue_depth{tier=gold}",
+							},
+						},
+					},
+				},
+			},
+			wantErr:      false,
+			checkDefault: "custom",
+		},
+		{
+			name: "custom metric attributeKey is required",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"metricSpec": "custom_queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: "attributeKey cannot be empty",
+		},
+		{
+			name: "custom metric spec is required",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "custom.queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: "spec cannot be empty",
 		},
 		{
 			name: "custom engineConfigs auto-appends vllm sglang trtllm-serve and triton-tensorrt-llm",
@@ -615,7 +666,7 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 				}
 			}
 
-			plugin, err := CoreMetricsExtractorFactory("test", params, nil)
+			plugin, err := CoreMetricsExtractorFactory("test", fwkplugin.StrictDecoder(params), nil)
 
 			if tt.wantErr {
 				if err == nil {

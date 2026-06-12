@@ -31,8 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	"github.com/llm-d/llm-d-inference-scheduler/test/sidecar/mock"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
 
 func newTestContext() context.Context {
@@ -117,12 +117,14 @@ var _ = Describe("Reverse Proxy", func() {
 
 			Entry("when the path is /v1/chat/completions and secure proxy is false", "/v1/chat/completions", false),
 			Entry("when the path is /v1/completions and secure proxy is false", "/v1/completions", false),
+			Entry("when the path is /v1/messages and secure proxy is false", "/v1/messages", false),
 			Entry("when the path is /v1/embeddings and secure proxy is false", "/v1/embeddings", false),
 			Entry("when the path is /score and secure proxy is false", "/score", false),
 			Entry("when the path is /healthz and secure proxy is false", "/healthz", false),
 
 			Entry("when the path is /v1/chat/completions and secure proxy is true", "/v1/chat/completions", true),
 			Entry("when the path is /v1/completions and secure proxy is true", "/v1/completions", true),
+			Entry("when the path is /v1/messages and secure proxy is true", "/v1/messages", true),
 			Entry("when the path is /v1/embeddings and secure proxy is true", "/v1/embeddings", true),
 			Entry("when the path is /score and secure proxy is true", "/score", true),
 			Entry("when the path is /healthz and secure proxy is true", "/healthz", true),

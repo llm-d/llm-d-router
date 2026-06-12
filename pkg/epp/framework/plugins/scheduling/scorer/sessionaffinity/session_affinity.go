@@ -7,11 +7,11 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -23,10 +23,10 @@ const (
 
 // compile-time type assertion
 var _ scheduling.Scorer = &SessionAffinity{}
-var _ requestcontrol.ResponseBodyProcessor = &SessionAffinity{}
+var _ requestcontrol.ResponseHeaderProcessor = &SessionAffinity{}
 
 // Factory defines the factory function for SessionAffinity scorer.
-func Factory(name string, _ json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func Factory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return NewSessionAffinity().WithName(name), nil
 }
 
@@ -62,7 +62,7 @@ func (s *SessionAffinity) Category() scheduling.ScorerCategory {
 }
 
 // Score assign a high score to the pod used in previous requests and zero to others
-func (s *SessionAffinity) Score(ctx context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
 	sessionToken := request.Headers[sessionTokenHeader]
 	podName := ""
@@ -85,20 +85,17 @@ func (s *SessionAffinity) Score(ctx context.Context, _ *scheduling.CycleState, r
 	return scoredEndpoints
 }
 
-// ResponseBody sets the session header on the response sent to the client
+// ResponseHeader sets the session header on the response sent to the client.
 // TODO: this should be using a cookie and ensure not overriding any other
 // cookie values if present.
-// Tracked in https://github.com/llm-d/llm-d-inference-scheduler/issues/28
-func (s *SessionAffinity) ResponseBody(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	if !response.EndOfStream {
-		return
-	}
+// Tracked in https://github.com/llm-d/llm-d-router/issues/28
+func (s *SessionAffinity) ResponseHeader(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
 	if response == nil || targetPod == nil {
 		reqID := "undefined"
 		if response != nil {
 			reqID = response.RequestID
 		}
-		log.FromContext(ctx).V(logutil.DEBUG).Info("Session affinity scorer - skip post response because one of response, targetPod is nil", "req id", reqID)
+		log.FromContext(ctx).V(logutil.DEBUG).Info("Session affinity scorer - skip response header because response or targetPod is nil", "req id", reqID)
 		return
 	}
 

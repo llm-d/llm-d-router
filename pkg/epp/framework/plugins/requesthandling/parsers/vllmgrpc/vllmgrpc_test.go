@@ -26,9 +26,9 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	pb "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 )
 
 // helper function to simulate the gRPC payload framing
@@ -83,13 +83,13 @@ func TestVllmGRPCParser_PluginLifecycle(t *testing.T) {
 
 func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 	tests := []struct {
-		name          string
-		reqMsg        proto.Message
-		headers       map[string]string
-		malformedData []byte
-		wantErr       bool
-		wantSkip      bool
-		want          *fwkrh.InferenceRequestBody
+		name                       string
+		reqMsg                     proto.Message
+		headers                    map[string]string
+		malformedData              []byte
+		wantErr                    bool
+		wantSkipResponseProcessing bool
+		want                       *fwkrh.InferenceRequestBody
 	}{
 		{
 			name: "Valid Text Request",
@@ -139,7 +139,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 						},
 					}},
 				TokenizedPrompt: &fwkrh.TokenizedPrompt{
-					TokenIDs: []uint32{11, 12, 13},
+					PerPromptTokens: [][]uint32{{11, 12, 13}},
 				},
 			},
 		},
@@ -183,7 +183,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 					},
 				},
 				TokenizedPrompt: &fwkrh.TokenizedPrompt{
-					TokenIDs: []uint32{101, 102, 103, 104, 105},
+					PerPromptTokens: [][]uint32{{101, 102, 103, 104, 105}},
 					MultiModalFeatures: []fwkrh.MultiModalFeature{
 						{Modality: fwkrh.ModalityImage, Hash: "hash-a", Offset: 1, Length: 2},
 						{Modality: fwkrh.ModalityImage, Hash: "hash-b", Offset: 4, Length: 1},
@@ -231,7 +231,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 					},
 				},
 				TokenizedPrompt: &fwkrh.TokenizedPrompt{
-					TokenIDs: []uint32{201, 202, 203, 204},
+					PerPromptTokens: [][]uint32{{201, 202, 203, 204}},
 					MultiModalFeatures: []fwkrh.MultiModalFeature{
 						{Modality: fwkrh.ModalityImage, Hash: "hash-only", Offset: 0, Length: 1},
 						{Modality: fwkrh.ModalityImage, Hash: "", Offset: 2, Length: 2},
@@ -306,10 +306,10 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
-			name:     "Unsupported Path skip",
-			reqMsg:   &pb.GenerateRequest{Input: &pb.GenerateRequest_Text{Text: "hello"}},
-			headers:  map[string]string{":path": "/unsupported/path"},
-			wantSkip: true,
+			name:                       "Unsupported Path skip",
+			reqMsg:                     &pb.GenerateRequest{Input: &pb.GenerateRequest_Text{Text: "hello"}},
+			headers:                    map[string]string{":path": "/unsupported/path"},
+			wantSkipResponseProcessing: true,
 		},
 		{
 			name:    "Embed Request missing tokenized input",
@@ -340,8 +340,14 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				return
 			}
 
-			if got.Skip != tt.wantSkip {
-				t.Errorf("got.Skip = %v, want %v", got.Skip, tt.wantSkip)
+			if got.SkipResponseProcessing != tt.wantSkipResponseProcessing {
+				t.Errorf("got.SkipResponseProcessing = %v, want %v", got.SkipResponseProcessing, tt.wantSkipResponseProcessing)
+			}
+
+			if tt.wantSkipResponseProcessing && tt.want == nil {
+				tt.want = &fwkrh.InferenceRequestBody{
+					Payload: fwkrh.RawPayload(payload),
+				}
 			}
 
 			if diff := cmp.Diff(tt.want, got.Body, protocmp.Transform()); diff != "" {
@@ -499,13 +505,18 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 	}
 }
 
-func TestVllmGRPCParser_SupportedAppProtocols(t *testing.T) {
+func TestVllmGRPCParser_Claims(t *testing.T) {
 	parser := NewVllmGRPCParser()
+	got := parser.Claims()
+	want := fwkrh.Claims{
+		Paths: []string{
+			vllmGeneratePath,
+			vllmEmbedPath,
+		},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C},
+	}
 
-	supported := parser.SupportedAppProtocols()
-	want := []v1.AppProtocol{v1.AppProtocolH2C}
-
-	if diff := cmp.Diff(want, supported); diff != "" {
-		t.Errorf("SupportedAppProtocols() mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }

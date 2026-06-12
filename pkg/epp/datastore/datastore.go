@@ -33,12 +33,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	podutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pod"
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	podutil "github.com/llm-d/llm-d-router/pkg/epp/util/pod"
 )
 
 var (
@@ -79,6 +79,9 @@ type Datastore interface {
 	// InferenceModelRewrite operations
 	ModelRewriteSet(infModelRewrite *v1alpha2.InferenceModelRewrite)
 	ModelRewriteDelete(namespacedName types.NamespacedName)
+	// ModelRewriteGet returns the highest-precedence rewrite rule for a given
+	// model name (prioritizing exact matches over generic wildcard rules) and
+	// the name of the InferenceModelRewrite object.
 	ModelRewriteGet(modelName string) (*v1alpha2.InferenceModelRewriteRule, string)
 	ModelRewriteGetAll() []*v1alpha2.InferenceModelRewrite
 
@@ -86,6 +89,11 @@ type Datastore interface {
 	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
 	PodUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.Pod) bool
 	PodDelete(podName string)
+
+	// EndpointUpsert adds or updates an endpoint from a non-Kubernetes discovery source.
+	EndpointUpsert(ctx context.Context, meta *fwkdl.EndpointMetadata)
+	// EndpointDelete removes the endpoint with the given namespaced name.
+	EndpointDelete(id types.NamespacedName)
 
 	// Clears the store state, happens when the pool gets deleted.
 	Clear()
@@ -321,6 +329,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 				Port:           strconv.Itoa(port),
 				MetricsHost:    net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(metricsPort)),
 				Labels:         labels,
+				RankIndex:      idx,
 			})
 	}
 
@@ -334,23 +343,9 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 	existingEpSet := sets.Set[types.NamespacedName]{}
 	for _, endpointMetadata := range pods {
 		existingEpSet.Insert(endpointMetadata.NamespacedName)
-		var ep fwkdl.Endpoint
-		existing, ok := ds.pods.Load(endpointMetadata.NamespacedName)
-		if !ok {
-			ep = ds.epf.NewEndpoint(ds.parentCtx, endpointMetadata, ds)
-			if ep == nil {
-				// NewEndpoint returns nil when a collector is already running for this
-				// endpoint (duplicate reconcile race). The existing entry in ds.pods
-				// is still valid; skip re-registering it.
-				continue
-			}
-			ds.pods.Store(endpointMetadata.NamespacedName, ep)
+		if ds.upsertEndpoint(ctx, endpointMetadata) {
 			result = false
-		} else {
-			ep = existing.(fwkdl.Endpoint)
 		}
-		// Update endpoint properties if anything changed.
-		ep.UpdateMetadata(endpointMetadata)
 	}
 
 	// remove endpoints that are no longer active in the pool
@@ -378,6 +373,42 @@ func (ds *datastore) PodDelete(podName string) {
 		}
 		return true
 	})
+}
+
+func (ds *datastore) EndpointUpsert(ctx context.Context, meta *fwkdl.EndpointMetadata) {
+	ds.upsertEndpoint(ctx, meta)
+}
+
+func (ds *datastore) EndpointDelete(id types.NamespacedName) {
+	if v, ok := ds.pods.LoadAndDelete(id); ok {
+		ds.epf.ReleaseEndpoint(v.(fwkdl.Endpoint))
+	}
+}
+
+// upsertEndpoint stores or updates a single endpoint in the pods map.
+// Returns true if the endpoint was newly created, false if it already existed
+// or if NewEndpoint returned nil (duplicate-start race).
+// Shared by EndpointUpsert and podUpdateOrAddIfNotExist.
+func (ds *datastore) upsertEndpoint(ctx context.Context, meta *fwkdl.EndpointMetadata) bool {
+	existing, ok := ds.pods.Load(meta.NamespacedName)
+	if !ok {
+		ep := ds.epf.NewEndpoint(ds.parentCtx, meta)
+		if ep == nil {
+			// NewEndpoint returns nil when a collector is already running for this
+			// endpoint (duplicate reconcile race). The existing entry in ds.pods
+			// is still valid; skip re-registering it.
+			return false
+		}
+		ds.pods.Store(meta.NamespacedName, ep)
+		return true
+	}
+	ep := existing.(fwkdl.Endpoint)
+	if ep.GetMetadata().Equal(meta) {
+		return false
+	}
+	ep.UpdateMetadata(meta)
+	ds.epf.UpdateEndpoint(ctx, ep)
+	return false
 }
 
 func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) error {

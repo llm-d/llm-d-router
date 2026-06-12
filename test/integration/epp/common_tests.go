@@ -26,8 +26,8 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 
-	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
-	integration "github.com/llm-d/llm-d-inference-scheduler/test/integration"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
 // Model name constants shared across test suites.
@@ -86,16 +86,25 @@ func ReqResponseOnly(
 	return reqs
 }
 
-// ReqResponseGRPCWithTailer creates a sequence simulating only the response phase from Envoy while passing gRPC payload.
-// It also generate a response trailer.
-// It skips the RequestHeaders phase entirely.
-func ReqResponseGRPCWithTailer(
+// ReqRequestHeadersAndResponseGRPC creates a sequence that starts with request headers (to resolve parser)
+// followed by response phase.
+func ReqRequestHeadersAndResponseGRPC(
+	reqHeaders map[string]string,
 	respHeaders map[string]string,
 	bodyChunks ...[]byte,
 ) []*extProcPb.ProcessingRequest {
-	reqs := make([]*extProcPb.ProcessingRequest, 0, 1+len(bodyChunks))
+	reqs := make([]*extProcPb.ProcessingRequest, 0, 2+len(bodyChunks))
 
-	// 1. Response Headers
+	// 1. Request Headers
+	reqs = append(reqs, &extProcPb.ProcessingRequest{
+		Request: &extProcPb.ProcessingRequest_RequestHeaders{
+			RequestHeaders: &extProcPb.HttpHeaders{
+				Headers: &envoyCorev3.HeaderMap{Headers: buildEnvoyHeaders(reqHeaders)},
+			},
+		},
+	})
+
+	// 2. Response Headers
 	reqs = append(reqs, &extProcPb.ProcessingRequest{
 		Request: &extProcPb.ProcessingRequest_ResponseHeaders{
 			ResponseHeaders: &extProcPb.HttpHeaders{
@@ -104,7 +113,7 @@ func ReqResponseGRPCWithTailer(
 		},
 	})
 
-	// 2. Response Body Chunks
+	// 3. Response Body Chunks
 	for _, chunk := range bodyChunks {
 		reqs = append(reqs, &extProcPb.ProcessingRequest{
 			Request: &extProcPb.ProcessingRequest_ResponseBody{
@@ -116,7 +125,7 @@ func ReqResponseGRPCWithTailer(
 		})
 	}
 
-	// 3. Response Trailer
+	// 4. Response Trailer
 	reqs = append(reqs, &extProcPb.ProcessingRequest{
 		Request: &extProcPb.ProcessingRequest_ResponseTrailers{
 			ResponseTrailers: &extProcPb.HttpTrailers{},
@@ -357,7 +366,7 @@ func labelsToString(labels []label) string {
 
 func metricReqTotal(model, target string, priority int) string {
 	return fmt.Sprintf(`
-    # HELP inference_objective_request_total [ALPHA] Counter of inference objective requests broken out for each model and target model.
+    # HELP inference_objective_request_total [ALPHA] [Deprecated: Use llm_d_router_epp_request_total] Counter of inference objective requests broken out for each model and target model.
     # TYPE inference_objective_request_total counter
     inference_objective_request_total{%s} 1
     `, labelsToString([]label{{"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
@@ -365,7 +374,7 @@ func metricReqTotal(model, target string, priority int) string {
 
 func metricReadyPods(count int) string {
 	return fmt.Sprintf(`
-    # HELP inference_pool_ready_pods [ALPHA] The number of ready pods in the inference server pool.
+    # HELP inference_pool_ready_pods [ALPHA] [Deprecated: Use llm_d_router_epp_ready_endpoints] The number of ready pods in the inference server pool.
     # TYPE inference_pool_ready_pods gauge
     inference_pool_ready_pods{%s} %d
     `, labelsToString([]label{{"name", testPoolName}}), count)

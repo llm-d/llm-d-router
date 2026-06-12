@@ -27,6 +27,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
+
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 )
 
 // mockProcessServer implements ExternalProcessor_ProcessServer for testing.
@@ -52,21 +54,57 @@ func (m *mockProcessServer) RecvMsg(any) error            { return nil }
 
 func TestUpdateStateAndSendIfNeeded_Evicted(t *testing.T) {
 	t.Parallel()
-	srv := &mockProcessServer{}
-	logger := logr.Discard()
 
-	reqCtx := &RequestContext{
-		RequestState: RequestEvicted,
+	tests := []struct {
+		name                 string
+		requestDroppedReason errcommon.RequestDroppedReason
+		wantHeader           bool
+	}{
+		{
+			name:                 "with eviction reason",
+			requestDroppedReason: errcommon.RequestDroppedReasonEvicted,
+			wantHeader:           true,
+		},
+		{
+			name:                 "without eviction reason",
+			requestDroppedReason: "",
+			wantHeader:           false,
+		},
 	}
 
-	err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
-	require.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := &mockProcessServer{}
+			logger := logr.Discard()
 
-	require.Len(t, srv.sentResponses, 1, "Should send exactly one response")
-	ir := srv.sentResponses[0].GetImmediateResponse()
-	require.NotNil(t, ir, "Response should be an ImmediateResponse")
-	assert.Equal(t, envoyTypePb.StatusCode_TooManyRequests, ir.Status.Code)
-	assert.Equal(t, []byte("request evicted by flow control"), ir.Body)
+			reqCtx := &RequestContext{
+				RequestState:         RequestEvicted,
+				RequestDroppedReason: tt.requestDroppedReason,
+			}
+
+			err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
+			require.NoError(t, err)
+
+			require.Len(t, srv.sentResponses, 1, "Should send exactly one response")
+			ir := srv.sentResponses[0].GetImmediateResponse()
+			require.NotNil(t, ir, "Response should be an ImmediateResponse")
+			assert.Equal(t, envoyTypePb.StatusCode_TooManyRequests, ir.Status.Code)
+			assert.Equal(t, []byte("request evicted by flow control"), ir.Body)
+
+			if tt.wantHeader {
+				require.NotNil(t, ir.Headers, "Should have HeaderMutation when eviction reason is set")
+				require.Len(t, ir.Headers.SetHeaders, 1)
+				gotHeaders := make(map[string]string, len(ir.Headers.SetHeaders))
+				for _, header := range ir.Headers.SetHeaders {
+					gotHeaders[header.Header.Key] = string(header.Header.RawValue)
+				}
+				assert.Equal(t, map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(tt.requestDroppedReason)}, gotHeaders)
+			} else {
+				assert.Nil(t, ir.Headers, "Should not have HeaderMutation when eviction reason is empty")
+			}
+		})
+	}
 }
 
 func TestUpdateStateAndSendIfNeeded_NotEvicted(t *testing.T) {

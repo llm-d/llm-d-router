@@ -22,8 +22,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 func TestKvCacheUtilizationScorer(t *testing.T) {
@@ -82,7 +82,7 @@ func TestKvCacheUtilizationScorer(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			scores := NewKVCacheUtilizationScorer().Score(context.Background(), fwksched.NewCycleState(), &fwksched.InferenceRequest{}, test.endpoints)
+			scores := NewKVCacheUtilizationScorer().Score(context.Background(), &fwksched.InferenceRequest{}, test.endpoints)
 
 			for i, endpoint := range test.endpoints {
 				expectedScore := test.expectedScoresEndpoint[i]

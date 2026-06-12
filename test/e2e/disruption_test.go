@@ -15,7 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	testutils "github.com/llm-d/llm-d-inference-scheduler/test/utils"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 const (
@@ -83,7 +83,7 @@ func eppPodReady(oldPodName string) func() bool {
 	}
 }
 
-var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label("Disruptive"), func() {
+var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disruptiveTestLabel), func() {
 	ginkgo.When("A decode pod is killed mid-request", func() {
 		ginkgo.It("should recover and route to surviving pods", func() {
 			infPoolObjects = createInferencePool(1, true)

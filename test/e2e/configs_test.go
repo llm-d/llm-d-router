@@ -4,10 +4,11 @@ package e2e
 const simpleConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 256
+- type: prefix-cache-scorer
 - type: decode-filter
 - type: max-score-picker
 - type: single-profile-handler
@@ -26,11 +27,12 @@ const deprecatedPdConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: prefill-header-handler
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 256
+- type: prefix-cache-scorer
 - type: prefill-filter
 - type: decode-filter
 - type: max-score-picker
@@ -85,11 +87,12 @@ plugins:
 - type: encode-filter
 - type: prefill-filter
 - type: decode-filter
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 256
+- type: prefix-cache-scorer
 - type: max-score-picker
 - type: always-disagg-multimodal-decider
 - type: prefix-based-pd-decider
@@ -122,11 +125,12 @@ schedulingProfiles:
 const pdConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 256
+- type: prefix-cache-scorer
 - type: prefill-filter
 - type: decode-filter
 - type: max-score-picker
@@ -156,11 +160,11 @@ schedulingProfiles:
 const decodeOnlyConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: prefix-cache-scorer
+- type: approx-prefix-cache-producer
   parameters:
-    hashBlockSize: 10
     maxPrefixBlocksToMatch: 256
     lruCapacityPerServer: 256
+- type: prefix-cache-scorer
 - type: encode-filter
 - type: prefill-filter
 - type: decode-filter
@@ -175,11 +179,15 @@ schedulingProfiles:
     weight: 2
 `
 
-// EPP config for running with precise prefix scoring (i.e. KV events)
-// Uses UDS tokenizer sidecar for tokenization
+// EPP config for running with precise prefix scoring (i.e. KV events).
 const kvConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
+  parameters:
+    modelName: Qwen/Qwen2.5-1.5B-Instruct
+    vllm:
+      url: http://localhost:8000
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:
@@ -188,12 +196,6 @@ plugins:
     kvEventsConfig:
       zmqEndpoint: tcp://0.0.0.0:5557
     indexerConfig:
-      prefixStoreConfig:
-        blockSize: 16
-      tokenizersPoolConfig:
-        modelName: Qwen/Qwen2.5-1.5B-Instruct
-        uds:
-          socketFile: "/tmp/tokenizer/tokenizer-uds.socket"
       kvBlockIndexConfig:
         enableMetrics: false                  # enable kv-block index metrics (prometheus)
         metricsLoggingInterval: 6000000000    # log kv-block metrics as well (1m in nanoseconds)
@@ -209,15 +211,15 @@ schedulingProfiles:
     weight: 10
 `
 
-// EPP config for running with precise prefix scoring and external tokenizer PrepareData plugin.
-// The tokenizer plugin runs in the PrepareData phase (before scoring) and attaches
-// pre-computed token IDs to the request, so the scorer skips internal tokenization.
+// Alias of kvConfig retained for tests that reference the external-tokenizer name.
 const kvExternalTokenizerConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: tokenizer
+- type: token-producer
   parameters:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
+    vllm:
+      url: http://localhost:8000
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:
@@ -226,12 +228,6 @@ plugins:
     kvEventsConfig:
       zmqEndpoint: tcp://0.0.0.0:5557
     indexerConfig:
-      prefixStoreConfig:
-        blockSize: 16
-      tokenizersPoolConfig:
-        modelName: Qwen/Qwen2.5-1.5B-Instruct
-        uds:
-          socketFile: "/tmp/tokenizer/tokenizer-uds.socket"
       kvBlockIndexConfig:
         enableMetrics: false
 - type: decode-filter

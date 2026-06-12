@@ -21,9 +21,10 @@ import (
 	"errors"
 	"time"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // MockFlowControlRequest provides a mock implementation of the FlowControlRequest interface.
@@ -255,3 +256,20 @@ func (m *MockFairnessPolicy) Pick(ctx context.Context, flowGroup flowcontrol.Pri
 }
 
 var _ flowcontrol.FairnessPolicy = &MockFairnessPolicy{}
+
+// MockSaturationDetector is a behavioral mock for the SaturationDetector interface.
+type MockSaturationDetector struct {
+	TypedNameV   plugin.TypedName
+	IsSaturatedV bool
+	SaturationV  float64
+}
+
+func (m *MockSaturationDetector) TypedName() plugin.TypedName { return m.TypedNameV }
+func (m *MockSaturationDetector) IsSaturated() bool           { return m.IsSaturatedV }
+func (m *MockSaturationDetector) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
+	return m.SaturationV
+}
+
+func (m *MockSaturationDetector) LastCheckTime() time.Time { return time.Time{} }
+
+var _ flowcontrol.SaturationDetector = &MockSaturationDetector{}

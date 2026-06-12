@@ -17,8 +17,8 @@ limitations under the License.
 package registry
 
 import (
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol/contracts"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
 // connection is the concrete, un-exported implementation of the contracts.ActiveFlowConnection interface.
@@ -31,13 +31,9 @@ type connection struct {
 
 var _ contracts.ActiveFlowConnection = &connection{}
 
-// Shards returns a stable snapshot of accessors for all internal state shards.
-func (c *connection) ActiveShards() []contracts.RegistryShard {
-	// Return a copy to ensure the caller cannot modify the registry's internal slice.
-	shardsCopy := make([]contracts.RegistryShard, 1)
-	shardsCopy[0] = c.registry.shard
-
-	return shardsCopy
+// GetDataPlane returns the registry data plane API.
+func (c *connection) GetDataPlane() contracts.FlowRegistryDataPlane {
+	return c.registry
 }
 
 // FlowKey returns the immutable identity of the flow this connection is pinned to.

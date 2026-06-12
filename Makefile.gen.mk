@@ -1,5 +1,9 @@
 ##@ Code generation targets
 
+# Extract upstream CRD versions from go.mod so references stay in sync with Go dependencies.
+GIE_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api-inference-extension)
+GATEWAY_API_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api)
+
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
@@ -15,8 +19,17 @@ CONTROLLER_TOOLS_VERSION ?= v0.19.0
 PROTOC_GEN_GO_VERSION ?= v1.34.2
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.5.1
 
+.PHONY: sync-upstream-versions
+sync-upstream-versions: ## Update upstream CRD version references to match go.mod once version bumped run this target
+	@echo "Syncing GIE version to $(GIE_VERSION)"
+	@sed -i 's|gateway-api-inference-extension/releases/download/.*/v1-manifests.yaml|gateway-api-inference-extension/releases/download/$(GIE_VERSION)/v1-manifests.yaml|' deploy/components/crds-gie/kustomization.yaml
+	@sed -i 's|GIE_VERSION="$${GIE_VERSION:-.*}"|GIE_VERSION="$${GIE_VERSION:-$(GIE_VERSION)}"|' hack/verify-helm.sh hack/verify-manifests.sh
+	@echo "Syncing Gateway API version to $(GATEWAY_API_VERSION)"
+	@sed -i 's|gateway-api/config/crd?ref=.*|gateway-api/config/crd?ref=$(GATEWAY_API_VERSION)|' deploy/components/crds-gateway-api/kustomization.yaml
+	@sed -i 's|GATEWAY_API_VERSION="$${GATEWAY_API_VERSION:-.*}"|GATEWAY_API_VERSION="$${GATEWAY_API_VERSION:-$(GATEWAY_API_VERSION)}"|' hack/verify-helm.sh hack/verify-manifests.sh
+
 .PHONY: generate
-generate: controller-gen code-generator tidy ## Generate WebhookConfiguration, ClusterRole, CustomResourceDefinition objects, code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: controller-gen code-generator tidy sync-upstream-versions ## Generate WebhookConfiguration, ClusterRole, CustomResourceDefinition objects, code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="/dev/null" paths="./..."
 	$(CONTROLLER_GEN) crd output:dir="./config/crd/bases" paths="./..."
 	./hack/update-codegen.sh $(LOCALBIN)
@@ -42,8 +55,8 @@ generate-proto: protoc-gen-go protoc-gen-go-grpc ## Generate Golang code from pr
 	PATH="$(LOCALBIN):$$PATH" $(PROTOC) \
 		-I pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto \
 		-I . \
-		--go_out=module=github.com/llm-d/llm-d-inference-scheduler:. \
-		--go-grpc_out=module=github.com/llm-d/llm-d-inference-scheduler:. \
+		--go_out=module=github.com/llm-d/llm-d-router:. \
+		--go-grpc_out=module=github.com/llm-d/llm-d-router:. \
 		pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto/*.proto
 
 .PHONY: protoc-gen-go

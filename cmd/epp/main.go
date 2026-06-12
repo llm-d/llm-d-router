@@ -29,10 +29,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/llm-d/llm-d-inference-scheduler/cmd/epp/runner"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/cmd/epp/runner"
 )
 
 func main() {
@@ -42,28 +39,10 @@ func main() {
 func run() int {
 	ctx := ctrl.SetupSignalHandler()
 
-	// Initialize tracing before creating any spans
-	shutdownTracing, err := telemetry.InitTracing(ctx)
-	if err != nil {
-		// Log error but don't fail - tracing is optional
-		ctrl.Log.Error(err, "Failed to initialize tracing")
-	}
-	if shutdownTracing != nil {
-		defer func() {
-			if err := shutdownTracing(ctx); err != nil {
-				ctrl.Log.Error(err, "Failed to shutdown tracing")
-			}
-		}()
-	}
-
-	// Register llm-d-inference-scheduler plugins
-	plugins.RegisterAllPlugins()
-
 	// Note: GIE built-in plugins are automatically registered by the runner
 	// when it processes configuration in runner.parsePluginsConfiguration()
 
 	if err := runner.NewRunner().
-		WithCustomCollectors(metrics.GetCollectors()...).
 		Run(ctx); err != nil {
 		return 1
 	}

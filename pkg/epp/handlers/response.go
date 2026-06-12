@@ -18,16 +18,20 @@ package handlers
 
 import (
 	"context"
+	"strconv"
+	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/protobuf/types/known/structpb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	envoy "github.com/llm-d/llm-d-inference-scheduler/pkg/common/envoy"
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/request"
+	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 // HandleResponseBody processes response data for both streaming and non-streaming models.
@@ -48,10 +52,21 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 
 	reqCtx.ResponseSize += len(responseBytes)
 
-	parsedResp, err := s.parser.ParseResponse(ctx, responseBytes, reqCtx.Response.Headers, endOfStream)
+	if reqCtx.FirstTokenTimestamp.IsZero() && len(responseBytes) > 0 {
+		reqCtx.FirstTokenTimestamp = time.Now()
+	}
+
+	var parsedResp *fwkrh.ParsedResponse
+	parser, err := s.getOrResolveParser(ctx, reqCtx)
 	if err != nil {
-		logger.Error(err, "parsing response")
-	} else if parsedResp != nil && parsedResp.Usage != nil {
+		logger.Error(err, "parsing response: failed to resolve parser")
+	} else {
+		parsedResp, err = parser.ParseResponse(ctx, responseBytes, reqCtx.Response.Headers, endOfStream)
+		if err != nil {
+			logger.Error(err, "parsing response")
+		}
+	}
+	if parsedResp != nil && parsedResp.Usage != nil {
 		reqCtx.Usage = *parsedResp.Usage
 		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.Usage.PromptTokens)
 		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.Usage.CompletionTokens)
@@ -60,9 +75,16 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		}
 	}
 	if endOfStream {
-		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
+		fairnessID := metadata.DefaultFairnessID
+		if reqCtx.SchedulingRequest != nil && reqCtx.SchedulingRequest.FairnessID != "" {
+			fairnessID = reqCtx.SchedulingRequest.FairnessID
+		}
+		priority := strconv.Itoa(reqCtx.Priority)
+		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
 		metrics.RecordRequestLatencies(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp)
 		metrics.RecordResponseSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.ResponseSize)
+		metrics.RecordRequestTTFT(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.modelServerStreaming, reqCtx.RequestReceivedTimestamp, reqCtx.FirstTokenTimestamp)
+		metrics.RecordRequestTPOT(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.FirstTokenTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
 	}
 	return s.director.HandleResponseBody(ctx, reqCtx, endOfStream)
 }

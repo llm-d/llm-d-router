@@ -29,7 +29,13 @@ go.work.sum
 # Environment Files
 .DS_Store
 .env
+
+# Agentic context files. Keep these out of version control to avoid unintentional changes to the context.
 CLAUDE.md
+AGENTS.md
+.gemini
+.claude
+.github/copilot-instructions.md
 
 # IDE files
 .idea
@@ -43,3 +49,7 @@ vendor
 # Coverage reports (HTML; .out files are already covered by *.out above)
 /coverage
 /pd-sidecar*
+
+# Helm dependency artifacts
+config/charts/*/charts/
+config/charts/*/Chart.lock

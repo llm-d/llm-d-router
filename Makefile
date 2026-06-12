@@ -17,29 +17,29 @@ include Makefile.gen.mk
 # Defaults
 TARGETOS ?= $(shell command -v go >/dev/null 2>&1 && go env GOOS || uname -s | tr '[:upper:]' '[:lower:]')
 TARGETARCH ?= $(shell command -v go >/dev/null 2>&1 && go env GOARCH || uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/; s/armv7l/arm/')
-PROJECT_NAME ?= llm-d-inference-scheduler
-SIDECAR_IMAGE_NAME ?= llm-d-routing-sidecar
+PROJECT_NAME ?= llm-d-router
+EPP_IMAGE_NAME ?= llm-d-router-endpoint-picker
+SIDECAR_IMAGE_NAME ?= llm-d-router-disagg-sidecar
 VLLM_SIMULATOR_IMAGE_NAME ?= llm-d-inference-sim
-UDS_TOKENIZER_IMAGE_NAME ?= llm-d-uds-tokenizer
 SIDECAR_NAME ?= pd-sidecar
 BUILDER_IMAGE_NAME ?= llm-d-builder
 IMAGE_REGISTRY ?= ghcr.io/llm-d
 
-IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(PROJECT_NAME)
+EPP_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(EPP_IMAGE_NAME)
 EPP_TAG ?= dev
-export EPP_IMAGE ?= $(IMAGE_TAG_BASE):$(EPP_TAG)
+export EPP_IMAGE ?= $(EPP_IMAGE_TAG_BASE):$(EPP_TAG)
 
-SIDECAR_TAG ?= dev
 SIDECAR_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(SIDECAR_IMAGE_NAME)
+SIDECAR_TAG ?= dev
 export SIDECAR_IMAGE ?= $(SIDECAR_IMAGE_TAG_BASE):$(SIDECAR_TAG)
 
-VLLM_SIMULATOR_TAG ?= v0.8.2
+VLLM_SIMULATOR_TAG ?= v0.9.2
 VLLM_SIMULATOR_TAG_BASE ?= $(IMAGE_REGISTRY)/$(VLLM_SIMULATOR_IMAGE_NAME)
 export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 
-UDS_TOKENIZER_TAG ?= dev
-UDS_TOKENIZER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(UDS_TOKENIZER_IMAGE_NAME)
-export UDS_TOKENIZER_IMAGE ?= $(UDS_TOKENIZER_TAG_BASE):$(UDS_TOKENIZER_TAG)
+# CPU-only vLLM image that exposes `vllm launch render` for the token-producer
+# plugin's HTTP backend.
+export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.21.0
 
 BUILDER_TAG ?= dev
 BUILDER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(BUILDER_IMAGE_NAME)
@@ -56,9 +56,9 @@ GIT_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null)
 ROOT_RELEASE_TAG_MATCH ?= v[0-9]*
 BUILD_REF ?= $(shell git describe --tags --match '$(ROOT_RELEASE_TAG_MATCH)' --abbrev=0 2>/dev/null)
 
-# Named volumes for Go module and build caches, persisted across container runs and image rebuilds.
-GO_MOD_CACHE_VOL ?= llm-d-gomodcache
-GO_BUILD_CACHE_VOL ?= llm-d-gobuildcache
+# Host directories for Go module and build caches, bind-mounted into the builder container.
+GO_MOD_CACHE_VOL ?= $(HOME)/.cache/llm-d-gomodcache
+GO_BUILD_CACHE_VOL ?= $(HOME)/.cache/llm-d-gobuildcache
 
 # Common flags for running the builder container: mounts source, Go caches, and runs as current user.
 # Podman rootless requires --userns=keep-id to correctly map host UID; docker uses -u directly.
@@ -76,8 +76,8 @@ endif
 
 BUILDER_RUN_FLAGS = --rm $(BUILDER_USER_FLAGS) \
 	-v $$(pwd):/app:Z -w /app \
-	-v $(GO_MOD_CACHE_VOL):/go/pkg/mod \
-	-v $(GO_BUILD_CACHE_VOL):/go/cache
+	-v $(GO_MOD_CACHE_VOL):/go/pkg/mod:z \
+	-v $(GO_BUILD_CACHE_VOL):/go/cache:z
 
 # Respect host KUBECONFIG if set; fall back to ~/.kube/config.
 # Note: if KUBECONFIG is a colon-separated list, only the first file is mounted.
@@ -105,7 +105,12 @@ DOCKER_SOCK_GID := $(shell stat -f '%g' $(CONTAINER_SOCK) 2>/dev/null)
 else
 DOCKER_SOCK_GID := $(shell stat -c '%g' $(CONTAINER_SOCK) 2>/dev/null)
 endif
-BUILDER_SOCK_FLAGS = --group-add $(DOCKER_SOCK_GID) \
+ifneq ($(DOCKER_SOCK_GID),)
+DOCKER_GROUP_PARAM := --group-add $(DOCKER_SOCK_GID)
+else
+DOCKER_GROUP_PARAM :=
+endif
+BUILDER_SOCK_FLAGS = $(DOCKER_GROUP_PARAM) \
 	-v $(CONTAINER_SOCK):$(CONTAINER_SOCK) \
 	-e DOCKER_HOST=unix://$(CONTAINER_SOCK) \
 	-e CONTAINER_RUNTIME=docker
@@ -114,9 +119,10 @@ endif
 # Env vars forwarded into the e2e test container.
 # Add new image vars here so they are automatically passed through.
 # Should we pass ALL env vars here?
-E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE UDS_TOKENIZER_IMAGE \
-               E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT
-BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e $(v)=$($(v))))
+E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE VLLM_RENDER_IMAGE \
+               E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT \
+               E2E_LABEL_FILTER LOAD_VLLM_RENDER_IMAGE
+BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
 endif
@@ -196,11 +202,19 @@ upgrade-deps: ## Upgrade all Go dependencies to latest minor/patch versions and 
 .PHONY: vulncheck
 vulncheck: image-build-builder ## Run govulncheck for known vulnerabilities
 	@printf "\033[33;1m==== Running govulncheck ====\033[0m\n"
-	$(BUILDER_RUN) 'go install golang.org/x/vuln/cmd/govulncheck@v1.3.0 && govulncheck ./...'
+	$(BUILDER_RUN) 'govulncheck ./...'
+
+.PHONY: check-latest-tags
+check-latest-tags: ## Check ':latest' image tags in YAML (warn-only; use check-latest-tags-strict to fail)
+	@./scripts/check-latest-tags.sh --warn
+
+.PHONY: check-latest-tags-strict
+check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails on any violation)
+	@./scripts/check-latest-tags.sh
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck
+presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags
 
 .PHONY: git-branch-check
 git-branch-check:
@@ -280,19 +294,33 @@ test-integration: image-build-builder ## Run integration tests (requires KUBECON
 test-integration-hermetic: image-build-builder ## Run hermetic integration tests (envtest, no cluster required)
 	@mkdir -p $(COVERAGE_DIR)
 	@printf "\033[33;1m==== Running Hermetic Integration Tests ====\033[0m\n"
-	$(BUILDER_RUN) 'CGO_ENABLED=1 KUBEBUILDER_ASSETS="$$(setup-envtest use $$ENVTEST_K8S_VERSION --bin-dir $$ENVTEST_ASSETS_DIR -p path)" go test -v -race -coverprofile=$(COVERAGE_DIR)/integration-hermetic.out -covermode=atomic ./test/integration/...'
+	$(BUILDER_RUN) 'CGO_ENABLED=1 KUBEBUILDER_ASSETS="$$(setup-envtest use $$ENVTEST_K8S_VERSION --bin-dir $$ENVTEST_ASSETS_DIR -p path)" go test -v -race $(if $(PATTERN),-run "$(PATTERN)",) -coverprofile=$(COVERAGE_DIR)/integration-hermetic.out -covermode=atomic ./test/integration/...'
 	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/integration-hermetic.out | tail -1'
 
-.PHONY: test-e2e
-test-e2e: image-build-builder image-build image-pull ## Run end-to-end tests against a new kind cluster
+.PHONY: test-e2e-gaie-run
+test-e2e-gaie-run: image-pull ## Ensure images are present, then run GAIE e2e tests
 	@printf "\033[33;1m==== Running GAIE End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		-e EPP_IMAGE=$(GAIE_E2E_IMAGE) \
 		-e USE_KIND=true \
 		$(BUILDER_IMAGE) ./hack/test-e2e.sh
+
+.PHONY: test-e2e-gaie
+test-e2e-gaie: image-build-builder image-build ## Build images and run GAIE e2e tests
+	$(MAKE) test-e2e-gaie-run
+
+.PHONY: test-e2e-scheduler-run
+test-e2e-scheduler-run: image-pull ## Ensure images are present, then run scheduler e2e tests
 	@printf "\033[33;1m==== Running End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		$(BUILDER_IMAGE) ./test/scripts/run_e2e.sh
+
+.PHONY: test-e2e-scheduler
+test-e2e-scheduler: image-build-builder image-build ## Build images and run scheduler e2e tests
+	$(MAKE) test-e2e-scheduler-run
+
+.PHONY: test-e2e
+test-e2e: test-e2e-gaie test-e2e-scheduler ## Run all end-to-end tests sequentially
 
 
 .PHONY: bench-tokenizer
@@ -307,23 +335,28 @@ post-deploy-test: ## Run post deployment tests
 	@echo "Success!"
 	@echo "Post-deployment tests passed."
 
+.PHONY: verify-manifests
+verify-manifests: kubectl-validate ## Validate deployment manifests.
+	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
+
 ##@ Helm
 
 .PHONY: verify-helm-charts
 verify-helm-charts: helm-install kubectl-validate ## Render and validate Helm charts.
 	HELM="$(HELM)" KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-helm.sh $(MODE)
 
-.PHONY: verify-manifests
-verify-manifests: kubectl-validate ## Validate deployment manifests.
-	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
+.PHONY: helm-push
+helm-push: yq helm-install ## Package and push a specified Helm chart. Usage: make helm-push CHART=<chart_name>
+	@if [ -z "$(CHART)" ]; then echo "Error: CHART variable is required (e.g. CHART=llm-d-router-standalone)"; exit 1; fi
+	CHART=$(CHART) EXTRA_TAG="$(EXTRA_TAG)" CHART_SUFFIX="$(CHART_SUFFIX)" EPP_RELEASE_IMAGE_REPOSITORY="$(EPP_RELEASE_IMAGE_REPOSITORY)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 
-.PHONY: inferencepool-helm-chart-push
-inferencepool-helm-chart-push: yq helm-install ## Package and push the InferencePool Helm chart.
-	CHART=inferencepool EXTRA_TAG="$(EXTRA_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
+.PHONY: helm-push-gateway
+helm-push-gateway: ## Package and push the llm-d-router-gateway Helm chart.
+	$(MAKE) helm-push CHART=llm-d-router-gateway
 
-.PHONY: standalone-helm-chart-push
-standalone-helm-chart-push: yq helm-install ## Package and push the standalone EPP Helm chart.
-	CHART=standalone EXTRA_TAG="$(EXTRA_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
+.PHONY: helm-push-standalone
+helm-push-standalone: ## Package and push the llm-d-router-standalone Helm chart.
+	$(MAKE) helm-push CHART=llm-d-router-standalone
 
 
 ##@ Coverage
@@ -408,6 +441,7 @@ BUILDER_STAMP = build/.builder.stamp
 
 .PHONY: image-build-builder
 image-build-builder: check-container-tool ## Build builder image if missing locally, stamp missing, or Dockerfile.builder newer than stamp
+	@mkdir -p $(GO_MOD_CACHE_VOL) $(GO_BUILD_CACHE_VOL)
 	@if ! $(CONTAINER_RUNTIME) image inspect $(BUILDER_IMAGE) >/dev/null 2>&1 || \
 	    [ ! -f $(BUILDER_STAMP) ] || \
 	    [ Dockerfile.builder -nt $(BUILDER_STAMP) ]; then \
@@ -428,7 +462,7 @@ image-push-%: check-container-tool ## Push container image to registry using $(C
 .PHONY: image-pull
 image-pull: check-container-tool ## Pull all related images using $(CONTAINER_RUNTIME)
 	@printf "\033[33;1m==== Pulling Container images ====\033[0m\n"
-	./scripts/pull_images.sh
+	TARGETARCH=$(TARGETARCH) ./scripts/pull_images.sh
 
 ##@ Container Run
 
@@ -452,15 +486,13 @@ env: ## Print environment variables
 	@echo "TARGETOS=$(TARGETOS)"
 	@echo "TARGETARCH=$(TARGETARCH)"
 	@echo "CONTAINER_RUNTIME=$(CONTAINER_RUNTIME)"
-	@echo "IMAGE_TAG_BASE=$(IMAGE_TAG_BASE)"
 	@echo "EPP_TAG=$(EPP_TAG)"
 	@echo "EPP_IMAGE=$(EPP_IMAGE)"
 	@echo "SIDECAR_TAG=$(SIDECAR_TAG)"
 	@echo "SIDECAR_IMAGE=$(SIDECAR_IMAGE)"
 	@echo "VLLM_SIMULATOR_TAG=$(VLLM_SIMULATOR_TAG)"
 	@echo "VLLM_IMAGE=$(VLLM_IMAGE)"
-	@echo "UDS_TOKENIZER_TAG=$(UDS_TOKENIZER_TAG)"
-	@echo "UDS_TOKENIZER_IMAGE=$(UDS_TOKENIZER_IMAGE)"
+	@echo "VLLM_RENDER_IMAGE=$(VLLM_RENDER_IMAGE)"
 	@echo "BUILDER_IMAGE=$(BUILDER_IMAGE)"
 
 .PHONY: print-namespace

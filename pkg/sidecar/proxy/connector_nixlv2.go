@@ -19,6 +19,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -28,28 +29,31 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
-func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType APIType) {
+// tokenLimitMap returns the map holding the token-limit fields: sampling_params
+// for the generate API (created if absent), or the request itself otherwise.
+// The second return value reports whether an empty sampling_params map was
+// synthesized; callers must drop it before dispatching downstream if it stays empty.
+func tokenLimitMap(req map[string]any, apiType APIType) (map[string]any, bool) {
+	if apiType != APITypeGenerate {
+		return req, false
+	}
+	if sp, ok := req[requestFieldSamplingParams].(map[string]any); ok {
+		return sp, false
+	}
+	sp := map[string]any{}
+	req[requestFieldSamplingParams] = sp
+	return sp, true
+}
+
+func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType APIType) {
 	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
 	s.logger.V(4).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
 
-	// Read request body
-	defer r.Body.Close() //nolint:errcheck
-	original, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest) // TODO: check FastAPI error code when failing to read body
-		w.Write([]byte(err.Error()))         //nolint:errcheck
-		return
-	}
-
-	// Parse completion request
-	var completionRequest map[string]any
-	if err := json.Unmarshal(original, &completionRequest); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	_, completionRequest, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -64,16 +68,16 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	uuidStr := uuid.String()
 
 	// Prefill Stage
-	tracer := telemetry.Tracer()
+	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
-	ctx, prefillSpan := tracer.Start(ctx, "llm_d.pd_proxy.prefill",
+	ctx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
 		attribute.String("llm_d.pd_proxy.prefill_target", prefillPodHostPort),
-		attribute.String("llm_d.pd_proxy.connector", "nixlv2"),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorNIXLV2),
 	)
 	prefillStart := time.Now()
 
@@ -92,9 +96,10 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 		val     any
 		present bool
 	}
+	tokenMap, createdSamplingParams := tokenLimitMap(completionRequest, apiType)
 	var savedTokenValues [2]savedField
 	for i, field := range tokenLimitFields {
-		if v, ok := completionRequest[field]; ok {
+		if v, ok := tokenMap[field]; ok {
 			savedTokenValues[i] = savedField{field: field, val: v, present: true}
 		} else {
 			savedTokenValues[i] = savedField{field: field}
@@ -114,7 +119,7 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	delete(completionRequest, requestFieldStreamOptions)
 
 	for _, field := range tokenLimitFields {
-		completionRequest[field] = 1
+		tokenMap[field] = 1
 	}
 
 	pbody, err := json.Marshal(completionRequest)
@@ -138,8 +143,41 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	// 2. Forward request to prefiller
 	s.logger.V(4).Info("sending prefill request", "to", prefillPodHostPort)
 	s.logger.V(5).Info("Prefill request", "body", string(pbody))
-	pw := &bufferedResponseWriter{}
-	prefillHandler.ServeHTTP(pw, preq)
+
+	// Retry on transient 5xx (502/503/504): these failures (e.g. connection
+	// reset → 502) are common when the prefill pod's accept queue overflows
+	// under load. Retrying the same host avoids expensive local prefill on
+	// decode. Non-transient errors (500/501) fail immediately.
+	var pw *bufferedResponseWriter
+retryLoop:
+	for attempt := 0; ; attempt++ {
+		pw = &bufferedResponseWriter{}
+		preq.Body = io.NopCloser(bytes.NewReader(pbody))
+		preq.ContentLength = int64(len(pbody))
+		prefillHandler.ServeHTTP(pw, preq)
+
+		if !isHTTPError(pw.statusCode) {
+			break
+		}
+		if !isRetryableStatus(pw.statusCode) {
+			break
+		}
+		if attempt >= s.config.PrefillMaxRetries {
+			break
+		}
+
+		s.logger.Info("retrying prefill request",
+			"attempt", attempt+1,
+			"target", prefillPodHostPort,
+			"request_id", uuidStr,
+			"previous_code", pw.statusCode)
+
+		select {
+		case <-time.After(s.config.PrefillRetryBackoff):
+		case <-preq.Context().Done():
+			break retryLoop
+		}
+	}
 
 	prefillDuration := time.Since(prefillStart)
 	prefillSpan.SetAttributes(
@@ -148,25 +186,20 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	)
 
 	if isHTTPError(pw.statusCode) {
-		s.logger.Error(err, "request failed", "code", pw.statusCode, "body", pw.buffer.String())
+		s.logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
+			"request_id", uuidStr,
+			"body", pw.buffer.String())
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		prefillSpan.End()
 
-		if shouldFallbackToDecode(pw) {
-			s.logger.Info("fallback to decode", "request_id", uuidStr)
-			r.Body = io.NopCloser(bytes.NewReader(original))
-			s.decoderProxy.ServeHTTP(w, r)
-		} else {
-			for key, values := range pw.Header() {
-				for _, v := range values {
-					w.Header().Add(key, v)
-				}
+		for key, values := range pw.Header() {
+			for _, v := range values {
+				w.Header().Add(key, v)
 			}
-			w.WriteHeader(pw.statusCode)
-			_, err := w.Write(pw.bodyBytes())
-			if err != nil {
-				s.logger.Error(err, "failed to send error response to client")
-			}
+		}
+		w.WriteHeader(pw.statusCode)
+		if _, writeErr := w.Write(pw.bodyBytes()); writeErr != nil {
+			s.logger.Error(writeErr, "failed to send error response to client")
 		}
 		return
 	}
@@ -187,19 +220,25 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	if !ok {
 		s.logger.Info("warning: missing 'kv_transfer_params' field in prefiller response")
 	}
+	pCachedTokens, hasPCachedTokens := extractCachedTokens(prefillerResponse)
+	if !hasPCachedTokens {
+		// vLLM returns prompt_tokens_details as null when cached_tokens is 0,
+		// so treat a missing prefiller cached_tokens value as zero.
+		pCachedTokens = 0
+	}
 
 	s.logger.V(5).Info("received prefiller response", requestFieldKVTransferParams, pKVTransferParams)
 
 	// Decode Stage
 
-	ctx, decodeSpan := tracer.Start(ctx, "llm_d.pd_proxy.decode",
+	ctx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
 
 	decodeSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
-		attribute.String("llm_d.pd_proxy.connector", "nixlv2"),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorNIXLV2),
 	)
 	decodeStart := time.Now()
 
@@ -223,10 +262,15 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 
 	for i := range savedTokenValues[:len(tokenLimitFields)] {
 		sv := &savedTokenValues[i]
-		delete(completionRequest, sv.field)
+		delete(tokenMap, sv.field)
 		if sv.present {
-			completionRequest[sv.field] = sv.val
+			tokenMap[sv.field] = sv.val
 		}
+	}
+	// Drop the sampling_params map synthesized for prefill capping if it ended up
+	// empty, so the decode request matches the caller's original (which omitted it).
+	if createdSamplingParams && len(tokenMap) == 0 {
+		delete(completionRequest, requestFieldSamplingParams)
 	}
 
 	completionRequest[requestFieldKVTransferParams] = pKVTransferParams
@@ -244,13 +288,19 @@ func (s *Server) runNIXLProtocolV2(w http.ResponseWriter, r *http.Request, prefi
 	// 2. Forward to local decoder.
 
 	s.logger.V(5).Info("sending request to decoder", "body", string(dbody))
-	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(w, dreq)
+	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens)
+	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
 	decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
 
 	if !dataParallelUsed {
 		s.logger.V(4).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
 		decodeSpan.SetAttributes(attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host))
-		s.decoderProxy.ServeHTTP(w, dreq)
+		s.dispatchDecode(decodeWriter, dreq, completionRequest)
+	}
+	if err := finalizeDecodeWriter(); err != nil {
+		s.logger.Error(err, "failed to flush cached token response writer")
+		decodeSpan.SetStatus(codes.Error, "failed to flush cached token response writer")
+		return
 	}
 
 	decodeDuration := time.Since(decodeStart)

@@ -25,6 +25,19 @@ type Cloneable interface {
 	Clone() Cloneable
 }
 
+// DynamicAttribute wraps a getter function to allow on-demand resolution of attributes.
+type DynamicAttribute struct {
+	Get func() Cloneable
+}
+
+// Clone implements Cloneable. It copies the function pointer.
+func (d *DynamicAttribute) Clone() Cloneable {
+	if d == nil {
+		return nil
+	}
+	return &DynamicAttribute{Get: d.Get}
+}
+
 // AttributeMap is used to store flexible metadata or traits
 // across different aspects of an inference server.
 // Stored values must be Cloneable.
@@ -52,12 +65,21 @@ func (a *Attributes) Put(key string, value Cloneable) {
 	}
 }
 
-// Get retrieves an attribute by key, returning a cloned copy.
+// Get retrieves an attribute by key, returning a cloned copy (or resolving it dynamically).
 func (a *Attributes) Get(key string) (Cloneable, bool) {
 	val, ok := a.data.Load(key)
 	if !ok {
 		return nil, false
 	}
+
+	if dynamic, ok := val.(*DynamicAttribute); ok {
+		realVal := dynamic.Get()
+		if realVal == nil {
+			return nil, false
+		}
+		return realVal.Clone(), true
+	}
+
 	if cloneable, ok := val.(Cloneable); ok {
 		return cloneable.Clone(), true
 	}
@@ -88,4 +110,22 @@ func (a *Attributes) Clone() AttributeMap {
 		return true
 	})
 	return clone
+}
+
+// ReadAttribute retrieves attribute with the given key from AttributeMap and asserts it to type T.
+// Second return value is 'false' if the key is not found or the type assertion fails.
+func ReadAttribute[T Cloneable](attributeMap AttributeMap, key string) (T, bool) {
+	var zero T
+
+	raw, ok := attributeMap.Get(key)
+	if !ok {
+		return zero, false
+	}
+
+	val, ok := raw.(T)
+	if !ok {
+		return zero, false
+	}
+
+	return val, true
 }

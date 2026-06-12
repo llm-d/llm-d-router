@@ -23,17 +23,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/http"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
 func TestDatasource(t *testing.T) {
 	_, err := http.NewHTTPDataSource("invalid", "/metrics", true, MetricsDataSourceType,
-		"metrics-data-source", parseMetrics, PrometheusMetricType)
+		"metrics-data-source", parseMetrics)
 	assert.NotNil(t, err, "expected to fail with invalid scheme")
 
 	source, err := http.NewHTTPDataSource("https", "/metrics", true, MetricsDataSourceType,
-		"metrics-data-source", parseMetrics, PrometheusMetricType)
+		"metrics-data-source", parseMetrics)
 	assert.Nil(t, err, "failed to create HTTP datasource")
 
 	dsType := source.TypedName().Type

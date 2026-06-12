@@ -47,7 +47,7 @@ const (
 	// pool and incur higher overheads for every GET (e.g., socket initiation, certificate
 	// exchange, connections in timed wait state, etc.).
 	maxIdleConnections = 5000
-	maxIdleTime        = 10 * time.Second // once a endpoint goes down, allow closing.
+	maxIdleTime        = 10 * time.Second // once an endpoint goes down, allow closing.
 	timeout            = 10 * time.Second // mostly guard against unresponsive endpoints.
 	// allow some grace when connections are not made idle immediately (e.g., parsing
 	// and updating might take some time). This allows maintaining up to two idle connections
@@ -61,12 +61,6 @@ var (
 		MaxIdleConnsPerHost: maxIdleConnsPerHost,
 		// TODO: set additional timeouts, transport options, etc.
 	}
-	defaultClient = &client{
-		Client: http.Client{
-			Timeout:   timeout,
-			Transport: baseTransport,
-		},
-	}
 )
 
 type client struct {
@@ -79,7 +73,7 @@ func (cl *client) Get(ctx context.Context, target *url.URL, ep Addressable,
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
-	resp, err := defaultClient.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch data from %s: %w", ep.GetNamespacedName(), err)
 	}

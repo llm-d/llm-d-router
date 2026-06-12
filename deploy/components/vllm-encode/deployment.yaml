@@ -17,6 +17,7 @@ spec:
         llm-d.ai/component: encode
         llm-d.ai/role: encode
     spec:
+      initContainers: []
       containers:
       - name: vllm
         # VLLM_IMAGE can be a simulator (e.g. llm-d-inference-sim) or a real
@@ -97,3 +98,4 @@ spec:
               fieldPath: metadata.namespace
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
+      volumes: []

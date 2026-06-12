@@ -38,41 +38,42 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	metricsource "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
+	sourcehttp "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
+	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
-// pipeline wraps a PollingDataSource and an Extractor, calling both in sequence.
-// This replicates what the Collector does at runtime, allowing tests to exercise
-// the full fetch→extract path without a running Collector.
+// pipeline pairs a typed HTTPDataSource with its extractor. Tests assert
+// against the dispatcher contract via Poll (which fans extract errors out
+// through DataLayerExtractErrorsTotal, not the return value), and against
+// the extractor's error logic by reaching into source/ext directly.
 type pipeline struct {
-	source    fwkdl.PollingDataSource
-	extractor fwkdl.Extractor
+	source *sourcehttp.HTTPDataSource[sourcemetrics.PrometheusMetricMap]
+	ext    *Extractor
 }
 
-// Poll fetches raw data from the source then passes it to the extractor.
+// Poll dispatches the source: fetches data and runs every bound extractor.
+// Per the PollingDispatcher contract, per-extractor failures are recorded via
+// DataLayerExtractErrorsTotal and do NOT surface as a returned error here.
 func (p *pipeline) Poll(ctx context.Context, ep fwkdl.Endpoint) error {
-	data, err := p.source.Poll(ctx, ep)
-	if err != nil {
-		return err
-	}
-	if data == nil {
-		return nil
-	}
-	return p.extractor.Extract(ctx, data, ep)
+	return p.source.Dispatch(ctx, ep)
 }
 
-// buildSource creates a MetricsDataSource pointing at the given server URL.
-func buildSource(t *testing.T, serverURL string) fwkdl.PollingDataSource {
+// buildSource creates a typed HTTPDataSource[PrometheusMetricMap] pointing at
+// the given server URL.
+func buildSource(t *testing.T, serverURL string) *sourcehttp.HTTPDataSource[sourcemetrics.PrometheusMetricMap] {
 	t.Helper()
 
 	parsedURL, err := url.Parse(serverURL)
 	require.NoError(t, err, "failed to parse server URL")
 
-	source, err := metricsource.NewHTTPMetricsDataSource(parsedURL.Scheme, parsedURL.Path, "metrics-data-source")
+	source, err := sourcemetrics.NewHTTPMetricsDataSource(parsedURL.Scheme, parsedURL.Path, "metrics-data-source")
 	require.NoError(t, err, "failed to create metrics data source")
 	return source
 }
@@ -94,7 +95,10 @@ func buildPipeline(t *testing.T, serverURL string, params *modelServerExtractorP
 	if err != nil {
 		return nil, err
 	}
-	return &pipeline{source: source, extractor: ext}, nil
+	if err := source.AppendExtractor(ext); err != nil {
+		return nil, err
+	}
+	return &pipeline{source: source, ext: ext}, nil
 }
 
 // newEndpointAt creates a fwkdl.Endpoint with the given host (host:port) and optional labels.
@@ -218,30 +222,19 @@ func TestMetricsExtractionLoRADisabledViaConfig(t *testing.T) {
 }
 
 // TestMetricsExtractionMissingMetricFamilyReturnsError verifies the error-path behavior:
-// when the server does not serve a metric that the extractor is configured to collect,
-// Poll returns an error whose message names the missing metric family.
+// when the server does not serve a required metric that the extractor is configured to
+// collect, Poll returns an error whose message names the missing metric family.
+//
+// LoRA is excluded because vLLM only emits vllm:lora_requests_info once an adapter has
+// been loaded, so the absent family is a legitimate "no adapters" signal rather than
+// an error (#926). The LoRA-tolerance case is asserted by
+// TestMetricsExtractionLoRAFamilyAbsentNoError.
 func TestMetricsExtractionMissingMetricFamilyReturnsError(t *testing.T) {
 	tests := []struct {
-		name                   string
-		served                 []MetricMock
-		wantErrContain         string
-		wantWaitingQueueSize   int
-		wantRunningRequestSize int
-		wantKVCachePercent     float64
+		name           string
+		served         []MetricMock
+		wantErrContain string
 	}{
-		{
-			name: "LoRA family absent - other metrics still extracted",
-			served: []MetricMock{
-				{Name: WaitingMetric, Value: 4},
-				{Name: RunningMetric, Value: 1},
-				{Name: KVCacheMetric, Value: 0.2},
-				// LoRA and CacheInfo deliberately not served
-			},
-			wantErrContain:         "lora_requests_info",
-			wantWaitingQueueSize:   4,
-			wantRunningRequestSize: 1,
-			wantKVCachePercent:     0.2,
-		},
 		{
 			name:           "all metric families absent",
 			served:         []MetricMock{},
@@ -262,18 +255,60 @@ func TestMetricsExtractionMissingMetricFamilyReturnsError(t *testing.T) {
 				DefaultEngineTypeLabelKey: "vllm",
 			})
 
-			pollErr := p.Poll(ctx, ep)
+			// Drive Poll + Extract directly so the extractor's error surfaces.
+			// The dispatcher contract intentionally swallows extractor errors
+			// into DataLayerExtractErrorsTotal; this test asserts on the error
+			// itself.
+			data, err := p.source.Poll(ctx, ep)
+			require.NoError(t, err, "fetch should succeed; we are testing the extractor's error path")
+			pollErr := p.ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
 
 			require.Error(t, pollErr, "expected error for missing metric family")
 			assert.True(t, strings.Contains(pollErr.Error(), tc.wantErrContain),
 				"error %q should contain %q", pollErr.Error(), tc.wantErrContain)
-
-			m := ep.GetMetrics()
-			assert.Equal(t, tc.wantWaitingQueueSize, m.WaitingQueueSize, "WaitingQueueSize")
-			assert.Equal(t, tc.wantRunningRequestSize, m.RunningRequestsSize, "RunningRequestsSize")
-			assert.InDelta(t, tc.wantKVCachePercent, m.KVCacheUsagePercent, 0.001, "KVCacheUsagePercent")
 		})
 	}
+}
+
+// TestMetricsExtractionLoRAFamilyAbsentNoError asserts the #926 fix end-to-end:
+// when vLLM has loaded no LoRA adapters and therefore emits no
+// vllm:lora_requests_info family, Extract returns no error and still populates
+// the other (required) metrics. Before the fix the extractor would return an
+// "lora_requests_info not found" error and the EPP would increment
+// DataLayerExtractErrorsTotal on every poll of any vanilla deployment.
+func TestMetricsExtractionLoRAFamilyAbsentNoError(t *testing.T) {
+	srv := createMockServer([]MetricMock{
+		{Name: WaitingMetric, Value: 4},
+		{Name: RunningMetric, Value: 1},
+		{Name: KVCacheMetric, Value: 0.2},
+		{
+			Name:  CacheConfigMetric,
+			Value: 1,
+			Labels: map[string]string{
+				CacheConfigBlockSizeInfoMetricName: "16",
+				CacheConfigNumGPUBlocksMetricName:  "512",
+			},
+		},
+	})
+	defer srv.Close()
+
+	p, err := buildPipeline(t, srv.URL, nil)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+	})
+
+	data, err := p.source.Poll(ctx, ep)
+	require.NoError(t, err)
+	require.NoError(t, p.ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}),
+		"missing optional LoRA family must not be an extraction error")
+
+	m := ep.GetMetrics()
+	assert.Equal(t, 4, m.WaitingQueueSize, "WaitingQueueSize")
+	assert.Equal(t, 1, m.RunningRequestsSize, "RunningRequestsSize")
+	assert.InDelta(t, 0.2, m.KVCacheUsagePercent, 0.001, "KVCacheUsagePercent")
 }
 
 // TestMetricsExtractionDisabledSpecNoError verifies that when all metric specs are
@@ -306,6 +341,89 @@ func TestMetricsExtractionDisabledSpecNoError(t *testing.T) {
 	assert.NoError(t, p.Poll(ctx, ep))
 }
 
+func TestMetricsExtractionCustomScalarFromConfig(t *testing.T) {
+	const attributeKey = "custom.queue_depth"
+
+	srv := createMockServer([]MetricMock{
+		{
+			Name:  "custom_queue_depth",
+			Value: 42.5,
+			Labels: map[string]string{
+				"tier": "gold",
+			},
+		},
+	})
+	defer srv.Close()
+
+	params := &modelServerExtractorParams{
+		EngineConfigs: []engineConfigParams{
+			{
+				Name: "vllm",
+				CustomMetrics: []customMetricConfigParams{
+					{
+						AttributeKey: attributeKey,
+						MetricSpec:   "custom_queue_depth{tier=gold}",
+					},
+				},
+			},
+		},
+	}
+
+	p, err := buildPipeline(t, srv.URL, params)
+	require.NoError(t, err)
+
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+	})
+
+	require.NoError(t, p.Poll(context.Background(), ep))
+
+	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attributeKey)
+	require.True(t, ok, "custom scalar metric should be stored as an endpoint attribute")
+	assert.InDelta(t, 42.5, float64(got), 0.001)
+	assert.Zero(t, ep.GetMetrics().WaitingQueueSize)
+	assert.Zero(t, ep.GetMetrics().RunningRequestsSize)
+	assert.Zero(t, ep.GetMetrics().KVCacheUsagePercent)
+}
+
+func TestMetricsExtractionCustomCounterFromConfig(t *testing.T) {
+	const attributeKey = "custom.total_requests"
+
+	ext := buildExtractor(t, &modelServerExtractorParams{
+		EngineConfigs: []engineConfigParams{
+			{
+				Name: "vllm",
+				CustomMetrics: []customMetricConfigParams{
+					{
+						AttributeKey: attributeKey,
+						MetricSpec:   "custom_total_requests",
+					},
+				},
+			},
+		},
+	})
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		Labels: map[string]string{DefaultEngineTypeLabelKey: "vllm"},
+	}, nil)
+	err := ext.Extract(context.Background(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+		Endpoint: ep,
+		Payload: sourcemetrics.PrometheusMetricMap{
+			"custom_total_requests": {
+				Type: dto.MetricType_COUNTER.Enum(),
+				Metric: []*dto.Metric{
+					{Counter: &dto.Counter{Value: ptr.To(12.0)}},
+				},
+			},
+		},
+	})
+
+	require.NoError(t, err)
+	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attributeKey)
+	require.True(t, ok, "custom counter should be stored as an endpoint attribute")
+	assert.InDelta(t, 12.0, float64(got), 0.001)
+}
+
 // TestMetricsExtractionServerError verifies that an HTTP error from the server propagates as a Poll error.
 func TestMetricsExtractionServerError(t *testing.T) {
 	srv := createMockServer([]MetricMock{})
@@ -336,7 +454,10 @@ func TestMetricsExtractionJoinedErrors(t *testing.T) {
 		DefaultEngineTypeLabelKey: "vllm",
 	})
 
-	pollErr := p.Poll(ctx, ep)
+	// Drive Poll + Extract directly so the joined extractor errors surface.
+	data, err := p.source.Poll(ctx, ep)
+	require.NoError(t, err)
+	pollErr := p.ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
 	require.Error(t, pollErr)
 
 	errMsg := pollErr.Error()
@@ -365,7 +486,11 @@ func TestMetricsExtractionMultipleExtractors(t *testing.T) {
 	})
 	defer srv.Close()
 
-	source := buildSource(t, srv.URL)
+	// Each extractor gets its own source so Dispatch fires only its own extractor;
+	// they share the same backing URL but isolated dispatchers preserve the
+	// per-extractor test intent (no cross-firing).
+	sourceA := buildSource(t, srv.URL)
+	sourceB := buildSource(t, srv.URL)
 
 	// Extractor A: queue + running only
 	extA := buildExtractor(t, &modelServerExtractorParams{
@@ -401,8 +526,10 @@ func TestMetricsExtractionMultipleExtractors(t *testing.T) {
 	epA := newEndpointAt(mustHost(t, srv.URL), vllmLabels)
 	epB := newEndpointAt(mustHost(t, srv.URL), vllmLabels)
 
-	pipeA := &pipeline{source: source, extractor: extA}
-	pipeB := &pipeline{source: source, extractor: extB}
+	require.NoError(t, sourceA.AppendExtractor(extA))
+	require.NoError(t, sourceB.AppendExtractor(extB))
+	pipeA := &pipeline{source: sourceA}
+	pipeB := &pipeline{source: sourceB}
 
 	require.NoError(t, pipeA.Poll(ctx, epA))
 	require.NoError(t, pipeB.Poll(ctx, epB))

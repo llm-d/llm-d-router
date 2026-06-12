@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 func TestFactory(t *testing.T) {
@@ -37,10 +37,10 @@ func TestFactory(t *testing.T) {
 		},
 		Address: "1.2.3.4:5678",
 	}
-	endpoint1 := runtime.NewEndpoint(context.Background(), pod1, nil)
+	endpoint1 := runtime.NewEndpoint(context.Background(), pod1)
 	assert.NotNil(t, endpoint1, "failed to create endpoint")
 
-	dup := runtime.NewEndpoint(context.Background(), pod1, nil)
+	dup := runtime.NewEndpoint(context.Background(), pod1)
 	assert.Nil(t, dup, "expected to fail to create a duplicate collector")
 
 	pod2 := &fwkdl.EndpointMetadata{
@@ -50,7 +50,7 @@ func TestFactory(t *testing.T) {
 		},
 		Address: "1.2.3.4:5679",
 	}
-	endpoint2 := runtime.NewEndpoint(context.Background(), pod2, nil)
+	endpoint2 := runtime.NewEndpoint(context.Background(), pod2)
 	assert.NotNil(t, endpoint2, "failed to create endpoint")
 
 	runtime.ReleaseEndpoint(endpoint1)

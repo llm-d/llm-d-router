@@ -18,15 +18,19 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
+
+const eventStreamContentType = "text/event-stream"
 
 var _ = Describe("NIXL Connector (v2)", func() {
 
@@ -36,8 +40,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		testInfo = sidecarConnectionTestSetup(KVConnectorNIXLV2)
 	})
 
-	It("should successfully send request to 1. prefill 2. decode with the correct fields", func() {
-		By("starting the proxy")
+	startProxy := func() string {
 		go func() {
 			defer GinkgoRecover()
 
@@ -49,19 +52,73 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		}()
 
 		<-testInfo.proxy.readyCh
-		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
+		DeferCleanup(func() {
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		})
 
-		By("sending a /v1/chat/completions request with prefill header")
-		//nolint:goconst
+		return "http://" + testInfo.proxy.addr.String()
+	}
+
+	sendChatCompletionsRequest := func(proxyBaseAddr string) map[string]any {
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		responseBody, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+
+		var response map[string]any
+		Expect(json.Unmarshal(responseBody, &response)).To(Succeed())
+		return response
+	}
+
+	sendStreamingChatCompletionsRequest := func(proxyBaseAddr string) string {
 		body := `{
 				"model": "Qwen/Qwen2-0.5B",
 				"messages": [
 				  {"role": "user", "content": "Hello"}
 				],
-				"max_tokens": 50
+				"max_tokens": 50,
+				"stream": true,
+				"stream_options": {"include_usage": true}
 			}`
 
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		responseBody, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+		Expect(rp.Header.Get("Content-Type")).To(ContainSubstring(eventStreamContentType))
+		return string(responseBody)
+	}
+
+	cachedTokensFromResponse := func(response map[string]any) float64 {
+		usage, ok := response["usage"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		details, ok := usage["prompt_tokens_details"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		cachedTokens, ok := details["cached_tokens"].(float64)
+		Expect(ok).To(BeTrue())
+		return cachedTokens
+	}
+
+	It("should successfully send request to 1. prefill 2. decode with the correct fields", func() {
+		proxyBaseAddr := startProxy()
+
+		By("sending a /v1/chat/completions request with prefill header")
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -100,8 +157,164 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
 
-		testInfo.cancelFn()
-		<-testInfo.stoppedCh
+		responseBody, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		var response map[string]any
+		Expect(json.Unmarshal(responseBody, &response)).To(Succeed())
+		usage := response["usage"].(map[string]any)
+		details := usage["prompt_tokens_details"].(map[string]any)
+		Expect(details["cached_tokens"]).To(BeNumerically("==", 7))
+
+	})
+
+	It("should add prefiller cached tokens when decoder usage details omit cached_tokens", func() {
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{}}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 7))
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+	})
+
+	It("should create prompt token details when decoder usage omits them", func() {
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 7))
+	})
+
+	It("should return zero cached tokens when prefiller does not report cached tokens", func() {
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{}}}`
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 0))
+	})
+
+	It("should overwrite decoder cached tokens when prefiller reports zero cached tokens", func() {
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":0}}}`
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 0))
+	})
+
+	It("should replace cached tokens in streamed usage chunks", func() {
+		testInfo.decodeHandler.RawResponseType = eventStreamContentType
+		testInfo.decodeHandler.RawResponse = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"completion_tokens\":1,\"total_tokens\":65,\"prompt_tokens_details\":{\"cached_tokens\":49}}}\n\ndata: [DONE]\n"
+		proxyBaseAddr := startProxy()
+
+		responseBody := sendStreamingChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(responseBody).To(ContainSubstring(`"content":"hello"`))
+		Expect(responseBody).To(ContainSubstring(`"cached_tokens":7`))
+		Expect(responseBody).ToNot(ContainSubstring(`"cached_tokens":49`))
+		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
+	})
+
+	It("should create cached token details in streamed usage chunks that omit them", func() {
+		testInfo.decodeHandler.RawResponseType = eventStreamContentType
+		testInfo.decodeHandler.RawResponse = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"completion_tokens\":1,\"total_tokens\":65}}\n\ndata: [DONE]\n"
+		proxyBaseAddr := startProxy()
+
+		responseBody := sendStreamingChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(responseBody).To(ContainSubstring(`"prompt_tokens_details":{"cached_tokens":7}`))
+		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
+	})
+
+	It("should return zero cached tokens in streamed usage when prefiller does not report cached tokens", func() {
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{}}}`
+		testInfo.decodeHandler.RawResponseType = eventStreamContentType
+		testInfo.decodeHandler.RawResponse = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"completion_tokens\":1,\"total_tokens\":65,\"prompt_tokens_details\":{\"cached_tokens\":49}}}\n\ndata: [DONE]\n"
+		proxyBaseAddr := startProxy()
+
+		responseBody := sendStreamingChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(responseBody).To(ContainSubstring(`"cached_tokens":0`))
+		Expect(responseBody).ToNot(ContainSubstring(`"cached_tokens":49`))
+		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
+	})
+
+	// Messages API tests — verify /v1/messages routes through the disaggregation
+	// handler with the same token-limit fields as chat completions.
+
+	It("should successfully send messages API request to 1. prefill 2. decode with the correct fields", func() {
+		proxyBaseAddr := startProxy()
+
+		By("sending a /v1/messages request with prefill header")
+		body := `{
+				"model": "claude-3-5-sonnet-20241022",
+				"messages": [
+				  {"role": "user", "content": "Hello"}
+				],
+				"max_tokens": 50
+			}`
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+MessagesPath, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		responseBody, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+
+		Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
+		prq1 := testInfo.prefillHandler.CompletionRequests[0]
+
+		Expect(prq1).To(HaveKey(requestFieldKVTransferParams))
+		kvTransferParams, ok := prq1[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+
+		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
+
+		Expect(prq1).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 1)))
+		Expect(prq1).To(HaveKeyWithValue("stream", false))
+
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
+	})
+
+	It("should pass through messages API request when no prefill header is set", func() {
+		proxyBaseAddr := startProxy()
+
+		By("sending a /v1/messages request without prefill header")
+		body := `{
+				"model": "claude-3-5-sonnet-20241022",
+				"messages": [
+				  {"role": "user", "content": "Hello"}
+				],
+				"max_tokens": 50
+			}`
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+MessagesPath, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		responseBody, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 	})
 
 	// Responses API tests — exercise the same NIXL v2 connector with
@@ -316,6 +529,114 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		<-testInfo.stoppedCh
 	})
 
+	DescribeTable("should retry prefill on retryable status and succeed",
+		func(statusCode int) {
+			testInfo.prefillHandler.FailForFirstN = 1
+			testInfo.prefillHandler.FailStatusCode = statusCode
+			testInfo.proxy.config.PrefillMaxRetries = 2
+			testInfo.proxy.config.PrefillRetryBackoff = time.Millisecond
+
+			proxyBaseAddr := startProxy()
+
+			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+			Expect(err).ToNot(HaveOccurred())
+			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+			rp, err := http.DefaultClient.Do(req)
+			Expect(err).ToNot(HaveOccurred())
+			defer rp.Body.Close()
+			Expect(rp.StatusCode).To(Equal(http.StatusOK))
+
+			By("verifying prefill was called twice (1 fail + 1 success)")
+			Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 2))
+
+			By("verifying decode received kv_transfer_params from the successful prefill")
+			Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+			decodeReq := testInfo.decodeHandler.CompletionRequests[0]
+			Expect(decodeReq).To(HaveKey(requestFieldKVTransferParams))
+		},
+		Entry("502 Bad Gateway", http.StatusBadGateway),
+		Entry("503 Service Unavailable", http.StatusServiceUnavailable),
+		Entry("504 Gateway Timeout", http.StatusGatewayTimeout),
+	)
+
+	It("should return error to client when retries are disabled and prefill fails", func() {
+		testInfo.prefillHandler.FailForFirstN = 1
+		testInfo.prefillHandler.FailStatusCode = http.StatusBadGateway
+		testInfo.proxy.config.PrefillMaxRetries = 0
+
+		proxyBaseAddr := startProxy()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		By("verifying the error is returned to the client")
+		Expect(rp.StatusCode).To(Equal(http.StatusBadGateway))
+
+		By("verifying prefill was called only once (no retry)")
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+
+		By("verifying decode was NOT called")
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+	})
+
+	It("should return error to client after exhausting all retries", func() {
+		testInfo.prefillHandler.FailForFirstN = 100
+		testInfo.prefillHandler.FailStatusCode = http.StatusBadGateway
+		testInfo.proxy.config.PrefillMaxRetries = 2
+		testInfo.proxy.config.PrefillRetryBackoff = time.Millisecond
+
+		proxyBaseAddr := startProxy()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		By("verifying the error is returned to the client")
+		Expect(rp.StatusCode).To(Equal(http.StatusBadGateway))
+
+		By("verifying prefill was called 3 times (1 initial + 2 retries)")
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 3))
+
+		By("verifying decode was NOT called")
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+	})
+
+	It("should not retry on non-retryable 500 and return error to client", func() {
+		testInfo.prefillHandler.FailForFirstN = 1
+		testInfo.prefillHandler.FailStatusCode = http.StatusInternalServerError
+		testInfo.proxy.config.PrefillMaxRetries = 2
+		testInfo.proxy.config.PrefillRetryBackoff = time.Millisecond
+
+		proxyBaseAddr := startProxy()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		By("verifying the error is returned to the client")
+		Expect(rp.StatusCode).To(Equal(http.StatusInternalServerError))
+
+		By("verifying prefill was called only once (no retry despite PrefillMaxRetries=2)")
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+
+		By("verifying decode was NOT called")
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+	})
+
 	It("should preserve stream settings in responses API request", func() {
 		By("starting the proxy")
 		go func() {
@@ -363,5 +684,131 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
+	})
+
+	// Generate API tests — exercise the same NIXL v2 connector with
+	// /inference/v1/generate, whose token limits live under sampling_params.
+
+	startProxyAndSendGenerate := func(body string, withPrefillHeader bool) {
+		go func() {
+			defer GinkgoRecover()
+
+			testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+			err := testInfo.proxy.Start(testInfo.ctx)
+			Expect(err).ToNot(HaveOccurred())
+
+			testInfo.stoppedCh <- struct{}{}
+		}()
+
+		<-testInfo.proxy.readyCh
+		DeferCleanup(func() {
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		})
+
+		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+GeneratePath, strings.NewReader(body))
+		Expect(err).ToNot(HaveOccurred())
+		if withPrefillHeader {
+			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		}
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		if rp.StatusCode != 200 {
+			bp, readErr := io.ReadAll(rp.Body)
+			Expect(readErr).ToNot(HaveOccurred())
+			Fail(string(bp))
+		}
+	}
+
+	samplingParamsOf := func(req map[string]any) map[string]any {
+		sp, ok := req[requestFieldSamplingParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		return sp
+	}
+
+	It("should successfully send generate API request to 1. prefill 2. decode with the correct fields", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4],
+				"sampling_params": {"max_tokens": 50}
+			}`, true)
+
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
+		prq1 := testInfo.prefillHandler.CompletionRequests[0]
+
+		kvTransferParams, ok := prq1[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
+
+		Expect(samplingParamsOf(prq1)).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(samplingParamsOf(prq1)).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+		Expect(prq1).To(HaveKeyWithValue("stream", false))
+
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
+	})
+
+	It("should cap sampling_params token limits in prefill and restore originals in decode", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4],
+				"sampling_params": {"max_tokens": 100, "min_tokens": 5}
+			}`, true)
+
+		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+
+		decodeSP := samplingParamsOf(testInfo.decodeHandler.CompletionRequests[0])
+		Expect(decodeSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
+		Expect(decodeSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
+	})
+
+	It("should cap prefill and drop the caps in decode when sampling_params omits them", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4],
+				"sampling_params": {"temperature": 0.7}
+			}`, true)
+
+		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+
+		decodeSP := samplingParamsOf(testInfo.decodeHandler.CompletionRequests[0])
+		Expect(decodeSP).ToNot(HaveKey(requestFieldMaxTokens))
+		Expect(decodeSP).ToNot(HaveKey(requestFieldMinTokens))
+		Expect(decodeSP).To(HaveKeyWithValue("temperature", BeNumerically("==", 0.7)))
+	})
+
+	It("should cap prefill and drop synthesized sampling_params in decode when the request omits it", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4]
+			}`, true)
+
+		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+
+		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
+		Expect(decodeReq).ToNot(HaveKey(requestFieldSamplingParams))
+	})
+
+	It("should pass through generate API request when no prefill header is set", func() {
+		startProxyAndSendGenerate(`{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4],
+				"sampling_params": {"max_tokens": 50}
+			}`, false)
+
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 	})
 })

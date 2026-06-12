@@ -26,10 +26,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/mocks"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
 var (
@@ -45,17 +46,17 @@ func setupRuntimeWithExtractor(r *datalayer.Runtime, extractorName string) (*moc
 	ext := mocks.NewNotificationExtractor(extractorName)
 	cfg := &datalayer.Config{
 		Sources: []datalayer.DataSourceConfig{
-			{Plugin: src, Extractors: []fwkdl.ExtractorBase{ext}},
+			{Plugin: src, Extractors: []fwkplugin.Plugin{ext}},
 		},
 	}
-	return ext, r.Configure(cfg, false, "", logger)
+	return ext, r.Configure(cfg, logger)
 }
 
 func TestRuntimeNotificationDispatch(t *testing.T) {
 	tests := []struct {
 		name    string
 		setup   func(*datalayer.Runtime) (*mocks.NotificationExtractor, error)
-		trigger func(*testSetup) error
+		trigger func(*testing.T, *testSetup, *mocks.NotificationExtractor) error
 		verify  func(*mocks.NotificationExtractor, int) bool
 	}{
 		{
@@ -63,7 +64,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 			setup: func(r *datalayer.Runtime) (*mocks.NotificationExtractor, error) {
 				return setupRuntimeWithExtractor(r, "test-extractor-add")
 			},
-			trigger: func(s *testSetup) error {
+			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod", s.namespace)
 				return s.mgrClient.Create(s.ctx, pod)
 			},
@@ -85,7 +86,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 			setup: func(r *datalayer.Runtime) (*mocks.NotificationExtractor, error) {
 				return setupRuntimeWithExtractor(r, "test-extractor-update")
 			},
-			trigger: func(s *testSetup) error {
+			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-update", s.namespace)
 				if err := s.mgrClient.Create(s.ctx, pod); err != nil {
 					return err
@@ -110,13 +111,25 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 			setup: func(r *datalayer.Runtime) (*mocks.NotificationExtractor, error) {
 				return setupRuntimeWithExtractor(r, "test-extractor-delete")
 			},
-			trigger: func(s *testSetup) error {
+			trigger: func(t *testing.T, s *testSetup, ext *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-delete", s.namespace)
 				if err := s.mgrClient.Create(s.ctx, pod); err != nil {
 					return err
 				}
-				// Wait a bit to ensure the pod is synced before deletion
-				time.Sleep(100 * time.Millisecond)
+				// Wait for the informer to deliver the add event before deleting.
+				// GetEvents() returns a locked, immutable snapshot so iterating the
+				// local variable below is free of data races with concurrent
+				// ExtractNotification calls from the informer goroutine.
+				require.Eventually(t, func() bool {
+					snapshot := ext.GetEvents()
+					for _, e := range snapshot {
+						if e.Type == fwkdl.EventAddOrUpdate && e.Object.GetName() == pod.Name {
+							return true
+						}
+					}
+					return false
+				}, eventWaitTimeout, eventPollInterval,
+					"add event for pod %q not received before delete", pod.Name)
 				return s.mgrClient.Delete(s.ctx, pod)
 			},
 			verify: func(ext *mocks.NotificationExtractor, initialCount int) bool {
@@ -141,12 +154,12 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 				ext2 := mocks.NewNotificationExtractor("extractor-2")
 				cfg := &datalayer.Config{
 					Sources: []datalayer.DataSourceConfig{
-						{Plugin: src, Extractors: []fwkdl.ExtractorBase{ext1, ext2}},
+						{Plugin: src, Extractors: []fwkplugin.Plugin{ext1, ext2}},
 					},
 				}
-				return ext1, r.Configure(cfg, false, "", logger)
+				return ext1, r.Configure(cfg, logger)
 			},
-			trigger: func(s *testSetup) error {
+			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-multi", s.namespace)
 				return s.mgrClient.Create(s.ctx, pod)
 			},
@@ -164,12 +177,12 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 				workingExtractor := mocks.NewNotificationExtractor("working-extractor")
 				cfg := &datalayer.Config{
 					Sources: []datalayer.DataSourceConfig{
-						{Plugin: src, Extractors: []fwkdl.ExtractorBase{errExtractor, workingExtractor}},
+						{Plugin: src, Extractors: []fwkplugin.Plugin{errExtractor, workingExtractor}},
 					},
 				}
-				return workingExtractor, r.Configure(cfg, false, "", logger)
+				return workingExtractor, r.Configure(cfg, logger)
 			},
-			trigger: func(s *testSetup) error {
+			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-error", s.namespace)
 				return s.mgrClient.Create(s.ctx, pod)
 			},
@@ -193,7 +206,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 
 			initialCount := len(extractor.GetEvents())
 
-			err = tc.trigger(setup)
+			err = tc.trigger(t, setup, extractor)
 			require.NoError(t, err)
 
 			require.Eventually(t, func() bool {
@@ -216,10 +229,10 @@ func TestRuntimeNotificationWithRuntime(t *testing.T) {
 
 	cfg := &datalayer.Config{
 		Sources: []datalayer.DataSourceConfig{
-			{Plugin: src, Extractors: []fwkdl.ExtractorBase{extractor}},
+			{Plugin: src, Extractors: []fwkplugin.Plugin{extractor}},
 		},
 	}
-	require.NoError(t, r.Configure(cfg, false, "", logger))
+	require.NoError(t, r.Configure(cfg, logger))
 
 	require.NoError(t, r.Start(setup.ctx, setup.mgr))
 
@@ -243,12 +256,12 @@ func TestRuntimeNotificationDifferentGVKs(t *testing.T) {
 
 	cfg := &datalayer.Config{
 		Sources: []datalayer.DataSourceConfig{
-			{Plugin: podSrc, Extractors: []fwkdl.ExtractorBase{podExtractor}},
-			{Plugin: svcSrc, Extractors: []fwkdl.ExtractorBase{svcExtractor}},
+			{Plugin: podSrc, Extractors: []fwkplugin.Plugin{podExtractor}},
+			{Plugin: svcSrc, Extractors: []fwkplugin.Plugin{svcExtractor}},
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, false, "", logger))
+	require.NoError(t, r.Configure(cfg, logger))
 	require.NoError(t, r.Start(setup.ctx, setup.mgr))
 
 	pod := newTestPod("test-pod-gvk", setup.namespace)

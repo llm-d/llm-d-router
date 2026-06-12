@@ -14,13 +14,14 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	dl_prefix "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/metrics"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -102,29 +103,42 @@ func (l *legacyDisaggProfileHandlerParameters) toDisaggParams(logger logr.Logger
 //
 //	if parameters.deciders.prefill is set - P disaggregation will be supported
 //	if parameters.deciders.encode is set - E disaggregation will be supported
-func HandlerFactory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
+	if handle == nil {
+		return nil, errors.New("plugin handle is required")
+	}
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
+	}
 	logger := log.FromContext(handle.Context())
 
 	parameters := disaggProfileHandlerParameters{}
 	if rawParameters != nil {
-		legacy := legacyDisaggProfileHandlerParameters{}
-
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		// Capture raw bytes once so we can try each schema independently with
+		// strict decoding. The decoder passed in is one-shot, so we re-read
+		// from these bytes for the second attempt.
+		var raw json.RawMessage
+		if err := rawParameters.Decode(&raw); err != nil {
 			return nil, fmt.Errorf("failed to parse parameters of the disagg-profile-handler - %w", err)
 		}
-		if err := json.Unmarshal(rawParameters, &legacy); err != nil {
-			return nil, fmt.Errorf("failed to parse parameters of the disagg-profile-handler - %w", err)
-		}
 
-		if parameters.Profiles != (disaggProfilesParameters{}) ||
-			parameters.Deciders != (disaggDecidersParameters{}) {
-			// Make sure the legacy parameters were not used
-			if legacy != (legacyDisaggProfileHandlerParameters{}) {
-				return nil, errors.New("cannot mix deprecated flat parameters (decodeProfile, prefillProfile, encodeProfile, " +
-					"deciderPluginName, prefillDeciderPluginName, encodeDeciderPluginName) " +
-					"with nested parameters (profiles, deciders): use one format or the other")
+		// Try the new (nested) schema strictly first. If the user supplied
+		// only new-format fields, this succeeds. Per #1068, deprecated
+		// (legacy flat) fields are not in the new struct, so they would
+		// produce "unknown field" errors here — that's the signal to fall
+		// back to the legacy schema.
+		errNew := plugin.StrictDecoder(raw).Decode(&parameters)
+		if errNew != nil {
+			legacy := legacyDisaggProfileHandlerParameters{}
+			if errLegacy := plugin.StrictDecoder(raw).Decode(&legacy); errLegacy != nil {
+				// Neither schema parses cleanly: either mixed schemas or a
+				// genuinely unknown field. Surface both errors so callers can
+				// tell which they meant.
+				return nil, fmt.Errorf("failed to parse parameters of the disagg-profile-handler: "+
+					"nested schema error: %w; legacy schema error: %v "+
+					"(use one format exclusively: either nested profiles/deciders or the deprecated flat fields)",
+					errNew, errLegacy)
 			}
-		} else {
 			logger.Info("Deprecated: using flat parameter format, migrate to nested profiles/deciders format")
 			parameters = legacy.toDisaggParams(logger)
 		}
@@ -225,8 +239,13 @@ func (h *Handler) WithName(name string) *Handler {
 }
 
 // Consumes defines data types consumed by this plugin (through the PD decider).
-func (*Handler) Consumes() map[string]any {
-	return map[string]any{dl_prefix.PrefixCacheMatchInfoKey: dl_prefix.PrefixCacheMatchInfo{}}
+func (*Handler) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{
+			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedPrompt{},
+		},
+	}
 }
 
 func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeProfile string, pdDecider, encodeDecider deciderPlugin) *Handler {
@@ -243,10 +262,10 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 // Pick implements scheduling.ProfileHandler.
 // Stages run in order: decode → encode (optional) → prefill (optional).
 // Returns the next profile to execute, or an empty map when all stages are done.
-func (h *Handler) Pick(ctx context.Context, _ *scheduling.CycleState, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
+func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
-	tracer := telemetry.Tracer()
-	ctx, span := tracer.Start(ctx, "llm_d.epp.disagg.profile_handler.pick",
+	tracer := tracing.Tracer(schedplugins.TracerScope)
+	ctx, span := tracer.Start(ctx, "pick_disagg_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
@@ -311,8 +330,8 @@ func (h *Handler) Pick(ctx context.Context, _ *scheduling.CycleState, request *s
 	encodeUsed := profileResults[h.encodeProfile] != nil
 	prefillUsed := profileResults[h.prefillProfile] != nil
 
-	decision := metrics.DisaggDecisionType(encodeUsed, prefillUsed)
-	metrics.RecordDisaggDecision(request.TargetModel, decision)
+	decision := DisaggDecisionType(encodeUsed, prefillUsed)
+	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
 	span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "complete_"+decision))
 
 	return map[string]scheduling.SchedulerProfile{}
@@ -322,7 +341,6 @@ func (h *Handler) Pick(ctx context.Context, _ *scheduling.CycleState, request *s
 // Builds the final SchedulingResult from whichever stages ran successfully.
 func (h *Handler) ProcessResults(
 	_ context.Context,
-	_ *scheduling.CycleState,
 	request *scheduling.InferenceRequest,
 	profileResults map[string]*scheduling.ProfileRunResult,
 ) (*scheduling.SchedulingResult, error) {
@@ -358,8 +376,8 @@ func (h *Handler) ProcessResults(
 // PreRequest wires prefill and encode SchedulerProfile results into headers
 // so the sidecar knows which pods to contact for disaggregated work.
 func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	tracer := telemetry.Tracer()
-	_, span := tracer.Start(ctx, "llm_d.epp.prerequest.disaggregation",
+	tracer := tracing.Tracer(schedplugins.TracerScope)
+	_, span := tracer.Start(ctx, "prepare_disaggregation",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

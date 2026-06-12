@@ -28,9 +28,17 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/common/routing"
-	"github.com/llm-d/llm-d-inference-scheduler/test/sidecar/mock"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
+
+const chatCompletionsRequestBody = `{
+				"model": "Qwen/Qwen2-0.5B",
+				"messages": [
+				  {"role": "user", "content": "Hello"}
+				],
+				"max_tokens": 50
+			}`
 
 type sidecarTestInfo struct {
 	ctx            context.Context
@@ -44,6 +52,25 @@ type sidecarTestInfo struct {
 	proxy          *Server
 }
 
+// startProxy launches the proxy in a goroutine, waits for it to be ready, and
+// returns its base address. Pair with testInfo.cancelFn() / <-testInfo.stoppedCh
+// for teardown.
+func (testInfo *sidecarTestInfo) startProxy() string {
+	go func() {
+		defer GinkgoRecover()
+
+		testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+		err := testInfo.proxy.Start(testInfo.ctx)
+		Expect(err).ToNot(HaveOccurred())
+
+		testInfo.stoppedCh <- struct{}{}
+	}()
+
+	<-testInfo.proxy.readyCh
+	return "http://" + testInfo.proxy.addr.String()
+}
+
+// SGLang and Mooncake excluded: async prefill requires Eventually and bootstrap server setup.
 var connectors = []string{KVConnectorSharedStorage, KVConnectorNIXLV2}
 
 var _ = Describe("Common Connector tests", func() {

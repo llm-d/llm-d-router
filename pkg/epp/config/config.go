@@ -17,18 +17,31 @@ limitations under the License.
 package config
 
 import (
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/flowcontrol"
-	fwkflowcontrol "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/handlers"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/scheduling"
+	"fmt"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 )
 
 // Config is the configuration loaded from the text based configuration
 type Config struct {
 	SchedulerConfig    *scheduling.SchedulerConfig
-	SaturationDetector fwkflowcontrol.SaturationDetector
+	SaturationDetector fwkfc.SaturationDetector
 	DataConfig         *datalayer.Config
 	FlowControlConfig  *flowcontrol.Config
-	ParserConfig       *handlers.Config
+	ParserRegistry     *handlers.ParserRegistry
+}
+
+func (c *Config) String() string {
+	if c == nil {
+		return "<nil>"
+	}
+	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
+	// A new type definition inherits the struct fields but does not copy its methods,
+	// bypassing the Stringer check and allowing a safe reflection-based field dump.
+	type temp Config
+	return fmt.Sprintf("%+v", temp(*c))
 }

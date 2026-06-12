@@ -23,9 +23,9 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrconcurrency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 )
 
 const (
@@ -37,23 +37,26 @@ const (
 type Config struct {
 	// QueueThresholdTokens defines the maximum number of in-flight tokens used for scoring normalization.
 	// Defaults to 4194304 if unset.
-	QueueThresholdTokens int64 `json:"queueThresholdTokens"`
+	QueueThresholdTokens     int64  `json:"queueThresholdTokens"`
+	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
 }
 
 // compile-time type assertion
-var _ framework.Scorer = &TokenLoadScorer{}
+var _ fwksched.Scorer = &TokenLoadScorer{}
 
 type TokenLoadScorer struct {
-	typedName            fwkplugin.TypedName
-	queueThresholdTokens float64
+	typedName                    fwkplugin.TypedName
+	queueThresholdTokens         float64
+	inFlightLoadDataKey          fwkplugin.DataKey
+	uncachedRequestTokensDataKey fwkplugin.DataKey
 }
 
-func TokenLoadScorerFactory(name string, params json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func TokenLoadScorerFactory(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	cfg := Config{
 		QueueThresholdTokens: tokenQueueThresholdDefault,
 	}
-	if len(params) > 0 {
-		if err := json.Unmarshal(params, &cfg); err != nil {
+	if params != nil {
+		if err := params.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal token load scorer config: %w", err)
 		}
 	}
@@ -62,8 +65,10 @@ func TokenLoadScorerFactory(name string, params json.RawMessage, _ fwkplugin.Han
 	}
 
 	return &TokenLoadScorer{
-		typedName:            fwkplugin.TypedName{Type: TokenLoadScorerType, Name: name},
-		queueThresholdTokens: float64(cfg.QueueThresholdTokens),
+		typedName:                    fwkplugin.TypedName{Type: TokenLoadScorerType, Name: name},
+		queueThresholdTokens:         float64(cfg.QueueThresholdTokens),
+		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
+		uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
 	}, nil
 }
 
@@ -71,29 +76,41 @@ func (s *TokenLoadScorer) TypedName() fwkplugin.TypedName {
 	return s.typedName
 }
 
-func (s *TokenLoadScorer) Category() framework.ScorerCategory {
-	return framework.Distribution
+func (s *TokenLoadScorer) Category() fwksched.ScorerCategory {
+	return fwksched.Distribution
 }
 
-func (s *TokenLoadScorer) Consumes() map[string]any {
-	return map[string]any{
-		attrconcurrency.InFlightLoadKey: attrconcurrency.InFlightLoad{},
+func (s *TokenLoadScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			s.inFlightLoadDataKey:          attrconcurrency.InFlightLoad{},
+			s.uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokens{},
+		},
 	}
 }
 
-func (s *TokenLoadScorer) Score(ctx context.Context, _ *framework.CycleState, _ *framework.InferenceRequest, endpoints []framework.Endpoint) map[framework.Endpoint]float64 {
-	scores := make(map[framework.Endpoint]float64, len(endpoints))
+func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	logger := log.FromContext(ctx)
 
 	for _, endpoint := range endpoints {
 		endpointID := endpoint.GetMetadata().NamespacedName.String()
 		tokenLoad := 0.0
 
-		if val, ok := endpoint.Get(attrconcurrency.InFlightLoadKey); ok {
-			if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
-				tokenLoad = float64(load.Tokens)
+		// Read both accumulated in-flight load and the projected impact of the
+		// request being scored, which are now carried on separate attributes.
+		var tokens int64
+		if val, ok := endpoint.Get(s.inFlightLoadDataKey.String()); ok {
+			if load, ok := val.(*attrconcurrency.InFlightLoad); ok && load != nil {
+				tokens += load.Tokens
 			}
 		}
+		if val, ok := endpoint.Get(s.uncachedRequestTokensDataKey.String()); ok {
+			if uncached, ok := val.(*attrconcurrency.UncachedRequestTokens); ok && uncached != nil {
+				tokens += uncached.Tokens
+			}
+		}
+		tokenLoad = float64(tokens)
 
 		score := 0.0
 		if tokenLoad <= 0 {

@@ -19,6 +19,7 @@ package logger
 import (
 	"bytes"
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,10 +33,10 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/datalayer"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metrics"
-	poolutil "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/util/pool"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 )
 
 // Buffer to write the logs to
@@ -73,6 +74,13 @@ func TestLogger(t *testing.T) {
 
 	time.Sleep(6 * time.Second)
 	cancel()
+
+	// Wait for goroutines to log shutdown message to avoid race condition with subsequent tests
+	assert.Eventually(t, func() bool {
+		logOutput := b.read()
+		return strings.Contains(logOutput, "Shutting down prometheus metrics thread") &&
+			strings.Contains(logOutput, "Shutting down metrics logger thread")
+	}, 1*time.Second, 10*time.Millisecond)
 
 	logOutput := b.read()
 	assert.Contains(t, logOutput, "Refreshing Prometheus Metrics	{\"ReadyPods\": 2}")

@@ -23,36 +23,111 @@ import (
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/stretchr/testify/assert"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
+
+func TestExtractTraceContext(t *testing.T) {
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	const (
+		traceID = "0af7651916cd43dd8448eb211c80319c"
+		spanID  = "b7ad6b7169203331"
+	)
+
+	tests := []struct {
+		name         string
+		headers      []*configPb.HeaderValue
+		wantTraceID  string
+		wantRemote   bool
+		wantHasTrace bool
+	}{
+		{
+			name: "extracts upstream traceparent",
+			headers: []*configPb.HeaderValue{
+				{Key: "traceparent", Value: "00-" + traceID + "-" + spanID + "-01"},
+			},
+			wantTraceID:  traceID,
+			wantRemote:   true,
+			wantHasTrace: true,
+		},
+		{
+			name: "case-insensitive header key",
+			headers: []*configPb.HeaderValue{
+				{Key: "TraceParent", RawValue: []byte("00-" + traceID + "-" + spanID + "-01")},
+			},
+			wantTraceID:  traceID,
+			wantRemote:   true,
+			wantHasTrace: true,
+		},
+		{
+			name: "no traceparent yields no remote span context",
+			headers: []*configPb.HeaderValue{
+				{Key: "x-test", Value: "val"},
+			},
+			wantHasTrace: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{
+					Headers: &configPb.HeaderMap{Headers: tc.headers},
+				},
+			}
+
+			ctx := extractTraceContext(context.Background(), req)
+			sc := trace.SpanContextFromContext(ctx)
+
+			assert.Equal(t, tc.wantHasTrace, sc.IsValid(), "span context validity should match")
+			if tc.wantHasTrace {
+				assert.Equal(t, tc.wantTraceID, sc.TraceID().String(), "trace ID should match upstream")
+				assert.Equal(t, tc.wantRemote, sc.IsRemote(), "span context should be remote")
+			}
+		})
+	}
+}
 
 func TestHandleRequestHeaders(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		headers        []*configPb.HeaderValue
-		wantHeaders    map[string]string
-		wantFairnessID string
+		name          string
+		headers       []*configPb.HeaderValue
+		wantHeaders   map[string]string
+		wantObjective string
+		wantTarget    string
 	}{
 		{
-			name: "Extracts Fairness ID and Removes Header",
+			name: "Lowercases mixed-case header keys",
 			headers: []*configPb.HeaderValue{
-				{Key: "x-test", Value: "val"},
-				{Key: metadata.FlowFairnessIDKey, Value: "user-123"},
+				{Key: "X-Test", Value: "val"},
 			},
-			wantHeaders:    map[string]string{"x-test": "val"},
-			wantFairnessID: "user-123",
+			wantHeaders: map[string]string{"x-test": "val"},
 		},
 		{
 			name: "Prefers RawValue over Value",
 			headers: []*configPb.HeaderValue{
-				{Key: metadata.FlowFairnessIDKey, RawValue: []byte("binary-id"), Value: "wrong-id"},
+				{Key: metadata.ObjectiveKey, RawValue: []byte("binary-id"), Value: "wrong-id"},
 			},
-			wantFairnessID: "binary-id",
+			wantObjective: "binary-id",
+		},
+		{
+			name: "Prefers new control headers over old aliases",
+			headers: []*configPb.HeaderValue{
+				{Key: metadata.OldObjectiveKey, Value: "old-objective"},
+				{Key: metadata.ObjectiveKey, Value: "new-objective"},
+				{Key: metadata.OldModelNameRewriteKey, Value: "old-model"},
+				{Key: metadata.ModelNameRewriteKey, Value: "new-model"},
+			},
+			wantObjective: "new-objective",
+			wantTarget:    "new-model",
 		},
 	}
 
@@ -71,7 +146,8 @@ func TestHandleRequestHeaders(t *testing.T) {
 			err := server.HandleRequestHeaders(context.Background(), reqCtx, req)
 			assert.NoError(t, err, "HandleRequestHeaders should not return an error")
 
-			assert.Equal(t, tc.wantFairnessID, reqCtx.FairnessID, "FairnessID should match expected value")
+			assert.Equal(t, tc.wantObjective, reqCtx.ObjectiveKey, "ObjectiveKey should match expected value")
+			assert.Equal(t, tc.wantTarget, reqCtx.TargetModelName, "TargetModelName should match expected value")
 
 			if tc.wantHeaders != nil {
 				for k, v := range tc.wantHeaders {
@@ -89,10 +165,11 @@ func TestGenerateHeaders_Sanitization(t *testing.T) {
 		RequestSize:    123,
 		Request: &Request{
 			Headers: map[string]string{
-				"x-user-data":                   "important",              // should passthrough
-				metadata.ObjectiveKey:           "sensitive-objective-id", // should be stripped
-				metadata.DestinationEndpointKey: "1.1.1.1:666",            // should be stripped
-				"content-length":                "99999",                  // should be stripped (re-added by logic)
+				"x-user-data":                   "important",                  // should passthrough
+				metadata.ObjectiveKey:           "sensitive-objective-id",     // should be stripped
+				metadata.OldObjectiveKey:        "old-sensitive-objective-id", // should be stripped
+				metadata.DestinationEndpointKey: "1.1.1.1:666",                // should be stripped
+				"content-length":                "99999",                      // should be stripped (re-added by logic)
 			},
 		},
 	}
@@ -106,6 +183,7 @@ func TestGenerateHeaders_Sanitization(t *testing.T) {
 
 	assert.Contains(t, gotHeaders, "x-user-data")
 	assert.NotContains(t, gotHeaders, metadata.ObjectiveKey)
+	assert.NotContains(t, gotHeaders, metadata.OldObjectiveKey)
 	assert.Equal(t, "1.2.3.4:8080", gotHeaders[metadata.DestinationEndpointKey])
 	assert.Equal(t, "123", gotHeaders["Content-Length"])
 }

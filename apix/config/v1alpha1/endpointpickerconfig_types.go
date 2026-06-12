@@ -50,11 +50,6 @@ type EndpointPickerConfig struct {
 	SchedulingProfiles []SchedulingProfile `json:"schedulingProfiles"`
 
 	// +optional
-	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
-	// Flow Control. If omitted, "utilization-detector" is used by default.
-	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
-
-	// +optional
 	// DataLayer configures the DataLayer. It is required if the new DataLayer is enabled.
 	DataLayer *DataLayerConfig `json:"dataLayer"`
 
@@ -64,8 +59,21 @@ type EndpointPickerConfig struct {
 	FlowControl *FlowControlConfig `json:"flowControl,omitempty"`
 
 	// +optional
+	// RequestHandler specifies the handling logic used by the EPP to process incoming requests.
+	RequestHandler *RequestHandlerConfig `json:"requestHandler,omitempty"`
+
+	// +optional
+	// SaturationDetector specifies which saturation detector plugin to use.
+	//
+	// Deprecated: use flowControl.saturationDetector instead. If both are set, the new field is used.
+	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
+	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
+
+	// +optional
 	// Parser specifies the parsing logic used by the EPP to process protocol messages.
-	// If unspecified, default parsing behavior will be applied.
+	//
+	// Deprecated: use requestHandler.parser instead. If both are set, the new field is used.
+	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
 	Parser *ParserConfig `json:"parser,omitempty"`
 }
 
@@ -83,11 +91,14 @@ func (cfg EndpointPickerConfig) String() string {
 	if cfg.DataLayer != nil {
 		parts = append(parts, fmt.Sprintf("DataLayer: %v", cfg.DataLayer))
 	}
-	if cfg.SaturationDetector != nil {
-		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", cfg.SaturationDetector))
-	}
 	if cfg.FlowControl != nil {
 		parts = append(parts, fmt.Sprintf("FlowControl: %v", cfg.FlowControl))
+	}
+	if cfg.RequestHandler != nil {
+		parts = append(parts, fmt.Sprintf("RequestHandler: %v", cfg.RequestHandler))
+	}
+	if cfg.SaturationDetector != nil {
+		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", cfg.SaturationDetector))
 	}
 	if cfg.Parser != nil {
 		parts = append(parts, fmt.Sprintf("Parser: %v", cfg.Parser))
@@ -220,13 +231,36 @@ type DataLayerConfig struct {
 	// +optional
 	// Sources is the list of sources to define to the DataLayer
 	Sources []DataLayerSource `json:"sources,omitempty"`
+	// +optional
+	// Discovery specifies which EndpointDiscovery plugin to use for populating the
+	// endpoint datastore. When set, the EPP bypasses Kubernetes CRD reconcilers and
+	// relies entirely on the referenced plugin to enumerate and track inference
+	// endpoints. This enables running the EPP without a Kubernetes cluster.
+	// If omitted, the EPP uses the default Kubernetes-based discovery.
+	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
 }
 
 func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v}", dlc.Sources)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v}", dlc.Sources, dlc.Discovery)
+}
+
+// DiscoveryConfig references the EndpointDiscovery plugin to use.
+type DiscoveryConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef is the name of the plugin instance (from the Plugins list) that
+	// implements EndpointDiscovery.
+	PluginRef string `json:"pluginRef"`
+}
+
+func (dc *DiscoveryConfig) String() string {
+	if dc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", dc.PluginRef)
 }
 
 // DataLayerSource contains the configuration of a DataSource of the DataLayer feature
@@ -267,6 +301,29 @@ type DataLayerExtractor struct {
 
 func (dle DataLayerExtractor) String() string {
 	return fmt.Sprintf("{PluginRef: %s}", dle.PluginRef)
+}
+
+// RequestHandlerConfig contains the configuration for incoming request handling.
+type RequestHandlerConfig struct {
+	// +optional
+	// Parsers specifies the parsing plugins used by the EPP to process protocol messages.
+	// If unspecified, default parsing behavior will be applied.
+	Parsers []ParserConfig `json:"parsers,omitempty"`
+}
+
+func (rhc *RequestHandlerConfig) String() string {
+	if rhc == nil {
+		return nilString
+	}
+	var parts []string
+	if len(rhc.Parsers) > 0 {
+		parserStrs := make([]string, len(rhc.Parsers))
+		for i := range rhc.Parsers {
+			parserStrs[i] = rhc.Parsers[i].String()
+		}
+		parts = append(parts, fmt.Sprintf("Parsers: [%s]", strings.Join(parserStrs, ", ")))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
 }
 
 func (pc *ParserConfig) String() string {
@@ -322,6 +379,13 @@ type FlowControlConfig struct {
 	// priority levels. This template cascades to the standard `PriorityBandConfig` defaults.
 	DefaultPriorityBand *PriorityBandConfig `json:"defaultPriorityBand,omitempty"`
 
+	// +optional
+	// DefaultNegativePriorityBand allows you to define a separate template for priority levels
+	// strictly below zero. This enables designating negative-priority traffic as sheddable by
+	// setting lower capacity limits (e.g., maxBytes: "0" to drop immediately).
+	// If not specified, negative priorities fall back to DefaultPriorityBand.
+	DefaultNegativePriorityBand *PriorityBandConfig `json:"defaultNegativePriorityBand,omitempty"`
+
 	// PriorityBands allows you to explicitly define policies (like capacity limits) for specific
 	// priority levels. Traffic matching these priorities will be handled according to these rules.
 	// If a priority band is not specified, it uses specific defaults.
@@ -332,6 +396,11 @@ type FlowControlConfig struct {
 	// Must reference a named plugin instance defined in the top-level Plugins section.
 	// If omitted, a default static policy (threshold=1.0, no gating) is used.
 	UsageLimitPolicyPluginRef string `json:"usageLimitPolicyPluginRef,omitempty"`
+
+	// +optional
+	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
+	// Flow Control. If omitted, "utilization-detector" is used by default.
+	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
 }
 
 func (fcc *FlowControlConfig) String() string {
@@ -360,12 +429,20 @@ func (fcc *FlowControlConfig) String() string {
 		parts = append(parts, fmt.Sprintf("DefaultPriorityBand: %v", fcc.DefaultPriorityBand))
 	}
 
+	if fcc.DefaultNegativePriorityBand != nil {
+		parts = append(parts, fmt.Sprintf("DefaultNegativePriorityBand: %v", fcc.DefaultNegativePriorityBand))
+	}
+
 	if len(fcc.PriorityBands) > 0 {
 		parts = append(parts, fmt.Sprintf("PriorityBands: %v", fcc.PriorityBands))
 	}
 
 	if fcc.UsageLimitPolicyPluginRef != "" {
 		parts = append(parts, "UsageLimitPolicyRef: "+fcc.UsageLimitPolicyPluginRef)
+	}
+
+	if fcc.SaturationDetector != nil {
+		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", fcc.SaturationDetector))
 	}
 
 	return "{" + strings.Join(parts, ", ") + "}"

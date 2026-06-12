@@ -21,8 +21,32 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
+
+// DiscoveryEndpointStore is the narrow interface required by NewDiscoveryNotifier.
+// Any store that implements EndpointUpsert and EndpointDelete satisfies it.
+type DiscoveryEndpointStore interface {
+	EndpointUpsert(ctx context.Context, meta *EndpointMetadata)
+	EndpointDelete(id types.NamespacedName)
+}
+
+// NewDiscoveryNotifier wraps a DiscoveryEndpointStore as a DiscoveryNotifier.
+func NewDiscoveryNotifier(store DiscoveryEndpointStore) DiscoveryNotifier {
+	return &discoveryNotifier{store: store}
+}
+
+type discoveryNotifier struct {
+	store DiscoveryEndpointStore
+}
+
+func (n *discoveryNotifier) Upsert(endpoint *EndpointMetadata) {
+	n.store.EndpointUpsert(context.Background(), endpoint)
+}
+
+func (n *discoveryNotifier) Delete(id types.NamespacedName) {
+	n.store.EndpointDelete(id)
+}
 
 // EndpointDiscovery discovers inference endpoints and drives their lifecycle in the datastore.
 // Implementations are registered in the plugin registry and selected via
@@ -40,6 +64,21 @@ type EndpointDiscovery interface {
 	// through their watch mechanism (e.g. a Kubernetes list+watch) may fold the
 	// initial enumeration into the watch sequence instead.
 	Start(ctx context.Context, notifier DiscoveryNotifier) error
+
+	// Ready returns a channel that is closed once after the plugin has completed
+	// its initial reconciliation with the underlying source, regardless of how
+	// many endpoints that produced. Callers use it to gate request-serving
+	// components until the datastore has been populated for the first time.
+	//
+	// Contract:
+	//   - The channel is closed at most once per Start invocation.
+	//   - It is closed only after a successful initial sync. If Start returns
+	//     an error before that point, the channel remains open and callers
+	//     waiting on it should also observe ctx cancellation.
+	//   - "Initial sync" means whatever the plugin considers a complete first
+	//     pass (e.g. file load for FileDiscovery; first list+watch reconcile
+	//     for a Kubernetes plugin). Zero endpoints is a valid outcome.
+	Ready() <-chan struct{}
 }
 
 // DiscoveryNotifier is the callback through which EndpointDiscovery communicates

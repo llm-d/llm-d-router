@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -28,10 +27,11 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	sourcemetrics "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/source/metrics"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
+	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
 const (
@@ -86,19 +86,10 @@ func (ext *Extractor) TypedName() fwkplugin.TypedName {
 	return ext.typedName
 }
 
-// ExpectedType defines the type expected by the metrics.Extractor - a
-// parsed output from a Prometheus metrics endpoint.
-func (ext *Extractor) ExpectedInputType() reflect.Type {
-	return sourcemetrics.PrometheusMetricType
-}
-
-// Extract transforms the data source output into a concrete attribute that
-// is stored on the given endpoint.
-func (ext *Extractor) Extract(ctx context.Context, data any, ep fwkdl.Endpoint) error {
-	families, ok := data.(sourcemetrics.PrometheusMetricMap)
-	if !ok {
-		return fmt.Errorf("unexpected input in Extract: %T", data)
-	}
+// Extract transforms the typed metrics payload into endpoint attributes.
+func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]) error {
+	families := in.Payload
+	ep := in.Endpoint
 
 	engineType := getEngineTypeFromEndpoint(ep, ext.engineLabelKey)
 	mapping, ok := ext.registry.Get(engineType)
@@ -139,10 +130,7 @@ func (ext *Extractor) Extract(ctx context.Context, data any, ep fwkdl.Endpoint) 
 	}
 
 	if spec := mapping.LoraRequestInfo; spec != nil { // extract LoRA-specific metrics
-		metric, err := spec.getLatestMetric(families)
-		if err != nil {
-			errs = append(errs, err)
-		} else if metric != nil {
+		if metric := spec.getLatestMetric(families); metric != nil {
 			populateLoRAMetrics(clone, metric, &errs)
 			updated = true
 		}
@@ -182,6 +170,16 @@ func (ext *Extractor) Extract(ctx context.Context, data any, ep fwkdl.Endpoint) 
 			clone.CacheNumBlocks = int(extractValue(metric))
 			updated = true
 		}
+	}
+
+	for _, custom := range mapping.CustomMetrics {
+		metric, err := custom.Spec.getLatestMetric(families)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
+			continue
+		}
+		ep.GetAttributes().Put(custom.AttributeKey, attrmetrics.ScalarMetricValue(extractValue(metric)))
+		updated = true
 	}
 
 	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().NamespacedName)

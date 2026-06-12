@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -23,7 +23,7 @@ type AlwaysDisaggPDDecider struct {
 
 // AlwaysDisaggPDDeciderPluginFactory defines the factory function for creating
 // a new instance of the AlwaysDisaggPDDecider.
-func AlwaysDisaggPDDeciderPluginFactory(name string, _ json.RawMessage,
+func AlwaysDisaggPDDeciderPluginFactory(name string, _ *json.Decoder,
 	_ plugin.Handle) (plugin.Plugin, error) {
 	return newAlwaysDisaggPDDecider().WithName(name), nil
 }

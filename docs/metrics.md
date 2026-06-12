@@ -1,12 +1,12 @@
 # Metrics
 
-The `llm-d-inference-scheduler` exposes the following Prometheus metrics to monitor its behavior and performance, particularly concerning Encode/Prefill/Decode disaggregation.
+The `llm-d-router` exposes the following Prometheus metrics to monitor its behavior and performance, particularly concerning Encode/Prefill/Decode disaggregation.
 
 All metrics are in the `llm_d_inference_scheduler` subsystem.
 
 ## Scrape and see the metric
 
-Metrics defined in llm-d-scheduler are in addition to Inference Gateway metrics. For more details of seeing metrics, see the [metrics and observability section](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/metrics-and-observability.md).
+Metrics defined by llm-d Router are in addition to Inference Gateway metrics. For more details of seeing metrics, see the [metrics and observability section](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/metrics-and-observability.md).
 
 ## Metrics Details
 

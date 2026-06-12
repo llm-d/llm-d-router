@@ -19,83 +19,156 @@ package http
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"reflect"
+	"runtime/debug"
+	"slices"
+	"sync"
+	"time"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-// HTTPDataSource is a data source that receives its data using HTTP client.
-type HTTPDataSource struct {
-	typedName fwkplugin.TypedName
-	scheme    string // scheme to use
-	path      string // path to use
+var ErrExtractorTypeMismatch = errors.New("extractor type mismatch")
 
-	client     Client // client (e.g. a wrapped http.Client) used to get data
-	parser     func(io.Reader) (any, error)
-	outputType reflect.Type
+// defaultStepTimeout bounds each Poll and each Extract independently so a slow
+// extractor cannot starve sibling extractors of their tick budget.
+const defaultStepTimeout = time.Second
+
+// HTTPDataSource is a typed polling dispatcher. T is the data type the source
+// produces; bound extractors must implement Extractor[PollInput[T]].
+type HTTPDataSource[T any] struct {
+	typedName fwkplugin.TypedName
+	scheme    string
+	path      string
+
+	client Client
+	// parser converts the response body to T. MUST NOT return (zero, nil) for nilable T;
+	// the dispatcher does not validate.
+	parser func(io.Reader) (T, error)
+
+	mu   sync.RWMutex
+	exts []fwkdl.PollingExtractor[T]
 }
 
-// NewHTTPDataSource returns a new data source, configured with
-// the provided scheme, path and certificate verification parameters.
-func NewHTTPDataSource(scheme string, path string, skipCertVerification bool, pluginType string,
-	pluginName string, parser func(io.Reader) (any, error), outputType reflect.Type) (*HTTPDataSource, error) {
+// NewHTTPDataSource constructs a typed polling dispatcher.
+func NewHTTPDataSource[T any](scheme, path string, skipCertVerification bool,
+	pluginType, pluginName string, parser func(io.Reader) (T, error)) (*HTTPDataSource[T], error) {
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
 	}
+	cl := &client{
+		Client: http.Client{
+			Timeout:   timeout,
+			Transport: baseTransport,
+		},
+	}
 	if scheme == "https" {
 		httpsTransport := baseTransport.Clone()
-		httpsTransport.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: skipCertVerification,
+		httpsTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: skipCertVerification}
+		cl.Transport = httpsTransport
+	}
+	return &HTTPDataSource[T]{
+		typedName: fwkplugin.TypedName{Type: pluginType, Name: pluginName},
+		scheme:    scheme,
+		path:      path,
+		client:    cl,
+		parser:    parser,
+	}, nil
+}
+
+func (s *HTTPDataSource[T]) TypedName() fwkplugin.TypedName { return s.typedName }
+
+// Poll fetches and parses one tick. Exposed for tests; runtime uses Dispatch.
+func (s *HTTPDataSource[T]) Poll(ctx context.Context, ep fwkdl.Endpoint) (T, error) {
+	target := s.getEndpoint(ep.GetMetadata())
+	raw, err := s.client.Get(ctx, target, ep.GetMetadata(), func(r io.Reader) (any, error) {
+		return s.parser(r)
+	})
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	// Defensive: unreachable with the current Client (parser passthrough); remove with Client[T] refactor.
+	typed, ok := raw.(T)
+	if !ok {
+		var zero T
+		return zero, fmt.Errorf("HTTPDataSource %s: parser returned %T, expected %T", s.typedName, raw, zero)
+	}
+	return typed, nil
+}
+
+// Dispatch polls the endpoint and fans the result out to every bound
+// extractor. Each step (Poll and each Extract) runs under its own
+// defaultStepTimeout so one slow extractor does not starve siblings.
+//
+// Return contract: a non-nil return indicates a poll-level failure (the
+// dispatcher could not produce data). Per-extractor failures are recorded
+// in DataLayerExtractErrorsTotal and do NOT surface as a returned error.
+// This keeps the collector's poll/extract counters cleanly separated.
+func (s *HTTPDataSource[T]) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
+	pollCtx, cancelPoll := context.WithTimeout(ctx, defaultStepTimeout)
+	data, err := s.Poll(pollCtx, ep)
+	cancelPoll()
+	if err != nil {
+		return err
+	}
+	in := fwkdl.PollInput[T]{Payload: data, Endpoint: ep}
+	s.mu.RLock()
+	exts := slices.Clone(s.exts)
+	s.mu.RUnlock()
+	for _, ext := range exts {
+		if ctx.Err() != nil {
+			return nil
 		}
-		defaultClient.Transport = httpsTransport
+		extCtx, cancelExt := context.WithTimeout(ctx, defaultStepTimeout)
+		s.runExtractor(extCtx, ext, in)
+		cancelExt()
 	}
-
-	dataSrc := &HTTPDataSource{
-		typedName: fwkplugin.TypedName{
-			Type: pluginType,
-			Name: pluginName,
-		},
-		scheme:     scheme,
-		path:       path,
-		client:     defaultClient,
-		parser:     parser,
-		outputType: outputType,
-	}
-	return dataSrc, nil
+	return nil
 }
 
-// TypedName returns the data source type and name.
-func (dataSrc *HTTPDataSource) TypedName() fwkplugin.TypedName {
-	return dataSrc.typedName
-}
-
-// OutputType returns the type of data this DataSource produces.
-func (dataSrc *HTTPDataSource) OutputType() reflect.Type {
-	return dataSrc.outputType
-}
-
-// ExtractorType returns the type of Extractor this DataSource expects.
-func (dataSrc *HTTPDataSource) ExtractorType() reflect.Type {
-	return fwkdl.ExtractorType
-}
-
-// Poll fetches data for an endpoint and returns it.
-func (dataSrc *HTTPDataSource) Poll(ctx context.Context, ep fwkdl.Endpoint) (any, error) {
-	target := dataSrc.getEndpoint(ep.GetMetadata())
-	return dataSrc.client.Get(ctx, target, ep.GetMetadata(), dataSrc.parser)
-}
-
-func (dataSrc *HTTPDataSource) getEndpoint(ep Addressable) *url.URL {
-	return &url.URL{
-		Scheme: dataSrc.scheme,
-		Host:   ep.GetMetricsHost(),
-		Path:   dataSrc.path,
+// runExtractor invokes ext under panic recovery; both failures and panics increment DataLayerExtractErrorsTotal.
+func (s *HTTPDataSource[T]) runExtractor(ctx context.Context, ext fwkdl.PollingExtractor[T], in fwkdl.PollInput[T]) {
+	logger := log.FromContext(ctx)
+	srcType := s.typedName.Type
+	extType := ext.TypedName().Type
+	defer func() {
+		if r := recover(); r != nil {
+			metrics.RecordDataLayerExtractError(srcType, extType)
+			logger.Error(fmt.Errorf("%v", r), "extractor panicked",
+				"source", s.typedName, "extractor", ext.TypedName(), "stack", string(debug.Stack()))
+		}
+	}()
+	if err := ext.Extract(ctx, in); err != nil {
+		metrics.RecordDataLayerExtractError(srcType, extType)
+		logger.V(logging.DEBUG).Info("extract failed", "source", s.typedName, "extractor", ext.TypedName(), "err", err)
 	}
 }
 
-var _ fwkdl.DataSource = (*HTTPDataSource)(nil)
-var _ fwkdl.PollingDataSource = (*HTTPDataSource)(nil)
+// AppendExtractor binds ext as a typed PollingExtractor[T]. Duplicate-Type detection
+// is the caller's responsibility (see runtime.Configure); this is a pure append.
+func (s *HTTPDataSource[T]) AppendExtractor(ext fwkplugin.Plugin) error {
+	typed, ok := ext.(fwkdl.PollingExtractor[T])
+	if !ok {
+		return fmt.Errorf("%w: extractor %s: expected %s, got %T",
+			ErrExtractorTypeMismatch, ext.TypedName(), reflect.TypeFor[fwkdl.PollingExtractor[T]](), ext)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.exts = append(s.exts, typed)
+	return nil
+}
+
+func (s *HTTPDataSource[T]) getEndpoint(ep Addressable) *url.URL {
+	return &url.URL{Scheme: s.scheme, Host: ep.GetMetricsHost(), Path: s.path}
+}

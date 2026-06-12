@@ -23,8 +23,8 @@ import (
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	fwksched "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 func TestPickWeightedRandomPicker(t *testing.T) {
@@ -115,7 +115,7 @@ func TestPickWeightedRandomPicker(t *testing.T) {
 
 			// Run multiple iterations to gather statistical data
 			for range testIterations {
-				result := picker.Pick(context.Background(), fwksched.NewCycleState(), test.input)
+				result := picker.Pick(context.Background(), test.input)
 
 				// Count selections for probability analysis
 				selectedEndpointName := result.TargetEndpoints[0].GetMetadata().NamespacedName.Name

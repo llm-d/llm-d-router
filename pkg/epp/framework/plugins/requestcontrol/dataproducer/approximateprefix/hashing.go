@@ -19,83 +19,95 @@ package approximateprefix
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
-	"errors"
+	"iter"
+	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-// hashPrompt divides the prompt into blocks and calculates a prefix cache hash for each block.
-// The first block hash includes the model name and cache salt (if provided).
+// HashBlock wraps a block of token IDs used for calculating prefix hashes.
+type HashBlock struct {
+	// Tokens are the token IDs covered by this block.
+	Tokens []uint32
+}
+
+// Hash computes a stable unique identifier for the HashBlock content.
+func (b HashBlock) Hash() uint64 {
+	if len(b.Tokens) > 0 {
+		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4)
+		return xxhash.Sum64(byteSlice)
+	}
+
+	return 0
+}
+
+// getBlockHashes divides the tokenized prompt into blocks and calculates a
+// prefix cache hash for each block. Each prompt in PerPromptTokens is hashed
+// independently so cross-prompt block adjacency is avoided. The first block
+// hash of every prompt includes the model name and cache salt (if provided).
 // For subsequent blocks, the hash is calculated as: hash(block i content, hash(i-1)).
-func hashPrompt(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) []blockHash {
+// It requires request.Body.TokenizedPrompt to be populated by a token-producer backend.
+func getBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) [][]blockHash {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	if request == nil || request.Body == nil {
 		loggerDebug.Info("Request or request data is nil, skipping hashing")
 		return nil
 	}
 
-	userInput, err := getUserInputBytes(request)
-	if err != nil {
-		loggerDebug.Error(err, "Failed to get user input bytes")
+	tp := request.Body.TokenizedPrompt
+	if tp == nil || tp.TokenCount() == 0 {
+		loggerDebug.Info("TokenizedPrompt is empty, skipping hashing")
 		return nil
 	}
 
-	// convert block size from tokens to characters
-	cacheBlockSizeChars := blockSizeTokens * averageCharactersPerToken
-
-	if cacheBlockSizeChars <= 0 {
-		loggerDebug.Info("Skipping prefix hashing: block size in characters must be positive",
-			"blockSizeTokens", blockSizeTokens,
-			"cacheBlockSizeChars", cacheBlockSizeChars)
+	var result [][]blockHash
+	for _, tokens := range tp.PerPromptTokens {
+		seq := getKVCacheBlocksFromTokens(tokens, blockSizeTokens)
+		hashes := computeBlockHashes(seq, request, maxPrefixBlocks)
+		if len(hashes) > 0 {
+			result = append(result, hashes)
+		}
+	}
+	if len(result) == 0 {
+		loggerDebug.Info("No kv cache block found")
 		return nil
 	}
+	return result
+}
 
-	if len(userInput) < cacheBlockSizeChars {
-		loggerDebug.Info("Request body too small for prefix cache", "size", len(userInput), "block size in chars", cacheBlockSizeChars)
-		return nil
-	}
-
-	if len(userInput) > cacheBlockSizeChars*maxPrefixBlocks {
-		loggerDebug.Info("Truncating input", "size", len(userInput), "max prefix blocks", maxPrefixBlocks, "block size in chars", cacheBlockSizeChars)
-		userInput = userInput[:maxPrefixBlocks*cacheBlockSizeChars]
-	}
-
-	// Split the body into blocks of size cacheBlockSizeChars.
-	res := make([]blockHash, 0, len(userInput)/cacheBlockSizeChars)
+// computeBlockHashes calculates the hash for content blocks.
+func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []blockHash {
+	var blockHashes []blockHash
 
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.
 	_, _ = h.Write([]byte(request.TargetModel))
-	if cacheSalt := request.Body.CacheSalt(); cacheSalt != "" {
+	if cacheSalt := request.Body.TokenizedPrompt.CacheSalt; cacheSalt != "" {
 		_, _ = h.Write([]byte(cacheSalt))
 	}
 
 	prevBlockHash := blockHash(h.Sum64())
-	i := 0
-	for ; i+cacheBlockSizeChars <= len(userInput); i += cacheBlockSizeChars {
-		h.Reset()
-		_, _ = h.Write(userInput[i : i+cacheBlockSizeChars])
-		_, _ = h.Write(toBytes(prevBlockHash))
-		res = append(res, blockHash(h.Sum64()))
 
-		prevBlockHash = res[len(res)-1]
+	count := 0
+	for block := range seq {
+		if count >= maxPrefixBlocks {
+			break
+		}
+		h.Reset()
+		blockID := block.Hash()
+		_, _ = h.Write(toBytes(blockHash(blockID)))
+		_, _ = h.Write(toBytes(prevBlockHash))
+		blockHashes = append(blockHashes, blockHash(h.Sum64()))
+
+		prevBlockHash = blockHashes[len(blockHashes)-1]
+		count++
 	}
 
-	// 2. Process any remaining bytes as a partial block
-	if i < len(userInput) {
-		h.Reset()
-
-		_, _ = h.Write(userInput[i:])
-		_, _ = h.Write(toBytes(prevBlockHash))
-		res = append(res, blockHash(h.Sum64()))
-	}
-
-	return res
+	return blockHashes
 }
 
 func toBytes(i blockHash) []byte {
@@ -104,33 +116,19 @@ func toBytes(i blockHash) []byte {
 	return bytes
 }
 
-func getUserInputBytes(request *scheduling.InferenceRequest) ([]byte, error) {
-	switch {
-	case request.Body.Conversations != nil:
-		return json.Marshal(request.Body.Conversations.Items)
-
-	case request.Body.Responses != nil:
-		var combined []map[string]interface{}
-		if request.Body.Responses.Instructions != nil {
-			combined = append(combined, map[string]interface{}{"instructions": request.Body.Responses.Instructions})
+func getKVCacheBlocksFromTokens(ids []uint32, blockSizeTokens int) iter.Seq[HashBlock] {
+	return func(yield func(HashBlock) bool) {
+		if len(ids) == 0 || blockSizeTokens <= 0 {
+			return
 		}
-		if request.Body.Responses.Tools != nil {
-			combined = append(combined, map[string]interface{}{"tools": request.Body.Responses.Tools})
+		for i := 0; i < len(ids); i += blockSizeTokens {
+			end := i + blockSizeTokens
+			if end > len(ids) {
+				end = len(ids)
+			}
+			if !yield(HashBlock{Tokens: ids[i:end]}) {
+				return
+			}
 		}
-		combined = append(combined, map[string]interface{}{"input": request.Body.Responses.Input})
-		return json.Marshal(combined)
-
-	case request.Body.ChatCompletions != nil:
-		return json.Marshal(request.Body.ChatCompletions.Messages)
-
-	case request.Body.Completions != nil:
-		return []byte(request.Body.Completions.Prompt.PlainText()), nil
-
-	case request.Body.Embeddings != nil:
-		// Handle embeddings API - marshal input for cache key generation
-		return json.Marshal(request.Body.Embeddings.Input)
-
-	default:
-		return nil, errors.New("invalid request body: no recognized API format found")
 	}
 }

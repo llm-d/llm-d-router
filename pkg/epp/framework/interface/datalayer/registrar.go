@@ -16,7 +16,7 @@ limitations under the License.
 
 package datalayer
 
-import "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+import "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 
 // Registrar accepts pending source/extractor dependency declarations from plugins.
 // Runtime.Configure() resolves them after processing user config.
@@ -40,7 +40,7 @@ type Registrant interface {
 type PendingRegistration struct {
 	Owner         plugin.TypedName // registering plugin; used as map key + error context
 	SourceType    string           // TypedName.Type to match, e.g. "endpoint-notification-source"
-	Extractor     ExtractorBase    // required; extractor to wire to the matched source
+	Extractor     plugin.Plugin    // required; framework type-asserts to the matched source's variant
 	DefaultSource DataSource       // nil → no auto-create; non-nil → create if absent
 	IfMissing     MissingPolicy    // applies only when DefaultSource is nil
 }

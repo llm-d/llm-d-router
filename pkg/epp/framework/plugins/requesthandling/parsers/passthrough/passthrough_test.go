@@ -21,8 +21,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 func TestPassthroughParser_ParseRequest(t *testing.T) {
@@ -59,8 +60,8 @@ func TestPassthroughParser_ParseRequest(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if got.Skip != false {
-				t.Errorf("got.Skip = %v, want false", got.Skip)
+			if got.SkipResponseProcessing != false {
+				t.Errorf("got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
 			}
 			if diff := cmp.Diff(tt.wantBody, got.Body); diff != "" {
 				t.Errorf("Unexpected body (-want +got):\n%s", diff)
@@ -82,10 +83,15 @@ func TestPassthroughParser_ParseResponse(t *testing.T) {
 	}
 }
 
-func TestPassthroughParser_SupportedAppProtocols(t *testing.T) {
+func TestPassthroughParser_Claims(t *testing.T) {
 	parser := NewPassthroughParser()
-	supported := parser.SupportedAppProtocols()
-	if len(supported) != 0 {
-		t.Errorf("SupportedAppProtocols() = %v, want empty non-nil list", supported)
+	got := parser.Claims()
+	want := fwkrh.Claims{
+		Paths:     nil,
+		Protocols: []v1.AppProtocol{},
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }

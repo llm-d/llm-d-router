@@ -7,8 +7,8 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -31,7 +31,7 @@ var _ scheduling.Filter = &ByLabel{} // validate interface conformance
 //
 // Deprecated: Use SelectorFactory for generic label-based filtering,
 // or the role-specific filters (decode-filter, prefill-filter, encode-filter) for role-based filtering.
-func Factory(name string, rawParameters json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
+func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	if handle != nil {
 		log.FromContext(handle.Context()).Info("Deprecated: plugin type 'by-label' is deprecated, " +
 			"use 'label-selector-filter' for generic label filtering or " +
@@ -39,7 +39,7 @@ func Factory(name string, rawParameters json.RawMessage, handle plugin.Handle) (
 	}
 	parameters := byLabelParameters{}
 	if rawParameters != nil {
-		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' filter - %w", ByLabelType, err)
 		}
 	}
@@ -101,7 +101,7 @@ func (f *ByLabel) WithName(name string) *ByLabel {
 
 // Filter filters out all endpoints that are not marked with one of roles from the validRoles collection
 // or has no role label in case allowsNoRolesLabel is true
-func (f *ByLabel) Filter(_ context.Context, _ *scheduling.CycleState, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+func (f *ByLabel) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	filteredEndpoints := []scheduling.Endpoint{}
 
 	for _, endpoint := range endpoints {

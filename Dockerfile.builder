@@ -1,4 +1,4 @@
-FROM quay.io/projectquay/golang:1.25
+FROM golang:1.25.11
 
 RUN mkdir /app
 WORKDIR /app
@@ -12,15 +12,9 @@ ARG DOCKER_VERSION=29.3.0
 ARG DOCKER_BUILDX_VERSION=v0.32.1
 ARG ENVTEST_VERSION=release-0.19
 ARG ENVTEST_K8S_VERSION=1.31.0
+ARG GOVULNCHECK_VERSION=v1.3.0
 
-RUN dnf install -y podman gcc-toolset-12 && dnf clean all
-
-# The base image ships GCC 8 (RHEL 8 default), which lacks the ARM64 LSE
-# atomic emulation helpers (__aarch64_ldadd8_sync etc.) required by Go's
-# race detector. gcc-toolset-12 provides GCC 12 which includes them.
-# TODO: remove gcc-toolset-12 once this base image is updated to RHEL 9
-#       (GCC 11+ ships natively there and includes the helpers).
-ENV PATH=/opt/rh/gcc-toolset-12/root/usr/bin:$PATH
+RUN apt-get update && apt-get install -y podman && apt-get clean all
 
 # Install docker CLI and buildx plugin
 RUN ARCH=$(uname -m) && \
@@ -63,6 +57,11 @@ RUN GOBIN=/usr/local/bin go install sigs.k8s.io/controller-runtime/tools/setup-e
     setup-envtest use ${ENVTEST_K8S_VERSION} --bin-dir ${ENVTEST_ASSETS_DIR} && \
     chmod -R a+rx ${ENVTEST_ASSETS_DIR}
 ENV ENVTEST_K8S_VERSION=${ENVTEST_K8S_VERSION}
+
+# Install govulncheck. Build-time install ensures runtime invocations under
+# --userns=keep-id / -u <uid> can use the binary without writing to root-owned
+# /usr/local/bin.
+RUN GOBIN=/usr/local/bin go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
 
 # Go caches are mounted as volumes at runtime for persistence across image rebuilds.
 # Directories are created with open permissions so non-root users (docker -u) can write.

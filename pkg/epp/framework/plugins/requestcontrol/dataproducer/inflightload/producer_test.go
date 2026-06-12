@@ -17,63 +17,170 @@ limitations under the License.
 package inflightload
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
-	schedulingtypes "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	attrconcurrency "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
-func TestInFlightLoadProducer_PrepareRequestData(t *testing.T) {
+func newTestProducer(t testing.TB) *InFlightLoadProducer {
+	params := Config{AddEstimatedOutputTokens: true}
+	raw, err := json.Marshal(params)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	p, err := InFlightLoadProducerFactory("inflight-load-producer", decoder, testutils.NewTestHandle(ctx))
+	require.NoError(t, err)
+	return p.(*InFlightLoadProducer)
+}
+
+func TestInFlightLoadProducer_Consumes(t *testing.T) {
 	t.Parallel()
 
-	producer := &InFlightLoadProducer{
-		requestTracker: newConcurrencyTracker(),
-		tokenTracker:   newConcurrencyTracker(),
-	}
+	deps := newTestProducer(t).Consumes()
 
+	// TokenizedPrompt is required so the data-layer DAG auto-creates a
+	// token-producer and orders it ahead of this producer; without it the input
+	// token estimate silently reads zero.
+	require.Contains(t, deps.Required, tokenproducer.TokenizedPromptDataKey)
+	// PrefixCacheMatchInfo is optional: consumed for the cached-prefix discount.
+	// With no prefixMatchInfoProducerName set, it defaults to the approximate
+	// producer's key.
+	require.Contains(t, deps.Optional, attrprefix.PrefixCacheMatchInfoDataKey)
+	require.NotContains(t, deps.Required, attrprefix.PrefixCacheMatchInfoDataKey)
+}
+
+// prefixMatchInfoProducerName selects which prefix producer (approximate or
+// precise) feeds the cached-prefix discount, by both the optional dependency key
+// and the runtime read.
+func TestInFlightLoadProducer_PrefixMatchInfoProducerName(t *testing.T) {
+	t.Parallel()
+
+	const preciseName = "precise-prefix-cache-producer"
+	raw, err := json.Marshal(Config{PrefixMatchInfoProducerName: preciseName})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	p, err := InFlightLoadProducerFactory("inflight-load-producer",
+		json.NewDecoder(bytes.NewReader(raw)), testutils.NewTestHandle(ctx))
+	require.NoError(t, err)
+	producer := p.(*InFlightLoadProducer)
+
+	preciseKey := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(preciseName)
+
+	// The optional dependency points at the configured precise producer, not approx.
+	require.Contains(t, producer.Consumes().Optional, preciseKey)
+	require.NotContains(t, producer.Consumes().Optional, attrprefix.PrefixCacheMatchInfoDataKey)
+
+	// The discount reads PrefixCacheMatchInfo from the configured producer's key
+	// (indexed 2*4=8, matched 1*4=4 -> uncached 4).
+	hit := newStubSchedulingEndpoint("ep-hit")
+	hit.Put(preciseKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	require.Equal(t, int64(4), producer.estimateRequestTokens(hit, 5))
+
+	// Data under the approx (default) key is ignored, so it falls back to inputTokens.
+	miss := newStubSchedulingEndpoint("ep-miss")
+	miss.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	require.Equal(t, int64(5), producer.estimateRequestTokens(miss, 5))
+}
+
+func TestInFlightLoadProducer_Produce(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+
+	endpointName := "test-endpoint"
+	endpoint := newStubSchedulingEndpoint(endpointName)
+	endpoints := []fwksched.Endpoint{endpoint}
+
+	// 1. Produce with nil request -> should not put anything
+	err := producer.Produce(context.Background(), nil, endpoints)
+	require.NoError(t, err)
+	_, ok := endpoint.Get(producer.uncachedRequestTokensDk.String())
+	require.False(t, ok)
+
+	// 2. Produce with request -> should put UncachedRequestTokens
+	req := makeTokenRequest("req1", 4) // 4 input tokens -> 10 total (with output)
+	err = producer.Produce(context.Background(), req, endpoints)
+
+	require.NoError(t, err)
+
+	val, ok := endpoint.Get(producer.uncachedRequestTokensDk.String())
+	require.True(t, ok)
+	uncached := val.(*attrconcurrency.UncachedRequestTokens)
+	require.Equal(t, int64(10), uncached.Tokens)
+
+	// Verify that InFlightLoad was NOT put/overwritten by Produce
+	_, ok = endpoint.Get(producer.dk.String())
+	require.False(t, ok, "InFlightLoad should not be populated by Produce")
+}
+
+func TestInFlightLoadProducer_Extract(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
 	endpointName := "test-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	// Mock some initial load
+	endpoint := newStubSchedulingEndpoint(endpointName)
+	ctx := context.Background()
+
+	// Simulate Add event
+	err := producer.Extract(ctx, datalayer.EndpointEvent{
+		Type:     datalayer.EventAddOrUpdate,
+		Endpoint: endpoint,
+	})
+	require.NoError(t, err)
+
+	// Verify dynamic attribute is registered
+	key := producer.dk.String()
+	val, ok := endpoint.Get(key)
+	require.True(t, ok)
+
+	// Verify initial values (should be 0)
+	load := val.(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(0), load.Requests)
+	require.Equal(t, int64(0), load.Tokens)
+
+	// Update trackers
 	producer.requestTracker.add(endpointID, 5)
 	producer.tokenTracker.add(endpointID, 500)
 
-	ctx := context.Background()
-	endpoints := []schedulingtypes.Endpoint{newStubSchedulingEndpoint(endpointName)}
-
-	err := producer.PrepareRequestData(ctx, nil, endpoints)
-	require.NoError(t, err)
-
-	// Verify AttributeMap population
-	val, ok := endpoints[0].Get(attrconcurrency.InFlightLoadKey)
+	// Verify values are updated dynamically without calling Produce
+	val2, ok := endpoint.Get(key)
 	require.True(t, ok)
-	load := val.(*attrconcurrency.InFlightLoad)
-	require.Equal(t, int64(5), load.Requests)
-	require.Equal(t, int64(500), load.Tokens)
+	load2 := val2.(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(5), load2.Requests)
+	require.Equal(t, int64(500), load2.Tokens)
 }
 
 func TestInFlightLoadProducer_Lifecycle(t *testing.T) {
 	t.Parallel()
 
-	producer := &InFlightLoadProducer{
-		requestTracker: newConcurrencyTracker(),
-		tokenTracker:   newConcurrencyTracker(),
-		tokenEstimator: NewSimpleTokenEstimator(),
-	}
+	producer := newTestProducer(t)
 	ctx := context.Background()
 	endpointName := "lifecycle-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
 	// 1. PreRequest (Inc)
-	req := makeTokenRequest("req1", "1234567890123456") // 16 chars / 4 = 4 input + 6 output = 10 tokens
+	req := makeTokenRequest("req1", 4) // 4 input + 6 output = 10 tokens
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 
@@ -91,11 +198,7 @@ func TestInFlightLoadProducer_Lifecycle(t *testing.T) {
 func TestInFlightLoadProducer_MultiPodLifecycle(t *testing.T) {
 	t.Parallel()
 
-	producer := &InFlightLoadProducer{
-		requestTracker: newConcurrencyTracker(),
-		tokenTracker:   newConcurrencyTracker(),
-		tokenEstimator: NewSimpleTokenEstimator(),
-	}
+	producer := newTestProducer(t)
 	ctx := context.Background()
 	podA := "pod-a"
 	podB := "pod-b"
@@ -103,12 +206,12 @@ func TestInFlightLoadProducer_MultiPodLifecycle(t *testing.T) {
 	idB := fullEndpointName(podB)
 
 	// 1. Dispatch to PodA (Prefill) and PodB (Decode)
-	req := makeTokenRequest("multi-req", "1234567890123456") // 10 tokens
-	res := &schedulingtypes.SchedulingResult{
+	req := makeTokenRequest("multi-req", 4) // 4 input + 6 output = 10 tokens
+	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
-		ProfileResults: map[string]*schedulingtypes.ProfileRunResult{
-			"prefill": {TargetEndpoints: []schedulingtypes.Endpoint{newStubSchedulingEndpoint(podA)}},
-			"decode":  {TargetEndpoints: []schedulingtypes.Endpoint{newStubSchedulingEndpoint(podB)}},
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(podA)}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(podB)}},
 		},
 	}
 
@@ -131,10 +234,7 @@ func TestInFlightLoadProducer_MultiPodLifecycle(t *testing.T) {
 func TestInFlightLoadProducer_NotificationCleanup(t *testing.T) {
 	t.Parallel()
 
-	producer := &InFlightLoadProducer{
-		requestTracker: newConcurrencyTracker(),
-		tokenTracker:   newConcurrencyTracker(),
-	}
+	producer := newTestProducer(t)
 	ctx := context.Background()
 	endpointName := "deleted-endpoint"
 	endpointID := fullEndpointName(endpointName)
@@ -149,7 +249,7 @@ func TestInFlightLoadProducer_NotificationCleanup(t *testing.T) {
 		Endpoint: newStubSchedulingEndpoint(endpointName),
 	}
 
-	err := producer.ExtractEndpoint(ctx, eventEndpoint)
+	err := producer.Extract(ctx, eventEndpoint)
 	require.NoError(t, err)
 
 	// Verify Cleanup
@@ -157,52 +257,94 @@ func TestInFlightLoadProducer_NotificationCleanup(t *testing.T) {
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
 }
 
-func TestInFlightLoadProducer_ConcurrencyStress(t *testing.T) {
+func TestInFlightLoadProducer_DumpState(t *testing.T) {
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
 		requestTracker: newConcurrencyTracker(),
 		tokenTracker:   newConcurrencyTracker(),
-		tokenEstimator: NewSimpleTokenEstimator(),
 	}
+	podA := fullEndpointName("pod-a")
+	podB := fullEndpointName("pod-b")
+
+	producer.requestTracker.add(podB, 2)
+	producer.tokenTracker.add(podA, 10)
+	producer.tokenTracker.add(podB, 20)
+
+	payload, err := producer.DumpState()
+	require.NoError(t, err)
+
+	var state inFlightLoadState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	require.Equal(t, inFlightLoadState{
+		Endpoints: []endpointInFlightLoadState{
+			{Endpoint: podB, Requests: 2, Tokens: 20},
+			{Endpoint: podA, Requests: 0, Tokens: 10},
+		},
+		TotalEndpoints: 2,
+		MaxEndpoints:   maxDebugDumpEndpoints,
+	}, state)
+}
+
+func TestInFlightLoadProducer_DumpStateCapsEndpoints(t *testing.T) {
+	t.Parallel()
+
+	producer := &InFlightLoadProducer{
+		requestTracker: newConcurrencyTracker(),
+		tokenTracker:   newConcurrencyTracker(),
+	}
+	for i := range maxDebugDumpEndpoints + 5 {
+		endpointID := fullEndpointName(fmt.Sprintf("pod-%03d", i))
+		producer.requestTracker.add(endpointID, int64(i))
+	}
+
+	payload, err := producer.DumpState()
+	require.NoError(t, err)
+
+	var state inFlightLoadState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	require.True(t, state.Truncated)
+	require.Equal(t, maxDebugDumpEndpoints+5, state.TotalEndpoints)
+	require.Equal(t, maxDebugDumpEndpoints, state.MaxEndpoints)
+	require.Len(t, state.Endpoints, maxDebugDumpEndpoints)
+	require.Equal(t, fullEndpointName("pod-104"), state.Endpoints[0].Endpoint)
+	require.Equal(t, int64(104), state.Endpoints[0].Requests)
+}
+
+func TestInFlightLoadProducer_ConcurrencyStress(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
 	ctx := context.Background()
 	endpointName := "stress-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
 	const (
 		numGoroutines = 50
-		opsPerRoutine = 1000
+		opsPerRoutine = 100
 	)
 
 	var wg sync.WaitGroup
-	wg.Add(numGoroutines * 2)
+	wg.Add(numGoroutines)
 
-	// Launch increments
-	for range numGoroutines {
-		go func() {
+	for i := 0; i < numGoroutines; i++ {
+		go func(g int) {
 			defer wg.Done()
-			res := makeSchedulingResult(endpointName)
-			for range opsPerRoutine {
-				producer.PreRequest(ctx, nil, res)
-			}
-		}()
-	}
+			for j := 0; j < opsPerRoutine; j++ {
+				reqID := fmt.Sprintf("req-%d-%d", g, j)
+				res := makeSchedulingResult(endpointName)
+				req := &fwksched.InferenceRequest{RequestID: reqID, SchedulingResult: res}
 
-	// Launch decrements
-	for range numGoroutines {
-		go func() {
-			defer wg.Done()
-			res := makeSchedulingResult(endpointName)
-			req := &schedulingtypes.InferenceRequest{SchedulingResult: res}
-			for range opsPerRoutine {
+				producer.PreRequest(ctx, req, res)
 				producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
 			}
-		}()
+		}(i)
 	}
 
 	wg.Wait()
 
 	require.Equal(t, int64(0), producer.requestTracker.get(endpointID), "request count drift detected")
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID), "token count drift detected")
 }
 
 // --- Helpers ---
@@ -211,19 +353,19 @@ func fullEndpointName(name string) string {
 	return types.NamespacedName{Name: name, Namespace: "default"}.String()
 }
 
-func makeSchedulingResult(endpointName string) *schedulingtypes.SchedulingResult {
-	return &schedulingtypes.SchedulingResult{
+func makeSchedulingResult(endpointName string) *fwksched.SchedulingResult {
+	return &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
-		ProfileResults: map[string]*schedulingtypes.ProfileRunResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"default": {
-				TargetEndpoints: []schedulingtypes.Endpoint{newStubSchedulingEndpoint(endpointName)},
+				TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)},
 			},
 		},
 	}
 }
 
 type stubSchedulingEndpoint struct {
-	schedulingtypes.Endpoint
+	fwksched.Endpoint
 	metadata *datalayer.EndpointMetadata
 	attr     datalayer.AttributeMap
 }
@@ -247,11 +389,512 @@ func (f *stubSchedulingEndpoint) Get(key string) (datalayer.Cloneable, bool) {
 }
 func (f *stubSchedulingEndpoint) Keys() []string { return f.attr.Keys() }
 
-func makeTokenRequest(requestID, prompt string) *schedulingtypes.InferenceRequest {
-	return &schedulingtypes.InferenceRequest{
+// makeTokenRequest builds a request whose tokenized prompt carries inputTokens token IDs,
+// which is what the estimator reads to derive the input token count.
+func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
+	return &fwksched.InferenceRequest{
 		RequestID: requestID,
 		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				PerPromptTokens: [][]uint32{make([]uint32, inputTokens)},
+			},
 		},
 	}
+}
+
+// TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease verifies that when
+// AddEstimatedOutputTokens is false, token counters are released as soon as the first chunk
+// arrives (StartOfStream), while request counters are released only on EndOfStream.
+func TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	producer.addEstimatedOutputTokens = false
+	ctx := context.Background()
+	endpointName := "exclude-output-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	// 4 input tokens. Output tokens are excluded.
+	req := makeTokenRequest("req-no-output", 4)
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(4), producer.tokenTracker.get(endpointID), "only input tokens should be tracked")
+
+	// First chunk arrives: tokens released, request still in flight.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID), "request counter should still be held")
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID), "tokens should be released at StartOfStream")
+
+	// EndOfStream releases the request counter.
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+}
+
+// TestInFlightLoadProducer_ExcludeOutputTokens_SingleChunk verifies that a single-chunk
+// response (StartOfStream && EndOfStream both true) releases both tokens and the request.
+func TestInFlightLoadProducer_ExcludeOutputTokens_SingleChunk(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	producer.addEstimatedOutputTokens = false
+	ctx := context.Background()
+	endpointName := "single-chunk-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	req := makeTokenRequest("req-single", 4)
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(4), producer.tokenTracker.get(endpointID))
+
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true, EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+}
+
+// TestInFlightLoadProducer_PrefixCacheDiscount verifies that when PrefixCacheMatchInfo
+// is published on the endpoint, the matched prefix is excluded from the tracked input
+// tokens, and that release subtracts the same (discounted) amount.
+func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointName := "prefix-cache-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	// 8 input tokens. Output = 8 * 1.5 = 12.
+	// With block_size=4, total=2 blocks, matched=1 block (4 tokens cached):
+	//   uncached_input = (2-1)*4 + max(0, 8-2*4) = 4
+	//   total tokens = 4 + 12 = 16
+	endpoint := newStubSchedulingEndpoint(endpointName)
+	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+
+	req := makeTokenRequest("req-prefix", 8)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	}
+
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(16), producer.tokenTracker.get(endpointID),
+		"only uncached input (4) plus output (12) should be tracked")
+
+	// Release uses the exact stored value, returning to zero.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID),
+		"release should subtract the same discounted amount that was added")
+}
+
+// TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint verifies that two profiles
+// targeting different endpoints with different prefix-cache match levels each get their
+// own discounted token amount, and that both counters return to zero after release.
+func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	podA := "pod-a-cached"
+	podB := "pod-b-uncached"
+	idA := fullEndpointName(podA)
+	idB := fullEndpointName(podB)
+
+	// 8 input tokens, output 12.
+	epA := newStubSchedulingEndpoint(podA)
+	epA.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(2, 2, 4)) // fully cached
+	epB := newStubSchedulingEndpoint(podB)
+	epB.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(0, 2, 4)) // none cached
+
+	req := makeTokenRequest("req-multi-cache", 8)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "prefill",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{epA}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{epB}},
+		},
+	}
+
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(0+12), producer.tokenTracker.get(idA), "fully cached: only output tokens")
+	require.Equal(t, int64(8+12), producer.tokenTracker.get(idB), "uncached: input + output")
+
+	// Drive the response lifecycle: StartOfStream releases prefill, EndOfStream releases decode.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.tokenTracker.get(idA))
+	require.Equal(t, int64(0), producer.tokenTracker.get(idB))
+	require.Equal(t, int64(0), producer.requestTracker.get(idA))
+	require.Equal(t, int64(0), producer.requestTracker.get(idB))
+}
+
+// TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint verifies that
+// when multiple profiles target the same endpoint, each contributes to the counters
+// independently and each release subtracts the exact added amount, returning counters
+// to their pre-request baseline.
+func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointName := "shared-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	// 4 input tokens, 6 output, total 10 tokens per profile.
+	// Two profiles both targeting the same endpoint => 2 requests, 20 tokens.
+	req := makeTokenRequest("req-shared", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "prefill",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}},
+		},
+	}
+
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(2), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(20), producer.tokenTracker.get(endpointID))
+
+	// StartOfStream releases the prefill profile only (1 request, 10 tokens).
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+
+	// EndOfStream releases the remaining (decode) profile.
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID),
+		"counters must return to zero with no drift across profiles")
+}
+
+// TestInFlightLoadProducer_ExcludeOutputTokens_EndOfStreamWithoutStart verifies the
+// safety net for non-streaming or error paths: when addEstimatedOutputTokens=false and
+// ResponseBody delivers EndOfStream without ever seeing StartOfStream, the token
+// counter and request counter must both drain (tokens are normally released at
+// StartOfStream, so a missing StartOfStream would otherwise leak them).
+func TestInFlightLoadProducer_ExcludeOutputTokens_EndOfStreamWithoutStart(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	producer.addEstimatedOutputTokens = false
+	ctx := context.Background()
+	endpointName := "no-start-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	req := makeTokenRequest("req-no-start", 4) // 4 input tokens
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(endpointName)}},
+		},
+	}
+
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(4), producer.tokenTracker.get(endpointID))
+
+	// EndOfStream only (no StartOfStream): both counters must drain.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID),
+		"tokens must be released on EndOfStream even if StartOfStream was never seen")
+
+	// PluginState entry should be gone too (no leak).
+	key := fwkplugin.StateKey(addedTokensKey(endpointID, "default"))
+	_, err := producer.PluginState.Read(req.RequestID, key)
+	require.ErrorIs(t, err, fwkplugin.ErrNotFound, "PluginState entry must be released")
+}
+
+// TestInFlightLoadProducer_Eviction verifies that global counters are rolled back
+// when a request is explicitly deleted from PluginState (simulating either
+// end-of-stream cleanup or janitor reaping).
+func TestInFlightLoadProducer_Eviction(t *testing.T) {
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointName := "eviction-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	// 1. PreRequest: Adds load
+	req := makeTokenRequest("req-eviction", 4) // 4 input + 6 output = 10 tokens
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(ctx, req, res)
+
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+
+	// 2. Explicitly delete the request (simulates what the janitor or EOS cleanup does).
+	producer.PluginState.Delete(req.RequestID)
+
+	// 3. Verify counters rolled back automatically via OnEvicted callback
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID), "request counter should have rolled back via Eviction")
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID), "token counter should have rolled back via Eviction")
+}
+
+// TestInFlightLoadProducer_Touch verifies that intermediate chunks extend the
+// request's lifetime in PluginState.
+func TestInFlightLoadProducer_Touch(t *testing.T) {
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointName := "touch-endpoint"
+
+	req := makeTokenRequest("req-touch", 4)
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(ctx, req, res)
+
+	// Get initial access time
+	t1, ok := producer.PluginState.LastAccessTime(req.RequestID)
+	require.True(t, ok)
+
+	// Simulate intermediate chunks until access time is updated.
+	// We use Eventually to handle coarse timer resolution or busy CI runners.
+	require.Eventually(t, func() bool {
+		req.SchedulingResult = res
+		producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: false, StartOfStream: false}, nil)
+
+		t2, ok := producer.PluginState.LastAccessTime(req.RequestID)
+		return ok && t2.After(t1)
+	}, 1*time.Second, 10*time.Millisecond, "Touch should have extended the lifetime")
+}
+
+// TestInFlightLoadProducer_LateResponseAfterReap verifies that if a ResponseBody
+// arrives after the janitor has already reaped the request, we do NOT double-decrement.
+func TestInFlightLoadProducer_LateResponseAfterReap(t *testing.T) {
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointName := "late-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	req := makeTokenRequest("req-late", 4) // 4 input + 6 output = 10 tokens
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(ctx, req, res)
+
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+
+	// Simulate janitor reap
+	producer.PluginState.Delete(req.RequestID)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID), "counters should be 0 after reap")
+
+	// Late ResponseBody arrives
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+
+	// Verify no double-decrement
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID), "counters should NOT go negative")
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+}
+
+func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointName := "race-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	req := makeTokenRequest("req-race", 4) // 4 input + 6 output = 10 tokens
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+
+	// Fire releaseTokensEarly and an explicit Delete concurrently. Whichever
+	// wins the Swap does the -10; the other is a no-op. Net must be 0.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		producer.releaseTokensEarly(res.ProfileResults["default"].TargetEndpoints[0], req, "default")
+	}()
+	go func() {
+		defer wg.Done()
+		producer.PluginState.Delete(req.RequestID)
+	}()
+	wg.Wait()
+
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+}
+
+func TestUncachedInputTokens_Overestimate(t *testing.T) {
+	// Setup:
+	// inputTokens (estimated) = 5
+	// PrefixCacheMatchInfo: matchBlocks=1, totalBlocks=2, blockSizeTokens=4
+	//   indexedTokens = 2 * 4 = 8
+	//   matchedTokens = 1 * 4 = 4
+
+	endpoint := newStubSchedulingEndpoint("test-ep")
+	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+
+	inputTokens := int64(5)
+
+	uncached := uncachedInputTokens(endpoint, inputTokens, attrprefix.PrefixCacheMatchInfoDataKey.String())
+
+	// When the prefix cache says 4 tokens are definitely uncached in the indexed portion (8-4),
+	// we trust that over the smaller (approximate) estimate of 5.
+	require.Equal(t, int64(4), uncached, "should trust the prefix cache's uncached count (indexed-matched) over the smaller estimate")
+}
+
+func TestInFlightLoadProducer_PanicSafety(t *testing.T) {
+	producer := newTestProducer(t)
+	ctx := context.Background()
+
+	t.Run("ExtractEndpoint", func(t *testing.T) {
+		// 1. Nil Endpoint
+		require.NotPanics(t, func() {
+			_ = producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: nil})
+		})
+
+		// 2. Nil Metadata
+		stub := newStubSchedulingEndpoint("nil-meta")
+		stub.metadata = nil
+		require.NotPanics(t, func() {
+			_ = producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: stub})
+		})
+	})
+
+	t.Run("Produce", func(t *testing.T) {
+		// 1. Nil Endpoints slice
+		require.NotPanics(t, func() {
+			_ = producer.Produce(ctx, nil, nil)
+		})
+
+		// 2. Slice with nil endpoint
+		require.NotPanics(t, func() {
+			_ = producer.Produce(ctx, nil, []fwksched.Endpoint{nil})
+		})
+
+		// 3. Endpoint with nil metadata
+		stub := newStubSchedulingEndpoint("nil-meta")
+		stub.metadata = nil
+		require.NotPanics(t, func() {
+			_ = producer.Produce(ctx, nil, []fwksched.Endpoint{stub})
+		})
+	})
+
+	t.Run("PreRequest", func(t *testing.T) {
+		// 1. Nil Result
+		require.NotPanics(t, func() {
+			producer.PreRequest(ctx, nil, nil)
+		})
+
+		// 2. Nil Request, non-nil Result
+		res := &fwksched.SchedulingResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("ep1")}},
+			},
+		}
+		require.NotPanics(t, func() {
+			producer.PreRequest(ctx, nil, res)
+		})
+		require.Equal(t, int64(0), producer.requestTracker.get(fullEndpointName("ep1")), "should not increment counters without request")
+
+		// 3. Empty ProfileResults
+		resEmpty := &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{}}
+		require.NotPanics(t, func() {
+			producer.PreRequest(ctx, &fwksched.InferenceRequest{}, resEmpty)
+		})
+
+		// 4. Nil ProfileResult
+		resNilProfile := &fwksched.SchedulingResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{"default": nil},
+		}
+		require.NotPanics(t, func() {
+			producer.PreRequest(ctx, &fwksched.InferenceRequest{RequestID: "req1"}, resNilProfile)
+		})
+
+		// 5. Empty TargetEndpoints
+		resEmptyEndpoints := &fwksched.SchedulingResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {TargetEndpoints: []fwksched.Endpoint{}},
+			},
+		}
+		require.NotPanics(t, func() {
+			producer.PreRequest(ctx, &fwksched.InferenceRequest{RequestID: "req1"}, resEmptyEndpoints)
+		})
+
+		// 6. Nil Endpoint in TargetEndpoints
+		resNilEndpoint := &fwksched.SchedulingResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {TargetEndpoints: []fwksched.Endpoint{nil}},
+			},
+		}
+		require.NotPanics(t, func() {
+			producer.PreRequest(ctx, &fwksched.InferenceRequest{RequestID: "req1"}, resNilEndpoint)
+		})
+
+		// 7. Endpoint with nil metadata
+		stub := newStubSchedulingEndpoint("nil-meta")
+		stub.metadata = nil
+		resNilMeta := &fwksched.SchedulingResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {TargetEndpoints: []fwksched.Endpoint{stub}},
+			},
+		}
+		require.NotPanics(t, func() {
+			producer.PreRequest(ctx, &fwksched.InferenceRequest{RequestID: "req1"}, resNilMeta)
+		})
+
+		// 8. Missing RequestID (Leak check)
+		resLeak := &fwksched.SchedulingResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("ep-leak")}},
+			},
+		}
+		require.NotPanics(t, func() {
+			producer.PreRequest(ctx, &fwksched.InferenceRequest{RequestID: ""}, resLeak)
+		})
+		require.Equal(t, int64(0), producer.requestTracker.get(fullEndpointName("ep-leak")), "should not increment counters with empty RequestID")
+	})
+
+	t.Run("ResponseBody", func(t *testing.T) {
+		// 1. Nil Request or Response
+		require.NotPanics(t, func() {
+			producer.ResponseBody(ctx, nil, nil, nil)
+		})
+		require.NotPanics(t, func() {
+			producer.ResponseBody(ctx, &fwksched.InferenceRequest{}, nil, nil)
+		})
+		require.NotPanics(t, func() {
+			producer.ResponseBody(ctx, nil, &requestcontrol.Response{}, nil)
+		})
+
+		// 2. Nil SchedulingResult
+		reqNoRes := &fwksched.InferenceRequest{SchedulingResult: nil}
+		require.NotPanics(t, func() {
+			producer.ResponseBody(ctx, reqNoRes, &requestcontrol.Response{}, nil)
+		})
+
+		// 3. Various nil components in result
+		resNilProfile := &fwksched.SchedulingResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{"default": nil},
+		}
+		reqNilProfile := &fwksched.InferenceRequest{SchedulingResult: resNilProfile}
+		require.NotPanics(t, func() {
+			producer.ResponseBody(ctx, reqNilProfile, &requestcontrol.Response{EndOfStream: true}, nil)
+		})
+
+		resNilEndpoint := &fwksched.SchedulingResult{
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {TargetEndpoints: []fwksched.Endpoint{nil}},
+			},
+		}
+		reqNilEndpoint := &fwksched.InferenceRequest{SchedulingResult: resNilEndpoint}
+		require.NotPanics(t, func() {
+			producer.ResponseBody(ctx, reqNilEndpoint, &requestcontrol.Response{EndOfStream: true}, nil)
+		})
+	})
+
+	t.Run("Factory_NilHandle", func(t *testing.T) {
+		p, err := InFlightLoadProducerFactory("test", nil, nil)
+		require.Error(t, err)
+		require.Nil(t, p)
+	})
 }

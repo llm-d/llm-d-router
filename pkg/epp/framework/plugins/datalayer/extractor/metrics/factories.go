@@ -24,7 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const (
@@ -60,6 +60,15 @@ type (
 		// CacheNumBlocksSpec defines the metric specification string for retrieving num GPU blocks directly
 		// as a gauge value (alternative to CacheInfoSpec labels). Used by engines like Triton TRT-LLM.
 		CacheNumBlocksSpec string `json:"cacheNumBlocksSpec,omitempty"`
+		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
+		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
+	}
+
+	customMetricConfigParams struct {
+		// AttributeKey is the endpoint attribute key where the scalar value is stored.
+		AttributeKey string `json:"attributeKey"`
+		// MetricSpec defines the source metric specification string.
+		MetricSpec string `json:"metricSpec"`
 	}
 
 	// modelServerExtractorParams holds the configuration parameters for the core metrics extractor plugin.
@@ -71,12 +80,12 @@ type (
 		// Can be any engine name from EngineConfigs. Defaults to "vllm".
 		DefaultEngine string `json:"defaultEngine"`
 		// EngineConfigs defines metric specifications for specific engine types.
-		// Built-in configs (vLLM, SGLang, trtllm-serve, triton-tensorrt-llm) are automatically appended if not explicitly defined.
+		// Built-in configs (vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, triton) are automatically appended if not explicitly defined.
 		EngineConfigs []engineConfigParams `json:"engineConfigs"`
 	}
 )
 
-// Default engine configurations for vLLM, SGLang, trtllm-serve, and triton-tensorrt-llm.
+// Default engine configurations for vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
 	{
 		Name:                "vllm",
@@ -116,6 +125,24 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheBlockSizeSpec:  "nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=tokens_per}",
 		CacheNumBlocksSpec:  "nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}",
 	},
+	// "triton" defines standard Triton Inference Server metrics configuration for non-LLM workloads
+	// (e.g. classic ML/DL models serving KServe v2 protocols).
+	//
+	// In contrast:
+	// - "triton-tensorrt-llm" is for Triton deployments specifically using the TensorRT-LLM backend for LLMs,
+	//   which exposes LLM-specific metrics like KV Cache and token metrics.
+	// - "trtllm-serve" is for TensorRT-LLM's standalone C++ server orchestrator, which exposes similar
+	//   LLM-specific metrics under different names.
+	{
+		Name:                "triton",
+		QueuedRequestsSpec:  "nv_inference_pending_request_count",
+		RunningRequestsSpec: "nv_inference_exec_count",
+		KVUsageSpec:         "",
+		LoRASpec:            "",
+		CacheInfoSpec:       "",
+		CacheBlockSizeSpec:  "",
+		CacheNumBlocksSpec:  "",
+	},
 }
 
 // defaultEngineName is the default engine used when defaultEngine is not specified.
@@ -123,11 +150,11 @@ const defaultEngineName = "vllm"
 
 // CoreMetricsExtractorFactory is a factory function used to instantiate data layer's metrics
 // Extractor plugins specified in a configuration.
-func CoreMetricsExtractorFactory(name string, parameters json.RawMessage, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func CoreMetricsExtractorFactory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	params := defaultExtractorParams()
 
 	if parameters != nil { // overlay the defaults with configured values
-		if err := json.Unmarshal(parameters, params); err != nil {
+		if err := parameters.Decode(params); err != nil {
 			return nil, err
 		}
 	}
@@ -179,6 +206,11 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			return nil, fmt.Errorf("engine config name cannot be %q (reserved)", DefaultEngineType)
 		}
 
+		customMetrics, customMetricErrs := customMetricConfigs(engineConfig.CustomMetrics)
+		if len(customMetricErrs) != 0 {
+			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, errors.Join(customMetricErrs...))
+		}
+
 		mapping, err := NewMappingFromConfig(MappingConfig{
 			Queue:               engineConfig.QueuedRequestsSpec,
 			Running:             engineConfig.RunningRequestsSpec,
@@ -189,6 +221,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			CacheNumBlocksLabel: engineConfig.CacheNumBlocksLabelName,
 			CacheBlockSize:      engineConfig.CacheBlockSizeSpec,
 			CacheNumBlocks:      engineConfig.CacheNumBlocksSpec,
+			CustomMetrics:       customMetrics,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, err)
@@ -221,6 +254,23 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 	}
 	extractor.typedName.Name = name
 	return extractor, nil
+}
+
+func customMetricConfigs(configs []customMetricConfigParams) ([]CustomMetric, []error) {
+	custom := make([]CustomMetric, 0, len(configs))
+	var errs []error
+	for _, cfg := range configs {
+		spec, err := parseStringToSpec(cfg.MetricSpec)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("custom metric %q: %w", cfg.AttributeKey, err))
+			continue
+		}
+		custom = append(custom, CustomMetric{
+			AttributeKey: cfg.AttributeKey,
+			Spec:         spec,
+		})
+	}
+	return custom, errs
 }
 
 func defaultExtractorParams() *modelServerExtractorParams {

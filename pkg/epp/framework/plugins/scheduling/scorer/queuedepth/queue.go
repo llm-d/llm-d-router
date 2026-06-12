@@ -21,9 +21,9 @@ import (
 	"encoding/json"
 	"math"
 
-	fwkplugin "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/plugin"
-	framework "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 )
 
 const (
@@ -31,10 +31,10 @@ const (
 )
 
 // compile-time type assertion
-var _ framework.Scorer = &QueueScorer{}
+var _ fwksched.Scorer = &QueueScorer{}
 
 // QueueScorerFactory defines the factory function for QueueScorer.
-func QueueScorerFactory(name string, _ json.RawMessage, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func QueueScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	return NewQueueScorer().WithName(name), nil
 }
 
@@ -57,8 +57,8 @@ func (s *QueueScorer) TypedName() fwkplugin.TypedName {
 }
 
 // Category returns the preference the scorer applies when scoring candidate endpoints.
-func (s *QueueScorer) Category() framework.ScorerCategory {
-	return framework.Distribution
+func (s *QueueScorer) Category() fwksched.ScorerCategory {
+	return fwksched.Distribution
 }
 
 // Consumes returns the list of data that is consumed by the plugin.
@@ -75,7 +75,7 @@ func (s *QueueScorer) WithName(name string) *QueueScorer {
 }
 
 // Score returns the scoring result for the given list of endpoints based on context.
-func (s *QueueScorer) Score(_ context.Context, _ *framework.CycleState, _ *framework.InferenceRequest, endpoints []framework.Endpoint) map[framework.Endpoint]float64 {
+func (s *QueueScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	minQueueSize := math.MaxInt
 	maxQueueSize := math.MinInt
 
@@ -91,7 +91,7 @@ func (s *QueueScorer) Score(_ context.Context, _ *framework.CycleState, _ *frame
 	}
 
 	// endpointScoreFunc calculates the score based on the queue size of each endpoint. Longer queue gets a lower score.
-	endpointScoreFunc := func(endpoint framework.Endpoint) float64 {
+	endpointScoreFunc := func(endpoint fwksched.Endpoint) float64 {
 		if maxQueueSize == minQueueSize {
 			// If all pods have the same queue size, return a neutral score
 			return 1.0
@@ -100,7 +100,7 @@ func (s *QueueScorer) Score(_ context.Context, _ *framework.CycleState, _ *frame
 	}
 
 	// Create a map to hold the scores for each endpoint
-	scores := make(map[framework.Endpoint]float64, len(endpoints))
+	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
 		scores[endpoint] = endpointScoreFunc(endpoint)
 	}

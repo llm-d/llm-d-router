@@ -17,6 +17,7 @@ spec:
         llm-d.ai/component: prefill
         llm-d.ai/role: prefill
     spec:
+      initContainers: []
       containers:
       - name: vllm
         # VLLM_IMAGE can be a simulator (e.g. llm-d-inference-sim) or a real
@@ -95,3 +96,4 @@ spec:
               fieldPath: metadata.namespace
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
+      volumes: []

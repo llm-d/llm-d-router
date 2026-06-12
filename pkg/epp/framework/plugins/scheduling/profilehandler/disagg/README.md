@@ -176,19 +176,19 @@ Decides per-request whether P/D disaggregation should run, based on how much of 
 
 Compares the uncached portion of the request prompt against a configurable threshold, triggering P/D disaggregation only when the uncached suffix is long enough to justify the overhead.
 
-1. Estimate the prompt token count from the request body 
+1. Read the prompt token count as `len(request.Body.TokenizedPrompt.TokenIDs)`.
 2. Read `PrefixCacheMatchInfo` from the decode endpoint attributes.
 3. Compute uncached suffix length.
 4. Return true (disaggregate) if uncached tokens ≥ `nonCachedTokens`.
 
 #### How It Works
 
-Token count is estimated by dividing raw character length by 4 (a fixed approximation). Prefix cache state is read from the `PrefixCacheMatchInfo` attribute on the decode endpoint, populated by `approx-prefix-cache-producer`. If the attribute is absent or malformed, disaggregation is skipped. Setting `nonCachedTokens: 0` disables the decider entirely (always returns false).
+The prompt token count is `len(request.Body.TokenizedPrompt.TokenIDs)`, populated by a `token-producer` — auto-created with the tokenizer-free `estimate` backend when none is configured. Prefix cache state is read from the `PrefixCacheMatchInfo` attribute on the decode endpoint, populated by `approx-prefix-cache-producer`. If the attribute is absent or malformed, disaggregation is skipped. Setting `nonCachedTokens: 0` disables the decider entirely (always returns false).
 
 #### Inputs consumed
 
 - `PrefixCacheMatchInfo` — endpoint attribute from `approx-prefix-cache-producer`, read from the decode endpoint.
-- Request body (prompt text or chat messages, used to estimate token count).
+- `request.Body.TokenizedPrompt.TokenIDs` — token IDs from a `token-producer` plugin; their count is the prompt token count.
 
 #### Configuration
 
@@ -199,8 +199,6 @@ Token count is estimated by dividing raw character length by 4 (a fixed approxim
 
 ##### Example
 ```yaml
-featureGates:
-- prepareDataPlugins
 plugins:
   - type: prefix-based-pd-decider
     parameters:
@@ -214,9 +212,8 @@ plugins:
 #### Limitations
 
 - `nonCachedTokens: 0` disables disaggregation entirely (the decider always returns false).
-- Token count is estimated (characters ÷ 4), not exact; behavior may differ for non-ASCII content.
+- A `token-producer` populates `TokenizedPrompt`; when none is configured the framework auto-creates one with the `estimate` backend, so disaggregation works without extra setup.
 - Requires `PrefixCacheMatchInfo` on the decode endpoint; if absent, disaggregation is skipped with an error log.
-- Requires the `prepareDataPlugins` feature gate to be enabled.
 
 ---
 

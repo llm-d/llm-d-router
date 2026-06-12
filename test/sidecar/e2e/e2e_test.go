@@ -24,7 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
 
-	"github.com/llm-d/llm-d-inference-scheduler/test/sidecar/utils"
+	"github.com/llm-d/llm-d-router/test/sidecar/utils"
 )
 
 const (
@@ -61,9 +61,9 @@ var _ = Describe("Sidecar", Ordered, func() {
 		cmd = exec.Command("kubectl", "describe", "pod", qwenPodName, "-n", namespace)
 		podDescription, err := utils.Run(cmd)
 		if err == nil {
-			fmt.Println("Pod description:\n", podDescription)
+			_, _ = fmt.Fprintf(GinkgoWriter, "Pod description:\n%s", podDescription)
 		} else {
-			fmt.Println("Failed to describe controller pod")
+			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to describe controller pod: %s", err)
 		}
 	})
 
