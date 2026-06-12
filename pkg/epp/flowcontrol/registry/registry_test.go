@@ -957,11 +957,10 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 		require.True(t, exists,
 			"Control-plane-desired band %d must survive GC after inactivity", desiredPrio)
 
-		// A follow-up request to the still-desired band must not be rejected/demoted.
+		// A follow-up request to the still-desired band must not be rejected with ErrPriorityBandNotFound.
 		err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error { return nil })
 		require.NoError(t, err,
 			"Request to a still-desired band must succeed after inactivity")
-		assert.NotErrorIs(t, err, contracts.ErrPriorityBandNotFound)
 	})
 
 	t.Run("ShouldCollectMultipleBands_InOneCycle", func(t *testing.T) {

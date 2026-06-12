@@ -282,6 +282,12 @@ func (fc *FlowController) EnqueueAndWait(
 
 // fallbackRequest wraps a FlowControlRequest to override its flow key, so a request that falls back to a different
 // priority is enqueued under the band that was actually leased rather than its original (unprovisioned) band.
+//
+// Trade-off: downstream consumers see this wrapper, so item.OriginalRequest().FlowKey() reports the fallback
+// priority rather than the requested one — despite the method name. This is intentional, since the item must be
+// leased, distributed, and enqueued consistently at the fallback priority. The originally requested priority
+// therefore survives only in the withConnectionWithFallback log; surfacing it in metrics is left as a follow-up
+// (a dedicated fallback counter labeled with the original priority).
 type fallbackRequest struct {
 	flowcontrol.FlowControlRequest
 	key flowcontrol.FlowKey
