@@ -256,7 +256,7 @@ func (sp *Processor) enqueue(item *FlowItem) {
 	// The ultimate guarantee of cleanup for any races is the runCleanupSweep mechanism.
 	if finalState := outcome; finalState != nil {
 		sp.logger.V(logutil.TRACE).Info("Item finalized externally before processing, discarding.",
-			"outcome", finalState.Outcome, "err", finalState.Err, "flowKey", key, "reqID", req.ID())
+			"outcome", finalState.Outcome, "err", finalState.Err, "flowKey", key, "requestID", req.ID())
 		return
 	}
 
@@ -264,7 +264,7 @@ func (sp *Processor) enqueue(item *FlowItem) {
 	managedQ, err := sp.registry.ManagedQueue(key)
 	if err != nil {
 		finalErr := fmt.Errorf("configuration error: failed to get queue for flow key %s: %w", key, err)
-		sp.logger.Error(finalErr, "Rejecting item.", "flowKey", key, "reqID", req.ID())
+		sp.logger.Error(finalErr, "Rejecting request, queue lookup failed", "flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		return
 	}
@@ -272,16 +272,18 @@ func (sp *Processor) enqueue(item *FlowItem) {
 	_, err = sp.registry.PriorityBandAccessor(key.Priority)
 	if err != nil {
 		finalErr := fmt.Errorf("configuration error: failed to get priority band for priority %d: %w", key.Priority, err)
-		sp.logger.Error(finalErr, "Rejecting item.", "flowKey", key, "reqID", req.ID())
+		sp.logger.Error(finalErr, "Rejecting request, priority band lookup failed", "flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		return
 	}
 
 	// --- Capacity Check ---
 	// This check is safe because it is performed by the single-writer Run goroutine.
-	if !sp.hasCapacity(key.Priority, req.ByteSize()) {
+	if ok, stats := sp.hasCapacity(key.Priority, req.ByteSize()); !ok {
 		sp.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
-			"flowKey", key, "reqID", req.ID(), "reqByteSize", req.ByteSize())
+			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
+			"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
+			"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, fmt.Errorf("%w: %w",
 			types.ErrRejected, types.ErrQueueAtCapacity))
 		return
@@ -291,39 +293,39 @@ func (sp *Processor) enqueue(item *FlowItem) {
 	// The item is admitted. The ManagedQueue.Add implementation is responsible for calling item.SetHandle() atomically.
 	if err := managedQ.Add(item); err != nil {
 		finalErr := fmt.Errorf("failed to add item to queue for flow key %s: %w", key, err)
-		sp.logger.Error(finalErr, "Rejecting item post-admission.",
-			"flowKey", key, "reqID", req.ID())
+		sp.logger.Error(finalErr, "Rejecting request, queue add failed",
+			"flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		return
 	}
 	sp.logger.V(logutil.TRACE).Info("Item enqueued.",
-		"flowKey", key, "reqID", req.ID())
+		"flowKey", key, "requestID", req.ID())
 }
 
 // hasCapacity checks if the shard and the specific priority band have enough capacity.
 // This check reflects actual resource utilization, including "zombie" items (finalized but unswept), to prevent
 // physical resource overcommitment.
-func (sp *Processor) hasCapacity(priority int, itemByteSize uint64) bool {
+func (sp *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.AggregateStats) {
 	stats := sp.registry.Stats()
 	if stats.TotalCapacityBytes > 0 && stats.TotalByteSize+itemByteSize > stats.TotalCapacityBytes {
-		return false
+		return false, stats
 	}
 	if stats.TotalCapacityRequests > 0 && stats.TotalLen+1 > stats.TotalCapacityRequests {
-		return false
+		return false, stats
 	}
 
 	bandStats, ok := stats.PerPriorityBandStats[priority]
 	if !ok {
-		return false
+		return false, stats
 	}
 	if bandStats.CapacityBytes > 0 && bandStats.ByteSize+itemByteSize > bandStats.CapacityBytes {
-		return false
+		return false, stats
 	}
 	if bandStats.CapacityRequests > 0 && bandStats.Len+1 > bandStats.CapacityRequests {
-		return false
+		return false, stats
 	}
 
-	return true
+	return true, stats
 }
 
 // dispatchCycle attempts to dispatch a single item by iterating through priority bands from highest to lowest.
@@ -358,7 +360,7 @@ func (sp *Processor) dispatchCycle(ctx context.Context) bool {
 		usageLimit := ceilings[i]
 		if saturation >= usageLimit {
 			sp.logger.V(logutil.DEBUG).Info("Priority band is saturated; enforcing HoL blocking.",
-				"priority", priority, "usageLimit", usageLimit)
+				"priority", priority, "saturation", saturation, "usageLimit", usageLimit)
 			// Stop the dispatch cycle entirely to respect strict policy decision and prevent priority inversion where
 			// lower-priority work might exacerbate the saturation affecting high-priority work.
 			return false
@@ -384,7 +386,7 @@ func (sp *Processor) dispatchCycle(ctx context.Context) bool {
 		req := item.OriginalRequest()
 		if err := sp.dispatchItem(item); err != nil {
 			sp.logger.Error(err, "Failed to dispatch item, skipping priority band for this cycle",
-				"flowKey", req.FlowKey(), "reqID", req.ID())
+				"flowKey", req.FlowKey(), "requestID", req.ID())
 			continue // Continue to the next band to maximize work conservation.
 		}
 		return true
@@ -428,12 +430,12 @@ func (sp *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 		// This happens benignly if the item was already removed by the cleanup sweep loop.
 		// We log it at a low level for visibility but return nil so the dispatch cycle proceeds.
 		sp.logger.V(logutil.DEBUG).Info("Failed to remove item during dispatch (likely already finalized and swept).",
-			"flowKey", key, "reqID", req.ID(), "error", err)
+			"flowKey", key, "requestID", req.ID(), "error", err)
 		return nil
 	}
 
 	removedItem := removedItemAcc.(*FlowItem)
-	sp.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "reqID", req.ID())
+	sp.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
 	removedItem.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
 	return nil
 }
@@ -467,8 +469,10 @@ func (sp *Processor) sweepFinalizedItems() {
 			return itemAcc.(*FlowItem).FinalState() != nil
 		}
 		removedItems := managedQ.Cleanup(predicate)
-		logger.V(logutil.DEBUG).Info("Swept finalized items and released capacity.",
-			"count", len(removedItems))
+		if len(removedItems) > 0 {
+			logger.V(logutil.TRACE).Info("Swept finalized items and released capacity.",
+				"count", len(removedItems))
+		}
 	}
 	sp.processAllQueuesConcurrently("sweepFinalizedItems", processFn)
 }
@@ -517,9 +521,8 @@ func (sp *Processor) evictAll() {
 			}
 
 			// Finalization is idempotent; safe to call even if already finalized externally.
+			// The per-request log is emitted by EnqueueAndWait when it unblocks.
 			item.FinalizeWithOutcome(outcome, errShutdown)
-			logger.V(logutil.TRACE).Info("Item evicted during shutdown.",
-				"reqID", item.OriginalRequest().ID())
 		}
 	}
 	sp.processAllQueuesConcurrently("evictAll", processFn)

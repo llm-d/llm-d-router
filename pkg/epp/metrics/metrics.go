@@ -440,6 +440,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdNormalizedTimePerOutputToken)
 		metrics.Registry.MustRegister(llmdRequestTTFT)
 		metrics.Registry.MustRegister(llmdRequestTPOT)
+		metrics.Registry.MustRegister(llmdInterTokenLatency)
 		metrics.Registry.MustRegister(inferencePoolAvgKVCache)
 		metrics.Registry.MustRegister(llmdInferencePoolAvgKVCache)
 		metrics.Registry.MustRegister(inferencePoolAvgQueueSize)
@@ -505,6 +506,7 @@ func Reset() {
 	llmdNormalizedTimePerOutputToken.Reset()
 	llmdRequestTTFT.Reset()
 	llmdRequestTPOT.Reset()
+	llmdInterTokenLatency.Reset()
 	inferencePoolAvgKVCache.Reset()
 	llmdInferencePoolAvgKVCache.Reset()
 	inferencePoolAvgQueueSize.Reset()
@@ -602,7 +604,7 @@ func RecordPromptCachedTokens(modelName, targetModelName string, size int) {
 }
 
 // RecordNormalizedTimePerOutputToken (NTPOT) records the normalized time per output token.
-func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetModelName string, received time.Time, complete time.Time, outputTokenCount int) bool {
+func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, complete time.Time, outputTokenCount int) bool {
 	if outputTokenCount <= 0 {
 		return false
 	}
@@ -617,7 +619,7 @@ func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetMo
 	secondsPerToken := elapsedSeconds / float64(outputTokenCount)
 
 	normalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName).Observe(secondsPerToken)
-	llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName).Observe(secondsPerToken)
+	llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(secondsPerToken)
 	return true
 }
 
@@ -631,11 +633,12 @@ func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairness
 			"modelName", modelName, "targetModelName", targetModelName, "firstTokenTime", firstToken, "receivedTime", received)
 		return false
 	}
-	ttftSeconds := firstToken.Sub(received).Seconds()
+
 	streamingLabel := "false"
 	if streaming {
 		streamingLabel = "true"
 	}
+	ttftSeconds := firstToken.Sub(received).Seconds()
 	llmdRequestTTFT.WithLabelValues(modelName, targetModelName, fairnessID, priority, streamingLabel).Observe(ttftSeconds)
 	return true
 }
@@ -651,10 +654,22 @@ func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairness
 			"receivedTime", received, "firstTokenTime", firstToken, "completeTime", complete)
 		return false
 	}
+
 	e2eSeconds := complete.Sub(received).Seconds()
 	ttftSeconds := firstToken.Sub(received).Seconds()
 	tpotSeconds := (e2eSeconds - ttftSeconds) / float64(outputTokenCount-1)
 	llmdRequestTPOT.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(tpotSeconds)
+	return true
+}
+
+// RecordInterTokenLatency records the time between consecutive response body chunks for streaming requests.
+func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName, fairnessID, priority string, itlSeconds float64) bool {
+	if itlSeconds < 0 {
+		log.FromContext(ctx).Error(nil, "Inter-token latency value must be non-negative",
+			"modelName", modelName, "targetModelName", targetModelName, "itlSeconds", itlSeconds)
+		return false
+	}
+	llmdInterTokenLatency.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(itlSeconds)
 	return true
 }
 

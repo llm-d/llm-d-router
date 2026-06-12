@@ -165,12 +165,12 @@ func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiMod
 		case blockTypeText:
 			out = append(out, []byte(block.Text)...)
 		case "image_url":
-			out, features = appendMMAsset(out, features, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
+			out, features = appendMMAsset(out, features, fwkrh.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
 		case "video_url":
-			out, features = appendMMAsset(out, features, block.VideoURL.URL, assetPlaceholderCount(len(block.VideoURL.URL)))
+			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, assetPlaceholderCount(len(block.VideoURL.URL)))
 		case "input_audio", "audio_url":
 			data := block.InputAudio.Data + block.InputAudio.Format
-			out, features = appendMMAsset(out, features, data, assetPlaceholderCount(len(data)))
+			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, assetPlaceholderCount(len(data)))
 		}
 	}
 	return out, features
@@ -211,7 +211,7 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 				out = append(out, []byte(block.Text)...)
 			case "image":
 				if content, count := b.img.placeholderForAnthropicImage(block.Source); content != "" {
-					out, features = appendMMAsset(out, features, content, count)
+					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, content, count)
 				}
 			}
 		}
@@ -221,9 +221,8 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 
 // appendMMAsset aligns out to a token boundary, appends count placeholder
 // pseudo-tokens derived from a stable content hash, and records the matching
-// feature. Modality is always ModalityImage: it is the only defined modality
-// const, and detection/scoring need only a non-empty, stably-hashed feature.
-func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, content string, count int) ([]byte, []fwkrh.MultiModalFeature) {
+// feature under modality so labels agree with the vllm backend.
+func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkrh.Modality, content string, count int) ([]byte, []fwkrh.MultiModalFeature) {
 	out = align(out)
 	offset := len(out) / bytesPerToken
 
@@ -235,7 +234,7 @@ func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, content strin
 	}
 
 	features = append(features, fwkrh.MultiModalFeature{
-		Modality: fwkrh.ModalityImage,
+		Modality: modality,
 		Hash:     strconv.FormatUint(sum, 16),
 		Offset:   offset,
 		Length:   count,

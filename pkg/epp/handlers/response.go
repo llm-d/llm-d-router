@@ -56,6 +56,19 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		reqCtx.FirstTokenTimestamp = time.Now()
 	}
 
+	if reqCtx.modelServerStreaming && len(responseBytes) > 0 {
+		now := time.Now()
+		if !reqCtx.LastChunkReceivedTimestamp.IsZero() {
+			fairnessID := metadata.DefaultFairnessID
+			if reqCtx.SchedulingRequest != nil {
+				fairnessID = reqCtx.SchedulingRequest.FairnessID
+			}
+			itl := now.Sub(reqCtx.LastChunkReceivedTimestamp).Seconds()
+			metrics.RecordInterTokenLatency(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, strconv.Itoa(reqCtx.Priority), itl)
+		}
+		reqCtx.LastChunkReceivedTimestamp = now
+	}
+
 	var parsedResp *fwkrh.ParsedResponse
 	parser, err := s.getOrResolveParser(ctx, reqCtx)
 	if err != nil {
@@ -75,14 +88,14 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		}
 	}
 	if endOfStream {
-		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
-		metrics.RecordRequestLatencies(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp)
-		metrics.RecordResponseSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.ResponseSize)
 		fairnessID := metadata.DefaultFairnessID
-		if reqCtx.SchedulingRequest != nil {
+		if reqCtx.SchedulingRequest != nil && reqCtx.SchedulingRequest.FairnessID != "" {
 			fairnessID = reqCtx.SchedulingRequest.FairnessID
 		}
 		priority := strconv.Itoa(reqCtx.Priority)
+		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
+		metrics.RecordRequestLatencies(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp)
+		metrics.RecordResponseSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.ResponseSize)
 		metrics.RecordRequestTTFT(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.modelServerStreaming, reqCtx.RequestReceivedTimestamp, reqCtx.FirstTokenTimestamp)
 		metrics.RecordRequestTPOT(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.FirstTokenTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
 	}

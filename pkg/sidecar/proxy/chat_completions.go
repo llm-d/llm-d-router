@@ -45,6 +45,9 @@ const (
 	// ResponsesPath is the OpenAI Responses API path
 	ResponsesPath = "/v1/responses"
 
+	// MessagesPath is the Anthropic Messages API path
+	MessagesPath = "/v1/messages"
+
 	// GeneratePath is vLLM's token-in generate endpoint
 	GeneratePath = "/inference/v1/generate"
 )

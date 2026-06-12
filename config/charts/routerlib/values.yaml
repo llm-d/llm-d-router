@@ -11,7 +11,9 @@ epp:
     tag: main
     pullPolicy: Always
   extProcPort: 9002
-  
+  # gRPC port serving EPP liveness and readiness checks, 9003 if unset.
+  # grpcHealthPort: 9003
+
   parsers: [] # e.g. ["openai-parser", "anthropic-parser"], or empty for auto-selection
 
   # Metrics DataSource Configuration

@@ -30,6 +30,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
+	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
@@ -106,24 +107,25 @@ type StreamingServer struct {
 // Refactor this monolithic struct. Fields related to the Envoy ext-proc protocol should be decoupled from the internal
 // request lifecycle state.
 type RequestContext struct {
-	TargetPod                 *fwkdl.EndpointMetadata
-	TargetEndpoint            string
-	IncomingModelName         string
-	TargetModelName           string
-	ObjectiveKey              string
-	Priority                  int
-	RequestReceivedTimestamp  time.Time
-	FirstTokenTimestamp       time.Time
-	ResponseCompleteTimestamp time.Time
-	RequestSize               int
-	Usage                     fwkrh.Usage
-	ResponseSize              int
-	ResponseBodyStarted       bool
-	ResponseComplete          bool
-	ResponseStatusCode        string
-	RequestRunning            bool
-	Request                   *Request
-	Parser                    fwkrh.Parser
+	TargetPod                  *fwkdl.EndpointMetadata
+	TargetEndpoint             string
+	IncomingModelName          string
+	TargetModelName            string
+	ObjectiveKey               string
+	Priority                   int
+	RequestReceivedTimestamp   time.Time
+	FirstTokenTimestamp        time.Time
+	ResponseCompleteTimestamp  time.Time
+	LastChunkReceivedTimestamp time.Time
+	RequestSize                int
+	Usage                      fwkrh.Usage
+	ResponseSize               int
+	ResponseBodyStarted        bool
+	ResponseComplete           bool
+	ResponseStatusCode         string
+	RequestRunning             bool
+	Request                    *Request
+	Parser                     fwkrh.Parser
 
 	SchedulingRequest *fwksched.InferenceRequest
 
@@ -298,6 +300,14 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.ResponseStatusCode)
 		} else if err != nil {
 			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, errcommon.CanonicalCode(err))
+		}
+		if span != nil {
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(otelcodes.Error, err.Error())
+			} else if reqCtx.ResponseStatusCode != "" {
+				span.SetStatus(otelcodes.Error, reqCtx.ResponseStatusCode)
+			}
 		}
 		if reqCtx.RequestRunning {
 			metrics.DecRunningRequests(reqCtx.IncomingModelName)

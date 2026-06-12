@@ -35,6 +35,30 @@ spec:
         port: {{ $port }}
         grpcServiceName: "/vllm.grpc.engine.VllmEngine/HealthCheck"
     {{- end }}
+{{- $eppHealthPort := int (.Values.router.epp.grpcHealthPort | default 9003) }}
+{{- /* The GKE gateway controller health-checks the EPP backend on gRPC port
+9003 by default, so an explicit HealthCheckPolicy is only needed for other ports. */}}
+{{- if ne $eppHealthPort 9003 }}
+---
+kind: HealthCheckPolicy
+apiVersion: networking.gke.io/v1
+metadata:
+  name: {{ .Release.Name }}-epp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: {{ include "llm-d-router.name" . }}
+  default:
+    config:
+      type: GRPC
+      grpcHealthCheck:
+        portSpecification: "USE_FIXED_PORT"
+        port: {{ $eppHealthPort }}
+{{- end }}
 ---
 apiVersion: networking.gke.io/v1
 kind: GCPBackendPolicy
