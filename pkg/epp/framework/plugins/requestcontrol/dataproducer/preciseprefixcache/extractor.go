@@ -52,6 +52,7 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 		logger.V(logging.DEBUG).Info("Adding subscriber", "endpoint", endpointKey)
 	case fwkdl.EventDelete:
 		p.subscribersManager.RemoveSubscriber(ctx, endpointKey)
+		p.healthMonitor.RemoveEndpoint(endpointKey)
 		logger.V(logging.DEBUG).Info("Removed KV-events subscriber", "endpoint", endpointKey)
 	}
 	return nil
