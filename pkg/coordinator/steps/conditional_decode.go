@@ -72,7 +72,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		return fmt.Errorf("conditional-decode: creating request: %w", err)
 	}
 	proxyReq.ContentLength = int64(len(bodyBytes))
-	proxyReq.Header.Set("Content-Type", "application/json")
+	proxyReq.Header.Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
 	for k, v := range reqCtx.ForwardedHeaders() {
 		proxyReq.Header.Set(k, v)
 	}

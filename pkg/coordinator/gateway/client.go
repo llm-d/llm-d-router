@@ -58,7 +58,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(ContentTypeHeader, ContentTypeJSON)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
