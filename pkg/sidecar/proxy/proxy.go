@@ -272,6 +272,7 @@ type Config struct {
 	// MoRIIODecodeHosts is the decode-side counterpart of MoRIIORemoteHosts,
 	// emitted as the prefill leg's remote_hosts. A multi-pod deployment sets
 	// both; the lists must use opposite sides or every cross-pod handshake hangs.
+	// DNS names (e.g., LWS pod names) are automatically resolved to IPs at startup.
 	MoRIIODecodeHosts []string
 }
 

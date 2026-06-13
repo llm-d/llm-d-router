@@ -1017,8 +1017,8 @@ func TestCompleteWideEPValidation(t *testing.T) {
 	}{
 		{
 			name:        "valid 2P2D DP16 both legs",
-			remoteHosts: []string{"10.0.0.1", "10.0.0.2"},
-			decodeHosts: []string{"10.0.1.1", "10.0.1.2"},
+			remoteHosts: []string{"localhost", "localhost"},
+			decodeHosts: []string{"localhost", "localhost"},
 			dpSize:      16,
 			dpLocal:     8,
 			wantErr:     "",
@@ -1230,4 +1230,235 @@ func TestCompleteTLSConfiguration(t *testing.T) {
 
 		})
 	}
+}
+
+// TestResolveHostsToIPs tests the DNS resolution helper function that
+// automatically converts hostnames to IP addresses at startup, enabling
+// LWS-compatible pod addressing (DNS names instead of hardcoded IPs).
+func TestResolveHostsToIPs(t *testing.T) {
+	t.Run("empty list returns empty", func(t *testing.T) {
+		result, err := resolveHostsToIPs(nil)
+		require.NoError(t, err)
+		require.Empty(t, result)
+
+		result, err = resolveHostsToIPs([]string{})
+		require.NoError(t, err)
+		require.Empty(t, result)
+	})
+
+	t.Run("raw IPv4 addresses are passed through", func(t *testing.T) {
+		hosts := []string{"10.0.0.1"}
+		result, err := resolveHostsToIPs(hosts)
+		require.NoError(t, err)
+		require.Equal(t, []string{"10.0.0.1"}, result)
+	})
+
+	t.Run("raw IPv6 addresses are passed through", func(t *testing.T) {
+		hosts := []string{"::1"}
+		result, err := resolveHostsToIPs(hosts)
+		require.NoError(t, err)
+		require.Equal(t, []string{"::1"}, result)
+	})
+
+	t.Run("localhost resolves to IP", func(t *testing.T) {
+		hosts := []string{"localhost"}
+		result, err := resolveHostsToIPs(hosts)
+		require.NoError(t, err)
+		require.Len(t, result, 1)
+		// localhost should resolve to 127.0.0.1 or ::1
+		require.True(t, result[0] == "127.0.0.1" || result[0] == "::1",
+			"expected localhost to resolve to 127.0.0.1 or ::1, got %s", result[0])
+	})
+
+	t.Run("mixed IPs and hostnames both work", func(t *testing.T) {
+		hosts := []string{"10.0.0.1", "localhost"}
+		result, err := resolveHostsToIPs(hosts)
+		require.NoError(t, err)
+		require.Len(t, result, 2)
+		require.Equal(t, "10.0.0.1", result[0])
+		// localhost resolves to 127.0.0.1 or ::1
+		require.True(t, result[1] == "127.0.0.1" || result[1] == "::1")
+	})
+
+	t.Run("multiple DNS names resolve correctly", func(t *testing.T) {
+		hosts := []string{"localhost", "localhost"}
+		result, err := resolveHostsToIPs(hosts)
+		require.NoError(t, err)
+		require.Len(t, result, 2)
+		for _, h := range result {
+			require.True(t, h == "127.0.0.1" || h == "::1",
+				"expected resolved IP, got %s", h)
+		}
+	})
+
+	t.Run("unresolvable hostname errors", func(t *testing.T) {
+		hosts := []string{"this-hostname-does-not-exist-12345.invalid"}
+		_, err := resolveHostsToIPs(hosts)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to resolve")
+	})
+}
+
+// TestCompleteAutomaticDNSResolution tests that DNS hostnames in
+// --moriio-remote-hosts and --moriio-decode-hosts are automatically resolved
+// to IPs at startup, aligning with LWS (LeaderWorkerSet) patterns.
+func TestCompleteAutomaticDNSResolution(t *testing.T) {
+	if !MoRIIOFeatureEnabled {
+		t.Skip("MoRI-IO feature is dormant; skipping DNS resolution tests")
+	}
+
+	t.Run("raw IP addresses are passed through", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODPSize = 16
+		opts.MoRIIODPSizeLocal = 8
+		opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2"}
+		opts.MoRIIODecodeHosts = []string{"10.0.1.1", "10.0.1.2"}
+		require.NoError(t, opts.Complete())
+		// IPs should be passed through unchanged
+		require.Equal(t, []string{"10.0.0.1", "10.0.0.2"}, opts.MoRIIORemoteHosts)
+		require.Equal(t, []string{"10.0.1.1", "10.0.1.2"}, opts.MoRIIODecodeHosts)
+	})
+
+	t.Run("localhost automatically resolves to IP", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODPSize = 8
+		opts.MoRIIODPSizeLocal = 8
+		opts.MoRIIORemoteHosts = []string{"localhost"}
+		opts.MoRIIODecodeHosts = []string{"localhost"}
+		require.NoError(t, opts.Complete())
+		// localhost should be automatically resolved to an IP
+		require.True(t, opts.MoRIIORemoteHosts[0] == "127.0.0.1" || opts.MoRIIORemoteHosts[0] == "::1")
+		require.True(t, opts.MoRIIODecodeHosts[0] == "127.0.0.1" || opts.MoRIIODecodeHosts[0] == "::1")
+	})
+
+	t.Run("unresolvable hostname errors", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODPSize = 8
+		opts.MoRIIORemoteHosts = []string{"unresolvable-host-xyz.invalid"}
+		err := opts.Complete()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "resolving --moriio-remote-hosts")
+	})
+}
+
+// TestWideEPScenarios tests both 1P1D and 2P2D Wide-EP configurations to ensure
+// automatic DNS resolution works correctly in both single-pod and multi-pod scenarios.
+func TestWideEPScenarios(t *testing.T) {
+	if !MoRIIOFeatureEnabled {
+		t.Skip("MoRI-IO feature is dormant; skipping Wide-EP scenario tests")
+	}
+
+	// Scenario 1: 1P1D (DP=EP=8, TP=1, intra-node single pod)
+	// This is the simplest Wide-EP case: all 8 DP ranks on a single pod pair.
+	t.Run("1P1D DP=8 intra-node (no remote hosts)", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.0.1"
+		opts.MoRIIODPSize = 8
+		opts.MoRIIOTPSize = 1
+		// No remote hosts needed for single-pod 1P1D
+		opts.MoRIIORemoteHosts = nil
+		opts.MoRIIODecodeHosts = nil
+		opts.MoRIIODPSizeLocal = 0 // Not needed for single pod
+
+		require.NoError(t, opts.Complete())
+		// Verify config is set correctly for 1P1D
+		require.Equal(t, 8, opts.MoRIIODPSize)
+		require.Equal(t, 1, opts.MoRIIOTPSize)
+		require.Empty(t, opts.MoRIIORemoteHosts)
+		require.Empty(t, opts.MoRIIODecodeHosts)
+	})
+
+	// Scenario 2: 2P2D (DP=EP=16, TP=1, inter-node multi-pod)
+	// Two prefill pods + two decode pods, each with 8 DP ranks.
+	// Both raw IPs and DNS names are supported.
+	t.Run("2P2D DP=16 inter-node with IPs (static deployment)", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODPSize = 16
+		opts.MoRIIOTPSize = 1
+		opts.MoRIIODPSizeLocal = 8
+		// Raw IPs work for static IP deployments
+		opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2"}
+		opts.MoRIIODecodeHosts = []string{"10.0.1.1", "10.0.1.2"}
+
+		require.NoError(t, opts.Complete())
+		// IPs should be passed through unchanged
+		require.Equal(t, []string{"10.0.0.1", "10.0.0.2"}, opts.MoRIIORemoteHosts)
+		require.Equal(t, []string{"10.0.1.1", "10.0.1.2"}, opts.MoRIIODecodeHosts)
+	})
+
+	t.Run("2P2D DP=16 inter-node with DNS names (LWS pattern)", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODPSize = 16
+		opts.MoRIIOTPSize = 1
+		opts.MoRIIODPSizeLocal = 8
+		// Use localhost as a resolvable DNS name for testing
+		opts.MoRIIORemoteHosts = []string{"localhost", "localhost"}
+		opts.MoRIIODecodeHosts = []string{"localhost", "localhost"}
+
+		require.NoError(t, opts.Complete())
+		// DNS names should be resolved to IPs
+		require.Len(t, opts.MoRIIORemoteHosts, 2)
+		require.Len(t, opts.MoRIIODecodeHosts, 2)
+		// All entries should now be IPs (127.0.0.1 or ::1)
+		for _, h := range opts.MoRIIORemoteHosts {
+			require.True(t, h == "127.0.0.1" || h == "::1",
+				"expected resolved IP, got %s", h)
+		}
+		for _, h := range opts.MoRIIODecodeHosts {
+			require.True(t, h == "127.0.0.1" || h == "::1",
+				"expected resolved IP, got %s", h)
+		}
+	})
+
+	// Validation tests for multi-pod configuration invariants
+	t.Run("2P2D validation: dp-size must be divisible by dp-size-local", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODPSize = 15 // Not divisible by 8
+		opts.MoRIIODPSizeLocal = 8
+		opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2"}
+
+		err := opts.Complete()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "must be divisible")
+	})
+
+	t.Run("2P2D validation: host count must match pod count", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODPSize = 16
+		opts.MoRIIODPSizeLocal = 8
+		// 3 hosts but dp-size/dp-size-local = 2 pods
+		opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+
+		err := opts.Complete()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "count of hosts must match")
+	})
+
+	t.Run("2P2D validation: dp-size-local required for multi-host", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODPSize = 16
+		opts.MoRIIODPSizeLocal = 0 // Missing!
+		opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2"}
+
+		err := opts.Complete()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "dp-size-local")
+	})
 }
