@@ -59,7 +59,7 @@ epp:
   # EPP container resources: CPU limits unset for burst capacity, memory capped at 16Gi
   resources:
     requests:
-      cpu: "4"
+      cpu: "8"
       memory: 8Gi
     limits:
       memory: 16Gi
