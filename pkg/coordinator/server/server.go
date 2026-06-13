@@ -8,6 +8,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/coordinator/pkg/config"
 	"github.com/llm-d/coordinator/pkg/gateway"
@@ -17,8 +18,8 @@ import (
 var serverLog = ctrl.Log.WithName("server")
 
 var (
-	loggedRequestHeaders  = []string{"Content-Type", "X-Request-ID", "EPP-Phase", "Prefer"}
-	loggedResponseHeaders = []string{"Content-Type", "X-Request-ID"}
+	loggedRequestHeaders  = []string{"Content-Type", reqcommon.RequestIDHeaderKey, gateway.EPPPhaseHeader, "Prefer"}
+	loggedResponseHeaders = []string{"Content-Type", reqcommon.RequestIDHeaderKey}
 )
 
 func pickHeaders(h http.Header, names []string) map[string]string {

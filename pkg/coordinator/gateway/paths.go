@@ -7,7 +7,9 @@ const (
 	PathCompletions     = "/v1/completions"
 	DefaultGeneratePath = "/inference/v1/generate"
 
-	EPPPhaseHeader = "EPP-Phase"
+	EPPPhaseHeader    = "EPP-Phase"
+	ContentTypeHeader = "Content-Type"
+	ContentTypeJSON   = "application/json"
 
 	PhaseEncode  = "encode"
 	PhasePrefill = "prefill"
