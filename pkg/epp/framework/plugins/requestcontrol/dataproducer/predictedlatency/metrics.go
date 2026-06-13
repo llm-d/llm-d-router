@@ -92,16 +92,6 @@ var (
 		modelLabels,
 	)
 
-	llmdRequestTTFT = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "request_ttft_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inference model TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
-		},
-		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name", "fairness_id", "priority"},
-	)
-
 	requestPredictedTTFT = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
@@ -150,16 +140,6 @@ var (
 			Buckets:   tpotBuckets,
 		},
 		modelLabels,
-	)
-
-	llmdRequestTPOT = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "request_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inference model TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   tpotBuckets,
-		},
-		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name"},
 	)
 
 	requestPredictedTPOT = prometheus.NewHistogramVec(
@@ -229,13 +209,11 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		inferenceGauges,
 		llmdInferenceGauges,
 		requestTTFT,
-		llmdRequestTTFT,
 		requestPredictedTTFT,
 		llmdRequestPredictedTTFT,
 		requestTTFTPredictionDuration,
 		llmdRequestTTFTPredictionDuration,
 		requestTPOT,
-		llmdRequestTPOT,
 		requestPredictedTPOT,
 		llmdRequestPredictedTPOT,
 		requestTPOTPredictionDuration,
@@ -261,7 +239,6 @@ func recordRequestTPOT(ctx context.Context, pluginName, pluginType, modelName, t
 		return false
 	}
 	requestTPOT.WithLabelValues(modelName, targetModelName).Observe(tpot)
-	llmdRequestTPOT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(tpot)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOT).Set(tpot)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOT).Set(tpot)
 	return true
@@ -315,14 +292,13 @@ func recordRequestTPOTPredictionDuration(ctx context.Context, pluginName, plugin
 	return true
 }
 
-func recordRequestTTFT(ctx context.Context, pluginName, pluginType, modelName, targetModelName, fairnessID, priority string, ttft float64) bool {
+func recordRequestTTFT(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, ttft float64) bool {
 	if ttft < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TTFT value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft)
 		return false
 	}
 	requestTTFT.WithLabelValues(modelName, targetModelName).Observe(ttft)
-	llmdRequestTTFT.WithLabelValues(pluginName, pluginType, modelName, targetModelName, fairnessID, priority).Observe(ttft)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFT).Set(ttft)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFT).Set(ttft)
 	return true
