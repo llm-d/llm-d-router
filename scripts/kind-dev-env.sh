@@ -200,7 +200,10 @@ done
 
 # Prometheus config-reloader needs sufficient inotify resources
 if [ "${PROM_ENABLED}" == "true" ]; then
-  INOTIFY_INSTANCES=$(cat /proc/sys/fs/inotify/max_user_instances)
+  # On non-Linux hosts (e.g. macOS) /proc does not exist and the kind pods run in
+  # the container-runtime VM, not the host, so fall back to a passing value rather
+  # than letting the failed read abort the script under `set -e`.
+  INOTIFY_INSTANCES=$(cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || echo 512)
   if [ "${INOTIFY_INSTANCES}" -lt 512 ]; then
     echo "Error: fs.inotify.max_user_instances is ${INOTIFY_INSTANCES} (need >= 512) for Prometheus."
     echo ""
