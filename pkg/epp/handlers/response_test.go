@@ -300,7 +300,7 @@ func TestHandleResponseBodyWithoutSchedulingRequest(t *testing.T) {
 		server.HandleResponseBody(ctx, reqCtx, []byte(body), true)
 	})
 
-	histogram := findHistogramMetric(t, "llm_d_router_epp_normalized_time_per_output_token_seconds", map[string]string{
+	histogram := findHistogramMetric(t, "llm_d_router_epp_request_ntpot_seconds", map[string]string{
 		"model_name":        "incoming-model",
 		"target_model_name": "target-model",
 		"fairness_id":       metadata.DefaultFairnessID,

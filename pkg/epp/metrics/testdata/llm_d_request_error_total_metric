@@ -1,4 +1,4 @@
-# HELP llm_d_router_epp_request_error_total [ALPHA] Counter of inference objective requests errors broken out for each model and target model.
+# HELP llm_d_router_epp_request_error_total [ALPHA] Total number of request errors.
 # TYPE llm_d_router_epp_request_error_total counter
 llm_d_router_epp_request_error_total{error_code="Internal",fairness_id="",model_name="m10",priority="0",target_model_name="t10"} 2
 llm_d_router_epp_request_error_total{error_code="ModelServerError",fairness_id="",model_name="m10",priority="0",target_model_name="t11"} 1

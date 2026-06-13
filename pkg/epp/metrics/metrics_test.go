@@ -403,7 +403,7 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantLatencyPerTokenNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantLatencyPerTokenNew, "llm_d_router_epp_normalized_time_per_output_token_seconds"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantLatencyPerTokenNew, "llm_d_router_epp_request_ntpot_seconds"); err != nil {
 				t.Error(err)
 			}
 
@@ -511,7 +511,7 @@ func TestRecordResponseMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantResponseSizeNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantResponseSizeNew, "llm_d_router_epp_response_sizes"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantResponseSizeNew, "llm_d_router_epp_request_response_sizes"); err != nil {
 				t.Error(err)
 			}
 
@@ -520,7 +520,7 @@ func TestRecordResponseMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantInputTokenNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantInputTokenNew, "llm_d_router_epp_input_tokens"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantInputTokenNew, "llm_d_router_epp_request_input_tokens"); err != nil {
 				t.Error(err)
 			}
 
@@ -529,7 +529,7 @@ func TestRecordResponseMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantOutputTokenNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantOutputTokenNew, "llm_d_router_epp_output_tokens"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantOutputTokenNew, "llm_d_router_epp_request_output_tokens"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -611,7 +611,7 @@ func TestRunningRequestsMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantRunningRequestsNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsNew, "llm_d_router_epp_running_requests"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsNew, "llm_d_router_epp_request_running"); err != nil {
 				t.Error(err)
 			}
 		})

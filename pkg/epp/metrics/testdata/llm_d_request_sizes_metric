@@ -1,4 +1,4 @@
-# HELP llm_d_router_epp_request_sizes [ALPHA] Inference objective requests size distribution in bytes for each model and target model.
+# HELP llm_d_router_epp_request_sizes [ALPHA] Incoming request body size distribution in bytes.
 # TYPE llm_d_router_epp_request_sizes histogram
 llm_d_router_epp_request_sizes_bucket{fairness_id="tenant-a",le="64",model_name="m10",priority="0",target_model_name="t10"} 0
 llm_d_router_epp_request_sizes_bucket{fairness_id="tenant-a",le="128",model_name="m10",priority="0",target_model_name="t10"} 0

@@ -41,7 +41,7 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_total",
-			Help:      metricsutil.HelpMsgWithStability("Counter of inference objective requests broken out for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Total number of processed requests.", compbasemetrics.ALPHA),
 		},
 		modelLabelsWithFairnessPriority,
 	)
@@ -50,7 +50,7 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_error_total",
-			Help:      metricsutil.HelpMsgWithStability("Counter of inference objective requests errors broken out for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Total number of request errors.", compbasemetrics.ALPHA),
 		},
 		append(modelLabelsWithFairnessPriority, "error_code"),
 	)
@@ -59,7 +59,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inference objective response latency distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("End-to-end request latency distribution in seconds.", compbasemetrics.ALPHA),
 			Buckets:   generalLatencyBuckets,
 		},
 		modelLabelsWithFairnessPriority,
@@ -69,7 +69,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_sizes",
-			Help:      metricsutil.HelpMsgWithStability("Inference objective requests size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Incoming request body size distribution in bytes.", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
 				131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608,
@@ -82,8 +82,8 @@ var (
 	llmdResponseSizes = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "response_sizes",
-			Help:      metricsutil.HelpMsgWithStability("Inference objective responses size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
+			Name:      "request_response_sizes",
+			Help:      metricsutil.HelpMsgWithStability("Outgoing response body size distribution in bytes.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536},
 		},
 		modelLabelsWithFairnessPriority,
@@ -92,8 +92,8 @@ var (
 	llmdInputTokens = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "input_tokens",
-			Help:      metricsutil.HelpMsgWithStability("Inference objective input token count distribution for requests in each model.", compbasemetrics.ALPHA),
+			Name:      "request_input_tokens",
+			Help:      metricsutil.HelpMsgWithStability("Input token count distribution per request.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
 		},
 		modelLabelsWithFairnessPriority,
@@ -102,8 +102,8 @@ var (
 	llmdOutputTokens = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "output_tokens",
-			Help:      metricsutil.HelpMsgWithStability("Inference objective output token count distribution for requests in each model.", compbasemetrics.ALPHA),
+			Name:      "request_output_tokens",
+			Help:      metricsutil.HelpMsgWithStability("Output token count distribution per request.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192},
 		},
 		modelLabelsWithFairnessPriority,
@@ -112,8 +112,8 @@ var (
 	llmdPromptCachedTokens = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "prompt_cached_tokens",
-			Help:      metricsutil.HelpMsgWithStability("Inference objective prompt cached token count distribution for requests in each model.", compbasemetrics.ALPHA),
+			Name:      "request_cached_tokens",
+			Help:      metricsutil.HelpMsgWithStability("Distribution of prompt tokens read from cache per request, as reported by the model server in the response.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
 		},
 		modelLabelsWithFairnessPriority,
@@ -122,8 +122,8 @@ var (
 	llmdRunningRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "running_requests",
-			Help:      metricsutil.HelpMsgWithStability("Inference objective number of running requests in each model.", compbasemetrics.ALPHA),
+			Name:      "request_running",
+			Help:      metricsutil.HelpMsgWithStability("Current number of active running requests.", compbasemetrics.ALPHA),
 		},
 		modelLabelsWithFairnessPriority,
 	)
@@ -131,8 +131,8 @@ var (
 	llmdNormalizedTimePerOutputToken = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "normalized_time_per_output_token_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inference objective latency divided by number of output tokens in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Name:      "request_ntpot_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Normalized time per output token in seconds (end-to-end latency divided by output token count).", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
 			},
@@ -143,7 +143,7 @@ var (
 	llmdRequestTTFT = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "ttft_seconds",
+			Name:      "request_ttft_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Time to first token in seconds, measured from request received to first response byte. For non-streaming requests, this equals total request duration.", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.005, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2, 3, 4, 5, 6,
@@ -156,7 +156,7 @@ var (
 	llmdRequestTPOT = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "streaming_tpot_seconds",
+			Name:      "request_streaming_tpot_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Average time per output token in seconds for streaming requests, computed as (e2e - TTFT) / (output_tokens - 1).", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.125, 0.15, 0.2,
@@ -169,7 +169,7 @@ var (
 	llmdInterTokenLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "streaming_inter_token_latency_seconds",
+			Name:      "request_streaming_itl_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Inter-token latency in seconds for streaming requests, measured as the time between consecutive response body chunks.", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1, 2,
