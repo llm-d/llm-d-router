@@ -95,7 +95,7 @@ func TestApproximatePrefixCacheTokenEstimator(t *testing.T) {
 				Type:     "video_url",
 				VideoURL: fwkrh.VideoBlock{URL: "https://example.com/video.mp4"},
 			},
-			expected: 7264, // default: int(16.0 * 2.0) * (640*360/(32*32) + 2) = 32 * 227
+			expected: 3584, // default: int(16.0 * 2.0) * (640*360/(32*32*2)) = 32 * 112
 		},
 	}
 

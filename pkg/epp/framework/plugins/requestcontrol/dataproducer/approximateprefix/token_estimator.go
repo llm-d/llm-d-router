@@ -115,6 +115,11 @@ func getVideoPlaceholders(multimodalConfig *multiModalTokenEstimatorConfig) int 
 		fps = defaultMultimodalConfig.Video.FPS
 	}
 	numFrames := int(duration * fps)
+	if numFrames < 4 {
+		numFrames = 4
+	} else if numFrames > 768 {
+		numFrames = 768
+	}
 	tpf := cfg.TokensPerFrame
 	if tpf == nil {
 		tpf = defaultMultimodalConfig.Video.TokensPerFrame
@@ -125,7 +130,7 @@ func getVideoPlaceholders(multimodalConfig *multiModalTokenEstimatorConfig) int 
 		tokensPerFrame = tpf.FixedCfg.FixedToken
 	case ModeDynamic:
 		f := tpf.DynamicCfg.Factor
-		tokensPerFrame = tpf.DefaultResolution.Width*tpf.DefaultResolution.Height/(f*f) + 2
+		tokensPerFrame = tpf.DefaultResolution.Width * tpf.DefaultResolution.Height / (f * f * 2)
 	}
 	return numFrames * tokensPerFrame
 }
