@@ -218,6 +218,18 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 	return otel.GetTextMapPropagator().Extract(ctx, carrier)
 }
 
+func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
+	if reqCtx == nil {
+		return metadata.DefaultFairnessID, "0"
+	}
+	fairnessID := metadata.DefaultFairnessID
+	if reqCtx.SchedulingRequest != nil && reqCtx.SchedulingRequest.FairnessID != "" {
+		fairnessID = reqCtx.SchedulingRequest.FairnessID
+	}
+	priority := strconv.Itoa(reqCtx.Priority)
+	return fairnessID, priority
+}
+
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 	ctx := srv.Context()
 
@@ -296,10 +308,11 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		if s.evictionLookup != nil && evictionRequestID != "" {
 			s.evictionLookup.Deregister(evictionRequestID)
 		}
+		fairnessID, priority := extractFairnessAndPriority(reqCtx)
 		if reqCtx.ResponseStatusCode != "" {
-			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.ResponseStatusCode)
+			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.ResponseStatusCode)
 		} else if err != nil {
-			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, errcommon.CanonicalCode(err))
+			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, errcommon.CanonicalCode(err))
 		}
 		if span != nil {
 			if err != nil {
@@ -310,7 +323,8 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			}
 		}
 		if reqCtx.RequestRunning {
-			metrics.DecRunningRequests(reqCtx.IncomingModelName)
+			fairnessID, priority := extractFairnessAndPriority(reqCtx)
+			metrics.DecRunningRequests(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority)
 		}
 
 		// If we scheduled a pod (TargetPod != nil) but never marked the response  as complete (e.g. error, disconnect,
@@ -436,8 +450,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 				reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
 				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
-				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.Priority)
-				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.RequestSize)
+				fairnessID, priority := extractFairnessAndPriority(reqCtx)
+				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, reqCtx.Priority)
+				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestSize)
 
 				if parseResult.SkipResponseProcessing {
 					reqCtx.RequestState = RequestResponseProcessingSkipped
@@ -636,7 +651,8 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		}
 		logger.V(logutil.DEFAULT).Info("EPP sent request body response(s) to proxy", "modelName", r.IncomingModelName, "targetModelName", r.TargetModelName)
 		r.RequestState = BodyRequestResponsesComplete
-		metrics.IncRunningRequests(r.IncomingModelName)
+		fairnessID, priority := extractFairnessAndPriority(r)
+		metrics.IncRunningRequests(r.IncomingModelName, r.TargetModelName, fairnessID, priority)
 		r.RequestRunning = true
 		// Dump the response so a new stream message can begin
 		r.reqBodyResp = nil

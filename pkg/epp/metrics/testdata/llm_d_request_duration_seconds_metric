@@ -1,116 +1,116 @@
 # HELP llm_d_router_epp_request_duration_seconds [ALPHA] Inference objective response latency distribution in seconds for each model and target model.
 # TYPE llm_d_router_epp_request_duration_seconds histogram
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="0.005"} 0
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="0.025"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="0.05"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="0.1"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="0.2"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="0.4"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="0.6"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="0.8"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="1.0"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="1.25"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="1.5"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="2"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="3"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="4"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="5"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="6"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="8"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="10"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="15"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="20"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="30"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="45"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="60"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="120"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="180"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="240"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="300"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="360"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="480"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="600"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="900"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="1200"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="1800"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="2700"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="3600"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10", target_model_name="t10", le="Inf"} 2
-llm_d_router_epp_request_duration_seconds_sum{model_name="m10", target_model_name="t10"} 1.61
-llm_d_router_epp_request_duration_seconds_count{model_name="m10", target_model_name="t10"} 2
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="0.005"} 0
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="0.025"} 0
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="0.05"} 0
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="0.1"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="0.2"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="0.4"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="0.6"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="0.8"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="1"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="1.25"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="1.5"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="2"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="3"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="4"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="5"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="6"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="8"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="10"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="15"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="20"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="30"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="45"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="60"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="120"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="180"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="240"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="300"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="360"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="480"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="600"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="900"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="1200"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="1800"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="2700"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="3600"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m10",target_model_name="t11",le="+Inf"} 1
-llm_d_router_epp_request_duration_seconds_sum{model_name="m10",target_model_name="t11"} 0.06
-llm_d_router_epp_request_duration_seconds_count{model_name="m10",target_model_name="t11"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="0.005"} 0
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="0.025"} 0
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="0.05"} 0
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="0.1"} 0
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="0.2"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="0.4"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="0.6"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="0.8"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="1"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="1.25"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="1.5"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="2"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="3"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="4"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="5"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="6"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="8"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="10"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="15"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="20"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="30"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="45"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="60"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="120"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="180"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="240"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="300"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="360"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="480"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="600"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="900"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="1200"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="1800"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="2700"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="3600"} 1
-llm_d_router_epp_request_duration_seconds_bucket{model_name="m20",target_model_name="t20",le="+Inf"} 1
-llm_d_router_epp_request_duration_seconds_sum{model_name="m20",target_model_name="t20"} 0.12
-llm_d_router_epp_request_duration_seconds_count{model_name="m20",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.005",model_name="m10",priority="0",target_model_name="t10"} 0
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.025",model_name="m10",priority="0",target_model_name="t10"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.05",model_name="m10",priority="0",target_model_name="t10"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.1",model_name="m10",priority="0",target_model_name="t10"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.2",model_name="m10",priority="0",target_model_name="t10"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.4",model_name="m10",priority="0",target_model_name="t10"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.6",model_name="m10",priority="0",target_model_name="t10"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.8",model_name="m10",priority="0",target_model_name="t10"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1.0",model_name="m10",priority="0",target_model_name="t10"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1.25",model_name="m10",priority="0",target_model_name="t10"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1.5",model_name="m10",priority="0",target_model_name="t10"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="2",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="3",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="4",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="5",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="6",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="8",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="10",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="15",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="20",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="30",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="45",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="60",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="120",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="180",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="240",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="300",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="360",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="480",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="600",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="900",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1200",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1800",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="2700",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="3600",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="Inf",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_sum{fairness_id="",model_name="m10",priority="0",target_model_name="t10"} 1.61
+llm_d_router_epp_request_duration_seconds_count{fairness_id="",model_name="m10",priority="0",target_model_name="t10"} 2
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.005",model_name="m10",priority="0",target_model_name="t11"} 0
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.025",model_name="m10",priority="0",target_model_name="t11"} 0
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.05",model_name="m10",priority="0",target_model_name="t11"} 0
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.1",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.2",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.4",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.6",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.8",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1.25",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1.5",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="2",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="3",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="4",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="5",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="6",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="8",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="10",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="15",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="20",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="30",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="45",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="60",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="120",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="180",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="240",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="300",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="360",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="480",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="600",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="900",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1200",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1800",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="2700",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="3600",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="+Inf",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_sum{fairness_id="",model_name="m10",priority="0",target_model_name="t11"} 0.06
+llm_d_router_epp_request_duration_seconds_count{fairness_id="",model_name="m10",priority="0",target_model_name="t11"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.005",model_name="m20",priority="0",target_model_name="t20"} 0
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.025",model_name="m20",priority="0",target_model_name="t20"} 0
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.05",model_name="m20",priority="0",target_model_name="t20"} 0
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.1",model_name="m20",priority="0",target_model_name="t20"} 0
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.2",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.4",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.6",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="0.8",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1.25",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1.5",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="2",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="3",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="4",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="5",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="6",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="8",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="10",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="15",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="20",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="30",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="45",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="60",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="120",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="180",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="240",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="300",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="360",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="480",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="600",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="900",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1200",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="1800",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="2700",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="3600",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_bucket{fairness_id="",le="+Inf",model_name="m20",priority="0",target_model_name="t20"} 1
+llm_d_router_epp_request_duration_seconds_sum{fairness_id="",model_name="m20",priority="0",target_model_name="t20"} 0.12
+llm_d_router_epp_request_duration_seconds_count{fairness_id="",model_name="m20",priority="0",target_model_name="t20"} 1

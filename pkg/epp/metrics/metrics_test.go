@@ -96,8 +96,8 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				RecordRequestCounter(req.modelName, req.targetModelName, 0)
-				RecordRequestSizes(req.modelName, req.targetModelName, req.reqSize)
+				RecordRequestCounter(req.modelName, req.targetModelName, "", 0)
+				RecordRequestSizes(req.modelName, req.targetModelName, "", "0", req.reqSize)
 			}
 
 			// Verify deprecated metrics
@@ -182,7 +182,7 @@ func TestRecordRequestErrorCounter(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				RecordRequestErrCounter(req.modelName, req.targetModelName, req.error)
+				RecordRequestErrCounter(req.modelName, req.targetModelName, "", "0", req.error)
 			}
 
 			// Verify deprecated metric
@@ -268,7 +268,7 @@ func TestRecordRequestLatencies(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				success := RecordRequestLatencies(ctx, req.modelName, req.targetModelName, req.receivedTime, req.completeTime)
+				success := RecordRequestLatencies(ctx, req.modelName, req.targetModelName, "", "0", req.receivedTime, req.completeTime)
 				if success == scenario.invalid {
 					t.Errorf("got record success(%v), but the request expects invalid(%v)", success, scenario.invalid)
 				}
@@ -466,10 +466,10 @@ func TestRecordResponseMetrics(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, resp := range scenario.resp {
-				RecordInputTokens(resp.modelName, resp.targetModelName, resp.inputToken)
-				RecordOutputTokens(resp.modelName, resp.targetModelName, resp.outputToken)
-				RecordResponseSizes(resp.modelName, resp.targetModelName, resp.respSize)
-				RecordPromptCachedTokens(resp.modelName, resp.targetModelName, resp.cachedToken)
+				RecordInputTokens(resp.modelName, resp.targetModelName, "", "0", resp.inputToken)
+				RecordOutputTokens(resp.modelName, resp.targetModelName, "", "0", resp.outputToken)
+				RecordResponseSizes(resp.modelName, resp.targetModelName, "", "0", resp.respSize)
+				RecordPromptCachedTokens(resp.modelName, resp.targetModelName, "", "0", resp.cachedToken)
 			}
 
 			// Verify deprecated metrics
@@ -569,9 +569,9 @@ func TestRunningRequestsMetrics(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.requests {
 				if req.complete {
-					DecRunningRequests(req.modelName)
+					DecRunningRequests(req.modelName, "", "", "0")
 				} else {
-					IncRunningRequests(req.modelName)
+					IncRunningRequests(req.modelName, "", "", "0")
 				}
 			}
 

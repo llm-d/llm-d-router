@@ -43,7 +43,7 @@ var (
 			Name:      "request_total",
 			Help:      metricsutil.HelpMsgWithStability("Counter of inference objective requests broken out for each model and target model.", compbasemetrics.ALPHA),
 		},
-		modelWithPriorityLabels,
+		modelLabelsWithFairnessPriority,
 	)
 
 	llmdRequestErrCounter = prometheus.NewCounterVec(
@@ -52,7 +52,7 @@ var (
 			Name:      "request_error_total",
 			Help:      metricsutil.HelpMsgWithStability("Counter of inference objective requests errors broken out for each model and target model.", compbasemetrics.ALPHA),
 		},
-		append(modelLabels, "error_code"),
+		append(modelLabelsWithFairnessPriority, "error_code"),
 	)
 
 	llmdRequestLatencies = prometheus.NewHistogramVec(
@@ -62,7 +62,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference objective response latency distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   generalLatencyBuckets,
 		},
-		modelLabels,
+		modelLabelsWithFairnessPriority,
 	)
 
 	llmdRequestSizes = prometheus.NewHistogramVec(
@@ -76,7 +76,7 @@ var (
 				16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824,
 			},
 		},
-		modelLabels,
+		modelLabelsWithFairnessPriority,
 	)
 
 	llmdResponseSizes = prometheus.NewHistogramVec(
@@ -86,7 +86,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference objective responses size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536},
 		},
-		modelLabels,
+		modelLabelsWithFairnessPriority,
 	)
 
 	llmdInputTokens = prometheus.NewHistogramVec(
@@ -96,7 +96,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference objective input token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
 		},
-		modelLabels,
+		modelLabelsWithFairnessPriority,
 	)
 
 	llmdOutputTokens = prometheus.NewHistogramVec(
@@ -106,7 +106,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference objective output token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192},
 		},
-		modelLabels,
+		modelLabelsWithFairnessPriority,
 	)
 
 	llmdPromptCachedTokens = prometheus.NewHistogramVec(
@@ -116,7 +116,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Inference objective prompt cached token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
 		},
-		modelLabels,
+		modelLabelsWithFairnessPriority,
 	)
 
 	llmdRunningRequests = prometheus.NewGaugeVec(
@@ -125,7 +125,7 @@ var (
 			Name:      "running_requests",
 			Help:      metricsutil.HelpMsgWithStability("Inference objective number of running requests in each model.", compbasemetrics.ALPHA),
 		},
-		[]string{"model_name"},
+		modelLabelsWithFairnessPriority,
 	)
 
 	llmdNormalizedTimePerOutputToken = prometheus.NewHistogramVec(
