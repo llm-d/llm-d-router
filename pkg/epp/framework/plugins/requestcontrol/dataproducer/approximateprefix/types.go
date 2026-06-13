@@ -139,13 +139,7 @@ type fixedTokenEstimatorConfig struct {
 	FixedToken int `json:"fixedToken"`
 }
 
-// dynamicTokenEstimatorConfig holds the effective patch stride for dynamic token estimation.
-// Factor is patch_size × spatial_merge_size from the model's vision config
-// (e.g. 32 for Qwen3-VL: patch_size=16, spatial_merge_size=2;
-//
-//	28 for Qwen2.5-VL: patch_size=14, spatial_merge_size=2).
-//
-// Token count is computed as (width * height) / (Factor * Factor) + 2.
+// dynamicTokenEstimatorConfig holds the effective patch stride (patch_size × spatial_merge_size).
 type dynamicTokenEstimatorConfig struct {
 	Factor int `json:"factor"`
 }
@@ -159,11 +153,7 @@ type imageTokenEstimatorConfig struct {
 }
 
 // videoTokenEstimatorConfig defines the configuration for video modality.
-// Token count is estimated as int(Duration * FPS) * TokensPerFrame.
-// Duration and FPS are EPP-level fallbacks used to approximate num_frames
-// (int(Duration * FPS)); the actual num_frames in vLLM is model-specific and
-// requires downloading the video, so llm-d uses configurable defaults instead.
-// TokensPerFrame reuses imageTokenEstimatorConfig since a video frame is treated as an image.
+// Token count is estimated as clamp(int(Duration*FPS), 4, 768) * TokensPerFrame.
 type videoTokenEstimatorConfig struct {
 	Duration       float64                    `json:"duration"`
 	FPS            float64                    `json:"fps"`
