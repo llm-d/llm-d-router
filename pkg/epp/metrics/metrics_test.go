@@ -63,6 +63,7 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 	type requests struct {
 		modelName       string
 		targetModelName string
+		fairnessID      string
 		reqSize         int
 	}
 	scenarios := []struct {
@@ -74,21 +75,25 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 			{
 				modelName:       "m10",
 				targetModelName: "t10",
+				fairnessID:      "tenant-a",
 				reqSize:         1200,
 			},
 			{
 				modelName:       "m10",
 				targetModelName: "t10",
+				fairnessID:      "tenant-a",
 				reqSize:         500,
 			},
 			{
 				modelName:       "m10",
 				targetModelName: "t11",
+				fairnessID:      "tenant-b",
 				reqSize:         2480,
 			},
 			{
 				modelName:       "m20",
 				targetModelName: "t20",
+				fairnessID:      "tenant-c",
 				reqSize:         80,
 			},
 		},
@@ -96,8 +101,8 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				RecordRequestCounter(req.modelName, req.targetModelName, "", 0)
-				RecordRequestSizes(req.modelName, req.targetModelName, "", "0", req.reqSize)
+				RecordRequestCounter(req.modelName, req.targetModelName, req.fairnessID, 0)
+				RecordRequestSizes(req.modelName, req.targetModelName, req.fairnessID, "0", req.reqSize)
 			}
 
 			// Verify deprecated metrics
@@ -534,8 +539,11 @@ func TestRecordResponseMetrics(t *testing.T) {
 func TestRunningRequestsMetrics(t *testing.T) {
 	Reset()
 	type request struct {
-		modelName string
-		complete  bool
+		modelName   string
+		targetModel string
+		fairnessID  string
+		priority    string
+		complete    bool
 	}
 
 	scenarios := []struct {
@@ -546,20 +554,32 @@ func TestRunningRequestsMetrics(t *testing.T) {
 			name: "basic test",
 			requests: []request{
 				{
-					modelName: "m1",
-					complete:  false,
+					modelName:   "m1",
+					targetModel: "t1",
+					fairnessID:  "tenant-x",
+					priority:    "10",
+					complete:    false,
 				},
 				{
-					modelName: "m1",
-					complete:  false,
+					modelName:   "m1",
+					targetModel: "t1",
+					fairnessID:  "tenant-x",
+					priority:    "10",
+					complete:    false,
 				},
 				{
-					modelName: "m1",
-					complete:  true,
+					modelName:   "m1",
+					targetModel: "t1",
+					fairnessID:  "tenant-x",
+					priority:    "10",
+					complete:    true,
 				},
 				{
-					modelName: "m2",
-					complete:  false,
+					modelName:   "m2",
+					targetModel: "t2",
+					fairnessID:  "tenant-y",
+					priority:    "20",
+					complete:    false,
 				},
 			},
 		},
@@ -569,9 +589,9 @@ func TestRunningRequestsMetrics(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.requests {
 				if req.complete {
-					DecRunningRequests(req.modelName, "", "", "0")
+					DecRunningRequests(req.modelName, req.targetModel, req.fairnessID, req.priority)
 				} else {
-					IncRunningRequests(req.modelName, "", "", "0")
+					IncRunningRequests(req.modelName, req.targetModel, req.fairnessID, req.priority)
 				}
 			}
 

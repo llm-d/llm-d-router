@@ -1,4 +1,4 @@
 # HELP llm_d_router_epp_running_requests [ALPHA] Inference objective number of running requests in each model.
 # TYPE llm_d_router_epp_running_requests gauge
-llm_d_router_epp_running_requests{fairness_id="",model_name="m1",priority="0",target_model_name=""} 1
-llm_d_router_epp_running_requests{fairness_id="",model_name="m2",priority="0",target_model_name=""} 1
+llm_d_router_epp_running_requests{fairness_id="tenant-x",model_name="m1",priority="10",target_model_name="t1"} 1
+llm_d_router_epp_running_requests{fairness_id="tenant-y",model_name="m2",priority="20",target_model_name="t2"} 1
