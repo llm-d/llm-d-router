@@ -134,12 +134,12 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 				t.Error(err)
 			}
 
-			wantRequestSizesNew, err := os.Open("testdata/llm_d_request_sizes_metric")
+			wantRequestSizesNew, err := os.Open("testdata/llm_d_request_size_bytes_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantRequestSizesNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestSizesNew, "llm_d_router_epp_request_sizes"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestSizesNew, "llm_d_router_epp_request_size_bytes"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -506,12 +506,12 @@ func TestRecordResponseMetrics(t *testing.T) {
 			}
 
 			// Verify llm_d_router_epp metrics
-			wantResponseSizeNew, err := os.Open("testdata/llm_d_response_sizes_metric")
+			wantResponseSizeNew, err := os.Open("testdata/llm_d_response_size_bytes_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantResponseSizeNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantResponseSizeNew, "llm_d_router_epp_request_response_sizes"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantResponseSizeNew, "llm_d_router_epp_response_size_bytes"); err != nil {
 				t.Error(err)
 			}
 

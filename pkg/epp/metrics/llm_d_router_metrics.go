@@ -68,7 +68,7 @@ var (
 	llmdRequestSizes = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "request_sizes",
+			Name:      "request_size_bytes",
 			Help:      metricsutil.HelpMsgWithStability("Incoming request body size distribution in bytes.", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
@@ -82,7 +82,7 @@ var (
 	llmdResponseSizes = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "request_response_sizes",
+			Name:      "response_size_bytes",
 			Help:      metricsutil.HelpMsgWithStability("Outgoing response body size distribution in bytes.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536},
 		},
