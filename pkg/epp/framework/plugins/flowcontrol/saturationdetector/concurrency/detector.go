@@ -131,14 +131,16 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 
 	var totalInflight, totalCapacity int64
 	for _, e := range endpoints {
+		if e == nil {
+			continue
+		}
+
 		if d.config.mode == modeTokens {
 			totalCapacity += d.config.maxTokenConcurrency
 		} else {
 			totalCapacity += d.config.maxConcurrency
 		}
 
-		// nil metadata = endpoint not yet populated by this EPP instance
-		// (fresh or passive); counts as idle capacity with zero in-flight load.
 		if e.GetMetadata() == nil {
 			continue
 		}
@@ -178,6 +180,9 @@ func (d *detector) Filter(
 	}
 
 	for _, e := range endpoints {
+		if e == nil {
+			continue
+		}
 		load := d.getLoad(e)
 
 		if d.config.mode == modeTokens {

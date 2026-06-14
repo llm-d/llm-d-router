@@ -73,7 +73,7 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 |-----------|------|----------|---------|-------------|
 | `affinityThreshold` | `float64` | No | `0.80` | Prefix cache score threshold for stickiness |
 | `explorationProbability` | `float64` | No | `0.01` | Probability of skipping the gate |
-| `maxTTFTPenaltyMs` | `float64` | No | `5000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
+| `maxTTFTPenaltyMs` | `float64` | No | `18000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
 | `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput` or `latencyPredictor` |
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
 

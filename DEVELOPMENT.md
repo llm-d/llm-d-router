@@ -173,14 +173,15 @@ PROM_ENABLED=true KIND_PROM_HOST_PORT=30091 make env-dev-kind
 
 ### Grafana Dashboard
 
-The upstream [Inference Gateway dashboard] covers EPP, inference pool, and vLLM metrics.
+The bundled [Inference Gateway dashboard] covers EPP metrics across the inference
+pool, inference objective, and flow control layers.
 
 Add a Prometheus datasource at `http://localhost:30090`, then import the JSON via
 **Dashboards > New > Import**. See the
 [Grafana installation docs](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
 for setup.
 
-[Inference Gateway dashboard]:https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/tools/dashboards/inference_gateway.json
+[Inference Gateway dashboard]:deploy/grafana/inference_gateway.json
 
 > [!NOTE]
 > For significant customization beyond the standard deployment, use the `deploy/components`
