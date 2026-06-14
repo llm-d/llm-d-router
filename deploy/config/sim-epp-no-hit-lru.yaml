@@ -3,13 +3,16 @@
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: precise-prefix-cache-scorer
+- type: precise-prefix-cache-producer
   parameters:
     indexerConfig:
       tokenProcessorConfig:
         blockSize: 5
       kvBlockIndexConfig:
         maxPrefixBlocksToMatch: 256
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
 - type: no-hit-lru-scorer
   parameters:
     lruSize: 2048
@@ -21,7 +24,7 @@ schedulingProfiles:
   plugins:
   - pluginRef: decode-filter
   - pluginRef: max-score-picker
-  - pluginRef: precise-prefix-cache-scorer
+  - pluginRef: prefix-cache-scorer
     weight: 2
   - pluginRef: no-hit-lru-scorer
     weight: 1
