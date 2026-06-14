@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -119,7 +120,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 				return err
 			}
 
-			results[i] = encResp.ECTransferParams
+			results[i] = ecParamsFromResponse(logger, encResp.ECTransferParams, i, reqCtx.RequestID)
 			return nil
 		})
 	}
@@ -237,5 +238,25 @@ func (s *EncodeStep) buildSingleImageContent(reqCtx *pipeline.RequestContext, en
 }
 
 type encodeResponse struct {
-	ECTransferParams map[string]any `json:"ec_transfer_params"`
+	// ECTransferParams is decoded as any (not map[string]any) so a non-object
+	// value does not fail the decode; ecParamsFromResponse coerces it.
+	ECTransferParams any `json:"ec_transfer_params"`
+}
+
+// ecParamsFromResponse coerces the ec_transfer_params value from an encoder
+// response to a map, mirroring the sidecar EC-NIXL proxy: a non-object value
+// is logged at debug and skipped (returns nil) rather than failing the
+// request. A missing value is already nil; empty maps pass through so the
+// connector's own no-metadata handling applies.
+func ecParamsFromResponse(logger logr.Logger, v any, idx int, requestID string) map[string]any {
+	switch m := v.(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		return m
+	default:
+		logger.V(logutil.DEBUG).Info("ec_transfer_params is not a JSON object; skipping",
+			"index", idx, "requestID", requestID, "type", fmt.Sprintf("%T", v))
+		return nil
+	}
 }

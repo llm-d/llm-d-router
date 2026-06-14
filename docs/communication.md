@@ -859,7 +859,7 @@ EPP-Phase: decode
 ```
 
 > [!NOTE]
-> The `kv_transfer_params` fields are connector-dependent. The example above shows the NIXLv2 format. The fields `remote_engine_id`, `remote_block_ids`, `remote_request_id`, `remote_host`, `remote_port`, and `tp_size` are returned by the prefill worker and forwarded verbatim to the decode worker. The coordinator adds `do_remote_decode: false` and `do_remote_prefill: true`.
+> The `kv_transfer_params` fields are connector-dependent. The example above shows the NIXL format. The fields `remote_engine_id`, `remote_block_ids`, `remote_request_id`, `remote_host`, `remote_port`, and `tp_size` are returned by the prefill worker and forwarded verbatim to the decode worker. The coordinator adds `do_remote_decode: false` and `do_remote_prefill: true`.
 
 ### Request (/v1/completions)
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -51,7 +52,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
 
 	// Run prefill step
-	prefillStep, _ := NewPrefillStep(map[string]any{})
+	prefillStep, _ := NewPrefillStep(map[string]any{ParamKVConnector: kv.NIXL})
 	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
@@ -94,7 +95,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	}
 
 	// Run decode step
-	decodeStep, _ := NewDecodeStep(map[string]any{})
+	decodeStep, _ := NewDecodeStep(map[string]any{ParamKVConnector: kv.NIXL})
 	decodeStep.(*DecodeStep).SetGatewayClient(gwClient)
 
 	recorder := httptest.NewRecorder()

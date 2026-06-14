@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -79,7 +80,10 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	format := s.resolveFormat(reqCtx)
-	body := s.buildPrefillBody(reqCtx, features, format)
+	body, err := s.buildPrefillBody(reqCtx, features, format)
+	if err != nil {
+		return fmt.Errorf("prefill: %w", err)
+	}
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -111,7 +115,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		return fmt.Errorf("prefill: decode response: %w", err)
 	}
 
-	reqCtx.KVTransferParams = prefillResp.KVTransferParams
+	reqCtx.KVTransferParams = kvParamsFromResponse(logger, prefillResp.KVTransferParams, reqCtx.RequestID)
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil
@@ -128,8 +132,11 @@ func (s *PrefillStep) resolveFormat(reqCtx *pipeline.RequestContext) gateway.Req
 	return detected
 }
 
-func (s *PrefillStep) buildPrefillBody(reqCtx *pipeline.RequestContext, features map[string]any, format gateway.RequestFormat) map[string]any {
-	ecParams := s.ec.PreparePrefillECParams(reqCtx)
+func (s *PrefillStep) buildPrefillBody(reqCtx *pipeline.RequestContext, features map[string]any, format gateway.RequestFormat) (map[string]any, error) {
+	ecParams, err := s.ec.PreparePrefillECParams(reqCtx)
+	if err != nil {
+		return nil, err
+	}
 	kvParams := s.kv.PreparePrefillKVParams(reqCtx)
 
 	switch format {
@@ -151,7 +158,7 @@ func (s *PrefillStep) buildPrefillBody(reqCtx *pipeline.RequestContext, features
 		if len(ecParams) > 0 {
 			body["ec_transfer_params"] = ecParams
 		}
-		return body
+		return body, nil
 
 	case gateway.FormatCompletions:
 		prompt := reqCtx.Body["prompt"]
@@ -171,7 +178,7 @@ func (s *PrefillStep) buildPrefillBody(reqCtx *pipeline.RequestContext, features
 		if len(ecParams) > 0 {
 			body["ec_transfer_params"] = ecParams
 		}
-		return body
+		return body, nil
 
 	default:
 		body := map[string]any{
@@ -191,10 +198,30 @@ func (s *PrefillStep) buildPrefillBody(reqCtx *pipeline.RequestContext, features
 		if len(ecParams) > 0 {
 			body["ec_transfer_params"] = ecParams
 		}
-		return body
+		return body, nil
 	}
 }
 
 type prefillResponse struct {
-	KVTransferParams map[string]any `json:"kv_transfer_params"`
+	// KVTransferParams is decoded as any (not map[string]any) so a non-object
+	// value does not fail the decode; kvParamsFromResponse coerces it.
+	KVTransferParams any `json:"kv_transfer_params"`
+}
+
+// kvParamsFromResponse coerces the kv_transfer_params value from a prefill
+// response to a map, mirroring ecParamsFromResponse: a non-object value is
+// logged at debug and skipped (returns nil) rather than failing the request.
+// A missing or null value is already nil; an empty map passes through so the
+// connector's own no-metadata handling applies.
+func kvParamsFromResponse(logger logr.Logger, v any, requestID string) map[string]any {
+	switch m := v.(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		return m
+	default:
+		logger.V(logutil.DEBUG).Info("kv_transfer_params is not a JSON object; skipping",
+			"requestID", requestID, "type", fmt.Sprintf("%T", v))
+		return nil
+	}
 }

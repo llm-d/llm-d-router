@@ -4,15 +4,15 @@ import (
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
-// sharedStorage is the EC connector for the shared_storage topology. Encoder
+// sharedStorageEC is the EC connector for the ec-shared-storage topology. Encoder
 // pods write embeddings to shared storage keyed by mm_hash; the consumer
 // reads them back, so no ec_transfer_params is emitted on the wire.
-type sharedStorage struct{}
+type sharedStorageEC struct{}
 
-func (sharedStorage) Name() string { return SharedStorage }
+func (sharedStorageEC) Name() string { return SharedStorage }
 
-func (sharedStorage) MergeEncodeResponse(_ *pipeline.RequestContext, _ map[string]any) {}
+func (sharedStorageEC) MergeEncodeResponse(_ *pipeline.RequestContext, _ map[string]any) {}
 
-func (sharedStorage) PreparePrefillECParams(_ *pipeline.RequestContext) map[string]any {
-	return nil
+func (sharedStorageEC) PreparePrefillECParams(_ *pipeline.RequestContext) (map[string]any, error) {
+	return make(map[string]any), nil
 }

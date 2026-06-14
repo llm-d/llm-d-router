@@ -24,9 +24,9 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 		ecConnector     string
 		wantECInPrefill bool // ec_transfer_params should be present in prefill body
 	}{
-		{kv.NIXLv2, ec.NIXLv2, true},
-		{kv.NIXLv2, ec.SharedStorage, false},
-		{kv.SharedStorage, ec.NIXLv2, true},
+		{kv.NIXL, ec.NIXL, true},
+		{kv.NIXL, ec.SharedStorage, false},
+		{kv.SharedStorage, ec.NIXL, true},
 		{kv.SharedStorage, ec.SharedStorage, false},
 	}
 
@@ -244,8 +244,8 @@ func TestFullPipeline_Integration(t *testing.T) {
 	stepConfigs := []config.StepConfig{
 		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
 		{Type: "render", Params: map[string]any{"endpoint": gateway.PathChatCompletions + "/render"}},
-		{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXLv2}},
-		{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXLv2}},
+		{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
+		{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
 		{Type: "decode", Params: map[string]any{"use_openai_format": false}},
 	}
 
