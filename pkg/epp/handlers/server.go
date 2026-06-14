@@ -326,7 +326,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			}
 		}
 		if reqCtx.RequestRunning {
-			fairnessID, priority := extractFairnessAndPriority(reqCtx)
 			metrics.DecRunningRequests(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority)
 		}
 
