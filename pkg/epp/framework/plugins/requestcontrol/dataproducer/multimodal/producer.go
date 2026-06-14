@@ -232,13 +232,13 @@ func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
 		if feature.Hash == "" {
 			continue
 		}
-		addItem(itemsByHash, feature.Hash)
+		addItem(itemsByHash, feature.Hash, string(feature.Modality))
 	}
 	return itemSlice(itemsByHash)
 }
 
-func addItem(itemsByHash map[string]attrmm.MatchItem, hash string) {
-	itemsByHash[hash] = attrmm.MatchItem{Hash: hash, Size: 1}
+func addItem(itemsByHash map[string]attrmm.MatchItem, hash, modality string) {
+	itemsByHash[hash] = attrmm.MatchItem{Hash: hash, Size: 1, Modality: modality}
 }
 
 func itemSlice(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
@@ -260,10 +260,10 @@ func (p *Producer) recordItemLookups(items []attrmm.MatchItem) {
 	defer p.mutex.RUnlock()
 	pluginType, pluginName := p.typedName.Type, p.typedName.Name
 	for _, item := range items {
-		encoderCacheQueriesTotal.WithLabelValues(pluginType, pluginName).Inc()
+		encoderCacheQueriesTotal.WithLabelValues(pluginType, pluginName, item.Modality).Inc()
 		for pod, podCache := range p.caches {
 			if podCache.Contains(item.Hash) {
-				encoderCacheHitsTotal.WithLabelValues(pluginType, pluginName, pod).Inc()
+				encoderCacheHitsTotal.WithLabelValues(pluginType, pluginName, pod, item.Modality).Inc()
 			}
 		}
 	}

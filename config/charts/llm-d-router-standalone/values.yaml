@@ -12,6 +12,20 @@ router:
   proxy:
     enabled: true
     proxyType: envoy
+
+    # Deployment mode for the proxy:
+    #   sidecar - proxy runs as a container in the EPP pod (default).
+    #   service - proxy runs as its own horizontally scalable Deployment and
+    #             Service, reaching EPP over the EPP Service. Envoy only.
+    mode: sidecar
+
+    # Replica count for the proxy Deployment when mode=service.
+    replicas: 2
+
+    # Whether the proxy passes traffic through (fail-open) when EPP is
+    # unreachable, for active/passive resiliency.
+    failOpen: true
+
     resources:
       requests:
         cpu: "4"
@@ -129,6 +143,7 @@ router:
                                 - name: envoy.filters.http.ext_proc
                                   typed_config:
                                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                                    failure_mode_allow: {{ include "llm-d-router.proxy.failOpen" . }}
                                     grpc_service:
                                       envoy_grpc:
                                         cluster_name: ext_proc
@@ -191,7 +206,7 @@ router:
                       use_http_header: true
                       http_header_name: x-gateway-destination-endpoint
                   - name: ext_proc
-                    type: STATIC
+                    type: {{ include "llm-d-router.proxy.extProcClusterType" . }}
                     connect_timeout: 86400s
                     lb_policy: LEAST_REQUEST
                     circuit_breakers:
@@ -232,7 +247,7 @@ router:
                             - endpoint:
                                 address:
                                   socket_address:
-                                    address: 127.0.0.1
+                                    address: {{ include "llm-d-router.proxy.extProcHost" . }}
                                     port_value: 9002
                               load_balancing_weight: 1
         name: envoy-proxy

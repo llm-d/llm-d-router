@@ -36,12 +36,12 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 func newFlowControlTestHandle(t *testing.T) fwkplugin.Handle {
 	t.Helper()
-	handle := igwtestutils.NewTestHandle(t.Context())
+	handle := testutils.NewTestHandle(t.Context())
 	handle.AddPlugin(globalstrict.GlobalStrictFairnessPolicyType, &fwkfcmocks.MockFairnessPolicy{
 		TypedNameV: fwkplugin.TypedName{
 			Type: globalstrict.GlobalStrictFairnessPolicyType,

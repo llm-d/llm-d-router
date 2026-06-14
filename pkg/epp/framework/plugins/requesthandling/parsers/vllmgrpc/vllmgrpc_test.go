@@ -139,7 +139,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 						},
 					}},
 				TokenizedPrompt: &fwkrh.TokenizedPrompt{
-					TokenIDs: []uint32{11, 12, 13},
+					PerPromptTokens: [][]uint32{{11, 12, 13}},
 				},
 			},
 		},
@@ -183,7 +183,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 					},
 				},
 				TokenizedPrompt: &fwkrh.TokenizedPrompt{
-					TokenIDs: []uint32{101, 102, 103, 104, 105},
+					PerPromptTokens: [][]uint32{{101, 102, 103, 104, 105}},
 					MultiModalFeatures: []fwkrh.MultiModalFeature{
 						{Modality: fwkrh.ModalityImage, Hash: "hash-a", Offset: 1, Length: 2},
 						{Modality: fwkrh.ModalityImage, Hash: "hash-b", Offset: 4, Length: 1},
@@ -231,7 +231,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 					},
 				},
 				TokenizedPrompt: &fwkrh.TokenizedPrompt{
-					TokenIDs: []uint32{201, 202, 203, 204},
+					PerPromptTokens: [][]uint32{{201, 202, 203, 204}},
 					MultiModalFeatures: []fwkrh.MultiModalFeature{
 						{Modality: fwkrh.ModalityImage, Hash: "hash-only", Offset: 0, Length: 1},
 						{Modality: fwkrh.ModalityImage, Hash: "", Offset: 2, Length: 2},

@@ -39,8 +39,8 @@ import (
 )
 
 type tokenizer interface {
-	Render(ctx context.Context, prompt string) ([]uint32, []tokenizerTypes.Offset, error)
-	RenderChat(ctx context.Context, req *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error)
+	Render(ctx context.Context, payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error)
+	RenderChat(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
 const (
@@ -252,7 +252,7 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		// A parser (e.g. vLLM gRPC) may pre-populate tokens without a salt;
 		// ensure cache-salt isolation still applies on the skip path.
 		if request.Body.TokenizedPrompt.CacheSalt == "" {
-			request.Body.TokenizedPrompt.CacheSalt = cacheSaltFromBody(request.Body)
+			request.Body.TokenizedPrompt.CacheSalt = CacheSaltFromBody(request.Body)
 		}
 		return nil
 	}
@@ -261,8 +261,10 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	if err != nil {
 		return err
 	}
-	tp.CacheSalt = cacheSaltFromBody(request.Body)
-
+	if tp == nil || tp.TokenCount() == 0 {
+		return nil
+	}
+	tp.CacheSalt = CacheSaltFromBody(request.Body)
 	request.Body.TokenizedPrompt = tp
 	return nil
 }

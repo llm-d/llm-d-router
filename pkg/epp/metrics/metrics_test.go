@@ -376,7 +376,7 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				success := RecordNormalizedTimePerOutputToken(ctx, req.modelName, req.targetModelName, req.receivedTime, req.completeTime, req.outputTokens)
+				success := RecordNormalizedTimePerOutputToken(ctx, req.modelName, req.targetModelName, "tenant-a", "3", req.receivedTime, req.completeTime, req.outputTokens)
 				if success == scenario.invalid {
 					t.Errorf("got record success(%v), but the request expects invalid(%v)", success, scenario.invalid)
 				}
@@ -400,6 +400,14 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 			defer wantLatencyPerTokenNew.Close()
 			if err := promtestutil.GatherAndCompare(metrics.Registry, wantLatencyPerTokenNew, "llm_d_router_epp_normalized_time_per_output_token_seconds"); err != nil {
 				t.Error(err)
+			}
+
+			// Verify llm_d_router_epp metric labels directly.
+			if !scenario.invalid {
+				observed, err := getHistogramVecLabelValues(t, llmdNormalizedTimePerOutputToken, "m10", "t10", "tenant-a", "3")
+				require.NoError(t, err)
+				require.Equal(t, uint64(2), observed.GetSampleCount())
+				require.InEpsilon(t, 0.03, observed.GetSampleSum(), 0.000001)
 			}
 		})
 	}
@@ -1241,6 +1249,104 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool))
 	require.NoError(t, err)
 	require.Equal(t, 0.5, valNew)
+}
+
+func TestRecordRequestTTFT(t *testing.T) {
+	Reset()
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	timeBaseline := time.Now()
+
+	t.Run("valid streaming requests", func(t *testing.T) {
+		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(10*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(1600*time.Millisecond)))
+		require.True(t, RecordRequestTTFT(ctx, "m20", "t20", "tenant-b", "5", false, timeBaseline, timeBaseline.Add(120*time.Millisecond)))
+
+		h, err := getHistogramVecLabelValues(t, llmdRequestTTFT, "m10", "t10", "tenant-a", "3", "true")
+		require.NoError(t, err)
+		require.Equal(t, uint64(2), h.GetSampleCount())
+		require.InDelta(t, 1.61, h.GetSampleSum(), 0.001)
+
+		h, err = getHistogramVecLabelValues(t, llmdRequestTTFT, "m20", "t20", "tenant-b", "5", "false")
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), h.GetSampleCount())
+		require.InDelta(t, 0.12, h.GetSampleSum(), 0.001)
+	})
+
+	t.Run("zero first token timestamp", func(t *testing.T) {
+		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, time.Time{}))
+	})
+
+	t.Run("first token before received", func(t *testing.T) {
+		require.False(t, RecordRequestTTFT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline.Add(10*time.Millisecond), timeBaseline))
+	})
+}
+
+func TestRecordRequestTPOT(t *testing.T) {
+	Reset()
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	timeBaseline := time.Now()
+
+	t.Run("valid multi-token request", func(t *testing.T) {
+		received := timeBaseline
+		firstToken := timeBaseline.Add(500 * time.Millisecond)
+		complete := timeBaseline.Add(2000 * time.Millisecond)
+		require.True(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", received, firstToken, complete, 11))
+
+		h, err := getHistogramVecLabelValues(t, llmdRequestTPOT, "m10", "t10", "tenant-a", "3")
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), h.GetSampleCount())
+		require.InDelta(t, 0.15, h.GetSampleSum(), 0.001)
+	})
+
+	t.Run("single token skipped", func(t *testing.T) {
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 1))
+	})
+
+	t.Run("zero tokens skipped", func(t *testing.T) {
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 0))
+	})
+
+	t.Run("zero first token timestamp", func(t *testing.T) {
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, time.Time{}, timeBaseline.Add(200*time.Millisecond), 10))
+	})
+
+	t.Run("first token before received", func(t *testing.T) {
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline.Add(100*time.Millisecond), timeBaseline, timeBaseline.Add(200*time.Millisecond), 10))
+	})
+
+	t.Run("complete before first token", func(t *testing.T) {
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(200*time.Millisecond), timeBaseline.Add(100*time.Millisecond), 10))
+	})
+}
+
+func TestRecordInterTokenLatency(t *testing.T) {
+	Reset()
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	t.Run("valid observations", func(t *testing.T) {
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0.05))
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0.08))
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0.12))
+		require.True(t, RecordInterTokenLatency(ctx, "m20", "t20", "tenant-b", "5", 0.03))
+
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3")
+		require.NoError(t, err)
+		require.Equal(t, uint64(3), h.GetSampleCount())
+		require.InDelta(t, 0.25, h.GetSampleSum(), 0.001)
+
+		h, err = getHistogramVecLabelValues(t, llmdInterTokenLatency, "m20", "t20", "tenant-b", "5")
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), h.GetSampleCount())
+		require.InDelta(t, 0.03, h.GetSampleSum(), 0.001)
+	})
+
+	t.Run("zero latency accepted", func(t *testing.T) {
+		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", 0))
+	})
+
+	t.Run("negative latency rejected", func(t *testing.T) {
+		require.False(t, RecordInterTokenLatency(ctx, "m10", "t10", "tenant-a", "3", -0.01))
+	})
 }
 
 func TestInferenceModelRewriteDecisionsTotalMetric(t *testing.T) {

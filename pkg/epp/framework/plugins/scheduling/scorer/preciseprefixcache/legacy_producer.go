@@ -107,7 +107,7 @@ func needsLegacyTokenization(request *scheduling.InferenceRequest) bool {
 	if request == nil || request.Body == nil {
 		return false
 	}
-	if tp := request.Body.TokenizedPrompt; tp != nil && len(tp.TokenIDs) > 0 {
+	if tp := request.Body.TokenizedPrompt; tp != nil && tp.TokenCount() > 0 {
 		return false
 	}
 	return request.Body.Completions != nil || request.Body.ChatCompletions != nil
@@ -131,8 +131,9 @@ func (lp *legacyProducer) tokenizeRequest(request *scheduling.InferenceRequest) 
 	}
 
 	request.Body.TokenizedPrompt = &fwkrh.TokenizedPrompt{
-		TokenIDs:           tokens,
+		PerPromptTokens:    [][]uint32{tokens},
 		MultiModalFeatures: flattenMMFeatures(mmFeatures),
+		CacheSalt:          tokenizer.CacheSaltFromBody(request.Body),
 	}
 }
 

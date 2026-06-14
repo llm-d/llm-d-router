@@ -32,12 +32,14 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 )
 
 type InferenceObjectiveReconciler struct {
 	client.Reader
-	Datastore datastore.Datastore
-	PoolGKNN  common.GKNN
+	Datastore                datastore.Datastore
+	PoolGKNN                 common.GKNN
+	PriorityBandControlPlane contracts.PriorityBandControlPlane
 }
 
 func (c *InferenceObjectiveReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -64,15 +66,30 @@ func (c *InferenceObjectiveReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if notFound || !infObjective.DeletionTimestamp.IsZero() || infObjective.Spec.PoolRef.Name != v1alpha2.ObjectName(c.PoolGKNN.Name) || infObjective.Spec.PoolRef.Group != v1alpha2.Group(c.PoolGKNN.Group) {
 		// InferenceObjective object got deleted or changed the referenced inferencePool.
 		c.Datastore.ObjectiveDelete(req.NamespacedName)
+		c.syncPriorityBands()
 		return ctrl.Result{}, nil
 	}
 
 	// Add or update if the InferenceObjective instance has a creation timestamp older than the existing entry of the model.
 	logger = logger.WithValues("poolRef", infObjective.Spec.PoolRef)
 	c.Datastore.ObjectiveSet(infObjective)
+	c.syncPriorityBands()
 	logger.Info("Added/Updated InferenceObjective")
 
 	return ctrl.Result{}, nil
+}
+
+func (c *InferenceObjectiveReconciler) syncPriorityBands() {
+	if c.PriorityBandControlPlane == nil {
+		return
+	}
+	desired := make(map[int]struct{})
+	for _, objective := range c.Datastore.ObjectiveGetAll() {
+		if objective.Spec.Priority != nil {
+			desired[int(*objective.Spec.Priority)] = struct{}{}
+		}
+	}
+	c.PriorityBandControlPlane.SubmitDesiredPriorities(desired)
 }
 
 func (c *InferenceObjectiveReconciler) SetupWithManager(mgr ctrl.Manager) error {

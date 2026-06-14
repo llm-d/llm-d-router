@@ -38,10 +38,13 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	sourcehttp "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
@@ -336,6 +339,89 @@ func TestMetricsExtractionDisabledSpecNoError(t *testing.T) {
 	})
 
 	assert.NoError(t, p.Poll(ctx, ep))
+}
+
+func TestMetricsExtractionCustomScalarFromConfig(t *testing.T) {
+	const attributeKey = "custom.queue_depth"
+
+	srv := createMockServer([]MetricMock{
+		{
+			Name:  "custom_queue_depth",
+			Value: 42.5,
+			Labels: map[string]string{
+				"tier": "gold",
+			},
+		},
+	})
+	defer srv.Close()
+
+	params := &modelServerExtractorParams{
+		EngineConfigs: []engineConfigParams{
+			{
+				Name: "vllm",
+				CustomMetrics: []customMetricConfigParams{
+					{
+						AttributeKey: attributeKey,
+						MetricSpec:   "custom_queue_depth{tier=gold}",
+					},
+				},
+			},
+		},
+	}
+
+	p, err := buildPipeline(t, srv.URL, params)
+	require.NoError(t, err)
+
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+	})
+
+	require.NoError(t, p.Poll(context.Background(), ep))
+
+	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attributeKey)
+	require.True(t, ok, "custom scalar metric should be stored as an endpoint attribute")
+	assert.InDelta(t, 42.5, float64(got), 0.001)
+	assert.Zero(t, ep.GetMetrics().WaitingQueueSize)
+	assert.Zero(t, ep.GetMetrics().RunningRequestsSize)
+	assert.Zero(t, ep.GetMetrics().KVCacheUsagePercent)
+}
+
+func TestMetricsExtractionCustomCounterFromConfig(t *testing.T) {
+	const attributeKey = "custom.total_requests"
+
+	ext := buildExtractor(t, &modelServerExtractorParams{
+		EngineConfigs: []engineConfigParams{
+			{
+				Name: "vllm",
+				CustomMetrics: []customMetricConfigParams{
+					{
+						AttributeKey: attributeKey,
+						MetricSpec:   "custom_total_requests",
+					},
+				},
+			},
+		},
+	})
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		Labels: map[string]string{DefaultEngineTypeLabelKey: "vllm"},
+	}, nil)
+	err := ext.Extract(context.Background(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+		Endpoint: ep,
+		Payload: sourcemetrics.PrometheusMetricMap{
+			"custom_total_requests": {
+				Type: dto.MetricType_COUNTER.Enum(),
+				Metric: []*dto.Metric{
+					{Counter: &dto.Counter{Value: ptr.To(12.0)}},
+				},
+			},
+		},
+	})
+
+	require.NoError(t, err)
+	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attributeKey)
+	require.True(t, ok, "custom counter should be stored as an endpoint attribute")
+	assert.InDelta(t, 12.0, float64(got), 0.001)
 }
 
 // TestMetricsExtractionServerError verifies that an HTTP error from the server propagates as a Poll error.

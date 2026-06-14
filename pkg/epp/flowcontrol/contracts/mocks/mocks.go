@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -96,6 +97,22 @@ func (m *MockRegistryDataPlane) WithConnection(key flowcontrol.FlowKey, fn func(
 	}
 	return nil
 }
+
+func (m *MockRegistryDataPlane) SubmitDesiredPriorities(_ map[int]struct{}) {}
+
+func (m *MockRegistryDataPlane) PriorityBandUpdateChannel() <-chan map[int]struct{} {
+	return nil
+}
+
+func (m *MockRegistryDataPlane) FlowGCTimeout() time.Duration {
+	return time.Minute
+}
+
+func (m *MockRegistryDataPlane) ApplyDesiredPriorities(_ map[int]struct{}) {}
+
+func (m *MockRegistryDataPlane) ExecuteGCCycle() {}
+
+var _ contracts.FlowRegistry = &MockRegistryDataPlane{}
 
 var _ contracts.FlowRegistryDataPlane = &MockRegistryDataPlane{}
 

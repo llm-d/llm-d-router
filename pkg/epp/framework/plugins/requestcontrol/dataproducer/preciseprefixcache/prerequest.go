@@ -42,21 +42,26 @@ var _ requestcontrol.PreRequest = &Producer{}
 // speculativeEntries records the speculative rows added on a routing decision
 // so the TTL-eviction callback can roll them back.
 type speculativeEntries struct {
-	blockKeys  []kvblock.BlockHash
-	podEntries []kvblock.PodEntry
+	perPromptKeys [][]kvblock.BlockHash
+	podEntries    []kvblock.PodEntry
 }
 
 // blockKeysState carries the block keys computed in Produce to PreRequest
 // via PluginState, avoiding a second hash on the same request.
+// perPromptKeys holds one slice of block keys per prompt; single-prompt
+// requests use a length-1 outer slice.
 type blockKeysState struct {
-	blockKeys []kvblock.BlockHash
+	perPromptKeys [][]kvblock.BlockHash
 }
 
 // Clone implements plugin.StateData.
 func (s *blockKeysState) Clone() plugin.StateData {
-	cp := make([]kvblock.BlockHash, len(s.blockKeys))
-	copy(cp, s.blockKeys)
-	return &blockKeysState{blockKeys: cp}
+	cp := make([][]kvblock.BlockHash, len(s.perPromptKeys))
+	for i, keys := range s.perPromptKeys {
+		cp[i] = make([]kvblock.BlockHash, len(keys))
+		copy(cp[i], keys)
+	}
+	return &blockKeysState{perPromptKeys: cp}
 }
 
 // buildSpeculativeCache constructs the TTL cache used to evict speculative
@@ -90,11 +95,11 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 			return
 		}
 		entries := item.Value()
-		for _, reqKey := range entries.blockKeys {
-			// Speculative entries were added without engineKey mapping, so
-			// evict by RequestKey directly.
-			//nolint:errcheck // best-effort cleanup on TTL expiry
-			index.Evict(ctx, reqKey, kvblock.RequestKey, entries.podEntries)
+		for _, promptKeys := range entries.perPromptKeys {
+			for _, reqKey := range promptKeys {
+				//nolint:errcheck // best-effort cleanup on TTL expiry
+				index.Evict(ctx, reqKey, kvblock.RequestKey, entries.podEntries)
+			}
 		}
 	})
 	go cache.Start()
@@ -129,7 +134,14 @@ func (p *Producer) PreRequest(ctx context.Context,
 	}
 	p.pluginState.Delete(request.RequestID)
 
-	if len(state.blockKeys) == 0 {
+	hasKeys := false
+	for _, pk := range state.perPromptKeys {
+		if len(pk) > 0 {
+			hasKeys = true
+			break
+		}
+	}
+	if !hasKeys {
 		return
 	}
 
@@ -148,10 +160,12 @@ func (p *Producer) PreRequest(ctx context.Context,
 	}
 
 	index := p.kvCacheIndexer.KVBlockIndex()
-	// nil engineKeys: confirmed KV events will fill them in.
-	if err := index.Add(ctx, nil, state.blockKeys, []kvblock.PodEntry{speculativePod}); err != nil {
-		logger.Error(err, "Failed to add speculative entries to index",
-			"pod", speculativePod.PodIdentifier)
+	// Insert per-prompt keys separately to preserve correct block adjacency.
+	for _, promptKeys := range state.perPromptKeys {
+		if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{speculativePod}); err != nil {
+			logger.Error(err, "Failed to add speculative entries to index",
+				"pod", speculativePod.PodIdentifier)
+		}
 	}
 
 	allPodEntries := []kvblock.PodEntry{speculativePod}
@@ -163,22 +177,24 @@ func (p *Producer) PreRequest(ctx context.Context,
 				PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
 				Speculative:   true,
 			}
-			if err := index.Add(ctx, nil, state.blockKeys, []kvblock.PodEntry{prefillPod}); err != nil {
-				logger.Error(err, "Failed to add speculative entries for prefill endpoint",
-					"pod", prefillPod.PodIdentifier)
+			for _, promptKeys := range state.perPromptKeys {
+				if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{prefillPod}); err != nil {
+					logger.Error(err, "Failed to add speculative entries for prefill endpoint",
+						"pod", prefillPod.PodIdentifier)
+				}
 			}
 			allPodEntries = append(allPodEntries, prefillPod)
 		}
 	}
 
 	p.speculativeCache.Set(request.RequestID, &speculativeEntries{
-		blockKeys:  state.blockKeys,
-		podEntries: allPodEntries,
+		perPromptKeys: state.perPromptKeys,
+		podEntries:    allPodEntries,
 	}, p.speculativeTTL)
 
 	logger.V(logging.TRACE).Info("Added speculative entries",
 		"requestID", request.RequestID,
 		"pod", speculativePod.PodIdentifier,
-		"blockKeys", len(state.blockKeys),
+		"prompts", len(state.perPromptKeys),
 		"ttl", p.speculativeTTL)
 }

@@ -19,9 +19,10 @@ set -euox pipefail
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 EPP_IMAGE="${EPP_IMAGE:-ghcr.io/llm-d/llm-d-router-endpoint-picker:dev}"
-SIM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:v0.9.0}"
+SIM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:v0.9.2}"
 MANIFEST_PATH="${MANIFEST_PATH:-${DIR}/../test/testdata/sim-deployment.yaml}"
 USE_KIND="${USE_KIND:-true}"
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-mirror.gcr.io/kindest/node:v1.32.2}"
 
 KIND_CLUSTER_NAME="inference-e2e"
 
@@ -76,7 +77,7 @@ if [ "${USE_KIND}" = "true" ]; then
       kubectl config use-context "kind-${KIND_CLUSTER_NAME}"
     else
       echo "Creating new kind cluster '${KIND_CLUSTER_NAME}' for running the tests..."
-      kind create cluster --name "${KIND_CLUSTER_NAME}"
+      kind create cluster --name "${KIND_CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}"
       CREATED_CLUSTER="${KIND_CLUSTER_NAME}"
     fi
     load_images "${KIND_CLUSTER_NAME}"

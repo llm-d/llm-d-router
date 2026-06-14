@@ -26,6 +26,8 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 const (
@@ -71,11 +73,32 @@ func newImageEstimator(cfg *estimateConfig) imageEstimator {
 	return est
 }
 
-// placeholderCount estimates the number of placeholder tokens an image occupies.
-// Static mode returns a constant count; dynamic mode uses decoded pixel dimensions
-// (or the default resolution) divided by the factor. The result is always >= 1 so
-// an image contributes weight to the pseudo-token stream.
+// placeholderCount estimates placeholder tokens for an image URL. Data URLs
+// are decoded for dimensions; other URLs fall back to the default resolution.
 func (e imageEstimator) placeholderCount(url string) int {
+	w, h, ok := imageDimensionsFromBase64(url)
+	return e.countFromDims(w, h, ok)
+}
+
+// placeholderForAnthropicImage returns the content (URL or raw base64) and
+// placeholder count for an Anthropic image source. Empty content means skip.
+func (e imageEstimator) placeholderForAnthropicImage(src *fwkrh.AnthropicImageSource) (content string, count int) {
+	if src == nil {
+		return "", 0
+	}
+	if src.URL != "" {
+		return src.URL, e.placeholderCount(src.URL)
+	}
+	if src.Data != "" {
+		w, h, ok := imageDimensionsFromBase64Payload(src.Data)
+		return src.Data, e.countFromDims(w, h, ok)
+	}
+	return "", 0
+}
+
+// countFromDims returns the token count from decoded dimensions (decoded==true)
+// or the configured defaults. Always >= 1 so every image carries weight.
+func (e imageEstimator) countFromDims(decW, decH int, decoded bool) int {
 	if e.mode == imageModeStatic {
 		if e.staticToken > 0 {
 			return e.staticToken
@@ -89,8 +112,8 @@ func (e imageEstimator) placeholderCount(url string) int {
 	if h <= 0 {
 		h = defaultImageHeight
 	}
-	if rw, rh, ok := imageDimensionsFromBase64(url); ok {
-		w, h = rw, rh
+	if decoded {
+		w, h = decW, decH
 	}
 	factor := e.factor
 	if factor <= 0 {
@@ -109,7 +132,13 @@ func imageDimensionsFromBase64(url string) (width, height int, ok bool) {
 		return 0, 0, false
 	}
 	idx := strings.Index(url, "base64,")
-	decoded, err := base64.StdEncoding.DecodeString(url[idx+len("base64,"):])
+	return imageDimensionsFromBase64Payload(url[idx+len("base64,"):])
+}
+
+// imageDimensionsFromBase64Payload decodes a bare base64 image payload and
+// returns its pixel dimensions.
+func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool) {
+	decoded, err := base64.StdEncoding.DecodeString(rawB64)
 	if err != nil {
 		return 0, 0, false
 	}

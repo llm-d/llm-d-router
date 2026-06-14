@@ -179,22 +179,27 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
 		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
 	}
-	hashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
-	total := len(hashes)
-	prefixCacheServers := p.matchLongestPrefix(ctx, hashes)
+	perPromptHashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
+
+	prefixCacheServers := make(map[ServerID]int)
+	totalBlocks := 0
+	for _, hashes := range perPromptHashes {
+		for server, matchLen := range p.matchLongestPrefix(ctx, hashes) {
+			prefixCacheServers[server] += matchLen
+		}
+		totalBlocks += len(hashes)
+	}
 
 	for _, pod := range pods {
 		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().NamespacedName)]
-		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, total, blockSize))
+		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
 	}
 
 	state := &SchedulingContextState{
-		PrefixHashes:       hashes,
+		PerPromptHashes:    perPromptHashes,
 		PrefixCacheServers: prefixCacheServers,
 	}
 
-	// Store the state in shared plugin state for later use in PreRequest.
-	// NOTE: We use the prefix plugin's name as part of the key so that multiple instances avoid collisions.
 	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
 
 	return nil
@@ -228,12 +233,17 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	// Update indexer asynchronously to avoid blocking the request path.
 	p.wg.Go(func() {
 		for _, s := range servers {
-			p.indexerInst.Add(state.PrefixHashes, s)
+			for _, hashes := range state.PerPromptHashes {
+				p.indexerInst.Add(hashes, s)
+			}
 		}
 	})
 
 	// Record metrics. Lengths are reported as a byte estimate (~averageCharactersPerToken bytes/token).
-	total := len(state.PrefixHashes)
+	total := 0
+	for _, hashes := range state.PerPromptHashes {
+		total += len(hashes)
+	}
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4

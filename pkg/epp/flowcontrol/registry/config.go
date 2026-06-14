@@ -413,6 +413,17 @@ func NewConfig(defaults PriorityBandPolicyDefaults, opts ...ConfigOption) (*Conf
 		}
 	}
 
+	// Ensure priority 0 is always provisioned. It is the fallback band for unmatched requests
+	// and the demotion target in withConnectionWithDemotion.
+	if _, exists := builder.config.PriorityBands[0]; !exists {
+		zero := *builder.config.DefaultPriorityBand
+		zero.Priority = 0
+		if err := zero.applyDefaults(defaults); err != nil {
+			return nil, fmt.Errorf("failed to apply defaults to priority band 0: %w", err)
+		}
+		builder.config.PriorityBands[0] = &zero
+	}
+
 	if err := builder.config.validate(builder.checker); err != nil {
 		return nil, fmt.Errorf("invalid registry config: %w", err)
 	}
