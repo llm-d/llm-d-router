@@ -240,64 +240,6 @@ func filterDocument(doc string) string {
 	return strings.TrimRight(string(out), "\n")
 }
 
-// rewriteModelCacheToHostPath swaps the render sidecar's model-cache volume
-// from emptyDir to a hostPath, so the kind-node-mounted HF weights cache backs
-// /root/.cache/huggingface across runs. No-op when nodePath is empty.
-func rewriteModelCacheToHostPath(inputs []string, nodePath string) []string {
-	if nodePath == "" {
-		return inputs
-	}
-	outputs := make([]string, len(inputs))
-	for idx, input := range inputs {
-		docs := strings.Split(input, "\n---")
-		rendered := make([]string, 0, len(docs))
-		for _, doc := range docs {
-			if strings.TrimSpace(doc) == "" {
-				continue
-			}
-			rendered = append(rendered, rewriteModelCacheVolumeInDoc(doc, nodePath))
-		}
-		outputs[idx] = strings.Join(rendered, "\n---\n")
-	}
-	return outputs
-}
-
-func rewriteModelCacheVolumeInDoc(doc, nodePath string) string {
-	obj := &unstructured.Unstructured{}
-	err := yaml.Unmarshal([]byte(doc), &obj.Object)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	if len(obj.Object) == 0 || obj.GetKind() != "Deployment" {
-		return doc
-	}
-	path := []string{"spec", "template", "spec", "volumes"}
-	items, found, err := unstructured.NestedSlice(obj.Object, path...)
-	if err != nil || !found {
-		return doc
-	}
-	changed := false
-	for i, item := range items {
-		m, ok := item.(map[string]any)
-		if !ok || m["name"] != "model-cache" {
-			continue
-		}
-		delete(m, "emptyDir")
-		m["hostPath"] = map[string]any{
-			"path": nodePath,
-			"type": "DirectoryOrCreate",
-		}
-		items[i] = m
-		changed = true
-	}
-	if !changed {
-		return doc
-	}
-	err = unstructured.SetNestedSlice(obj.Object, items, path...)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	out, err := yaml.Marshal(obj.Object)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	return strings.TrimRight(string(out), "\n")
-}
-
 func removePodSpecListItem(obj *unstructured.Unstructured, fieldName, itemName string) {
 	path := []string{"spec", "template", "spec", fieldName}
 	items, found, err := unstructured.NestedSlice(obj.Object, path...)
