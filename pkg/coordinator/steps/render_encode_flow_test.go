@@ -89,7 +89,7 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 	// Run encode step (nixl EC connector merges per-hash ec_transfer_params)
 	encodeStep, _ := NewEncodeStep(map[string]any{
 		"use_openai_format": false,
-		ParamECConnector:    ec.NIXLv2,
+		ParamECConnector:    ec.NIXL,
 	})
 	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 

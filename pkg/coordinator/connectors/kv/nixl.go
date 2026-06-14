@@ -5,15 +5,15 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
-// nixlV2 implements the NIXL v2 P2P KV transfer protocol. The prefill request
+// nixlKV implements the NIXL P2P KV transfer protocol. The prefill request
 // declares the request will be remote-decoded; the decode request forwards
 // the prefill response's kv_transfer_params verbatim plus do_remote_prefill
 // so the decode pod can pull KV blocks from the prefill pod.
-type nixlV2 struct{}
+type nixlKV struct{}
 
-func (nixlV2) Name() string { return NIXLv2 }
+func (nixlKV) Name() string { return NIXL }
 
-func (nixlV2) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any {
+func (nixlKV) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any {
 	params := map[string]any{
 		"do_remote_decode":  true,
 		"do_remote_prefill": false,
@@ -26,8 +26,8 @@ func (nixlV2) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any 
 	return params
 }
 
-func (nixlV2) PrepareDecodeKVParams(reqCtx *pipeline.RequestContext) map[string]any {
-	out := make(map[string]any, len(reqCtx.KVTransferParams))
+func (nixlKV) PrepareDecodeKVParams(reqCtx *pipeline.RequestContext) map[string]any {
+	out := make(map[string]any, len(reqCtx.KVTransferParams)+2)
 	for k, v := range reqCtx.KVTransferParams {
 		out[k] = v
 	}

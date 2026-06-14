@@ -1,6 +1,6 @@
 package ec
 
 const (
-	NIXLv2        = "nixlv2"
-	SharedStorage = "shared_storage"
+	NIXL          = "ec-nixl"
+	SharedStorage = "ec-shared-storage"
 )

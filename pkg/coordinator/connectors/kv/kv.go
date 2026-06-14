@@ -1,7 +1,7 @@
 // Package kv contains KV transfer connector implementations selected at
 // config time. Each connector defines the kv_transfer_params shape sent to
-// prefill and decode pods. Orchestration variants (shared_storage
-// try-decode-first) are not implemented in this package — they require
+// prefill and decode pods. Orchestration variants (shared-storage
+// try-decode-first) are not implemented in this package, they require
 // pipeline changes outside the per-step wire format.
 package kv
 
@@ -14,8 +14,8 @@ import (
 )
 
 // DefaultKVConnectorName is the KV connector selected when an empty string is
-// passed to Build.
-const DefaultKVConnectorName = NIXLv2
+// passed to Build. Defaults to kv-shared-storage (no-op on the wire).
+const DefaultKVConnectorName = SharedStorage
 
 var logger = ctrl.Log.WithName("kv")
 
@@ -39,13 +39,13 @@ func Build(name string) (Connector, error) {
 		name = DefaultKVConnectorName
 	}
 	switch name {
-	case NIXLv2:
-		return nixlV2{}, nil
+	case NIXL:
+		return nixlKV{}, nil
 	case SharedStorage:
-		return sharedStorage{}, nil
+		return sharedStorageKV{}, nil
 	case SGLang:
 		return sglangKV{}, nil
 	default:
-		return nil, fmt.Errorf("unknown connector: %q", name)
+		return nil, fmt.Errorf("unknown kv_connector: %q", name)
 	}
 }

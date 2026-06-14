@@ -77,7 +77,7 @@ func TestConnectors_KVParams(t *testing.T) {
 		wantDecode     map[string]any
 	}{
 		{
-			name: NIXLv2,
+			name: NIXL,
 			decodeIncoming: map[string]any{
 				"block_id":  "block-999",
 				"peer_host": "10.0.0.42",

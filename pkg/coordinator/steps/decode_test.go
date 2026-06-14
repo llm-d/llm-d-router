@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -90,7 +91,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, err := NewDecodeStep(map[string]any{})
+	step, err := NewDecodeStep(map[string]any{ParamKVConnector: kv.NIXL})
 	if err != nil {
 		t.Fatal(err)
 	}

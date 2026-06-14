@@ -25,7 +25,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 		denyFields []string
 	}{
 		{
-			connector: kv.NIXLv2,
+			connector: kv.NIXL,
 			wantFields: map[string]any{
 				"do_remote_decode":  true,
 				"do_remote_prefill": false,
@@ -100,13 +100,13 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 }
 
 // TestDecodeStep_ConnectorShapesDecodeBody verifies the per-connector
-// kv_transfer_params shape sent on the decode request. nixlv2 forwards all
+// kv_transfer_params shape sent on the decode request. kv-nixl forwards all
 // prefill response fields and overrides do_remote_decode/do_remote_prefill;
-// shared_storage emits only the two flags.
+// kv-shared-storage emits only the two flags.
 func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
-	// nixlV2PrefillResponse simulates the kv_transfer_params returned by a
-	// nixlv2 prefill worker (remote addressing fields filled in).
-	nixlV2PrefillResponse := map[string]any{
+	// nixlPrefillResponse simulates the kv_transfer_params returned by a
+	// nixl prefill worker (remote addressing fields filled in).
+	nixlPrefillResponse := map[string]any{
 		"do_remote_decode":  true,
 		"do_remote_prefill": false,
 		"remote_engine_id":  "e95b1c63-2ba6-4f26-96d0-9338d40a2560",
@@ -124,8 +124,8 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 		denyFields      []string
 	}{
 		{
-			connector:       kv.NIXLv2,
-			prefillResponse: nixlV2PrefillResponse,
+			connector:       kv.NIXL,
+			prefillResponse: nixlPrefillResponse,
 			wantFields: map[string]any{
 				"do_remote_decode":  false,
 				"do_remote_prefill": true,
