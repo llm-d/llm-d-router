@@ -38,8 +38,6 @@ const (
 	inferExtManifest = "../../deploy/components/inference-gateway/inference-pools.yaml"
 	// simModelName is the test model name.
 	simModelName = "food-review"
-	// kvModelName is the model name used in KV tests.
-	kvModelName = "Qwen/Qwen2.5-1.5B-Instruct"
 	// envoyManifest is the manifest for the envoy proxy test resources.
 	envoyManifest = "../../deploy/environments/dev/e2e-infra/envoy.yaml"
 	// eppManifest is the manifest for the deployment of the EPP
@@ -76,6 +74,10 @@ var (
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
+	// kvModelName is the model name used in KV tests. The CI workflow sets
+	// HF_MODEL_NAME and uses the same value to key the HuggingFace cache, so
+	// the two stay in sync there. The fallback is for local dev.
+	kvModelName = env.GetEnvString("HF_MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct", ginkgo.GinkgoLogr)
 	// hfCacheHostPath, when non-empty, is bind-mounted into the kind node at
 	// /opt/hf-cache and used as a hostPath for the render sidecar's
 	// /root/.cache/huggingface, so tokenizer/config files survive across CI runs

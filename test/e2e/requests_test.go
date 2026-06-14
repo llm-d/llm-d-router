@@ -46,14 +46,14 @@ func doPost(path, body string, extraHeaders map[string]string) (string, string, 
 	return resp.Header.Get("x-inference-namespace"), resp.Header.Get("x-inference-pod"), respBody
 }
 
-func runCompletion(prompt string, theModel openai.CompletionNewParamsModel) (string, string, string) {
+func runCompletion(prompt, theModel string) (string, string, string) {
 	var httpResp *http.Response
 
 	completionParams := openai.CompletionNewParams{
 		Prompt: openai.CompletionNewParamsPromptUnion{
 			OfString: openai.String(prompt),
 		},
-		Model: theModel,
+		Model: openai.CompletionNewParamsModel(theModel),
 	}
 
 	ginkgo.By(fmt.Sprintf("Sending Completion Request: (port %s) %#v", port, completionParams))
@@ -72,11 +72,11 @@ func runCompletion(prompt string, theModel openai.CompletionNewParamsModel) (str
 
 // tryCompletion is like runCompletion but returns an error instead of asserting,
 // intended for use inside Eventually blocks where transient failures are acceptable.
-func tryCompletion(prompt string, theModel openai.CompletionNewParamsModel) (string, string, string, error) {
+func tryCompletion(prompt, theModel string) (string, string, string, error) {
 	var httpResp *http.Response
 	completionParams := openai.CompletionNewParams{
 		Prompt: openai.CompletionNewParamsPromptUnion{OfString: openai.String(prompt)},
-		Model:  theModel,
+		Model:  openai.CompletionNewParamsModel(theModel),
 	}
 	resp, err := newOpenAIClient().Completions.New(
 		testConfig.Context,
@@ -170,7 +170,7 @@ func runChatCompletionWithAudio() (string, string) {
 	return runRawChatCompletion(body)
 }
 
-func runStreamingCompletion(prompt string, theModel openai.CompletionNewParamsModel) (string, string) {
+func runStreamingCompletion(prompt, theModel string) (string, string) {
 	ginkgo.By(fmt.Sprintf("Sending Streaming Completion Request: (port %s) model=%s", port, theModel))
 	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":50,"stream":true}`, theModel, prompt)
 	ns, pod, respBody := doPost("/v1/completions", body, nil)
