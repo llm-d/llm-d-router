@@ -28,6 +28,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // DefaultHeader is the default request/response header carrying the session
@@ -80,4 +81,18 @@ func WriteResponseHeader(ctx context.Context, pluginType, sessionHeader string, 
 	}
 
 	response.Headers[sessionHeader] = base64.StdEncoding.EncodeToString([]byte(targetPod.NamespacedName.String()))
+}
+
+// ResolvePodToWrite looks up the target pod from the scheduling results if profileName is set.
+// It returns targetPod if profileName is empty or if the lookup fails.
+func ResolvePodToWrite(request *scheduling.InferenceRequest, profileName string, targetPod *datalayer.EndpointMetadata) *datalayer.EndpointMetadata {
+	podToWrite := targetPod
+	if profileName != "" && request != nil && request.SchedulingResult != nil {
+		if result := request.SchedulingResult.ProfileResults[profileName]; result != nil && len(result.TargetEndpoints) > 0 && result.TargetEndpoints[0] != nil {
+			if md := result.TargetEndpoints[0].GetMetadata(); md != nil {
+				podToWrite = md
+			}
+		}
+	}
+	return podToWrite
 }

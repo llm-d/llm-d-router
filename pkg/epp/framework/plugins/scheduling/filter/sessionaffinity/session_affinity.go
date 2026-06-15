@@ -107,13 +107,6 @@ func (s *SessionAffinity) Filter(ctx context.Context, request *scheduling.Infere
 
 // ResponseHeader sets the session header on the response sent to the client.
 func (s *SessionAffinity) ResponseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	podToWrite := targetPod
-	if s.profileName != "" && request != nil && request.SchedulingResult != nil {
-		if result := request.SchedulingResult.ProfileResults[s.profileName]; result != nil && len(result.TargetEndpoints) > 0 && result.TargetEndpoints[0] != nil {
-			if md := result.TargetEndpoints[0].GetMetadata(); md != nil {
-				podToWrite = md
-			}
-		}
-	}
+	podToWrite := sessionutil.ResolvePodToWrite(request, s.profileName, targetPod)
 	sessionutil.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, podToWrite)
 }
