@@ -112,7 +112,6 @@ This document defines the process for releasing llm-d-router.
     1. Choose the tag that you created for the release.
     1. Use the tag as the release title, e.g. `v0.1.0`.
     1. Click "Generate release notes" and preview the release body.
-    1. Go to the [Gateway Inference Extension] latest release and make sure to include the highlights in llm-d-router as well.
     1. Ensure the release body includes: highlights, breaking changes (if any), known issues, and upgrade steps.
     1. If this is a release candidate, select the "This is a pre-release" checkbox.
 1. If you find any bugs in this process, create an [issue].
@@ -137,5 +136,4 @@ Use the following steps to announce the release.
 [sidecar image]: https://github.com/orgs/llm-d/packages/container/package/llm-d-router-disagg-sidecar
 [new release]: https://github.com/llm-d/llm-d-router/releases/new
 [issue]: https://github.com/llm-d/llm-d-router/issues/new/choose
-[Gateway Inference Extension]: https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases
 [CI release workflow]: https://github.com/llm-d/llm-d-router/actions/workflows/ci-release.yaml
