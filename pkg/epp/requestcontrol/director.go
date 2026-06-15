@@ -628,7 +628,10 @@ func (d *Director) runAdmissionPlugins(ctx context.Context,
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	for _, plugin := range d.requestControlPlugins.admissionPlugins {
 		loggerDebug.Info("Running Admit plugin", "plugin", plugin.TypedName())
-		if denyReason := plugin.Admit(ctx, request, endpoints); denyReason != nil {
+		before := time.Now()
+		denyReason := plugin.Admit(ctx, request, endpoints)
+		metrics.RecordPluginProcessingLatency(fwkrc.AdmissionExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		if denyReason != nil {
 			loggerDebug.Info("Admit plugin denied the request", "plugin", plugin.TypedName(), "reason", denyReason.Error())
 			return denyReason
 		}
