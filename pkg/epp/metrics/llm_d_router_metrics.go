@@ -252,6 +252,30 @@ var (
 		},
 		[]string{"extension_point", "plugin_type", "plugin_name"},
 	)
+
+	llmdRequestProcessingLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "request_processing_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("EPP request processing latency distribution in seconds, from request receipt until an endpoint is selected, excluding flow-control admission wait.", compbasemetrics.ALPHA),
+			Buckets: []float64{
+				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+			},
+		},
+		[]string{},
+	)
+
+	llmdResponseProcessingLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "response_processing_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("EPP response processing latency distribution in seconds, accumulated across response handlers and excluding model server generation time.", compbasemetrics.ALPHA),
+			Buckets: []float64{
+				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+			},
+		},
+		[]string{},
+	)
 )
 
 // --- llm-d Info Metrics ---

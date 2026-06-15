@@ -232,6 +232,13 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 // HandleRequest orchestrates the request lifecycle.
 // It always returns the requestContext even in the error case, as the request context is used in error handling.
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
+	start := time.Now()
+	var admissionWait time.Duration
+	// request_processing_duration captures EPP's own processing cost, so the
+	// flow-control admission wait (tracked separately by
+	// flow_control_request_queue_duration_seconds) is subtracted out.
+	defer func() { metrics.RecordRequestProcessingLatency(time.Since(start) - admissionWait) }()
+
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")
 	ctx, span := tracer.Start(ctx, "gateway.request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
 	defer func() {
@@ -284,8 +291,11 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 
 	// Admit may block until flow control admits the request.
-	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
-		return reqCtx, err
+	admitStart := time.Now()
+	admitErr := d.admissionController.Admit(ctx, reqCtx, priority)
+	admissionWait = time.Since(admitStart)
+	if admitErr != nil {
+		return reqCtx, admitErr
 	}
 
 	endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
