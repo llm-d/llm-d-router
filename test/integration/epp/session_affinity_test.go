@@ -120,16 +120,9 @@ func sendSessionRequest(t *testing.T, h *TestHarness, sessionToken string) (endp
 	return endpoint, token
 }
 
-// TestSessionAffinityFilter_PDFlow validates the session affinity flow in a
-// prefill/decode disaggregated setup: two session-affinity-filter instances
-// emit separate tokens for the decode and prefill endpoints. The test verifies
-// that on a second request both tokens pin to the same pods, and that on a
-// decode-only request (where the always-disagg decider still schedules prefill
-// because it always returns true) the prefill token is set correctly.
-func TestSessionAffinityFilter_PDFlow(t *testing.T) {
-	const prefillHeader = "x-session-token-prefill"
-
-	configText := `
+// pdConfigBase is the shared EPP config skeleton for PD session-affinity tests.
+// The caller must supply the disagg-profile-handler parameters block (%s).
+const pdConfigBase = `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
@@ -137,8 +130,7 @@ plugins:
   - type: always-disagg-pd-decider
   - type: disagg-profile-handler
     parameters:
-      deciders:
-        prefill: always-disagg-pd-decider
+%s
   - type: prefill-filter
   - type: decode-filter
   - type: queue-scorer
@@ -172,11 +164,13 @@ schedulingProfiles:
     - pluginRef: session-affinity-decode
 `
 
+// setupPDHarness creates a test harness with prefill and decode pods for PD
+// session-affinity tests.
+func setupPDHarness(t *testing.T, configText string) *TestHarness {
+	t.Helper()
 	ctx := t.Context()
 	h := NewTestHarness(ctx, t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
 
-	// Create pods with role labels. The by-label filters need llm-d.ai/role to
-	// separate prefill and decode candidates.
 	metricsMap := make(map[types.NamespacedName]*fwkdl.Metrics)
 	type podDef struct {
 		index int
@@ -213,6 +207,18 @@ schedulingProfiles:
 	h.metricsBackend.SetPodMetrics(metricsMap)
 	h.WaitForSync(len(pods), modelMyModel)
 	h.WaitForReadyPodsMetric(len(pods))
+	return h
+}
+
+// TestSessionAffinityFilter_PDDisaggregated validates the session affinity flow
+// in a prefill/decode disaggregated setup where every request is disaggregated.
+// Two session-affinity-filter instances emit separate tokens for the decode and
+// prefill endpoints. The second request pins both profiles to the same pods.
+func TestSessionAffinityFilter_PDDisaggregated(t *testing.T) {
+	const prefillHeader = "x-session-token-prefill"
+
+	configText := fmt.Sprintf(pdConfigBase, "      deciders:\n        prefill: always-disagg-pd-decider")
+	h := setupPDHarness(t, configText)
 
 	// First request: no session headers.
 	firstDecodeEP, decodeToken := sendSessionRequest(t, h, "")
@@ -228,6 +234,27 @@ schedulingProfiles:
 
 	secondPrefillToken := sendSessionRequestGetHeader(t, h, decodeToken, firstPrefillToken, prefillHeader)
 	require.NotEmpty(t, secondPrefillToken, "second response must carry a prefill session token")
+}
+
+// TestSessionAffinityFilter_DecodeOnly validates that when the disagg profile
+// handler has no prefill decider configured, prefill is skipped and the
+// profile-scoped session-affinity-filter does NOT emit a prefill session token
+// (i.e. it does not fall back to the decode pod).
+func TestSessionAffinityFilter_DecodeOnly(t *testing.T) {
+	const prefillHeader = "x-session-token-prefill"
+
+	// No deciders block: disagg-profile-handler skips prefill entirely.
+	configText := fmt.Sprintf(pdConfigBase, "      {}")
+	h := setupPDHarness(t, configText)
+
+	// Request routed to decode only; decode token must be present, prefill
+	// token must be absent.
+	_, decodeToken := sendSessionRequest(t, h, "")
+	require.NotEmpty(t, decodeToken, "response must carry a decode session token")
+
+	prefillToken := sendSessionRequestGetHeader(t, h, "", "", prefillHeader)
+	require.Empty(t, prefillToken,
+		"decode-only response must NOT carry a prefill session token")
 }
 
 // sendSessionRequestGetHeader drives a request through the EPP and returns the
