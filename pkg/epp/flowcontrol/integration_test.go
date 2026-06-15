@@ -1122,7 +1122,7 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 	var queueSizeWhileQueued float64
 	var foundQueueSize bool
 	for _, f := range families {
-		if f.GetName() == "llm_d_router_epp_flow_control_queue_size" {
+		if f.GetName() == "llm_d_epp_flow_control_queue_size" {
 			foundQueueSize = true
 			for _, m := range f.GetMetric() {
 				queueSizeWhileQueued += m.GetGauge().GetValue()
@@ -1130,7 +1130,7 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 		}
 	}
 	require.True(t, foundQueueSize,
-		"llm_d_router_epp_flow_control_queue_size metric should exist")
+		"llm_d_epp_flow_control_queue_size metric should exist")
 	require.Greater(t, queueSizeWhileQueued, 0.0,
 		"queue_size should be > 0 while a request is actively queued")
 
