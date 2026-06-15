@@ -223,9 +223,11 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 				Prompt: fwkrh.Prompt{TokenIDs: copiedTokenIDsInt},
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens:    [][]uint32{copiedTokenIDsInt},
-				MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					TokenIDs:           copiedTokenIDsInt,
+					MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
+				}},
 			},
 		}
 	default:
@@ -240,7 +242,7 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 	return body, nil
 }
 
-func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) [][]fwkrh.MultiModalFeature {
+func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModalFeature {
 	if mmInputs == nil {
 		return nil
 	}
@@ -270,7 +272,7 @@ func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) [][]fwkrh.MultiMod
 		features = append(features, feature)
 	}
 
-	return [][]fwkrh.MultiModalFeature{features}
+	return features
 }
 
 func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.InferenceRequestBody, error) {

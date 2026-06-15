@@ -241,10 +241,10 @@ func TestCalculateRangeScoreFallback(t *testing.T) {
 	})
 }
 
-// TokenizedPrompt tests — plugin reads tokens from InferenceRequestBody.TokenizedPrompt
+// TokenizedRequest tests — plugin reads tokens from InferenceRequestBody.TokenizedRequest
 // as populated by the tokenizer DataProducer plugin.
 
-func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
+func TestContextLengthAwareWithTokenizedRequestOnRequest(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	tokenCount := 42
@@ -273,7 +273,7 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 		RequestID:   "test-request",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokenIDs}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}},
 		},
 	}
 
@@ -282,10 +282,10 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
 }
 
-func TestContextLengthAwareNilTokenizedPromptIsZero(t *testing.T) {
+func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
-	// Without TokenizedPrompt the context length is 0 (unknown); no protocol structs are read.
+	// Without TokenizedRequest the context length is 0 (unknown); no protocol structs are read.
 	endpoints := []scheduling.Endpoint{
 		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "matching-range"},
 			"10.0.0.1",

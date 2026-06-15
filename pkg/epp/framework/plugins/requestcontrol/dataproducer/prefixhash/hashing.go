@@ -64,9 +64,9 @@ func GetBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, b
 		return nil
 	}
 
-	tp := request.Body.TokenizedPrompt
+	tp := request.Body.TokenizedRequest
 	if tp == nil || tp.TokenCount() == 0 {
-		loggerDebug.Info("TokenizedPrompt is empty, skipping hashing")
+		loggerDebug.Info("TokenizedRequest is empty, skipping hashing")
 		return nil
 	}
 
@@ -92,7 +92,7 @@ func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRe
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.
 	_, _ = h.Write([]byte(request.TargetModel))
-	if cacheSalt := request.Body.TokenizedPrompt.CacheSalt; cacheSalt != "" {
+	if cacheSalt := request.Body.TokenizedRequest.CacheSalt; cacheSalt != "" {
 		_, _ = h.Write([]byte(cacheSalt))
 	}
 
