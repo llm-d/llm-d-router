@@ -96,12 +96,7 @@ var _ fwkrc.PreRequest = &LoadAwarePicker{}
 var _ fwkrc.ResponseBodyProcessor = &LoadAwarePicker{}
 
 // LoadAwarePickerFactory is the factory function for LoadAwarePicker.
-func LoadAwarePickerFactory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	if rawParameters != nil {
-		if err := rawParameters.Decode(&struct{}{}); err != nil {
-			return nil, fmt.Errorf("failed to parse parameters for %s: %w", LoadAwarePickerType, err)
-		}
-	}
+func LoadAwarePickerFactory(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	p, err := newLoadAwarePicker(name, handle)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create %s: %w", LoadAwarePickerType, err)
