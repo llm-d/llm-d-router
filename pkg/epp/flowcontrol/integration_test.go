@@ -86,7 +86,7 @@ func TestConcurrentSaturationReads(t *testing.T) {
 			req := &fwksched.InferenceRequest{
 				RequestID: fmt.Sprintf("req-%d", i),
 				Body: &fwkrh.InferenceRequestBody{
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 10)}},
+					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
 				},
 			}
 			result := &fwksched.SchedulingResult{
@@ -163,7 +163,7 @@ func TestSaturationFullLoop(t *testing.T) {
 		req := &fwksched.InferenceRequest{
 			RequestID: fmt.Sprintf("prefill-%d", i),
 			Body: &fwkrh.InferenceRequestBody{
-				TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 50)}},
+				TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 			},
 		}
 		result := &fwksched.SchedulingResult{
@@ -452,7 +452,7 @@ func TestUsageLimitThresholdGatesDispatch(t *testing.T) {
 		req := &fwksched.InferenceRequest{
 			RequestID: fmt.Sprintf("inflight-%d", i),
 			Body: &fwkrh.InferenceRequestBody{
-				TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 10)}},
+				TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
 			},
 		}
 		result := &fwksched.SchedulingResult{
@@ -1002,7 +1002,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	oldReq := &fwksched.InferenceRequest{
 		RequestID: "old-req",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 50)}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	oldResult := &fwksched.SchedulingResult{
@@ -1058,7 +1058,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	newReq := &fwksched.InferenceRequest{
 		RequestID: "new-req",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 50)}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	newResult := &fwksched.SchedulingResult{
@@ -1119,7 +1119,7 @@ func TestEndpointIdentityCollisionDuringPodReplacement(t *testing.T) {
 	req := &fwksched.InferenceRequest{
 		RequestID: "new-pod-req",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 50)}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	result := &fwksched.SchedulingResult{

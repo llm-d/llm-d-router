@@ -87,10 +87,10 @@ func (e *SimpleTokenEstimator) Estimate(request *fwksched.InferenceRequest) int6
 // EstimateInput returns the input token count read from the tokenized prompt,
 // or 0 when no tokenization is available.
 func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest) int64 {
-	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
 		return 0
 	}
-	return int64(request.Body.TokenizedPrompt.TokenCount())
+	return int64(request.Body.TokenizedRequest.TokenCount())
 }
 
 // EstimateOutput returns the estimated output token count given the input token
