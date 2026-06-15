@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 const ReplaceMediaURLsStepName = "replace-media-urls"
 
 const imageURLPartType = "image_url"
+
+const defaultContentType = "application/octet-stream"
 
 func init() {
 	pipeline.Register(ReplaceMediaURLsStepName, NewReplaceMediaURLsStep)
@@ -145,7 +148,9 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		})
 	}
 
-	logger.V(logutil.TRACE).Info("downloading images", "count", len(imageURLs))
+	// Log proxy presence only: HTTP(S)_PROXY URLs can carry basic-auth
+	// credentials (http://user:pass@host) that must not reach logs.
+	logger.V(logutil.TRACE).Info("downloading images", "count", len(imageURLs), "http_proxy_set", os.Getenv("HTTP_PROXY") != "", "https_proxy_set", os.Getenv("HTTPS_PROXY") != "")
 
 	if err := g.Wait(); err != nil {
 		return err
@@ -196,7 +201,7 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, url string) ([]byte
 	}
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
-		contentType = "application/octet-stream"
+		contentType = defaultContentType
 	}
 	return data, contentType, nil
 }
@@ -231,7 +236,7 @@ func parseDataURI(uri string) (contentType, b64 string, err error) {
 		return "", "", errors.New("data URI must be base64-encoded")
 	}
 	if ct == "" {
-		ct = "application/octet-stream"
+		ct = defaultContentType
 	}
 	return ct, payload, nil
 }
