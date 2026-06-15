@@ -130,7 +130,7 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 | `router.epp.flags` | Map of command-line flags passed directly to the EPP binary. | `{}` |
 | `router.epp.affinity` | Affinity rules for EPP pods. | `{}` |
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
-| `router.epp.resources` | EPP container resource requests and limits. | `requests.cpu: "4"`, `requests.memory: 8Gi`, `limits.memory: 16Gi` |
+| `router.epp.resources` | EPP container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi`, `limits.memory: 16Gi` |
 | `router.epp.pluginsConfigFile` | EPP plugins configuration file name. | `default-plugins.yaml` |
 | `router.epp.pluginsCustomConfig` | Inline custom YAML configuration for EPP plugins. | `{}` |
 | `router.epp.volumes` | Extra volumes for EPP pod. | `[]` |

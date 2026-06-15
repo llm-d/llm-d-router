@@ -59,7 +59,7 @@ epp:
   # EPP container resources: CPU limits unset for burst capacity, memory capped at 16Gi
   resources:
     requests:
-      cpu: "4"
+      cpu: "8"
       memory: 8Gi
     limits:
       memory: 16Gi
@@ -160,10 +160,9 @@ latencyPredictor:
   # Training Server Configuration
   trainingServer:
     image:
-      # TODO: Update this default once llm-d owns and publishes this image.
-      registry: us-central1-docker.pkg.dev/k8s-staging-images
-      repository: gateway-api-inference-extension/latency-training-server
-      tag: main
+      registry: ghcr.io/llm-d
+      repository: llm-d-latency-predictor-training-server-dev
+      tag: latest
       pullPolicy: Always
     port: 8000
     resources:
@@ -202,10 +201,9 @@ latencyPredictor:
     count: 1
     startPort: 8001
     image:
-      # TODO: Update this default once llm-d owns and publishes this image.
-      registry: us-central1-docker.pkg.dev/k8s-staging-images
-      repository: gateway-api-inference-extension/latency-prediction-server
-      tag: main
+      registry: ghcr.io/llm-d
+      repository: llm-d-latency-predictor-prediction-server-dev
+      tag: latest
       pullPolicy: Always
     resources:
       requests:

@@ -63,6 +63,7 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 	type requests struct {
 		modelName       string
 		targetModelName string
+		fairnessID      string
 		reqSize         int
 	}
 	scenarios := []struct {
@@ -74,21 +75,25 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 			{
 				modelName:       "m10",
 				targetModelName: "t10",
+				fairnessID:      "tenant-a",
 				reqSize:         1200,
 			},
 			{
 				modelName:       "m10",
 				targetModelName: "t10",
+				fairnessID:      "tenant-a",
 				reqSize:         500,
 			},
 			{
 				modelName:       "m10",
 				targetModelName: "t11",
+				fairnessID:      "tenant-b",
 				reqSize:         2480,
 			},
 			{
 				modelName:       "m20",
 				targetModelName: "t20",
+				fairnessID:      "tenant-c",
 				reqSize:         80,
 			},
 		},
@@ -96,8 +101,8 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				RecordRequestCounter(req.modelName, req.targetModelName, 0)
-				RecordRequestSizes(req.modelName, req.targetModelName, req.reqSize)
+				RecordRequestCounter(req.modelName, req.targetModelName, req.fairnessID, 0)
+				RecordRequestSizes(req.modelName, req.targetModelName, req.fairnessID, "0", req.reqSize)
 			}
 
 			// Verify deprecated metrics
@@ -129,12 +134,12 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 				t.Error(err)
 			}
 
-			wantRequestSizesNew, err := os.Open("testdata/llm_d_request_sizes_metric")
+			wantRequestSizesNew, err := os.Open("testdata/llm_d_request_size_bytes_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantRequestSizesNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestSizesNew, "llm_d_router_epp_request_sizes"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestSizesNew, "llm_d_router_epp_request_size_bytes"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -182,7 +187,7 @@ func TestRecordRequestErrorCounter(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				RecordRequestErrCounter(req.modelName, req.targetModelName, req.error)
+				RecordRequestErrCounter(req.modelName, req.targetModelName, "", "0", req.error)
 			}
 
 			// Verify deprecated metric
@@ -268,7 +273,7 @@ func TestRecordRequestLatencies(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				success := RecordRequestLatencies(ctx, req.modelName, req.targetModelName, req.receivedTime, req.completeTime)
+				success := RecordRequestLatencies(ctx, req.modelName, req.targetModelName, "", "0", req.receivedTime, req.completeTime)
 				if success == scenario.invalid {
 					t.Errorf("got record success(%v), but the request expects invalid(%v)", success, scenario.invalid)
 				}
@@ -398,7 +403,7 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantLatencyPerTokenNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantLatencyPerTokenNew, "llm_d_router_epp_normalized_time_per_output_token_seconds"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantLatencyPerTokenNew, "llm_d_router_epp_request_ntpot_seconds"); err != nil {
 				t.Error(err)
 			}
 
@@ -466,10 +471,10 @@ func TestRecordResponseMetrics(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, resp := range scenario.resp {
-				RecordInputTokens(resp.modelName, resp.targetModelName, resp.inputToken)
-				RecordOutputTokens(resp.modelName, resp.targetModelName, resp.outputToken)
-				RecordResponseSizes(resp.modelName, resp.targetModelName, resp.respSize)
-				RecordPromptCachedTokens(resp.modelName, resp.targetModelName, resp.cachedToken)
+				RecordInputTokens(resp.modelName, resp.targetModelName, "", "0", resp.inputToken)
+				RecordOutputTokens(resp.modelName, resp.targetModelName, "", "0", resp.outputToken)
+				RecordResponseSizes(resp.modelName, resp.targetModelName, "", "0", resp.respSize)
+				RecordPromptCachedTokens(resp.modelName, resp.targetModelName, "", "0", resp.cachedToken)
 			}
 
 			// Verify deprecated metrics
@@ -501,12 +506,12 @@ func TestRecordResponseMetrics(t *testing.T) {
 			}
 
 			// Verify llm_d_router_epp metrics
-			wantResponseSizeNew, err := os.Open("testdata/llm_d_response_sizes_metric")
+			wantResponseSizeNew, err := os.Open("testdata/llm_d_response_size_bytes_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantResponseSizeNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantResponseSizeNew, "llm_d_router_epp_response_sizes"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantResponseSizeNew, "llm_d_router_epp_response_size_bytes"); err != nil {
 				t.Error(err)
 			}
 
@@ -515,7 +520,7 @@ func TestRecordResponseMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantInputTokenNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantInputTokenNew, "llm_d_router_epp_input_tokens"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantInputTokenNew, "llm_d_router_epp_request_input_tokens"); err != nil {
 				t.Error(err)
 			}
 
@@ -524,7 +529,7 @@ func TestRecordResponseMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantOutputTokenNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantOutputTokenNew, "llm_d_router_epp_output_tokens"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantOutputTokenNew, "llm_d_router_epp_request_output_tokens"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -534,8 +539,11 @@ func TestRecordResponseMetrics(t *testing.T) {
 func TestRunningRequestsMetrics(t *testing.T) {
 	Reset()
 	type request struct {
-		modelName string
-		complete  bool
+		modelName   string
+		targetModel string
+		fairnessID  string
+		priority    string
+		complete    bool
 	}
 
 	scenarios := []struct {
@@ -546,20 +554,32 @@ func TestRunningRequestsMetrics(t *testing.T) {
 			name: "basic test",
 			requests: []request{
 				{
-					modelName: "m1",
-					complete:  false,
+					modelName:   "m1",
+					targetModel: "t1",
+					fairnessID:  "tenant-x",
+					priority:    "10",
+					complete:    false,
 				},
 				{
-					modelName: "m1",
-					complete:  false,
+					modelName:   "m1",
+					targetModel: "t1",
+					fairnessID:  "tenant-x",
+					priority:    "10",
+					complete:    false,
 				},
 				{
-					modelName: "m1",
-					complete:  true,
+					modelName:   "m1",
+					targetModel: "t1",
+					fairnessID:  "tenant-x",
+					priority:    "10",
+					complete:    true,
 				},
 				{
-					modelName: "m2",
-					complete:  false,
+					modelName:   "m2",
+					targetModel: "t2",
+					fairnessID:  "tenant-y",
+					priority:    "20",
+					complete:    false,
 				},
 			},
 		},
@@ -569,9 +589,9 @@ func TestRunningRequestsMetrics(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.requests {
 				if req.complete {
-					DecRunningRequests(req.modelName)
+					DecRunningRequests(req.modelName, req.targetModel, req.fairnessID, req.priority)
 				} else {
-					IncRunningRequests(req.modelName)
+					IncRunningRequests(req.modelName, req.targetModel, req.fairnessID, req.priority)
 				}
 			}
 
@@ -591,7 +611,7 @@ func TestRunningRequestsMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantRunningRequestsNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsNew, "llm_d_router_epp_running_requests"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsNew, "llm_d_router_epp_request_running"); err != nil {
 				t.Error(err)
 			}
 		})

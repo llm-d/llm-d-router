@@ -148,13 +148,16 @@ A complete configuration might look like this:
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: precise-prefix-cache-scorer
+- type: precise-prefix-cache-producer
   parameters:
     indexerConfig:
       tokenProcessorConfig:
         blockSize: 5
       kvBlockIndexConfig:
         maxPrefixBlocksToMatch: 256
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
 - type: decode-filter
 - type: max-score-picker
 - type: single-profile-handler
@@ -163,7 +166,7 @@ schedulingProfiles:
   plugins:
   - pluginRef: decode-filter
   - pluginRef: max-score-picker
-  - pluginRef: precise-prefix-cache-scorer
+  - pluginRef: prefix-cache-scorer
     weight: 50
 ```
 
@@ -171,6 +174,35 @@ If the configuration is in a file, the EPP command line argument `--configFile` 
  to specify the full path of the file in question. If the configuration is passed as in-line
  text the EPP command line argument `--configText` should be used.
 
+### Default plugins
+
+The EPP injects these plugins when they are absent, so a configuration does not need to list them. Some
+example configs list them anyway for clarity; that has the same effect as omitting them. To override
+a default, configure it explicitly.
+
+Scheduling:
+- When `schedulingProfiles` is omitted, a single `default` profile is created and populated with the
+  listed plugins that are filters, scorers, or pickers.
+- When there is exactly one profile (including the auto-created `default`) and no handler is configured, `single-profile-handler` is added.
+- `max-score-picker` is added when no picker is configured, and appended to any profile that lacks one.
+- A scorer's `weight` defaults to `1.0` when omitted.
+
+RequestHandler:
+- When no parsers are configured, `openai-parser`, `anthropic-parser`, and `vllmhttp-parser` are used.
+
+FlowControl:
+- `fcfs-ordering-policy`, `global-strict-fairness-policy`, and `static-usage-limit-policy` are configured when absent.
+- `utilization-detector` is configured as the saturation detector when none is set.
+
+DataLayer:
+- `metrics-data-source` and `core-metrics-extractor` are injected and wired together. Skipped when
+  `dataLayer.injectDefaults` is `false`, or when the config's own `dataLayer.sources` already lists a
+  `metrics-data-source` entry.
+
+DataProducer:
+- When a plugin needs data from a producer but none is configured, the default producer for that data
+  is created automatically. Defaults: `token-producer`, `approx-prefix-cache-producer`,
+  `mm-embeddings-cache-producer`, `inflight-load-producer`, `predicted-latency-producer`, `session-id-producer`.
 
 ### Available plugins
 

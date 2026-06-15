@@ -211,6 +211,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 			continue
 		}
 		matchedItems := p.matchedItemsForPod(metadata.NamespacedName.String(), requestItems)
+		p.recordHitRatio(len(matchedItems), len(requestItems))
 		endpoint.Put(p.dk.String(), attrmm.NewEncoderCacheMatchInfo(
 			matchedItems,
 			requestItems,
@@ -269,6 +270,17 @@ func (p *Producer) recordItemLookups(items []attrmm.MatchItem) {
 			}
 		}
 	}
+}
+
+// recordHitRatio observes the fraction of a request's multimodal items that
+// matched a single endpoint's LRU. A zero total is not a meaningful ratio and
+// is not observed.
+func (p *Producer) recordHitRatio(matchedItems, totalItems int) {
+	if totalItems == 0 {
+		return
+	}
+	ratio := float64(matchedItems) / float64(totalItems)
+	encoderCacheHitRatio.WithLabelValues(p.typedName.Type, p.typedName.Name).Observe(ratio)
 }
 
 func (p *Producer) matchedItemsForPod(pod string, requestItems []attrmm.MatchItem) []attrmm.MatchItem {

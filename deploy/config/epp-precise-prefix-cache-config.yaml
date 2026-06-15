@@ -1,4 +1,5 @@
-# Sample EPP configuration with the precise-prefix-cache scorer.
+# Sample EPP config: split precise-prefix-cache pipeline
+#   token-producer -> precise-prefix-cache-producer -> prefix-cache-scorer
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
@@ -12,13 +13,16 @@ plugins:
   - type: core-metrics-extractor
   - type: single-profile-handler
   - type: decode-filter
-  - type: precise-prefix-cache-scorer
+  - type: precise-prefix-cache-producer
     parameters:
       tokenProcessorConfig:
         blockSize: 64
       indexerConfig:
         kvBlockIndexConfig:
-          enableMetrics: true         # enable kv-block index metrics (prometheus)
+          enableMetrics: true       # enable kv-block index metrics (prometheus)
+  - type: prefix-cache-scorer
+    parameters:
+      prefixMatchInfoProducerName: precise-prefix-cache-producer
   - type: kv-cache-utilization-scorer
   - type: queue-scorer
   - type: max-score-picker
@@ -29,12 +33,12 @@ dataLayer:
         - pluginRef: core-metrics-extractor
     - pluginRef: endpoint-notification-source
       extractors:
-        - pluginRef: precise-prefix-cache-scorer
+        - pluginRef: precise-prefix-cache-producer
 schedulingProfiles:
   - name: default
     plugins:
       - pluginRef: decode-filter
-      - pluginRef: precise-prefix-cache-scorer
+      - pluginRef: prefix-cache-scorer
         weight: 2.0
       - pluginRef: kv-cache-utilization-scorer
         weight: 1.0

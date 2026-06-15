@@ -716,3 +716,19 @@ func (e *nilMetadataEndpoint) Get(string) (datalayer.Cloneable, bool)       { re
 func (e *nilMetadataEndpoint) Put(string, datalayer.Cloneable)              {}
 func (e *nilMetadataEndpoint) Keys() []string                               { return nil }
 func (e *nilMetadataEndpoint) Clone() datalayer.AttributeMap                { return e }
+
+func TestDetector_NilEndpointInList(t *testing.T) {
+	t.Parallel()
+	cfg := config{mode: modeRequests, maxConcurrency: 10}
+	d := newDetector("nil-test", cfg, logr.Discard())
+
+	require.NotPanics(t, func() {
+		sat := d.Saturation(t.Context(), []datalayer.Endpoint{nil})
+		require.InDelta(t, 1.0, sat, 1e-9, "nil endpoint skipped, 0 capacity = fail closed")
+	})
+
+	require.NotPanics(t, func() {
+		filtered := d.Filter(t.Context(), nil, []fwksched.Endpoint{nil})
+		require.Empty(t, filtered, "nil endpoint should be skipped by filter")
+	})
+}

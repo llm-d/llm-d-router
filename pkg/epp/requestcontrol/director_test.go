@@ -18,6 +18,7 @@ package requestcontrol
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,6 +55,8 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
+	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
@@ -1321,6 +1324,69 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 	}
 	if diff := cmp.Diff("namespace1/test-pod-name", pr1.lastTargetPodOnResponse); diff != "" {
 		t.Errorf("Scheduler.OnResponse TargetPodName mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestDirector_HandleResponseHeader_SessionAffinity validates that the
+// session-affinity scorer and filter, registered as response-received plugins,
+// set the session token header when the director runs the response-header hook.
+func TestDirector_HandleResponseHeader_SessionAffinity(t *testing.T) {
+	targetPod := &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}}
+	wantToken := base64.StdEncoding.EncodeToString([]byte(targetPod.NamespacedName.String()))
+
+	tests := []struct {
+		name       string
+		plugin     fwkrc.ResponseHeaderProcessor
+		wantHeader string
+	}{
+		{
+			name:       "scorer with default header",
+			plugin:     sessionaffinityscorer.NewSessionAffinity("test-scorer", ""),
+			wantHeader: "x-session-token",
+		},
+		{
+			name:       "scorer with custom header",
+			plugin:     sessionaffinityscorer.NewSessionAffinity("test-scorer", "x-custom-session"),
+			wantHeader: "x-custom-session",
+		},
+		{
+			name:       "filter with default header",
+			plugin:     sessionaffinityfilter.NewSessionAffinity("test-filter", ""),
+			wantHeader: "x-session-token",
+		},
+		{
+			name:       "filter with custom header",
+			plugin:     sessionaffinityfilter.NewSessionAffinity("test-filter", "x-custom-session"),
+			wantHeader: "x-custom-session",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := logutil.NewTestLoggerIntoContext(context.Background())
+			ds := datastore.NewDatastore(t.Context(), nil, 0)
+			endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
+			director := NewDirectorWithConfig(
+				ds,
+				&mockScheduler{},
+				&mockAdmissionController{},
+				endpointCandidates,
+				NewConfig().WithResponseReceivedPlugins(test.plugin),
+			)
+
+			reqCtx := &handlers.RequestContext{
+				Request: &handlers.Request{
+					Headers: map[string]string{reqcommon.RequestIDHeaderKey: "test-req-id"},
+				},
+				Response:  &handlers.Response{Headers: map[string]string{}},
+				TargetPod: targetPod,
+			}
+
+			director.HandleResponseHeader(ctx, reqCtx)
+
+			assert.Equal(t, wantToken, reqCtx.Response.Headers[test.wantHeader],
+				"session token should be set on the %q response header", test.wantHeader)
+		})
 	}
 }
 

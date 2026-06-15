@@ -1,5 +1,5 @@
 # Sample EPP configuration with the token-producer plugin (vLLM HTTP backend)
-# and the precise-prefix-cache-scorer. Sidecar:
+# and the precise-prefix-cache-producer + prefix-cache-scorer. Sidecar:
 #   command: ["vllm", "launch", "render"]
 #   args:    ["${MODEL_NAME}", "--port=8000"]
 apiVersion: llm-d.ai/v1alpha1
@@ -12,7 +12,7 @@ plugins:
       url: "http://localhost:8000"
       # timeout: "5s"
       # mmTimeout: "30s"
-- type: precise-prefix-cache-scorer
+- type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
       blockSize: 16
@@ -22,6 +22,9 @@ plugins:
     indexerConfig:
       kvBlockIndexConfig:
         enableMetrics: false
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
 - type: decode-filter
 - type: max-score-picker
 - type: single-profile-handler
@@ -30,5 +33,5 @@ schedulingProfiles:
   plugins:
   - pluginRef: decode-filter
   - pluginRef: max-score-picker
-  - pluginRef: precise-prefix-cache-scorer
+  - pluginRef: prefix-cache-scorer
     weight: 10

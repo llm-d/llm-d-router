@@ -59,4 +59,4 @@ schedulingProfiles:
 
 - The scorer does not hash request media and does not maintain cache state.
 - It only converts producer-generated match data into endpoint scores.
-- KV-prefix cache affinity remains owned by `precise-prefix-cache-scorer`.
+- KV-prefix cache affinity remains owned by `precise-prefix-cache-producer`.

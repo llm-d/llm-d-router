@@ -1,39 +1,67 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sessionaffinity
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"fmt"
 
-	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
 const (
 	// SessionAffinityType is the type of the SessionAffinity scorer.
 	SessionAffinityType = "session-affinity-scorer"
-
-	sessionTokenHeader = "x-session-token" // name of the session header in request
 )
+
+// parameters configures the SessionAffinity scorer.
+type parameters struct {
+	// HeaderName overrides the default x-session-token header used to read and
+	// write the session token. When empty the default is used.
+	HeaderName string `json:"headerName"`
+}
 
 // compile-time type assertion
 var _ scheduling.Scorer = &SessionAffinity{}
 var _ requestcontrol.ResponseHeaderProcessor = &SessionAffinity{}
 
 // Factory defines the factory function for SessionAffinity scorer.
-func Factory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
-	return NewSessionAffinity().WithName(name), nil
+func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
+	params := parameters{}
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&params); err != nil {
+			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", SessionAffinityType, err)
+		}
+	}
+
+	return NewSessionAffinity(name, params.HeaderName), nil
 }
 
-// NewSessionAffinity returns a scorer
-func NewSessionAffinity() *SessionAffinity {
+// NewSessionAffinity returns a scorer. When sessionHeader is empty the default
+// x-session-token header is used.
+func NewSessionAffinity(name, sessionHeader string) *SessionAffinity {
 	return &SessionAffinity{
-		typedName: plugin.TypedName{Type: SessionAffinityType},
+		typedName:     plugin.TypedName{Type: SessionAffinityType, Name: name},
+		sessionHeader: sessionutil.NormalizeHeader(sessionHeader),
 	}
 }
 
@@ -43,17 +71,13 @@ func NewSessionAffinity() *SessionAffinity {
 // zero score to the rest of the targets
 type SessionAffinity struct {
 	typedName plugin.TypedName
+	// sessionHeader is the request/response header carrying the session token.
+	sessionHeader string
 }
 
 // TypedName returns the typed name of the plugin.
 func (s *SessionAffinity) TypedName() plugin.TypedName {
 	return s.typedName
-}
-
-// WithName sets the name of the plugin.
-func (s *SessionAffinity) WithName(name string) *SessionAffinity {
-	s.typedName.Name = name
-	return s
 }
 
 // Category returns the preference the scorer applies when scoring candidate endpoints.
@@ -64,17 +88,8 @@ func (s *SessionAffinity) Category() scheduling.ScorerCategory {
 // Score assign a high score to the pod used in previous requests and zero to others
 func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
-	sessionToken := request.Headers[sessionTokenHeader]
-	podName := ""
+	podName := sessionutil.DecodePodName(ctx, request.Headers[s.sessionHeader])
 
-	if sessionToken != "" {
-		decodedBytes, err := base64.StdEncoding.DecodeString(sessionToken)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "Error decoding session header")
-		} else {
-			podName = string(decodedBytes)
-		}
-	}
 	for _, endpoint := range endpoints {
 		scoredEndpoints[endpoint] = 0.0 // initial value
 		if endpoint.GetMetadata().NamespacedName.String() == podName {
@@ -86,22 +101,6 @@ func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.Inferen
 }
 
 // ResponseHeader sets the session header on the response sent to the client.
-// TODO: this should be using a cookie and ensure not overriding any other
-// cookie values if present.
-// Tracked in https://github.com/llm-d/llm-d-router/issues/28
 func (s *SessionAffinity) ResponseHeader(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	if response == nil || targetPod == nil {
-		reqID := "undefined"
-		if response != nil {
-			reqID = response.RequestID
-		}
-		log.FromContext(ctx).V(logutil.DEBUG).Info("Session affinity scorer - skip response header because response or targetPod is nil", "req id", reqID)
-		return
-	}
-
-	if response.Headers == nil { // TODO should always be populated?
-		response.Headers = make(map[string]string)
-	}
-
-	response.Headers[sessionTokenHeader] = base64.StdEncoding.EncodeToString([]byte(targetPod.NamespacedName.String()))
+	sessionutil.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, targetPod)
 }

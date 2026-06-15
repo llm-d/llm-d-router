@@ -78,6 +78,10 @@ func (f *fakeKVBlockIndex) GetRequestKey(_ context.Context, _ kvblock.BlockHash)
 	return kvblock.EmptyBlockHash, nil
 }
 
+func (f *fakeKVBlockIndex) Clear(_ context.Context, _ string) error {
+	return nil
+}
+
 type fakeKVBlockScorer struct {
 	score func(ctx context.Context, keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry) (map[string]float64, error)
 }
