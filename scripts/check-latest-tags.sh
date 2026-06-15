@@ -14,9 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Check that YAML files do not use the ':latest' image tag.
-# Container images should be pinned to a specific version so that builds
-# and tests are reproducible.
+# Check that external container images in YAML files do not use the ':latest'
+# tag. Images for components outside the llm-d project are pinned to a specific
+# version so that builds and tests are reproducible and not broken by upstream
+# API or behavior changes. Images owned by the llm-d project are allowed to
+# track ':latest' on main so cross-component regressions surface early.
 #
 # Usage:
 #   ./scripts/check-latest-tags.sh [--warn] [DIR ...]
@@ -31,6 +33,9 @@ set -o nounset
 set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Images under these llm-d-owned registries may use ':latest'.
+OWNED_IMAGE_RE='image:[[:space:]]*"?(ghcr\.io|quay\.io)/llm-d/'
 
 WARN_ONLY=false
 
@@ -70,6 +75,7 @@ for dir in "${SCAN_DIRS[@]}"; do
     | grep -v ':latest-' \
     | grep -v 'description:' \
     | grep -v '<your-registry>' \
+    | grep -vE "$OWNED_IMAGE_RE" \
     | awk -F: '{content = substr($0, index($0,$3)); if (content !~ /^[[:space:]]*#/) print}' \
     || true)"
 
@@ -79,16 +85,16 @@ for dir in "${SCAN_DIRS[@]}"; do
 done
 
 if [[ -z "$violations" ]]; then
-  echo "No ':latest' image tags found in YAML files."
+  echo "No ':latest' image tags found for external images in YAML files."
   exit 0
 fi
 
 if [[ "$WARN_ONLY" == true ]]; then
-  echo "WARNING: The following YAML files use the ':latest' image tag."
+  echo "WARNING: The following YAML files use the ':latest' tag for an external image."
 else
-  echo "ERROR: The following YAML files use the ':latest' image tag."
+  echo "ERROR: The following YAML files use the ':latest' tag for an external image."
 fi
-echo "Pin images to a specific version for reproducible builds."
+echo "Pin external images to a specific version for reproducible builds."
 echo ""
 echo "$violations"
 
