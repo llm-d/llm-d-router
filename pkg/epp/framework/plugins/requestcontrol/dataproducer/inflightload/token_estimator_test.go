@@ -29,8 +29,8 @@ import (
 func tokenizedRequest(n int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{make([]uint32, n)},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, n)}},
 			},
 		},
 	}
@@ -72,7 +72,7 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 			name: "Empty tokenized prompt",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{},
+					TokenizedRequest: &fwkrh.TokenizedRequest{},
 				},
 			},
 			expected: 0,

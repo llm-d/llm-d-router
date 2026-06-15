@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package tokenizer provides a DataProducer plugin that tokenizes the request
-// prompt and publishes the result on InferenceRequestBody.TokenizedPrompt for
+// prompt and publishes the result on InferenceRequestBody.TokenizedRequest for
 // downstream consumers (scorers, filters, other data producers).
 package tokenizer
 
@@ -208,7 +208,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 }
 
 // Plugin tokenizes the prompt in the incoming request and writes the result to
-// InferenceRequestBody.TokenizedPrompt for downstream DataProducer / scoring plugins.
+// InferenceRequestBody.TokenizedRequest for downstream DataProducer / scoring plugins.
 type Plugin struct {
 	typedName plugin.TypedName
 	backend   tokenInputProducer
@@ -228,7 +228,7 @@ func (p *Plugin) TypedName() plugin.TypedName {
 
 // Produces returns the data keys this plugin produces.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedPrompt{}}
+	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedRequest{}}
 }
 
 // ProduceTimeout surfaces the backend's render timeout when it manages one, so
@@ -241,18 +241,18 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 	return 0
 }
 
-// Produce derives the request's TokenizedPrompt via the configured backend and
+// Produce derives the request's TokenizedRequest via the configured backend and
 // stores it on the body. Skips when one is already present; errors propagate to
 // the Director, which logs and continues.
 func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
 	if request.Body == nil {
 		return errors.New("request body is nil")
 	}
-	if request.Body.TokenizedPrompt != nil {
+	if request.Body.TokenizedRequest != nil {
 		// A parser (e.g. vLLM gRPC) may pre-populate tokens without a salt;
 		// ensure cache-salt isolation still applies on the skip path.
-		if request.Body.TokenizedPrompt.CacheSalt == "" {
-			request.Body.TokenizedPrompt.CacheSalt = CacheSaltFromBody(request.Body)
+		if request.Body.TokenizedRequest.CacheSalt == "" {
+			request.Body.TokenizedRequest.CacheSalt = CacheSaltFromBody(request.Body)
 		}
 		return nil
 	}
@@ -265,7 +265,7 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		return nil
 	}
 	tp.CacheSalt = CacheSaltFromBody(request.Body)
-	request.Body.TokenizedPrompt = tp
+	request.Body.TokenizedRequest = tp
 	return nil
 }
 
@@ -302,10 +302,9 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 }
 
 // convertMMFeaturesToUpstream flattens the kv-cache map-shaped multimodal
-// metadata into a single-prompt per-prompt slice, sorted by placeholder
-// offset so consumers see items in prompt order. Returns nil when no
-// content is present.
-func convertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) [][]fwkrh.MultiModalFeature {
+// metadata into a flat list sorted by placeholder offset so consumers see
+// items in prompt order. Returns nil when no content is present.
+func convertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) []fwkrh.MultiModalFeature {
 	if src == nil || len(src.MMHashes) == 0 {
 		return nil
 	}
@@ -333,7 +332,7 @@ func convertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) [][]fwkrh
 		return nil
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Offset < items[j].Offset })
-	return [][]fwkrh.MultiModalFeature{items}
+	return items
 }
 
 // ConvertMMFeaturesFromUpstream regroups the flat list of multimodal features

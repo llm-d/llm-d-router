@@ -95,40 +95,45 @@ type InferenceRequestBody struct {
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
 	Payload RequestPayload `json:"-"`
-	// TokenizedPrompt contains parser-derived tokenization results when available.
+	// TokenizedRequest contains parser-derived tokenization results when available.
 	// It is nil when the request was not already tokenized.
-	TokenizedPrompt *TokenizedPrompt `json:"-"`
+	TokenizedRequest *TokenizedRequest `json:"-"`
 
 	// Stream indicates whether the request specifies a streaming response (e.g., via a stream field).
 	// This typically implies the model server's response will be streamed.
 	Stream bool `json:"-"`
 }
 
-// TokenizedPrompt contains the result of tokenizing the request prompt.
+// TokenizedRequest contains the result of tokenizing the request prompt.
 // It is consumed by scheduling and request-control plugins that benefit from
 // actual token data such as prefix-cache awareness.
-type TokenizedPrompt struct {
-	// PerPromptTokens holds the token IDs for each prompt in the request.
-	// Single-prompt requests (chat, generate, single-string completions) use a
-	// length-1 outer slice. Multi-string completions use one inner slice per
-	// prompt string.
-	PerPromptTokens [][]uint32
-	// MultiModalFeatures holds multimodal items per prompt, indexed in
-	// lockstep with PerPromptTokens. Single-prompt requests use a length-1
-	// outer slice. Nil if the prompt contains no multimodal content.
-	MultiModalFeatures [][]MultiModalFeature
+type TokenizedRequest struct {
+	// Prompts holds the per-prompt token data. Single-prompt requests (chat,
+	// generate, single-string completions) use a length-1 slice. Multi-string
+	// completions use one entry per prompt string.
+	Prompts []PromptTokens
 	// CacheSalt isolates prefix caches across requests. Populated by the token-producer.
 	CacheSalt string
 }
 
+// PromptTokens bundles the token IDs and multimodal features for a single
+// prompt in the request.
+type PromptTokens struct {
+	// TokenIDs holds the token IDs for this prompt.
+	TokenIDs []uint32
+	// MultiModalFeatures holds multimodal items for this prompt, ordered by
+	// token position. Nil if the prompt contains no multimodal content.
+	MultiModalFeatures []MultiModalFeature
+}
+
 // TokenCount returns the total number of tokens across all prompts.
-func (tp *TokenizedPrompt) TokenCount() int {
+func (tp *TokenizedRequest) TokenCount() int {
 	if tp == nil {
 		return 0
 	}
 	n := 0
-	for _, pp := range tp.PerPromptTokens {
-		n += len(pp)
+	for _, p := range tp.Prompts {
+		n += len(p.TokenIDs)
 	}
 	return n
 }
@@ -142,7 +147,7 @@ type MultiModalFeature struct {
 	// Hash is the content hash of the item, used for KV-cache reuse across requests.
 	Hash string
 	// Offset is the index of the first placeholder token for this item
-	// in the corresponding PerPromptTokens entry.
+	// in the owning PromptTokens.TokenIDs slice.
 	Offset int
 	// Length is the number of placeholder tokens this item occupies.
 	Length int

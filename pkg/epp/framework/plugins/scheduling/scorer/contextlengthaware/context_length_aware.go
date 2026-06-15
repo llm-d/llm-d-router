@@ -80,7 +80,7 @@ func NewContextLengthAware(name string, params *contextLengthAwareParameters) *C
 // If filtering is enabled, endpoints that don't support the request's context length are filtered out.
 // Additionally, it scores endpoints based on how well their context length ranges match the request.
 //
-// The context length is the token count from InferenceRequestBody.TokenizedPrompt as
+// The context length is the token count from InferenceRequestBody.TokenizedRequest as
 // populated by the tokenizer DataProducer plugin. When tokens are not available it is
 // treated as 0 (unknown).
 type ContextLengthAware struct {
@@ -103,12 +103,12 @@ func (p *ContextLengthAware) WithName(name string) *ContextLengthAware {
 	return p
 }
 
-// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
 // the token-producer before this plugin runs and auto-creates one when none is
 // configured; the context length is the token count it provides.
 func (p *ContextLengthAware) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
 	}
 }
 
@@ -200,13 +200,13 @@ func (p *ContextLengthAware) Category() scheduling.ScorerCategory {
 }
 
 // getContextLength returns the context length (token count) for the request, read solely
-// from InferenceRequestBody.TokenizedPrompt as populated by the tokenizer DataProducer
+// from InferenceRequestBody.TokenizedRequest as populated by the tokenizer DataProducer
 // plugin. When tokens are unavailable it returns 0 (unknown).
 func getContextLength(request *scheduling.InferenceRequest) int {
-	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
 		return 0
 	}
-	return request.Body.TokenizedPrompt.TokenCount()
+	return request.Body.TokenizedRequest.TokenCount()
 }
 
 // parseContextRange parses a label value into a single context range.

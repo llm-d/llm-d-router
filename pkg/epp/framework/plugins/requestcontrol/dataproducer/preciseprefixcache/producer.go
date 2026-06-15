@@ -208,15 +208,15 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedPrompt dependency from token-producer so
+// Consumes declares the TokenizedRequest dependency from token-producer so
 // the data-layer DAG orders tokenization before this producer runs.
 func (p *Producer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
 	}
 }
 
-// Produce hashes the request's TokenizedPrompt into KV-block keys, looks
+// Produce hashes the request's TokenizedRequest into KV-block keys, looks
 // them up in the per-endpoint KV-block index, and writes PrefixCacheMatchInfo
 // to each candidate endpoint. No-op when the request carries no tokens.
 // With speculativeIndexing enabled, the computed block keys are stashed

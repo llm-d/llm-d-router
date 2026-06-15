@@ -243,7 +243,7 @@ func (*Handler) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedPrompt{},
+			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedRequest{},
 		},
 	}
 }

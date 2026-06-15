@@ -110,8 +110,8 @@ func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
 
 func TestNewPredictedLatencyContext_GenerateUsesTokenIDCount(t *testing.T) {
 	request := createTestInferenceRequestWithBody("test-generate", 1.0, 0.05, &fwkrh.InferenceRequestBody{
-		Generate:        &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5}},
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 5)}},
+		Generate:         &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5}},
+		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 5)}}},
 	})
 	ctx := newPredictedLatencyContext(request)
 

@@ -56,7 +56,7 @@ func TestInFlightLoadProducer_Consumes(t *testing.T) {
 
 	deps := newTestProducer(t).Consumes()
 
-	// TokenizedPrompt is required so the data-layer DAG auto-creates a
+	// TokenizedRequest is required so the data-layer DAG auto-creates a
 	// token-producer and orders it ahead of this producer; without it the input
 	// token estimate silently reads zero.
 	require.Contains(t, deps.Required, tokenproducer.TokenizedPromptDataKey)
@@ -395,8 +395,8 @@ func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequ
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{make([]uint32, inputTokens)},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}},
 			},
 		},
 	}

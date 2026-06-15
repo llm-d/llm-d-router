@@ -138,7 +138,7 @@ func (h *PdProfileHandler) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			h.dk:                                 attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{},
+			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
 		},
 	}
 }

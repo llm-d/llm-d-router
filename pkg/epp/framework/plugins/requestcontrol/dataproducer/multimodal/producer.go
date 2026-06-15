@@ -177,12 +177,12 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrmm.EncoderCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
 // the token-producer before this producer runs and auto-creates one when none
 // is configured; multimodal features come from the tokenizer output.
 func (p *Producer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
 	}
 }
 
@@ -224,13 +224,13 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 // ExtractMMItems returns deterministic, unique multimodal encoder-cache items
 // derived from the tokenized prompt's multimodal features.
 func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
-	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
 		return nil
 	}
 
 	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, perPrompt := range request.Body.TokenizedPrompt.MultiModalFeatures {
-		for _, feature := range perPrompt {
+	for _, p := range request.Body.TokenizedRequest.Prompts {
+		for _, feature := range p.MultiModalFeatures {
 			if feature.Hash == "" {
 				continue
 			}
