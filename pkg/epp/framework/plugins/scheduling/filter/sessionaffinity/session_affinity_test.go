@@ -211,6 +211,54 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 			},
 			wantHeaders: map[string]string{"x-session-token-prefill": base64.StdEncoding.EncodeToString([]byte("default/prefill-pod"))},
 		},
+		{
+			name:            "profile set but absent from results (decode-only) writes no header",
+			sessionHeader:   "x-session-token-prefill",
+			profileName:     "prefill",
+			initialResponse: &requestcontrol.Response{RequestID: "req-decode-only", Headers: make(map[string]string)},
+			targetPod:       targetEndpoint,
+			request: &scheduling.InferenceRequest{
+				RequestID: "req-decode-only",
+				SchedulingResult: &scheduling.SchedulingResult{
+					ProfileResults: map[string]*scheduling.ProfileRunResult{},
+				},
+			},
+			wantHeaders: map[string]string{},
+		},
+		{
+			name:            "profile set but TargetEndpoints empty writes no header",
+			sessionHeader:   "x-session-token-prefill",
+			profileName:     "prefill",
+			initialResponse: &requestcontrol.Response{RequestID: "req-empty-ep", Headers: make(map[string]string)},
+			targetPod:       targetEndpoint,
+			request: &scheduling.InferenceRequest{
+				RequestID: "req-empty-ep",
+				SchedulingResult: &scheduling.SchedulingResult{
+					ProfileResults: map[string]*scheduling.ProfileRunResult{
+						"prefill": {TargetEndpoints: []scheduling.Endpoint{}},
+					},
+				},
+			},
+			wantHeaders: map[string]string{},
+		},
+		{
+			name:            "profile set but nil SchedulingResult writes no header",
+			sessionHeader:   "x-session-token-prefill",
+			profileName:     "prefill",
+			initialResponse: &requestcontrol.Response{RequestID: "req-nil-sr", Headers: make(map[string]string)},
+			targetPod:       targetEndpoint,
+			request:         &scheduling.InferenceRequest{RequestID: "req-nil-sr"},
+			wantHeaders:     map[string]string{},
+		},
+		{
+			name:            "profile set but nil request writes no header",
+			sessionHeader:   "x-session-token-prefill",
+			profileName:     "prefill",
+			initialResponse: &requestcontrol.Response{RequestID: "req-nil-req", Headers: make(map[string]string)},
+			targetPod:       targetEndpoint,
+			request:         nil,
+			wantHeaders:     map[string]string{},
+		},
 	}
 
 	ctx := utils.NewTestContext(t)

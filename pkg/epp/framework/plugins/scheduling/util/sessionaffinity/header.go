@@ -84,15 +84,19 @@ func WriteResponseHeader(ctx context.Context, pluginType, sessionHeader string, 
 }
 
 // ResolvePodToWrite looks up the target pod from the scheduling results if profileName is set.
-// It returns targetPod if profileName is empty or if the lookup fails.
+// When profileName is empty, targetPod (the primary/decode pod) is returned.
+// When profileName is set, the function returns the profile's endpoint or nil
+// if the profile was not scheduled (e.g. decode-only requests skip prefill).
 func ResolvePodToWrite(request *scheduling.InferenceRequest, profileName string, targetPod *datalayer.EndpointMetadata) *datalayer.EndpointMetadata {
-	podToWrite := targetPod
-	if profileName != "" && request != nil && request.SchedulingResult != nil {
+	if profileName == "" {
+		return targetPod
+	}
+	if request != nil && request.SchedulingResult != nil {
 		if result := request.SchedulingResult.ProfileResults[profileName]; result != nil && len(result.TargetEndpoints) > 0 && result.TargetEndpoints[0] != nil {
 			if md := result.TargetEndpoints[0].GetMetadata(); md != nil {
-				podToWrite = md
+				return md
 			}
 		}
 	}
-	return podToWrite
+	return nil
 }
