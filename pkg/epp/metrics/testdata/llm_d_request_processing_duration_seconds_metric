@@ -1,4 +1,4 @@
-# HELP llm_d_router_epp_request_processing_duration_seconds [ALPHA] EPP request processing latency distribution in seconds, from request receipt until an endpoint is selected, excluding flow-control admission wait.
+# HELP llm_d_router_epp_request_processing_duration_seconds [ALPHA] EPP request orchestration latency distribution in seconds, from request receipt through endpoint selection and request preparation, excluding admission-control time.
 # TYPE llm_d_router_epp_request_processing_duration_seconds histogram
 llm_d_router_epp_request_processing_duration_seconds_bucket{le="0.0001"} 0
 llm_d_router_epp_request_processing_duration_seconds_bucket{le="0.0002"} 1

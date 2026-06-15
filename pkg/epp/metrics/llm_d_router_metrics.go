@@ -284,7 +284,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_processing_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("EPP request processing latency distribution in seconds, from request receipt until an endpoint is selected, excluding flow-control admission wait.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("EPP request orchestration latency distribution in seconds, from request receipt through endpoint selection and request preparation, excluding admission-control time.", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
 			},

@@ -234,9 +234,11 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
 	start := time.Now()
 	var admissionWait time.Duration
-	// request_processing_duration captures EPP's own processing cost, so the
-	// flow-control admission wait (tracked separately by
-	// flow_control_request_queue_duration_seconds) is subtracted out.
+	// request_processing_duration measures EPP's own orchestration cost for a
+	// request (receipt through endpoint selection and request preparation). Time
+	// spent in admission control is subtracted: under flow control it is
+	// dominated by the queue wait, which is load- rather than EPP-driven and is
+	// tracked separately by flow_control_request_queue_duration_seconds.
 	defer func() { metrics.RecordRequestProcessingLatency(time.Since(start) - admissionWait) }()
 
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")

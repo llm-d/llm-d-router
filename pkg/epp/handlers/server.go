@@ -269,6 +269,17 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		},
 	}
 
+	// Record EPP response processing latency once when the stream ends. Using a
+	// defer (rather than emitting on end-of-stream) ensures aborted streams
+	// (client cancel or upstream error before EOS) are also recorded, so the
+	// metric is not biased toward fully streamed responses. The guard skips
+	// requests that never reached the response phase.
+	defer func() {
+		if reqCtx.responseProcessingDuration > 0 {
+			metrics.RecordResponseProcessingLatency(reqCtx.responseProcessingDuration)
+		}
+	}()
+
 	buf := s.bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer func() {
@@ -501,9 +512,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
-				if endOfStream {
-					metrics.RecordResponseProcessingLatency(reqCtx.responseProcessingDuration)
-				}
 			} else {
 				respBody = append(respBody, chunk...)
 				if endOfStream {
@@ -575,7 +583,6 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 		reqCtx.respBodyResp = generateResponseBodyResponses(body, setEos, reqCtx.Response.DynamicMetadata)
 	}
 	reqCtx.responseProcessingDuration += time.Since(start)
-	metrics.RecordResponseProcessingLatency(reqCtx.responseProcessingDuration)
 }
 
 // rewriteModelName replaces occurrences of the target (internal) model name with the
