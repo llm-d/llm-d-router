@@ -1,6 +1,7 @@
 package kv
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestSGLangKV_Params(t *testing.T) {
 	}
 
 	// Prefill: must have the required bootstrap fields; bootstrap_room is random so check type.
-	prefill := c.PreparePrefillKVParams(reqCtx)
+	prefill := c.PreparePrefillKVParams(context.Background(), reqCtx)
 	if prefill["do_remote_decode"] != true {
 		t.Errorf("prefill: do_remote_decode = %v, want true", prefill["do_remote_decode"])
 	}
@@ -48,7 +49,7 @@ func TestSGLangKV_Params(t *testing.T) {
 		"do_remote_decode":  false,
 		"do_remote_prefill": true,
 	}
-	if got := c.PrepareDecodeKVParams(reqCtx); !reflect.DeepEqual(got, wantDecode) {
+	if got := c.PrepareDecodeKVParams(context.Background(), reqCtx); !reflect.DeepEqual(got, wantDecode) {
 		t.Errorf("decode params:\n got=%v\nwant=%v", got, wantDecode)
 	}
 }
@@ -119,10 +120,10 @@ func TestConnectors_KVParams(t *testing.T) {
 
 			reqCtx := &pipeline.RequestContext{KVTransferParams: tc.decodeIncoming}
 
-			if got := c.PreparePrefillKVParams(reqCtx); !reflect.DeepEqual(got, tc.wantPrefill) {
+			if got := c.PreparePrefillKVParams(context.Background(), reqCtx); !reflect.DeepEqual(got, tc.wantPrefill) {
 				t.Errorf("prefill params:\n got=%v\nwant=%v", got, tc.wantPrefill)
 			}
-			if got := c.PrepareDecodeKVParams(reqCtx); !reflect.DeepEqual(got, tc.wantDecode) {
+			if got := c.PrepareDecodeKVParams(context.Background(), reqCtx); !reflect.DeepEqual(got, tc.wantDecode) {
 				t.Errorf("decode params:\n got=%v\nwant=%v", got, tc.wantDecode)
 			}
 		})

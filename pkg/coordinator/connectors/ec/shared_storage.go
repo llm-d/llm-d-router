@@ -1,6 +1,8 @@
 package ec
 
 import (
+	"context"
+
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -11,8 +13,9 @@ type sharedStorageEC struct{}
 
 func (sharedStorageEC) Name() string { return SharedStorage }
 
-func (sharedStorageEC) MergeEncodeResponse(_ *pipeline.RequestContext, _ map[string]any) {}
+func (sharedStorageEC) MergeEncodeResponse(_ context.Context, _ *pipeline.RequestContext, _ map[string]any) {
+}
 
-func (sharedStorageEC) PreparePrefillECParams(_ *pipeline.RequestContext) (map[string]any, error) {
+func (sharedStorageEC) PreparePrefillECParams(_ context.Context, _ *pipeline.RequestContext) (map[string]any, error) {
 	return make(map[string]any), nil
 }

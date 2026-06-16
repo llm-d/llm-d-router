@@ -131,7 +131,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	}
 
 	for _, r := range results {
-		s.ec.MergeEncodeResponse(reqCtx, r)
+		s.ec.MergeEncodeResponse(ctx, reqCtx, r)
 	}
 
 	logger.V(logutil.DEFAULT).Info("all sub-requests complete", "count", len(results))

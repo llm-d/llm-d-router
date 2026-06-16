@@ -200,9 +200,20 @@ func verifyCoordinatorSteps(expectedSteps []string, expectedImages int) {
 		ginkgo.By("Verifying encode returned ec_transfer_params for all images")
 		// The encoder logs "merged encode response","total":<N> as it
 		// accumulates ec_transfer_params from each sub-request, and
-		// "all sub-requests complete","count":<N> when done.
-		ecMarker := fmt.Sprintf(`"msg":"merged encode response","total":%d`, expectedImages)
-		gomega.Expect(logs).To(gomega.ContainSubstring(ecMarker),
+		// "all sub-requests complete","count":<N> when done. Match msg and the
+		// count field independently per line: structured-log fields such as
+		// x-request-id sit between them, so a contiguous substring would miss.
+		mergedMarker := `"msg":"merged encode response"`
+		totalField := fmt.Sprintf(`"total":%d`, expectedImages)
+		merged := false
+		for _, line := range strings.Split(logs, "\n") {
+			if strings.Contains(line, mergedMarker) &&
+				strings.Contains(line, totalField) {
+				merged = true
+				break
+			}
+		}
+		gomega.Expect(merged).To(gomega.BeTrue(),
 			"coordinator logs missing merged encode response with total=%d", expectedImages)
 
 		countMarker := `"msg":"all sub-requests complete"`

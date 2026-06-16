@@ -4,9 +4,8 @@
 package ec
 
 import (
+	"context"
 	"fmt"
-
-	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -15,7 +14,9 @@ import (
 // passed to Build. Defaults to ec-shared-storage (no-op on the wire).
 const DefaultECConnectorName = SharedStorage
 
-var logger = ctrl.Log.WithName("ec")
+// loggerName is the WithName scope applied to the context logger in connector
+// log lines.
+const loggerName = "ec"
 
 // Connector controls how encoder cache (vision encoder embeddings) is
 // transferred from encoder pods to the prefill consumer pod. Two flavors:
@@ -38,12 +39,12 @@ type Connector interface {
 	// reqCtx.ECTransferParams. Callers must not call MergeEncodeResponse
 	// concurrently; the encode step serializes calls after gathering parallel
 	// responses.
-	MergeEncodeResponse(reqCtx *pipeline.RequestContext, encResp map[string]any)
+	MergeEncodeResponse(ctx context.Context, reqCtx *pipeline.RequestContext, encResp map[string]any)
 	// PreparePrefillECParams returns the ec_transfer_params map for the
 	// prefill request body. A nil/empty return means no ec_transfer_params
 	// field should be emitted. It errors when encoder responses carry
 	// conflicting descriptors for the same mm_hash.
-	PreparePrefillECParams(reqCtx *pipeline.RequestContext) (map[string]any, error)
+	PreparePrefillECParams(ctx context.Context, reqCtx *pipeline.RequestContext) (map[string]any, error)
 }
 
 // Build returns the named EC connector. An empty name selects DefaultECConnectorName.
