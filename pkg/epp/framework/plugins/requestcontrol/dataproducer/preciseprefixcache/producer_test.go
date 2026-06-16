@@ -191,12 +191,14 @@ func TestProduce_UsesTokenizedPrompt(t *testing.T) {
 	assert.Equal(t, 1, info.MatchBlocks())
 	assert.Equal(t, 1, info.TotalBlocks())
 	assert.Equal(t, 16, info.BlockSizeTokens())
+	assert.Nil(t, info.MM(), "text-only request must leave MM untracked")
 
 	raw2, ok := testEndpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
 	require.True(t, ok)
 	info2 := raw2.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Equal(t, 0, info2.MatchBlocks())
 	assert.Equal(t, 1, info2.TotalBlocks())
+	assert.Nil(t, info2.MM(), "text-only request must leave MM untracked")
 }
 
 // No tokens → no-op (no prompt-string fallback).

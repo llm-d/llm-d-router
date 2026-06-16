@@ -300,12 +300,12 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		for _, lu := range lookups {
 			cachedBlocks += matchedBlockCount(lu.keys, lu.keyToPods, addr)
 		}
-		// mmBlockIndices is nil for multi-prompt; mmMatch=0 in that case.
-		mmMatch := countMMMatchedBlocks(mmBlockIndices, cachedBlocks)
-		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
-				WithCachedBlockCount(cachedBlocks).
-				WithMM(attrprefix.MMMatchInfo{MatchBlocks: mmMatch}))
+		info := attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
+			WithCachedBlockCount(cachedBlocks)
+		if len(mmBlockIndices) > 0 {
+			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, cachedBlocks)})
+		}
+		ep.Put(p.dk.String(), info)
 	}
 
 	if p.speculativeEnabled {

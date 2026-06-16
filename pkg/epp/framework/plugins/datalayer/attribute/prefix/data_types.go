@@ -65,7 +65,9 @@ func (p *PrefixCacheMatchInfo) WithCachedBlockCount(cachedBlockCount int) *Prefi
 	return p
 }
 
-// WithMM attaches MM tracking. Call even when MatchBlocks=0.
+// WithMM attaches MM tracking. Call only for requests that carry MM content
+// (MatchBlocks may be 0 on a miss); leave unset for text-only so MM() stays nil
+// and consumers can tell "no MM" from "MM, zero match".
 func (p *PrefixCacheMatchInfo) WithMM(mm MMMatchInfo) *PrefixCacheMatchInfo {
 	p.mm = &mm
 	return p
