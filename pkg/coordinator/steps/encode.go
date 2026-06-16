@@ -12,6 +12,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/coordinator/pkg/common/httplog"
 	"github.com/llm-d/coordinator/pkg/connectors/ec"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
@@ -95,7 +96,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 			headers[gateway.EPPPhaseHeader] = gateway.PhaseEncode
 
 			if v := logger.V(logutil.DEBUG); v.Enabled() {
-				v.Info("sub-request body", "index", i, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", redactedHeaders(headers))
+				v.Info("sub-request body", "index", i, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
 			}
 
 			resp, err := s.gwClient.Post(gCtx, path, bodyBytes, headers)
@@ -120,7 +121,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 				return err
 			}
 
-			results[i] = ecParamsFromResponse(logger, encResp.ECTransferParams, i, reqCtx.RequestID)
+			results[i] = ecParamsFromResponse(logger, encResp.ECTransferParams, i)
 			return nil
 		})
 	}
@@ -248,7 +249,7 @@ type encodeResponse struct {
 // is logged at debug and skipped (returns nil) rather than failing the
 // request. A missing value is already nil; empty maps pass through so the
 // connector's own no-metadata handling applies.
-func ecParamsFromResponse(logger logr.Logger, v any, idx int, requestID string) map[string]any {
+func ecParamsFromResponse(logger logr.Logger, v any, idx int) map[string]any {
 	switch m := v.(type) {
 	case nil:
 		return nil
@@ -256,7 +257,7 @@ func ecParamsFromResponse(logger logr.Logger, v any, idx int, requestID string) 
 		return m
 	default:
 		logger.V(logutil.DEBUG).Info("ec_transfer_params is not a JSON object; skipping",
-			"index", idx, "requestID", requestID, "type", fmt.Sprintf("%T", v))
+			"index", idx, "type", fmt.Sprintf("%T", v))
 		return nil
 	}
 }

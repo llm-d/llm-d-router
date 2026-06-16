@@ -12,6 +12,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/coordinator/pkg/common/httplog"
 	"github.com/llm-d/coordinator/pkg/connectors/ec"
 	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
@@ -97,7 +98,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
 	headers[gateway.EPPPhaseHeader] = gateway.PhasePrefill
 
-	logger.V(logutil.DEBUG).Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", redactedHeaders(headers))
+	logger.V(logutil.DEBUG).Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
 
 	resp, err := s.gwClient.Post(ctx, path, bodyBytes, headers)
 	if err != nil {
@@ -115,7 +116,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		return fmt.Errorf("prefill: decode response: %w", err)
 	}
 
-	reqCtx.KVTransferParams = kvParamsFromResponse(logger, prefillResp.KVTransferParams, reqCtx.RequestID)
+	reqCtx.KVTransferParams = kvParamsFromResponse(logger, prefillResp.KVTransferParams)
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil
@@ -213,7 +214,7 @@ type prefillResponse struct {
 // logged at debug and skipped (returns nil) rather than failing the request.
 // A missing or null value is already nil; an empty map passes through so the
 // connector's own no-metadata handling applies.
-func kvParamsFromResponse(logger logr.Logger, v any, requestID string) map[string]any {
+func kvParamsFromResponse(logger logr.Logger, v any) map[string]any {
 	switch m := v.(type) {
 	case nil:
 		return nil
@@ -221,7 +222,7 @@ func kvParamsFromResponse(logger logr.Logger, v any, requestID string) map[strin
 		return m
 	default:
 		logger.V(logutil.DEBUG).Info("kv_transfer_params is not a JSON object; skipping",
-			"requestID", requestID, "type", fmt.Sprintf("%T", v))
+			"type", fmt.Sprintf("%T", v))
 		return nil
 	}
 }

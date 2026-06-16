@@ -15,6 +15,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
+	"github.com/llm-d/coordinator/pkg/common/httplog"
 	"github.com/llm-d/coordinator/pkg/config"
 )
 
@@ -65,7 +66,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 
 	logger := log.FromContext(ctx).WithName("gateway")
 	if body != nil {
-		logger.V(logutil.TRACE).Info("request body", "method", method, "path", path, "headers", req.Header, "body", redactBody(body))
+		logger.V(logutil.TRACE).Info("request body", "method", method, "path", path, "headers", httplog.RedactedHeaders(req.Header), "body", redactBody(body))
 	}
 
 	resp, err := c.httpClient.Do(req)

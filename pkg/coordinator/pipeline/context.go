@@ -19,6 +19,8 @@ var hopByHopHeaders = map[string]bool{
 
 // ForwardedHeaders returns original request headers suitable for forwarding
 // to upstream services, excluding hop-by-hop headers and Content-Length/Host.
+// Keys are normalized to lowercase so they do not collide by case with headers
+// stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
 	out := make(map[string]string)
 	if rc.OriginalHeaders == nil {
@@ -30,7 +32,7 @@ func (rc *RequestContext) ForwardedHeaders() map[string]string {
 			continue
 		}
 		if len(vals) > 0 {
-			out[key] = vals[0]
+			out[lower] = vals[0]
 		}
 	}
 	return out

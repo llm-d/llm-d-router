@@ -65,7 +65,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		StartTime:        time.Now(),
 	}
 
-	logger := ctrl.Log.WithName("handler").WithValues("request_id", reqCtx.RequestID)
+	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	ctx := log.IntoContext(r.Context(), logger)
 
 	logger.V(logutil.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)

@@ -15,6 +15,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/coordinator/pkg/common/httplog"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -80,7 +81,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	proxyReq.Header.Set(gateway.EPPPhaseHeader, gateway.PhaseDecode)
 	proxyReq.Header.Set("Prefer", "if-available")
 
-	logger.V(logutil.DEBUG).Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", redactedHeaders(proxyReq.Header))
+	logger.V(logutil.DEBUG).Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(proxyReq.Header))
 
 	var cacheMiss bool
 	proxy := &httputil.ReverseProxy{

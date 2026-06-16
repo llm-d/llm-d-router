@@ -7,6 +7,7 @@ import (
 
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // nixlEC is the NIXL EC connector: each encoder response carries an
@@ -20,7 +21,7 @@ func (nixlEC) Name() string { return NIXL }
 func (nixlEC) MergeEncodeResponse(reqCtx *pipeline.RequestContext, encResp map[string]any) {
 	if len(encResp) == 0 {
 		logger.Info("warning: encoder returned no ec_transfer_params; no nixl descriptor will be forwarded for this image",
-			"requestID", reqCtx.RequestID)
+			reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 		return
 	}
 	reqCtx.ECTransferParams = append(reqCtx.ECTransferParams, encResp)
@@ -42,7 +43,7 @@ func (nixlEC) PreparePrefillECParams(reqCtx *pipeline.RequestContext) (map[strin
 				// A hash with no descriptor carries nothing to transfer; drop it
 				// so the prefill body never sends "<mm_hash>": null.
 				logger.V(logutil.DEBUG).Info("dropping ec_transfer_params entry with no descriptor",
-					"mmHash", k, "requestID", reqCtx.RequestID)
+					"mmHash", k, reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 				continue
 			}
 			desc := copyDescriptor(v)

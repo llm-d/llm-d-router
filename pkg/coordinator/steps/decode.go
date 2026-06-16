@@ -14,6 +14,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/coordinator/pkg/common/httplog"
 	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
@@ -80,7 +81,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	proxyReq.Header.Set(gateway.EPPPhaseHeader, gateway.PhaseDecode)
 
-	logger.V(logutil.DEBUG).Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", redactedHeaders(proxyReq.Header))
+	logger.V(logutil.DEBUG).Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(proxyReq.Header))
 
 	proxy := &httputil.ReverseProxy{
 		Director:      func(_ *http.Request) {},
