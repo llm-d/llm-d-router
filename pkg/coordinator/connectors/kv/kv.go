@@ -6,9 +6,8 @@
 package kv
 
 import (
+	"context"
 	"fmt"
-
-	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -17,7 +16,9 @@ import (
 // passed to Build. Defaults to kv-shared-storage (no-op on the wire).
 const DefaultKVConnectorName = SharedStorage
 
-var logger = ctrl.Log.WithName("kv")
+// loggerName is the WithName scope applied to the context logger in connector
+// log lines.
+const loggerName = "kv"
 
 // Connector controls the kv_transfer_params wire shape on the prefill and
 // decode requests. Implementations are stateless and safe to share across
@@ -26,11 +27,11 @@ type Connector interface {
 	Name() string
 	// PreparePrefillKVParams returns the kv_transfer_params map written into
 	// the prefill request body.
-	PreparePrefillKVParams(reqCtx *pipeline.RequestContext) map[string]any
+	PreparePrefillKVParams(ctx context.Context, reqCtx *pipeline.RequestContext) map[string]any
 	// PrepareDecodeKVParams returns the kv_transfer_params map written into
 	// the decode request body. The prefill response's kv_transfer_params is
 	// already populated into reqCtx.KVTransferParams by PrefillStep.
-	PrepareDecodeKVParams(reqCtx *pipeline.RequestContext) map[string]any
+	PrepareDecodeKVParams(ctx context.Context, reqCtx *pipeline.RequestContext) map[string]any
 }
 
 // Build returns the KV connector for name. An empty name selects DefaultKVConnectorName.

@@ -2,12 +2,14 @@ package ec
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // nixlEC is the NIXL EC connector: each encoder response carries an
@@ -18,10 +20,10 @@ type nixlEC struct{}
 
 func (nixlEC) Name() string { return NIXL }
 
-func (nixlEC) MergeEncodeResponse(reqCtx *pipeline.RequestContext, encResp map[string]any) {
+func (nixlEC) MergeEncodeResponse(ctx context.Context, reqCtx *pipeline.RequestContext, encResp map[string]any) {
+	logger := log.FromContext(ctx).WithName(loggerName)
 	if len(encResp) == 0 {
-		logger.Info("warning: encoder returned no ec_transfer_params; no nixl descriptor will be forwarded for this image",
-			reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
+		logger.Info("warning: encoder returned no ec_transfer_params; no nixl descriptor will be forwarded for this image")
 		return
 	}
 	reqCtx.ECTransferParams = append(reqCtx.ECTransferParams, encResp)
@@ -32,7 +34,8 @@ func (nixlEC) MergeEncodeResponse(reqCtx *pipeline.RequestContext, encResp map[s
 // map keyed by mm_hash for the prefill request body. The returned map and its
 // descriptors are independent copies of reqCtx.ECTransferParams, so callers may
 // mutate the result freely.
-func (nixlEC) PreparePrefillECParams(reqCtx *pipeline.RequestContext) (map[string]any, error) {
+func (nixlEC) PreparePrefillECParams(ctx context.Context, reqCtx *pipeline.RequestContext) (map[string]any, error) {
+	logger := log.FromContext(ctx).WithName(loggerName)
 	if len(reqCtx.ECTransferParams) == 0 {
 		return make(map[string]any), nil
 	}
@@ -43,7 +46,7 @@ func (nixlEC) PreparePrefillECParams(reqCtx *pipeline.RequestContext) (map[strin
 				// A hash with no descriptor carries nothing to transfer; drop it
 				// so the prefill body never sends "<mm_hash>": null.
 				logger.V(logutil.DEBUG).Info("dropping ec_transfer_params entry with no descriptor",
-					"mmHash", k, reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
+					"mmHash", k)
 				continue
 			}
 			desc := copyDescriptor(v)

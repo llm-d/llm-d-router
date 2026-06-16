@@ -81,7 +81,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	format := s.resolveFormat(reqCtx)
-	body, err := s.buildPrefillBody(reqCtx, features, format)
+	body, err := s.buildPrefillBody(ctx, reqCtx, features, format)
 	if err != nil {
 		return fmt.Errorf("prefill: %w", err)
 	}
@@ -133,12 +133,12 @@ func (s *PrefillStep) resolveFormat(reqCtx *pipeline.RequestContext) gateway.Req
 	return detected
 }
 
-func (s *PrefillStep) buildPrefillBody(reqCtx *pipeline.RequestContext, features map[string]any, format gateway.RequestFormat) (map[string]any, error) {
-	ecParams, err := s.ec.PreparePrefillECParams(reqCtx)
+func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, features map[string]any, format gateway.RequestFormat) (map[string]any, error) {
+	ecParams, err := s.ec.PreparePrefillECParams(ctx, reqCtx)
 	if err != nil {
 		return nil, err
 	}
-	kvParams := s.kv.PreparePrefillKVParams(reqCtx)
+	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
 
 	switch format {
 	case gateway.FormatChatCompletions:

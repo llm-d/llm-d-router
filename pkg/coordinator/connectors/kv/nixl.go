@@ -1,6 +1,10 @@
 package kv
 
 import (
+	"context"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
@@ -13,7 +17,7 @@ type nixlKV struct{}
 
 func (nixlKV) Name() string { return NIXL }
 
-func (nixlKV) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any {
+func (nixlKV) PreparePrefillKVParams(ctx context.Context, _ *pipeline.RequestContext) map[string]any {
 	params := map[string]any{
 		"do_remote_decode":  true,
 		"do_remote_prefill": false,
@@ -22,17 +26,17 @@ func (nixlKV) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any 
 		"remote_host":       nil,
 		"remote_port":       nil,
 	}
-	logger.V(logutil.TRACE).Info("preparing prefill kv params", "params", params)
+	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing prefill kv params", "params", params)
 	return params
 }
 
-func (nixlKV) PrepareDecodeKVParams(reqCtx *pipeline.RequestContext) map[string]any {
+func (nixlKV) PrepareDecodeKVParams(ctx context.Context, reqCtx *pipeline.RequestContext) map[string]any {
 	out := make(map[string]any, len(reqCtx.KVTransferParams)+2)
 	for k, v := range reqCtx.KVTransferParams {
 		out[k] = v
 	}
 	out["do_remote_decode"] = false
 	out["do_remote_prefill"] = true
-	logger.V(logutil.TRACE).Info("preparing decode kv params", "params", out)
+	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing decode kv params", "params", out)
 	return out
 }

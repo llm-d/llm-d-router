@@ -54,7 +54,7 @@ func (s *DecodeStep) Name() string { return DecodeStepName }
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
-	s.prepareDecodeBody(reqCtx)
+	s.prepareDecodeBody(ctx, reqCtx)
 
 	bodyBytes, err := json.Marshal(reqCtx.Body)
 	if err != nil {
@@ -96,8 +96,8 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	return nil
 }
 
-func (s *DecodeStep) prepareDecodeBody(reqCtx *pipeline.RequestContext) {
-	reqCtx.Body["kv_transfer_params"] = s.kv.PrepareDecodeKVParams(reqCtx)
+func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) {
+	reqCtx.Body["kv_transfer_params"] = s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 	s.injectUUIDs(reqCtx)
 
 	format := s.resolveFormat(reqCtx)
