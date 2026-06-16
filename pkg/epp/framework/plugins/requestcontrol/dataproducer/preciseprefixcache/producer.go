@@ -381,13 +381,13 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 				cachedBlocksByTier[tier] += count
 			}
 		}
-		// mmBlockIndices is nil for multi-prompt; mmMatch=0 in that case.
-		mmMatch := countMMMatchedBlocks(mmBlockIndices, cachedBlocks)
-		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
-				WithCachedBlockCount(cachedBlocks).
-				WithCachedBlocksByTier(cachedBlocksByTier).
-				WithMM(attrprefix.MMMatchInfo{MatchBlocks: mmMatch}))
+		info := attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
+			WithCachedBlockCount(cachedBlocks).
+			WithCachedBlocksByTier(cachedBlocksByTier)
+		if len(mmBlockIndices) > 0 {
+			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, cachedBlocks)})
+		}
+		ep.Put(p.dk.String(), info)
 	}
 
 	if p.speculativeEnabled {
