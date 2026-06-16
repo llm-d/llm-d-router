@@ -154,6 +154,7 @@ type imageTokenEstimatorConfig struct {
 
 // videoTokenEstimatorConfig defines the configuration for video modality.
 // Token count is estimated as clamp(int(Duration*FPS), 4, 768) * TokensPerFrame.
+// Duration and FPS are fallbacks used when real video metadata cannot be read from the request.
 type videoTokenEstimatorConfig struct {
 	Duration       float64                    `json:"duration"`
 	FPS            float64                    `json:"fps"`
