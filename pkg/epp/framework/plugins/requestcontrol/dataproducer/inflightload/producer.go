@@ -110,6 +110,7 @@ type InFlightLoadProducer struct {
 	dk                       fwkplugin.DataKey
 	prefixMatchInfoDK        fwkplugin.DataKey
 	uncachedRequestTokensDk  fwkplugin.DataKey
+	registeredEndpoints      sync.Map // key: string (NamespacedName), value: datalayer.Endpoint
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -283,9 +284,19 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 
 	switch event.Type {
 	case datalayer.EventDelete:
+		// This guard assumes the datalayer delivers the same Endpoint pointer for
+		// delete as was used for the preceding add. If the datalayer ever
+		// reconstructs endpoint objects on delete, this check would need to use a
+		// generation counter instead of pointer identity.
+		if registered, ok := p.registeredEndpoints.Load(id); ok && registered != event.Endpoint {
+			log.FromContext(ctx).V(logutil.DEFAULT).Info("Ignoring stale delete for replaced endpoint", "endpoint", id)
+			break
+		}
+		p.registeredEndpoints.Delete(id)
 		p.DeleteEndpoint(id)
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
 	case datalayer.EventAddOrUpdate:
+		p.registeredEndpoints.Store(id, event.Endpoint)
 		event.Endpoint.GetAttributes().Put(p.dk.String(), &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{

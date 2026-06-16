@@ -39,6 +39,18 @@ import (
 )
 
 const (
+	// MoRIIOFeatureEnabled controls whether MoRI-IO WRITE-mode and Wide-EP
+	// features are available. Set to false to keep the feature dormant until
+	// full validation and CI integration is complete in a future RC.
+	//
+	// When false, any attempt to use --moriio-write-mode or related flags will
+	// fail with a clear error message directing users to wait for the feature
+	// to be officially released.
+	//
+	// TODO(AMD-MoRI-IO): Set to true once CI tests and production validation
+	// are complete in a future release candidate.
+	MoRIIOFeatureEnabled = false
+
 	// Flags
 	port                      = "port"
 	vllmPort                  = "vllm-port"
@@ -201,6 +213,21 @@ func NewOptions() *Options {
 			PoolGroup:               routing.InferencePoolAPIGroup,
 			DecodeChunkSize:         0,
 			Tracing:                 false,
+			// MoRI-IO defaults: off, preserving existing NIXLv2 behaviour.
+			// Port defaults match vLLM's MoRI-IO connector defaults.
+			MoRIIOWriteMode:            false,
+			MoRIIODecodeNotifyPort:     61005,
+			MoRIIODecodeHandshakePort:  6301,
+			MoRIIODecodePodIP:          os.Getenv("POD_IP"),
+			MoRIIOParallelDispatch:     false,
+			MoRIIOPrefillHandshakePort: 6301,
+			MoRIIOPrefillNotifyPort:    61005,
+			MoRIIOTPSize:               1,
+			MoRIIODPSize:               1,
+			// Wide-EP multi-pod: empty disables fan-out (single-pod fallback).
+			MoRIIORemoteHosts: nil,
+			MoRIIODPSizeLocal: 0,
+			MoRIIODecodeHosts: nil,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
@@ -235,6 +262,46 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
+
+	// MoRI-IO WRITE-mode flags. Only meaningful with --kv-connector=nixlv2
+	// against vLLM engines running MoRI-IO in WRITE mode.
+	fs.BoolVar(&opts.MoRIIOWriteMode, "moriio-write-mode", opts.MoRIIOWriteMode,
+		"Enable MoRI-IO WRITE-mode passthrough in kv_transfer_params. Requires --kv-connector=nixlv2.")
+	fs.IntVar(&opts.MoRIIODecodeNotifyPort, "moriio-decode-notify-port", opts.MoRIIODecodeNotifyPort,
+		"Base MoRI-IO notify port on the decode pod.")
+	fs.StringVar(&opts.MoRIIODecodePodIP, "moriio-local-pod-ip", opts.MoRIIODecodePodIP,
+		"Decode pod's routable IP, used as the prefill leg's remote_host. "+
+			"Defaults to the POD_IP env var. Required with --moriio-write-mode.")
+	fs.IntVar(&opts.MoRIIODecodeHandshakePort, "moriio-decode-handshake-port", opts.MoRIIODecodeHandshakePort,
+		"Base MoRI-IO handshake port on the decode pod.")
+
+	// Concurrent-dispatch flags: synthesise decode's kv_transfer_params from
+	// config so prefill and decode dispatch can overlap.
+	fs.BoolVar(&opts.MoRIIOParallelDispatch, "moriio-parallel-dispatch", opts.MoRIIOParallelDispatch,
+		"Fire prefill and decode concurrently. Requires --moriio-write-mode.")
+	fs.IntVar(&opts.MoRIIOPrefillHandshakePort, "moriio-prefill-handshake-port", opts.MoRIIOPrefillHandshakePort,
+		"Prefill pod's base MoRI-IO handshake port, used to build the decode leg in parallel-dispatch mode.")
+	fs.IntVar(&opts.MoRIIOPrefillNotifyPort, "moriio-prefill-notify-port", opts.MoRIIOPrefillNotifyPort,
+		"Prefill pod's base MoRI-IO notify port.")
+	fs.IntVar(&opts.MoRIIOTPSize, "moriio-tp-size", opts.MoRIIOTPSize,
+		"Tensor-parallel size of the engines, echoed into kv_transfer_params[tp_size].")
+	fs.IntVar(&opts.MoRIIODPSize, "moriio-dp-size", opts.MoRIIODPSize,
+		"Data-parallel world size, emitted as kv_transfer_params[remote_dp_size] on both legs. "+
+			"Set to the engine DP size for Wide-EP (TP=1, DP>1); default 1 leaves the wire unchanged.")
+
+	// Wide-EP multi-pod fan-out. Optional: empty preserves single-pod behaviour.
+	// remote_hosts carries the opposite side's pod IPs (decode IPs on the prefill
+	// leg and vice versa); dp-size-local maps a global DP rank to a pod via
+	// pod_idx = dp_rank / dp_size_local.
+	fs.StringSliceVar(&opts.MoRIIORemoteHosts, "moriio-remote-hosts", opts.MoRIIORemoteHosts,
+		"Wide-EP: comma-separated remote (prefill-side) pod IPs for per-DP-rank fan-out. "+
+			"Pair with --moriio-dp-size-local.")
+	fs.IntVar(&opts.MoRIIODPSizeLocal, "moriio-dp-size-local", opts.MoRIIODPSizeLocal,
+		"Wide-EP: per-pod DP size used to map a global DP rank to a pod index. "+
+			"Must satisfy --moriio-dp-size = dp-size-local * len(hosts).")
+	fs.StringSliceVar(&opts.MoRIIODecodeHosts, "moriio-decode-hosts", opts.MoRIIODecodeHosts,
+		"Wide-EP: comma-separated decode-side pod IPs, emitted as the prefill leg's "+
+			"remote_hosts. Pair with --moriio-dp-size-local.")
 
 	fs.StringSliceVar(&opts.enableTLS, enableTLS, opts.enableTLS, "stages to enable TLS for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
 	fs.StringSliceVar(&opts.tlsInsecureSkipVerify, tlsInsecureSkipVerify, opts.tlsInsecureSkipVerify, "stages to skip TLS verification for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
@@ -329,6 +396,95 @@ func (opts *Options) Complete() error {
 		return fmt.Errorf("failed to parse target URL: %w", err)
 	}
 
+	// MoRI-IO feature gate: when MoRIIOFeatureEnabled is false, reject ANY
+	// --moriio-* flag at a non-default value. This keeps the feature fully
+	// dormant until CI and production validation is complete. Even flags like
+	// --moriio-dp-size > 1 can affect routing behavior (X-Data-Parallel-Rank
+	// header) without WRITE mode, so all MoRI-IO flags must be blocked.
+	if !MoRIIOFeatureEnabled && opts.hasMoRIIOFlagsSet() {
+		return errors.New(
+			"MoRI-IO WRITE-mode and Wide-EP features are not yet enabled in this release. " +
+				"The --moriio-* flags are reserved for a future release candidate. " +
+				"Please remove all --moriio-* flags, or wait for the " +
+				"official feature release. See pkg/sidecar/proxy/MORIIO_README.md for details")
+	}
+
+	// WRITE mode without a routable decode pod IP makes prefill handshake with
+	// itself and hang silently, so fail fast.
+	if opts.MoRIIOWriteMode && opts.MoRIIODecodePodIP == "" {
+		return errors.New(
+			"--moriio-write-mode requires --moriio-local-pod-ip (or the POD_IP " +
+				"env var) set to decode's routable pod IP")
+	}
+
+	// Concurrent dispatch needs the fields only WRITE mode synthesises.
+	if opts.MoRIIOParallelDispatch && !opts.MoRIIOWriteMode {
+		return errors.New("--moriio-parallel-dispatch requires --moriio-write-mode")
+	}
+
+	// Both legs share the same dp_size / dp_size_local contract; only the host
+	// list differs.
+	if err := validateWideEPHosts(
+		"--moriio-remote-hosts", opts.MoRIIORemoteHosts,
+		opts.MoRIIODPSize, opts.MoRIIODPSizeLocal); err != nil {
+		return err
+	}
+	return validateWideEPHosts(
+		"--moriio-decode-hosts", opts.MoRIIODecodeHosts,
+		opts.MoRIIODPSize, opts.MoRIIODPSizeLocal)
+}
+
+// hasMoRIIOFlagsSet returns true if any --moriio-* flag is set to a non-default
+// value. Used by the dormant feature gate to reject any MoRI-IO configuration
+// when the feature is not yet enabled.
+func (opts *Options) hasMoRIIOFlagsSet() bool {
+	// Behavioral flags that affect routing or wire shape
+	if opts.MoRIIOWriteMode || opts.MoRIIOParallelDispatch {
+		return true
+	}
+	// DP-size > 1 triggers X-Data-Parallel-Rank header even without WRITE mode
+	if opts.MoRIIODPSize > 1 {
+		return true
+	}
+	// Wide-EP multi-pod configuration
+	if len(opts.MoRIIORemoteHosts) > 0 || len(opts.MoRIIODecodeHosts) > 0 {
+		return true
+	}
+	if opts.MoRIIODPSizeLocal > 0 {
+		return true
+	}
+	return false
+}
+
+// validateWideEPHosts checks the multi-pod fan-out invariants for one host
+// list: dpLocal must divide dpSize and the host count must equal the pod count
+// (dpSize / dpLocal), since vLLM indexes hosts[dp_rank / dpLocal]. A misconfig
+// otherwise surfaces only as a cross-pod handshake that hangs, so it fails fast.
+// Lists of 0 or 1 host are the single-pod case and pass unchecked.
+func validateWideEPHosts(flag string, hosts []string, dpSize, dpLocal int) error {
+	if len(hosts) <= 1 {
+		return nil
+	}
+	if dpLocal <= 0 {
+		return fmt.Errorf(
+			"%s has %d entries but --moriio-dp-size-local is %d; "+
+				"Wide-EP multi-pod requires dp-size-local > 0 so vLLM "+
+				"can compute pod_idx = dp_rank / dp_size_local",
+			flag, len(hosts), dpLocal)
+	}
+	if dpSize%dpLocal != 0 {
+		return fmt.Errorf(
+			"--moriio-dp-size (%d) must be divisible by "+
+				"--moriio-dp-size-local (%d) for Wide-EP multi-pod (%s)",
+			dpSize, dpLocal, flag)
+	}
+	if dpSize/dpLocal != len(hosts) {
+		return fmt.Errorf(
+			"%s has %d entries but dp-size/dp-size-local = %d; the "+
+				"count of hosts must match the number of pods so the "+
+				"per-rank pod_idx mapping covers every DP rank",
+			flag, len(hosts), dpSize/dpLocal)
+	}
 	return nil
 }
 

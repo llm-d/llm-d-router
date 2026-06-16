@@ -440,6 +440,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdNormalizedTimePerOutputToken)
 		metrics.Registry.MustRegister(llmdRequestTTFT)
 		metrics.Registry.MustRegister(llmdRequestTPOT)
+		metrics.Registry.MustRegister(llmdInterTokenLatency)
 		metrics.Registry.MustRegister(inferencePoolAvgKVCache)
 		metrics.Registry.MustRegister(llmdInferencePoolAvgKVCache)
 		metrics.Registry.MustRegister(inferencePoolAvgQueueSize)
@@ -505,6 +506,7 @@ func Reset() {
 	llmdNormalizedTimePerOutputToken.Reset()
 	llmdRequestTTFT.Reset()
 	llmdRequestTPOT.Reset()
+	llmdInterTokenLatency.Reset()
 	inferencePoolAvgKVCache.Reset()
 	llmdInferencePoolAvgKVCache.Reset()
 	inferencePoolAvgQueueSize.Reset()
@@ -540,28 +542,28 @@ func Reset() {
 }
 
 // RecordRequestCounter records the number of requests.
-func RecordRequestCounter(modelName, targetModelName string, priority int) {
+func RecordRequestCounter(modelName, targetModelName, fairnessID string, priority int) {
 	prioStr := strconv.Itoa(priority)
 	requestCounter.WithLabelValues(modelName, targetModelName, prioStr).Inc()
-	llmdRequestCounter.WithLabelValues(modelName, targetModelName, prioStr).Inc()
+	llmdRequestCounter.WithLabelValues(modelName, targetModelName, fairnessID, prioStr).Inc()
 }
 
 // RecordRequestErrCounter records the number of error requests.
-func RecordRequestErrCounter(modelName, targetModelName string, code string) {
+func RecordRequestErrCounter(modelName, targetModelName, fairnessID, priority string, code string) {
 	if code != "" {
 		requestErrCounter.WithLabelValues(modelName, targetModelName, code).Inc()
-		llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, code).Inc()
+		llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, code).Inc()
 	}
 }
 
 // RecordRequestSizes records the request sizes.
-func RecordRequestSizes(modelName, targetModelName string, reqSize int) {
+func RecordRequestSizes(modelName, targetModelName, fairnessID, priority string, reqSize int) {
 	requestSizes.WithLabelValues(modelName, targetModelName).Observe(float64(reqSize))
-	llmdRequestSizes.WithLabelValues(modelName, targetModelName).Observe(float64(reqSize))
+	llmdRequestSizes.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(reqSize))
 }
 
 // RecordRequestLatencies records duration of request.
-func RecordRequestLatencies(ctx context.Context, modelName, targetModelName string, received time.Time, complete time.Time) bool {
+func RecordRequestLatencies(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, complete time.Time) bool {
 	if !complete.After(received) {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "Request latency values are invalid",
 			"modelName", modelName, "targetModelName", targetModelName, "completeTime", complete, "receivedTime", received)
@@ -569,36 +571,36 @@ func RecordRequestLatencies(ctx context.Context, modelName, targetModelName stri
 	}
 	elapsedSeconds := complete.Sub(received).Seconds()
 	requestLatencies.WithLabelValues(modelName, targetModelName).Observe(elapsedSeconds)
-	llmdRequestLatencies.WithLabelValues(modelName, targetModelName).Observe(elapsedSeconds)
+	llmdRequestLatencies.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(elapsedSeconds)
 	return true
 }
 
 // RecordResponseSizes records the response sizes.
-func RecordResponseSizes(modelName, targetModelName string, size int) {
+func RecordResponseSizes(modelName, targetModelName, fairnessID, priority string, size int) {
 	responseSizes.WithLabelValues(modelName, targetModelName).Observe(float64(size))
-	llmdResponseSizes.WithLabelValues(modelName, targetModelName).Observe(float64(size))
+	llmdResponseSizes.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(size))
 }
 
 // RecordInputTokens records input tokens count.
-func RecordInputTokens(modelName, targetModelName string, size int) {
+func RecordInputTokens(modelName, targetModelName, fairnessID, priority string, size int) {
 	if size > 0 {
 		inputTokens.WithLabelValues(modelName, targetModelName).Observe(float64(size))
-		llmdInputTokens.WithLabelValues(modelName, targetModelName).Observe(float64(size))
+		llmdInputTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(size))
 	}
 }
 
 // RecordOutputTokens records output tokens count.
-func RecordOutputTokens(modelName, targetModelName string, size int) {
+func RecordOutputTokens(modelName, targetModelName, fairnessID, priority string, size int) {
 	if size > 0 {
 		outputTokens.WithLabelValues(modelName, targetModelName).Observe(float64(size))
-		llmdOutputTokens.WithLabelValues(modelName, targetModelName).Observe(float64(size))
+		llmdOutputTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(size))
 	}
 }
 
 // RecordPromptCachedTokens records prompt cached tokens count.
-func RecordPromptCachedTokens(modelName, targetModelName string, size int) {
+func RecordPromptCachedTokens(modelName, targetModelName, fairnessID, priority string, size int) {
 	promptCachedTokens.WithLabelValues(modelName, targetModelName).Observe(float64(size))
-	llmdPromptCachedTokens.WithLabelValues(modelName, targetModelName).Observe(float64(size))
+	llmdPromptCachedTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(size))
 }
 
 // RecordNormalizedTimePerOutputToken (NTPOT) records the normalized time per output token.
@@ -660,19 +662,30 @@ func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairness
 	return true
 }
 
+// RecordInterTokenLatency records the time between consecutive response body chunks for streaming requests.
+func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName, fairnessID, priority string, itlSeconds float64) bool {
+	if itlSeconds < 0 {
+		log.FromContext(ctx).Error(nil, "Inter-token latency value must be non-negative",
+			"modelName", modelName, "targetModelName", targetModelName, "itlSeconds", itlSeconds)
+		return false
+	}
+	llmdInterTokenLatency.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(itlSeconds)
+	return true
+}
+
 // IncRunningRequests increases the current running requests.
-func IncRunningRequests(modelName string) {
+func IncRunningRequests(modelName, targetModelName, fairnessID, priority string) {
 	if modelName != "" {
 		runningRequests.WithLabelValues(modelName).Inc()
-		llmdRunningRequests.WithLabelValues(modelName).Inc()
+		llmdRunningRequests.WithLabelValues(modelName, targetModelName, fairnessID, priority).Inc()
 	}
 }
 
 // DecRunningRequests decreases the current running requests.
-func DecRunningRequests(modelName string) {
+func DecRunningRequests(modelName, targetModelName, fairnessID, priority string) {
 	if modelName != "" {
 		runningRequests.WithLabelValues(modelName).Dec()
-		llmdRunningRequests.WithLabelValues(modelName).Dec()
+		llmdRunningRequests.WithLabelValues(modelName, targetModelName, fairnessID, priority).Dec()
 	}
 }
 

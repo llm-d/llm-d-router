@@ -18,12 +18,17 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
@@ -811,4 +816,356 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 0))
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 	})
+
+	// MoRI-IO WRITE-mode regression test.
+	// When --moriio-write-mode is enabled, the sidecar must populate
+	// remote_host / remote_notify_port / transfer_id on the prefill leg
+	// (rather than leaving them nil as the standard NIXLv2 contract does) so
+	// the prefill engine's MoRIIOConnector can issue RDMA Write to decode.
+	// The same transfer_id must also be carried forward into the decode request
+	// so the consumer side can bind notifications to the right transfer.
+	It("populates MoRI-IO WRITE-mode kv_transfer_params when MoRIIOWriteMode is enabled", func() {
+		// Manual setup because sidecarConnectionTestSetup does not accept
+		// MoRI-IO config knobs.  Mirrors the helper exactly otherwise.
+		ctx := newTestContext()
+		ctx, cancelFn := context.WithCancel(ctx)
+		stoppedCh := make(chan struct{})
+
+		decodeHandler := &mock.ChatCompletionHandler{
+			Connector:       KVConnectorNIXLV2,
+			Role:            mock.RoleDecode,
+			MoRIIOWriteMode: true,
+		}
+		decodeBackend := httptest.NewServer(decodeHandler)
+		DeferCleanup(decodeBackend.Close)
+
+		prefillHandler := &mock.ChatCompletionHandler{
+			Connector:       KVConnectorNIXLV2,
+			Role:            mock.RolePrefill,
+			MoRIIOWriteMode: true,
+		}
+		prefillBackend := httptest.NewServer(prefillHandler)
+		DeferCleanup(prefillBackend.Close)
+
+		decodeURL, err := url.Parse(decodeBackend.URL)
+		Expect(err).ToNot(HaveOccurred())
+
+		cfg := Config{
+			Port:                   "0",
+			DecoderURL:             decodeURL,
+			KVConnector:            KVConnectorNIXLV2,
+			MoRIIOWriteMode:        true,
+			MoRIIODecodeNotifyPort: 61005,
+			// r6: kv_transfer_params["remote_host"] is sourced from this
+			// field (the decode pod's routable IP) instead of
+			// DecoderURL.Hostname().  Set it so the assertion at
+			// line 195 (remote_host == decodeURL.Hostname()) holds.
+			MoRIIODecodePodIP: decodeURL.Hostname(),
+		}
+		proxy := NewProxy(cfg)
+
+		By("starting the proxy")
+		go func() {
+			defer GinkgoRecover()
+			proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+			err := proxy.Start(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			stoppedCh <- struct{}{}
+		}()
+
+		<-proxy.readyCh
+		proxyBaseAddr := "http://" + proxy.addr.String()
+
+		By("sending a /v1/chat/completions request")
+		body := `{
+			"model": "Qwen/Qwen2-0.5B",
+			"messages": [{"role": "user", "content": "Hello"}],
+			"max_tokens": 50
+		}`
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, strings.NewReader(body))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		if rp.StatusCode != 200 {
+			bp, _ := io.ReadAll(rp.Body) //nolint:all
+			Fail(string(bp))
+		}
+
+		By("verifying prefill request has WRITE-mode kv_transfer_params populated")
+		Expect(prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(prefillHandler.CompletionRequests).To(HaveLen(1))
+		prq := prefillHandler.CompletionRequests[0]
+
+		Expect(prq).To(HaveKey(requestFieldKVTransferParams))
+		kv, ok := prq[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+
+		// New WRITE-mode fields must be non-nil and match config / request UUID.
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteHost, decodeURL.Hostname()))
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteNotifyPort, BeNumerically("==", 61005)))
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteDPRank, BeNumerically("==", 0)))
+		Expect(kv).To(HaveKey(requestFieldTransferID))
+		Expect(kv[requestFieldTransferID]).ToNot(BeEmpty())
+
+		// Pre-existing nil fields are still nil because they are populated by
+		// the prefill engine's request_finished, not the sidecar.
+		Expect(kv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+		Expect(kv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteEngineID, BeNil()))
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteBlockIDs, BeNil()))
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemotePort, BeNil()))
+
+		transferID := kv[requestFieldTransferID]
+
+		By("verifying decode request carries the same transfer_id")
+		Expect(decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(decodeHandler.CompletionRequests).To(HaveLen(1))
+		drq := decodeHandler.CompletionRequests[0]
+
+		Expect(drq).To(HaveKey(requestFieldKVTransferParams))
+		dkv, ok := drq[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(dkv).To(HaveKey(requestFieldTransferID))
+		Expect(dkv[requestFieldTransferID]).To(Equal(transferID))
+
+		cancelFn()
+		<-stoppedCh
+	})
+
+	// MoRI-IO Wide-EP DP-rank pinning and multi-pod fan-out coverage for the
+	// 1P1D DP=8 and 2P2D DP=16 topologies, plus the flags-off legacy path.
+	//
+	// These tests use mocks and build Config directly - they don't need the
+	// MoRIIOFeatureEnabled gate since they bypass Options.Complete().
+
+	// 1P1D DP=8, concurrent dispatch: both legs pinned to one DP rank, decode
+	// flips do_remote_prefill, remote_dp_size carries the DP world size.
+	It("parallel-dispatch 1P1D DP=8 pins both legs to one DP rank and emits remote_dp_size", func() {
+		env := startMoRIProxy(func(c *Config) {
+			c.MoRIIOParallelDispatch = true
+			c.MoRIIODPSize = 8
+		})
+		env.send()
+
+		Expect(env.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(env.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+
+		By("prefill leg carries WRITE-mode + Wide-EP fields")
+		pkv := kvParams(env.prefillHandler, 0)
+		Expect(pkv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+		Expect(pkv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
+		Expect(pkv).To(HaveKeyWithValue(requestFieldRemoteHost, env.decodePodIP))
+		Expect(pkv).To(HaveKeyWithValue("remote_dp_size", BeNumerically("==", 8)))
+		Expect(pkv).To(HaveKeyWithValue(requestFieldRemoteDPRankOverride, true))
+		// Single-pod: the multi-pod fan-out keys must be omitted entirely.
+		Expect(pkv).ToNot(HaveKey("remote_hosts"))
+		Expect(pkv).ToNot(HaveKey("remote_dp_size_local"))
+		pRank, ok := pkv[requestFieldRemoteDPRank].(float64)
+		Expect(ok).To(BeTrue())
+		Expect(pRank).To(And(BeNumerically(">=", 0), BeNumerically("<", 8)))
+
+		By("decode leg flips do_remote_prefill and reuses the same rank + transfer_id")
+		dkv := kvParams(env.decodeHandler, 0)
+		Expect(dkv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, true))
+		Expect(dkv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, false))
+		Expect(dkv).To(HaveKeyWithValue("remote_dp_size", BeNumerically("==", 8)))
+		Expect(dkv[requestFieldRemoteDPRank]).To(Equal(pRank))
+		Expect(dkv[requestFieldTransferID]).To(Equal(pkv[requestFieldTransferID]))
+		Expect(dkv[requestFieldTransferID]).ToNot(BeEmpty())
+
+		By("both HTTP legs share the same X-Data-Parallel-Rank header")
+		ph := dpRankHeader(env.prefillHandler, 0)
+		Expect(ph).To(Equal(strconv.Itoa(int(pRank))))
+		Expect(dpRankHeader(env.decodeHandler, 0)).To(Equal(ph))
+	})
+
+	// 2P2D DP=16 multi-pod fan-out: each leg's remote_hosts is the opposite
+	// side's pod IPs (prefill leg -> decode IPs, decode leg -> prefill IPs).
+	It("parallel-dispatch 2P2D DP=EP=16 fans out remote_hosts with opposite host lists per leg", func() {
+		prefillHosts := []string{"10.0.0.1", "10.0.0.2"}
+		decodeHosts := []string{"10.0.1.1", "10.0.1.2"}
+		env := startMoRIProxy(func(c *Config) {
+			c.MoRIIOParallelDispatch = true
+			c.MoRIIODPSize = 16
+			c.MoRIIODPSizeLocal = 8
+			c.MoRIIORemoteHosts = prefillHosts
+			c.MoRIIODecodeHosts = decodeHosts
+		})
+		env.send()
+
+		Expect(env.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		Expect(env.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+
+		By("prefill leg fans out to the DECODE-side host list")
+		pkv := kvParams(env.prefillHandler, 0)
+		Expect(pkv["remote_hosts"]).To(Equal([]any{"10.0.1.1", "10.0.1.2"}))
+		Expect(pkv).To(HaveKeyWithValue("remote_dp_size_local", BeNumerically("==", 8)))
+		Expect(pkv).To(HaveKeyWithValue("remote_dp_size", BeNumerically("==", 16)))
+
+		By("decode leg fans out to the PREFILL-side host list")
+		dkv := kvParams(env.decodeHandler, 0)
+		Expect(dkv["remote_hosts"]).To(Equal([]any{"10.0.0.1", "10.0.0.2"}))
+		Expect(dkv).To(HaveKeyWithValue("remote_dp_size_local", BeNumerically("==", 8)))
+		Expect(dkv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, true))
+
+		By("both legs share one pinned DP rank in [0,16)")
+		Expect(dpRankHeader(env.prefillHandler, 0)).To(Equal(dpRankHeader(env.decodeHandler, 0)))
+		pRank, ok := pkv[requestFieldRemoteDPRank].(float64)
+		Expect(ok).To(BeTrue())
+		Expect(pRank).To(And(BeNumerically(">=", 0), BeNumerically("<", 16)))
+	})
+
+	// 1P1D DP=8, serial dispatch: the prefill leg sets the DP-rank header and
+	// the decode leg's kv_transfer_params are backfilled with the same rank.
+	It("serial WRITE-mode DP=8 pins prefill and decode HTTP legs to the same DP rank", func() {
+		env := startMoRIProxy(func(c *Config) {
+			c.MoRIIODPSize = 8 // ParallelDispatch stays false -> strictly-serial path
+		})
+		env.send()
+
+		pkv := kvParams(env.prefillHandler, 0)
+		Expect(pkv).To(HaveKeyWithValue(requestFieldRemoteDPRankOverride, true))
+		pRank, ok := pkv[requestFieldRemoteDPRank].(float64)
+		Expect(ok).To(BeTrue())
+		Expect(pRank).To(And(BeNumerically(">=", 0), BeNumerically("<", 8)))
+
+		ph := dpRankHeader(env.prefillHandler, 0)
+		Expect(ph).To(Equal(strconv.Itoa(int(pRank))))
+		Expect(dpRankHeader(env.decodeHandler, 0)).To(Equal(ph))
+
+		By("decode kv_transfer_params (from prefill response) is backfilled with the same rank")
+		dkv := kvParams(env.decodeHandler, 0)
+		Expect(dkv[requestFieldRemoteDPRank]).To(Equal(pRank))
+		Expect(dkv).To(HaveKeyWithValue(requestFieldRemoteDPRankOverride, true))
+	})
+
+	// Flags-off path: the sidecar must produce the legacy NIXLv2 wire shape
+	// (remote_host nil, no transfer_id / remote_dp_size) with no DP-rank header.
+	It("keeps the legacy NIXLv2 wire shape and omits the DP-rank header when MoRI flags are off", func() {
+		proxyBaseAddr := startProxy()
+		sendChatCompletionsRequest(proxyBaseAddr)
+
+		pkv, ok := testInfo.prefillHandler.CompletionRequests[0][requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(pkv).To(HaveKeyWithValue(requestFieldRemoteHost, BeNil()))
+		Expect(pkv).ToNot(HaveKey(requestFieldTransferID))
+		Expect(pkv).ToNot(HaveKey("remote_dp_size"))
+		Expect(pkv).ToNot(HaveKey("remote_hosts"))
+
+		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
+		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
+	})
 })
+
+// moriProxyEnv bundles a running MoRI-IO proxy with its mock prefill/decode
+// backends for the Wide-EP integration tests.
+type moriProxyEnv struct {
+	proxy          *Server
+	prefillHandler *mock.ChatCompletionHandler
+	decodeHandler  *mock.ChatCompletionHandler
+	prefillBackend *httptest.Server
+	decodeBackend  *httptest.Server
+	baseAddr       string
+	decodePodIP    string
+}
+
+// startMoRIProxy spins up prefill + decode mock backends and a proxy whose
+// Config is seeded with MoRI-IO WRITE-mode defaults, then customised by mutate.
+// Both mock backends run with MoRIIOWriteMode so the prefill-side validation
+// tolerates the populated remote_host / transfer_id fields.  Cleanup is
+// registered via DeferCleanup, so callers just invoke this from within an It.
+func startMoRIProxy(mutate func(cfg *Config)) *moriProxyEnv {
+	ctx, cancelFn := context.WithCancel(newTestContext())
+	stoppedCh := make(chan struct{})
+	env := &moriProxyEnv{}
+
+	env.decodeHandler = &mock.ChatCompletionHandler{
+		Connector:       KVConnectorNIXLV2,
+		Role:            mock.RoleDecode,
+		MoRIIOWriteMode: true,
+	}
+	env.decodeBackend = httptest.NewServer(env.decodeHandler)
+	DeferCleanup(env.decodeBackend.Close)
+
+	env.prefillHandler = &mock.ChatCompletionHandler{
+		Connector:       KVConnectorNIXLV2,
+		Role:            mock.RolePrefill,
+		MoRIIOWriteMode: true,
+	}
+	env.prefillBackend = httptest.NewServer(env.prefillHandler)
+	DeferCleanup(env.prefillBackend.Close)
+
+	decodeURL, err := url.Parse(env.decodeBackend.URL)
+	Expect(err).ToNot(HaveOccurred())
+	env.decodePodIP = decodeURL.Hostname()
+
+	cfg := Config{
+		Port:                       "0",
+		DecoderURL:                 decodeURL,
+		KVConnector:                KVConnectorNIXLV2,
+		MoRIIOWriteMode:            true,
+		MoRIIODecodePodIP:          env.decodePodIP,
+		MoRIIODecodeNotifyPort:     61005,
+		MoRIIODecodeHandshakePort:  6301,
+		MoRIIOPrefillNotifyPort:    61006,
+		MoRIIOPrefillHandshakePort: 6302,
+		MoRIIOTPSize:               1,
+		MoRIIODPSize:               1,
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	env.proxy = NewProxy(cfg)
+
+	go func() {
+		defer GinkgoRecover()
+		env.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+		err := env.proxy.Start(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		stoppedCh <- struct{}{}
+	}()
+
+	<-env.proxy.readyCh
+	env.baseAddr = "http://" + env.proxy.addr.String()
+	DeferCleanup(func() {
+		cancelFn()
+		<-stoppedCh
+	})
+	return env
+}
+
+// send issues a /v1/chat/completions request with the prefill header and
+// asserts a 200.  Both legs have completed (wg.Wait in the concurrent path,
+// sequential in the serial path) by the time this returns, so the captured
+// requests / headers are safe to read afterwards.
+func (env *moriProxyEnv) send() {
+	req, err := http.NewRequest(http.MethodPost, env.baseAddr+ChatCompletionsPath, strings.NewReader(chatCompletionsRequestBody))
+	Expect(err).ToNot(HaveOccurred())
+	req.Header.Add(routing.PrefillEndpointHeader, env.prefillBackend.URL[len("http://"):])
+
+	rp, err := http.DefaultClient.Do(req)
+	Expect(err).ToNot(HaveOccurred())
+	defer rp.Body.Close()
+	body, _ := io.ReadAll(rp.Body) //nolint:errcheck
+	Expect(rp.StatusCode).To(Equal(http.StatusOK), string(body))
+}
+
+// kvParams returns the kv_transfer_params map of the i-th request captured by h.
+func kvParams(h *mock.ChatCompletionHandler, i int) map[string]any { //nolint:unparam // i kept for future multi-request tests
+	reqs := h.GetCompletionRequests()
+	ExpectWithOffset(1, len(reqs)).To(BeNumerically(">", i))
+	kv, ok := reqs[i][requestFieldKVTransferParams].(map[string]any)
+	ExpectWithOffset(1, ok).To(BeTrue())
+	return kv
+}
+
+// dpRankHeader returns the X-Data-Parallel-Rank header of the i-th request
+// captured by h (empty string when unset).
+func dpRankHeader(h *mock.ChatCompletionHandler, i int) string { //nolint:unparam // i kept for future multi-request tests
+	hdrs := h.GetCompletionHeaders()
+	ExpectWithOffset(1, len(hdrs)).To(BeNumerically(">", i))
+	return hdrs[i].Get(requestHeaderDataParallelRank)
+}

@@ -11,7 +11,9 @@ epp:
     tag: main
     pullPolicy: Always
   extProcPort: 9002
-  
+  # gRPC port serving EPP liveness and readiness checks, 9003 if unset.
+  # grpcHealthPort: 9003
+
   parsers: [] # e.g. ["openai-parser", "anthropic-parser"], or empty for auto-selection
 
   # Metrics DataSource Configuration
@@ -57,7 +59,7 @@ epp:
   # EPP container resources: CPU limits unset for burst capacity, memory capped at 16Gi
   resources:
     requests:
-      cpu: "4"
+      cpu: "8"
       memory: 8Gi
     limits:
       memory: 16Gi
@@ -158,10 +160,9 @@ latencyPredictor:
   # Training Server Configuration
   trainingServer:
     image:
-      # TODO: Update this default once llm-d owns and publishes this image.
-      registry: us-central1-docker.pkg.dev/k8s-staging-images
-      repository: gateway-api-inference-extension/latency-training-server
-      tag: main
+      registry: ghcr.io/llm-d
+      repository: llm-d-latency-predictor-training-server-dev
+      tag: latest
       pullPolicy: Always
     port: 8000
     resources:
@@ -200,10 +201,9 @@ latencyPredictor:
     count: 1
     startPort: 8001
     image:
-      # TODO: Update this default once llm-d owns and publishes this image.
-      registry: us-central1-docker.pkg.dev/k8s-staging-images
-      repository: gateway-api-inference-extension/latency-prediction-server
-      tag: main
+      registry: ghcr.io/llm-d
+      repository: llm-d-latency-predictor-prediction-server-dev
+      tag: latest
       pullPolicy: Always
     resources:
       requests:

@@ -50,6 +50,20 @@ var (
 		[]string{"plugin_type", "plugin_name", "pod", "modality"},
 	)
 
+	// encoderCacheHitRatio records, per endpoint and per request, the fraction of the
+	// request's multimodal items already present in that endpoint's LRU. The counters
+	// give an aggregate hit rate; this histogram exposes the distribution of
+	// per-endpoint hit ratios, which surfaces uneven cache locality across pods.
+	encoderCacheHitRatio = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "encoder_cache_hit_ratio",
+			Help:      metricsutil.HelpMsgWithStability("Ratio of matched multimodal items to total items per endpoint in an encoder-cache lookup.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
+		},
+		[]string{"plugin_type", "plugin_name"},
+	)
+
 	registerOnce sync.Once
 )
 
@@ -57,5 +71,6 @@ func registerEncoderCacheMetrics() {
 	registerOnce.Do(func() {
 		metrics.Registry.MustRegister(encoderCacheQueriesTotal)
 		metrics.Registry.MustRegister(encoderCacheHitsTotal)
+		metrics.Registry.MustRegister(encoderCacheHitRatio)
 	})
 }
