@@ -25,7 +25,7 @@ import (
 
 const (
 	// LLMDRouterEndpointPickerSubsystem is the subsystem for llm-d router endpoint picker metrics.
-	LLMDRouterEndpointPickerSubsystem = "llm_d_router_epp"
+	LLMDRouterEndpointPickerSubsystem = "llm_d_epp"
 )
 
 var (
@@ -366,7 +366,7 @@ var (
 var (
 	// DescInferencePoolPerEndpointQueueSize is the standardized exported prometheus descriptor.
 	DescInferencePoolPerEndpointQueueSize = prometheus.NewDesc(
-		"llm_d_router_epp_per_endpoint_queue_size",
+		"llm_d_epp_per_endpoint_queue_size",
 		metricsutil.HelpMsgWithStability("The total number of requests pending in the model server queue for each underlying endpoint.", compbasemetrics.ALPHA),
 		[]string{
 			"name",

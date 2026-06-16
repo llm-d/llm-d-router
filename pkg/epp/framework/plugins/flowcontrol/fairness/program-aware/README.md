@@ -63,7 +63,7 @@ A complete sample is shipped at [`deploy/config/sim-program-aware-config.yaml`](
 
 ## Observability
 
-The plugin exports two shared collectors and one strategy-owned collector under the `llm_d_router_epp` Prometheus subsystem:
+The plugin exports two shared collectors and one strategy-owned collector under the `llm_d_epp` Prometheus subsystem:
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|

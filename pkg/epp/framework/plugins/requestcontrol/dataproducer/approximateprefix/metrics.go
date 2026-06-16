@@ -32,7 +32,7 @@ var (
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.InferenceExtensionSubsystem,
 			Name:      "prefix_indexer_size",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_prefix_indexer_size] Size of the prefix indexer.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_prefix_indexer_size] Size of the prefix indexer.", compbasemetrics.ALPHA),
 		},
 		[]string{},
 	)
@@ -50,7 +50,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceExtensionSubsystem,
 			Name:      "prefix_indexer_hit_ratio",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_prefix_indexer_hit_ratio] Ratio of prefix length matched to total prefix length in the cache lookup.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_prefix_indexer_hit_ratio] Ratio of prefix length matched to total prefix length in the cache lookup.", compbasemetrics.ALPHA),
 			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
 		},
 		[]string{},
@@ -70,7 +70,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceExtensionSubsystem,
 			Name:      "prefix_indexer_hit_bytes",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_prefix_indexer_hit_bytes] Length of the prefix match in number of bytes in the cache lookup.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_prefix_indexer_hit_bytes] Length of the prefix match in number of bytes in the cache lookup.", compbasemetrics.ALPHA),
 			Buckets:   []float64{0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536},
 		},
 		[]string{},

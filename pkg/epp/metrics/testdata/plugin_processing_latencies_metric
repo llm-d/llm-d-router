@@ -1,4 +1,4 @@
-# HELP inference_extension_plugin_duration_seconds [ALPHA] [Deprecated: Use llm_d_router_epp_plugin_duration_seconds] Plugin processing latency distribution in seconds for each extension point, plugin type and plugin name.
+# HELP inference_extension_plugin_duration_seconds [ALPHA] [Deprecated: Use llm_d_epp_plugin_duration_seconds] Plugin processing latency distribution in seconds for each extension point, plugin type and plugin name.
 # TYPE inference_extension_plugin_duration_seconds histogram
 inference_extension_plugin_duration_seconds_bucket{extension_point="ProfilePicker",plugin_name="PluginB",plugin_type="ProfileHandler",le="0.0001"} 0
 inference_extension_plugin_duration_seconds_bucket{extension_point="ProfilePicker",plugin_name="PluginB",plugin_type="ProfileHandler",le="0.0002"} 0
