@@ -47,7 +47,7 @@ standalone validations
   {{- end -}}
   {{- if eq $proxyType "agentgateway" -}}
     {{- if hasKey $proxy "agentgateway" -}}
-      {{- fail ".Values.router.proxy.agentgateway is no longer supported; standalone agentgateway derives its logical backend from router.modelServers settings" -}}
+      {{- fail ".Values.router.proxy.agentgateway is no longer supported; standalone agentgateway uses EPP endpoint discovery with a logical service backend" -}}
     {{- end -}}
     {{- if ne .Values.router.inferencePool.create false -}}
       {{- fail ".Values.router.inferencePool.create=false is required when proxyType=agentgateway; standalone agentgateway currently supports only service-backed routing" -}}

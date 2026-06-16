@@ -232,6 +232,14 @@ if ! grep -q -- 'destinationMode: passthrough' "${agentgateway_render_output}"; 
   echo "Agentgateway Helm template did not render passthrough destination mode"
   exit 1
 fi
+if ! grep -q -- 'name: "default/llm-instance-gateway"' "${agentgateway_render_output}"; then
+  echo "Agentgateway Helm template did not derive the logical backend name from modelServers"
+  exit 1
+fi
+if ! grep -q -- 'hostname: "llm-instance-gateway"' "${agentgateway_render_output}"; then
+  echo "Agentgateway Helm template did not derive the logical backend hostname from modelServers"
+  exit 1
+fi
 if grep -q -- '# Source: llm-d-router-standalone/templates/agentgateway-service.yaml' "${agentgateway_render_output}"; then
   echo "Agentgateway model Service unexpectedly rendered"
   exit 1
