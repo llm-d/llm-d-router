@@ -229,7 +229,7 @@ func (p *Producer) Produce(ctx context.Context,
 	)
 	defer span.End()
 
-	span.SetAttributes(attribute.Int("llm_d.producer.candidate_endpoints", len(endpoints)))
+	span.SetAttributes(attribute.Int("llm_d.epp.producer.candidate_endpoints", len(endpoints)))
 	if request != nil {
 		if request.TargetModel != "" {
 			span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
@@ -245,7 +245,7 @@ func (p *Producer) Produce(ctx context.Context,
 		return fmt.Errorf("failed to compute block keys: %w", err)
 	}
 	if len(perPromptKeys) == 0 {
-		span.SetAttributes(attribute.String("llm_d.producer.result", "skipped_no_tokens"))
+		span.SetAttributes(attribute.String("llm_d.epp.producer.result", "skipped_no_tokens"))
 		return nil
 	}
 
@@ -314,8 +314,8 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	span.SetAttributes(
-		attribute.Int("llm_d.producer.total_blocks", totalBlocks),
-		attribute.Int("llm_d.producer.max_match_blocks", maxMatch),
+		attribute.Int("llm_d.epp.producer.total_blocks", totalBlocks),
+		attribute.Int("llm_d.epp.producer.max_match_blocks", maxMatch),
 	)
 
 	logger.V(logging.TRACE).Info("Produce completed",
