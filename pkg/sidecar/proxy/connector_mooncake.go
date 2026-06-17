@@ -31,6 +31,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the other timeout on vllm
@@ -222,11 +223,13 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 		pw := &bufferedResponseWriter{}
 		prefillHandler.ServeHTTP(pw, prefillReq)
 		prefillDuration := time.Since(prefillStart)
+		metrics.RecordPrefillDuration(KVConnectorMooncake, prefillDuration)
 		prefillSpan.SetAttributes(
 			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
 			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
 		)
 		if isHTTPError(pw.statusCode) {
+			metrics.RecordError(KVConnectorMooncake, metrics.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		}
 		s.logger.V(5).Info("mooncake prefill request completed", "status", pw.statusCode)
@@ -248,6 +251,7 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 	s.decoderProxy.ServeHTTP(w, decodeReq)
 
 	decodeDuration := time.Since(decodeStart)
+	metrics.RecordDecodeDuration(KVConnectorMooncake, decodeDuration)
 	decodeSpan.SetAttributes(
 		attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())),
 		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),
