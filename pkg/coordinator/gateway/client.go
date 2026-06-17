@@ -66,7 +66,9 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 
 	logger := log.FromContext(ctx).WithName("gateway")
 	if body != nil {
-		logger.V(logutil.TRACE).Info("request body", "method", method, "path", path, "headers", httplog.RedactedHeaders(req.Header), "body", redactBody(body))
+		if v := logger.V(logutil.TRACE); v.Enabled() {
+			v.Info("request body", "method", method, "path", path, "headers", httplog.RedactedHeaders(req.Header), "body", redactBody(body))
+		}
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -79,7 +81,9 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 	if err != nil {
 		return nil, fmt.Errorf("reading response from gateway: %w", err)
 	}
-	logger.V(logutil.TRACE).Info("response body", "status", resp.StatusCode, "body", redactBody(respBody))
+	if v := logger.V(logutil.TRACE); v.Enabled() {
+		v.Info("response body", "status", resp.StatusCode, "body", redactBody(respBody))
+	}
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
 	return resp, nil

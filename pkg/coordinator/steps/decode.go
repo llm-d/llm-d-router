@@ -78,7 +78,9 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	proxyReq.Header.Set(gateway.EPPPhaseHeader, gateway.PhaseDecode)
 
-	logger.V(logutil.DEBUG).Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(proxyReq.Header))
+	if v := logger.V(logutil.DEBUG); v.Enabled() {
+		v.Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(proxyReq.Header))
+	}
 
 	proxy := &httputil.ReverseProxy{
 		Director:      func(_ *http.Request) {},
