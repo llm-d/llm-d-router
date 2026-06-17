@@ -270,20 +270,20 @@ func verifyMetrics() {
 		"inference_extension_info",
 
 		// llm_d metrics
-		"llm_d_router_epp_request_total",
-		"llm_d_router_epp_request_error_total",
-		"llm_d_router_epp_request_duration_seconds",
-		"llm_d_router_epp_normalized_time_per_output_token_seconds",
-		"llm_d_router_epp_request_sizes",
-		"llm_d_router_epp_response_sizes",
-		"llm_d_router_epp_input_tokens",
-		"llm_d_router_epp_output_tokens",
-		"llm_d_router_epp_average_kv_cache_utilization",
-		"llm_d_router_epp_average_queue_size",
-		"llm_d_router_epp_per_endpoint_queue_size",
-		"llm_d_router_epp_running_requests",
-		"llm_d_router_epp_ready_endpoints",
-		"llm_d_router_epp_info",
+		"llm_d_epp_request_total",
+		"llm_d_epp_request_error_total",
+		"llm_d_epp_request_duration_seconds",
+		"llm_d_epp_normalized_time_per_output_token_seconds",
+		"llm_d_epp_request_sizes",
+		"llm_d_epp_response_sizes",
+		"llm_d_epp_input_tokens",
+		"llm_d_epp_output_tokens",
+		"llm_d_epp_average_kv_cache_utilization",
+		"llm_d_epp_average_queue_size",
+		"llm_d_epp_per_endpoint_queue_size",
+		"llm_d_epp_running_requests",
+		"llm_d_epp_ready_endpoints",
+		"llm_d_epp_info",
 	}
 	expectedMetrics := make([]string, 0, len(preset)+len(modelServerPods)*numPorts*2)
 	expectedMetrics = append(expectedMetrics, preset...)
@@ -299,7 +299,7 @@ func verifyMetrics() {
 			expectedMetrics = append(expectedMetrics, metricQueueSize)
 
 			metricQueueSizeNew := fmt.Sprintf(
-				"llm_d_router_epp_per_endpoint_queue_size{model_server_endpoint=\"%s-rank-%d\",name=\"%s\"}",
+				"llm_d_epp_per_endpoint_queue_size{model_server_endpoint=\"%s-rank-%d\",name=\"%s\"}",
 				modelServerPod.Name,
 				rank,
 				modelServerName,

@@ -64,7 +64,7 @@ type Config struct {
 	AffinityThreshold float64 `json:"affinityThreshold,omitempty"`
 
 	// ExplorationProbability is the probability of skipping the gate entirely,
-	// keeping all endpoints for exploration. Range: [0, 1]. Default: 0.01.
+	// keeping all endpoints for exploration. Range: [0, 1]. Default: 0.
 	ExplorationProbability float64 `json:"explorationProbability,omitempty"`
 
 	// MaxTTFTPenaltyMs is the max TTFT penalty (ms) before breaking stickiness.
@@ -92,7 +92,7 @@ type Config struct {
 
 var DefaultConfig = Config{
 	AffinityThreshold:      0.80,
-	ExplorationProbability: 0.01,
+	ExplorationProbability: 0,
 	MaxTTFTPenaltyMs:       18000,
 	TTFTSource:             TTFTSourcePrefillThroughput,
 

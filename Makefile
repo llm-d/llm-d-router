@@ -55,6 +55,7 @@ GIT_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null)
 # Match only root-level release tags (v[0-9]*) so submodule tags don't leak into image versions.
 ROOT_RELEASE_TAG_MATCH ?= v[0-9]*
 BUILD_REF ?= $(shell git describe --tags --match '$(ROOT_RELEASE_TAG_MATCH)' --abbrev=0 2>/dev/null)
+LATENCY_PREDICTOR_TAG ?= $(or $(EXTRA_TAG),$(BUILD_REF),latest)
 
 # Host directories for Go module and build caches, bind-mounted into the builder container.
 GO_MOD_CACHE_VOL ?= $(HOME)/.cache/llm-d-gomodcache
@@ -214,7 +215,7 @@ check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails o
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags
+presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags-strict
 
 .PHONY: git-branch-check
 git-branch-check:
@@ -348,7 +349,7 @@ verify-helm-charts: helm-install kubectl-validate ## Render and validate Helm ch
 .PHONY: helm-push
 helm-push: yq helm-install ## Package and push a specified Helm chart. Usage: make helm-push CHART=<chart_name>
 	@if [ -z "$(CHART)" ]; then echo "Error: CHART variable is required (e.g. CHART=llm-d-router-standalone)"; exit 1; fi
-	CHART=$(CHART) EXTRA_TAG="$(EXTRA_TAG)" CHART_SUFFIX="$(CHART_SUFFIX)" EPP_RELEASE_IMAGE_REPOSITORY="$(EPP_RELEASE_IMAGE_REPOSITORY)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
+	CHART=$(CHART) EXTRA_TAG="$(EXTRA_TAG)" CHART_SUFFIX="$(CHART_SUFFIX)" EPP_RELEASE_IMAGE_REPOSITORY="$(EPP_RELEASE_IMAGE_REPOSITORY)" LATENCY_PREDICTOR_TAG="$(LATENCY_PREDICTOR_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 
 .PHONY: helm-push-gateway
 helm-push-gateway: ## Package and push the llm-d-router-gateway Helm chart.

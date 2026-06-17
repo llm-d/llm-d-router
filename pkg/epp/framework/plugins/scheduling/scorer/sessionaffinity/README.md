@@ -11,12 +11,36 @@ The session is carried in a request header whose value is the base64-encoded `na
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `headerName` | string | `x-session-token` | Request and response header carrying the session token. When set, only this header is read; the default is ignored. |
+| `profileName` | string | | The name of the profile this instance is associated with. When set (e.g. `prefill`), the plugin looks up the target pod from the results of that profile in `SchedulingResult` during the response received phase. When empty, it defaults to the primary (decode) pod. |
+
+### Default Configuration (without PD disaggregation)
 
 ```yaml
 - type: session-affinity-scorer
   parameters:
     headerName: x-session-token
 ```
+
+### PD Disaggregation Configuration
+
+To support session affinity with PD disaggregation, configure two separate instances of the scorer: one for decode and one for prefill.
+
+```yaml
+# Instance for the decode profile (pins decode requests)
+- name: session-affinity-decode
+  type: session-affinity-scorer
+  parameters:
+    headerName: x-session-token
+
+# Instance for the prefill profile (pins prefill requests)
+- name: session-affinity-prefill
+  type: session-affinity-scorer
+  parameters:
+    headerName: x-session-token-prefill
+    profileName: prefill
+```
+
+The decode instance uses the default behavior (writing the decode pod to `x-session-token`). The prefill instance uses `profileName: prefill` to look up the prefill pod from the scheduling results and write it to `x-session-token-prefill`. This ensures that subsequent requests in the same session target both the same prefill pod and the same decode pod.
 
 ## Relationship to the session affinity filter
 

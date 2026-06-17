@@ -28,6 +28,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // DefaultHeader is the default request/response header carrying the session
@@ -80,4 +81,22 @@ func WriteResponseHeader(ctx context.Context, pluginType, sessionHeader string, 
 	}
 
 	response.Headers[sessionHeader] = base64.StdEncoding.EncodeToString([]byte(targetPod.NamespacedName.String()))
+}
+
+// ResolvePodToWrite looks up the target pod from the scheduling results if profileName is set.
+// When profileName is empty, targetPod (the primary/decode pod) is returned.
+// When profileName is set, the function returns the profile's endpoint or nil
+// if the profile was not scheduled (e.g. decode-only requests skip prefill).
+func ResolvePodToWrite(request *scheduling.InferenceRequest, profileName string, targetPod *datalayer.EndpointMetadata) *datalayer.EndpointMetadata {
+	if profileName == "" {
+		return targetPod
+	}
+	if request != nil && request.SchedulingResult != nil {
+		if result := request.SchedulingResult.ProfileResults[profileName]; result != nil && len(result.TargetEndpoints) > 0 && result.TargetEndpoints[0] != nil {
+			if md := result.TargetEndpoints[0].GetMetadata(); md != nil {
+				return md
+			}
+		}
+	}
+	return nil
 }

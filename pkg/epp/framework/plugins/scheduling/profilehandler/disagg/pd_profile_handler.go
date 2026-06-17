@@ -167,8 +167,8 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 
 	// Set initial attributes
 	span.SetAttributes(
-		attribute.Int("llm_d.profile_handler.total_profiles", len(profiles)),
-		attribute.Int("llm_d.profile_handler.executed_profiles", len(profileResults)),
+		attribute.Int("llm_d.epp.profile_handler.total_profiles", len(profiles)),
+		attribute.Int("llm_d.epp.profile_handler.executed_profiles", len(profileResults)),
 	)
 
 	// Set optional request attributes if request is not nil
@@ -184,8 +184,8 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 	if _, executed := profileResults[h.decodeProfile]; !executed {
 		// if decode profile was not executed yet, first let the scheduler run the decode profile
 		span.SetAttributes(
-			attribute.String("llm_d.profile_handler.decision", "run_decode"),
-			attribute.String("llm_d.profile_handler.selected_profile", h.decodeProfile),
+			attribute.String("llm_d.epp.profile_handler.decision", "run_decode"),
+			attribute.String("llm_d.epp.profile_handler.selected_profile", h.decodeProfile),
 		)
 		return map[string]scheduling.SchedulerProfile{
 			h.decodeProfile: profiles[h.decodeProfile],
@@ -197,8 +197,8 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 	// check if all configured profiles have been executed, or if decode failed, no need to run more profiles.
 	if len(profiles) == len(profileResults) || profileResults[h.decodeProfile] == nil {
 		span.SetAttributes(
-			attribute.String("llm_d.profile_handler.decision", "complete"),
-			attribute.Bool("llm_d.profile_handler.decode_failed", profileResults[h.decodeProfile] == nil),
+			attribute.String("llm_d.epp.profile_handler.decision", "complete"),
+			attribute.Bool("llm_d.epp.profile_handler.decode_failed", profileResults[h.decodeProfile] == nil),
 		)
 		return map[string]scheduling.SchedulerProfile{}
 	}
@@ -207,8 +207,8 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 		RecordPDDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, DecisionTypePrefillDecode) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
 		// run the prefill profile
 		span.SetAttributes(
-			attribute.String("llm_d.profile_handler.decision", "prefill_decode"),
-			attribute.String("llm_d.profile_handler.selected_profile", h.prefillProfile),
+			attribute.String("llm_d.epp.profile_handler.decision", "prefill_decode"),
+			attribute.String("llm_d.epp.profile_handler.selected_profile", h.prefillProfile),
 		)
 		return map[string]scheduling.SchedulerProfile{
 			h.prefillProfile: profiles[h.prefillProfile],
@@ -217,7 +217,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 
 	RecordPDDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, DecisionTypeDecodeOnly) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
 	span.SetAttributes(
-		attribute.String("llm_d.profile_handler.decision", "decode_only"),
+		attribute.String("llm_d.epp.profile_handler.decision", "decode_only"),
 	)
 	return map[string]scheduling.SchedulerProfile{} // do not run prefill
 }

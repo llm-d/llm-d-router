@@ -44,7 +44,7 @@ Metrics defined by llm-d Router are in addition to Inference Gateway metrics. Fo
 
 ## Opt-in ext_proc Stream Metrics
 
-Three metrics covering ext_proc gRPC stream lifecycle. Disabled by default; enable with `--enable-grpc-stream-metrics`. All carry the `llm_d_router_epp_` prefix.
+Three metrics covering ext_proc gRPC stream lifecycle. Disabled by default; enable with `--enable-grpc-stream-metrics`. These metrics are emitted under the `llm_d_epp_` prefix (separate from `llm_d_inference_scheduler_*`).
 
 ### `extproc_streams_inflight`
 

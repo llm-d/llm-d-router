@@ -38,6 +38,10 @@ type parameters struct {
 	// HeaderName overrides the default x-session-token header used to read and
 	// write the session token. When empty the default is used.
 	HeaderName string `json:"headerName"`
+	// ProfileName is the name of the profile this instance is associated with (optional).
+	// When empty, the plugin defaults to the primary (decode) pod.
+	// Used in ResponseHeader to look up the correct target pod from SchedulingResult.
+	ProfileName string `json:"profileName"`
 }
 
 // compile-time type assertion
@@ -53,15 +57,16 @@ func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.
 		}
 	}
 
-	return NewSessionAffinity(name, params.HeaderName), nil
+	return NewSessionAffinity(name, params.HeaderName, params.ProfileName), nil
 }
 
 // NewSessionAffinity returns a filter. When sessionHeader is empty the default
 // x-session-token header is used.
-func NewSessionAffinity(name, sessionHeader string) *SessionAffinity {
+func NewSessionAffinity(name, sessionHeader, profileName string) *SessionAffinity {
 	return &SessionAffinity{
 		typedName:     plugin.TypedName{Type: SessionAffinityType, Name: name},
 		sessionHeader: sessionutil.NormalizeHeader(sessionHeader),
+		profileName:   profileName,
 	}
 }
 
@@ -74,6 +79,8 @@ type SessionAffinity struct {
 	typedName plugin.TypedName
 	// sessionHeader is the request/response header carrying the session token.
 	sessionHeader string
+	// profileName is the name of the profile this instance is associated with.
+	profileName string
 }
 
 // TypedName returns the typed name of the plugin.
@@ -99,6 +106,7 @@ func (s *SessionAffinity) Filter(ctx context.Context, request *scheduling.Infere
 }
 
 // ResponseHeader sets the session header on the response sent to the client.
-func (s *SessionAffinity) ResponseHeader(ctx context.Context, _ *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	sessionutil.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, targetPod)
+func (s *SessionAffinity) ResponseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
+	podToWrite := sessionutil.ResolvePodToWrite(request, s.profileName, targetPod)
+	sessionutil.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, podToWrite)
 }
