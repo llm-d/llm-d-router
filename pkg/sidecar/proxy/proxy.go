@@ -189,6 +189,10 @@ type Config struct {
 	// InsecureSkipVerifyForDecoder configures the proxy to skip TLS verification for requests to the decoder.
 	InsecureSkipVerifyForDecoder bool
 
+	// MetricsPort is the port the Prometheus /metrics endpoint listens on.
+	// 0 disables the metrics server.
+	MetricsPort int
+
 	// SecureServing enables TLS for the sidecar server itself.
 	SecureServing bool
 	// CertPath is the path to TLS certificates for the sidecar server.
