@@ -9,7 +9,7 @@ scenario-specific patches. The atomic components live in `deploy/components/`:
 | `vllm-decode/` | Decode pod — always deployed, includes routing sidecar (removed in EPD scenario) |
 | `vllm-prefill/` | Prefill pod — deployed when `DISAGG_P=true` |
 | `vllm-encode/` | Encoder pod — deployed when `DISAGG_E=true` |
-| `overlays/simulator/` | Adds `--mode=${VLLM_SIM_MODE}`, vLLM render, KV cache and ZMQ args (included by all scenario overlays) |
+| `overlays/simulator/` | Adds `--mode=${VLLM_SIM_MODE}`, KV cache and ZMQ args (included by all scenario overlays) |
 
 These overlays are used by both `scripts/kind-dev-env.sh` (for local KIND clusters)
 and e2e tests (via `kustomize build` + env var substitution).
