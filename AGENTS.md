@@ -30,6 +30,12 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 - The PR addresses that issue and nothing else: no renames, reformatting, refactors, new abstractions, or pattern changes beyond what the issue requires.
 - Unrelated improvements belong in their own issue and PR, not folded into this PR. If you spot dead code or unrelated bugs in passing, mention them; don't fix them.
 - Self-check on the way out: if the change grew larger than expected or the fix feels hacky, rewrite the clean version before opening the PR.
+- Verify the code passs `make presubmit` locally before submitting a PR.
+- Always use the project's `.github/PULL_REQUEST_TEMPLATE.md`.
+  - Document user (not developer) facing changes in the ```release-note``` block. The  `release-notes.d/unreleased/*`
+    file is automatically generated from the block's content - do not create the file directly. 
+  - If you include a test plan section, mark passing tests with [x] so it is clear which ran and passed.
+    List only new tests - indicate functionality verified, not the test names.
 
 ## Code style
 
