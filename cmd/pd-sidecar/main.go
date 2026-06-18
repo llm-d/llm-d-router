@@ -17,44 +17,15 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"net/http"
-	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/pflag"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
-	sidecarmetrics "github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/version"
 )
-
-// metricsShutdownTimeout bounds graceful shutdown of the metrics server so a
-// scraper holding a connection at process exit cannot block termination.
-const metricsShutdownTimeout = 5 * time.Second
-
-// serveMetrics starts a standalone Prometheus metrics HTTP server serving
-// controller-runtime's registry, where sidecar metrics are registered.
-func serveMetrics(ctx context.Context, port int) error {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
-	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("metrics server: %w", err)
-	}
-	return nil
-}
 
 func main() {
 	// Initialize options with defaults
@@ -95,16 +66,6 @@ func main() {
 				}
 			}()
 		}
-	}
-
-	if opts.MetricsPort > 0 {
-		sidecarmetrics.Register()
-		go func() {
-			logger.Info("starting metrics server", "port", opts.MetricsPort)
-			if err := serveMetrics(ctx, opts.MetricsPort); err != nil {
-				logger.Error(err, "metrics server failed")
-			}
-		}()
 	}
 
 	logger.Info("Proxy starting", "Built on", version.BuildRef, "From Git SHA", version.CommitSHA)
