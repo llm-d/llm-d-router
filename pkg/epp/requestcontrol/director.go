@@ -61,9 +61,10 @@ const (
 )
 
 // primaryDecodeEndpoint returns the first endpoint chosen by the primary
-// profile, or nil when the result is empty or malformed. False-return reasons
-// are logged at V(logutil.DEBUG) to disambiguate misconfiguration from a real
-// cache miss.
+// profile, or nil when the result is nil, the primary profile is missing, or
+// it produced no endpoints. Each nil-return reason is logged at
+// V(logutil.DEBUG) so an unexpected nil here can be distinguished from a
+// healthy schedule with no endpoint.
 func primaryDecodeEndpoint(logger logr.Logger, result *fwksched.SchedulingResult) fwksched.Endpoint {
 	debug := logger.V(logutil.DEBUG)
 	if result == nil {
