@@ -425,7 +425,7 @@ The gate uses the same `nonCachedTokens` threshold as the disaggregation decisio
 - Plugin not declared in the config → gate disabled (the EPP forwards conditional-decode requests unconditionally).
 - Prefix-cache state unreadable on the chosen endpoint (e.g. no approximate-prefix producer wired up) → fail closed (412).
 
-This behavior differs from earlier releases, where the gate was a hard-coded check inside the director that forwarded on any cache hit and rejected only on a complete cache miss. The threshold is now in tokens (not blocks), is operator-configurable, and is opt-in via the plugin.
+The threshold is configured in tokens, drives both the disaggregation decision and the 412 gate, and is opt-in: omitting the plugin disables the gate.
 
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.
