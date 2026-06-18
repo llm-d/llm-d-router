@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package metrics defines the Prometheus metrics exposed by the P/D sidecar
-// proxy. Metrics are registered with controller-runtime's registry so the
-// sidecar's /metrics endpoint serves them alongside Go runtime metrics, matching
-// EPP. The subsystem mirrors the sidecar span namespace (llm_d.pd_proxy.*).
+// Package metrics defines the Prometheus metrics exposed by the disaggregation
+// sidecar proxy. Metrics are registered with controller-runtime's registry and
+// served on the sidecar's /metrics route alongside Go runtime metrics, matching
+// EPP. The sidecar handles encode, prefill, and decode disaggregation.
 package metrics
 
 import (
@@ -31,18 +31,19 @@ import (
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
-// subsystem is the Prometheus subsystem for sidecar metrics, aligned with the
-// llm_d.pd_proxy.* span namespace.
-const subsystem = "llm_d_pd_proxy"
+// subsystem is the Prometheus subsystem for the disaggregation sidecar metrics.
+const subsystem = "llm_d_disagg_sidecar"
 
-// Stage labels for prefill/decode error attribution.
+// Stage labels for encode/prefill/decode error attribution.
 const (
+	StageEncode  = "encode"
 	StagePrefill = "prefill"
 	StageDecode  = "decode"
 )
 
-// latencyBuckets covers prefill and decode wall-clock latency in seconds, from a
-// few milliseconds to several minutes (decode can stream for a long time).
+// latencyBuckets covers encode, prefill, and decode wall-clock latency in
+// seconds, from a few milliseconds to several minutes (decode can stream for a
+// long time).
 var latencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}
 
 var (
@@ -60,6 +61,16 @@ var (
 			Subsystem: subsystem,
 			Name:      "disagg_requests_total",
 			Help:      metricsutil.HelpMsgWithStability("Total requests routed through disaggregation, by connector.", compbasemetrics.ALPHA),
+		},
+		[]string{"connector"},
+	)
+
+	encodeDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: subsystem,
+			Name:      "encode_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Encode stage latency in seconds, by connector.", compbasemetrics.ALPHA),
+			Buckets:   latencyBuckets,
 		},
 		[]string{"connector"},
 	)
@@ -103,6 +114,7 @@ func Register() {
 		ctrlmetrics.Registry.MustRegister(
 			requestsTotal,
 			disaggRequestsTotal,
+			encodeDuration,
 			prefillDuration,
 			decodeDuration,
 			errorsTotal,
@@ -118,6 +130,11 @@ func RecordRequest(apiType string) {
 // RecordDisagg counts a request routed through disaggregation for the given connector.
 func RecordDisagg(connector string) {
 	disaggRequestsTotal.WithLabelValues(connector).Inc()
+}
+
+// RecordEncodeDuration records encode stage latency for the given connector.
+func RecordEncodeDuration(connector string, d time.Duration) {
+	encodeDuration.WithLabelValues(connector).Observe(d.Seconds())
 }
 
 // RecordPrefillDuration records prefill stage latency for the given connector.

@@ -73,7 +73,6 @@ const (
 	inlineConfiguration       = "configuration"
 	configurationFile         = "configuration-file"
 	tracingFlag               = "tracing"
-	metricsPortFlag           = "metrics-port"
 
 	// Deprecated flags
 	connector                      = "connector"
@@ -93,7 +92,6 @@ const (
 	defaultVLLMPort              = "8001"
 	defaultDataParallelSize      = 1
 	defaultMooncakeBootstrapPort = 8998
-	defaultMetricsPort           = 9090
 
 	// TLS stages
 	prefillStage = "prefiller"
@@ -127,7 +125,6 @@ type yamlConfiguration struct {
 	PrefillRetryBackoff            string   `json:"prefill-retry-backoff,omitempty"`
 	DecodeChunkSize                int      `json:"decode-chunk-size,omitempty"`
 	Tracing                        *bool    `json:"tracing,omitempty"`
-	MetricsPort                    *int     `json:"metrics-port,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -216,7 +213,6 @@ func NewOptions() *Options {
 			PoolGroup:               routing.InferencePoolAPIGroup,
 			DecodeChunkSize:         0,
 			Tracing:                 false,
-			MetricsPort:             defaultMetricsPort,
 			// MoRI-IO defaults: off, preserving existing NIXLv2 behaviour.
 			// Port defaults match vLLM's MoRI-IO connector defaults.
 			MoRIIOWriteMode:            false,
@@ -266,7 +262,6 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
-	fs.IntVar(&opts.MetricsPort, metricsPortFlag, opts.MetricsPort, "the port the Prometheus /metrics endpoint listens on (0 disables it)")
 
 	// MoRI-IO WRITE-mode flags. Only meaningful with --kv-connector=nixlv2
 	// against vLLM engines running MoRI-IO in WRITE mode.
@@ -551,11 +546,6 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--mooncake-bootstrap-port must be between 1 and 65535, got %d", opts.MooncakeBootstrapPort)
 	}
 
-	// Validate metrics port (0 disables the metrics server)
-	if opts.MetricsPort < 0 || opts.MetricsPort > 65535 {
-		return fmt.Errorf("--metrics-port must be between 0 and 65535 (0 disables it), got %d", opts.MetricsPort)
-	}
-
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
 		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {
@@ -646,9 +636,6 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.MooncakeBootstrapPort != 0 && !opts.isFlagSet(mooncakeBootstrapPortFlag) {
 		opts.MooncakeBootstrapPort = cfg.MooncakeBootstrapPort
-	}
-	if cfg.MetricsPort != nil && !opts.isFlagSet(metricsPortFlag) {
-		opts.MetricsPort = *cfg.MetricsPort
 	}
 	if cfg.DataParallelSize != 0 && !opts.isFlagSet(dataParallelSize) {
 		opts.DataParallelSize = cfg.DataParallelSize

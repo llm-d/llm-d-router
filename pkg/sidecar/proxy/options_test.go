@@ -621,32 +621,6 @@ func TestValidateConnector(t *testing.T) {
 	}
 }
 
-func TestValidateMetricsPort(t *testing.T) {
-	tests := []struct {
-		name        string
-		metricsPort int
-		wantErr     bool
-	}{
-		{"default", defaultMetricsPort, false},
-		{"disabled", 0, false},
-		{"max", 65535, false},
-		{"negative", -1, true},
-		{"too large", 65536, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opts := NewOptions()
-			opts.MetricsPort = tt.metricsPort
-			_ = opts.Complete() // Complete must be called before Validate
-			err := opts.Validate()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
 func TestValidateTLSStages(t *testing.T) {
 	tests := []struct {
 		name      string

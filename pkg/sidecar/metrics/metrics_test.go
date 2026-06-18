@@ -45,12 +45,15 @@ func TestRecordDisagg(t *testing.T) {
 }
 
 func TestRecordDurations(t *testing.T) {
+	encodeDuration.Reset()
 	prefillDuration.Reset()
 	decodeDuration.Reset()
 
+	RecordEncodeDuration("nixl", 50*time.Millisecond)
 	RecordPrefillDuration("nixlv2", 100*time.Millisecond)
 	RecordDecodeDuration("nixlv2", 250*time.Millisecond)
 
+	require.Equal(t, 1, promtestutil.CollectAndCount(encodeDuration))
 	require.Equal(t, 1, promtestutil.CollectAndCount(prefillDuration))
 	require.Equal(t, 1, promtestutil.CollectAndCount(decodeDuration))
 }
@@ -61,9 +64,11 @@ func TestRecordError(t *testing.T) {
 	RecordError("sglang", StagePrefill)
 	RecordError("sglang", StagePrefill)
 	RecordError("sglang", StageDecode)
+	RecordError("nixl", StageEncode)
 
 	require.Equal(t, 2.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues("sglang", StagePrefill)))
 	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues("sglang", StageDecode)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues("nixl", StageEncode)))
 }
 
 // Register must be idempotent so repeated calls do not panic on duplicate
