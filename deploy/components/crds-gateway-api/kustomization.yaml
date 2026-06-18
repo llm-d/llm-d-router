@@ -3,9 +3,13 @@
 #
 # **Warning**: CRDs are cluster-level, so in a shared development environment
 # this needs to be done in a controlled and communicated manner.
+#
+# These files are copied from the pinned Gateway API Go module by `make sync-upstream-crds`
 # ------------------------------------------------------------------------------
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-- https://github.com/kubernetes-sigs/gateway-api/config/crd?ref=v1.5.1
+- gateway.networking.k8s.io_gatewayclasses.yaml
+- gateway.networking.k8s.io_gateways.yaml
+- gateway.networking.k8s.io_httproutes.yaml
