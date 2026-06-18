@@ -328,6 +328,15 @@ var (
 		},
 		[]string{"inference_pool"},
 	)
+
+	llmdFlowControlRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_requests_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of requests processed by the Flow Control layer.", compbasemetrics.ALPHA),
+		},
+		[]string{"outcome", "priority", "inference_pool"},
+	)
 )
 
 // --- llm-d Inference Model Rewrite Metrics ---

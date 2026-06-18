@@ -283,6 +283,8 @@ func (fc *FlowController) EnqueueAndWait(
 			"requestID", req.ID(), "flowKey", flowKey, "outcome", finalOutcome, "err", err)
 	}
 
+	metrics.IncFlowControlRequestsTotal(finalOutcome.String(), priority, req.InferencePoolName())
+
 	return finalOutcome, err
 }
 
