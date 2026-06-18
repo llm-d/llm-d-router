@@ -307,10 +307,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// so it fires regardless of which profile handler is configured.
 	if routing.IsConditionalDecode(reqCtx.Request.Headers) {
 		decider := d.requestControlPlugins.ConditionalDecodeDecider()
-		switch {
-		case decider == nil:
+		if decider == nil {
 			logger.V(logutil.DEBUG).Info("conditional-decode: no decider configured, forwarding")
-		default:
+		} else {
 			endpoint := primaryDecodeEndpoint(logger, result)
 			if endpoint == nil || decider.ShouldRejectConditionalDecode(ctx, reqCtx.SchedulingRequest, endpoint) {
 				logger.V(logutil.DEBUG).Info("conditional-decode: chosen decode worker has no cached prefix, returning 412")
