@@ -21,6 +21,8 @@ package multimodal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -33,6 +35,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
@@ -59,6 +62,7 @@ var (
 	_ requestcontrol.DataProducer = &Producer{}
 	_ requestcontrol.PreRequest   = &Producer{}
 	_ fwkdl.EndpointExtractor     = &Producer{}
+	_ plugin.ConsumerPlugin       = &Producer{}
 )
 
 // Parameters configures the multimodal encoder-cache data producer.
@@ -177,12 +181,12 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrmm.EncoderCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
-// the token-producer before this producer runs and auto-creates one when none
-// is configured; multimodal features come from the tokenizer output.
+// Consumes declares TokenizedPrompt as an optional dependency. When token-producer
+// is configured, the data-layer DAG orders it before this producer; when it is
+// absent, no producer is auto-created and unit-weight fallback extraction is used.
 func (p *Producer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+		Optional: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
 	}
 }
 
@@ -221,24 +225,103 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 	return nil
 }
 
+func (p *Producer) extractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
+	return extractMMItems(request)
+}
+
 // ExtractMMItems returns deterministic, unique multimodal encoder-cache items
-// derived from the tokenized prompt's multimodal features.
+// for a request. Tokenized multimodal features are preferred because they carry
+// placeholder lengths; if unavailable, typed structured media blocks are hashed
+// from stable identifiers.
 func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
-	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
+	return extractMMItems(request)
+}
+
+func extractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
+	if request == nil || request.Body == nil {
 		return nil
 	}
 
+	if request.Body.TokenizedPrompt != nil && len(request.Body.TokenizedPrompt.MultiModalFeatures) > 0 {
+		return itemsFromTokenizedPrompt(request.Body.TokenizedPrompt.MultiModalFeatures)
+	}
+
+	if g := request.Body.Generate; g != nil && g.Features != nil && len(g.Features.MMHashes) > 0 {
+		return itemsFromGenerateFeatures(g.Features.MMHashes)
+	}
+
+	if request.Body.ChatCompletions != nil {
+		return itemsFromChat(request.Body.ChatCompletions)
+	}
+
+	return nil
+}
+
+func itemsFromGenerateFeatures(mmHashes map[string][]string) []attrmm.MatchItem {
 	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, feature := range request.Body.TokenizedPrompt.MultiModalFeatures {
-		if feature.Hash == "" {
-			continue
+	for modality, hashes := range mmHashes {
+		for _, hash := range hashes {
+			addItem(itemsByHash, hash, modality)
 		}
-		addItem(itemsByHash, feature.Hash, string(feature.Modality))
 	}
 	return itemSlice(itemsByHash)
 }
 
+func itemsFromTokenizedPrompt(features []fwkrh.MultiModalFeature) []attrmm.MatchItem {
+	itemsByHash := map[string]attrmm.MatchItem{}
+	for _, feature := range features {
+		addTokenizedItem(itemsByHash, feature)
+	}
+	return itemSlice(itemsByHash)
+}
+
+func addTokenizedItem(itemsByHash map[string]attrmm.MatchItem, feature fwkrh.MultiModalFeature) {
+	if feature.Hash == "" {
+		return
+	}
+	if _, exists := itemsByHash[feature.Hash]; exists {
+		return
+	}
+	weight := 1
+	if feature.Length > 0 {
+		weight = feature.Length
+	}
+	itemsByHash[feature.Hash] = attrmm.MatchItem{Hash: feature.Hash, Size: weight, Modality: string(feature.Modality)}
+}
+
+func itemsFromChat(request *fwkrh.ChatCompletionsRequest) []attrmm.MatchItem {
+	itemsByHash := map[string]attrmm.MatchItem{}
+	for _, message := range request.Messages {
+		for _, block := range message.Content.Structured {
+			addBlockItem(itemsByHash, block)
+		}
+	}
+	return itemSlice(itemsByHash)
+}
+
+func addBlockItem(itemsByHash map[string]attrmm.MatchItem, block fwkrh.ContentBlock) {
+	switch {
+	case block.ImageURL.URL != "":
+		addItem(itemsByHash, contentHash("image_url", block.ImageURL.URL), string(fwkrh.ModalityImage))
+	case block.VideoURL.URL != "":
+		addItem(itemsByHash, contentHash("video_url", block.VideoURL.URL), string(fwkrh.ModalityVideo))
+	case block.InputAudio.Data != "":
+		addItem(itemsByHash, contentHash("input_audio", block.InputAudio.Format+":"+block.InputAudio.Data), string(fwkrh.ModalityAudio))
+	}
+}
+
+func contentHash(kind, identifier string) string {
+	sum := sha256.Sum256([]byte(kind + "\x00" + identifier))
+	return hex.EncodeToString(sum[:])
+}
+
 func addItem(itemsByHash map[string]attrmm.MatchItem, hash, modality string) {
+	if hash == "" {
+		return
+	}
+	if _, exists := itemsByHash[hash]; exists {
+		return
+	}
 	itemsByHash[hash] = attrmm.MatchItem{Hash: hash, Size: 1, Modality: modality}
 }
 
