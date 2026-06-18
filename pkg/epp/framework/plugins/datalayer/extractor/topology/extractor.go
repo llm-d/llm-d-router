@@ -21,13 +21,16 @@ limitations under the License.
 // events. When hostnameLabel is configured, the label value is read from the
 // endpoint event's pod metadata and written as the Topology attribute; Pod
 // notifications are a no-op. When hostnameLabel is empty, the endpoint event
-// tracks the endpoint in an internal map; the Pod notification reads
-// spec.hostname and stamps the matching endpoint.
+// tracks live endpoints keyed by pod identity; the Pod notification (ready pods
+// only) reads spec.hostname, caches it, and stamps all current endpoints for
+// that pod. Whichever event fires first, the attribute is set once both have
+// been processed.
 package topology
 
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -65,10 +68,14 @@ type TopologyExtractor struct {
 	hostnameLabel string
 	dk            fwkplugin.DataKey
 
-	// endpoints maps pod NamespacedName to the live Endpoint.
-	// Used in the no-label path so Pod notifications can find the endpoint to stamp.
-	mu        sync.RWMutex
-	endpoints map[types.NamespacedName]fwkdl.Endpoint
+	// mu guards endpoints and hostnames.
+	mu sync.Mutex
+	// endpoints maps pod identity to all live Endpoints for that pod.
+	// Keyed by {PodName, Namespace} — one pod may have N rank endpoints.
+	endpoints map[types.NamespacedName][]fwkdl.Endpoint
+	// hostnames caches spec.hostname per pod (ready pods only).
+	// Populated by Pod notifications; cleared on pod delete.
+	hostnames map[types.NamespacedName]string
 }
 
 // Factory is the plugin factory for topology-extractor.
@@ -86,7 +93,8 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 		typedName:     fwkplugin.TypedName{Type: attrtopology.TopologyExtractorType, Name: name},
 		hostnameLabel: p.HostnameLabel,
 		dk:            attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(name),
-		endpoints:     make(map[types.NamespacedName]fwkdl.Endpoint),
+		endpoints:     make(map[types.NamespacedName][]fwkdl.Endpoint),
+		hostnames:     make(map[types.NamespacedName]string),
 	}, nil
 }
 
@@ -121,10 +129,17 @@ func (e *TopologyExtractor) RegisterDependencies(r fwkdl.Registrar) error {
 	})
 }
 
+// podKey returns the pod identity key from endpoint metadata.
+// One pod may produce multiple endpoints (one per rank), all sharing the same key.
+func podKey(meta *fwkdl.EndpointMetadata) types.NamespacedName {
+	return types.NamespacedName{Name: meta.PodName, Namespace: meta.NamespacedName.Namespace}
+}
+
 // endpointHandler handles endpoint lifecycle events.
 //
 // With hostnameLabel set: extracts the label value and writes the Topology attribute.
-// Without hostnameLabel: maintains the endpoint map for Pod notification lookups.
+// Without hostnameLabel: maintains the endpoint map for Pod notification lookups,
+// and stamps the attribute immediately if a hostname is already cached.
 type endpointHandler struct {
 	ext *TopologyExtractor
 }
@@ -140,13 +155,10 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	if meta == nil {
 		return nil
 	}
-	key := meta.GetNamespacedName()
 
 	if event.Type == fwkdl.EventDelete {
 		if h.ext.hostnameLabel == "" {
-			h.ext.mu.Lock()
-			delete(h.ext.endpoints, key)
-			h.ext.mu.Unlock()
+			h.removeEndpoint(meta, event.Endpoint)
 		}
 		return nil
 	}
@@ -157,18 +169,46 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 			return nil
 		}
 		event.Endpoint.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{Hostname: val})
-	} else {
-		h.ext.mu.Lock()
-		h.ext.endpoints[key] = event.Endpoint
-		h.ext.mu.Unlock()
+		return nil
+	}
+
+	// No-label path: track endpoint; stamp immediately if hostname already cached.
+	key := podKey(meta)
+	h.ext.mu.Lock()
+	h.ext.endpoints[key] = append(h.ext.endpoints[key], event.Endpoint)
+	hn := h.ext.hostnames[key]
+	h.ext.mu.Unlock()
+
+	if hn != "" {
+		event.Endpoint.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{Hostname: hn})
 	}
 	return nil
+}
+
+func (h *endpointHandler) removeEndpoint(meta *fwkdl.EndpointMetadata, _ fwkdl.Endpoint) {
+	key := podKey(meta)
+	epKey := meta.GetNamespacedName()
+
+	h.ext.mu.Lock()
+	defer h.ext.mu.Unlock()
+
+	eps := h.ext.endpoints[key]
+	eps = slices.DeleteFunc(eps, func(e fwkdl.Endpoint) bool {
+		return e.GetMetadata().GetNamespacedName() == epKey
+	})
+	if len(eps) == 0 {
+		delete(h.ext.endpoints, key)
+	} else {
+		h.ext.endpoints[key] = eps
+	}
 }
 
 // podNotificationHandler handles Pod k8s notification events.
 //
 // With hostnameLabel set: no-op.
-// Without hostnameLabel: reads spec.hostname and stamps the matching endpoint.
+// Without hostnameLabel: caches spec.hostname for ready pods and stamps all
+// current endpoints for that pod. Evicts the cache entry when the pod is
+// deleted or becomes not-ready.
 type podNotificationHandler struct {
 	ext *TopologyExtractor
 }
@@ -184,17 +224,17 @@ func (h *podNotificationHandler) GVK() schema.GroupVersionKind {
 }
 
 func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.NotificationEvent) error {
-	if h.ext.hostnameLabel != "" || event.Type == fwkdl.EventDelete {
+	if h.ext.hostnameLabel != "" {
 		return nil
 	}
 
 	obj := event.Object
 	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 
-	h.ext.mu.RLock()
-	ep, ok := h.ext.endpoints[key]
-	h.ext.mu.RUnlock()
-	if !ok {
+	if event.Type == fwkdl.EventDelete || !isPodReady(obj) {
+		h.ext.mu.Lock()
+		delete(h.ext.hostnames, key)
+		h.ext.mu.Unlock()
 		return nil
 	}
 
@@ -203,6 +243,31 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 		return nil
 	}
 
-	ep.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{Hostname: hostname})
+	h.ext.mu.Lock()
+	h.ext.hostnames[key] = hostname
+	eps := slices.Clone(h.ext.endpoints[key])
+	h.ext.mu.Unlock()
+
+	for _, ep := range eps {
+		ep.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{Hostname: hostname})
+	}
 	return nil
+}
+
+// isPodReady returns true if the pod's Ready condition is True.
+func isPodReady(obj *unstructured.Unstructured) bool {
+	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	for _, c := range conditions {
+		cond, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		t, _, _ := unstructured.NestedString(cond, "type")
+		if t != "Ready" {
+			continue
+		}
+		s, _, _ := unstructured.NestedString(cond, "status")
+		return s == "True"
+	}
+	return false
 }
