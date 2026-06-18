@@ -285,9 +285,12 @@ func (h *maxMinHeap) Remove(handle flowcontrol.QueueItemHandle) (flowcontrol.Que
 		delete(h.handles, handle)
 		h.byteSize.Add(^item.OriginalRequest().ByteSize() + 1) // Atomic subtraction
 
-		// The swapped item at index i might violate the heap property, so we must restore it
-		// by bubbling the item down the heap.
+		// The swapped item at index i might violate the heap property in either direction:
+		//   - downward: it is less extreme than its descendants -> down() fixes this.
+		//   - upward:   it is more extreme than its ancestors   -> up() fixes this.
+		// Both calls are needed because the replacement can come from a different subtree.
 		h.down(i)
+		h.up(i)
 	} else {
 		// It's the last item, just remove it.
 		h.items = h.items[:n]
