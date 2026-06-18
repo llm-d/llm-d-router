@@ -63,8 +63,14 @@ func makeDecoder(v any) *json.Decoder {
 	return json.NewDecoder(bytes.NewReader(b))
 }
 
-func readTopology(ep fwkdl.Endpoint, name string) (*attrtopology.Topology, bool) {
-	dk := attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(name).String()
+const (
+	testPluginName   = "test"
+	testNamespace    = "default"
+	testNodeHostname = "node-hostname"
+)
+
+func readTopology(ep fwkdl.Endpoint) (*attrtopology.Topology, bool) {
+	dk := attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(testPluginName).String()
 	raw, ok := ep.GetAttributes().Get(dk)
 	if !ok {
 		return nil, false
@@ -75,21 +81,21 @@ func readTopology(ep fwkdl.Endpoint, name string) (*attrtopology.Topology, bool)
 
 // newRankEndpoint creates an endpoint whose NamespacedName uses the rank suffix
 // matching the real datastore convention (pod.Name + "-rank-" + idx).
-func newRankEndpoint(podName, namespace string, rank int, labels map[string]string) fwkdl.Endpoint {
+func newRankEndpoint(podName string, rank int, labels map[string]string) fwkdl.Endpoint {
 	epName := fmt.Sprintf("%s-rank-%d", podName, rank)
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: epName, Namespace: namespace},
+		NamespacedName: types.NamespacedName{Name: epName, Namespace: testNamespace},
 		PodName:        podName,
 		Labels:         labels,
 	}, nil)
 }
 
 // makePod builds an unstructured Pod with optional spec.hostname and readiness.
-func makePod(name, namespace, hostname string, ready bool) *unstructured.Unstructured {
+func makePod(name, hostname string, ready bool) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(podGVK)
 	u.SetName(name)
-	u.SetNamespace(namespace)
+	u.SetNamespace(testNamespace)
 	if hostname != "" {
 		_ = unstructured.SetNestedField(u.Object, hostname, "spec", "hostname")
 	}
@@ -144,12 +150,12 @@ func podEvent(t fwkdl.EventType, pod *unstructured.Unstructured) fwkdl.Notificat
 func TestLabel_EndpointHandler_LabelPresent(t *testing.T) {
 	_, epH, _ := getHandlers(t, &params{HostnameLabel: "topology.hostname"})
 
-	ep := newRankEndpoint("worker-1", "default", 0, map[string]string{"topology.hostname": "rack-42"})
+	ep := newRankEndpoint("worker-1", 0, map[string]string{"topology.hostname": "rack-42"})
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
 
-	got, ok := readTopology(ep, "test")
+	got, ok := readTopology(ep)
 	if !ok {
 		t.Fatal("expected Topology attribute")
 	}
@@ -161,11 +167,11 @@ func TestLabel_EndpointHandler_LabelPresent(t *testing.T) {
 func TestLabel_EndpointHandler_LabelMissing(t *testing.T) {
 	_, epH, _ := getHandlers(t, &params{HostnameLabel: "topology.hostname"})
 
-	ep := newRankEndpoint("worker-2", "default", 0, map[string]string{"other": "value"})
+	ep := newRankEndpoint("worker-2", 0, map[string]string{"other": "value"})
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	if _, ok := readTopology(ep, "test"); ok {
+	if _, ok := readTopology(ep); ok {
 		t.Error("expected no Topology attribute when label is absent")
 	}
 }
@@ -173,11 +179,11 @@ func TestLabel_EndpointHandler_LabelMissing(t *testing.T) {
 func TestLabel_EndpointHandler_NilLabels(t *testing.T) {
 	_, epH, _ := getHandlers(t, &params{HostnameLabel: "topology.hostname"})
 
-	ep := newRankEndpoint("worker-3", "default", 0, nil)
+	ep := newRankEndpoint("worker-3", 0, nil)
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	if _, ok := readTopology(ep, "test"); ok {
+	if _, ok := readTopology(ep); ok {
 		t.Error("expected no Topology attribute when pod has no labels")
 	}
 }
@@ -185,11 +191,11 @@ func TestLabel_EndpointHandler_NilLabels(t *testing.T) {
 func TestLabel_EndpointHandler_DeleteIsNoop(t *testing.T) {
 	_, epH, _ := getHandlers(t, &params{HostnameLabel: "topology.hostname"})
 
-	ep := newRankEndpoint("worker-4", "default", 0, map[string]string{"topology.hostname": "rack-1"})
+	ep := newRankEndpoint("worker-4", 0, map[string]string{"topology.hostname": "rack-1"})
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventDelete, ep)); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	if _, ok := readTopology(ep, "test"); ok {
+	if _, ok := readTopology(ep); ok {
 		t.Error("expected no Topology attribute for delete event")
 	}
 }
@@ -197,7 +203,7 @@ func TestLabel_EndpointHandler_DeleteIsNoop(t *testing.T) {
 func TestLabel_PodHandler_IsNoop(t *testing.T) {
 	_, _, podH := getHandlers(t, &params{HostnameLabel: "topology.hostname"})
 
-	pod := makePod("worker-1", "default", "actual-hostname", true)
+	pod := makePod("worker-1", "actual-hostname", true)
 	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, pod)); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
@@ -208,22 +214,22 @@ func TestLabel_PodHandler_IsNoop(t *testing.T) {
 func TestNoLabel_PodFirst_SingleEndpoint(t *testing.T) {
 	_, epH, podH := getHandlers(t, nil)
 
-	pod := makePod("worker-5", "default", "node-hostname", true)
+	pod := makePod("worker-5", testNodeHostname, true)
 	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, pod)); err != nil {
 		t.Fatalf("podH.Extract: %v", err)
 	}
 
-	ep := newRankEndpoint("worker-5", "default", 0, nil)
+	ep := newRankEndpoint("worker-5", 0, nil)
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
 		t.Fatalf("epH.Extract: %v", err)
 	}
 
-	got, ok := readTopology(ep, "test")
+	got, ok := readTopology(ep)
 	if !ok {
 		t.Fatal("expected Topology attribute")
 	}
-	if got.Hostname != "node-hostname" {
-		t.Errorf("hostname = %q, want %q", got.Hostname, "node-hostname")
+	if got.Hostname != testNodeHostname {
+		t.Errorf("hostname = %q, want %q", got.Hostname, testNodeHostname)
 	}
 }
 
@@ -231,14 +237,14 @@ func TestNoLabel_PodFirst_MultiPort(t *testing.T) {
 	_, epH, podH := getHandlers(t, nil)
 
 	// Pod notification fires once.
-	pod := makePod("worker-6", "default", "node-hostname", true)
+	pod := makePod("worker-6", testNodeHostname, true)
 	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, pod)); err != nil {
 		t.Fatalf("podH.Extract: %v", err)
 	}
 
 	// Two rank endpoints arrive.
-	ep0 := newRankEndpoint("worker-6", "default", 0, nil)
-	ep1 := newRankEndpoint("worker-6", "default", 1, nil)
+	ep0 := newRankEndpoint("worker-6", 0, nil)
+	ep1 := newRankEndpoint("worker-6", 1, nil)
 	for i, ep := range []fwkdl.Endpoint{ep0, ep1} {
 		if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
 			t.Fatalf("epH.Extract rank %d: %v", i, err)
@@ -246,12 +252,12 @@ func TestNoLabel_PodFirst_MultiPort(t *testing.T) {
 	}
 
 	for i, ep := range []fwkdl.Endpoint{ep0, ep1} {
-		got, ok := readTopology(ep, "test")
+		got, ok := readTopology(ep)
 		if !ok {
 			t.Fatalf("rank %d: expected Topology attribute", i)
 		}
-		if got.Hostname != "node-hostname" {
-			t.Errorf("rank %d: hostname = %q, want %q", i, got.Hostname, "node-hostname")
+		if got.Hostname != testNodeHostname {
+			t.Errorf("rank %d: hostname = %q, want %q", i, got.Hostname, testNodeHostname)
 		}
 	}
 }
@@ -261,48 +267,48 @@ func TestNoLabel_PodFirst_MultiPort(t *testing.T) {
 func TestNoLabel_EndpointFirst_SingleEndpoint(t *testing.T) {
 	_, epH, podH := getHandlers(t, nil)
 
-	ep := newRankEndpoint("worker-7", "default", 0, nil)
+	ep := newRankEndpoint("worker-7", 0, nil)
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
 		t.Fatalf("epH.Extract: %v", err)
 	}
 
-	pod := makePod("worker-7", "default", "node-hostname", true)
+	pod := makePod("worker-7", testNodeHostname, true)
 	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, pod)); err != nil {
 		t.Fatalf("podH.Extract: %v", err)
 	}
 
-	got, ok := readTopology(ep, "test")
+	got, ok := readTopology(ep)
 	if !ok {
 		t.Fatal("expected Topology attribute")
 	}
-	if got.Hostname != "node-hostname" {
-		t.Errorf("hostname = %q, want %q", got.Hostname, "node-hostname")
+	if got.Hostname != testNodeHostname {
+		t.Errorf("hostname = %q, want %q", got.Hostname, testNodeHostname)
 	}
 }
 
 func TestNoLabel_EndpointFirst_MultiPort(t *testing.T) {
 	_, epH, podH := getHandlers(t, nil)
 
-	ep0 := newRankEndpoint("worker-8", "default", 0, nil)
-	ep1 := newRankEndpoint("worker-8", "default", 1, nil)
+	ep0 := newRankEndpoint("worker-8", 0, nil)
+	ep1 := newRankEndpoint("worker-8", 1, nil)
 	for i, ep := range []fwkdl.Endpoint{ep0, ep1} {
 		if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
 			t.Fatalf("epH.Extract rank %d: %v", i, err)
 		}
 	}
 
-	pod := makePod("worker-8", "default", "node-hostname", true)
+	pod := makePod("worker-8", testNodeHostname, true)
 	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, pod)); err != nil {
 		t.Fatalf("podH.Extract: %v", err)
 	}
 
 	for i, ep := range []fwkdl.Endpoint{ep0, ep1} {
-		got, ok := readTopology(ep, "test")
+		got, ok := readTopology(ep)
 		if !ok {
 			t.Fatalf("rank %d: expected Topology attribute", i)
 		}
-		if got.Hostname != "node-hostname" {
-			t.Errorf("rank %d: hostname = %q, want %q", i, got.Hostname, "node-hostname")
+		if got.Hostname != testNodeHostname {
+			t.Errorf("rank %d: hostname = %q, want %q", i, got.Hostname, testNodeHostname)
 		}
 	}
 }
@@ -313,17 +319,17 @@ func TestNoLabel_NotReadyPod_NotCached(t *testing.T) {
 	ext, epH, podH := getHandlers(t, nil)
 
 	// Not-ready pod notification — hostname must not be cached.
-	pod := makePod("worker-9", "default", "node-hostname", false)
+	pod := makePod("worker-9", testNodeHostname, false)
 	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, pod)); err != nil {
 		t.Fatalf("podH.Extract: %v", err)
 	}
 
-	ep := newRankEndpoint("worker-9", "default", 0, nil)
+	ep := newRankEndpoint("worker-9", 0, nil)
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
 		t.Fatalf("epH.Extract: %v", err)
 	}
 
-	if _, ok := readTopology(ep, "test"); ok {
+	if _, ok := readTopology(ep); ok {
 		t.Error("expected no Topology attribute for not-ready pod")
 	}
 
@@ -341,7 +347,7 @@ func TestNoLabel_NotReadyEvictsCache(t *testing.T) {
 	podKey := types.NamespacedName{Name: "worker-10", Namespace: "default"}
 
 	// Pod is ready — hostname cached.
-	ready := makePod("worker-10", "default", "node-hostname", true)
+	ready := makePod("worker-10", testNodeHostname, true)
 	_ = podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, ready))
 
 	ext.mu.Lock()
@@ -352,7 +358,7 @@ func TestNoLabel_NotReadyEvictsCache(t *testing.T) {
 	}
 
 	// Pod becomes not-ready — cache evicted.
-	notReady := makePod("worker-10", "default", "node-hostname", false)
+	notReady := makePod("worker-10", testNodeHostname, false)
 	_ = podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, notReady))
 
 	ext.mu.Lock()
@@ -368,16 +374,16 @@ func TestNoLabel_NotReadyEvictsCache(t *testing.T) {
 func TestNoLabel_EmptyHostname_NoAttribute(t *testing.T) {
 	_, epH, podH := getHandlers(t, nil)
 
-	ep := newRankEndpoint("worker-11", "default", 0, nil)
+	ep := newRankEndpoint("worker-11", 0, nil)
 	_ = epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep))
 
 	// Ready pod but spec.hostname not set.
-	pod := makePod("worker-11", "default", "", true)
+	pod := makePod("worker-11", "", true)
 	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, pod)); err != nil {
 		t.Fatalf("podH.Extract: %v", err)
 	}
 
-	if _, ok := readTopology(ep, "test"); ok {
+	if _, ok := readTopology(ep); ok {
 		t.Error("expected no Topology attribute when spec.hostname is empty")
 	}
 }
@@ -386,7 +392,7 @@ func TestNoLabel_PodDelete_ClearsHostnameCache(t *testing.T) {
 	ext, _, podH := getHandlers(t, nil)
 
 	podKey := types.NamespacedName{Name: "worker-12", Namespace: "default"}
-	ready := makePod("worker-12", "default", "node-hostname", true)
+	ready := makePod("worker-12", testNodeHostname, true)
 	_ = podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, ready))
 
 	ext.mu.Lock()
@@ -396,7 +402,7 @@ func TestNoLabel_PodDelete_ClearsHostnameCache(t *testing.T) {
 		t.Fatal("precondition: expected hostname cached")
 	}
 
-	deleted := makePod("worker-12", "default", "", false)
+	deleted := makePod("worker-12", "", false)
 	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventDelete, deleted)); err != nil {
 		t.Fatalf("podH.Extract delete: %v", err)
 	}
@@ -413,8 +419,8 @@ func TestNoLabel_EndpointDelete_RemovesFromMap(t *testing.T) {
 	ext, epH, _ := getHandlers(t, nil)
 
 	podKey := types.NamespacedName{Name: "worker-13", Namespace: "default"}
-	ep0 := newRankEndpoint("worker-13", "default", 0, nil)
-	ep1 := newRankEndpoint("worker-13", "default", 1, nil)
+	ep0 := newRankEndpoint("worker-13", 0, nil)
+	ep1 := newRankEndpoint("worker-13", 1, nil)
 
 	_ = epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep0))
 	_ = epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep1))

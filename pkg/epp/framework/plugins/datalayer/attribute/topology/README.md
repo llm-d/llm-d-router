@@ -9,12 +9,12 @@ Carries the locality of an endpoint. Populated once at endpoint creation.
 
 - **Key**: `TopologyAttributeKey` (`Topology`)
 - **Fields**:
-  - `Hostname`: The host name of the endpoint, derived from the Pod hostname
-    field or from a user-configured label.
+  - `Hostname`: The host name of the endpoint. Sourced from `spec.hostname`
+    on the Pod object, or from a user-configured pod label.
 
 ## Producers
 
 The following plugins produce this attribute:
 
-- **`topology-extractor`** (Data Layer): Sets the `Topology` attribute on each
-  endpoint when it is created, using the Pod hostname or a configured label.
+- **`topology-extractor`** (Data Layer): Sets the `Topology` attribute using
+  `spec.hostname` from the Pod object, or the value of a configured pod label.
