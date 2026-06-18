@@ -327,8 +327,7 @@ func TestManagedQueue_FlowQueueAccessor(t *testing.T) {
 		q := &mocks.MockSafeQueue{}
 		harness := newMockedMqHarness(t, q, flowKey)
 		item := fwkfcmocks.NewMockQueueItemAccessor(100, "req-1", flowKey)
-		q.PeekHeadV = item
-		q.PeekTailV = item
+		q.PeekV = item
 		q.NameV = "MockQueue"
 		q.CapabilitiesV = []flowcontrol.QueueCapability{flowcontrol.CapabilityFIFO}
 		require.NoError(t, harness.mq.Add(item), "Test setup: Adding an item must succeed")
@@ -346,21 +345,18 @@ func TestManagedQueue_FlowQueueAccessor(t *testing.T) {
 		assert.Equal(t, harness.mockPolicy, accessor.OrderingPolicy(),
 			"Accessor OrderingPolicy() must return the policy provided by the configured ordering policy")
 
-		peekedHead := accessor.PeekHead()
-		assert.Same(t, item, peekedHead, "Accessor PeekHead() must return the exact item instance at the head")
-
-		peekedTail := accessor.PeekTail()
-		assert.Same(t, item, peekedTail, "Accessor PeekTail() must return the exact item instance at the tail")
+		peekedHead := accessor.Peek()
+		assert.Same(t, item, peekedHead, "Accessor Peek() must return the exact item instance at the head")
 	})
 
 	t.Run("EmptyQueue", func(t *testing.T) {
 		t.Parallel()
 		flowKey := flowcontrol.FlowKey{ID: "flow", Priority: 1}
 		q := &mocks.MockSafeQueue{}
-		q.PeekHeadV = nil
+		q.PeekV = nil
 		harness := newMockedMqHarness(t, q, flowKey)
 		accessor := harness.mq.FlowQueueAccessor()
-		assert.Nil(t, accessor.PeekHead(), "Accessor PeekHead() should return an nil on an empty queue")
+		assert.Nil(t, accessor.Peek(), "Accessor Peek() should return an nil on an empty queue")
 	})
 }
 
