@@ -18,6 +18,13 @@ standalone validations
 {{- if not (or (eq $proxyMode "sidecar") (eq $proxyMode "service")) -}}
   {{- fail (printf ".Values.router.proxy.mode must be one of [sidecar, service], got %q" $proxyMode) -}}
 {{- end -}}
+{{- /* Without an InferencePool the EPP --endpoint-selector is rendered from modelServers.matchLabels; an empty selector is rejected by EPP at startup, so require it here. */ -}}
+{{- $useInferencePool := ne .Values.router.inferencePool.create false -}}
+{{- if not $useInferencePool -}}
+  {{- if or (empty .Values.router.modelServers) (not .Values.router.modelServers.matchLabels) -}}
+    {{- fail ".Values.router.modelServers.matchLabels is required when .Values.router.inferencePool.create=false: standalone mode renders the EPP --endpoint-selector from matchLabels and cannot start with an empty selector" -}}
+  {{- end -}}
+{{- end -}}
 {{- $failOpen := index $proxy "failOpen" -}}
 {{- if and (not (kindIs "invalid" $failOpen)) (not (kindIs "bool" $failOpen)) -}}
   {{- fail (printf ".Values.router.proxy.failOpen must be a boolean, got %q" (toString $failOpen)) -}}

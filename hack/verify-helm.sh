@@ -148,6 +148,13 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
 done
 
 echo "Running llm-d-router-standalone negative validation tests..."
+missing_endpoint_selector_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.inferencePool.create=false --set router.modelServers.type=vllm --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
+echo "Executing: ${missing_endpoint_selector_command}"
+if eval "${missing_endpoint_selector_command}"; then
+  echo "Helm template unexpectedly succeeded for inferencePool.create=false without modelServers.matchLabels"
+  exit 1
+fi
+
 invalid_proxy_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.proxyType=bogus >/dev/null"
 echo "Executing: ${invalid_proxy_command}"
 if eval "${invalid_proxy_command}"; then
