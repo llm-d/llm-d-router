@@ -133,7 +133,7 @@ func TestCalculateSLODeadline(t *testing.T) {
 	reqBoth := mocks.NewMockFlowControlRequest(1, "both", testFlowKey)
 	reqBoth.ReceivedTimestampV = now
 	reqBoth.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{
-		sloTtftHeader:                "200",
+		metadata.TTFTSLOHeaderKey:    "200",
 		metadata.OldTTFTSLOHeaderKey: "50",
 	}}
 	accBoth := &mocks.MockQueueItemAccessor{OriginalRequestV: reqBoth}
