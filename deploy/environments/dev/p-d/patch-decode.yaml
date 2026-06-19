@@ -17,3 +17,5 @@ spec:
         - "--mooncake-bootstrap-port=8000"
         - "--secure-proxy=false"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
+        - "${SIDECAR_EXTRA_ARGS_BOOL}"
+        - "${SIDECAR_EXTRA_ARGS}"

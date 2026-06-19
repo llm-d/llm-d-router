@@ -21,6 +21,8 @@ import (
 	. "github.com/onsi/gomega"    // nolint:revive
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/set"
 )
 
@@ -49,19 +51,23 @@ var _ = Describe("AllowlistValidator", func() {
 				enabled:   true,
 				namespace: "test-namespace",
 				allowedTargets: set.New(
-					"10.244.1.100",
-					"valid-pod",
-					"valid-pod.test-namespace.svc.cluster.local",
+					"10.244.1.100:8000",
+					"valid-pod:8000",
+					"valid-pod.test-namespace.svc.cluster.local:8000",
 				),
+				poolPorts: make(map[string][]int),
 			}
 		})
 
-		It("should allow targets in the allowlist", func() {
+		It("should allow targets matching host:port in the allowlist", func() {
 			Expect(validator.IsAllowed("10.244.1.100:8000")).To(BeTrue())
 			Expect(validator.IsAllowed("valid-pod:8000")).To(BeTrue())
 			Expect(validator.IsAllowed("valid-pod.test-namespace.svc.cluster.local:8000")).To(BeTrue())
-			Expect(validator.IsAllowed("10.244.1.100:8001")).To(BeTrue()) // Different port, same host
-			Expect(validator.IsAllowed("valid-pod:9999")).To(BeTrue())    // Any port on allowed host
+		})
+
+		It("should block targets with wrong port", func() {
+			Expect(validator.IsAllowed("10.244.1.100:9090")).To(BeFalse())
+			Expect(validator.IsAllowed("valid-pod:9999")).To(BeFalse())
 		})
 
 		It("should block targets not in the allowlist", func() {
@@ -70,16 +76,141 @@ var _ = Describe("AllowlistValidator", func() {
 			Expect(validator.IsAllowed("evil-pod:8000")).To(BeFalse())
 		})
 
-		It("should parse host:port correctly", func() {
-			// Test host:port format parsing
-			Expect(extractHost("10.244.1.100:8000")).To(Equal("10.244.1.100"))
-			Expect(extractHost("valid-pod:8000")).To(Equal("valid-pod"))
-			// Just hostname (no port)
-			Expect(extractHost("valid-pod")).To(Equal("valid-pod"))
-			// IPv6 addresses (net.SplitHostPort handles these correctly
-			Expect(extractHost("[::1]:8000")).To(Equal("::1"))
-			// IPv6 without port
-			Expect(extractHost("::1")).To(Equal("::1"))
+		It("should block host-only input without port", func() {
+			Expect(validator.IsAllowed("10.244.1.100")).To(BeFalse())
+			Expect(validator.IsAllowed("valid-pod")).To(BeFalse())
+		})
+	})
+
+	Context("updatePodsForPool selector parsing", func() {
+		var validator *AllowlistValidator
+
+		BeforeEach(func() {
+			validator = &AllowlistValidator{
+				enabled:        true,
+				namespace:      "test-namespace",
+				allowedTargets: set.New[string](),
+				poolPorts:      make(map[string][]int),
+				podInformers:   make(map[string]cache.SharedInformer),
+				podStopChans:   make(map[string]chan struct{}),
+				stopCh:         make(chan struct{}),
+			}
+		})
+
+		AfterEach(func() {
+			validator.Stop()
+		})
+
+		It("should read selector from spec.selector.matchLabels", func() {
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"name": "test-pool",
+					},
+					"spec": map[string]interface{}{
+						"selector": map[string]interface{}{
+							"matchLabels": map[string]interface{}{
+								"app": "test-app",
+							},
+						},
+						"targetPorts": []interface{}{
+							map[string]interface{}{
+								"number": float64(8000),
+							},
+						},
+					},
+				},
+			}
+
+			validator.updatePodsForPool(pool)
+
+			validator.poolPortsMu.RLock()
+			defer validator.poolPortsMu.RUnlock()
+			Expect(validator.poolPorts["test-pool"]).To(Equal([]int{8000}))
+		})
+
+		It("should extract multiple targetPorts", func() {
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"name": "multi-port-pool",
+					},
+					"spec": map[string]interface{}{
+						"selector": map[string]interface{}{
+							"matchLabels": map[string]interface{}{
+								"app": "test-app",
+							},
+						},
+						"targetPorts": []interface{}{
+							map[string]interface{}{
+								"number": float64(8000),
+							},
+							map[string]interface{}{
+								"number": float64(8001),
+							},
+						},
+					},
+				},
+			}
+
+			validator.updatePodsForPool(pool)
+
+			validator.poolPortsMu.RLock()
+			defer validator.poolPortsMu.RUnlock()
+			Expect(validator.poolPorts["multi-port-pool"]).To(Equal([]int{8000, 8001}))
+		})
+
+		It("should fail gracefully with missing matchLabels", func() {
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"name": "bad-pool",
+					},
+					"spec": map[string]interface{}{
+						"selector": map[string]interface{}{
+							"matchExpressions": []interface{}{},
+						},
+					},
+				},
+			}
+
+			validator.updatePodsForPool(pool)
+
+			validator.poolPortsMu.RLock()
+			defer validator.poolPortsMu.RUnlock()
+			Expect(validator.poolPorts).ToNot(HaveKey("bad-pool"))
+		})
+	})
+
+	Context("addPodToAllowlist", func() {
+		var validator *AllowlistValidator
+
+		BeforeEach(func() {
+			validator = &AllowlistValidator{
+				enabled:        true,
+				allowedTargets: set.New[string](),
+				poolPorts: map[string][]int{
+					"test-pool": {8000},
+				},
+			}
+		})
+
+		It("should format IPv6 pod IP targets like EPP headers", func() {
+			pod := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"name": "vllm-pod",
+					},
+					"status": map[string]interface{}{
+						"podIP": "fd00::10",
+					},
+				},
+			}
+
+			validator.addPodToAllowlist(pod, "test-pool")
+
+			Expect(validator.IsAllowed("[fd00::10]:8000")).To(BeTrue())
+			Expect(validator.IsAllowed("fd00::10:8000")).To(BeFalse())
 		})
 	})
 })

@@ -1,0 +1,14 @@
+# ------------------------------------------------------------------------------
+# P/D (Prefill/Decode) with SSRF Protection
+#
+# Deploys the full dev stack with separate prefill and decode deployments.
+#
+# Applies sidecar RBAC required for SSRF protection. Sidecar flags are injected
+# through the base P/D overlay's SIDECAR_EXTRA_ARGS placeholders.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../p-d/
+- ../../../components/vllm-decode/rbac-ssrf.yaml

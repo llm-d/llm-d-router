@@ -35,6 +35,8 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${VLLM_EXTRA_ARGS_E}":       "",
 		"${VLLM_EXTRA_ARGS_P}":       "",
 		"${VLLM_EXTRA_ARGS_D}":       "",
+		"${SIDECAR_EXTRA_ARGS_BOOL}": "",
+		"${SIDECAR_EXTRA_ARGS}":      "",
 	}
 	for k, v := range extra {
 		subs[k] = v

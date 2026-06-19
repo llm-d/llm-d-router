@@ -116,6 +116,18 @@ func getPodNames(labels map[string]string) []string {
 	return names
 }
 
+// getPodIPs returns the PodIPs of all running pods matching the given label selector.
+func getPodIPs(labels map[string]string) []string {
+	pods := getPods(labels)
+	ips := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		if pod.Status.PodIP != "" {
+			ips = append(ips, pod.Status.PodIP)
+		}
+	}
+	return ips
+}
+
 func podsInDeploymentsReady(objects []string) {
 	isDeploymentReady := func(deploymentName string) bool {
 		var deployment appsv1.Deployment
