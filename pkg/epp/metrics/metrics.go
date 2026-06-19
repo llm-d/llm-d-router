@@ -333,7 +333,7 @@ var (
 		[]string{"slo_class", "inference_pool"},
 	)
 
-	// Deprecated: Use llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds instead.
+	// Deprecated: Use llm_d_epp_flow_control_dispatch_cycle_duration_seconds instead.
 	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	flowControlDispatchCycleDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
