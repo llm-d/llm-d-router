@@ -211,7 +211,13 @@ func (fc *FlowController) EnqueueAndWait(
 	flowKey := req.FlowKey()
 	priority := strconv.Itoa(flowKey.Priority)
 	reqBytes := req.ByteSize()
-	sloClass := extractHeader(req, metadata.ObjectiveKey)
+	sloClass := metrics.SLOClassNone
+	if r := req.InferenceRequest(); r != nil {
+		sloClass = fwkrequest.GetHeader(r.Headers, metadata.ObjectiveKey)
+		if sloClass == "" {
+			sloClass = metrics.SLOClassNone
+		}
+	}
 	if sloClass == "" {
 		sloClass = metrics.SLOClassNone
 	}
@@ -338,13 +344,6 @@ func (fc *FlowController) withConnectionWithFallback(
 	return fc.registry.WithConnection(fallbackKey, func(conn contracts.ActiveFlowConnection) error {
 		return fn(conn, fallback)
 	})
-}
-func extractHeader(req flowcontrol.FlowControlRequest, name string) string {
-	infReq := req.InferenceRequest()
-	if infReq == nil || infReq.Headers == nil {
-		return ""
-	}
-	return fwkrequest.GetHeader(infReq.Headers, name)
 }
 
 // tryDistribution handles a single attempt to submit a request to the processor.

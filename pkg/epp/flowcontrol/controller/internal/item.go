@@ -168,9 +168,12 @@ func (fi *FlowItem) finalizeInternal(outcome types.QueueOutcome, err error) {
 		fi.OriginalRequest().ModelName(), fi.OriginalRequest().TargetModelName(),
 		duration)
 
-	sloClass := extractHeader(fi.originalRequest, metadata.ObjectiveKey)
-	if sloClass == "" {
-		sloClass = metrics.SLOClassNone
+	sloClass := metrics.SLOClassNone
+	if req := fi.originalRequest.InferenceRequest(); req != nil {
+		sloClass = request.GetHeader(req.Headers, metadata.ObjectiveKey)
+		if sloClass == "" {
+			sloClass = metrics.SLOClassNone
+		}
 	}
 	metrics.RecordFlowControlSLORequestQueueDuration(
 		sloClass, outcomeStr, fi.originalRequest.InferencePoolName(),
@@ -178,14 +181,6 @@ func (fi *FlowItem) finalizeInternal(outcome types.QueueOutcome, err error) {
 
 	fi.done <- finalState
 	close(fi.done)
-}
-
-func extractHeader(req flowcontrol.FlowControlRequest, name string) string {
-	infReq := req.InferenceRequest()
-	if infReq == nil || infReq.Headers == nil {
-		return ""
-	}
-	return request.GetHeader(infReq.Headers, name)
 }
 
 // inferOutcome determines the correct QueueOutcome and Error based on the cause of finalization and whether the item
