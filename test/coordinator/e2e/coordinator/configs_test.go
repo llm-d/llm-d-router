@@ -38,7 +38,7 @@ pipeline:
   steps:
     - type: replace-media-urls
       params:
-        download_timeout: 10s
+        download_timeout: 30s
         max_concurrent_downloads: 10
     - type: render
       params:
