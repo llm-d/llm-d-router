@@ -21,6 +21,8 @@ import (
 	. "github.com/onsi/gomega"    // nolint:revive
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/set"
 )
 
@@ -38,6 +40,139 @@ var _ = Describe("AllowlistValidator", func() {
 			Expect(validator.IsAllowed("malicious.example.com:8080")).To(BeTrue())
 			Expect(validator.IsAllowed("10.0.0.1:8000")).To(BeTrue())
 			Expect(validator.IsAllowed("http://evil.host/ssrf")).To(BeTrue())
+		})
+	})
+
+	Context("poolSelector", func() {
+		It("should extract selector from GA InferencePool (matchLabels)", func() {
+			av := &AllowlistValidator{
+				gvr: schema.GroupVersionResource{
+					Group:    routing.InferencePoolAPIGroup,
+					Version:  "v1",
+					Resource: "inferencepools",
+				},
+			}
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "inference.networking.k8s.io/v1",
+					"kind":       "InferencePool",
+					"metadata":   map[string]interface{}{"name": "test-pool"},
+					"spec": map[string]interface{}{
+						"selector": map[string]interface{}{
+							"matchLabels": map[string]interface{}{
+								"app.kubernetes.io/name": "my-model",
+								"component":              "serving",
+							},
+						},
+					},
+				},
+			}
+
+			selector, err := av.poolSelector(pool)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(selector.String()).To(SatisfyAll(
+				ContainSubstring("app.kubernetes.io/name=my-model"),
+				ContainSubstring("component=serving"),
+			))
+		})
+
+		It("should extract selector from deprecated alpha InferencePool (flat map)", func() {
+			av := &AllowlistValidator{
+				gvr: schema.GroupVersionResource{
+					Group:    "inference.networking.x-k8s.io",
+					Version:  "v1alpha2",
+					Resource: "inferencepools",
+				},
+			}
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+					"kind":       "InferencePool",
+					"metadata":   map[string]interface{}{"name": "test-pool"},
+					"spec": map[string]interface{}{
+						"selector": map[string]interface{}{
+							"app.kubernetes.io/name": "my-model",
+							"component":              "serving",
+						},
+					},
+				},
+			}
+
+			selector, err := av.poolSelector(pool)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(selector.String()).To(SatisfyAll(
+				ContainSubstring("app.kubernetes.io/name=my-model"),
+				ContainSubstring("component=serving"),
+			))
+		})
+
+		It("should fail for GA pool with flat selector (no matchLabels)", func() {
+			av := &AllowlistValidator{
+				gvr: schema.GroupVersionResource{
+					Group:    routing.InferencePoolAPIGroup,
+					Version:  "v1",
+					Resource: "inferencepools",
+				},
+			}
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "inference.networking.k8s.io/v1",
+					"kind":       "InferencePool",
+					"metadata":   map[string]interface{}{"name": "test-pool"},
+					"spec": map[string]interface{}{
+						"selector": map[string]interface{}{
+							"app": "my-model",
+						},
+					},
+				},
+			}
+
+			_, err := av.poolSelector(pool)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("matchLabels"))
+		})
+
+		It("should fail when spec is missing", func() {
+			av := &AllowlistValidator{
+				gvr: schema.GroupVersionResource{
+					Group:    routing.InferencePoolAPIGroup,
+					Version:  "v1",
+					Resource: "inferencepools",
+				},
+			}
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "inference.networking.k8s.io/v1",
+					"kind":       "InferencePool",
+					"metadata":   map[string]interface{}{"name": "test-pool"},
+				},
+			}
+
+			_, err := av.poolSelector(pool)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec"))
+		})
+
+		It("should fail when selector is missing", func() {
+			av := &AllowlistValidator{
+				gvr: schema.GroupVersionResource{
+					Group:    "inference.networking.x-k8s.io",
+					Version:  "v1alpha2",
+					Resource: "inferencepools",
+				},
+			}
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+					"kind":       "InferencePool",
+					"metadata":   map[string]interface{}{"name": "test-pool"},
+					"spec":       map[string]interface{}{},
+				},
+			}
+
+			_, err := av.poolSelector(pool)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("selector"))
 		})
 	})
 
