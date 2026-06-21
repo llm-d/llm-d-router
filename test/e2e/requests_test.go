@@ -11,6 +11,7 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/packages/param"
 )
 
 func newOpenAIClient() *openai.Client {
@@ -22,6 +23,30 @@ func extractInferenceHeaders(httpResp *http.Response) (string, string, string) {
 	return httpResp.Header.Get("x-inference-namespace"),
 		httpResp.Header.Get("x-inference-pod"),
 		httpResp.Header.Get("x-inference-port")
+}
+
+func generateAndCheckLoad(count int) {
+	for range count {
+		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+		gomega.Expect(prefillPods).Should(gomega.BeEmpty())
+		gomega.Expect(decodePods).Should(gomega.HaveLen(1))
+
+		nsHdr, podHdr, _ := runCompletion(simplePrompt, simModelName)
+		gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+		gomega.Expect(podHdr).Should(gomega.Equal(decodePods[0]))
+
+		nsHdr, podHdr, _ = runChatCompletion(simplePrompt, simModelName)
+		gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+		gomega.Expect(podHdr).Should(gomega.Equal(decodePods[0]))
+
+		nsHdr, podHdr, _ = runEmbeddings(singleEmbedding, simModelName)
+		gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+		gomega.Expect(podHdr).Should(gomega.Equal(decodePods[0]))
+
+		nsHdr, podHdr, _ = runEmbeddings(doubleEmbedding, simModelName)
+		gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+		gomega.Expect(podHdr).Should(gomega.Equal(decodePods[0]))
+	}
 }
 
 // doPost sends a POST request with a JSON body to the given path, asserts HTTP 200,
@@ -44,6 +69,27 @@ func doPost(path, body string, extraHeaders map[string]string) (string, string, 
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
 	return resp.Header.Get("x-inference-namespace"), resp.Header.Get("x-inference-pod"), respBody
+}
+
+// doPostWithError sends a POST request with a JSON body to the given path
+// and returns the status code and the response body.
+func doPostWithError(path, body string, extraHeaders map[string]string) (int, []byte) {
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%s%s", port, path), strings.NewReader(body))
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	defer func() {
+		gomega.Expect(resp.Body.Close()).ToNot(gomega.HaveOccurred())
+	}()
+
+	respBody, err := io.ReadAll(resp.Body)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+
+	return resp.StatusCode, respBody
 }
 
 func runCompletion(prompt string, theModel openai.CompletionNewParamsModel) (string, string, string) {
@@ -111,6 +157,27 @@ func runChatCompletion(prompt, modelName string) (string, string, string) {
 	gomega.Expect(resp.Choices).Should(gomega.HaveLen(1))
 	gomega.Expect(resp.Choices[0].FinishReason).Should(gomega.Equal("stop"))
 	gomega.Expect(resp.Choices[0].Message.Content).Should(gomega.Equal(prompt))
+
+	return extractInferenceHeaders(httpResp)
+}
+
+func runEmbeddings(embeddings []string, modelName string) (string, string, string) {
+	var httpResp *http.Response
+
+	input := openai.EmbeddingNewParamsInputUnion{}
+	if len(embeddings) == 1 {
+		input.OfString = param.NewOpt(embeddings[0])
+	} else {
+		input.OfArrayOfStrings = embeddings
+	}
+
+	params := openai.EmbeddingNewParams{
+		Input: input,
+		Model: modelName,
+	}
+	resp, err := newOpenAIClient().Embeddings.New(testConfig.Context, params, option.WithResponseInto(&httpResp))
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Expect(resp.Data).Should(gomega.HaveLen(len(embeddings)))
 
 	return extractInferenceHeaders(httpResp)
 }
@@ -216,4 +283,87 @@ func cacheThresholdHeaders(force bool) map[string]string {
 		return map[string]string{"X-Cache-Threshold-Finish-Reason": "true"}
 	}
 	return nil
+}
+
+func verifyMetrics(infPoolName string, numTargetPorts int) {
+
+	generateAndCheckLoad(10)
+
+	// Send a few errors
+	for range 10 {
+		doPostWithError("/v1/chat/completions", "an invalid body", nil)
+	}
+
+	metricsURL := fmt.Sprintf("http://localhost:%s/metrics", metricsPort)
+
+	if k8sContext != "" {
+		// Use port-forward to access the EPP pod's metrics endpoint.
+		startEPPMetricsPortForward()
+	}
+
+	theMetrics := getMetrics(metricsURL)
+	gomega.Expect(theMetrics).ShouldNot(gomega.BeEmpty())
+	metricsAsString := strings.Join(theMetrics, "\n")
+
+	_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+
+	// Define the metrics we expect to see
+	preset := []string{ //nolint:prealloc
+		"inference_objective_request_total",
+		"inference_objective_request_error_total",
+		"inference_objective_request_duration_seconds",
+		"inference_objective_normalized_time_per_output_token_seconds",
+		"inference_objective_request_sizes",
+		"inference_objective_response_sizes",
+		"inference_objective_input_tokens",
+		"inference_objective_output_tokens",
+		"inference_pool_average_kv_cache_utilization",
+		"inference_pool_average_queue_size",
+		"inference_pool_per_pod_queue_size",
+		"inference_objective_running_requests",
+		"inference_pool_ready_pods",
+		"inference_extension_info",
+
+		// llm_d metrics
+		"llm_d_epp_request_total",
+		"llm_d_epp_request_error_total",
+		"llm_d_epp_request_duration_seconds",
+		"llm_d_epp_normalized_time_per_output_token_seconds",
+		"llm_d_epp_request_sizes",
+		"llm_d_epp_response_sizes",
+		"llm_d_epp_input_tokens",
+		"llm_d_epp_output_tokens",
+		"llm_d_epp_average_kv_cache_utilization",
+		"llm_d_epp_average_queue_size",
+		"llm_d_epp_per_endpoint_queue_size",
+		"llm_d_epp_running_requests",
+		"llm_d_epp_ready_endpoints",
+		"llm_d_epp_info",
+	}
+	expectedMetrics := make([]string, 0, len(preset)+len(decodePods)*numTargetPorts*2)
+	expectedMetrics = append(expectedMetrics, preset...)
+
+	for _, modelServerPodName := range decodePods {
+		for rank := range numTargetPorts {
+			metricQueueSize := fmt.Sprintf(
+				"inference_pool_per_pod_queue_size{model_server_pod=\"%s-rank-%d\",name=\"%s\"}",
+				modelServerPodName,
+				rank,
+				infPoolName)
+			expectedMetrics = append(expectedMetrics, metricQueueSize)
+
+			metricQueueSizeNew := fmt.Sprintf(
+				"llm_d_epp_per_endpoint_queue_size{model_server_endpoint=\"%s-rank-%d\",name=\"%s\"}",
+				modelServerPodName,
+				rank,
+				infPoolName,
+			)
+			expectedMetrics = append(expectedMetrics, metricQueueSizeNew)
+		}
+	}
+
+	// Check if all expected metrics are present in the metrics output.
+	for _, metric := range expectedMetrics {
+		gomega.Expect(metricsAsString).Should(gomega.ContainSubstring(metric))
+	}
 }
