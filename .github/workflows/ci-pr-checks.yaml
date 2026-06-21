@@ -442,6 +442,35 @@ jobs:
             docker load --input "$image"
           done
 
+      # HuggingFace runtime cache (tokenizer + configs; render mode does not
+      # load weights). Only the renderer-using suite touches the cache key, so
+      # parallel matrix entries cannot race to save an empty directory under
+      # the same key. The model name comes from the Makefile (single source
+      # of truth) so changing it auto-busts the cache; the trailing -vN is
+      # a manual lever for forced re-population without changing the model.
+      - name: Resolve HF model name
+        if: ${{ matrix.suite.needs-renderer == 'true' }}
+        id: model
+        shell: bash
+        run: echo "name=$(make -s print-hf-model-name)" >> "$GITHUB_OUTPUT"
+
+      - name: Create HF cache dir
+        if: ${{ matrix.suite.needs-renderer == 'true' }}
+        id: hf-cache
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/hf-cache"
+          echo "path=${RUNNER_TEMP}/hf-cache" >> "$GITHUB_OUTPUT"
+
+      - name: Cache HuggingFace files
+        if: ${{ matrix.suite.needs-renderer == 'true' }}
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.hf-cache.outputs.path }}
+          key: hf-cache-${{ runner.os }}-${{ steps.model.outputs.name }}-v2
+          restore-keys: |
+            hf-cache-${{ runner.os }}-${{ steps.model.outputs.name }}-
+
       - name: Run e2e-router (${{ matrix.suite.name }})
         shell: bash
         env:
@@ -450,4 +479,5 @@ jobs:
           E2E_LABEL_FILTER: ${{ matrix.suite.label-filter }}
           LOAD_VLLM_RENDER_IMAGE: ${{ matrix.suite.needs-renderer }}
           PULL_VLLM_RENDER_IMAGE: "false"
+          HF_CACHE_HOST_PATH: ${{ steps.hf-cache.outputs.path }}
         run: make test-e2e-scheduler-run

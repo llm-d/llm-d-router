@@ -93,6 +93,13 @@ spec:
           name: epp-config
       - name: cache
         emptyDir: {}
-      # HuggingFace cache for the render sidecar's model weights.
+      # HuggingFace cache for the render sidecar (tokenizer + configs;
+      # render mode does not load weights). hostPath lets CI bind-mount a
+      # persistent runner directory into the kind node via extraMounts at
+      # /opt/hf-cache so cached files survive across runs. With no
+      # extraMounts (local dev), kubelet creates the directory on the
+      # kind node on demand and behaves like an emptyDir for that cluster.
       - name: model-cache
-        emptyDir: {}
+        hostPath:
+          path: /opt/hf-cache
+          type: DirectoryOrCreate
