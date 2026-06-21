@@ -101,11 +101,8 @@ func buildPipeline(cfg *config.Config, gwClient *gateway.Client) ([]pipeline.Ste
 			return nil, err
 		}
 
-		// Inject dependencies based on step type
-		type gatewayAware interface {
-			SetGatewayClient(*gateway.Client)
-		}
-		if ga, ok := step.(gatewayAware); ok {
+		// Inject the gateway client into steps that need it.
+		if ga, ok := step.(gateway.ClientAware); ok {
 			ga.SetGatewayClient(gwClient)
 		}
 

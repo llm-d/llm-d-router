@@ -73,8 +73,7 @@ func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
 			t.Fatalf("building step %s: %v", sc.Type, err)
 		}
 
-		type gatewayAware interface{ SetGatewayClient(*gateway.Client) }
-		if ga, ok := step.(gatewayAware); ok {
+		if ga, ok := step.(gateway.ClientAware); ok {
 			ga.SetGatewayClient(gwClient)
 		}
 		type renderAware interface{ SetServiceAddress(string) }

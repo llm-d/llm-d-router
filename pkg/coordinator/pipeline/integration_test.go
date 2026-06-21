@@ -112,8 +112,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 				if err != nil {
 					t.Fatalf("building step %s: %v", sc.Type, err)
 				}
-				type gatewayAware interface{ SetGatewayClient(*gateway.Client) }
-				if ga, ok := step.(gatewayAware); ok {
+				if ga, ok := step.(gateway.ClientAware); ok {
 					ga.SetGatewayClient(gwClient)
 				}
 				type renderAware interface{ SetServiceAddress(string) }
@@ -256,8 +255,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 			t.Fatalf("building step %s: %v", sc.Type, err)
 		}
 
-		type gatewayAware interface{ SetGatewayClient(*gateway.Client) }
-		if ga, ok := step.(gatewayAware); ok {
+		if ga, ok := step.(gateway.ClientAware); ok {
 			ga.SetGatewayClient(gwClient)
 		}
 		type renderAware interface{ SetServiceAddress(string) }

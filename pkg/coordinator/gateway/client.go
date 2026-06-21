@@ -25,6 +25,13 @@ type Client struct {
 	baseURL    string
 }
 
+// ClientAware is implemented by pipeline steps that need the gateway client
+// injected after construction. The entrypoint type-asserts each built step
+// against this interface and calls SetGatewayClient when it matches.
+type ClientAware interface {
+	SetGatewayClient(*Client)
+}
+
 func New(cfg config.GatewayConfig) *Client {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
