@@ -382,11 +382,17 @@ kubectl --context ${KUBE_CONTEXT} delete configmap epp-config --ignore-not-found
 envsubst '$MODEL_NAME' < ${EPP_CONFIG} > ${TEMP_FILE}
 kubectl --context ${KUBE_CONTEXT} create configmap epp-config --from-file=epp-config.yaml=${TEMP_FILE}
 
+# The replica count is changed in some end to end tests
+export EPP_REPLICA_COUNT=1
+# Some end to end tests enable leader election
+export ENABLE_LEADER_ELECTION=false
+
 # Deploy Istio base (shared infrastructure)
 kubectl kustomize --enable-helm deploy/environments/dev/base-kind-istio \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
   ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
-${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE}' \
+  ${EPP_REPLICA_COUNT} ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} \
+  ${VLLM_DATA_PARALLEL_SIZE} ${ENABLE_LEADER_ELECTION}' \
   | kubectl --context ${KUBE_CONTEXT} apply -f -
 
 # Deploy scenario-specific vLLM components
