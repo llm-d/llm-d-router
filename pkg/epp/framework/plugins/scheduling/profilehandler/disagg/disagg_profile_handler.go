@@ -14,13 +14,14 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
+	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -263,14 +264,14 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 // Returns the next profile to execute, or an empty map when all stages are done.
 func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
-	tracer := telemetry.Tracer()
-	ctx, span := tracer.Start(ctx, "llm_d.epp.disagg.profile_handler.pick",
+	tracer := tracing.Tracer(schedplugins.TracerScope)
+	ctx, span := tracer.Start(ctx, "pick_disagg_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
 
 	if request == nil {
-		span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "complete_nil_request"))
+		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "complete_nil_request"))
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
@@ -283,18 +284,18 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if _, executed := profileResults[h.decodeProfile]; !executed {
 		decodeProfile, ok := profiles[h.decodeProfile]
 		if !ok {
-			span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "error_missing_decode_profile"))
+			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "error_missing_decode_profile"))
 			return map[string]scheduling.SchedulerProfile{}
 		}
-		span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "run_decode"))
+		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_decode"))
 		return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
 	}
 
 	decodeRes := profileResults[h.decodeProfile]
 	if decodeRes == nil || len(decodeRes.TargetEndpoints) == 0 {
 		span.SetAttributes(
-			attribute.String("llm_d.profile_handler.decision", "complete"),
-			attribute.Bool("llm_d.profile_handler.decode_failed", true),
+			attribute.String("llm_d.epp.profile_handler.decision", "complete"),
+			attribute.Bool("llm_d.epp.profile_handler.decode_failed", true),
 		)
 		return map[string]scheduling.SchedulerProfile{}
 	}
@@ -303,12 +304,12 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if _, hasEncodeProfile := profiles[h.encodeProfile]; hasEncodeProfile {
 		if _, executed := profileResults[h.encodeProfile]; !executed {
 			if h.encodeDecider != nil && h.encodeDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
-				span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "run_encode"))
+				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_encode"))
 				return map[string]scheduling.SchedulerProfile{h.encodeProfile: profiles[h.encodeProfile]}
 			}
 			// Decider rejected encode - mark as evaluated so we don't re-run the decider.
 			profileResults[h.encodeProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "skip_encode"))
+			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_encode"))
 		}
 	}
 
@@ -316,12 +317,12 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
 			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
-				span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "run_prefill"))
+				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
 				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 			}
 			// Decider rejected prefill - mark as evaluated so we don't re-run the decider.
 			profileResults[h.prefillProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "skip_prefill"))
+			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_prefill"))
 		}
 	}
 
@@ -331,7 +332,7 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 
 	decision := DisaggDecisionType(encodeUsed, prefillUsed)
 	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
-	span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "complete_"+decision))
+	span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "complete_"+decision))
 
 	return map[string]scheduling.SchedulerProfile{}
 }
@@ -375,8 +376,8 @@ func (h *Handler) ProcessResults(
 // PreRequest wires prefill and encode SchedulerProfile results into headers
 // so the sidecar knows which pods to contact for disaggregated work.
 func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	tracer := telemetry.Tracer()
-	_, span := tracer.Start(ctx, "llm_d.epp.prerequest.disaggregation",
+	tracer := tracing.Tracer(schedplugins.TracerScope)
+	_, span := tracer.Start(ctx, "prepare_disaggregation",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

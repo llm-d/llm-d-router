@@ -36,8 +36,8 @@ To enable the Vertex AI parser, configure it in your `EndpointPickerConfig` unde
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 requestHandler:
-  parser:
-    pluginRef: vertexai-parser
+  parsers:
+  - pluginRef: vertexai-parser
 plugins:
   - name: vertexai-parser
     type: vertexai-parser

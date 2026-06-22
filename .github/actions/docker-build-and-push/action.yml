@@ -57,6 +57,7 @@ runs:
         tags: |
           ${{ inputs.registry }}/${{ inputs.image-name }}:${{ inputs.tag }}
           ${{ inputs.push == 'true' && inputs.prerelease != 'true' && format('{0}/{1}:latest', inputs.registry, inputs.image-name) || '' }}
+          ${{ inputs.commit-sha != '' && format('{0}/{1}:{2}', inputs.registry, inputs.image-name, inputs.commit-sha) || '' }}
         build-args: |
           LDFLAGS=-s -w
           COMMIT_SHA=${{ inputs.commit-sha || 'unknown' }}

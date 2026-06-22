@@ -42,9 +42,10 @@ type Mapping struct {
 	// (e.g. Triton TRT-LLM).
 	CacheBlockSize *Spec
 	CacheNumBlocks *Spec
+	CustomMetrics  []CustomMetric
 }
 
-// MappingConfig holds the string-based configuration used to build a Mapping.
+// MappingConfig holds configuration used to build a Mapping.
 type MappingConfig struct {
 	Queue               string
 	Running             string
@@ -55,6 +56,12 @@ type MappingConfig struct {
 	CacheNumBlocksLabel string
 	CacheBlockSize      string
 	CacheNumBlocks      string
+	CustomMetrics       []CustomMetric
+}
+
+type CustomMetric struct {
+	AttributeKey string
+	Spec         *Spec
 }
 
 type namedSpec struct {
@@ -68,13 +75,22 @@ func (m *Mapping) specs() []namedSpec {
 	if m.LoraRequestInfo != nil {
 		loraSpec = m.LoraRequestInfo.Spec
 	}
-	return []namedSpec{
-		{"queue", m.TotalQueuedRequests, m.TotalQueuedRequests != nil},
-		{"running", m.TotalRunningRequests, m.TotalRunningRequests != nil},
-		{"kv", m.KVCacheUtilization, m.KVCacheUtilization != nil},
-		{"lora", loraSpec, m.LoraRequestInfo != nil},
-		{"cacheInfo", m.CacheInfo, m.CacheInfo != nil},
+	specs := make([]namedSpec, 0, 5+len(m.CustomMetrics))
+	specs = append(specs,
+		namedSpec{"queue", m.TotalQueuedRequests, m.TotalQueuedRequests != nil},
+		namedSpec{"running", m.TotalRunningRequests, m.TotalRunningRequests != nil},
+		namedSpec{"kv", m.KVCacheUtilization, m.KVCacheUtilization != nil},
+		namedSpec{"lora", loraSpec, m.LoraRequestInfo != nil},
+		namedSpec{"cacheInfo", m.CacheInfo, m.CacheInfo != nil},
+	)
+	for _, custom := range m.CustomMetrics {
+		specs = append(specs, namedSpec{
+			name:    custom.AttributeKey,
+			spec:    custom.Spec,
+			enabled: custom.Spec != nil,
+		})
 	}
+	return specs
 }
 
 // String returns a human-readable representation of the Mapping, listing which specs are disabled (nil).
@@ -145,6 +161,8 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	customMetrics, customErrs := parseCustomMetrics(cfg.CustomMetrics)
+	errs = append(errs, customErrs...)
 
 	if len(errs) != 0 {
 		return nil, errors.Join(errs...)
@@ -159,5 +177,32 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		CacheNumBlocksLabel:  cfg.CacheNumBlocksLabel,
 		CacheBlockSize:       cacheBlockSizeSpec,
 		CacheNumBlocks:       cacheNumBlocksSpec,
+		CustomMetrics:        customMetrics,
 	}, nil
+}
+
+func parseCustomMetrics(configs []CustomMetric) ([]CustomMetric, []error) {
+	metrics := make([]CustomMetric, 0, len(configs))
+	var errs []error
+	seenKeys := make(map[string]struct{}, len(configs))
+	for _, cfg := range configs {
+		if cfg.AttributeKey == "" {
+			errs = append(errs, errors.New("custom metric attributeKey cannot be empty"))
+			continue
+		}
+		if _, ok := seenKeys[cfg.AttributeKey]; ok {
+			errs = append(errs, fmt.Errorf("custom metric attributeKey %q is duplicated", cfg.AttributeKey))
+			continue
+		}
+		seenKeys[cfg.AttributeKey] = struct{}{}
+		if cfg.Spec == nil {
+			errs = append(errs, fmt.Errorf("custom metric %q spec cannot be empty", cfg.AttributeKey))
+			continue
+		}
+		metrics = append(metrics, CustomMetric{
+			AttributeKey: cfg.AttributeKey,
+			Spec:         cfg.Spec,
+		})
+	}
+	return metrics, errs
 }

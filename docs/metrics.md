@@ -41,3 +41,30 @@ Metrics defined by llm-d Router are in addition to Inference Gateway metrics. Fo
 > [!NOTE]
 > This metric is maintained for backward compatibility with the deprecated
 > `pd-profile-handler`. New deployments should use `disagg_decision_total`.
+
+## Opt-in ext_proc Stream Metrics
+
+Three metrics covering ext_proc gRPC stream lifecycle. Disabled by default; enable with `--enable-grpc-stream-metrics`. These metrics are emitted under the `llm_d_epp_` prefix (separate from `llm_d_inference_scheduler_*`).
+
+### `extproc_streams_inflight`
+
+*   **Type:** Gauge
+*   **Release Stage:** ALPHA
+*   **Description:** Number of ext_proc gRPC streams currently open.
+*   **Usage:** Sized at one stream per Envoy worker per EPP backend. A persistent increase under steady load indicates streams are being opened faster than they close.
+
+### `extproc_stream_duration_seconds`
+
+*   **Type:** Histogram
+*   **Release Stage:** ALPHA
+*   **Description:** Duration an ext_proc gRPC stream stays open, in seconds.
+*   **Usage:** Long-lived streams are normal; the histogram surfaces the distribution. A sudden shift toward short durations can indicate Envoy reconnecting due to handler errors.
+
+### `extproc_streams_total`
+
+*   **Type:** Counter
+*   **Labels:**
+    *   `code`: string — the gRPC status code at stream close (`OK`, `Canceled`, `DeadlineExceeded`, `Internal`, ...). Bare `context.Canceled` and `context.DeadlineExceeded` are classified to their canonical codes rather than collapsing into `Unknown`.
+*   **Release Stage:** ALPHA
+*   **Description:** Total ext_proc gRPC streams completed, by gRPC status code.
+*   **Usage:** Rate of `code="OK"` is the healthy stream-completion rate. A rising rate of `code="Internal"` or `code="Unknown"` indicates handler errors. `code="Canceled"` is expected on Envoy restarts and rolling EPP updates.

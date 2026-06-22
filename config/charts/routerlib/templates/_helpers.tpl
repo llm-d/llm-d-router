@@ -9,7 +9,7 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 
 {{/*
-Inference extension name
+Router deployment name
 */}}
 {{- define "llm-d-router.name" -}}
 {{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
@@ -52,7 +52,7 @@ llm-d.ai/igw-mode: llm-d-router-gateway
 {{/*
 Return the monitoring provider name.
 
-If inferenceExtension.monitoring.provider.name is unset/empty, default to
+If router.monitoring.provider.name is unset/empty, default to
 prometheusoperator. For backwards compatibility, provider.name=gke still maps
 to gmp when no monitoring provider is explicitly set.
 */}}
@@ -74,7 +74,7 @@ prometheusoperator
 {{/*
 Return the monitoring provider config object.
 
-When inferenceExtension.monitoring.provider.name is unset/empty, use defaults.
+When router.monitoring.provider.name is unset/empty, use defaults.
 For backwards compatibility, provider.gke.autopilot is still honored when
 provider.name=gke and no monitoring provider is explicitly set.
 */}}
@@ -104,6 +104,73 @@ Return the standalone proxy type.
 {{- define "llm-d-router.proxyType" -}}
 {{- $proxy := .Values.router.proxy | default dict -}}
 {{- default "envoy" ($proxy.proxyType | default "envoy") | lower -}}
+{{- end -}}
+
+{{/*
+Return the standalone proxy deployment mode: "sidecar" (proxy runs in the EPP
+pod) or "service" (proxy runs as its own horizontally scalable Deployment).
+*/}}
+{{- define "llm-d-router.proxyMode" -}}
+{{- $proxy := .Values.router.proxy | default dict -}}
+{{- default "sidecar" ($proxy.mode | default "sidecar") | lower -}}
+{{- end -}}
+
+{{/*
+Name of the standalone proxy Deployment and Service used in service mode.
+*/}}
+{{- define "llm-d-router.proxyName" -}}
+{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
+{{ $base }}-proxy
+{{- end -}}
+
+{{/*
+Selector labels for the service-mode proxy Deployment and Service. Distinct
+from the EPP selector so the proxy and EPP pods are never co-selected.
+*/}}
+{{- define "llm-d-router.proxySelectorLabels" -}}
+llm-d-router-proxy: {{ include "llm-d-router.proxyName" . }}
+{{- end -}}
+
+{{/*
+ext_proc upstream host the proxy uses to reach EPP. Loopback in sidecar mode;
+the EPP Service FQDN in service mode.
+*/}}
+{{- define "llm-d-router.proxy.extProcHost" -}}
+{{- if eq (include "llm-d-router.proxyMode" .) "service" -}}
+{{- $domain := .Values.router.clusterDomain | default "cluster.local" -}}
+{{- printf "%s.%s.svc.%s" (include "llm-d-router.name" .) .Release.Namespace $domain -}}
+{{- else -}}
+127.0.0.1
+{{- end -}}
+{{- end -}}
+
+{{/*
+ext_proc cluster discovery type. STATIC for the loopback sidecar; STRICT_DNS so
+the proxy resolves the EPP Service FQDN in service mode.
+*/}}
+{{- define "llm-d-router.proxy.extProcClusterType" -}}
+{{- if eq (include "llm-d-router.proxyMode" .) "service" -}}
+STRICT_DNS
+{{- else -}}
+STATIC
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether the proxy fails open (passes traffic through) when EPP is unreachable.
+Defaults to true in service mode for active/passive resiliency, false in
+sidecar mode; overridable via router.proxy.failOpen.
+*/}}
+{{- define "llm-d-router.proxy.failOpen" -}}
+{{- $proxy := .Values.router.proxy | default dict -}}
+{{- $failOpen := index $proxy "failOpen" -}}
+{{- if kindIs "bool" $failOpen -}}
+{{- $failOpen -}}
+{{- else if eq (include "llm-d-router.proxyMode" .) "service" -}}
+true
+{{- else -}}
+false
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -202,13 +269,20 @@ Return the standalone EPP model-server target ports.
 {{- end -}}
 
 {{/*
-Return the agentgateway model Service ports.
+Return the agentgateway standalone logical backend service name.
+Derives the name from .Values.router.modelServers.matchLabels.app,
+falling back to .Release.Name if not set.
 */}}
-{{- define "llm-d-router.agentgateway.modelServicePorts" -}}
-{{- $proxyValues := .Values.router.proxy | default dict -}}
-{{- $agentgateway := index $proxyValues "agentgateway" | default dict -}}
-{{- $service := index $agentgateway "service" | default dict -}}
-{{- include "llm-d-router.normalizedPortList" (dict "path" ".Values.router.proxy.agentgateway.service.ports" "value" (index $service "ports")) -}}
+{{- define "llm-d-router.agentgateway.logicalBackendName" -}}
+{{- $appLabel := "" -}}
+{{- if and .Values.router.modelServers .Values.router.modelServers.matchLabels -}}
+  {{- $appLabel = index .Values.router.modelServers.matchLabels "app" | default "" -}}
+{{- end -}}
+{{- if not (empty $appLabel) -}}
+  {{- $appLabel -}}
+{{- else -}}
+  {{- .Release.Name -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -246,37 +320,31 @@ Return the rendered proxy ConfigMap data.
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
 {{- $configMap := index $proxy "configMap" | default dict -}}
 {{- $data := deepCopy ((index $configMap "data") | default dict) -}}
-{{- if and (hasPrefix "llm-d-router-standalone" .Chart.Name) (eq (include "llm-d-router.proxyType" .) "agentgateway") -}}
-  {{- $generated := dict "config.yaml" (include "llm-d-router.proxy.agentgatewayConfig" .) -}}
-  {{- $data = mergeOverwrite $data $generated -}}
+{{- if hasPrefix "llm-d-router-standalone" .Chart.Name -}}
+  {{- $proxyType := include "llm-d-router.proxyType" . -}}
+  {{- if eq $proxyType "agentgateway" -}}
+    {{- $generated := dict "config.yaml" (include "llm-d-router.proxy.agentgatewayConfig" .) -}}
+    {{- $data = mergeOverwrite $data $generated -}}
+  {{- else if eq $proxyType "envoy" -}}
+    {{- /* Render only the chart-owned envoy.yaml so the ext_proc target and
+           fail-open directives resolve; user-supplied keys stay literal. */ -}}
+    {{- if hasKey $data "envoy.yaml" -}}
+      {{- $_ := set $data "envoy.yaml" (tpl (toString (index $data "envoy.yaml")) $) -}}
+    {{- end -}}
+  {{- end -}}
 {{- end -}}
 {{- toYaml $data -}}
 {{- end -}}
 
-{{/*
-Render labels from the standalone endpoint selector for the generated model Service.
-Only equality-based selectors are supported because Service selectors are a map.
-*/}}
-{{- define "llm-d-router.agentgateway.modelServiceSelectorLabels" -}}
-{{- if and .Values.router.modelServers .Values.router.modelServers.matchLabels -}}
-{{- range $key, $value := .Values.router.modelServers.matchLabels -}}
-{{- printf "%s: %s\n" ($key | quote) ($value | quote) -}}
-{{- end -}}
-{{- else -}}
-  {{- fail ".Values.modelServers.matchLabels is required when creating an agentgateway model Service" -}}
-{{- end -}}
-{{- end -}}
+
 
 {{/*
 Render the default standalone agentgateway proxy config template.
 */}}
 {{- define "llm-d-router.proxy.agentgatewayConfig" -}}
-{{- $proxyValues := .Values.router.proxy | default dict -}}
-{{- $agentgateway := index $proxyValues "agentgateway" | default dict -}}
-{{- $service := index $agentgateway "service" | default dict -}}
-{{- $serviceName := index $service "name" | default "" -}}
-{{- $serviceNamespace := index $service "namespace" | default .Release.Namespace -}}
-{{- $servicePorts := splitList "," (include "llm-d-router.agentgateway.modelServicePorts" .) -}}
+{{- $serviceName := include "llm-d-router.agentgateway.logicalBackendName" . -}}
+{{- $serviceNamespace := .Release.Namespace -}}
+{{- $servicePorts := splitList "," (include "llm-d-router.standaloneEndpointTargetPorts" .) -}}
 {{- $backendPort := index $servicePorts 0 -}}
 {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . | int -}}
 config:

@@ -87,7 +87,7 @@ func TestGetBlockHashes(t *testing.T) {
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					TokenizedPrompt: &fwkrh.TokenizedPrompt{
-						TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+						PerPromptTokens: [][]uint32{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
 					},
 				},
 			},
@@ -122,8 +122,12 @@ func TestGetBlockHashes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hashes := getBlockHashes(context.Background(), tt.request, tt.blockSizeTokens, defaultMaxPrefixBlocks)
-			assert.Equal(t, tt.expectedBlocks, len(hashes))
+			perPromptHashes := getBlockHashes(context.Background(), tt.request, tt.blockSizeTokens, defaultMaxPrefixBlocks)
+			totalBlocks := 0
+			for _, ph := range perPromptHashes {
+				totalBlocks += len(ph)
+			}
+			assert.Equal(t, tt.expectedBlocks, totalBlocks)
 		})
 	}
 }
@@ -132,8 +136,8 @@ func TestGetBlockHashesCacheSalt(t *testing.T) {
 	body := func(salt string) *fwkrh.InferenceRequestBody {
 		return &fwkrh.InferenceRequestBody{
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				TokenIDs:  []uint32{1, 2, 3, 4},
-				CacheSalt: salt,
+				PerPromptTokens: [][]uint32{{1, 2, 3, 4}},
+				CacheSalt:       salt,
 			},
 		}
 	}
@@ -147,6 +151,91 @@ func TestGetBlockHashesCacheSalt(t *testing.T) {
 
 	assert.Equal(t, len(noSalt), len(salted))
 	assert.NotEqual(t, noSalt, salted, "cache salt must change the block hashes")
+}
+
+func TestGetBlockHashes_MultiPrompt(t *testing.T) {
+	tests := []struct {
+		name                    string
+		perPromptTokens         [][]uint32
+		blockSizeTokens         int
+		expectedPrompts         int
+		expectedBlocksPerPrompt []int
+	}{
+		{
+			name:                    "TwoPrompts",
+			perPromptTokens:         [][]uint32{{1, 2, 3, 4}, {5, 6, 7, 8}},
+			blockSizeTokens:         2,
+			expectedPrompts:         2,
+			expectedBlocksPerPrompt: []int{2, 2},
+		},
+		{
+			name:                    "ThreePromptsUnevenLengths",
+			perPromptTokens:         [][]uint32{{1, 2, 3}, {4, 5}, {6}},
+			blockSizeTokens:         2,
+			expectedPrompts:         3,
+			expectedBlocksPerPrompt: []int{2, 1, 1},
+		},
+		{
+			name:                    "EmptyPromptSkipped",
+			perPromptTokens:         [][]uint32{{1, 2}, {}, {3, 4}},
+			blockSizeTokens:         2,
+			expectedPrompts:         2,
+			expectedBlocksPerPrompt: []int{1, 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := &fwksched.InferenceRequest{
+				TargetModel: "model",
+				Body: &fwkrh.InferenceRequestBody{
+					TokenizedPrompt: &fwkrh.TokenizedPrompt{
+						PerPromptTokens: tt.perPromptTokens,
+					},
+				},
+			}
+			result := getBlockHashes(context.Background(), request, tt.blockSizeTokens, defaultMaxPrefixBlocks)
+			assert.Equal(t, tt.expectedPrompts, len(result))
+			for i, expected := range tt.expectedBlocksPerPrompt {
+				assert.Equal(t, expected, len(result[i]), "prompt %d block count", i)
+			}
+		})
+	}
+}
+
+func TestGetBlockHashes_MultiPromptHashIndependence(t *testing.T) {
+	multiPrompt := &fwksched.InferenceRequest{
+		TargetModel: "model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				PerPromptTokens: [][]uint32{{1, 2}, {3, 4}},
+			},
+		},
+	}
+	singlePrompt := &fwksched.InferenceRequest{
+		TargetModel: "model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				PerPromptTokens: [][]uint32{{1, 2, 3, 4}},
+			},
+		},
+	}
+
+	multi := getBlockHashes(context.Background(), multiPrompt, 2, defaultMaxPrefixBlocks)
+	single := getBlockHashes(context.Background(), singlePrompt, 2, defaultMaxPrefixBlocks)
+
+	assert.Equal(t, 2, len(multi), "multi-prompt should produce 2 inner slices")
+	assert.Equal(t, 1, len(single), "single-prompt should produce 1 inner slice")
+
+	// First block of each starts from the same model seed, so [1,2] hashes match.
+	assert.Equal(t, multi[0][0], single[0][0],
+		"first block of first prompt should match single prompt's first block")
+	// Second prompt's first block [3,4] starts a fresh hash chain from the model
+	// seed, while single prompt's second block [3,4] chains from the first block.
+	// These must differ — this is the cross-prompt adjacency bug the per-prompt
+	// split prevents.
+	assert.NotEqual(t, multi[1][0], single[0][1],
+		"second prompt must start its own hash chain, not chain from the first prompt")
 }
 
 func TestKVCacheBlock_Hash(t *testing.T) {

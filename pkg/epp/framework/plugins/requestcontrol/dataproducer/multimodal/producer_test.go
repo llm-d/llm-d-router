@@ -58,15 +58,18 @@ func TestExtractMMItemsFromTokenizedPrompt(t *testing.T) {
 		Body: &fwkrh.InferenceRequestBody{
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
 				MultiModalFeatures: []fwkrh.MultiModalFeature{
-					{Hash: "image-a", Length: 576},
-					{Hash: "image-b", Length: 0},
-					{Hash: "image-a", Length: 144},
+					{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 576},
+					{Modality: fwkrh.ModalityImage, Hash: "image-b", Length: 0},
+					{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 144},
 				},
 			},
 		},
 	})
 
-	assert.ElementsMatch(t, []attrmm.MatchItem{{Hash: "image-a", Size: 1}, {Hash: "image-b", Size: 1}}, items)
+	assert.ElementsMatch(t, []attrmm.MatchItem{
+		{Hash: "image-a", Size: 1, Modality: string(fwkrh.ModalityImage)},
+		{Hash: "image-b", Size: 1, Modality: string(fwkrh.ModalityImage)},
+	}, items)
 }
 
 func TestExtractMMItemsNilTokenizedPromptReturnsNil(t *testing.T) {
@@ -118,15 +121,16 @@ func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
 
 	require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpointA, endpointB, endpointC}))
 
+	img := string(fwkrh.ModalityImage)
 	assertMatchInfo(t, producer, endpointA,
-		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}},
-		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}, {Hash: "hash-c", Size: 1}})
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}},
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}, {Hash: "hash-c", Size: 1, Modality: img}})
 	assertMatchInfo(t, producer, endpointB,
-		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}},
-		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}, {Hash: "hash-c", Size: 1}})
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}},
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}, {Hash: "hash-c", Size: 1, Modality: img}})
 	assertMatchInfo(t, producer, endpointC,
 		nil,
-		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}, {Hash: "hash-c", Size: 1}})
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}, {Hash: "hash-c", Size: 1, Modality: img}})
 
 	producer.PreRequest(context.Background(), request, schedulingResult(endpointC))
 	producer.wg.Wait()
@@ -171,12 +175,13 @@ func TestStalePodCleanup(t *testing.T) {
 	endpointB := newEndpoint(podB)
 	require.NoError(t, producer.Produce(context.Background(), requestWithHashes("req", map[string]int{"hash-a": 1}), []scheduling.Endpoint{endpointA, endpointB}))
 
+	img := string(fwkrh.ModalityImage)
 	assertMatchInfo(t, producer, endpointA,
-		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}},
-		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}})
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}},
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}})
 	assertMatchInfo(t, producer, endpointB,
 		nil,
-		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1}})
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}})
 }
 
 func TestProducerEndpointExtractorInterfaceContract(t *testing.T) {
@@ -256,7 +261,7 @@ func newEndpoint(name k8stypes.NamespacedName) scheduling.Endpoint {
 func requestWithHashes(requestID string, hashToWeight map[string]int) *scheduling.InferenceRequest {
 	features := make([]fwkrh.MultiModalFeature, 0, len(hashToWeight))
 	for hash, weight := range hashToWeight {
-		features = append(features, fwkrh.MultiModalFeature{Hash: hash, Length: weight})
+		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Hash: hash, Length: weight})
 	}
 	return &scheduling.InferenceRequest{
 		RequestID: requestID,

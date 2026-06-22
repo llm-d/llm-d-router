@@ -15,13 +15,16 @@ plugins:
     parameters:
       cacheSizeInMB: 2048
   - type: mm-embeddings-cache-scorer
-  - type: precise-prefix-cache-scorer
+  - type: precise-prefix-cache-producer
     parameters:
       tokenProcessorConfig:
         blockSize: 64
       indexerConfig:
         kvBlockIndexConfig:
           enableMetrics: true
+  - type: prefix-cache-scorer
+    parameters:
+      prefixMatchInfoProducerName: precise-prefix-cache-producer
   - type: queue-scorer
   - type: max-score-picker
   - type: single-profile-handler
@@ -34,12 +37,12 @@ dataLayer:
     - pluginRef: endpoint-notification-source
       extractors:
         - pluginRef: mm-embeddings-cache-producer
-        - pluginRef: precise-prefix-cache-scorer
+        - pluginRef: precise-prefix-cache-producer
 schedulingProfiles:
   - name: default
     plugins:
       - pluginRef: decode-filter
-      - pluginRef: precise-prefix-cache-scorer
+      - pluginRef: prefix-cache-scorer
         weight: 10
       - pluginRef: mm-embeddings-cache-scorer
         weight: 4

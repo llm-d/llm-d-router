@@ -9,7 +9,7 @@ plugins:
     modelName: TinyLlama/TinyLlama-1.1B-Chat-v1.0  # replace to use a different model
     vllm:
       url: http://localhost:8000
-- type: precise-prefix-cache-scorer
+- type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
       blockSize: 16
@@ -19,6 +19,9 @@ plugins:
       kvBlockIndexConfig:
         enableMetrics: false                # enable kv-block index metrics (prometheus)
         metricsLoggingInterval: 6000000000  # log kv-block metrics as well (1m in nanoseconds)
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
 - type: decode-filter
 - type: max-score-picker
 - type: single-profile-handler
@@ -27,5 +30,5 @@ schedulingProfiles:
   plugins:
   - pluginRef: decode-filter
   - pluginRef: max-score-picker
-  - pluginRef: precise-prefix-cache-scorer
+  - pluginRef: prefix-cache-scorer
     weight: 10

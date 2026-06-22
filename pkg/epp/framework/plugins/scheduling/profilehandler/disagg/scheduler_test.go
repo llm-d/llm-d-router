@@ -40,7 +40,7 @@ const (
 func completionsBody(prompt string) *fwkrh.InferenceRequestBody {
 	return &fwkrh.InferenceRequestBody{
 		Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)},
+		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, len(prompt)/averageCharactersPerToken)}},
 	}
 }
 

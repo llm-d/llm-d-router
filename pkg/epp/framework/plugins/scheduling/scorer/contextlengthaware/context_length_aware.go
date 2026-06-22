@@ -206,7 +206,7 @@ func getContextLength(request *scheduling.InferenceRequest) int {
 	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
 		return 0
 	}
-	return len(request.Body.TokenizedPrompt.TokenIDs)
+	return request.Body.TokenizedPrompt.TokenCount()
 }
 
 // parseContextRange parses a label value into a single context range.

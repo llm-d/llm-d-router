@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -41,6 +42,7 @@ import (
 const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
 	profilePrefill           = "prefill"
+	maxDebugDumpEndpoints    = 100
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
@@ -95,6 +97,7 @@ var (
 	_ datalayer.EndpointExtractor          = (*InFlightLoadProducer)(nil)
 	_ datalayer.Registrant                 = &InFlightLoadProducer{}
 	_ fwkplugin.ConsumerPlugin             = &InFlightLoadProducer{}
+	_ fwkplugin.StateDumper                = &InFlightLoadProducer{}
 )
 
 type InFlightLoadProducer struct {
@@ -107,6 +110,7 @@ type InFlightLoadProducer struct {
 	dk                       fwkplugin.DataKey
 	prefixMatchInfoDK        fwkplugin.DataKey
 	uncachedRequestTokensDk  fwkplugin.DataKey
+	registeredEndpoints      sync.Map // key: string (NamespacedName), value: datalayer.Endpoint
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -171,8 +175,92 @@ func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
 	}
 }
 
+type inFlightLoadState struct {
+	Endpoints      []endpointInFlightLoadState `json:"endpoints"`
+	TotalEndpoints int                         `json:"totalEndpoints"`
+	MaxEndpoints   int                         `json:"maxEndpoints"`
+	Truncated      bool                        `json:"truncated"`
+}
+
+type endpointInFlightLoadState struct {
+	Endpoint string `json:"endpoint"`
+	Requests int64  `json:"requests"`
+	Tokens   int64  `json:"tokens"`
+}
+
 func (p *InFlightLoadProducer) TypedName() fwkplugin.TypedName {
 	return p.typedName
+}
+
+// DumpState implements [fwkplugin.StateDumper] and exposes per-endpoint
+// in-flight request and token counts for the /debug/plugins/state endpoint.
+//
+// The request and token tracker maps are snapshotted under separate read
+// locks, so the returned per-endpoint Requests and Tokens values are not
+// guaranteed to correspond to the same instant in time and the endpoint set
+// itself may change between the two snapshots. This is acceptable for a
+// debug endpoint, where best-effort visibility is preferred over coordinating
+// a single global lock that would contend with the hot path.
+//
+// The endpoint list is capped to the busiest endpoints to keep the debug
+// payload bounded when a deployment has a large endpoint set.
+func (p *InFlightLoadProducer) DumpState() (json.RawMessage, error) {
+	state := p.snapshotState()
+	return json.Marshal(state)
+}
+
+func (p *InFlightLoadProducer) snapshotState() inFlightLoadState {
+	requestCounts := map[string]int64{}
+	if p.requestTracker != nil {
+		requestCounts = p.requestTracker.snapshot()
+	}
+
+	tokenCounts := map[string]int64{}
+	if p.tokenTracker != nil {
+		tokenCounts = p.tokenTracker.snapshot()
+	}
+
+	endpointSet := make(map[string]struct{}, len(requestCounts)+len(tokenCounts))
+	for endpointID := range requestCounts {
+		endpointSet[endpointID] = struct{}{}
+	}
+	for endpointID := range tokenCounts {
+		endpointSet[endpointID] = struct{}{}
+	}
+
+	endpointIDs := make([]string, 0, len(endpointSet))
+	for endpointID := range endpointSet {
+		endpointIDs = append(endpointIDs, endpointID)
+	}
+	sort.Strings(endpointIDs)
+
+	state := inFlightLoadState{
+		Endpoints:      make([]endpointInFlightLoadState, 0, len(endpointIDs)),
+		TotalEndpoints: len(endpointIDs),
+		MaxEndpoints:   maxDebugDumpEndpoints,
+	}
+	for _, endpointID := range endpointIDs {
+		state.Endpoints = append(state.Endpoints, endpointInFlightLoadState{
+			Endpoint: endpointID,
+			Requests: requestCounts[endpointID],
+			Tokens:   tokenCounts[endpointID],
+		})
+	}
+
+	sort.SliceStable(state.Endpoints, func(i, j int) bool {
+		iLoad := state.Endpoints[i].Requests + state.Endpoints[i].Tokens
+		jLoad := state.Endpoints[j].Requests + state.Endpoints[j].Tokens
+		if iLoad != jLoad {
+			return iLoad > jLoad
+		}
+		return state.Endpoints[i].Endpoint < state.Endpoints[j].Endpoint
+	})
+	if len(state.Endpoints) > maxDebugDumpEndpoints {
+		state.Endpoints = state.Endpoints[:maxDebugDumpEndpoints]
+		state.Truncated = true
+	}
+
+	return state
 }
 
 // RegisterDependencies declares that this plugin needs an endpoint-notification-source to track
@@ -196,9 +284,19 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 
 	switch event.Type {
 	case datalayer.EventDelete:
+		// This guard assumes the datalayer delivers the same Endpoint pointer for
+		// delete as was used for the preceding add. If the datalayer ever
+		// reconstructs endpoint objects on delete, this check would need to use a
+		// generation counter instead of pointer identity.
+		if registered, ok := p.registeredEndpoints.Load(id); ok && registered != event.Endpoint {
+			log.FromContext(ctx).V(logutil.DEFAULT).Info("Ignoring stale delete for replaced endpoint", "endpoint", id)
+			break
+		}
+		p.registeredEndpoints.Delete(id)
 		p.DeleteEndpoint(id)
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
 	case datalayer.EventAddOrUpdate:
+		p.registeredEndpoints.Store(id, event.Endpoint)
 		event.Endpoint.GetAttributes().Put(p.dk.String(), &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{
@@ -512,6 +610,17 @@ func (t *concurrencyTracker) get(endpointID string) int64 {
 		return 0
 	}
 	return counter.Load()
+}
+
+func (t *concurrencyTracker) snapshot() map[string]int64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	result := make(map[string]int64, len(t.counts))
+	for endpointID, counter := range t.counts {
+		result[endpointID] = counter.Load()
+	}
+	return result
 }
 
 func (t *concurrencyTracker) inc(endpointID string) {

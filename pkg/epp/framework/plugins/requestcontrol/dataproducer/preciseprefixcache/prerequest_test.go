@@ -76,7 +76,7 @@ func TestPreRequest_SeedsSpeculativeForPrimary(t *testing.T) {
 
 	blockKeys := []kvblock.BlockHash{0xAA, 0xBB}
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-1"}
-	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{blockKeys: blockKeys})
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perPromptKeys: [][]kvblock.BlockHash{blockKeys}})
 
 	p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
@@ -88,7 +88,7 @@ func TestPreRequest_SeedsSpeculativeForPrimary(t *testing.T) {
 
 	cached := p.speculativeCache.Get(req.RequestID)
 	require.NotNil(t, cached)
-	assert.Equal(t, blockKeys, cached.Value().blockKeys)
+	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPromptKeys)
 	require.Len(t, cached.Value().podEntries, 1)
 	assert.Equal(t, "10.0.0.1:8080", cached.Value().podEntries[0].PodIdentifier)
 }
@@ -107,7 +107,7 @@ func TestPreRequest_EmptyBlockKeys_NoAdd(t *testing.T) {
 	p := newProducerForPreRequest(ctx, true, idx)
 
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-empty"}
-	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{blockKeys: nil})
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perPromptKeys: nil})
 
 	p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
@@ -130,7 +130,7 @@ func TestPreRequest_PrefillProfile_SeedsBoth(t *testing.T) {
 
 	blockKeys := []kvblock.BlockHash{0xCC}
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-pd"}
-	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{blockKeys: blockKeys})
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perPromptKeys: [][]kvblock.BlockHash{blockKeys}})
 
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
@@ -167,7 +167,7 @@ func TestPreRequest_SpeculativeDisabled_NoOp(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-off"}
 	p.pluginState.Write(req.RequestID, blockKeysStateKey,
-		&blockKeysState{blockKeys: []kvblock.BlockHash{0xDD}})
+		&blockKeysState{perPromptKeys: [][]kvblock.BlockHash{{0xDD}}})
 
 	p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 

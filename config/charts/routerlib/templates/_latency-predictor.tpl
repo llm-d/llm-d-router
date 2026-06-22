@@ -55,7 +55,7 @@ Latency Predictor Sidecar Containers
   image: {{ $.Values.router.latencyPredictor.predictionServers.image.registry }}/{{ $.Values.router.latencyPredictor.predictionServers.image.repository }}:{{ $.Values.router.latencyPredictor.predictionServers.image.tag }}
   imagePullPolicy: {{ $.Values.router.latencyPredictor.predictionServers.image.pullPolicy }}
   command: ["uvicorn"]
-  args: ["prediction_server:app", "--host", "0.0.0.0", "--port", "{{ add $.Values.router.latencyPredictor.predictionServers.startPort $i }}"]
+  args: ["llm_d_latency_predictor.prediction_server:app", "--host", "0.0.0.0", "--port", "{{ add $.Values.router.latencyPredictor.predictionServers.startPort $i }}"]
   ports:
   - containerPort: {{ add $.Values.router.latencyPredictor.predictionServers.startPort $i }}
     name: predict-port-{{ add $i 1 }}

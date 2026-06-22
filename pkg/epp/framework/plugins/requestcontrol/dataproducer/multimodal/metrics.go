@@ -24,19 +24,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
-
-const llmdSubsystem = "llm_d_router_epp"
 
 var (
 	// encoderCacheQueriesTotal counts every multimodal item hash lookup against the LRU.
 	encoderCacheQueriesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Subsystem: llmdSubsystem,
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "encoder_cache_queries_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of multimodal item hash lookups made against the encoder-cache affinity LRU.", compbasemetrics.ALPHA),
 		},
-		[]string{"plugin_type", "plugin_name"},
+		[]string{"plugin_type", "plugin_name", "modality"},
 	)
 
 	// encoderCacheHitsTotal counts the subset of encoder_cache_queries_total where
@@ -44,11 +43,25 @@ var (
 	// Divide by queries_total for hit rate.
 	encoderCacheHitsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Subsystem: llmdSubsystem,
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "encoder_cache_hits_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of multimodal item hash lookups that found a match in the encoder-cache affinity LRU, by endpoint.", compbasemetrics.ALPHA),
 		},
-		[]string{"plugin_type", "plugin_name", "pod"},
+		[]string{"plugin_type", "plugin_name", "pod", "modality"},
+	)
+
+	// encoderCacheHitRatio records, per endpoint and per request, the fraction of the
+	// request's multimodal items already present in that endpoint's LRU. The counters
+	// give an aggregate hit rate; this histogram exposes the distribution of
+	// per-endpoint hit ratios, which surfaces uneven cache locality across pods.
+	encoderCacheHitRatio = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "encoder_cache_hit_ratio",
+			Help:      metricsutil.HelpMsgWithStability("Ratio of matched multimodal items to total items per endpoint in an encoder-cache lookup.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
+		},
+		[]string{"plugin_type", "plugin_name"},
 	)
 
 	registerOnce sync.Once
@@ -58,5 +71,6 @@ func registerEncoderCacheMetrics() {
 	registerOnce.Do(func() {
 		metrics.Registry.MustRegister(encoderCacheQueriesTotal)
 		metrics.Registry.MustRegister(encoderCacheHitsTotal)
+		metrics.Registry.MustRegister(encoderCacheHitRatio)
 	})
 }

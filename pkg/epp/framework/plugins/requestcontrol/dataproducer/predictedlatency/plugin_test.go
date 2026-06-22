@@ -33,7 +33,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 // mockPredictor implements PredictorInterface for testing
@@ -121,7 +121,7 @@ func createTestInferenceRequest(reqID string, ttftSLO, tpotSLO float64) *fwksche
 		Completions: &fwkrh.CompletionsRequest{
 			Prompt: fwkrh.Prompt{Raw: "test prompt"},
 		},
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, 2)},
+		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 2)}},
 	})
 }
 
@@ -133,7 +133,7 @@ func createTestChatCompletionsInferenceRequest(reqID string, ttftSLO, tpotSLO fl
 				{Role: "user", Content: fwkrh.Content{Raw: "Tell me a joke."}},
 			},
 		},
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, 8)},
+		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 8)}},
 	})
 }
 
@@ -386,7 +386,7 @@ func TestPredictedLatencyFactory(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			handle := igwtestutils.NewTestHandle(context.Background())
+			handle := testutils.NewTestHandle(context.Background())
 			rawParams := json.RawMessage(tt.jsonParams)
 			plugin, err := PredictedLatencyFactory(tt.pluginName, fwkplugin.StrictDecoder(rawParams), handle)
 
@@ -422,7 +422,7 @@ func TestPredictedLatencyFactoryInvalidJSON(t *testing.T) {
 
 	for _, tt := range invalidTests {
 		t.Run(tt.name, func(t *testing.T) {
-			handle := igwtestutils.NewTestHandle(context.Background())
+			handle := testutils.NewTestHandle(context.Background())
 			rawParams := json.RawMessage(tt.jsonParams)
 			plugin, err := PredictedLatencyFactory("test", fwkplugin.StrictDecoder(rawParams), handle)
 

@@ -72,6 +72,7 @@ import (
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
+	programaware "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/program-aware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
@@ -99,6 +100,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
+	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/random"
@@ -217,9 +219,16 @@ func (r *Runner) Run(ctx context.Context) error {
 	logutil.InitLogging(&opts.ZapOptions)
 
 	if opts.Tracing {
-		err := tracing.InitTracing(ctx, setupLog, "llm-d-router/epp")
+		shutdown, err := tracing.InitTracing(ctx, setupLog, "llm-d-epp")
 		if err != nil {
 			return fmt.Errorf("failed to init tracing %w", err)
+		}
+		if shutdown != nil {
+			defer func() {
+				if err := shutdown(context.Background()); err != nil {
+					setupLog.Error(err, "Failed to shutdown tracing")
+				}
+			}()
 		}
 	}
 
@@ -347,6 +356,13 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		}
 	}
 
+	if r.PluginHandle == nil {
+		setupLog.Info("Plugin state debug handler not registered: plugin handle unavailable")
+	} else if err = runserver.SetupPluginStateDebugHandler(mgr, r.PluginHandle); err != nil {
+		setupLog.Error(err, "Failed to setup plugin state debug handler")
+		return nil, nil, err
+	}
+
 	// --- Initialize Core EPP Components ---
 	if r.schedulerConfig == nil {
 		err := errors.New("scheduler config must be set either by config api or through code")
@@ -365,7 +381,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
-	endpointCandidates, admissionController := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+	endpointCandidates, admissionController, priorityBandControlPlane := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
@@ -383,8 +399,10 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		Director:                         director,
 		ParserRegistry:                   r.parserRegistry,
 		SaturationDetector:               eppConfig.SaturationDetector,
+		PriorityBandControlPlane:         priorityBandControlPlane,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
+		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 	}
 
 	if err := serverRunner.SetupWithManager(mgr); err != nil {
@@ -468,6 +486,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(bylabel.EncodeRoleType, bylabel.EncodeRoleFactory)
 	fwkplugin.Register(bylabel.DecodeRoleType, bylabel.DecodeRoleFactory)
 	fwkplugin.Register(bylabel.PrefillRoleType, bylabel.PrefillRoleFactory)
+	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, sessionaffinityfilter.Factory)
 
 	// dataparallel profile handler
 	fwkplugin.Register(dataparallel.DataParallelProfileHandlerType, dataparallel.ProfileHandlerFactory)
@@ -507,6 +526,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Flow Control plugins
 	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, globalstrict.GlobalStrictFairnessPolicyFactory)
 	fwkplugin.Register(roundrobin.RoundRobinFairnessPolicyType, roundrobin.RoundRobinFairnessPolicyFactory)
+	fwkplugin.Register(programaware.ProgramAwarePluginType, programaware.ProgramAwarePluginFactory)
 	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, fcfs.FCFSOrderingPolicyFactory)
 	fwkplugin.Register(edf.EDFOrderingPolicyType, edf.EDFOrderingPolicyFactory)
 	fwkplugin.Register(slodeadline.SLODeadlineOrderingPolicyType, slodeadline.SLODeadlineOrderingPolicyFactory)
@@ -808,11 +828,12 @@ func (r *Runner) initAdmissionControl(
 	opts *runserver.Options,
 	eppConfig *config.Config,
 	endpointCandidates contracts.EndpointCandidates,
-) (contracts.EndpointCandidates, requestcontrol.AdmissionController) {
+) (contracts.EndpointCandidates, requestcontrol.AdmissionController, contracts.PriorityBandControlPlane) {
 	if !r.featureGates[flowcontrol.FeatureGate] {
 		setupLog.Info("Experimental Flow Control layer is disabled, using legacy admission control")
 		return endpointCandidates,
-			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates)
+			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates),
+			nil
 	}
 	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
 	setupLog.Info("Initializing experimental Flow Control layer")
@@ -828,8 +849,7 @@ func (r *Runner) initAdmissionControl(
 			UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
 		},
 	)
-	go registry.Run(ctx)
-	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName)
+	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName), registry
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
@@ -904,7 +924,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// EndpointPickerConfig.flowControl still apply.
 	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
-	endpointCandidates, admissionController := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+	// File-discovery mode has no InferenceObjective reconciler to drive the
+	// control plane; static bands from config apply at registry construction.
+	endpointCandidates, admissionController, _ := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 
 	gknn := common.GKNN{
@@ -926,6 +948,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		SaturationDetector:               eppConfig.SaturationDetector,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
+		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))

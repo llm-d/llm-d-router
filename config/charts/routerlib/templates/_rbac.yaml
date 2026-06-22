@@ -1,4 +1,4 @@
-{{- define "inference-extension.rbac" -}}
+{{- define "llm-d-router.rbac" -}}
 {{- if .Values.router.monitoring.prometheus.enabled }}
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1

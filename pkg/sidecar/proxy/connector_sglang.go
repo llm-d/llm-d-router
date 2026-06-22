@@ -31,7 +31,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
 var (
@@ -81,11 +81,11 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 }
 
 func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.Request, body []byte, prefillHost string) {
-	tracer := telemetry.Tracer()
+	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
 	// Prefill Stage - async
-	ctx, prefillSpan := tracer.Start(ctx, "llm_d.pd_proxy.prefill",
+	ctx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -133,7 +133,7 @@ func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.R
 	}()
 
 	// Decode Stage - sync
-	ctx, decodeSpan := tracer.Start(ctx, "llm_d.pd_proxy.decode",
+	ctx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()

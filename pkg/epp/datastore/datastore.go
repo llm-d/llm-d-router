@@ -79,6 +79,9 @@ type Datastore interface {
 	// InferenceModelRewrite operations
 	ModelRewriteSet(infModelRewrite *v1alpha2.InferenceModelRewrite)
 	ModelRewriteDelete(namespacedName types.NamespacedName)
+	// ModelRewriteGet returns the highest-precedence rewrite rule for a given
+	// model name (prioritizing exact matches over generic wildcard rules) and
+	// the name of the InferenceModelRewrite object.
 	ModelRewriteGet(modelName string) (*v1alpha2.InferenceModelRewriteRule, string)
 	ModelRewriteGetAll() []*v1alpha2.InferenceModelRewrite
 

@@ -52,6 +52,21 @@ func TestGetRequestPath(t *testing.T) {
 			want:    "/baz",
 		},
 		{
+			name:    "query parameters stripped from :path",
+			headers: map[string]string{":path": "/v1/messages?beta=true"},
+			want:    "/v1/messages",
+		},
+		{
+			name:    "query parameters stripped from x-original-path",
+			headers: map[string]string{"x-original-path": "/v1/messages?foo=bar&baz=1"},
+			want:    "/v1/messages",
+		},
+		{
+			name:    "query parameters stripped from x-forwarded-path",
+			headers: map[string]string{"x-forwarded-path": "/v1/chat/completions?stream=true"},
+			want:    "/v1/chat/completions",
+		},
+		{
 			name:    "fallback to completions",
 			headers: map[string]string{},
 			want:    "/v1/completions",

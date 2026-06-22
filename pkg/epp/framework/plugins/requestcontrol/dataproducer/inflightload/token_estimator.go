@@ -61,7 +61,7 @@ func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest)
 	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
 		return 0
 	}
-	return int64(len(request.Body.TokenizedPrompt.TokenIDs))
+	return int64(request.Body.TokenizedPrompt.TokenCount())
 }
 
 // EstimateOutput returns the estimated output token count given the input token count.
