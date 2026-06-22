@@ -359,6 +359,17 @@ helm-push-standalone: ## Package and push the llm-d-router-standalone Helm chart
 	$(MAKE) helm-push CHART=llm-d-router-standalone
 
 
+##@ Release
+
+.PHONY: artifacts
+artifacts: yq ## Generate release artifacts (CRD manifests)
+	if [ -d artifacts ]; then rm -rf artifacts; fi
+	mkdir -p artifacts
+	kubectl kustomize config/crd/bases -o artifacts/manifests.yaml
+	$(YQ) -P 'select(.spec.versions[].name == "v1")' artifacts/manifests.yaml > artifacts/v1-manifests.yaml
+	$(YQ) -P 'select(.spec.versions[].name != "v1")' artifacts/manifests.yaml > artifacts/experimental-manifests.yaml
+
+
 ##@ Coverage
 
 COVERAGE_DIR       ?= coverage
