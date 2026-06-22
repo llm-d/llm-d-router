@@ -56,10 +56,9 @@ var (
 const (
 	// Type is the unique identifier for the prefix cache scorer plugin.
 	PrefixCacheScorerPluginType = "prefix-cache-scorer"
-
-	// defaultPrefixLengthWeight is the default weight of the absolute prefix length in the score.
+	// The default weight of the absolute prefix length in the score.
 	defaultPrefixLengthWeight = 0.0
-	// defaultPrefillSaturationTokens is the default number of tokens at which prefill value saturates.
+	// Default number of tokens at which prefill value saturates.
 	defaultPrefillSaturationTokens = 8192
 )
 
