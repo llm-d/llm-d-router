@@ -375,6 +375,7 @@ retryLoop:
 			}
 		}
 	}
+	delete(completionRequest, requestFieldECTransferParams)
 	completionRequest[requestFieldKVTransferParams] = pKVTransferParams
 
 	dbody, err := json.Marshal(completionRequest)
