@@ -363,6 +363,7 @@ jobs:
           E2E_LABEL_FILTER: ${{ matrix.suite.label-filter }}
           PULL_SIDECAR_IMAGE: "false"
           PULL_VLLM_RENDER_IMAGE: "false"
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: make test-e2e-gaie-run
 
   e2e-router:
@@ -450,4 +451,5 @@ jobs:
           E2E_LABEL_FILTER: ${{ matrix.suite.label-filter }}
           LOAD_VLLM_RENDER_IMAGE: ${{ matrix.suite.needs-renderer }}
           PULL_VLLM_RENDER_IMAGE: "false"
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: make test-e2e-router-run
