@@ -50,6 +50,7 @@ runs:
     - name: Build image
       uses: docker/build-push-action@v6
       with:
+        context: .
         file: ${{ inputs.docker-file }}
         push: ${{ inputs.push == 'true' }}
         outputs: ${{ inputs.buildx-outputs }}
