@@ -32,12 +32,15 @@ const (
 var TopologyAttributeKey = plugin.NewDataKey("Topology", TopologyExtractorType)
 
 // Topology carries the locality information for an endpoint.
-// The Hostname field is populated once when the endpoint is created and
-// does not change unless the endpoint is re-created.
+// Fields are populated from pod labels at endpoint creation time.
+// Hostname falls back to spec.hostname when the configured label is absent.
 type Topology struct {
-	// Hostname identifies the node or host on which the endpoint runs.
-	// Derived from the Pod's hostname field or from a user-configured label.
+	// Hostname identifies the node on which the endpoint runs.
 	Hostname string
+	// Zone identifies the failure domain zone of the endpoint.
+	Zone string
+	// Region identifies the geographic region of the endpoint.
+	Region string
 }
 
 // Clone returns an independent copy of the Topology.

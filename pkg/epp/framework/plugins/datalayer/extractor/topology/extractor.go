@@ -15,16 +15,13 @@ limitations under the License.
 */
 
 // Package topology provides a datalayer plugin that stamps each endpoint with
-// a Topology attribute containing the endpoint's hostname.
+// a Topology attribute containing locality fields (hostname, zone, region).
 //
-// The plugin registers for both endpoint lifecycle events and Pod k8s notification
-// events. When hostnameLabel is configured, the label value is read from the
-// endpoint event's pod metadata and written as the Topology attribute; Pod
-// notifications are a no-op. When hostnameLabel is empty, the endpoint event
-// tracks live endpoints keyed by pod identity; the Pod notification (ready pods
-// only) reads spec.hostname, caches it, and stamps all current endpoints for
-// that pod. Whichever event fires first, the attribute is set once both have
-// been processed.
+// Label names for each field are resolved from plugin parameters, defaulting to
+// the standard Kubernetes topology labels. Labels are read from the endpoint's
+// pod metadata at endpoint event time. When the hostname label is absent from
+// the pod, the plugin falls back to spec.hostname from Pod notification events.
+// Zone and region have no fallback.
 package topology
 
 import (
@@ -33,6 +30,7 @@ import (
 	"slices"
 	"sync"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -53,12 +51,27 @@ var (
 // podGVK is the core/v1 Pod GVK watched by the pod notification handler.
 var podGVK = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
 
+const (
+	defaultHostnameLabel = corev1.LabelHostname
+	defaultZoneLabel     = corev1.LabelTopologyZone
+	defaultRegionLabel   = corev1.LabelTopologyRegion
+)
+
 // params holds the user-facing configuration for the topology extractor.
+// Each field names the pod label used to read the corresponding topology value.
+// When a field is empty, the corresponding default Kubernetes topology label is used.
+// When the hostname label is absent on a pod, spec.hostname is used as a fallback.
+// Zone and region have no fallback.
 type params struct {
-	// HostnameLabel is the pod label whose value is used as the topology hostname.
-	// When empty (default), spec.hostname from the Pod object is used instead.
-	// When set but absent on the pod, the attribute is not added.
-	HostnameLabel string `json:"hostnameLabel,omitempty"`
+	// Hostname is the pod label name whose value is used as the topology hostname.
+	// Defaults to kubernetes.io/hostname.
+	Hostname string `json:"hostname,omitempty"`
+	// Zone is the pod label name whose value is used as the topology zone.
+	// Defaults to topology.kubernetes.io/zone.
+	Zone string `json:"zone,omitempty"`
+	// Region is the pod label name whose value is used as the topology region.
+	// Defaults to topology.kubernetes.io/region.
+	Region string `json:"region,omitempty"`
 }
 
 // TopologyExtractor stamps each endpoint with a Topology attribute.
@@ -66,12 +79,15 @@ type params struct {
 type TopologyExtractor struct {
 	typedName     fwkplugin.TypedName
 	hostnameLabel string
+	zoneLabel     string
+	regionLabel   string
 	dk            fwkplugin.DataKey
 
 	// mu guards endpoints and hostnames.
 	mu sync.Mutex
 	// endpoints maps pod identity to all live Endpoints for that pod.
 	// Keyed by {PodName, Namespace} — one pod may have N rank endpoints.
+	// Only endpoints whose hostname label was absent are tracked here.
 	endpoints map[types.NamespacedName][]fwkdl.Endpoint
 	// hostnames caches spec.hostname per pod (ready pods only).
 	// Populated by Pod notifications; cleared on pod delete.
@@ -86,12 +102,23 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 			return nil, err
 		}
 	}
+	if p.Hostname == "" {
+		p.Hostname = defaultHostnameLabel
+	}
+	if p.Zone == "" {
+		p.Zone = defaultZoneLabel
+	}
+	if p.Region == "" {
+		p.Region = defaultRegionLabel
+	}
 	if name == "" {
 		name = attrtopology.TopologyExtractorType
 	}
 	return &TopologyExtractor{
 		typedName:     fwkplugin.TypedName{Type: attrtopology.TopologyExtractorType, Name: name},
-		hostnameLabel: p.HostnameLabel,
+		hostnameLabel: p.Hostname,
+		zoneLabel:     p.Zone,
+		regionLabel:   p.Region,
 		dk:            attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(name),
 		endpoints:     make(map[types.NamespacedName][]fwkdl.Endpoint),
 		hostnames:     make(map[types.NamespacedName]string),
@@ -157,31 +184,31 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	}
 
 	if event.Type == fwkdl.EventDelete {
-		if h.ext.hostnameLabel == "" {
-			h.removeEndpoint(meta, event.Endpoint)
-		}
+		h.removeEndpoint(meta, event.Endpoint)
 		return nil
 	}
 
-	if h.ext.hostnameLabel != "" {
-		val, ok := meta.Labels[h.ext.hostnameLabel]
-		if !ok || val == "" {
-			return nil
-		}
-		event.Endpoint.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{Hostname: val})
+	hn := meta.Labels[h.ext.hostnameLabel]
+	zone := meta.Labels[h.ext.zoneLabel]
+	region := meta.Labels[h.ext.regionLabel]
+
+	if hn == "" {
+		// Hostname label absent: track endpoint for spec.hostname fallback via pod notification.
+		key := podKey(meta)
+		h.ext.mu.Lock()
+		h.ext.endpoints[key] = append(h.ext.endpoints[key], event.Endpoint)
+		hn = h.ext.hostnames[key]
+		h.ext.mu.Unlock()
+	}
+
+	if hn == "" && zone == "" && region == "" {
 		return nil
 	}
-
-	// No-label path: track endpoint; stamp immediately if hostname already cached.
-	key := podKey(meta)
-	h.ext.mu.Lock()
-	h.ext.endpoints[key] = append(h.ext.endpoints[key], event.Endpoint)
-	hn := h.ext.hostnames[key]
-	h.ext.mu.Unlock()
-
-	if hn != "" {
-		event.Endpoint.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{Hostname: hn})
-	}
+	event.Endpoint.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{
+		Hostname: hn,
+		Zone:     zone,
+		Region:   region,
+	})
 	return nil
 }
 
@@ -224,10 +251,6 @@ func (h *podNotificationHandler) GVK() schema.GroupVersionKind {
 }
 
 func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.NotificationEvent) error {
-	if h.ext.hostnameLabel != "" {
-		return nil
-	}
-
 	obj := event.Object
 	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 
@@ -249,7 +272,15 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 	h.ext.mu.Unlock()
 
 	for _, ep := range eps {
-		ep.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{Hostname: hostname})
+		// Preserve zone/region already set from the endpoint event.
+		topo := &attrtopology.Topology{Hostname: hostname}
+		if raw, ok := ep.GetAttributes().Get(h.ext.dk.String()); ok {
+			if existing, ok := raw.(*attrtopology.Topology); ok {
+				topo.Zone = existing.Zone
+				topo.Region = existing.Region
+			}
+		}
+		ep.GetAttributes().Put(h.ext.dk.String(), topo)
 	}
 	return nil
 }

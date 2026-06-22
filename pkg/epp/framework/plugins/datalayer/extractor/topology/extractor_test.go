@@ -148,7 +148,7 @@ func podEvent(t fwkdl.EventType, pod *unstructured.Unstructured) fwkdl.Notificat
 // --- label-configured path ---
 
 func TestLabel_EndpointHandler_LabelPresent(t *testing.T) {
-	_, epH, _ := getHandlers(t, &params{HostnameLabel: "topology.hostname"})
+	_, epH, _ := getHandlers(t, &params{Hostname: "topology.hostname"})
 
 	ep := newRankEndpoint("worker-1", 0, map[string]string{"topology.hostname": "rack-42"})
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
@@ -165,7 +165,7 @@ func TestLabel_EndpointHandler_LabelPresent(t *testing.T) {
 }
 
 func TestLabel_EndpointHandler_LabelMissing(t *testing.T) {
-	_, epH, _ := getHandlers(t, &params{HostnameLabel: "topology.hostname"})
+	_, epH, _ := getHandlers(t, &params{Hostname: "topology.hostname"})
 
 	ep := newRankEndpoint("worker-2", 0, map[string]string{"other": "value"})
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
@@ -177,7 +177,7 @@ func TestLabel_EndpointHandler_LabelMissing(t *testing.T) {
 }
 
 func TestLabel_EndpointHandler_NilLabels(t *testing.T) {
-	_, epH, _ := getHandlers(t, &params{HostnameLabel: "topology.hostname"})
+	_, epH, _ := getHandlers(t, &params{Hostname: "topology.hostname"})
 
 	ep := newRankEndpoint("worker-3", 0, nil)
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
@@ -189,7 +189,7 @@ func TestLabel_EndpointHandler_NilLabels(t *testing.T) {
 }
 
 func TestLabel_EndpointHandler_DeleteIsNoop(t *testing.T) {
-	_, epH, _ := getHandlers(t, &params{HostnameLabel: "topology.hostname"})
+	_, epH, _ := getHandlers(t, &params{Hostname: "topology.hostname"})
 
 	ep := newRankEndpoint("worker-4", 0, map[string]string{"topology.hostname": "rack-1"})
 	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventDelete, ep)); err != nil {
@@ -201,7 +201,7 @@ func TestLabel_EndpointHandler_DeleteIsNoop(t *testing.T) {
 }
 
 func TestLabel_PodHandler_IsNoop(t *testing.T) {
-	_, _, podH := getHandlers(t, &params{HostnameLabel: "topology.hostname"})
+	_, _, podH := getHandlers(t, &params{Hostname: "topology.hostname"})
 
 	pod := makePod("worker-1", "actual-hostname", true)
 	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, pod)); err != nil {
@@ -452,6 +452,124 @@ func TestNoLabel_EndpointDelete_RemovesFromMap(t *testing.T) {
 	ext.mu.Unlock()
 	if still {
 		t.Error("expected pod entry removed from map when all endpoints deleted")
+	}
+}
+
+// --- zone and region label extraction ---
+
+func TestLabel_ZoneAndRegion(t *testing.T) {
+	_, epH, _ := getHandlers(t, &params{
+		Hostname: "my/hostname",
+		Zone:     "my/zone",
+		Region:   "my/region",
+	})
+
+	ep := newRankEndpoint("worker-z1", 0, map[string]string{
+		"my/hostname": "host-1",
+		"my/zone":     "us-east-1a",
+		"my/region":   "us-east-1",
+	})
+	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	got, ok := readTopology(ep)
+	if !ok {
+		t.Fatal("expected Topology attribute")
+	}
+	if got.Hostname != "host-1" {
+		t.Errorf("hostname = %q, want %q", got.Hostname, "host-1")
+	}
+	if got.Zone != "us-east-1a" {
+		t.Errorf("zone = %q, want %q", got.Zone, "us-east-1a")
+	}
+	if got.Region != "us-east-1" {
+		t.Errorf("region = %q, want %q", got.Region, "us-east-1")
+	}
+}
+
+func TestLabel_ZoneAndRegionDefault(t *testing.T) {
+	_, epH, _ := getHandlers(t, nil)
+
+	ep := newRankEndpoint("worker-z2", 0, map[string]string{
+		defaultHostnameLabel: "host-2",
+		defaultZoneLabel:     "eu-west-1b",
+		defaultRegionLabel:   "eu-west-1",
+	})
+	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	got, ok := readTopology(ep)
+	if !ok {
+		t.Fatal("expected Topology attribute")
+	}
+	if got.Hostname != "host-2" {
+		t.Errorf("hostname = %q, want %q", got.Hostname, "host-2")
+	}
+	if got.Zone != "eu-west-1b" {
+		t.Errorf("zone = %q, want %q", got.Zone, "eu-west-1b")
+	}
+	if got.Region != "eu-west-1" {
+		t.Errorf("region = %q, want %q", got.Region, "eu-west-1")
+	}
+}
+
+func TestLabel_ZoneOnlyNoHostname_FallsBackToSpecHostname(t *testing.T) {
+	_, epH, podH := getHandlers(t, &params{Zone: "my/zone"})
+
+	// Endpoint has zone label but not the hostname label (defaults to kubernetes.io/hostname).
+	ep := newRankEndpoint("worker-z3", 0, map[string]string{
+		"my/zone": "ap-south-1a",
+	})
+	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
+		t.Fatalf("epH.Extract: %v", err)
+	}
+
+	// Zone set but hostname still empty — pod notification provides the fallback.
+	pod := makePod("worker-z3", testNodeHostname, true)
+	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, pod)); err != nil {
+		t.Fatalf("podH.Extract: %v", err)
+	}
+
+	got, ok := readTopology(ep)
+	if !ok {
+		t.Fatal("expected Topology attribute")
+	}
+	if got.Hostname != testNodeHostname {
+		t.Errorf("hostname = %q, want %q", got.Hostname, testNodeHostname)
+	}
+	if got.Zone != "ap-south-1a" {
+		t.Errorf("zone = %q, want %q", got.Zone, "ap-south-1a")
+	}
+}
+
+func TestLabel_HostnameLabelAbsent_FallsBackToSpecHostname(t *testing.T) {
+	_, epH, podH := getHandlers(t, &params{Hostname: "custom/hostname"})
+
+	// Endpoint does not have the configured hostname label.
+	ep := newRankEndpoint("worker-z4", 0, map[string]string{"other": "val"})
+	if err := epH.Extract(context.Background(), epEvent(fwkdl.EventAddOrUpdate, ep)); err != nil {
+		t.Fatalf("epH.Extract: %v", err)
+	}
+
+	// No attribute yet.
+	if _, ok := readTopology(ep); ok {
+		t.Error("expected no Topology attribute before pod notification")
+	}
+
+	// Pod notification provides spec.hostname fallback.
+	pod := makePod("worker-z4", testNodeHostname, true)
+	if err := podH.Extract(context.Background(), podEvent(fwkdl.EventAddOrUpdate, pod)); err != nil {
+		t.Fatalf("podH.Extract: %v", err)
+	}
+
+	got, ok := readTopology(ep)
+	if !ok {
+		t.Fatal("expected Topology attribute after pod notification")
+	}
+	if got.Hostname != testNodeHostname {
+		t.Errorf("hostname = %q, want %q", got.Hostname, testNodeHostname)
 	}
 }
 
