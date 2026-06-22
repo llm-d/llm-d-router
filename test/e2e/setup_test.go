@@ -188,10 +188,9 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 
 	if waitForReady {
 		return append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls)...)
-	} else {
-		objs := testutils.CreateUnstructuredObjs(testConfig, eppYamls)
-		return append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, func(kind string, clientObj client.Object) {})...)
 	}
+	objs := testutils.CreateUnstructuredObjs(testConfig, eppYamls)
+	return append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, func(kind string, clientObj client.Object) {})...)
 }
 
 func usesTokenProducer(eppConfig string) bool {
