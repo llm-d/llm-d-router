@@ -250,27 +250,34 @@ func (av *AllowlistValidator) onInferencePoolDelete(obj interface{}) {
 func (av *AllowlistValidator) updatePodsForPool(poolObj *unstructured.Unstructured) {
 	poolName := poolObj.GetName()
 
-	// Parse the pool spec to get selector
+	selector, err := av.poolSelector(poolObj)
+	if err != nil {
+		av.logger.Error(err, "failed to extract selector from InferencePool", "name", poolName)
+		return
+	}
+
+	av.createPodInformer(poolName, selector)
+}
+
+func (av *AllowlistValidator) poolSelector(poolObj *unstructured.Unstructured) (labels.Selector, error) {
 	spec, found, err := unstructured.NestedMap(poolObj.Object, "spec")
 	if err != nil || !found {
-		av.logger.Error(err, "InferencePool missing or invalid spec field", "name", poolName, "found", found)
-		return
+		return nil, fmt.Errorf("missing or invalid spec field (found=%t): %w", found, err)
 	}
 
-	selectorData, found, err := unstructured.NestedMap(spec, "selector")
+	// GA API (inference.networking.k8s.io) uses spec.selector.matchLabels;
+	// deprecated alpha API (inference.networking.x-k8s.io) uses a flat spec.selector map.
+	selectorPath := []string{"selector", "matchLabels"}
+	if av.gvr.Group != routing.InferencePoolAPIGroup {
+		selectorPath = []string{"selector"}
+	}
+
+	selectorData, found, err := unstructured.NestedStringMap(spec, selectorPath...)
 	if err != nil || !found {
-		av.logger.Error(err, "InferencePool missing or invalid selector field", "name", poolName, "found", found)
-		return
+		return nil, fmt.Errorf("missing or invalid selector field at %v (found=%t): %w", selectorPath, found, err)
 	}
 
-	// Convert to labels.Selector
-	labelSelector := labels.Set{}
-	for k, v := range selectorData {
-		labelSelector[k] = fmt.Sprintf("%v", v)
-	}
-
-	// Create or update pod informer for this selector
-	av.createPodInformer(poolName, labelSelector.AsSelector())
+	return labels.Set(selectorData).AsSelector(), nil
 }
 
 // createPodInformer creates a new pod informer for the given selector

@@ -50,14 +50,14 @@ then
     exit 1
   fi
   ${YQ} -i \
-    '.latencyPredictor.trainingServer.image.registry=strenv(IMAGE_REGISTRY) |
-     .latencyPredictor.trainingServer.image.repository="llm-d-latency-predictor-training-server" |
-     .latencyPredictor.trainingServer.image.tag=strenv(LATENCY_PREDICTOR_TAG) |
-     .latencyPredictor.trainingServer.image.pullPolicy="IfNotPresent" |
-     .latencyPredictor.predictionServers.image.registry=strenv(IMAGE_REGISTRY) |
-     .latencyPredictor.predictionServers.image.repository="llm-d-latency-predictor-prediction-server" |
-     .latencyPredictor.predictionServers.image.tag=strenv(LATENCY_PREDICTOR_TAG) |
-     .latencyPredictor.predictionServers.image.pullPolicy="IfNotPresent"' \
+    '.router.latencyPredictor.trainingServer.image.registry=strenv(IMAGE_REGISTRY) |
+     .router.latencyPredictor.trainingServer.image.repository="llm-d-latency-predictor-training-server" |
+     .router.latencyPredictor.trainingServer.image.tag=strenv(LATENCY_PREDICTOR_TAG) |
+     .router.latencyPredictor.trainingServer.image.pullPolicy="IfNotPresent" |
+     .router.latencyPredictor.predictionServers.image.registry=strenv(IMAGE_REGISTRY) |
+     .router.latencyPredictor.predictionServers.image.repository="llm-d-latency-predictor-prediction-server" |
+     .router.latencyPredictor.predictionServers.image.tag=strenv(LATENCY_PREDICTOR_TAG) |
+     .router.latencyPredictor.predictionServers.image.pullPolicy="IfNotPresent"' \
     config/charts/${CHART}/values.yaml
   if [[ ${CHART} == "llm-d-router-standalone" ]]; then
     ${YQ} -i \

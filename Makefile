@@ -304,24 +304,24 @@ test-e2e-gaie-run: image-pull ## Ensure images are present, then run GAIE e2e te
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		-e EPP_IMAGE=$(GAIE_E2E_IMAGE) \
 		-e USE_KIND=true \
-		$(BUILDER_IMAGE) ./hack/test-e2e.sh
+		$(BUILDER_IMAGE) ./test/scripts/test-e2e-gaie.sh
 
 .PHONY: test-e2e-gaie
 test-e2e-gaie: image-build-builder image-build ## Build images and run GAIE e2e tests
 	$(MAKE) test-e2e-gaie-run
 
-.PHONY: test-e2e-scheduler-run
-test-e2e-scheduler-run: image-pull ## Ensure images are present, then run scheduler e2e tests
+.PHONY: test-e2e-router-run
+test-e2e-router-run: image-pull ## Ensure images are present, then run router e2e tests
 	@printf "\033[33;1m==== Running End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
-		$(BUILDER_IMAGE) ./test/scripts/run_e2e.sh
+		$(BUILDER_IMAGE) ./test/scripts/test-e2e-router.sh
 
-.PHONY: test-e2e-scheduler
-test-e2e-scheduler: image-build-builder image-build ## Build images and run scheduler e2e tests
-	$(MAKE) test-e2e-scheduler-run
+.PHONY: test-e2e-router
+test-e2e-router: image-build-builder image-build ## Build images and run router e2e tests
+	$(MAKE) test-e2e-router-run
 
 .PHONY: test-e2e
-test-e2e: test-e2e-gaie test-e2e-scheduler ## Run all end-to-end tests sequentially
+test-e2e: test-e2e-gaie test-e2e-router ## Run all end-to-end tests sequentially
 
 
 .PHONY: bench-tokenizer

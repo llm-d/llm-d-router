@@ -31,6 +31,7 @@ import (
 
 	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -400,10 +401,12 @@ func (s *Server) Clone() *Server {
 	}
 }
 
-// newProxyTransport returns an http.Transport cloned from the default with
-// connection-pool settings applied. If scheme is schemeHTTPS the transport's
-// TLSClientConfig is set accordingly.
-func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) *http.Transport {
+// newProxyTransport returns an http.RoundTripper backed by an http.Transport
+// cloned from the default with connection-pool settings applied. If scheme is
+// schemeHTTPS the transport's TLSClientConfig is set accordingly. The transport
+// is wrapped with otelhttp so outbound requests carry W3C trace context,
+// keeping EPP, routing-proxy, and vLLM spans in a single trace.
+func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.RoundTripper {
 	maxIdle := s.config.MaxIdleConnsPerHost
 	if maxIdle <= 0 {
 		maxIdle = defaultMaxIdleConnsPerHost
@@ -427,7 +430,7 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) *http
 			},
 		}
 	}
-	return t
+	return otelhttp.NewTransport(t)
 }
 
 func (s *Server) setKVConnector() {
