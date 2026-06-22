@@ -11,7 +11,9 @@ For each candidate endpoint, the scorer reads the `PrefixCacheMatchInfo` attribu
 The score is computed as:
 
 ```text
-score = prefixLengthWeight * matchLengthRatio + (1.0 - prefixLengthWeight) * matchRatio
+score = 0
+score += prefixLengthWeight * matchLengthRatio
+score += (1.0 - prefixLengthWeight) * matchRatio
 ```
 
 Where:
