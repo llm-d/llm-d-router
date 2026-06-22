@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import (
 
 // PriorityQueueName is the name of the priority queue implementation.
 //
-// This queue provides a concurrent-safe priority queue backed by the standard library's
+// This queue provides a concurrent-safe priority queue whose ordering is maintained by an internal
 // container/heap. Items are ordered by the configured OrderingPolicy, with the highest-priority
 // item (per the policy) at the head. It advertises the CapabilityPriorityConfigurable capability.
 //
@@ -157,27 +157,31 @@ func (pq *priorityQueue) Peek() flowcontrol.QueueItemAccessor {
 // Add adds an item to the queue.
 // Time complexity: O(log n).
 func (pq *priorityQueue) Add(item flowcontrol.QueueItemAccessor) {
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
-
 	hi := &heapItem{item: item}
 	item.SetHandle(hi)
+
+	pq.mu.Lock()
 	heap.Push(pq.heap, hi)
+	pq.mu.Unlock()
+
 	pq.byteSize.Add(item.OriginalRequest().ByteSize())
 }
 
 // Remove removes an item from the queue.
 // Time complexity: O(log n).
 func (pq *priorityQueue) Remove(handle flowcontrol.QueueItemHandle) (flowcontrol.QueueItemAccessor, error) {
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
-
-	if handle == nil || handle.IsInvalidated() {
+	if handle == nil {
+		return nil, contracts.ErrInvalidQueueItemHandle
+	}
+	hi, ok := handle.(*heapItem)
+	if !ok {
 		return nil, contracts.ErrInvalidQueueItemHandle
 	}
 
-	hi, ok := handle.(*heapItem)
-	if !ok {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	if hi.IsInvalidated() {
 		return nil, contracts.ErrInvalidQueueItemHandle
 	}
 
@@ -192,7 +196,7 @@ func (pq *priorityQueue) Remove(handle flowcontrol.QueueItemHandle) (flowcontrol
 
 	heap.Remove(pq.heap, i)
 	pq.byteSize.Add(^hi.item.OriginalRequest().ByteSize() + 1) // Atomic subtraction.
-	handle.Invalidate()
+	hi.Invalidate()
 	return hi.item, nil
 }
 
@@ -202,24 +206,30 @@ func (pq *priorityQueue) Cleanup(predicate contracts.PredicateFunc) []flowcontro
 	defer pq.mu.Unlock()
 
 	var removedItems []flowcontrol.QueueItemAccessor
-	itemsToKeep := make([]*heapItem, 0, len(pq.heap.items))
 
-	for _, hi := range pq.heap.items {
+	// Compact survivors in place: the kept count never exceeds the read index, so survivors can be
+	// written back into the existing backing array instead of allocating a second slice.
+	items := pq.heap.items
+	kept := 0
+	for _, hi := range items {
 		if predicate(hi.item) {
 			removedItems = append(removedItems, hi.item)
 			hi.Invalidate()
 			hi.index = -1
 			pq.byteSize.Add(^hi.item.OriginalRequest().ByteSize() + 1) // Atomic subtraction.
-		} else {
-			itemsToKeep = append(itemsToKeep, hi)
+			continue
 		}
+		items[kept] = hi
+		hi.index = kept
+		kept++
 	}
 
 	if len(removedItems) > 0 {
-		for i, hi := range itemsToKeep {
-			hi.index = i
+		// Clear the vacated tail so removed items aren't retained by the backing array.
+		for i := kept; i < len(items); i++ {
+			items[i] = nil
 		}
-		pq.heap.items = itemsToKeep
+		pq.heap.items = items[:kept]
 		// Re-establish the heap property on the remaining items.
 		heap.Init(pq.heap)
 	}
