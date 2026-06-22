@@ -50,8 +50,8 @@ func MustRegisterQueue(name RegisteredQueueName, constructor QueueConstructor) {
 	RegisteredQueues[name] = constructor
 }
 
-// NewQueueFromName creates a new SafeQueue given its registered name and the OrderingPolicy that will be optionally
-// used to configure the queue (provided it declares CapabilityPriorityConfigurable).
+// NewQueueFromName creates a new SafeQueue given its registered name and the OrderingPolicy used to
+// configure the queue's ordering.
 // This is called by the FlowRegistry during initialization of a flow's ManagedQueue.
 func NewQueueFromName(name RegisteredQueueName, policy flowcontrol.OrderingPolicy) (contracts.SafeQueue, error) {
 	mu.RLock()
