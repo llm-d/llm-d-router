@@ -19,14 +19,21 @@ spec:
         image: ${VLLM_RENDER_IMAGE}
         imagePullPolicy: IfNotPresent
         command: ["vllm", "launch", "render"]
-        args: ["${MODEL_NAME}", "--port=8082"]
+        args: ["${MODEL_NAME}", "--port=${VLLM_RENDER_PORT}"]
+        # For gated models, inject HF_TOKEN via a Secret reference:
+        # env:
+        # - name: HF_TOKEN
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: hf-token
+        #       key: token
         ports:
         - name: render-http
-          containerPort: 8082
+          containerPort: ${VLLM_RENDER_PORT}
         startupProbe:
           httpGet:
             path: /health
-            port: 8082
+            port: ${VLLM_RENDER_PORT}
           initialDelaySeconds: 2
           periodSeconds: 1
           failureThreshold: 600
@@ -34,21 +41,21 @@ spec:
         livenessProbe:
           httpGet:
             path: /health
-            port: 8082
+            port: ${VLLM_RENDER_PORT}
           periodSeconds: 10
           failureThreshold: 5
           timeoutSeconds: 1
         readinessProbe:
           httpGet:
             path: /health
-            port: 8082
+            port: ${VLLM_RENDER_PORT}
           periodSeconds: 5
           failureThreshold: 1
           timeoutSeconds: 1
         volumeMounts:
         - name: model-cache
           mountPath: /root/.cache/huggingface
-      volumes: 
+      volumes:
       - name: model-cache
         emptyDir: {}
 ---
@@ -64,6 +71,6 @@ spec:
   ports:
   - name: http
     protocol: TCP
-    port: 8082
-    targetPort: 8082
+    port: ${VLLM_RENDER_PORT}
+    targetPort: ${VLLM_RENDER_PORT}
   type: ClusterIP

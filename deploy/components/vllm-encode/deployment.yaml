@@ -30,7 +30,7 @@ spec:
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
         - "--no-enable-prefix-caching"
         - "--mm-encoder-only"
-        - "--render-url=http://vllm-render:8082"
+        - "--render-url=${VLLM_RENDER_URL}"
         - "${VLLM_EXTRA_ARGS_E}"
         ports:
         - name: encode-http

@@ -28,7 +28,7 @@ spec:
         - "--model=${MODEL_NAME}"
         - "--port=8000"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
-        - "--render-url=http://vllm-render:8082"
+        - "--render-url=${VLLM_RENDER_URL}"
         - "${VLLM_EXTRA_ARGS_P}"
         ports:
         - name: prefill-http

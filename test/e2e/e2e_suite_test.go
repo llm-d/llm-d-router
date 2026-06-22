@@ -64,6 +64,9 @@ const (
 	metricsTestLabel       = "Metrics"
 	deprecatedPDTestLabel  = "DeprecatedPD"
 	disaggTestLabel        = "Disagg"
+
+	// images
+	simulatorImg = "ghcr.io/llm-d/llm-d-inference-sim:v0.9.2"
 )
 
 var (
@@ -81,6 +84,7 @@ var (
 	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.2", ginkgo.GinkgoLogr)
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
+	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
 	numProcesses     = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
 	// baseNsName is the base of the namespace in which the K8S objects will be created

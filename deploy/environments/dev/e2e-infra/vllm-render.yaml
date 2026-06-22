@@ -20,16 +20,16 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - "--model=${MODEL_NAME}"
-        - "--port=8082"
+        - "--port=${VLLM_RENDER_PORT}"
         - "--mode=echo"
         - "--force-dummy-tokenizer"
         ports:
         - name: http
-          containerPort: 8082
+          containerPort: ${VLLM_RENDER_PORT}
         startupProbe:
           httpGet:
             path: /health
-            port: 8082
+            port: ${VLLM_RENDER_PORT}
           initialDelaySeconds: 2
           periodSeconds: 1
           failureThreshold: 600
@@ -37,18 +37,17 @@ spec:
         livenessProbe:
           httpGet:
             path: /health
-            port: 8082
+            port: ${VLLM_RENDER_PORT}
           periodSeconds: 10
           failureThreshold: 5
           timeoutSeconds: 1
         readinessProbe:
           httpGet:
             path: /health
-            port: 8082
+            port: ${VLLM_RENDER_PORT}
           periodSeconds: 5
           failureThreshold: 1
           timeoutSeconds: 1
-      volumes: []
 ---
 apiVersion: v1
 kind: Service
@@ -62,6 +61,6 @@ spec:
   ports:
   - name: http
     protocol: TCP
-    port: 8082
-    targetPort: 8082
+    port: ${VLLM_RENDER_PORT}
+    targetPort: ${VLLM_RENDER_PORT}
   type: ClusterIP

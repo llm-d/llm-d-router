@@ -128,6 +128,7 @@ func createRender(nsName string) []string {
 		map[string]string{
 			"${MODEL_NAME}":        kvModelName,
 			"${VLLM_RENDER_IMAGE}": vllmRenderImage,
+			"${VLLM_RENDER_PORT}":  vllmRenderPort,
 		})
 	objects := testutils.CreateObjsFromYaml(testConfig, renderYamls, nsName)
 	podsInDeploymentsReady(objects)
