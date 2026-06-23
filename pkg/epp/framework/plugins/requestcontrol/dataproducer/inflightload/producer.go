@@ -50,6 +50,10 @@ type Config struct {
 	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
 	// the in-flight token counter. Defaults to false.
 	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
+	// OutputRatio is the estimated output-to-input token ratio used when
+	// AddEstimatedOutputTokens is true: estimated output = inputTokens * OutputRatio.
+	// Must be non-negative. Unset defaults to DefaultOutputRatio.
+	OutputRatio *float64 `json:"outputRatio,omitempty"`
 	// PrefixMatchInfoProducerName selects which prefix-cache producer's
 	// PrefixCacheMatchInfo to read for the cached-prefix discount. Empty defaults
 	// to the approximate-prefix producer; set it to a precise-prefix-cache
@@ -77,11 +81,19 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		}
 	}
 
+	outputRatio := DefaultOutputRatio
+	if cfg.OutputRatio != nil {
+		if *cfg.OutputRatio < 0 {
+			return nil, fmt.Errorf("outputRatio must be non-negative, got %v", *cfg.OutputRatio)
+		}
+		outputRatio = *cfg.OutputRatio
+	}
+
 	return &InFlightLoadProducer{
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:           newConcurrencyTracker(),
 		tokenTracker:             newConcurrencyTracker(),
-		tokenEstimator:           NewSimpleTokenEstimator(),
+		tokenEstimator:           NewSimpleTokenEstimatorWithRatio(outputRatio),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
