@@ -19,6 +19,8 @@ package loader
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -120,8 +122,15 @@ func validateFeatureGates(gates configapi.FeatureGates) error {
 	registeredFeatureGatesMu.RLock()
 	defer registeredFeatureGatesMu.RUnlock()
 	for _, gate := range gates {
-		if !registeredFeatureGates.Has(gate) {
-			return fmt.Errorf("feature gate '%s' is unknown or unregistered", gate)
+		parts := strings.Split(gate, "=")
+		if _, ok := registeredFeatureGates[parts[0]]; !ok {
+			return fmt.Errorf("feature gate '%s' is unknown or unregistered", parts[0])
+		}
+		if len(parts) > 1 {
+			_, err := strconv.ParseBool(strings.ToLower(strings.TrimSpace(parts[1])))
+			if err != nil {
+				return fmt.Errorf("%s is not a valid value for the feature gate %s (error: %w)", parts[1], parts[0], err)
+			}
 		}
 	}
 
