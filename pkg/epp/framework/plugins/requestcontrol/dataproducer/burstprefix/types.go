@@ -54,12 +54,13 @@ type config struct {
 	// maxBlocks = MaxPrefixTokensToMatch / BlockSizeTokens; otherwise
 	// defaultMaxPrefixBlocks applies.
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
-	// MinColocateBlocks is the minimum shared leading blocks required to place two
-	// distinct groups on the same replica (inter-group prefix co-location). 0
-	// disables it: placement is purely load-balanced and only identical prompts
-	// co-locate. A larger value avoids co-locating on a trivial shared preamble.
-	// Co-location is always bounded by a per-replica fair-share cap, so raising
-	// this never lets prefix-sharing groups stampede onto one replica.
+	// MinColocateBlocks is the minimum shared leading blocks for inter-unit prefix
+	// co-location, and the minimum a single (non-duplicated) request must share
+	// with another request to gain an affinity at all. 0 disables both: only
+	// identical groups are placed and placement is purely load-balanced. A larger
+	// value avoids co-locating on a trivial shared preamble. Co-location is always
+	// bounded by a per-replica fair-share cap, so raising this never lets
+	// prefix-sharing units stampede onto one replica.
 	MinColocateBlocks int `json:"minColocateBlocks"`
 }
 

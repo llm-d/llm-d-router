@@ -54,6 +54,57 @@ func groupKey(hashes [][]prefixhash.BlockHash) string {
 	return b.String()
 }
 
+// prefixSignature encodes the first n prefix blocks. Two requests with equal
+// signatures share at least n leading blocks (the chained-hash property), so it
+// groups requests that overlap on a prefix without being identical.
+func prefixSignature(hashes [][]prefixhash.BlockHash, n int) string {
+	var b strings.Builder
+	var buf [8]byte
+	count := 0
+	for _, ph := range hashes {
+		for _, h := range ph {
+			if count >= n {
+				return b.String()
+			}
+			binary.LittleEndian.PutUint64(buf[:], uint64(h))
+			b.Write(buf[:])
+			count++
+		}
+		b.WriteByte('|')
+	}
+	return b.String()
+}
+
+// sharedPrefixKeys returns the group keys whose requests share at least
+// minColocateBlocks leading blocks with some other request in the batch. It is
+// the affinity gate for non-identical requests: a lone request that overlaps no
+// other keeps no affinity, while overlapping ones (e.g. one prompt contained in
+// another) become placeable. Keys with fewer than minColocateBlocks blocks can
+// never meet the threshold and are excluded.
+func sharedPrefixKeys(groups map[string][]*entry, order []string, minColocateBlocks int) map[string]bool {
+	if minColocateBlocks <= 0 {
+		return nil
+	}
+	count := map[string]int{}
+	keySig := map[string]string{}
+	for _, key := range order {
+		hashes := groups[key][0].hashes
+		if totalBlocks(hashes) < minColocateBlocks {
+			continue
+		}
+		s := prefixSignature(hashes, minColocateBlocks)
+		keySig[key] = s
+		count[s] += len(groups[key])
+	}
+	shared := map[string]bool{}
+	for key, s := range keySig {
+		if count[s] >= 2 {
+			shared[key] = true
+		}
+	}
+	return shared
+}
+
 // batchIndex records which replicas hold each prefix block, for matching later
 // groups against groups already placed in this batch. Because a whole prompt
 // prefix is added at once, holding block i implies holding blocks 0..i, so a
@@ -99,25 +150,30 @@ func (b *batchIndex) longestPrefix(hashes [][]prefixhash.BlockHash) map[string]i
 	return res
 }
 
-// assign steers each batched request to a replica so prompt-sharing samples
-// co-locate. Pass 1 groups requests by identical prefix (samples of one prompt);
-// only groups with more than one member receive an affinity (singletons have no
-// reuse and are left for other scorers).
+// assign steers each batched request to a replica so prompt-sharing requests
+// co-locate. Pass 1 groups requests by identical prefix (the samples of one
+// prompt). An identical group of more than one member is always a placeable
+// unit; a single request becomes placeable only when it shares at least
+// minColocateBlocks leading blocks with some other request in the batch (so a
+// lone, distinct request keeps no affinity and is left for other scorers).
 //
-// Pass 2 places the groups jointly over the whole batch. Groups are placed
-// longest-prefix first so they seed the batch index for shorter groups to match
-// against. Each group prefers a replica that already holds a group sharing at
-// least minColocateBlocks leading blocks AND is still below its fair share of the
-// batch (total placed samples / replicas); this prefills a long shared prefix
-// once across groups without letting many prefix-sharing groups stampede onto one
-// replica. With no eligible match a group seeds the least-loaded replica. Within
-// a group, samples fill one replica up to maxPerReplica (k) before spilling to
-// the next least-loaded replica; k == -1 places the whole group on one replica.
-// minColocateBlocks == 0 disables inter-group co-location (placement is purely
-// load-balanced).
+// Pass 2 places the units jointly over the whole batch. Identical groups are
+// placed first - longest-prefix first, kept whole (never split except by an
+// explicit maxPerReplica cap) - so the proven same-prompt co-location is the firm
+// structure; prefix-sharing singletons then attach to the established clusters.
+// Each unit prefers a replica that already holds a unit sharing at least
+// minColocateBlocks leading blocks AND is still below its fair share of the batch
+// (total placed samples / replicas); this prefills a shared prefix once across
+// units without letting many prefix-sharing units stampede onto one replica. With
+// no eligible match a unit seeds the least-loaded replica. Within a group,
+// samples fill one replica up to maxPerReplica (k) before spilling to the next
+// least-loaded replica; k == -1 places the whole group on one replica.
+// minColocateBlocks == 0 disables inter-unit co-location: only identical groups
+// are placed and purely load-balanced.
 func assign(entries []*entry, k, minColocateBlocks int) {
 	groups := map[string][]*entry{}
 	order := []string{}
+	var replicas []fwksched.Endpoint
 	for _, e := range entries {
 		key := groupKey(e.hashes)
 		if key == "" {
@@ -127,47 +183,64 @@ func assign(entries []*entry, k, minColocateBlocks int) {
 			order = append(order, key)
 		}
 		groups[key] = append(groups[key], e)
-	}
-
-	// Placeable groups (more than one member) and the total samples they
-	// contribute, which sets the per-replica fair-share cap.
-	var placeKeys []string
-	total := 0
-	var replicas []fwksched.Endpoint
-	for _, key := range order {
-		members := groups[key]
-		if len(members) < 2 {
-			continue
-		}
-		placeKeys = append(placeKeys, key)
-		total += len(members)
 		if replicas == nil {
-			replicas = members[0].pods
+			replicas = e.pods
 		}
 	}
-	if len(placeKeys) == 0 || len(replicas) == 0 {
+	if len(replicas) == 0 {
 		return
 	}
 
-	// Longest-prefix first: a longer group seeds more blocks in the index, so
-	// shorter groups match against the richest set of already-placed prefixes.
-	sort.SliceStable(placeKeys, func(i, j int) bool {
-		return totalBlocks(groups[placeKeys[i]][0].hashes) > totalBlocks(groups[placeKeys[j]][0].hashes)
-	})
+	// Identical groups are always placed; a singleton is placed only when it
+	// overlaps another request's prefix. Identical groups are placed before
+	// singletons so same-prompt co-location is never displaced by an attaching
+	// singleton.
+	shared := sharedPrefixKeys(groups, order, minColocateBlocks)
+	var groupUnits, singleUnits []string
+	total := 0
+	for _, key := range order {
+		switch {
+		case len(groups[key]) >= 2:
+			groupUnits = append(groupUnits, key)
+			total += len(groups[key])
+		case shared[key]:
+			singleUnits = append(singleUnits, key)
+			total += len(groups[key])
+		}
+	}
+	if len(groupUnits) == 0 && len(singleUnits) == 0 {
+		return
+	}
+
+	// Longest-prefix first within each tier: a longer prefix seeds more blocks in
+	// the index, so shorter units match against the richest set of placed blocks.
+	sortByPrefixLen(groupUnits, groups)
+	sortByPrefixLen(singleUnits, groups)
 
 	maxShare := (total + len(replicas) - 1) / len(replicas) // ceil: equal samples per replica
 
 	idx := newBatchIndex()
 	load := map[string]int{} // batch-wide samples assigned per replica
-	for _, key := range placeKeys {
+	for _, key := range groupUnits {
+		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, idx, load)
+	}
+	for _, key := range singleUnits {
 		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, idx, load)
 	}
 }
 
-// placeGroup places one identical-prompt group. The first (primary) replica is
-// chosen with the inter-group prefix preference bounded by the fair-share cap;
-// remaining samples (when k caps the group) spill to least-loaded replicas. The
-// group's blocks are then recorded so later groups can match against it.
+// sortByPrefixLen orders keys by descending prefix-block count (stable).
+func sortByPrefixLen(keys []string, groups map[string][]*entry) {
+	sort.SliceStable(keys, func(i, j int) bool {
+		return totalBlocks(groups[keys[i]][0].hashes) > totalBlocks(groups[keys[j]][0].hashes)
+	})
+}
+
+// placeGroup places one unit (an identical group, or a single prefix-sharing
+// request). The first (primary) replica is chosen with the inter-unit prefix
+// preference bounded by the fair-share cap; remaining samples (when k caps the
+// group) spill to least-loaded replicas. The unit's blocks are then recorded so
+// later units can match against it.
 func placeGroup(members []*entry, replicas []fwksched.Endpoint, k, minColocateBlocks, maxShare int, idx *batchIndex, load map[string]int) {
 	if len(replicas) == 0 {
 		return

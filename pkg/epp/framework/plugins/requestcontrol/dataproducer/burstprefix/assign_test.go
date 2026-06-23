@@ -180,6 +180,57 @@ func TestAssign_FairShareSpreadsPrefixSharingGroups(t *testing.T) {
 		"the fair-share cap must spread prefix-sharing groups, not stampede them onto one replica")
 }
 
+func TestAssign_SingletonAttachesToOverlappingGroup(t *testing.T) {
+	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
+	// An identical group plus a single request that overlaps its prefix but is
+	// not identical (shares leading {1,2} / {7,8}).
+	gx := group(2, []prefixhash.BlockHash{1, 2, 3}, replicas)
+	sx := group(1, []prefixhash.BlockHash{1, 2, 8}, replicas)
+	gy := group(2, []prefixhash.BlockHash{7, 8, 5}, replicas)
+	sy := group(1, []prefixhash.BlockHash{7, 8, 9}, replicas)
+	entries := concat(gx, sx, gy, sy)
+
+	assign(entries, unlimitedPerReplica, 2)
+
+	// The identical group stays whole, and the overlapping singleton attaches to
+	// the replica holding the group it shares a prefix with.
+	assert.Equal(t, assignedName(gx[0]), assignedName(gx[1]), "an identical group is never broken")
+	assert.Equal(t, assignedName(gx[0]), assignedName(sx[0]), "a prefix-sharing singleton attaches to the overlapping group")
+	assert.Equal(t, assignedName(gy[0]), assignedName(sy[0]), "a prefix-sharing singleton attaches to the overlapping group")
+	assert.Equal(t, map[string]int{"pod1": 3, "pod2": 3}, counts(entries))
+}
+
+func TestAssign_LoneSingletonGetsNoAffinity(t *testing.T) {
+	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
+	g := group(2, []prefixhash.BlockHash{1, 2, 3}, replicas)
+	lone := group(1, []prefixhash.BlockHash{5, 5, 5}, replicas) // overlaps nothing
+	entries := concat(g, lone)
+
+	assign(entries, unlimitedPerReplica, 2)
+
+	assert.Nil(t, lone[0].assigned, "a request overlapping no other must keep no affinity")
+	assert.Equal(t, assignedName(g[0]), assignedName(g[1]), "the identical group still co-locates")
+}
+
+func TestAssign_OverlappingSingletonsColocateWithoutGroups(t *testing.T) {
+	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
+	// No identical duplicates at all: four distinct requests sharing leading
+	// blocks {1,2} (the RAG / shared-system-prompt burst).
+	s1 := group(1, []prefixhash.BlockHash{1, 2, 3}, replicas)
+	s2 := group(1, []prefixhash.BlockHash{1, 2, 4}, replicas)
+	s3 := group(1, []prefixhash.BlockHash{1, 2, 5}, replicas)
+	s4 := group(1, []prefixhash.BlockHash{1, 2, 6}, replicas)
+	entries := concat(s1, s2, s3, s4)
+
+	assign(entries, unlimitedPerReplica, 2)
+
+	for _, e := range entries {
+		assert.NotNil(t, e.assigned, "overlapping singletons receive an affinity even without identical groups")
+	}
+	assert.Equal(t, map[string]int{"pod1": 2, "pod2": 2}, counts(entries),
+		"overlapping singletons co-locate but stay balanced under the fair-share cap")
+}
+
 func TestAssign_SharedPrefixBelowThresholdDoesNotColocate(t *testing.T) {
 	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
 	// Both families share only 2 leading blocks, below minColocateBlocks=3.
