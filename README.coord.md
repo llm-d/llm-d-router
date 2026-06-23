@@ -57,12 +57,7 @@ gateway:
   timeout: 60s                   # Per-request timeout
 ```
 
-### Rendering Service
-
-```yaml
-rendering_service:
-  address: "http://rendering-service:8080"
-```
+The rendering service address is not a top-level setting; it is the `address` parameter of the `render` pipeline step (see below).
 
 ### Pipeline
 
@@ -77,14 +72,11 @@ pipeline:
         max_concurrent_downloads: 10
     - type: render
       params:
-        endpoint: "/v1/chat/completions/render"
+        address: "http://rendering-service:8080"
     - type: encode
       params:
-        gateway_path: "/inference/v1/generate"
         max_parallel: 8
     - type: prefill
-      params:
-        gateway_path: "/inference/v1/generate"
     - type: decode
 ```
 
@@ -96,20 +88,21 @@ To remove a step, delete it from the list. To reorder, move entries up or down. 
 |------|-----------|---------|-------------|
 | replace-media-urls | `download_timeout` | `10s` | Timeout for each image download |
 | replace-media-urls | `max_concurrent_downloads` | `10` | Max parallel downloads |
-| render | `endpoint` | `/v1/chat/completions/render` | Rendering service endpoint path |
-| encode | `gateway_path` | `/inference/v1/generate` | Path appended after `/encode` prefix |
+| render | `address` | (required) | Base URL of the rendering service |
+| render | `timeout` | `30s` | Timeout for a single render call |
+| render | `max_total_tokens` | `0` (unlimited) | Reject requests whose tokenized prompt exceeds this |
+| render | `max_total_placeholder_tokens` | `0` (unlimited) | Reject requests whose summed image-placeholder length exceeds this |
 | encode | `max_parallel` | `8` | Max parallel encode requests |
-| prefill | `gateway_path` | `/inference/v1/generate` | Path appended after `/prefill` prefix |
 
 ### Gateway Routing
 
-The coordinator sends requests to the gateway with phase-specific path prefixes:
+The coordinator sends every sub-request to the same gateway address. It does not use phase-specific URL prefixes; instead it stamps an `EPP-Phase` header (`encode`, `prefill`, or `decode`) so the Endpoint Picker can route to the correct worker pool. The request path is chosen by the request format:
 
-| Phase | Gateway Path | Example |
-|-------|-------------|---------|
-| Encode | `/encode` + `gateway_path` | `/encode/inference/v1/generate` |
-| Prefill | `/prefill` + `gateway_path` | `/prefill/inference/v1/generate` |
-| Decode | `/decode` + original request path | `/decode/v1/chat/completions` or `/decode/v1/completions` |
+| Phase | Header | Path |
+|-------|--------|------|
+| Encode | `EPP-Phase: encode` | `/v1/completions` for completions requests; otherwise `/inference/v1/generate`, or `/v1/chat/completions` when `use_openai_format` is set |
+| Prefill | `EPP-Phase: prefill` | same as encode |
+| Decode | `EPP-Phase: decode` | original client request path (`/v1/chat/completions` or `/v1/completions`) |
 
 The decode step preserves the original client request path so the gateway can route it to the correct OpenAI-compatible endpoint on the decode worker.
 
@@ -192,19 +185,16 @@ pipeline:
 
 ### Dependency Injection
 
-Steps that need the gateway client or rendering service address can implement optional interfaces:
+A step that needs the shared gateway HTTP client implements `gateway.ClientAware`. After building each step, the coordinator type-asserts it against this interface and calls `SetGatewayClient` when it matches:
 
 ```go
-// Receives the shared gateway HTTP client
-type gatewayAware interface {
-    SetGatewayClient(*gateway.Client)
-}
-
-// Receives the rendering service base URL
-type renderAware interface {
-    SetServiceAddress(string)
+// gateway.ClientAware receives the shared gateway HTTP client.
+type ClientAware interface {
+    SetGatewayClient(*Client)
 }
 ```
+
+Step parameters from the YAML `params` map are the mechanism for everything else. For example, the render step reads its service address from `params.address` in its factory rather than through an injected interface. The render step does expose a `SetServiceAddress` method, but it is used only by tests to point the step at a local server and is not called in production.
 
 ### RequestContext
 
