@@ -12,7 +12,6 @@ spec:
       - name: routing-sidecar
         args:
         - "--port=8000"
-        - "--vllm-port=8200"
         - "--ec-connector=${EC_CONNECTOR_TYPE}"
         - "--secure-proxy=false"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
