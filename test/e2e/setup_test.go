@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -31,7 +32,7 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${DECODE_ROLE}":             "",
 		"${EPP_NAME}":                "e2e-epp",
 		"${NAMESPACE}":               nsName,
-		"${HF_TOKEN}":                "",
+		"${HF_TOKEN}":                os.Getenv("HF_TOKEN"),
 		"${VLLM_EXTRA_ARGS_E}":       "",
 		"${VLLM_EXTRA_ARGS_P}":       "",
 		"${VLLM_EXTRA_ARGS_D}":       "",

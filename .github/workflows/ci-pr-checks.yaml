@@ -25,7 +25,7 @@ jobs:
       helm: ${{ steps.filter.outputs.helm }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -70,7 +70,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Create Go cache dirs
         id: go-cache
@@ -228,7 +228,7 @@ jobs:
     steps:
       - name: Checkout source
         if: ${{ matrix.image.source == 'build' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Build ${{ matrix.image.name }} image
         if: ${{ matrix.image.source == 'build' }}
@@ -278,7 +278,7 @@ jobs:
     steps:
       - name: Checkout source
         if: ${{ matrix.image.source == 'build' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Build ${{ matrix.image.name }} image
         if: ${{ matrix.image.source == 'build' }}
@@ -324,7 +324,7 @@ jobs:
     name: e2e-gaie (${{ matrix.suite.name }})
     steps:
       - name: Checkout source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up e2e runner
         id: e2e-setup
@@ -363,6 +363,7 @@ jobs:
           E2E_LABEL_FILTER: ${{ matrix.suite.label-filter }}
           PULL_SIDECAR_IMAGE: "false"
           PULL_VLLM_RENDER_IMAGE: "false"
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: make test-e2e-gaie-run
 
   e2e-router:
@@ -398,7 +399,7 @@ jobs:
     name: e2e-router (${{ matrix.suite.name }})
     steps:
       - name: Checkout source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up e2e runner
         id: e2e-setup
@@ -450,4 +451,5 @@ jobs:
           E2E_LABEL_FILTER: ${{ matrix.suite.label-filter }}
           LOAD_VLLM_RENDER_IMAGE: ${{ matrix.suite.needs-renderer }}
           PULL_VLLM_RENDER_IMAGE: "false"
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: make test-e2e-router-run

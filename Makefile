@@ -122,7 +122,7 @@ endif
 # Should we pass ALL env vars here?
 E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE VLLM_RENDER_IMAGE \
                E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT \
-               E2E_LABEL_FILTER LOAD_VLLM_RENDER_IMAGE
+               E2E_LABEL_FILTER LOAD_VLLM_RENDER_IMAGE HF_TOKEN
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
@@ -358,6 +358,19 @@ helm-push-gateway: ## Package and push the llm-d-router-gateway Helm chart.
 .PHONY: helm-push-standalone
 helm-push-standalone: ## Package and push the llm-d-router-standalone Helm chart.
 	$(MAKE) helm-push CHART=llm-d-router-standalone
+
+
+##@ Release
+
+.PHONY: artifacts
+artifacts: yq check-kustomize ## Generate release artifacts (CRD manifests)
+	if [ -d artifacts ]; then rm -rf artifacts; fi
+	mkdir -p artifacts
+	kubectl kustomize config/crd > artifacts/manifests_all.yaml
+	$(YQ) -P 'select(.spec.group == "llm-d.ai")' artifacts/manifests_all.yaml > artifacts/manifests.yaml
+	rm -f artifacts/manifests_all.yaml
+	$(YQ) -P 'select(.spec.versions | map(.name == "v1") | any)' artifacts/manifests.yaml > artifacts/v1-manifests.yaml
+	$(YQ) -P 'select(.spec.versions | map(.name != "v1") | all)' artifacts/manifests.yaml > artifacts/experimental-manifests.yaml
 
 
 ##@ Coverage
