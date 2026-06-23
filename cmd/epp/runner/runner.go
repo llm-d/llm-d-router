@@ -602,7 +602,7 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 		}
 	}
 
-	loader.RegisterFeatureGate(flowcontrol.FeatureGate)
+	loader.RegisterFeatureGate(flowcontrol.FeatureGate, false)
 
 	r.registerInTreePlugins()
 
