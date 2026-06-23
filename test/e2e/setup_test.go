@@ -161,6 +161,8 @@ func createEndPointPicker(eppConfig string) []string {
 		})
 	if !usesTokenProducer(eppConfig) {
 		eppYamls = removeRenderSidecar(eppYamls)
+	} else if usesSimRender(eppConfig) {
+		eppYamls = swapToSimRenderSidecar(eppYamls, vllmSimImage, simModelName)
 	}
 
 	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls)...)
@@ -188,6 +190,19 @@ func usesTokenProducer(eppConfig string) bool {
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	for _, plugin := range cfg.Plugins {
 		if plugin.Type == tokenizer.PluginType {
+			return true
+		}
+	}
+	return false
+}
+
+// usesSimRender reports whether the config needs multimodal /render output;
+// such configs require the sim sidecar (text-only vLLM emits no mm_features).
+func usesSimRender(eppConfig string) bool {
+	cfg, _, err := configloader.LoadRawConfig([]byte(eppConfig), ginkgo.GinkgoLogr)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	for _, plugin := range cfg.Plugins {
+		if plugin.Type == "mm-embeddings-cache-producer" {
 			return true
 		}
 	}
