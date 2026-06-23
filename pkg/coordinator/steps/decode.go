@@ -1,20 +1,13 @@
 package steps
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httputil"
-	"net/url"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
-	"github.com/llm-d/coordinator/pkg/common/httplog"
 	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
@@ -53,44 +46,14 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	s.prepareDecodeBody(ctx, reqCtx)
 
-	bodyBytes, err := json.Marshal(reqCtx.Body)
+	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
+
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
 	if err != nil {
-		return fmt.Errorf("decode: marshal: %w", err)
+		return err
 	}
 
-	path := reqCtx.OriginalPath
-	logger.V(logutil.DEFAULT).Info("sending request", "path", path, "stream", reqCtx.Stream)
-
-	upstreamURL, err := url.Parse(s.gwClient.BaseURL() + path)
-	if err != nil {
-		return fmt.Errorf("decode: parse url: %w", err)
-	}
-
-	proxyReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL.String(), bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("decode: creating request: %w", err)
-	}
-	proxyReq.ContentLength = int64(len(bodyBytes))
-	proxyReq.Header.Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
-	for k, v := range reqCtx.ForwardedHeaders() {
-		proxyReq.Header.Set(k, v)
-	}
-	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
-	proxyReq.Header.Set(gateway.EPPPhaseHeader, gateway.PhaseDecode)
-
-	if v := logger.V(logutil.DEBUG); v.Enabled() {
-		v.Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(proxyReq.Header))
-	}
-
-	proxy := &httputil.ReverseProxy{
-		Director:      func(_ *http.Request) {},
-		FlushInterval: -1,
-		Transport:     s.gwClient.Transport(),
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
-			logger.Error(proxyErr, "proxy error")
-			w.WriteHeader(http.StatusBadGateway)
-		},
-	}
+	proxy := newDecodeProxy(logger, s.gwClient.Transport(), nil)
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
 	return nil
 }

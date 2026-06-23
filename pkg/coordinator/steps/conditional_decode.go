@@ -1,28 +1,18 @@
 package steps
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
-	"github.com/llm-d/coordinator/pkg/common/httplog"
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
 const ConditionalDecodeStepName = "conditional-decode"
-
-var errCacheMiss = errors.New("cache miss")
 
 func init() {
 	pipeline.Register(ConditionalDecodeStepName, NewConditionalDecodeStep)
@@ -49,54 +39,21 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	body := copyBody(reqCtx.Body)
 	s.prepareBody(reqCtx, body)
 
-	bodyBytes, err := json.Marshal(body)
+	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
+
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, ConditionalDecodeStepName, reqCtx, s.gwClient, body, map[string]string{"Prefer": "if-available"})
 	if err != nil {
-		return fmt.Errorf("conditional-decode: marshal: %w", err)
+		return err
 	}
-
-	path := reqCtx.OriginalPath
-	logger.V(logutil.DEFAULT).Info("sending request", "path", path)
-
-	upstreamURL, err := url.Parse(s.gwClient.BaseURL() + path)
-	if err != nil {
-		return fmt.Errorf("conditional-decode: parse url: %w", err)
-	}
-
-	proxyReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL.String(), bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("conditional-decode: creating request: %w", err)
-	}
-	proxyReq.ContentLength = int64(len(bodyBytes))
-	proxyReq.Header.Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
-	for k, v := range reqCtx.ForwardedHeaders() {
-		proxyReq.Header.Set(k, v)
-	}
-	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
-	proxyReq.Header.Set(gateway.EPPPhaseHeader, gateway.PhaseDecode)
-	proxyReq.Header.Set("Prefer", "if-available")
-
-	logger.V(logutil.DEBUG).Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(proxyReq.Header))
 
 	var cacheMiss bool
-	proxy := &httputil.ReverseProxy{
-		Director:      func(_ *http.Request) {},
-		FlushInterval: -1,
-		Transport:     s.gwClient.Transport(),
-		ModifyResponse: func(resp *http.Response) error {
-			if resp.StatusCode == http.StatusPreconditionFailed {
-				cacheMiss = true
-				return errCacheMiss
-			}
-			return nil
-		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
-			if errors.Is(proxyErr, errCacheMiss) {
-				return
-			}
-			logger.Error(proxyErr, "proxy error")
-			w.WriteHeader(http.StatusBadGateway)
-		},
-	}
+	proxy := newDecodeProxy(logger, s.gwClient.Transport(), func(resp *http.Response) error {
+		if resp.StatusCode == http.StatusPreconditionFailed {
+			cacheMiss = true
+			return errCacheMiss
+		}
+		return nil
+	})
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
 
 	if cacheMiss {
