@@ -602,7 +602,6 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 		}
 	}
 
-	loader.RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
 	loader.RegisterFeatureGate(flowcontrol.FeatureGate)
 
 	r.registerInTreePlugins()
@@ -613,11 +612,6 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 	}
 
 	r.featureGates = featureGates
-
-	if r.featureGates[datalayer.ExperimentalDatalayerFeatureGate] {
-		setupLog.Info("The data layer is now enabled by default. " +
-			"Please remove the 'dataLayer' feature gate from your config.")
-	}
 
 	setupLog.Info("Data layer: ENABLED")
 
