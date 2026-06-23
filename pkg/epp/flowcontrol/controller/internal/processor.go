@@ -413,7 +413,7 @@ func (sp *Processor) selectItem(
 	}
 	// The queue itself is responsible for explicit ordering via its configured OrderingPolicy.
 	// We simply peek at the head.
-	return queue.PeekHead(), nil
+	return queue.Peek(), nil
 }
 
 // dispatchItem handles the final steps of dispatching an item: removing it from the queue and finalizing its outcome.

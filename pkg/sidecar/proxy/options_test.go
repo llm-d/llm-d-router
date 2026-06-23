@@ -43,7 +43,7 @@ func createConfigWithValidYAML(t *testing.T) string {
 	t.Helper()
 	return writeTempYAML(t, "valid.yaml", fmt.Sprintf(`
 port: 8100
-vllm-port: 8200
+vllm-port: 8001
 data-parallel-size: 5
 kv-connector: %q
 connector: %q
@@ -74,7 +74,7 @@ func createConfigWithUnknownKeys(t *testing.T) string {
 	t.Helper()
 	return writeTempYAML(t, "valid.yaml", `
 port: 8100
-vllm-port: 8200
+vllm-port: 8001
 unknown-key: 1001
 `)
 }
@@ -183,7 +183,7 @@ func TestSidecarConfiguration(t *testing.T) {
 			},
 			expected: func(o *Options) {
 				o.Port = "8100"
-				o.vllmPort = "8200"
+				o.vllmPort = "8001"
 				o.DataParallelSize = 5
 				o.MaxIdleConnsPerHost = 300
 				o.MooncakeBootstrapPort = 9000

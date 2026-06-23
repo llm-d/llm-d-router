@@ -351,8 +351,8 @@ func TestNewPriorityBandConfig(t *testing.T) {
 		t.Parallel()
 		pb, err := NewPriorityBandConfig(10, defaults, WithOrderingPolicy(mockEDFOrdering), WithFairnessPolicy(mockGSFairness))
 		require.NoError(t, err)
-		assert.Equal(t, queue.RegisteredQueueName(queue.MaxMinHeapName), pb.Queue,
-			"EDF requires PriorityConfigurable, so should default to MaxMinHeap")
+		assert.Equal(t, queue.RegisteredQueueName(queue.PriorityQueueName), pb.Queue,
+			"EDF requires PriorityConfigurable, so should default to the PriorityQueue")
 	})
 
 	t.Run("ShouldDefaultToList_WhenPolicyDoesNotRequirePriority", func(t *testing.T) {
