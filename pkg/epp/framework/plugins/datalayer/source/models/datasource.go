@@ -3,7 +3,6 @@ package models
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
@@ -35,7 +34,7 @@ type modelsDatasourceParams struct {
 // Use this function directly in tests to bypass JSON parameter marshaling.
 func NewHTTPModelsDataSource(scheme, path, name string) (*http.HTTPDataSource[*extmodels.ModelResponse], error) {
 	return http.NewHTTPDataSource(scheme, path, defaultModelsInsecureSkipVerify,
-		ModelsDataSourceType, name, parseModels)
+		ModelsDataSourceType, name, extmodels.ParseModels)
 }
 
 // ModelDataSourceFactory is a factory function used to instantiate data layer's
@@ -52,7 +51,7 @@ func ModelDataSourceFactory(name string, parameters *json.Decoder, _ plugin.Hand
 	}
 
 	ds, err := http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify,
-		ModelsDataSourceType, name, parseModels)
+		ModelsDataSourceType, name, extmodels.ParseModels)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP data source: %w", err)
 	}
@@ -65,16 +64,4 @@ func defaultDataSourceConfigParams() *modelsDatasourceParams {
 		Path:               defaultModelsPath,
 		InsecureSkipVerify: defaultModelsInsecureSkipVerify,
 	}
-}
-
-func parseModels(data io.Reader) (*extmodels.ModelResponse, error) {
-	body, err := io.ReadAll(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %v", err)
-	}
-	var modelsResponse extmodels.ModelResponse
-	if err := json.Unmarshal(body, &modelsResponse); err != nil {
-		return nil, err
-	}
-	return &modelsResponse, nil
 }

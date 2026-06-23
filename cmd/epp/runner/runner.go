@@ -499,6 +499,9 @@ func (r *Runner) registerInTreePlugins() {
 	// data layer models source/extractor
 	fwkplugin.Register(srcmodels.ModelsDataSourceType, srcmodels.ModelDataSourceFactory)
 	fwkplugin.Register(attrmodels.ModelsExtractorType, extmodels.ModelServerExtractorFactory)
+	// Default producer of the /v1/models attribute: fetches once per endpoint on
+	// add rather than polling, and self-wires its endpoint-notification source.
+	fwkplugin.RegisterAsDefaultProducer(extmodels.ModelsEndpointExtractorType, extmodels.ModelEndpointExtractorFactory, attrmodels.ModelsAttributeKey)
 
 	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, prefix.PrefixCachePluginFactory)
 	fwkplugin.Register(maxscore.MaxScorePickerType, maxscore.MaxScorePickerFactory)
