@@ -48,8 +48,7 @@ func NewSimpleTokenEstimator() TokenEstimator {
 }
 
 // NewSimpleTokenEstimatorWithRatio returns a SimpleTokenEstimator that estimates
-// output tokens as inputTokens * ratio.
-func NewSimpleTokenEstimatorWithRatio(ratio float64) TokenEstimator {
+// output tokens as round(inputTokens * ratio).
 	return &SimpleTokenEstimator{
 		OutputRatio: ratio,
 	}

@@ -51,7 +51,7 @@ type Config struct {
 	// the in-flight token counter. Defaults to false.
 	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
 	// OutputRatio is the estimated output-to-input token ratio used when
-	// AddEstimatedOutputTokens is true: estimated output = inputTokens * OutputRatio.
+	// AddEstimatedOutputTokens is true: estimated output = round(inputTokens * OutputRatio).
 	// Must be non-negative. Unset defaults to DefaultOutputRatio.
 	OutputRatio *float64 `json:"outputRatio,omitempty"`
 	// PrefixMatchInfoProducerName selects which prefix-cache producer's
