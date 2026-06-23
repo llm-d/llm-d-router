@@ -27,7 +27,6 @@ package topology
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -86,9 +85,10 @@ type TopologyExtractor struct {
 	// mu guards endpoints and hostnames.
 	mu sync.Mutex
 	// endpoints maps pod identity to all live Endpoints for that pod.
-	// Keyed by {PodName, Namespace} — one pod may have N rank endpoints.
+	// Outer key: {PodName, Namespace}; inner key: endpoint NamespacedName.
+	// One pod may have N rank endpoints, each with a distinct inner key.
 	// Only endpoints whose hostname label was absent are tracked here.
-	endpoints map[types.NamespacedName][]fwkdl.Endpoint
+	endpoints map[types.NamespacedName]map[types.NamespacedName]fwkdl.Endpoint
 	// hostnames caches spec.hostname per pod (ready pods only).
 	// Populated by Pod notifications; cleared on pod delete.
 	hostnames map[types.NamespacedName]string
@@ -120,7 +120,7 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 		zoneLabel:     p.Zone,
 		regionLabel:   p.Region,
 		dk:            attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(name),
-		endpoints:     make(map[types.NamespacedName][]fwkdl.Endpoint),
+		endpoints:     make(map[types.NamespacedName]map[types.NamespacedName]fwkdl.Endpoint),
 		hostnames:     make(map[types.NamespacedName]string),
 	}, nil
 }
@@ -195,8 +195,12 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	if hn == "" {
 		// Hostname label absent: track endpoint for spec.hostname fallback via pod notification.
 		key := podKey(meta)
+		epKey := meta.GetNamespacedName()
 		h.ext.mu.Lock()
-		h.ext.endpoints[key] = append(h.ext.endpoints[key], event.Endpoint)
+		if h.ext.endpoints[key] == nil {
+			h.ext.endpoints[key] = make(map[types.NamespacedName]fwkdl.Endpoint)
+		}
+		h.ext.endpoints[key][epKey] = event.Endpoint
 		hn = h.ext.hostnames[key]
 		h.ext.mu.Unlock()
 	}
@@ -220,13 +224,9 @@ func (h *endpointHandler) removeEndpoint(meta *fwkdl.EndpointMetadata, _ fwkdl.E
 	defer h.ext.mu.Unlock()
 
 	eps := h.ext.endpoints[key]
-	eps = slices.DeleteFunc(eps, func(e fwkdl.Endpoint) bool {
-		return e.GetMetadata().GetNamespacedName() == epKey
-	})
+	delete(eps, epKey)
 	if len(eps) == 0 {
 		delete(h.ext.endpoints, key)
-	} else {
-		h.ext.endpoints[key] = eps
 	}
 }
 
@@ -268,7 +268,10 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 
 	h.ext.mu.Lock()
 	h.ext.hostnames[key] = hostname
-	eps := slices.Clone(h.ext.endpoints[key])
+	eps := make([]fwkdl.Endpoint, 0, len(h.ext.endpoints[key]))
+	for _, ep := range h.ext.endpoints[key] {
+		eps = append(eps, ep)
+	}
 	h.ext.mu.Unlock()
 
 	for _, ep := range eps {

@@ -17,4 +17,4 @@ Carries the locality of an endpoint. Populated once at endpoint creation.
 The following plugins produce this attribute:
 
 - **`topology-extractor`** (Data Layer): Sets the `Topology` attribute using
-  `spec.hostname` from the Pod object, or the value of a configured pod label.
+  `spec.hostname` from the Pod object, or the value of a configured endpoint label.
