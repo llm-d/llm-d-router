@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,6 +29,13 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
 const maxRequestBodySize = 64 << 20 // 64 MB
 
+// validRequestID bounds a client-supplied x-request-id to alphanumerics and
+// dashes, at most 128 characters. handleInference replaces a header that fails
+// the match with a generated UUID before it reaches error responses; the
+// request-logging middleware redacts it. This keeps attacker-controlled content
+// out of both surfaces.
+var validRequestID = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,128}$`)
+
 func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize+1))
 	if err != nil {
@@ -49,7 +57,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	model, _ := parsed["model"].(string)
 
 	requestID := r.Header.Get(reqcommon.RequestIDHeaderKey)
-	if requestID == "" {
+	clientRequestID := requestID
+	requestIDReplaced := !validRequestID.MatchString(requestID)
+	if requestIDReplaced {
 		requestID = uuid.New().String()
 	}
 
@@ -68,6 +78,12 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	ctx := log.IntoContext(r.Context(), logger)
+
+	if requestIDReplaced && clientRequestID != "" {
+		// Log the rejected length, never the raw value, to avoid reflecting
+		// attacker-controlled content into the log.
+		logger.V(logutil.DEFAULT).Info("replaced invalid client request ID", "rejectedLength", len(clientRequestID))
+	}
 
 	logger.V(logutil.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)
 

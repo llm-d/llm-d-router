@@ -27,9 +27,14 @@ var (
 func pickHeaders(h http.Header, names []string) map[string]string {
 	out := make(map[string]string, len(names))
 	for _, n := range names {
-		if v := h.Get(n); v != "" {
-			out[n] = v
+		v := h.Get(n)
+		if v == "" {
+			continue
 		}
+		if n == reqcommon.RequestIDHeaderKey && !validRequestID.MatchString(v) {
+			v = "<redacted>"
+		}
+		out[n] = v
 	}
 	return out
 }

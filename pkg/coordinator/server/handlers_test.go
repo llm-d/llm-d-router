@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"github.com/llm-d/coordinator/pkg/config"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
@@ -29,7 +31,15 @@ func newTestServer(stepErr error) *Server {
 
 func postInference(t *testing.T, srv *Server) *httptest.ResponseRecorder {
 	t.Helper()
+	return postInferenceWithRequestID(t, srv, "")
+}
+
+func postInferenceWithRequestID(t *testing.T, srv *Server, requestID string) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	if requestID != "" {
+		req.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
+	}
 	rec := httptest.NewRecorder()
 	srv.handleInference(rec, req)
 	return rec
@@ -82,5 +92,35 @@ func TestHandleInference_SuccessMapsTo200(t *testing.T) {
 	rec := postInference(t, newTestServer(nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 on success, got %d", rec.Code)
+	}
+}
+
+func TestHandleInference_ValidRequestIDIsReflected(t *testing.T) {
+	// A well-formed client request ID is echoed in the error response.
+	stepErr := fmt.Errorf("render: %w", pipeline.ErrBadRequest)
+	rec := postInferenceWithRequestID(t, newTestServer(stepErr), "req-abc-123")
+	if !strings.Contains(rec.Body.String(), "req-abc-123") {
+		t.Fatalf("expected valid request_id in response, got %q", rec.Body.String())
+	}
+}
+
+func TestHandleInference_MaliciousRequestIDIsRejected(t *testing.T) {
+	// A request ID with disallowed characters must not be reflected into the
+	// error response; the handler substitutes a generated one.
+	stepErr := fmt.Errorf("render: %w", pipeline.ErrBadRequest)
+	malicious := "evil\r\nInjected: header value with spaces"
+	rec := postInferenceWithRequestID(t, newTestServer(stepErr), malicious)
+	if strings.Contains(rec.Body.String(), malicious) || strings.Contains(rec.Body.String(), "Injected") {
+		t.Fatalf("malicious request_id must not leak to the client: %q", rec.Body.String())
+	}
+}
+
+func TestHandleInference_OverlongRequestIDIsRejected(t *testing.T) {
+	// A request ID over the length cap is replaced with a generated one.
+	stepErr := fmt.Errorf("render: %w", pipeline.ErrBadRequest)
+	overlong := strings.Repeat("a", 129)
+	rec := postInferenceWithRequestID(t, newTestServer(stepErr), overlong)
+	if strings.Contains(rec.Body.String(), overlong) {
+		t.Fatalf("overlong request_id must not leak to the client: %q", rec.Body.String())
 	}
 }
