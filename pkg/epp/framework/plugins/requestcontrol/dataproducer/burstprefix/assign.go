@@ -34,30 +34,10 @@ func totalBlocks(hashes [][]prefixhash.BlockHash) int {
 	return total
 }
 
-// groupKey identifies requests that share an identical prompt prefix. Because
-// each block hash chains its predecessor, an identical leading hash sequence
-// means an identical prompt prefix. Requests with no prefix return "" and are
-// never grouped.
-func groupKey(hashes [][]prefixhash.BlockHash) string {
-	if totalBlocks(hashes) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	var buf [8]byte
-	for _, ph := range hashes {
-		for _, h := range ph {
-			binary.LittleEndian.PutUint64(buf[:], uint64(h))
-			b.Write(buf[:])
-		}
-		b.WriteByte('|')
-	}
-	return b.String()
-}
-
-// prefixSignature encodes the first n prefix blocks. Two requests with equal
-// signatures share at least n leading blocks (the chained-hash property), so it
-// groups requests that overlap on a prefix without being identical.
-func prefixSignature(hashes [][]prefixhash.BlockHash, n int) string {
+// encodePrefix serializes the first n prefix blocks. Equal results imply an
+// equal n-block leading prefix: each block hash chains its predecessor, so an
+// equal leading hash sequence means an equal prompt prefix.
+func encodePrefix(hashes [][]prefixhash.BlockHash, n int) string {
 	var b strings.Builder
 	var buf [8]byte
 	count := 0
@@ -73,6 +53,16 @@ func prefixSignature(hashes [][]prefixhash.BlockHash, n int) string {
 		b.WriteByte('|')
 	}
 	return b.String()
+}
+
+// groupKey identifies requests that share an identical prompt prefix. Requests
+// with no prefix return "" and are never grouped.
+func groupKey(hashes [][]prefixhash.BlockHash) string {
+	n := totalBlocks(hashes)
+	if n == 0 {
+		return ""
+	}
+	return encodePrefix(hashes, n)
 }
 
 // sharedPrefixKeys returns the group keys whose requests share at least
@@ -92,7 +82,7 @@ func sharedPrefixKeys(groups map[string][]*entry, order []string, minColocateBlo
 		if totalBlocks(hashes) < minColocateBlocks {
 			continue
 		}
-		s := prefixSignature(hashes, minColocateBlocks)
+		s := encodePrefix(hashes, minColocateBlocks)
 		keySig[key] = s
 		count[s] += len(groups[key])
 	}
@@ -151,25 +141,10 @@ func (b *batchIndex) longestPrefix(hashes [][]prefixhash.BlockHash) map[string]i
 }
 
 // assign steers each batched request to a replica so prompt-sharing requests
-// co-locate. Pass 1 groups requests by identical prefix (the samples of one
-// prompt). An identical group of more than one member is always a placeable
-// unit; a single request becomes placeable only when it shares at least
-// minColocateBlocks leading blocks with some other request in the batch (so a
-// lone, distinct request keeps no affinity and is left for other scorers).
-//
-// Pass 2 places the units jointly over the whole batch. Identical groups are
-// placed first - longest-prefix first, kept whole (never split except by an
-// explicit maxPerReplica cap) - so the proven same-prompt co-location is the firm
-// structure; prefix-sharing singletons then attach to the established clusters.
-// Each unit prefers a replica that already holds a unit sharing at least
-// minColocateBlocks leading blocks AND is still below its fair share of the batch
-// (total placed samples / replicas); this prefills a shared prefix once across
-// units without letting many prefix-sharing units stampede onto one replica. With
-// no eligible match a unit seeds the least-loaded replica. Within a group,
-// samples fill one replica up to maxPerReplica (k) before spilling to the next
-// least-loaded replica; k == -1 places the whole group on one replica.
-// minColocateBlocks == 0 disables inter-unit co-location: only identical groups
-// are placed and purely load-balanced.
+// co-locate. It groups requests by shared prefix, then places the groups jointly
+// over the batch (longest-prefix first) so a shared prefix is prefilled once per
+// replica rather than scattered. Identical groups are placed before prefix-sharing
+// singletons so proven same-prompt co-location anchors the layout.
 func assign(entries []*entry, k, minColocateBlocks int) {
 	groups := map[string][]*entry{}
 	order := []string{}
@@ -191,10 +166,6 @@ func assign(entries []*entry, k, minColocateBlocks int) {
 		return
 	}
 
-	// Identical groups are always placed; a singleton is placed only when it
-	// overlaps another request's prefix. Identical groups are placed before
-	// singletons so same-prompt co-location is never displaced by an attaching
-	// singleton.
 	shared := sharedPrefixKeys(groups, order, minColocateBlocks)
 	var groupUnits, singleUnits []string
 	total := 0
@@ -221,10 +192,7 @@ func assign(entries []*entry, k, minColocateBlocks int) {
 
 	idx := newBatchIndex()
 	load := map[string]int{} // batch-wide samples assigned per replica
-	for _, key := range groupUnits {
-		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, idx, load)
-	}
-	for _, key := range singleUnits {
+	for _, key := range append(groupUnits, singleUnits...) {
 		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, idx, load)
 	}
 }
@@ -246,10 +214,14 @@ func placeGroup(members []*entry, replicas []fwksched.Endpoint, k, minColocateBl
 		return
 	}
 	hashes := members[0].hashes // identical group: any member represents it
-	matches := idx.longestPrefix(hashes)
 
-	perReplica := map[string]int{} // samples of THIS group already on a replica
+	var matches map[string]int
 	preferMatch := minColocateBlocks > 0
+	if preferMatch {
+		matches = idx.longestPrefix(hashes)
+	}
+
+	perReplica := map[string]int{} // samples of this group already on a replica
 	i := 0
 	for i < len(members) {
 		target := pickReplica(replicas, perReplica, k, load, matches, minColocateBlocks, maxShare, preferMatch)
@@ -317,7 +289,7 @@ func pickReplica(replicas []fwksched.Endpoint, perReplica map[string]int, k int,
 
 // pickLeastLoaded returns the least batch-loaded replica with capacity for this
 // group, falling back to the overall least-loaded replica when all are at the
-// cap. Ties break by running requests then by name for deterministic placement.
+// cap.
 func pickLeastLoaded(replicas []fwksched.Endpoint, perReplica map[string]int, k int, load map[string]int) fwksched.Endpoint {
 	var best fwksched.Endpoint
 	var bestName string
