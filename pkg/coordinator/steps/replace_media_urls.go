@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,6 +29,8 @@ const imageURLPartType = "image_url"
 
 const defaultContentType = "application/octet-stream"
 
+const defaultMaxDownloadSize = 10 << 20 // 10 MB
+
 func init() {
 	pipeline.Register(ReplaceMediaURLsStepName, NewReplaceMediaURLsStep)
 }
@@ -36,6 +39,7 @@ type ReplaceMediaURLsStep struct {
 	downloadTimeout        time.Duration
 	maxConcurrentDownloads int
 	maxMultimodalEntries   int
+	maxDownloadSize        int64
 	guard                  *addressGuard
 	client                 *http.Client
 }
@@ -65,6 +69,17 @@ func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
 		maxEntries = v
 	}
 
+	maxDownloadSize := int64(defaultMaxDownloadSize)
+	if v, ok := params["max_download_size"].(int); ok {
+		// math.MaxInt is reserved so download() can read maxDownloadSize+1 as an
+		// oversize sentinel without overflowing to a negative limit, which
+		// io.LimitReader would treat as immediate EOF.
+		if v <= 0 || v == math.MaxInt {
+			return nil, fmt.Errorf("max_download_size must be positive and below %d, got %d", math.MaxInt, v)
+		}
+		maxDownloadSize = int64(v)
+	}
+
 	guard := &addressGuard{}
 	if v, ok := params["allow_private_networks"].(bool); ok {
 		guard.allowPrivate = v
@@ -81,6 +96,7 @@ func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
 		downloadTimeout:        timeout,
 		maxConcurrentDownloads: maxConcurrent,
 		maxMultimodalEntries:   maxEntries,
+		maxDownloadSize:        maxDownloadSize,
 		guard:                  guard,
 	}
 	step.client = guard.newClient(timeout)
@@ -224,9 +240,16 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 		return nil, "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	if resp.ContentLength > s.maxDownloadSize {
+		return nil, "", fmt.Errorf("response too large: Content-Length %d exceeds max %d: %w", resp.ContentLength, s.maxDownloadSize, pipeline.ErrBadRequest)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, s.maxDownloadSize+1))
 	if err != nil {
 		return nil, "", err
+	}
+	if int64(len(data)) > s.maxDownloadSize {
+		return nil, "", fmt.Errorf("response too large: body exceeds max %d: %w", s.maxDownloadSize, pipeline.ErrBadRequest)
 	}
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {

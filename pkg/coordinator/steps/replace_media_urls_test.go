@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -647,6 +648,147 @@ func TestReplaceMediaURLsStep_DownloadInvalidURL(t *testing.T) {
 	_, _, err := rmu.download(context.Background(), "http://\x7f/control-char")
 	if err == nil {
 		t.Fatal("expected error building request for URL with control character")
+	}
+}
+
+func TestReplaceMediaURLsStep_RejectsOversizedBody(t *testing.T) {
+	var hits atomic.Int32
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		// No Content-Length set: force the size check to happen during the read.
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(make([]byte, 64))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"max_download_size": 16})
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageServer.URL + "/big.png"}},
+					},
+				},
+			},
+		},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for oversized download")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected no entries populated on rejection, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
+func TestReplaceMediaURLsStep_RejectsOversizedContentLength(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, 1000))
+	}))
+	defer imageServer.Close()
+
+	rmu := newLoopbackStep(t, map[string]any{"max_download_size": 16})
+
+	_, _, err := rmu.download(context.Background(), imageServer.URL+"/big.png")
+	if err == nil {
+		t.Fatal("expected error for oversized Content-Length")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+func TestReplaceMediaURLsStep_AllowsBodyAtCap(t *testing.T) {
+	const size = 16
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(make([]byte, size))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"max_download_size": size})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageServer.URL + "/atcap.png"}},
+					},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error for body exactly at cap: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if want := base64.StdEncoding.EncodeToString(make([]byte, size)); reqCtx.MultimodalEntries[0].Base64Data != want {
+		t.Fatalf("entry data mismatch: got %q want %q", reqCtx.MultimodalEntries[0].Base64Data, want)
+	}
+}
+
+// A request may carry several image_url entries. The per-download cap must
+// bound each one independently: a single oversized entry rejects the whole
+// request even when the others are within the cap.
+func TestReplaceMediaURLsStep_RejectsOneOversizedAmongMany(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		if strings.HasPrefix(r.URL.Path, "/big") {
+			_, _ = w.Write(make([]byte, 64))
+			return
+		}
+		_, _ = w.Write(make([]byte, 4))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"max_download_size": 16})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageServer.URL + "/small1.png"}},
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageServer.URL + "/big.png"}},
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageServer.URL + "/small2.png"}},
+					},
+				},
+			},
+		},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error when one of several entries is oversized")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+func TestReplaceMediaURLsStep_RejectsInvalidMaxDownloadSize(t *testing.T) {
+	// math.MaxInt is rejected so the maxDownloadSize+1 sentinel read in
+	// download() cannot overflow to a negative limit (which io.LimitReader
+	// would treat as immediate EOF, accepting an oversized body as empty).
+	for _, v := range []int{0, -1, math.MaxInt} {
+		if _, err := NewReplaceMediaURLsStep(map[string]any{"max_download_size": v}); err == nil {
+			t.Fatalf("expected error for max_download_size=%d", v)
+		}
 	}
 }
 
