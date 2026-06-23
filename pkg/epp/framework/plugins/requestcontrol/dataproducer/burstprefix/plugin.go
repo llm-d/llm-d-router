@@ -100,6 +100,9 @@ func newDataProducer(_ context.Context, name string, cfg config) (*dataProducer,
 	if cfg.MaxPrefixTokensToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: maxPrefixTokensToMatch must be >= 0 (current value: %d)", cfg.MaxPrefixTokensToMatch)
 	}
+	if cfg.MinColocateBlocks < 0 {
+		return nil, fmt.Errorf("invalid configuration: minColocateBlocks must be >= 0 (current value: %d)", cfg.MinColocateBlocks)
+	}
 
 	maxBlocks := defaultMaxPrefixBlocks
 	if cfg.MaxPrefixTokensToMatch > 0 {
@@ -165,7 +168,7 @@ func (p *dataProducer) seal(b *batch) {
 	entries := b.entries
 	p.mu.Unlock()
 
-	assign(entries, p.config.MaxPerReplica)
+	assign(entries, p.config.MaxPerReplica, p.config.MinColocateBlocks)
 	close(b.sealed)
 }
 

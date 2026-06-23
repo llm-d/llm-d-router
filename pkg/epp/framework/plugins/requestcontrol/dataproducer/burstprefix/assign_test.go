@@ -49,6 +49,19 @@ func group(n int, prefix []prefixhash.BlockHash, replicas []fwksched.Endpoint) [
 	return entries
 }
 
+// concat flattens groups into one entry slice in order.
+func concat(groups ...[]*entry) []*entry {
+	n := 0
+	for _, g := range groups {
+		n += len(g)
+	}
+	all := make([]*entry, 0, n)
+	for _, g := range groups {
+		all = append(all, g...)
+	}
+	return all
+}
+
 func counts(entries []*entry) map[string]int {
 	c := map[string]int{}
 	for _, e := range entries {
@@ -61,7 +74,7 @@ func TestAssign_UnlimitedColocatesWholeGroup(t *testing.T) {
 	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2"), testEndpoint("pod3"), testEndpoint("pod4")}
 	entries := group(8, []prefixhash.BlockHash{1, 2, 3}, replicas)
 
-	assign(entries, unlimitedPerReplica)
+	assign(entries, unlimitedPerReplica, 0)
 
 	for _, e := range entries {
 		assert.Equal(t, "pod1", assignedName(e), "all samples of one group must co-locate when k=-1")
@@ -72,7 +85,7 @@ func TestAssign_CapSpreadsEvenly(t *testing.T) {
 	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2"), testEndpoint("pod3"), testEndpoint("pod4")}
 	entries := group(8, []prefixhash.BlockHash{1, 2, 3}, replicas)
 
-	assign(entries, 2)
+	assign(entries, 2, 0)
 
 	assert.Equal(t, map[string]int{"pod1": 2, "pod2": 2, "pod3": 2, "pod4": 2}, counts(entries),
 		"k=2 over 8 samples and 4 replicas must place 2 per replica")
@@ -82,7 +95,7 @@ func TestAssign_CapFillsBeforeSpilling(t *testing.T) {
 	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2"), testEndpoint("pod3"), testEndpoint("pod4")}
 	entries := group(8, []prefixhash.BlockHash{1, 2, 3}, replicas)
 
-	assign(entries, 4)
+	assign(entries, 4, 0)
 
 	// k=4 fills one replica to 4 before using the next; only two replicas used.
 	assert.Equal(t, map[string]int{"pod1": 4, "pod2": 4}, counts(entries))
@@ -92,7 +105,7 @@ func TestAssign_SingletonGetsNoAffinity(t *testing.T) {
 	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
 	entries := group(1, []prefixhash.BlockHash{1, 2, 3}, replicas)
 
-	assign(entries, unlimitedPerReplica)
+	assign(entries, unlimitedPerReplica, 0)
 
 	assert.Nil(t, entries[0].assigned, "a singleton group has no reuse and must not receive an affinity")
 }
@@ -104,7 +117,7 @@ func TestAssign_EmptyPrefixGetsNoAffinity(t *testing.T) {
 		{hashes: nil, pods: replicas},
 	}
 
-	assign(entries, unlimitedPerReplica)
+	assign(entries, unlimitedPerReplica, 0)
 
 	for _, e := range entries {
 		assert.Nil(t, e.assigned, "requests with no prefix must not be grouped")
@@ -117,7 +130,7 @@ func TestAssign_DistinctGroupsSpreadAcrossReplicas(t *testing.T) {
 	groupB := group(8, []prefixhash.BlockHash{9, 9, 9}, replicas)
 	entries := append(append([]*entry{}, groupA...), groupB...)
 
-	assign(entries, unlimitedPerReplica)
+	assign(entries, unlimitedPerReplica, 0)
 
 	// Each group co-locates, and the second group lands on a different, less
 	// loaded replica than the first.
@@ -129,4 +142,58 @@ func TestAssign_DistinctGroupsSpreadAcrossReplicas(t *testing.T) {
 	for _, e := range groupB {
 		assert.Equal(t, "pod2", assignedName(e))
 	}
+}
+
+func TestAssign_SharedPrefixFamiliesColocateWithinFairShare(t *testing.T) {
+	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
+	// Two prefix families of two groups each: famX groups share leading {1, 2},
+	// famY groups share leading {7, 8}.
+	x1 := group(2, []prefixhash.BlockHash{1, 2, 3}, replicas)
+	x2 := group(2, []prefixhash.BlockHash{1, 2, 4}, replicas)
+	y1 := group(2, []prefixhash.BlockHash{7, 8, 5}, replicas)
+	y2 := group(2, []prefixhash.BlockHash{7, 8, 6}, replicas)
+	entries := concat(x1, x2, y1, y2)
+
+	assign(entries, unlimitedPerReplica, 2)
+
+	// Each family co-locates onto one replica, the two families land on
+	// different replicas, and the batch stays balanced (4 samples per replica).
+	assert.Equal(t, assignedName(x1[0]), assignedName(x2[0]), "groups sharing >= minColocateBlocks leading blocks co-locate")
+	assert.Equal(t, assignedName(y1[0]), assignedName(y2[0]), "groups sharing >= minColocateBlocks leading blocks co-locate")
+	assert.NotEqual(t, assignedName(x1[0]), assignedName(y1[0]), "distinct families spread across replicas")
+	assert.Equal(t, map[string]int{"pod1": 4, "pod2": 4}, counts(entries))
+}
+
+func TestAssign_FairShareSpreadsPrefixSharingGroups(t *testing.T) {
+	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2"), testEndpoint("pod3"), testEndpoint("pod4")}
+	// Four groups all sharing leading {1, 2}. Pure longest-match would pile them
+	// onto one replica; the fair-share cap must spread them instead.
+	g1 := group(2, []prefixhash.BlockHash{1, 2, 3}, replicas)
+	g2 := group(2, []prefixhash.BlockHash{1, 2, 4}, replicas)
+	g3 := group(2, []prefixhash.BlockHash{1, 2, 5}, replicas)
+	g4 := group(2, []prefixhash.BlockHash{1, 2, 6}, replicas)
+	entries := concat(g1, g2, g3, g4)
+
+	assign(entries, unlimitedPerReplica, 2)
+
+	assert.Equal(t, map[string]int{"pod1": 2, "pod2": 2, "pod3": 2, "pod4": 2}, counts(entries),
+		"the fair-share cap must spread prefix-sharing groups, not stampede them onto one replica")
+}
+
+func TestAssign_SharedPrefixBelowThresholdDoesNotColocate(t *testing.T) {
+	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
+	// Both families share only 2 leading blocks, below minColocateBlocks=3.
+	x1 := group(2, []prefixhash.BlockHash{1, 2, 3}, replicas)
+	x2 := group(2, []prefixhash.BlockHash{1, 2, 4}, replicas)
+	y1 := group(2, []prefixhash.BlockHash{7, 8, 5}, replicas)
+	y2 := group(2, []prefixhash.BlockHash{7, 8, 6}, replicas)
+	entries := concat(x1, x2, y1, y2)
+
+	assign(entries, unlimitedPerReplica, 3)
+
+	// The shared prefix falls short of the threshold, so groups are placed purely
+	// by load and a family is not kept together.
+	assert.NotEqual(t, assignedName(x1[0]), assignedName(x2[0]),
+		"a shared prefix below minColocateBlocks must not co-locate")
+	assert.Equal(t, map[string]int{"pod1": 4, "pod2": 4}, counts(entries))
 }

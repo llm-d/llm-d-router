@@ -29,9 +29,10 @@ const (
 	// per-replica cap, sending every sample of a group to a single replica.
 	unlimitedPerReplica = -1
 
-	defaultWindowDurationMs = 100
-	defaultMaxPerReplica    = unlimitedPerReplica
-	defaultBlockSizeTokens  = 64
+	defaultWindowDurationMs  = 100
+	defaultMaxPerReplica     = unlimitedPerReplica
+	defaultBlockSizeTokens   = 64
+	defaultMinColocateBlocks = 0
 
 	// defaultMaxPrefixBlocks caps how many leading blocks form a group key.
 	// Two prompts identical up to this many blocks are treated as one group.
@@ -53,6 +54,13 @@ type config struct {
 	// maxBlocks = MaxPrefixTokensToMatch / BlockSizeTokens; otherwise
 	// defaultMaxPrefixBlocks applies.
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
+	// MinColocateBlocks is the minimum shared leading blocks required to place two
+	// distinct groups on the same replica (inter-group prefix co-location). 0
+	// disables it: placement is purely load-balanced and only identical prompts
+	// co-locate. A larger value avoids co-locating on a trivial shared preamble.
+	// Co-location is always bounded by a per-replica fair-share cap, so raising
+	// this never lets prefix-sharing groups stampede onto one replica.
+	MinColocateBlocks int `json:"minColocateBlocks"`
 }
 
 // defaultConfig provides sensible defaults for the burst prefix cache producer.
@@ -61,6 +69,7 @@ var defaultConfig = config{
 	MaxPerReplica:          defaultMaxPerReplica,
 	BlockSizeTokens:        defaultBlockSizeTokens,
 	MaxPrefixTokensToMatch: 0,
+	MinColocateBlocks:      defaultMinColocateBlocks,
 }
 
 // entry is one request collected into a batch window.

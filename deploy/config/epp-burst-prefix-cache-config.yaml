@@ -18,6 +18,7 @@ plugins:
     parameters:
       windowDurationMs: 100       # batch window T
       maxPerReplica: -1           # k; -1 sends all samples of a group to one replica
+      minColocateBlocks: 0        # >0 co-locates distinct groups sharing >= N leading blocks; 0 = load-balanced
   - type: prefix-cache-scorer
     parameters:
       prefixMatchInfoProducerName: burst-prefix-cache-producer

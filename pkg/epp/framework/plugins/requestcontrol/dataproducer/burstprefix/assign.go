@@ -18,6 +18,7 @@ package burstprefix
 
 import (
 	"encoding/binary"
+	"sort"
 	"strings"
 
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -53,14 +54,68 @@ func groupKey(hashes [][]prefixhash.BlockHash) string {
 	return b.String()
 }
 
-// assign steers each batched request to a replica so samples sharing a prompt
-// co-locate. Requests are grouped by identical prefix; only groups with more
-// than one member receive an affinity (singletons have no reuse to exploit and
-// are left for other scorers). Within a group, samples fill one replica up to
-// maxPerReplica (k) before spilling to the next least-loaded replica; k == -1
-// places the whole group on one replica. Group placement is balanced by the
-// batch-wide assignment count so distinct groups spread across replicas.
-func assign(entries []*entry, k int) {
+// batchIndex records which replicas hold each prefix block, for matching later
+// groups against groups already placed in this batch. Because a whole prompt
+// prefix is added at once, holding block i implies holding blocks 0..i, so a
+// greedy walk that stops at the first unheld block yields the longest contiguous
+// shared prefix per replica (the approximateprefix matchLongestPrefix property).
+type batchIndex struct {
+	holders map[prefixhash.BlockHash]map[string]struct{}
+}
+
+func newBatchIndex() *batchIndex {
+	return &batchIndex{holders: map[prefixhash.BlockHash]map[string]struct{}{}}
+}
+
+// add records every block of hashes as held by replica.
+func (b *batchIndex) add(hashes [][]prefixhash.BlockHash, replica string) {
+	for _, ph := range hashes {
+		for _, h := range ph {
+			s := b.holders[h]
+			if s == nil {
+				s = map[string]struct{}{}
+				b.holders[h] = s
+			}
+			s[replica] = struct{}{}
+		}
+	}
+}
+
+// longestPrefix returns, per replica, the number of leading prefix blocks that
+// replica already holds (summed across prompts) - the shared-prefix length.
+func (b *batchIndex) longestPrefix(hashes [][]prefixhash.BlockHash) map[string]int {
+	res := map[string]int{}
+	for _, ph := range hashes {
+		for _, h := range ph {
+			holders := b.holders[h]
+			if len(holders) == 0 {
+				break
+			}
+			for name := range holders {
+				res[name]++
+			}
+		}
+	}
+	return res
+}
+
+// assign steers each batched request to a replica so prompt-sharing samples
+// co-locate. Pass 1 groups requests by identical prefix (samples of one prompt);
+// only groups with more than one member receive an affinity (singletons have no
+// reuse and are left for other scorers).
+//
+// Pass 2 places the groups jointly over the whole batch. Groups are placed
+// longest-prefix first so they seed the batch index for shorter groups to match
+// against. Each group prefers a replica that already holds a group sharing at
+// least minColocateBlocks leading blocks AND is still below its fair share of the
+// batch (total placed samples / replicas); this prefills a long shared prefix
+// once across groups without letting many prefix-sharing groups stampede onto one
+// replica. With no eligible match a group seeds the least-loaded replica. Within
+// a group, samples fill one replica up to maxPerReplica (k) before spilling to
+// the next least-loaded replica; k == -1 places the whole group on one replica.
+// minColocateBlocks == 0 disables inter-group co-location (placement is purely
+// load-balanced).
+func assign(entries []*entry, k, minColocateBlocks int) {
 	groups := map[string][]*entry{}
 	order := []string{}
 	for _, e := range entries {
@@ -74,33 +129,59 @@ func assign(entries []*entry, k int) {
 		groups[key] = append(groups[key], e)
 	}
 
-	// load is the batch-wide count of samples assigned per replica, used to
-	// spread groups across replicas.
-	load := map[string]int{}
+	// Placeable groups (more than one member) and the total samples they
+	// contribute, which sets the per-replica fair-share cap.
+	var placeKeys []string
+	total := 0
+	var replicas []fwksched.Endpoint
 	for _, key := range order {
 		members := groups[key]
 		if len(members) < 2 {
 			continue
 		}
-		assignGroup(members, members[0].pods, k, load)
+		placeKeys = append(placeKeys, key)
+		total += len(members)
+		if replicas == nil {
+			replicas = members[0].pods
+		}
+	}
+	if len(placeKeys) == 0 || len(replicas) == 0 {
+		return
+	}
+
+	// Longest-prefix first: a longer group seeds more blocks in the index, so
+	// shorter groups match against the richest set of already-placed prefixes.
+	sort.SliceStable(placeKeys, func(i, j int) bool {
+		return totalBlocks(groups[placeKeys[i]][0].hashes) > totalBlocks(groups[placeKeys[j]][0].hashes)
+	})
+
+	maxShare := (total + len(replicas) - 1) / len(replicas) // ceil: equal samples per replica
+
+	idx := newBatchIndex()
+	load := map[string]int{} // batch-wide samples assigned per replica
+	for _, key := range placeKeys {
+		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, idx, load)
 	}
 }
 
-// assignGroup places the members of one group across replicas honoring the
-// per-replica cap k and updating the batch-wide load counter.
-func assignGroup(members []*entry, replicas []fwksched.Endpoint, k int, load map[string]int) {
+// placeGroup places one identical-prompt group. The first (primary) replica is
+// chosen with the inter-group prefix preference bounded by the fair-share cap;
+// remaining samples (when k caps the group) spill to least-loaded replicas. The
+// group's blocks are then recorded so later groups can match against it.
+func placeGroup(members []*entry, replicas []fwksched.Endpoint, k, minColocateBlocks, maxShare int, idx *batchIndex, load map[string]int) {
 	if len(replicas) == 0 {
 		return
 	}
-	perReplica := map[string]int{} // samples of THIS group already on a replica
+	hashes := members[0].hashes // identical group: any member represents it
+	matches := idx.longestPrefix(hashes)
 
+	perReplica := map[string]int{} // samples of THIS group already on a replica
+	preferMatch := minColocateBlocks > 0
 	i := 0
 	for i < len(members) {
-		target := pickReplica(replicas, perReplica, k, load)
+		target := pickReplica(replicas, perReplica, k, load, matches, minColocateBlocks, maxShare, preferMatch)
 		name := target.GetMetadata().NamespacedName.String()
 
-		// Fill this replica up to its remaining capacity before moving on, so a
-		// group concentrates rather than scatters.
 		run := len(members) - i
 		if k != unlimitedPerReplica {
 			capLeft := k - perReplica[name]
@@ -117,14 +198,54 @@ func assignGroup(members []*entry, replicas []fwksched.Endpoint, k int, load map
 		perReplica[name] += run
 		load[name] += run
 		i += run
+		preferMatch = false // only the primary replica gets the prefix preference
+	}
+
+	for _, m := range members {
+		if m.assigned != nil {
+			idx.add(hashes, m.assigned.GetMetadata().NamespacedName.String())
+		}
 	}
 }
 
-// pickReplica returns the least batch-loaded replica that still has capacity for
-// this group. When every replica is at the cap (more members than k*replicas)
-// it falls back to the least-loaded replica ignoring the cap. Ties break by
-// running requests then by name for deterministic placement.
-func pickReplica(replicas []fwksched.Endpoint, perReplica map[string]int, k int, load map[string]int) fwksched.Endpoint {
+// pickReplica chooses the target replica for the next run of a group. When
+// preferMatch is set it first tries the replica sharing the longest prefix (at
+// least minColocateBlocks blocks) that still has per-group capacity and is below
+// its fair share of the batch; otherwise, or when no such replica exists, it
+// falls back to the least batch-loaded replica. The fair-share bound is what
+// keeps many prefix-sharing groups from stampeding onto a single replica.
+func pickReplica(replicas []fwksched.Endpoint, perReplica map[string]int, k int, load, matches map[string]int, minColocateBlocks, maxShare int, preferMatch bool) fwksched.Endpoint {
+	if preferMatch {
+		var best fwksched.Endpoint
+		var bestName string
+		bestMatch := 0
+		for _, r := range replicas {
+			name := r.GetMetadata().NamespacedName.String()
+			if k != unlimitedPerReplica && perReplica[name] >= k {
+				continue
+			}
+			if load[name] >= maxShare {
+				continue // at fair share: co-locating here would unbalance the batch
+			}
+			m := matches[name]
+			if m < minColocateBlocks {
+				continue
+			}
+			if best == nil || m > bestMatch || (m == bestMatch && less(r, name, load, best, bestName)) {
+				best, bestName, bestMatch = r, name, m
+			}
+		}
+		if best != nil {
+			return best
+		}
+	}
+	return pickLeastLoaded(replicas, perReplica, k, load)
+}
+
+// pickLeastLoaded returns the least batch-loaded replica with capacity for this
+// group, falling back to the overall least-loaded replica when all are at the
+// cap. Ties break by running requests then by name for deterministic placement.
+func pickLeastLoaded(replicas []fwksched.Endpoint, perReplica map[string]int, k int, load map[string]int) fwksched.Endpoint {
 	var best fwksched.Endpoint
 	var bestName string
 	for _, r := range replicas {
@@ -139,7 +260,6 @@ func pickReplica(replicas []fwksched.Endpoint, perReplica map[string]int, k int,
 	if best != nil {
 		return best
 	}
-	// All replicas at cap: ignore the cap and balance by load.
 	for _, r := range replicas {
 		name := r.GetMetadata().NamespacedName.String()
 		if best == nil || less(r, name, load, best, bestName) {
