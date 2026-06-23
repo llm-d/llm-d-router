@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -44,6 +45,7 @@ func Load(path string) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	v.SetEnvPrefix("COORDINATOR")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
 	v.SetDefault("log_level", 2)
