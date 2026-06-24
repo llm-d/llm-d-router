@@ -198,6 +198,36 @@ for cmd in kind kubectl ${CONTAINER_RUNTIME}; do
     fi
 done
 
+# The Prometheus config-reloader needs a sufficient inotify instance limit. The
+# argument is the limit read from the kernel backing the kind node: the host on
+# Linux, the runtime VM on macOS. A non-numeric value means the limit could not
+# be read; warn and skip rather than fail or compare a garbage string.
+check_inotify_limit() {
+  local limit="$1"
+  if ! [[ "${limit}" =~ ^[0-9]+$ ]]; then
+    echo "Warning: could not read fs.inotify.max_user_instances; skipping Prometheus inotify check." >&2
+    return 0
+  fi
+  if [ "${limit}" -lt 512 ]; then
+    echo "Error: fs.inotify.max_user_instances is ${limit} (need >= 512) for Prometheus."
+    echo ""
+    echo "Raise it on the kind node's kernel. On Linux this is the host:"
+    echo "  sudo sysctl -w fs.inotify.max_user_instances=512"
+    echo "To persist: echo 'fs.inotify.max_user_instances=512' | sudo tee /etc/sysctl.d/99-inotify.conf"
+    echo ""
+    echo "On macOS the kind node runs in the container runtime VM; raise it there, e.g.:"
+    echo "  ${CONTAINER_RUNTIME} exec ${CLUSTER_NAME}-control-plane sysctl -w fs.inotify.max_user_instances=512"
+    exit 1
+  fi
+}
+
+# On Linux the host kernel is shared with kind's node containers, so the limit
+# can be verified before creating the cluster to fail fast. Hosts where kind
+# runs inside a VM have no inotify proc file and are checked from the node below.
+if [ "${PROM_ENABLED}" == "true" ] && [ -r /proc/sys/fs/inotify/max_user_instances ]; then
+  check_inotify_limit "$(cat /proc/sys/fs/inotify/max_user_instances)"
+fi
+
 # TARGET_PORTS is substituted directly into the `targetPorts: ${TARGET_PORTS}` field
 # in deploy/components/inference-gateway/inference-pools.yaml. Each item must be
 # indented with exactly 2 spaces to match the indentation of that field. If the
@@ -252,23 +282,11 @@ set -x
 CONTAINER_NAME="${CLUSTER_NAME}-control-plane"
 ${CONTAINER_RUNTIME} exec ${CONTAINER_NAME} /bin/bash -c "sysctl net.ipv4.conf.all.arp_ignore=0"
 
-# Prometheus config-reloader needs sufficient inotify resources. The limit that
-# applies to pods is the one in the kernel of the kind node, which is the host
-# kernel on Linux and the runtime VM kernel on macOS; reading it from inside the
-# node container is correct in both cases.
-if [ "${PROM_ENABLED}" == "true" ]; then
-  INOTIFY_INSTANCES=$(${CONTAINER_RUNTIME} exec ${CONTAINER_NAME} cat /proc/sys/fs/inotify/max_user_instances)
-  if [ "${INOTIFY_INSTANCES}" -lt 512 ]; then
-    echo "Error: fs.inotify.max_user_instances is ${INOTIFY_INSTANCES} (need >= 512) for Prometheus."
-    echo ""
-    echo "Raise it on the kind node's kernel. On Linux this is the host:"
-    echo "  sudo sysctl -w fs.inotify.max_user_instances=512"
-    echo "To persist: echo 'fs.inotify.max_user_instances=512' | sudo tee /etc/sysctl.d/99-inotify.conf"
-    echo ""
-    echo "On macOS the kind node runs in the container runtime VM; raise it there, e.g.:"
-    echo "  ${CONTAINER_RUNTIME} exec ${CONTAINER_NAME} sysctl -w fs.inotify.max_user_instances=512"
-    exit 1
-  fi
+# Hosts where kind runs inside a VM (e.g. macOS) have no inotify proc file, so
+# the limit is read from the node, whose kernel is the runtime VM's. The host
+# case is handled by the fast-fail check before cluster creation.
+if [ "${PROM_ENABLED}" == "true" ] && [ ! -r /proc/sys/fs/inotify/max_user_instances ]; then
+  check_inotify_limit "$(${CONTAINER_RUNTIME} exec "${CONTAINER_NAME}" cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || true)"
 fi
 
 # Wait for all pods to be ready
