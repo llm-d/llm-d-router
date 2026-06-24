@@ -357,6 +357,70 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 	}
 }
 
+func TestVllmGRPCParser_ParseRequest_MaxOutputTokens(t *testing.T) {
+	parser := NewVllmGRPCParser()
+	ctx := context.Background()
+	headers := map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"}
+	u32 := func(v uint32) *uint32 { return &v }
+	i64 := func(v int64) *int64 { return &v }
+
+	tests := []struct {
+		name   string
+		reqMsg *pb.GenerateRequest
+		want   *int64
+	}{
+		{
+			name: "text input with max_tokens",
+			reqMsg: &pb.GenerateRequest{
+				Input:          &pb.GenerateRequest_Text{Text: "hello"},
+				SamplingParams: &pb.SamplingParams{MaxTokens: u32(256)},
+			},
+			want: i64(256),
+		},
+		{
+			name: "tokenized input with max_tokens",
+			reqMsg: &pb.GenerateRequest{
+				Input:          &pb.GenerateRequest_Tokenized{Tokenized: &pb.TokenizedInput{InputIds: []uint32{1, 2, 3}}},
+				SamplingParams: &pb.SamplingParams{MaxTokens: u32(128)},
+			},
+			want: i64(128),
+		},
+		{
+			name:   "no sampling params",
+			reqMsg: &pb.GenerateRequest{Input: &pb.GenerateRequest_Text{Text: "hello"}},
+			want:   nil,
+		},
+		{
+			name: "sampling params without max_tokens",
+			reqMsg: &pb.GenerateRequest{
+				Input:          &pb.GenerateRequest_Text{Text: "hello"},
+				SamplingParams: &pb.SamplingParams{},
+			},
+			want: nil,
+		},
+		{
+			name: "explicit zero max_tokens binds",
+			reqMsg: &pb.GenerateRequest{
+				Input:          &pb.GenerateRequest_Text{Text: "hello"},
+				SamplingParams: &pb.SamplingParams{MaxTokens: u32(0)},
+			},
+			want: i64(0),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseRequest(ctx, createGrpcPayload(t, tt.reqMsg), headers)
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got.Body.MaxOutputTokens); diff != "" {
+				t.Errorf("MaxOutputTokens mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 	tests := []struct {
 		name    string

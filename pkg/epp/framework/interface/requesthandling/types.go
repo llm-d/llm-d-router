@@ -102,6 +102,48 @@ type InferenceRequestBody struct {
 	// Stream indicates whether the request specifies a streaming response (e.g., via a stream field).
 	// This typically implies the model server's response will be streamed.
 	Stream bool `json:"-"`
+
+	// MaxOutputTokens is the client-requested cap on generated output tokens,
+	// normalized across APIs (OpenAI max_tokens / max_completion_tokens, Anthropic
+	// max_tokens, Responses max_output_tokens, vLLM SamplingParams.max_tokens).
+	// It is nil when the client did not specify a cap. Consumers such as output
+	// token estimators use it as an upper bound. Derived, not round-tripped.
+	MaxOutputTokens *int64 `json:"-"`
+}
+
+// MaxOutputTokensFromPayload returns the client-requested output-token cap read
+// from a decoded JSON request body. The keys are tried in order, so callers
+// express per-API precedence (e.g. chat completions: max_completion_tokens then
+// the legacy max_tokens). JSON numbers decode as float64; json.Number is also
+// accepted. An explicit non-negative whole number (including 0) is returned;
+// absent keys, negative values, and non-integral numbers yield nil ("no cap").
+func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
+	for _, k := range keys {
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		var f float64
+		switch n := v.(type) {
+		case float64:
+			f = n
+		case json.Number:
+			parsed, err := n.Float64()
+			if err != nil {
+				return nil
+			}
+			f = parsed
+		default:
+			return nil
+		}
+		// Reject negative or non-integral values as malformed input.
+		if f < 0 || f != math.Trunc(f) {
+			return nil
+		}
+		out := int64(f)
+		return &out
+	}
+	return nil
 }
 
 // TokenizedPrompt contains the result of tokenizing the request prompt.

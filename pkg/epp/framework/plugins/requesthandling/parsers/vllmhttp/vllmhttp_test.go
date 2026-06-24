@@ -105,7 +105,8 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					},
 					"stream": true,
 				},
-				Stream: true,
+				Stream:          true,
+				MaxOutputTokens: func() *int64 { v := int64(128); return &v }(),
 			},
 		},
 		{
@@ -268,6 +269,56 @@ func TestVllmHTTPParser_RejectsNonGeneratePaths(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported path") {
 		t.Errorf("expected error to contain 'unsupported path', got: %v", err)
+	}
+}
+
+func TestVllmHTTPParser_ParseRequest_MaxOutputTokens(t *testing.T) {
+	parser := NewVllmHTTPParser()
+	i64 := func(v int64) *int64 { return &v }
+	headers := map[string]string{":path": "/inference/v1/generate"}
+
+	tests := []struct {
+		name string
+		body map[string]any
+		want *int64
+	}{
+		{
+			name: "sampling_params max_tokens present",
+			body: map[string]any{
+				"token_ids":       []any{1, 2, 3},
+				"sampling_params": map[string]any{"max_tokens": float64(128)},
+			},
+			want: i64(128),
+		},
+		{
+			name: "no sampling_params",
+			body: map[string]any{"token_ids": []any{1, 2, 3}},
+			want: nil,
+		},
+		{
+			name: "sampling_params without max_tokens",
+			body: map[string]any{
+				"token_ids":       []any{1, 2, 3},
+				"sampling_params": map[string]any{"temperature": 0.8},
+			},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bodyBytes, err := json.Marshal(tt.body)
+			if err != nil {
+				t.Fatalf("marshal body: %v", err)
+			}
+			got, err := parser.ParseRequest(context.Background(), bodyBytes, headers)
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got.Body.MaxOutputTokens); diff != "" {
+				t.Errorf("MaxOutputTokens mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

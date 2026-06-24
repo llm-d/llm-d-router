@@ -17,6 +17,7 @@ limitations under the License.
 package requesthandling
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -243,6 +244,43 @@ func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, g.TokenIDs)
+		})
+	}
+}
+
+func TestMaxOutputTokensFromPayload(t *testing.T) {
+	i64 := func(v int64) *int64 { return &v }
+
+	tests := []struct {
+		name string
+		m    PayloadMap
+		keys []string
+		want *int64
+	}{
+		{name: "absent", m: PayloadMap{"other": float64(1)}, keys: []string{"max_tokens"}, want: nil},
+		{name: "float64 value", m: PayloadMap{"max_tokens": float64(64)}, keys: []string{"max_tokens"}, want: i64(64)},
+		{name: "json.Number value", m: PayloadMap{"max_tokens": json.Number("128")}, keys: []string{"max_tokens"}, want: i64(128)},
+		{name: "explicit zero binds", m: PayloadMap{"max_tokens": float64(0)}, keys: []string{"max_tokens"}, want: i64(0)},
+		{name: "negative ignored", m: PayloadMap{"max_tokens": float64(-1)}, keys: []string{"max_tokens"}, want: nil},
+		{name: "non-integral ignored", m: PayloadMap{"max_tokens": float64(1.5)}, keys: []string{"max_tokens"}, want: nil},
+		{name: "wrong type ignored", m: PayloadMap{"max_tokens": "64"}, keys: []string{"max_tokens"}, want: nil},
+		{
+			name: "precedence: first present key wins",
+			m:    PayloadMap{"max_completion_tokens": float64(100), "max_tokens": float64(50)},
+			keys: []string{"max_completion_tokens", "max_tokens"},
+			want: i64(100),
+		},
+		{
+			name: "precedence: fall back to second key",
+			m:    PayloadMap{"max_tokens": float64(50)},
+			keys: []string{"max_completion_tokens", "max_tokens"},
+			want: i64(50),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, MaxOutputTokensFromPayload(tt.m, tt.keys...))
 		})
 	}
 }

@@ -117,10 +117,27 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		return nil, err
 	}
 	extractedBody.Payload = fwkrh.PayloadMap(bodyMap)
+	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(determineAPITypeFromPath(request.GetRequestPath(headers)), bodyMap)
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		extractedBody.Stream = true
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// maxOutputTokensForAPI normalizes the per-API output-token cap field into a
+// single value, applying each API's field name and precedence. Endpoints with no
+// output-token concept (conversations, embeddings) return nil.
+func maxOutputTokensForAPI(apiType string, bodyMap map[string]any) *int64 {
+	switch apiType {
+	case chatCompletionsAPI:
+		return fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_completion_tokens", "max_tokens")
+	case completionsAPI:
+		return fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens")
+	case responsesAPI:
+		return fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_output_tokens")
+	default:
+		return nil
+	}
 }
 
 // ParseResponse extracts usage metadata from the provider's response.

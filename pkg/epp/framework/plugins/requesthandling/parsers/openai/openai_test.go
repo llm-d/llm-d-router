@@ -1374,3 +1374,83 @@ func BenchmarkExtractRequestData_Embeddings(b *testing.B) {
 		}
 	}
 }
+
+func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
+	parser := NewOpenAIParser()
+	i64 := func(v int64) *int64 { return &v }
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		body    map[string]any
+		want    *int64
+	}{
+		{
+			name:    "completions max_tokens",
+			headers: map[string]string{":path": "/v1/completions"},
+			body:    map[string]any{"model": "m", "prompt": "p", "max_tokens": float64(64)},
+			want:    i64(64),
+		},
+		{
+			name:    "completions absent",
+			headers: map[string]string{":path": "/v1/completions"},
+			body:    map[string]any{"model": "m", "prompt": "p"},
+			want:    nil,
+		},
+		{
+			name:    "chat max_completion_tokens preferred over legacy max_tokens",
+			headers: map[string]string{":path": "/v1/chat/completions"},
+			body: map[string]any{
+				"model":                 "m",
+				"messages":              []any{map[string]any{"role": "user", "content": "hi"}},
+				"max_completion_tokens": float64(100),
+				"max_tokens":            float64(50),
+			},
+			want: i64(100),
+		},
+		{
+			name:    "chat legacy max_tokens fallback",
+			headers: map[string]string{":path": "/v1/chat/completions"},
+			body: map[string]any{
+				"model":      "m",
+				"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+				"max_tokens": float64(50),
+			},
+			want: i64(50),
+		},
+		{
+			name:    "responses max_output_tokens",
+			headers: map[string]string{":path": "/v1/responses"},
+			body:    map[string]any{"input": "hi", "max_output_tokens": float64(32)},
+			want:    i64(32),
+		},
+		{
+			name:    "explicit zero binds",
+			headers: map[string]string{":path": "/v1/completions"},
+			body:    map[string]any{"model": "m", "prompt": "p", "max_tokens": float64(0)},
+			want:    i64(0),
+		},
+		{
+			name:    "negative ignored",
+			headers: map[string]string{":path": "/v1/completions"},
+			body:    map[string]any{"model": "m", "prompt": "p", "max_tokens": float64(-5)},
+			want:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bodyBytes, err := json.Marshal(tt.body)
+			if err != nil {
+				t.Fatalf("marshal body: %v", err)
+			}
+			got, err := parser.ParseRequest(context.Background(), bodyBytes, tt.headers)
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got.Body.MaxOutputTokens); diff != "" {
+				t.Errorf("MaxOutputTokens mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
