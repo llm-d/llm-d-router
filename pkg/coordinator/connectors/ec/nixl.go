@@ -17,10 +17,9 @@ limitations under the License.
 package ec
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -71,11 +70,7 @@ func (nixlEC) PreparePrefillECParams(ctx context.Context, reqCtx *pipeline.Reque
 				// descriptors are harmless; conflicting ones are not. Picking
 				// one (last-write-wins) would point the prefill pull at a peer
 				// that may have rotated its buffers, so reject the request.
-				equal, err := descriptorsEqual(existing, desc)
-				if err != nil {
-					return nil, fmt.Errorf("ec_transfer_params: comparing descriptors for mm_hash %q: %w", k, err)
-				}
-				if !equal {
+				if !reflect.DeepEqual(existing, desc) {
 					return nil, fmt.Errorf("ec_transfer_params: conflicting descriptors for mm_hash %q across encoder responses", k)
 				}
 				continue
@@ -100,19 +95,4 @@ func copyDescriptor(v any) any {
 		cp[key] = val
 	}
 	return cp
-}
-
-// descriptorsEqual reports whether two ec_transfer_params descriptors are
-// byte-equal under canonical JSON encoding. encoding/json sorts object keys,
-// so the comparison is independent of map iteration order.
-func descriptorsEqual(a, b any) (bool, error) {
-	ab, err := json.Marshal(a)
-	if err != nil {
-		return false, err
-	}
-	bb, err := json.Marshal(b)
-	if err != nil {
-		return false, err
-	}
-	return bytes.Equal(ab, bb), nil
 }
