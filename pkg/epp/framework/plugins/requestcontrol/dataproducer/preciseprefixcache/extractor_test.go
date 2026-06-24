@@ -50,6 +50,7 @@ func newExtractorProducer(discoverPods bool) *Producer {
 		subscribersManager: kvevents.NewSubscriberManager(kvevents.NewPool(cfg, nil, nil, nil)),
 		kvEventsConfig:     cfg,
 		subscriberCtx:      context.Background(),
+		healthMonitor:      NewKVEventsHealthMonitor(discoverPods),
 	}
 }
 

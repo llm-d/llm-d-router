@@ -140,6 +140,7 @@ func newProducerWithIndexer(ctx context.Context, idx kvCacheIndexer, scorer kvca
 		dk:              attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"),
 		pluginState:     plugin.NewPluginState(ctx),
 		blockSizeTokens: testBlockSize,
+		healthMonitor:   NewKVEventsHealthMonitor(false),
 	}
 }
 
