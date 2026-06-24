@@ -108,7 +108,6 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 				if ga, ok := step.(gateway.ClientAware); ok {
 					ga.SetGatewayClient(gwClient)
 				}
-				type renderAware interface{ SetServiceAddress(string) }
 				if ra, ok := step.(renderAware); ok {
 					ra.SetServiceAddress(renderServer.URL)
 				}
@@ -245,7 +244,6 @@ func TestFullPipeline_Integration(t *testing.T) {
 		if ga, ok := step.(gateway.ClientAware); ok {
 			ga.SetGatewayClient(gwClient)
 		}
-		type renderAware interface{ SetServiceAddress(string) }
 		if ra, ok := step.(renderAware); ok {
 			ra.SetServiceAddress(renderServer.URL)
 		}
