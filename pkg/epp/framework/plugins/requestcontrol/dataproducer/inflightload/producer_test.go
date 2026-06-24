@@ -94,12 +94,12 @@ func TestInFlightLoadProducer_PrefixMatchInfoProducerName(t *testing.T) {
 	// (indexed 2*4=8, matched 1*4=4 -> uncached 4).
 	hit := newStubSchedulingEndpoint("ep-hit")
 	hit.Put(preciseKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
-	require.Equal(t, int64(4), producer.estimateRequestTokens(hit, 5))
+	require.Equal(t, int64(4), producer.estimateRequestTokens(hit, nil, 5))
 
 	// Data under the approx (default) key is ignored, so it falls back to inputTokens.
 	miss := newStubSchedulingEndpoint("ep-miss")
 	miss.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
-	require.Equal(t, int64(5), producer.estimateRequestTokens(miss, 5))
+	require.Equal(t, int64(5), producer.estimateRequestTokens(miss, nil, 5))
 }
 
 func TestInFlightLoadProducer_Produce(t *testing.T) {
@@ -920,26 +920,64 @@ func TestInFlightLoadProducerFactory_OutputRatio(t *testing.T) {
 		t.Parallel()
 		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true})
 		require.NoError(t, err)
-		require.Equal(t, int64(15), p.tokenEstimator.EstimateOutput(10)) // 10 * 1.5
+		require.Equal(t, int64(15), p.tokenEstimator.EstimateOutput(10, nil)) // 10 * 1.5
 	})
 
 	t.Run("custom ratio applied", func(t *testing.T) {
 		t.Parallel()
 		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, OutputRatio: ptr.To(2.0)})
 		require.NoError(t, err)
-		require.Equal(t, int64(20), p.tokenEstimator.EstimateOutput(10)) // 10 * 2.0
+		require.Equal(t, int64(20), p.tokenEstimator.EstimateOutput(10, nil)) // 10 * 2.0
 	})
 
 	t.Run("zero ratio is valid", func(t *testing.T) {
 		t.Parallel()
 		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, OutputRatio: ptr.To(0.0)})
 		require.NoError(t, err)
-		require.Equal(t, int64(0), p.tokenEstimator.EstimateOutput(10))
+		require.Equal(t, int64(0), p.tokenEstimator.EstimateOutput(10, nil))
 	})
 
 	t.Run("negative ratio rejected", func(t *testing.T) {
 		t.Parallel()
 		_, err := newProducer(t, Config{AddEstimatedOutputTokens: true, OutputRatio: ptr.To(-1.0)})
+		require.Error(t, err)
+	})
+}
+
+func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
+	t.Parallel()
+
+	newProducer := func(t *testing.T, cfg Config) (*InFlightLoadProducer, error) {
+		raw, err := json.Marshal(cfg)
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		p, err := InFlightLoadProducerFactory("inflight-load-producer",
+			json.NewDecoder(bytes.NewReader(raw)), testutils.NewTestHandle(ctx))
+		if err != nil {
+			return nil, err
+		}
+		return p.(*InFlightLoadProducer), nil
+	}
+
+	t.Run("operator cap bounds the estimate", func(t *testing.T) {
+		t.Parallel()
+		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(40))})
+		require.NoError(t, err)
+		// 100 * 1.5 = 150, capped to 40.
+		require.Equal(t, int64(40), p.tokenEstimator.EstimateOutput(100, nil))
+	})
+
+	t.Run("estimate below cap is unaffected", func(t *testing.T) {
+		t.Parallel()
+		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(1000))})
+		require.NoError(t, err)
+		require.Equal(t, int64(150), p.tokenEstimator.EstimateOutput(100, nil))
+	})
+
+	t.Run("negative cap rejected", func(t *testing.T) {
+		t.Parallel()
+		_, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(-1))})
 		require.Error(t, err)
 	})
 }

@@ -54,6 +54,10 @@ type Config struct {
 	// AddEstimatedOutputTokens is true: estimated output = round(inputTokens * OutputRatio).
 	// Must be non-negative. Unset defaults to DefaultOutputRatio.
 	OutputRatio *float64 `json:"outputRatio,omitempty"`
+	// MaxEstimatedOutputTokens optionally caps the estimated output tokens added per
+	// request when AddEstimatedOutputTokens is true, regardless of input length or
+	// the client-requested output cap. Must be non-negative. Unset means no cap.
+	MaxEstimatedOutputTokens *int64 `json:"maxEstimatedOutputTokens,omitempty"`
 	// PrefixMatchInfoProducerName selects which prefix-cache producer's
 	// PrefixCacheMatchInfo to read for the cached-prefix discount. Empty defaults
 	// to the approximate-prefix producer; set it to a precise-prefix-cache
@@ -89,11 +93,15 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		outputRatio = *cfg.OutputRatio
 	}
 
+	if cfg.MaxEstimatedOutputTokens != nil && *cfg.MaxEstimatedOutputTokens < 0 {
+		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
+	}
+
 	return &InFlightLoadProducer{
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:           newConcurrencyTracker(),
 		tokenTracker:             newConcurrencyTracker(),
-		tokenEstimator:           NewSimpleTokenEstimatorWithRatio(outputRatio),
+		tokenEstimator:           NewSimpleTokenEstimatorWithConfig(outputRatio, cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
@@ -333,7 +341,7 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 			continue
 		}
 		if request != nil {
-			tokens := p.estimateRequestTokens(e, inputTokens)
+			tokens := p.estimateRequestTokens(e, request, inputTokens)
 			e.Put(p.uncachedRequestTokensDk.String(), &attrconcurrency.UncachedRequestTokens{
 				Tokens: tokens,
 			})
@@ -380,7 +388,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		// Prefer the prefix producer's view (real tokens) when available so the
 		// match-length and the input length are in the same units; fall back to
 		// the (estimated) input tokens otherwise.
-		tokens := p.estimateRequestTokens(endpoint, inputTokens)
+		tokens := p.estimateRequestTokens(endpoint, request, inputTokens)
 
 		p.tokenTracker.add(eid, tokens)
 
@@ -399,12 +407,16 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	}
 }
 
-func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, inputTokens int64) int64 {
+func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK.String())
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
+		var maxOutputTokens *int64
+		if request != nil && request.Body != nil {
+			maxOutputTokens = request.Body.MaxOutputTokens
+		}
 		// Output tokens are based on the full input, not the cached portion.
-		tokens += p.tokenEstimator.EstimateOutput(inputTokens)
+		tokens += p.tokenEstimator.EstimateOutput(inputTokens, maxOutputTokens)
 	}
 	return tokens
 }
