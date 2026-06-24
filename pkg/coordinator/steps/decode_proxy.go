@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 
 	"github.com/go-logr/logr"
 
@@ -67,12 +69,19 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 // modifyResponse, when non-nil, inspects each upstream response (the conditional
 // cache probe uses it to detect a 412). Transport errors are logged and answered
 // 502, except errCacheMiss, which is swallowed so the miss falls through.
+//
+// A failure after the upstream response has started streaming cannot become a
+// 502: the 200 status and partial body are already on the wire, so the proxy
+// aborts the connection (the client sees a truncated response). The stdlib only
+// surfaces that case through its ErrorLog, so ErrorLog is wired to the
+// request-scoped logger to make the truncation observable with the request id.
 func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyResponse func(*http.Response) error) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Director:       func(_ *http.Request) {},
 		FlushInterval:  -1,
 		Transport:      transport,
 		ModifyResponse: modifyResponse,
+		ErrorLog:       log.New(&proxyErrorLogWriter{logger: logger}, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
 			if errors.Is(proxyErr, errCacheMiss) {
 				return
@@ -81,4 +90,17 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
+}
+
+// proxyErrorLogWriter adapts the reverse proxy's *log.Logger sink to the
+// request-scoped logr. The proxy logs here when a read fails mid-copy, after
+// the response has started, which is the only signal that the client received a
+// truncated partial response.
+type proxyErrorLogWriter struct {
+	logger logr.Logger
+}
+
+func (w *proxyErrorLogWriter) Write(p []byte) (int, error) {
+	w.logger.Error(errors.New(strings.TrimSpace(string(p))), "decode proxy streaming error: client received a partial response")
+	return len(p), nil
 }
