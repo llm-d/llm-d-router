@@ -22,10 +22,13 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -122,7 +125,7 @@ func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceR
 	// if we got here, there is at least one endpoint to score
 	weightedScorePerEndpoint := p.runScorerPlugins(ctx, request, endpoints)
 
-	result := p.runPickerPlugin(ctx, weightedScorePerEndpoint)
+	result := p.runPickerPlugin(ctx, request, weightedScorePerEndpoint)
 
 	return result, nil
 }
@@ -184,8 +187,13 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	return weightedScorePerEndpoint
 }
 
-func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, weightedScorePerEndpoint map[fwksched.Endpoint]float64) *fwksched.ProfileRunResult {
+func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, req *fwksched.InferenceRequest, weightedScorePerEndpoint map[fwksched.Endpoint]float64) *fwksched.ProfileRunResult {
 	logger := log.FromContext(ctx)
+
+	ctx, span := tracing.Tracer(tracerScope).Start(ctx, "pick_endpoints",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
 
 	// Allocate the ScoredEndpoint values as a single contiguous backing array
 	// and build the picker's pointer slice by indexing into it. Previously each
@@ -202,12 +210,29 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, weightedScorePer
 		scoredEndpoints[i] = &storage[i]
 		i++
 	}
+
+	span.SetAttributes(attribute.Int("llm_d.epp.picker.candidate_endpoints", n))
+	if req != nil {
+		if req.TargetModel != "" {
+			span.SetAttributes(attribute.String("gen_ai.request.model", req.TargetModel))
+		}
+		if req.RequestID != "" {
+			span.SetAttributes(attribute.String("gen_ai.request.id", req.RequestID))
+		}
+	}
+
 	logger.V(logutil.VERBOSE).Info("Running picker plugin", "plugin", p.picker.TypedName())
 	logger.V(logutil.DEBUG).Info("Candidate pods for picking", "endpoints-weighted-score", scoredEndpoints)
 	before := time.Now()
 	result := p.picker.Pick(ctx, scoredEndpoints)
 	metrics.RecordPluginProcessingLatency(pickerExtensionPoint, p.picker.TypedName().Type, p.picker.TypedName().Name, time.Since(before))
 	logger.V(logutil.DEBUG).Info("Completed running picker plugin successfully", "plugin", p.picker.TypedName(), "result", result)
+
+	selected := 0
+	if result != nil {
+		selected = len(result.TargetEndpoints)
+	}
+	span.SetAttributes(attribute.Int("llm_d.epp.picker.selected_endpoints", selected))
 
 	return result
 }

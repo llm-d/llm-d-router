@@ -30,6 +30,9 @@ import (
 )
 
 const (
+	// tracerScope is the OTel instrumentation scope for spans emitted by the scheduling engine.
+	tracerScope = "llm-d-router/pkg/epp/scheduling"
+
 	profilePickerExtensionPoint          = "ProfilePicker"
 	filterExtensionPoint                 = "Filter"
 	scorerExtensionPoint                 = "Scorer"
