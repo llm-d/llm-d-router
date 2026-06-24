@@ -269,13 +269,20 @@ Return the standalone EPP model-server target ports.
 {{- end -}}
 
 {{/*
-Return the agentgateway model Service ports.
+Return the agentgateway standalone logical backend service name.
+Derives the name from .Values.router.modelServers.matchLabels.app,
+falling back to .Release.Name if not set.
 */}}
-{{- define "llm-d-router.agentgateway.modelServicePorts" -}}
-{{- $proxyValues := .Values.router.proxy | default dict -}}
-{{- $agentgateway := index $proxyValues "agentgateway" | default dict -}}
-{{- $service := index $agentgateway "service" | default dict -}}
-{{- include "llm-d-router.normalizedPortList" (dict "path" ".Values.router.proxy.agentgateway.service.ports" "value" (index $service "ports")) -}}
+{{- define "llm-d-router.agentgateway.logicalBackendName" -}}
+{{- $appLabel := "" -}}
+{{- if and .Values.router.modelServers .Values.router.modelServers.matchLabels -}}
+  {{- $appLabel = index .Values.router.modelServers.matchLabels "app" | default "" -}}
+{{- end -}}
+{{- if not (empty $appLabel) -}}
+  {{- $appLabel -}}
+{{- else -}}
+  {{- .Release.Name -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -329,30 +336,15 @@ Return the rendered proxy ConfigMap data.
 {{- toYaml $data -}}
 {{- end -}}
 
-{{/*
-Render labels from the standalone endpoint selector for the generated model Service.
-Only equality-based selectors are supported because Service selectors are a map.
-*/}}
-{{- define "llm-d-router.agentgateway.modelServiceSelectorLabels" -}}
-{{- if and .Values.router.modelServers .Values.router.modelServers.matchLabels -}}
-{{- range $key, $value := .Values.router.modelServers.matchLabels -}}
-{{- printf "%s: %s\n" ($key | quote) ($value | quote) -}}
-{{- end -}}
-{{- else -}}
-  {{- fail ".Values.modelServers.matchLabels is required when creating an agentgateway model Service" -}}
-{{- end -}}
-{{- end -}}
+
 
 {{/*
 Render the default standalone agentgateway proxy config template.
 */}}
 {{- define "llm-d-router.proxy.agentgatewayConfig" -}}
-{{- $proxyValues := .Values.router.proxy | default dict -}}
-{{- $agentgateway := index $proxyValues "agentgateway" | default dict -}}
-{{- $service := index $agentgateway "service" | default dict -}}
-{{- $serviceName := index $service "name" | default "" -}}
-{{- $serviceNamespace := index $service "namespace" | default .Release.Namespace -}}
-{{- $servicePorts := splitList "," (include "llm-d-router.agentgateway.modelServicePorts" .) -}}
+{{- $serviceName := include "llm-d-router.agentgateway.logicalBackendName" . -}}
+{{- $serviceNamespace := .Release.Namespace -}}
+{{- $servicePorts := splitList "," (include "llm-d-router.standaloneEndpointTargetPorts" .) -}}
 {{- $backendPort := index $servicePorts 0 -}}
 {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . | int -}}
 config:
