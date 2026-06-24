@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -103,7 +102,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	defer resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody := readErrorBody(resp.Body)
 		return upstreamError(PrefillStepName, resp.StatusCode, respBody)
 	}
 

@@ -18,6 +18,7 @@ package steps
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/go-logr/logr"
 
@@ -26,6 +27,16 @@ import (
 	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
+
+// maxErrorBodySize caps how much of a non-2xx upstream response body is read
+// into memory, bounding OOM exposure to an adversarial upstream pod.
+const maxErrorBodySize = 8 << 10 // 8 KB
+
+// readErrorBody reads up to maxErrorBodySize of an upstream error response body.
+func readErrorBody(r io.Reader) []byte {
+	body, _ := io.ReadAll(io.LimitReader(r, maxErrorBodySize))
+	return body
+}
 
 // upstreamError builds a pipeline.UpstreamError tagged with the step name so the
 // server can map an upstream 4xx to a client error and a 5xx to a gateway fault.

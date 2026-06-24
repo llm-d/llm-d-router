@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"strings"
@@ -249,7 +248,7 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody := readErrorBody(resp.Body)
 		return upstreamError(RenderStepName, resp.StatusCode, respBody)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
