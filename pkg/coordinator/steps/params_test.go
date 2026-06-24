@@ -21,6 +21,8 @@ func TestParamInt(t *testing.T) {
 		{name: "float-fractional", val: 8192.5, wantErr: true},
 		{name: "json.Number integral", val: json.Number("8192"), want: 8192, wantOK: true},
 		{name: "json.Number fractional", val: json.Number("8192.5"), wantErr: true},
+		{name: "float out of range", val: 1e19, wantErr: true},
+		{name: "json.Number out of int64 range", val: json.Number("9223372036854775808"), wantErr: true},
 		{name: "string", val: "8192", wantErr: true},
 		{name: "bool", val: true, wantErr: true},
 	}
