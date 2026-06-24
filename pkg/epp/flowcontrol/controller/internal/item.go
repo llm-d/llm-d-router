@@ -26,7 +26,9 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -159,10 +161,22 @@ func (fi *FlowItem) finalizeInternal(outcome types.QueueOutcome, err error) {
 
 	duration := time.Since(fi.enqueueTime)
 	flowKey := fi.originalRequest.FlowKey()
+	outcomeStr := outcome.String()
 	metrics.RecordFlowControlRequestQueueDuration(
-		flowKey.ID, strconv.Itoa(flowKey.Priority), outcome.String(),
+		flowKey.ID, strconv.Itoa(flowKey.Priority), outcomeStr,
 		fi.originalRequest.InferencePoolName(),
 		fi.OriginalRequest().ModelName(), fi.OriginalRequest().TargetModelName(),
+		duration)
+
+	sloClass := metrics.SLOClassNone
+	if req := fi.originalRequest.InferenceRequest(); req != nil {
+		sloClass = request.GetHeader(req.Headers, metadata.ObjectiveKey)
+		if sloClass == "" {
+			sloClass = metrics.SLOClassNone
+		}
+	}
+	metrics.RecordFlowControlSLORequestQueueDuration(
+		sloClass, outcomeStr, fi.originalRequest.InferencePoolName(),
 		duration)
 
 	fi.done <- finalState

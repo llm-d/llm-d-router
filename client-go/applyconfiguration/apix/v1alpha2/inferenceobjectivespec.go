@@ -30,6 +30,11 @@ type InferenceObjectiveSpecApplyConfiguration struct {
 	Priority *int32 `json:"priority,omitempty"`
 	// PoolRef is a reference to the inference pool, the pool must exist in the same namespace.
 	PoolRef *PoolObjectReferenceApplyConfiguration `json:"poolRef,omitempty"`
+	// SLO defines the expected Service Level Objective ranges for requests targeting this objective.
+	// When set, the InferenceObjective name is used as the SLO class label in metrics.
+	// The ranges define the expected bounds for SLO header values (e.g. x-slo-ttft-ms),
+	// enabling mismatch detection between a request's SLO deadline and its declared objective.
+	SLO *SLOSpecApplyConfiguration `json:"slo,omitempty"`
 }
 
 // InferenceObjectiveSpecApplyConfiguration constructs a declarative configuration of the InferenceObjectiveSpec type for use with
@@ -51,5 +56,13 @@ func (b *InferenceObjectiveSpecApplyConfiguration) WithPriority(value int32) *In
 // If called multiple times, the PoolRef field is set to the value of the last call.
 func (b *InferenceObjectiveSpecApplyConfiguration) WithPoolRef(value *PoolObjectReferenceApplyConfiguration) *InferenceObjectiveSpecApplyConfiguration {
 	b.PoolRef = value
+	return b
+}
+
+// WithSLO sets the SLO field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the SLO field is set to the value of the last call.
+func (b *InferenceObjectiveSpecApplyConfiguration) WithSLO(value *SLOSpecApplyConfiguration) *InferenceObjectiveSpecApplyConfiguration {
+	b.SLO = value
 	return b
 }

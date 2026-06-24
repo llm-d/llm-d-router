@@ -76,6 +76,47 @@ type InferenceObjectiveSpec struct {
 	//
 	// +kubebuilder:validation:Required
 	PoolRef PoolObjectReference `json:"poolRef"`
+
+	// SLO defines the expected Service Level Objective ranges for requests targeting this objective.
+	// When set, the InferenceObjective name is used as the SLO class label in metrics.
+	// The ranges define the expected bounds for SLO header values (e.g. x-slo-ttft-ms),
+	// enabling mismatch detection between a request's SLO deadline and its declared objective.
+	//
+	// +optional
+	SLO *SLOSpec `json:"slo,omitempty"`
+}
+
+// SLOSpec defines the expected SLO ranges for this objective.
+type SLOSpec struct {
+	// TTFT defines the expected Time To First Token SLO range in milliseconds.
+	// The range bounds correspond to values expected in the x-slo-ttft-ms request header.
+	//
+	// +optional
+	TTFT *SLORangeMs `json:"ttft,omitempty"`
+
+	// TPOT defines the expected Time Per Output Token SLO range in milliseconds.
+	// The range bounds correspond to values expected in the x-slo-tpot-ms request header.
+	//
+	// +optional
+	TPOT *SLORangeMs `json:"tpot,omitempty"`
+}
+
+// SLORangeMs defines a millisecond range for an SLO metric.
+// MinMs is inclusive, MaxMs is exclusive: [MinMs, MaxMs).
+// Omitting MinMs implies 0 (no lower bound).
+// Omitting MaxMs implies no upper bound.
+type SLORangeMs struct {
+	// MinMs is the inclusive lower bound of the SLO range in milliseconds.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MinMs *int64 `json:"minMs,omitempty"`
+
+	// MaxMs is the exclusive upper bound of the SLO range in milliseconds.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxMs *int64 `json:"maxMs,omitempty"`
 }
 
 // InferenceObjectiveStatus defines the observed state of InferenceObjective

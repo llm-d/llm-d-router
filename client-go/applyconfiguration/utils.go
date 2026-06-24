@@ -36,6 +36,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apixv1alpha2.ModelMatchApplyConfiguration{}
 	case v1alpha2.SchemeGroupVersion.WithKind("PoolObjectReference"):
 		return &apixv1alpha2.PoolObjectReferenceApplyConfiguration{}
+	case v1alpha2.SchemeGroupVersion.WithKind("SLORangeMs"):
+		return &apixv1alpha2.SLORangeMsApplyConfiguration{}
+	case v1alpha2.SchemeGroupVersion.WithKind("SLOSpec"):
+		return &apixv1alpha2.SLOSpecApplyConfiguration{}
 	case v1alpha2.SchemeGroupVersion.WithKind("TargetModel"):
 		return &apixv1alpha2.TargetModelApplyConfiguration{}
 

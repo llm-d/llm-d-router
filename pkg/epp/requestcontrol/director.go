@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -284,6 +286,8 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 
 	// Admit may block until flow control admits the request.
+	warnSLORangeMismatch(logger, infObjective, reqCtx.Request.Headers)
+
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
 	}
@@ -483,6 +487,32 @@ func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.E
 	}
 
 	return result
+}
+
+func warnSLORangeMismatch(logger logr.Logger, objective *v1alpha2.InferenceObjective, headers map[string]string) {
+	if objective.Spec.SLO == nil {
+		return
+	}
+	checkRange(logger, objective.Name, "ttft slo", objective.Spec.SLO.TTFT, headers[fwkrequest.TTFTSLOMsHeaderKey])
+	checkRange(logger, objective.Name, "tpot slo", objective.Spec.SLO.TPOT, headers[fwkrequest.TPOTSLOMsHeaderKey])
+}
+
+func checkRange(logger logr.Logger, objectiveName, metric string, sloRange *v1alpha2.SLORangeMs, headerValue string) {
+	if sloRange == nil || headerValue == "" {
+		return
+	}
+	ms, err := strconv.ParseInt(headerValue, 10, 64)
+	if err != nil {
+		return
+	}
+	if sloRange.MinMs != nil && ms < *sloRange.MinMs {
+		logger.V(logutil.VERBOSE).Info("SLO header value below objective range",
+			"metric", metric, "headerValueMs", ms, "minMs", *sloRange.MinMs, "objective", objectiveName)
+	}
+	if sloRange.MaxMs != nil && ms >= *sloRange.MaxMs {
+		logger.V(logutil.VERBOSE).Info("SLO header value above objective range",
+			"metric", metric, "headerValueMs", ms, "maxMs", *sloRange.MaxMs, "objective", objectiveName)
+	}
 }
 
 // HandleResponseHeader is called when the response headers are received.

@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -55,7 +56,7 @@ func TestSLODeadlinePolicy_RequiredQueueCapabilities(t *testing.T) {
 func makeSLOItem(id string, received time.Time, sloTTFTMs string) flowcontrol.QueueItemAccessor {
 	req := mocks.NewMockFlowControlRequest(10, id, testFlowKey)
 	req.ReceivedTimestampV = received
-	req.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{sloTtftHeader: sloTTFTMs}}
+	req.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{fwkrequest.TTFTSLOMsHeaderKey: sloTTFTMs}}
 	return &mocks.MockQueueItemAccessor{
 		EffectiveTTLV:    0,
 		OriginalRequestV: req,
@@ -116,7 +117,7 @@ func TestCalculateSLODeadline(t *testing.T) {
 	// Valid header
 	reqValid := mocks.NewMockFlowControlRequest(1, "valid", testFlowKey)
 	reqValid.ReceivedTimestampV = now
-	reqValid.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{sloTtftHeader: "200"}}
+	reqValid.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{fwkrequest.TTFTSLOMsHeaderKey: "200"}}
 	accValid := &mocks.MockQueueItemAccessor{OriginalRequestV: reqValid}
 	deadline := calculateSLODeadline(accValid)
 	assert.Equal(t, now.Add(200*time.Millisecond), deadline)
@@ -132,7 +133,7 @@ func TestCalculateSLODeadline(t *testing.T) {
 	reqBoth := mocks.NewMockFlowControlRequest(1, "both", testFlowKey)
 	reqBoth.ReceivedTimestampV = now
 	reqBoth.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{
-		sloTtftHeader:                "200",
+		metadata.TTFTSLOHeaderKey:    "200",
 		metadata.OldTTFTSLOHeaderKey: "50",
 	}}
 	accBoth := &mocks.MockQueueItemAccessor{OriginalRequestV: reqBoth}
@@ -150,7 +151,7 @@ func TestCalculateSLODeadline(t *testing.T) {
 
 	// Invalid value
 	reqInvalid := mocks.NewMockFlowControlRequest(3, "inv", testFlowKey)
-	reqInvalid.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{sloTtftHeader: "x"}}
+	reqInvalid.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{fwkrequest.TTFTSLOMsHeaderKey: "x"}}
 	accInvalid := &mocks.MockQueueItemAccessor{OriginalRequestV: reqInvalid}
 	assert.Equal(t, sloMaxDeadlineTime, calculateSLODeadline(accInvalid))
 
