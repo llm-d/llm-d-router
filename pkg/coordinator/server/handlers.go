@@ -35,14 +35,6 @@ import (
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
-func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	s.handleInference(w, r)
-}
-
-func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
-	s.handleInference(w, r)
-}
-
 const maxRequestBodySize = 64 << 20 // 64 MB
 
 // validRequestID bounds a client-supplied x-request-id to alphanumerics and

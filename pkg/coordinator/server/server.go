@@ -90,8 +90,8 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline) *Server {
 	r.Use(middleware.Recoverer)
 	r.Use(logRequestResponse)
 
-	r.Post(gateway.PathChatCompletions, s.handleChatCompletions)
-	r.Post(gateway.PathCompletions, s.handleCompletions)
+	r.Post(gateway.PathChatCompletions, s.handleInference)
+	r.Post(gateway.PathCompletions, s.handleInference)
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
 
