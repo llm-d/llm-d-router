@@ -17,6 +17,8 @@ limitations under the License.
 package requestcontrol
 
 import (
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 )
@@ -41,6 +43,12 @@ type Config struct {
 	preRequestPlugins        []fwkrc.PreRequest
 	responseReceivedPlugins  []fwkrc.ResponseHeaderProcessor
 	responseStreamingPlugins []fwkrc.ResponseBodyProcessor
+
+	// conditionalDecodeDecider, when set, is consulted by the director on
+	// requests carrying RFC 7240 "Prefer: if-available" to decide whether to
+	// reject the request with HTTP 412. When nil, conditional-decode requests
+	// are forwarded unconditionally.
+	conditionalDecodeDecider fwkrc.ConditionalDecodeDecider
 }
 
 // WithPreAdmissionPlugins sets the given plugins as the PreAdmitter plugins.
@@ -76,6 +84,19 @@ func (c *Config) WithDataProducerPlugins(plugins ...fwkrc.DataProducer) *Config 
 	return c
 }
 
+// WithConditionalDecodeDecider sets the plugin consulted by the director to
+// gate RFC 7240 "Prefer: if-available" requests. Passing nil disables the gate.
+func (c *Config) WithConditionalDecodeDecider(d fwkrc.ConditionalDecodeDecider) *Config {
+	c.conditionalDecodeDecider = d
+	return c
+}
+
+// ConditionalDecodeDecider returns the configured conditional-decode decider,
+// or nil when no plugin is wired in.
+func (c *Config) ConditionalDecodeDecider() fwkrc.ConditionalDecodeDecider {
+	return c.conditionalDecodeDecider
+}
+
 // WithAdmissionPlugins sets the given plugins as the Admit plugins.
 func (c *Config) WithAdmissionPlugins(plugins ...fwkrc.Admitter) *Config {
 	c.admissionPlugins = plugins
@@ -104,6 +125,15 @@ func (c *Config) AddPlugins(pluginObjects ...plugin.Plugin) {
 		}
 		if admissionPlugin, ok := plugin.(fwkrc.Admitter); ok {
 			c.admissionPlugins = append(c.admissionPlugins, admissionPlugin)
+		}
+		if condDecider, ok := plugin.(fwkrc.ConditionalDecodeDecider); ok {
+			if c.conditionalDecodeDecider == nil {
+				c.conditionalDecodeDecider = condDecider
+			} else {
+				log.Log.Info("Multiple ConditionalDecodeDecider plugins configured; ignoring later instance",
+					"kept", c.conditionalDecodeDecider.TypedName().String(),
+					"ignored", condDecider.TypedName().String())
+			}
 		}
 	}
 }

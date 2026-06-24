@@ -98,3 +98,11 @@ type PreAdmitter interface {
 	plugin.Plugin
 	PreAdmit(ctx context.Context, request *fwksched.InferenceRequest) error
 }
+
+// ConditionalDecodeDecider decides whether a request carrying the
+// RFC 7240 "Prefer: if-available" header should be rejected with HTTP 412
+// Precondition Failed or forwarded to the chosen decode endpoint.
+type ConditionalDecodeDecider interface {
+	plugin.Plugin
+	ShouldRejectConditionalDecode(ctx context.Context, request *fwksched.InferenceRequest, endpoint fwksched.Endpoint) bool
+}

@@ -413,6 +413,23 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 - `nonCachedTokens`: Number of non-cached tokens that trigger disaggregation
   - If set to 0, disaggregation never occurs for any request
 
+**Conditional-decode 412 gate**
+
+When this plugin is configured, it also gates requests carrying the RFC 7240 `Prefer: if-available` header: a request is forwarded to the chosen decode worker only when the worker's KV cache already covers the prompt; otherwise the EPP returns HTTP 412 Precondition Failed.
+
+> **Note**
+> The llm-d coordinator uses this header to mark speculative early-decode attempts. A 412 response signals that the local cache was insufficient, prompting the coordinator to restart the pipeline at encode/prefill/decode.
+
+The gate uses the same `nonCachedTokens` threshold as the disaggregation decision:
+
+- Non-cached suffix `< nonCachedTokens` → forward to the chosen decode worker.
+- Non-cached suffix `≥ nonCachedTokens` → return 412.
+- `nonCachedTokens: 0` → gate disabled (forwards every conditional-decode request).
+- Plugin not declared in the config → gate disabled (the EPP forwards conditional-decode requests unconditionally).
+- Prefix-cache state unreadable on the chosen endpoint (e.g. no approximate-prefix producer wired up) → fail closed (412).
+
+The threshold is configured in tokens, drives both the disaggregation decision and the 412 gate, and is opt-in: omitting the plugin disables the gate.
+
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.
 It always triggers disaggregation, regardless of prefix cache state or prompt characteristics.

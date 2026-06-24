@@ -10,6 +10,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
@@ -33,8 +34,11 @@ func (p PrefixBasedPDDeciderConfig) validate() error {
 	return nil
 }
 
-// compile-time type assertion
-var _ deciderPlugin = &PrefixBasedPDDecider{}
+// compile-time type assertions
+var (
+	_ deciderPlugin                  = &PrefixBasedPDDecider{}
+	_ fwkrc.ConditionalDecodeDecider = &PrefixBasedPDDecider{}
+)
 
 // PrefixBasedPDDecider is a PD decider plugin which decision is based prefix aware
 type PrefixBasedPDDecider struct {
@@ -93,7 +97,6 @@ func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 }
 
 func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) bool {
-	logger := log.FromContext(ctx)
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 
 	// NonCachedTokens defines the minimum number of non-cached tokens required
@@ -101,50 +104,84 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 	if d.config.NonCachedTokens == 0 {
 		return false
 	}
-	if endpoint == nil {
-		logger.Error(nil, "prefix decider: endpoint is nil")
-		return false
-	}
-	inputTokens, err := getUserInputLenInTokens(request)
-	if err != nil {
-		logger.Error(err, "prefix decider: failed to get user input length in tokens")
-		return false
-	}
-	if inputTokens < d.config.NonCachedTokens {
-		debugLogger.Info("Input is shorter than the nonCachedToken, no disaggregated PD")
-		return false
-	}
-	// inspect the decode endpoint to disaggregate if prefill should run or not.
-	// if the non-cached part is short enough - no disaggregation.
-	prefixInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String())
-	if !ok || prefixInfoRaw == nil {
-		logger.Error(nil, "unable to read prefix cache state")
-		return false
-	}
-	prefixCacheMatchInfo, ok := prefixInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
+	nonCachedTokens, ok := d.computeNonCachedTokens(ctx, request, endpoint)
 	if !ok {
-		logger.Error(nil, "wrong type of prefix cache match info")
 		return false
 	}
-
-	// number of cached tokens. Use the unweighted cached-block count, not the
-	// tier-weighted match score: a RAM-cached prefix must contribute its full
-	// token count here, otherwise the non-cached suffix is overestimated and
-	// requests with large local-RAM hits are misrouted to remote prefill.
-	hitPrefixTokens := prefixCacheMatchInfo.CachedBlockCount() * prefixCacheMatchInfo.BlockSizeTokens()
-	// length of non-cached suffix in tokens
-	nonCachedTokens := inputTokens - hitPrefixTokens
-
-	debugLogger.Info("Computed hit percentage for prefix cache",
-		"absolute hit prefix len (tokens)", hitPrefixTokens,
-		"prompt length (token)", inputTokens)
-
 	if nonCachedTokens < d.config.NonCachedTokens {
 		debugLogger.Info("Non-cached suffix is smaller than threshold, using decode profile only")
 		return false // do not run prefill
 	}
-
 	return true
+}
+
+// ShouldRejectConditionalDecode reports whether a conditional-decode request
+// (RFC 7240 "Prefer: if-available") should be rejected with HTTP 412 because
+// the chosen decode endpoint's KV cache does not cover enough of the prompt.
+//
+// Returns true (reject) when the non-cached suffix meets or exceeds
+// NonCachedTokens, or when the prefix cache state cannot be read from the
+// endpoint. Returns false when NonCachedTokens is 0 (gate disabled) or the
+// non-cached suffix is below the threshold.
+func (d *PrefixBasedPDDecider) ShouldRejectConditionalDecode(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) bool {
+	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
+	if d.config.NonCachedTokens == 0 {
+		return false
+	}
+	nonCachedTokens, ok := d.computeNonCachedTokens(ctx, request, endpoint)
+	if !ok {
+		// Cannot read prefix cache state - fail closed (reject) to preserve
+		// the current 412 behavior when no prefix-cache producer is wired up.
+		return true
+	}
+	if nonCachedTokens < d.config.NonCachedTokens {
+		debugLogger.Info("conditional-decode: non-cached suffix below threshold, forwarding",
+			"nonCachedTokens", nonCachedTokens, "threshold", d.config.NonCachedTokens)
+		return false
+	}
+	debugLogger.Info("conditional-decode: non-cached suffix at or above threshold, rejecting",
+		"nonCachedTokens", nonCachedTokens, "threshold", d.config.NonCachedTokens)
+	return true
+}
+
+// computeNonCachedTokens returns the length of the non-cached prompt suffix in
+// tokens for the given endpoint. ok is false when the input length or the
+// endpoint's PrefixCacheMatchInfo attribute could not be read.
+//
+// Uses the unweighted cached-block count, not the tier-weighted match score:
+// a RAM-cached prefix must contribute its full token count, otherwise the
+// non-cached suffix is overestimated and requests with large local-RAM hits
+// are misrouted to remote prefill.
+func (d *PrefixBasedPDDecider) computeNonCachedTokens(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) (int, bool) {
+	logger := log.FromContext(ctx)
+	debugLogger := logger.V(logging.DEBUG)
+
+	if endpoint == nil {
+		logger.Error(nil, "prefix decider: endpoint is nil")
+		return 0, false
+	}
+	inputTokens, err := getUserInputLenInTokens(request)
+	if err != nil {
+		logger.Error(err, "prefix decider: failed to get user input length in tokens")
+		return 0, false
+	}
+	prefixInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String())
+	if !ok || prefixInfoRaw == nil {
+		logger.Error(nil, "unable to read prefix cache state")
+		return 0, false
+	}
+	prefixCacheMatchInfo, ok := prefixInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
+	if !ok {
+		logger.Error(nil, "wrong type of prefix cache match info")
+		return 0, false
+	}
+
+	hitPrefixTokens := prefixCacheMatchInfo.CachedBlockCount() * prefixCacheMatchInfo.BlockSizeTokens()
+	nonCachedTokens := inputTokens - hitPrefixTokens
+	debugLogger.Info("Computed hit percentage for prefix cache",
+		"absolute hit prefix len (tokens)", hitPrefixTokens,
+		"prompt length (token)", inputTokens)
+	return nonCachedTokens, true
 }
 
 // getUserInputLenInTokens returns an estimated token count for the user input.

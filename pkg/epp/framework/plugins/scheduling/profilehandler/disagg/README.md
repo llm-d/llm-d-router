@@ -2,6 +2,8 @@
 
 Plugins for disaggregated inference scheduling: a profile handler that selects the active stages: EPD (no disaggregation), P/D (Prefill/Decode), E/P/D (Encode/Prefill/Decode), or E/PD (Encode/Prefill-Decode), legacy headers handlers (deprecated) kept for backward compatibility, and decider plugins that control whether each disaggregation stage runs per request.
 
+`PrefixBasedPDDecider` additionally drives the EPP director's conditional-decode 412 gate (RFC 7240 `Prefer: if-available`) via the `ConditionalDecodeDecider` extension point — see its section for details.
+
 ## Contents
 
 - [Profile Handlers](#profile-handlers)
@@ -170,20 +172,35 @@ plugins:
 
 **Type:** `prefix-based-pd-decider`
 
-Decides per-request whether P/D disaggregation should run, based on how much of the prompt is already cached on the selected decode pod.
+Drives two decisions per request, both based on how much of the prompt is already cached on the selected decode pod:
+
+1. **P/D disaggregation** — whether to offload prefill to a remote prefill pod (consumed by `disagg-profile-handler` via `deciders.prefill`).
+2. **Conditional-decode 412 gate** — whether a request carrying RFC 7240 `Prefer: if-available` should be rejected with HTTP 412 instead of forwarded (consumed by the EPP director through the `ConditionalDecodeDecider` extension point).
+
+Both decisions share the same `nonCachedTokens` threshold and the same uncached-suffix computation; they differ only in their failure semantics (see [How It Works](#how-it-works)).
 
 #### What it does
 
-Compares the uncached portion of the request prompt against a configurable threshold, triggering P/D disaggregation only when the uncached suffix is long enough to justify the overhead.
+Compares the uncached portion of the request prompt against a configurable threshold:
 
 1. Read the prompt token count as `len(request.Body.TokenizedPrompt.TokenIDs)`.
 2. Read `PrefixCacheMatchInfo` from the decode endpoint attributes.
 3. Compute uncached suffix length.
-4. Return true (disaggregate) if uncached tokens ≥ `nonCachedTokens`.
+4. **Disaggregation:** return true (disaggregate) if uncached tokens ≥ `nonCachedTokens`.
+5. **Conditional-decode gate:** return true (reject with 412) if uncached tokens ≥ `nonCachedTokens`.
 
 #### How It Works
 
-The prompt token count is `len(request.Body.TokenizedPrompt.TokenIDs)`, populated by a `token-producer` — auto-created with the tokenizer-free `estimate` backend when none is configured. Prefix cache state is read from the `PrefixCacheMatchInfo` attribute on the decode endpoint, populated by `approx-prefix-cache-producer`. If the attribute is absent or malformed, disaggregation is skipped. Setting `nonCachedTokens: 0` disables the decider entirely (always returns false).
+The prompt token count is `len(request.Body.TokenizedPrompt.TokenIDs)`, populated by a `token-producer` — auto-created with the tokenizer-free `estimate` backend when none is configured. Prefix cache state is read from the `PrefixCacheMatchInfo` attribute on the decode endpoint, populated by `approx-prefix-cache-producer`.
+
+Setting `nonCachedTokens: 0` disables both decisions entirely (disaggregation never runs, the conditional-decode gate always forwards).
+
+**Failure semantics** when prefix-cache state is unreadable (attribute missing, malformed, or producer not configured) differ between the two decisions:
+
+| Decision | Behavior on unreadable prefix info | Rationale |
+|---|---|---|
+| Disaggregation | fail open — return false (no disaggregation) | A misconfigured prefix-cache producer should not silently route every request to remote prefill. |
+| Conditional-decode 412 gate | fail closed — return true (reject with 412) | The `Prefer: if-available` header is a fast-fail hint: if the EPP cannot prove the cache covers the prompt, the safe answer is to reject with 412 so the caller can fall back. |
 
 #### Inputs consumed
 
@@ -195,9 +212,9 @@ The prompt token count is `len(request.Body.TokenizedPrompt.TokenIDs)`, populate
 ##### Parameters
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `nonCachedTokens` | `int` | No | `0` | Uncached token threshold above which P/D disaggregation is triggered. `0` disables the decider. |
+| `nonCachedTokens` | `int` | No | `0` | Uncached token threshold above which P/D disaggregation is triggered, and at or above which the conditional-decode 412 gate rejects. `0` disables both behaviors. |
 
-##### Example
+##### Example — P/D disaggregation
 ```yaml
 plugins:
   - type: prefix-based-pd-decider
@@ -209,11 +226,26 @@ plugins:
         prefill: prefix-based-pd-decider
 ```
 
+##### Example — conditional-decode 412 gate only (no P/D)
+```yaml
+plugins:
+  - type: prefix-based-pd-decider
+    parameters:
+      nonCachedTokens: 512
+  # No disagg-profile-handler / no `prefill` profile.
+  # The plugin is auto-registered as the ConditionalDecodeDecider via
+  # AddPlugins; the director consults it whenever a request carries the
+  # RFC 7240 `Prefer: if-available` header.
+```
+
+When the plugin is *not* declared in the EPP config, the conditional-decode gate is disabled and the director forwards every `Prefer: if-available` request unconditionally.
+
 #### Limitations
 
-- `nonCachedTokens: 0` disables disaggregation entirely (the decider always returns false).
-- A `token-producer` populates `TokenizedPrompt`; when none is configured the framework auto-creates one with the `estimate` backend, so disaggregation works without extra setup.
-- Requires `PrefixCacheMatchInfo` on the decode endpoint; if absent, disaggregation is skipped with an error log.
+- `nonCachedTokens: 0` disables both the disaggregation decision and the conditional-decode gate (the decider returns false for disaggregation and false for "should reject").
+- A `token-producer` populates `TokenizedPrompt`; when none is configured the framework auto-creates one with the `estimate` backend, so both behaviors work without extra setup.
+- Requires `PrefixCacheMatchInfo` on the decode endpoint. If absent: disaggregation is skipped with an error log (fail open); the conditional-decode gate rejects with 412 (fail closed).
+- Only one `ConditionalDecodeDecider` is consulted per director. If multiple plugins implement the interface, the first one registered through `Config.AddPlugins` wins; later instances are logged and ignored.
 
 ---
 
