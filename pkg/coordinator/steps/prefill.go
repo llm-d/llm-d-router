@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -126,7 +127,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 
 	switch format {
 	case gateway.FormatChatCompletions:
-		body := copyBody(reqCtx.Body)
+		body := maps.Clone(reqCtx.Body)
 		tokens := map[string]any{
 			"token_ids": reqCtx.TokenIDs,
 		}

@@ -33,14 +33,6 @@ func upstreamError(step string, statusCode int, body []byte) error {
 	return &pipeline.UpstreamError{Step: step, StatusCode: statusCode, Body: string(body)}
 }
 
-func copyBody(src map[string]any) map[string]any {
-	dst := make(map[string]any, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
 // parseUseOpenAIFormat reads the use_openai_format step parameter, defaulting to
 // true when absent or not a bool.
 func parseUseOpenAIFormat(params map[string]any) bool {

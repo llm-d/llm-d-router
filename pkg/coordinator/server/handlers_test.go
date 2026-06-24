@@ -111,6 +111,17 @@ func TestHandleInference_SuccessMapsTo200(t *testing.T) {
 	}
 }
 
+func TestHandleInference_NullBodyMapsTo400(t *testing.T) {
+	// JSON `null` unmarshals to a nil map without error; reject it before steps
+	// write to the body and panic.
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("null"))
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for null body, got %d", rec.Code)
+	}
+}
+
 func TestHandleInference_ValidRequestIDIsReflected(t *testing.T) {
 	// A well-formed client request ID is echoed in the error response.
 	stepErr := fmt.Errorf("render: %w", pipeline.ErrBadRequest)

@@ -18,6 +18,7 @@ package steps
 
 import (
 	"context"
+	"maps"
 	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -52,7 +53,7 @@ func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName
 func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ConditionalDecodeStepName)
 
-	body := copyBody(reqCtx.Body)
+	body := maps.Clone(reqCtx.Body)
 	s.prepareBody(reqCtx, body)
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)

@@ -68,6 +68,10 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
+	if parsed == nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
 
 	stream, _ := parsed["stream"].(bool)
 	model, _ := parsed["model"].(string)
