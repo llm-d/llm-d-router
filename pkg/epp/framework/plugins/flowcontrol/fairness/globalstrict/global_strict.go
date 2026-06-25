@@ -88,7 +88,7 @@ func (p *globalStrict) Pick(
 			return true
 		}
 
-		item := queue.PeekHead()
+		item := queue.Peek()
 		if item == nil {
 			return true
 		}

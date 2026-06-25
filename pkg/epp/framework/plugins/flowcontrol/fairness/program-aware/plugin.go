@@ -181,7 +181,7 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	// can compute the queue wait time. Attribute lifetime tracks the
 	// request, so abandoned requests cannot leak.
 	if best != nil {
-		if head := best.PeekHead(); head != nil {
+		if head := best.Peek(); head != nil {
 			if req := head.OriginalRequest().InferenceRequest(); req != nil {
 				req.PutAttribute(enqueueTimeAttributeKey, head.EnqueueTime())
 			}
