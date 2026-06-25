@@ -256,7 +256,7 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 		Endpoint: ep,
 	}))
 
-	assert.Equal(t, "10.0.0.99", clearedPod, "index should be cleared using pod IP address")
+	assert.Equal(t, "10.0.0.99:8080", clearedPod, "index should be cleared using pod IP:Port matching PodIdentifier format")
 
 	ids, _ := p.subscribersManager.GetActiveSubscribers()
 	assert.Empty(t, ids)
