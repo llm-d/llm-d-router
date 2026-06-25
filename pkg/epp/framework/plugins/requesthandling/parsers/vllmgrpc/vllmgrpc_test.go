@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
+	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -361,8 +362,6 @@ func TestVllmGRPCParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 	parser := NewVllmGRPCParser()
 	ctx := context.Background()
 	headers := map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"}
-	u32 := func(v uint32) *uint32 { return &v }
-	i64 := func(v int64) *int64 { return &v }
 
 	tests := []struct {
 		name   string
@@ -373,17 +372,17 @@ func TestVllmGRPCParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 			name: "text input with max_tokens",
 			reqMsg: &pb.GenerateRequest{
 				Input:          &pb.GenerateRequest_Text{Text: "hello"},
-				SamplingParams: &pb.SamplingParams{MaxTokens: u32(256)},
+				SamplingParams: &pb.SamplingParams{MaxTokens: ptr.To(uint32(256))},
 			},
-			want: i64(256),
+			want: ptr.To(int64(256)),
 		},
 		{
 			name: "tokenized input with max_tokens",
 			reqMsg: &pb.GenerateRequest{
 				Input:          &pb.GenerateRequest_Tokenized{Tokenized: &pb.TokenizedInput{InputIds: []uint32{1, 2, 3}}},
-				SamplingParams: &pb.SamplingParams{MaxTokens: u32(128)},
+				SamplingParams: &pb.SamplingParams{MaxTokens: ptr.To(uint32(128))},
 			},
-			want: i64(128),
+			want: ptr.To(int64(128)),
 		},
 		{
 			name:   "no sampling params",
@@ -402,9 +401,9 @@ func TestVllmGRPCParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 			name: "explicit zero max_tokens binds",
 			reqMsg: &pb.GenerateRequest{
 				Input:          &pb.GenerateRequest_Text{Text: "hello"},
-				SamplingParams: &pb.SamplingParams{MaxTokens: u32(0)},
+				SamplingParams: &pb.SamplingParams{MaxTokens: ptr.To(uint32(0))},
 			},
-			want: i64(0),
+			want: ptr.To(int64(0)),
 		},
 	}
 

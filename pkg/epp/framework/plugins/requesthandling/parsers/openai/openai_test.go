@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -1294,7 +1295,7 @@ func BenchmarkExtractRequestData_ChatCompletionsWithOptionals(b *testing.B) {
 		"add_generation_prompt":        true,
 		"chat_template_kwargs":         map[string]any{"key": "value"},
 	}
-	headers := map[string]string{":path": "/v1/chat/completions"}
+	apiType := determineAPITypeFromPath("/v1/chat/completions")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1302,7 +1303,7 @@ func BenchmarkExtractRequestData_ChatCompletionsWithOptionals(b *testing.B) {
 		if err != nil {
 			b.Errorf("body cannot be marshalled to JSON bytes")
 		}
-		_, err = extractRequestBody(jsonBytes, headers)
+		_, err = extractRequestBody(apiType, jsonBytes)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -1377,7 +1378,6 @@ func BenchmarkExtractRequestData_Embeddings(b *testing.B) {
 
 func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 	parser := NewOpenAIParser()
-	i64 := func(v int64) *int64 { return &v }
 
 	tests := []struct {
 		name    string
@@ -1389,7 +1389,7 @@ func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 			name:    "completions max_tokens",
 			headers: map[string]string{":path": "/v1/completions"},
 			body:    map[string]any{"model": "m", "prompt": "p", "max_tokens": float64(64)},
-			want:    i64(64),
+			want:    ptr.To(int64(64)),
 		},
 		{
 			name:    "completions absent",
@@ -1406,7 +1406,7 @@ func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 				"max_completion_tokens": float64(100),
 				"max_tokens":            float64(50),
 			},
-			want: i64(100),
+			want: ptr.To(int64(100)),
 		},
 		{
 			name:    "chat legacy max_tokens fallback",
@@ -1416,19 +1416,19 @@ func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 				"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
 				"max_tokens": float64(50),
 			},
-			want: i64(50),
+			want: ptr.To(int64(50)),
 		},
 		{
 			name:    "responses max_output_tokens",
 			headers: map[string]string{":path": "/v1/responses"},
 			body:    map[string]any{"input": "hi", "max_output_tokens": float64(32)},
-			want:    i64(32),
+			want:    ptr.To(int64(32)),
 		},
 		{
 			name:    "explicit zero binds",
 			headers: map[string]string{":path": "/v1/completions"},
 			body:    map[string]any{"model": "m", "prompt": "p", "max_tokens": float64(0)},
-			want:    i64(0),
+			want:    ptr.To(int64(0)),
 		},
 		{
 			name:    "negative ignored",

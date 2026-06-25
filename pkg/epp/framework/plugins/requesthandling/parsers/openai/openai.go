@@ -112,12 +112,13 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if err := json.Unmarshal(body, &bodyMap); err != nil {
 		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
 	}
-	extractedBody, err := extractRequestBody(body, headers)
+	apiType := determineAPITypeFromPath(request.GetRequestPath(headers))
+	extractedBody, err := extractRequestBody(apiType, body)
 	if err != nil {
 		return nil, err
 	}
 	extractedBody.Payload = fwkrh.PayloadMap(bodyMap)
-	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(determineAPITypeFromPath(request.GetRequestPath(headers)), bodyMap)
+	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(apiType, bodyMap)
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		extractedBody.Stream = true
 	}
@@ -201,12 +202,9 @@ func determineAPITypeFromPath(path string) string {
 	return completionsAPI
 }
 
-// extractRequestBody extracts the InferenceRequestBody from the given request body map using path-based detection.
-func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.InferenceRequestBody, error) {
-	// Determine API type from request path
-	path := request.GetRequestPath(headers)
-	apiType := determineAPITypeFromPath(path)
-
+// extractRequestBody extracts the InferenceRequestBody from the given raw body
+// for the already-resolved API type.
+func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequestBody, error) {
 	switch apiType {
 	case conversationsAPI:
 		var conversations fwkrh.ConversationsRequest

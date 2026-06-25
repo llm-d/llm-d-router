@@ -112,11 +112,13 @@ type InferenceRequestBody struct {
 }
 
 // MaxOutputTokensFromPayload returns the client-requested output-token cap read
-// from a decoded JSON request body. The keys are tried in order, so callers
-// express per-API precedence (e.g. chat completions: max_completion_tokens then
-// the legacy max_tokens). JSON numbers decode as float64; json.Number is also
-// accepted. An explicit non-negative whole number (including 0) is returned;
-// absent keys, negative values, and non-integral numbers yield nil ("no cap").
+// from a decoded JSON request body. The keys are tried in order and the first one
+// holding a valid value wins, so callers express per-API precedence (e.g. chat
+// completions: max_completion_tokens then the legacy max_tokens). JSON numbers
+// decode as float64; json.Number is also accepted. A present key whose value is
+// the wrong type, negative, or non-integral is treated as absent and the next key
+// is tried. An explicit non-negative whole number (including 0) is returned; if no
+// key holds a valid value the result is nil ("no cap").
 func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
 	for _, k := range keys {
 		v, ok := m[k]
@@ -130,15 +132,15 @@ func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
 		case json.Number:
 			parsed, err := n.Float64()
 			if err != nil {
-				return nil
+				continue
 			}
 			f = parsed
 		default:
-			return nil
+			continue
 		}
-		// Reject negative or non-integral values as malformed input.
+		// Skip negative or non-integral values as malformed and try the next key.
 		if f < 0 || f != math.Trunc(f) {
-			return nil
+			continue
 		}
 		out := int64(f)
 		return &out

@@ -22,13 +22,12 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
-
-func ptrInt64(v int64) *int64 { return &v }
 
 func TestNewAnthropicParser(t *testing.T) {
 	parser := NewAnthropicParser()
@@ -64,7 +63,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
-				MaxOutputTokens: ptrInt64(1024),
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello, Claude"}},
@@ -95,7 +94,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
-				MaxOutputTokens: ptrInt64(1024),
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{
@@ -131,7 +130,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
-				MaxOutputTokens: ptrInt64(1024),
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					System: fwkrh.AnthropicContent{Raw: "You are a helpful assistant."},
 					Messages: []fwkrh.AnthropicMessage{
@@ -162,7 +161,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
-				MaxOutputTokens: ptrInt64(1024),
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					System: fwkrh.AnthropicContent{
 						Structured: []fwkrh.AnthropicContentBlock{
@@ -209,7 +208,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
-				MaxOutputTokens: ptrInt64(1024),
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{
@@ -266,7 +265,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
-				MaxOutputTokens: ptrInt64(1024),
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Tools: []any{
 						map[string]any{
@@ -305,7 +304,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
-				MaxOutputTokens: ptrInt64(1024),
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}},
@@ -334,7 +333,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
-				MaxOutputTokens: ptrInt64(1024),
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}},
@@ -362,7 +361,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
-				MaxOutputTokens: ptrInt64(1024),
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}},
@@ -686,7 +685,6 @@ func TestAnthropicParser_ParseRequest_CountTokens(t *testing.T) {
 
 func TestAnthropicParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 	parser := NewAnthropicParser()
-	i64 := func(v int64) *int64 { return &v }
 	headers := map[string]string{":path": "/v1/messages"}
 	msgs := []any{map[string]any{"role": "user", "content": "Hello"}}
 
@@ -698,7 +696,7 @@ func TestAnthropicParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 		{
 			name: "max_tokens present",
 			body: map[string]any{"model": "claude-sonnet-4-6", "max_tokens": float64(1024), "messages": msgs},
-			want: i64(1024),
+			want: ptr.To(int64(1024)),
 		},
 		{
 			name: "max_tokens absent",

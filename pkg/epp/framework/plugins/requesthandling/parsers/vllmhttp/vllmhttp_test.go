@@ -25,6 +25,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
+	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -106,7 +107,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					"stream": true,
 				},
 				Stream:          true,
-				MaxOutputTokens: func() *int64 { v := int64(128); return &v }(),
+				MaxOutputTokens: ptr.To(int64(128)),
 			},
 		},
 		{
@@ -274,7 +275,6 @@ func TestVllmHTTPParser_RejectsNonGeneratePaths(t *testing.T) {
 
 func TestVllmHTTPParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 	parser := NewVllmHTTPParser()
-	i64 := func(v int64) *int64 { return &v }
 	headers := map[string]string{":path": "/inference/v1/generate"}
 
 	tests := []struct {
@@ -288,7 +288,7 @@ func TestVllmHTTPParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 				"token_ids":       []any{1, 2, 3},
 				"sampling_params": map[string]any{"max_tokens": float64(128)},
 			},
-			want: i64(128),
+			want: ptr.To(int64(128)),
 		},
 		{
 			name: "no sampling_params",
