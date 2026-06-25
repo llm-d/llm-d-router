@@ -1238,14 +1238,9 @@ func TestShardProcessor(t *testing.T) {
 				// (Phase 1), not deferred to Phase 3 workers. A deferred lookup
 				// races with flow GC which can delete the flow after collection.
 				//
-				// Strategy: ManagedQueueFunc succeeds while IterateQueues is running
-				// and fails after it returns — simulating GC firing between phases.
-				//
-				// With eager resolution (Phase 1): ManagedQueue resolved inside
-				//   IterateQueues callback -> succeeds -> processFn called.
-				// With deferred resolution (Phase 3, regression): ManagedQueue
-				//   resolved in worker after IterateQueues returns -> fails ->
-				//   processFn NOT called.
+				// ManagedQueueFunc succeeds while IterateQueues is running and fails
+				// after it returns, simulating GC firing between phases. With eager
+				// resolution processFn is called; with deferred resolution it is not.
 				h := newTestHarness(t, testCleanupTick)
 				h.addQueue(testFlow)
 

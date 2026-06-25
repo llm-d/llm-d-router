@@ -544,7 +544,7 @@ func (sp *Processor) processAllQueuesConcurrently(
 	// Phase 1: Collect all queues and resolve ManagedQueue handles in one pass.
 	// Resolving here (instead of in the worker) eliminates a race where flow GC
 	// can delete a flow between collection and the worker's ManagedQueue lookup.
-	var work []queueTask
+	var resolvedQueues []queueTask
 	for _, priority := range sp.registry.AllOrderedPriorityLevels() {
 		band, err := sp.registry.PriorityBandAccessor(priority)
 		if err != nil {
@@ -557,7 +557,7 @@ func (sp *Processor) processAllQueuesConcurrently(
 			if err != nil {
 				return true
 			}
-			work = append(work, queueTask{
+			resolvedQueues = append(resolvedQueues, queueTask{
 				mq: mq,
 				logger: logger.WithValues(
 					"flowKey", key,
@@ -568,12 +568,12 @@ func (sp *Processor) processAllQueuesConcurrently(
 		})
 	}
 
-	if len(work) == 0 {
+	if len(resolvedQueues) == 0 {
 		return
 	}
 
 	// Phase 2: Determine the optimal number of workers.
-	numWorkers := min(maxCleanupWorkers, len(work))
+	numWorkers := min(maxCleanupWorkers, len(resolvedQueues))
 
 	// Phase 3: Create a worker pool to process the resolved queues.
 	tasks := make(chan queueTask)
@@ -581,14 +581,14 @@ func (sp *Processor) processAllQueuesConcurrently(
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Go(func() {
-			for t := range tasks {
-				processFn(t.mq, t.logger)
+			for task := range tasks {
+				processFn(task.mq, task.logger)
 			}
 		})
 	}
 
-	for _, t := range work {
-		tasks <- t
+	for _, task := range resolvedQueues {
+		tasks <- task
 	}
 	close(tasks)
 	wg.Wait()
