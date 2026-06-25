@@ -4,7 +4,7 @@
 
 A usage limit policy that computes differentiated admission ceilings per priority level. As pool saturation rises, lower-priority traffic is gated first, reserving capacity for higher-priority work.
 
-This replaces the default static usage limit policy (which applies a single ceiling to all priorities) with priority-aware stepped gating.
+This can be used in place the default static usage limit policy (which applies a single ceiling to all priorities) with priority-aware stepped gating.
 
 ## What It Does
 
@@ -39,7 +39,7 @@ Use when the numerical spacing between priority values carries meaning and prior
 
 - `strategy` (string, required, no default): Gating algorithm: `"stepwise-spread"` or `"linear-proportional"`.
 - `minCeiling` (float64, required, no default): Ceiling for the lowest priority. Must be in `[0.0, 1.0)`.
-- `maxCeiling` (float64, required, default: `1.0`): Ceiling for the highest priority. Must be in `(0.0, 1.0]`.
+- `maxCeiling` (float64, optional, default: `1.0`): Ceiling for the highest priority. Must be in `(0.0, 1.0]`.
 
 `minCeiling` is required because it determines how aggressively low-priority traffic is gated and there is no universally correct default.
 

@@ -88,6 +88,8 @@ func (p *priorityHoldbackPolicy) ComputeLimit(_ context.Context, _ float64, prio
 	if len(priorities) == 1 {
 		return []float64{p.cMax}
 	}
+	// Ceilings are monotonically decreasing as priorities are ordered from highest to lowest per UsageLimitPolicy contract.
+	// New strategies (e.g. sigmoid/static definition) could require explicit monotizing sweep.
 	return p.computeFn(p.cMin, p.cMax, priorities)
 }
 
