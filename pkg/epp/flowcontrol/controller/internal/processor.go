@@ -554,7 +554,8 @@ func (sp *Processor) processAllQueuesConcurrently(
 			key := queue.FlowKey()
 			mq, err := sp.registry.ManagedQueue(key)
 			if err != nil {
-				logger.V(logutil.DEBUG).Info("Skipping GC'd flow during queue collection", "flowKey", key)
+				logger.V(logutil.DEBUG).Info("Skipping queue; ManagedQueue no longer resolvable",
+					"flowKey", key, "err", err)
 				return true
 			}
 			resolvedQueues = append(resolvedQueues, resolvedQueue{
