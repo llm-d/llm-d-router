@@ -32,8 +32,13 @@ var hopByHopHeaders = map[string]bool{
 	"upgrade":             true,
 }
 
+var internalForwardingHeaders = map[string]bool{
+	"epp-phase": true,
+}
+
 // ForwardedHeaders returns original request headers suitable for forwarding
-// to upstream services, excluding hop-by-hop headers and Content-Length/Host.
+// to upstream services, excluding hop-by-hop headers, Content-Length/Host, and
+// coordinator-owned routing headers.
 // Keys are normalized to lowercase so they do not collide by case with headers
 // stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
@@ -43,7 +48,7 @@ func (rc *RequestContext) ForwardedHeaders() map[string]string {
 	}
 	for key, vals := range rc.OriginalHeaders {
 		lower := strings.ToLower(key)
-		if hopByHopHeaders[lower] || lower == "content-length" || lower == "host" || lower == "content-type" {
+		if hopByHopHeaders[lower] || internalForwardingHeaders[lower] || lower == "content-length" || lower == "host" || lower == "content-type" {
 			continue
 		}
 		if len(vals) > 0 {
