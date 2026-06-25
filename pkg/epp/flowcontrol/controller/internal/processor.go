@@ -81,6 +81,12 @@ type Processor struct {
 	// enqueueChan is the entry point for new requests.
 	enqueueChan chan *FlowItem
 
+	// poolEmpty caches whether the candidate pool had zero endpoints as of the most recent dispatchCycle. enqueue reads
+	// it to distinguish a queue-capacity rejection caused by genuine unavailability (no backends, e.g. scale-from-zero)
+	// from one caused by backpressure against a contended but non-empty pool. Only accessed from the Run goroutine, so
+	// it needs no synchronization.
+	poolEmpty bool
+
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
 	isShuttingDown atomic.Bool
@@ -280,6 +286,15 @@ func (sp *Processor) enqueue(item *FlowItem) {
 	// --- Capacity Check ---
 	// This check is safe because it is performed by the single-writer Run goroutine.
 	if ok, stats := sp.hasCapacity(key.Priority, req.ByteSize()); !ok {
+		// When the pool has no endpoints, the queue is acting as a scale-from-zero waiting room. A capacity rejection in
+		// that state reflects genuine unavailability (surfaced as 503), not backpressure against a contended pool (429).
+		if sp.poolEmpty {
+			sp.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity with no endpoints",
+				"flowKey", key, "reqID", req.ID(), "reqByteSize", req.ByteSize())
+			item.FinalizeWithOutcome(types.QueueOutcomeRejectedNoEndpoints, fmt.Errorf("%w: %w",
+				types.ErrRejected, types.ErrNoEndpoints))
+			return
+		}
 		sp.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
 			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
 			"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
@@ -346,6 +361,7 @@ func (sp *Processor) dispatchCycle(ctx context.Context) bool {
 	}()
 
 	pool := sp.endpointCandidates.Locate(ctx, nil)
+	sp.poolEmpty = len(pool) == 0
 	saturation := sp.saturationDetector.Saturation(ctx, pool)
 
 	// Record pool saturation metric
