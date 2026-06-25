@@ -312,64 +312,93 @@ func TestInFlightLoadProducer_DumpStateCapsEndpoints(t *testing.T) {
 	require.Equal(t, int64(104), state.Endpoints[0].Requests)
 }
 
-// TestInFlightLoadProducer_FlapDoesNotUnderflow asserts that an in-flight request's release lands
-// on the exact counter instance it incremented, even after the endpoint is deleted and recreated
-// under the same NamespacedName. A release from a request that predates the flap hits the orphaned
-// counter, leaving the live counter accurate and never negative.
+// TestInFlightLoadProducer_FlapDoesNotUnderflow asserts that a request's release lands on the exact
+// counter instance it incremented, even after the endpoint is deleted and recreated under the same
+// NamespacedName. A release that predates the flap hits the orphaned counter, leaving the live
+// counter accurate and never negative. Cases cover the request and token counters across both the
+// EndOfStream eviction path (OnEvicted) and the StartOfStream early-release path (releaseTokensEarly).
 func TestInFlightLoadProducer_FlapDoesNotUnderflow(t *testing.T) {
 	t.Parallel()
 
-	producer := newTestProducer(t)
-	ctx := context.Background()
-	endpointName := "flap-endpoint"
-	endpointID := fullEndpointName(endpointName)
+	requests := func(p *InFlightLoadProducer, id string) int64 { return p.requestTracker.get(id) }
+	tokens := func(p *InFlightLoadProducer, id string) int64 { return p.tokenTracker.get(id) }
 
-	// E joins the endpoint set. The same Endpoint object is reused for the
-	// matching delete so the registeredEndpoints stale-delete guard allows
-	// cleanup (mirrors the datalayer's same-pointer add/delete contract).
-	epA := newStubSchedulingEndpoint(endpointName)
-	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{
-		Type:     datalayer.EventAddOrUpdate,
-		Endpoint: epA,
-	}))
+	tests := []struct {
+		name                     string
+		addEstimatedOutputTokens bool
+		release                  requestcontrol.Response // chunk that triggers the release under test
+		read                     func(*InFlightLoadProducer, string) int64
+		inputA, inputB           int   // input tokens for requests A and B
+		liveAfterA, liveAfterB   int64 // live counter after A's, then B's, PreRequest
+		liveAfterReleaseA        int64 // live counter after A releases, while B is still in flight
+	}{
+		{
+			name:    "request counter, EndOfStream eviction",
+			release: requestcontrol.Response{EndOfStream: true},
+			read:    requests,
+			inputA:  4, inputB: 4,
+			liveAfterA: 1, liveAfterB: 1, liveAfterReleaseA: 1,
+		},
+		{
+			name:                     "token counter, EndOfStream eviction",
+			addEstimatedOutputTokens: true, // 4 input + 6 estimated output = 10 tokens per request
+			release:                  requestcontrol.Response{EndOfStream: true},
+			read:                     tokens,
+			inputA:                   4, inputB: 4,
+			liveAfterA: 10, liveAfterB: 10, liveAfterReleaseA: 10,
+		},
+		{
+			name:    "token counter, StartOfStream early release",
+			release: requestcontrol.Response{StartOfStream: true}, // output excluded: tokens == input
+			read:    tokens,
+			inputA:  4, inputB: 6,
+			liveAfterA: 4, liveAfterB: 6, liveAfterReleaseA: 6,
+		},
+	}
 
-	// Request A is routed to endpoint E.
-	reqA := makeTokenRequest("req-A", 4)
-	resA := makeSchedulingResult(endpointName)
-	producer.PreRequest(ctx, reqA, resA)
-	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	const endpointName = "flap-endpoint"
+	extract := func(t *testing.T, p *InFlightLoadProducer, eventType datalayer.EventType, ep datalayer.Endpoint) {
+		require.NoError(t, p.Extract(context.Background(), datalayer.EndpointEvent{Type: eventType, Endpoint: ep}))
+	}
 
-	// E flaps: it leaves the endpoint set (NotReady) while A is still in flight,
-	// dropping its counter.
-	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{
-		Type:     datalayer.EventDelete,
-		Endpoint: epA,
-	}))
-	require.Equal(t, int64(0), producer.requestTracker.get(endpointID), "counter dropped on delete")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			producer := newTestProducer(t)
+			producer.addEstimatedOutputTokens = tc.addEstimatedOutputTokens
+			ctx := context.Background()
+			endpointID := fullEndpointName(endpointName)
 
-	// E rejoins with the same NamespacedName but a new Endpoint object; request
-	// B's PreRequest recreates a fresh counter instance under the same key.
-	epB := newStubSchedulingEndpoint(endpointName)
-	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{
-		Type:     datalayer.EventAddOrUpdate,
-		Endpoint: epB,
-	}))
-	reqB := makeTokenRequest("req-B", 4)
-	resB := makeSchedulingResult(endpointName)
-	producer.PreRequest(ctx, reqB, resB)
-	require.Equal(t, int64(1), producer.requestTracker.get(endpointID), "B recreated the counter")
+			// E joins. The same Endpoint object is reused for its delete so the registeredEndpoints
+			// guard allows cleanup (the datalayer's same-pointer add/delete contract).
+			epA := newStubSchedulingEndpoint(endpointName)
+			extract(t, producer, datalayer.EventAddOrUpdate, epA)
+			reqA := makeTokenRequest("req-A", tc.inputA)
+			resA := makeSchedulingResult(endpointName)
+			producer.PreRequest(ctx, reqA, resA)
+			require.Equal(t, tc.liveAfterA, tc.read(producer, endpointID))
 
-	// A completes. Its release must hit the orphaned counter, not B's live one, which still holds B.
-	reqA.SchedulingResult = resA
-	producer.ResponseBody(ctx, reqA, &requestcontrol.Response{EndOfStream: true}, nil)
-	require.Equal(t, int64(1), producer.requestTracker.get(endpointID),
-		"A's release must not discount B's live counter")
+			// E flaps and rejoins under the same NamespacedName; B recreates a fresh counter instance.
+			extract(t, producer, datalayer.EventDelete, epA)
+			require.Equal(t, int64(0), tc.read(producer, endpointID), "counter dropped on delete")
+			epB := newStubSchedulingEndpoint(endpointName)
+			extract(t, producer, datalayer.EventAddOrUpdate, epB)
+			reqB := makeTokenRequest("req-B", tc.inputB)
+			resB := makeSchedulingResult(endpointName)
+			producer.PreRequest(ctx, reqB, resB)
+			require.Equal(t, tc.liveAfterB, tc.read(producer, endpointID), "B recreated the counter")
 
-	// B completes. The live counter settles at 0 and never underflows.
-	reqB.SchedulingResult = resB
-	producer.ResponseBody(ctx, reqB, &requestcontrol.Response{EndOfStream: true}, nil)
-	require.Equal(t, int64(0), producer.requestTracker.get(endpointID),
-		"counter must settle at 0, never negative")
+			// A releases. It must hit the orphaned counter, not B's live one.
+			reqA.SchedulingResult = resA
+			producer.ResponseBody(ctx, reqA, &tc.release, nil)
+			require.Equal(t, tc.liveAfterReleaseA, tc.read(producer, endpointID),
+				"A's release must not discount B's live counter")
+
+			// B releases. The live counter settles at 0 and never underflows.
+			reqB.SchedulingResult = resB
+			producer.ResponseBody(ctx, reqB, &tc.release, nil)
+			require.Equal(t, int64(0), tc.read(producer, endpointID), "counter must settle at 0, never negative")
+		})
+	}
 }
 
 // TestInFlightLoadProducer_CrashWithHighLoadDoesNotUnderflow models a pod that crashes while
