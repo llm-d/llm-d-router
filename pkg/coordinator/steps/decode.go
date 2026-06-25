@@ -74,6 +74,12 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	return nil
 }
 
+// prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike
+// prefill and conditional-decode). decode is the terminal pipeline step: its body
+// is streamed straight to the client and no later step reads reqCtx.Body. A clone
+// would also be insufficient, since injectUUIDs mutates nested values that a shallow
+// maps.Clone would still share. This is sound only while the pipeline runs steps
+// sequentially; if it ever goes concurrent, decode must copy like the others.
 func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) {
 	reqCtx.Body["kv_transfer_params"] = s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 	s.injectUUIDs(reqCtx)
