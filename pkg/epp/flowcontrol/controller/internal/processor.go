@@ -536,15 +536,14 @@ func (sp *Processor) processAllQueuesConcurrently(
 ) {
 	logger := sp.logger.WithName(ctxName)
 
-	type queueTask struct {
+	type resolvedQueue struct {
 		mq     contracts.ManagedQueue
 		logger logr.Logger
 	}
 
 	// Phase 1: Collect all queues and resolve ManagedQueue handles in one pass.
-	// Resolving here (instead of in the worker) eliminates a race where flow GC
-	// can delete a flow between collection and the worker's ManagedQueue lookup.
-	var resolvedQueues []queueTask
+	// This avoids holding locks on the shard while processing, and allows us to determine the optimal number of workers.
+	var resolvedQueues []resolvedQueue
 	for _, priority := range sp.registry.AllOrderedPriorityLevels() {
 		band, err := sp.registry.PriorityBandAccessor(priority)
 		if err != nil {
@@ -555,9 +554,10 @@ func (sp *Processor) processAllQueuesConcurrently(
 			key := queue.FlowKey()
 			mq, err := sp.registry.ManagedQueue(key)
 			if err != nil {
+				logger.V(logutil.DEBUG).Info("Skipping GC'd flow during queue collection", "flowKey", key)
 				return true
 			}
-			resolvedQueues = append(resolvedQueues, queueTask{
+			resolvedQueues = append(resolvedQueues, resolvedQueue{
 				mq: mq,
 				logger: logger.WithValues(
 					"flowKey", key,
@@ -576,7 +576,7 @@ func (sp *Processor) processAllQueuesConcurrently(
 	numWorkers := min(maxCleanupWorkers, len(resolvedQueues))
 
 	// Phase 3: Create a worker pool to process the resolved queues.
-	tasks := make(chan queueTask)
+	tasks := make(chan resolvedQueue)
 
 	var wg sync.WaitGroup
 	for range numWorkers {
@@ -587,9 +587,10 @@ func (sp *Processor) processAllQueuesConcurrently(
 		})
 	}
 
+	// Feed the channel with all the queues to be processed.
 	for _, task := range resolvedQueues {
 		tasks <- task
 	}
-	close(tasks)
-	wg.Wait()
+	close(tasks) // Close the channel to signal workers to exit.
+	wg.Wait()    // Wait for all workers to finish.
 }
