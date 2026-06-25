@@ -26,8 +26,7 @@ import (
 const redactedValue = "[REDACTED]"
 
 // maxValueLen caps a logged header value. Longer values are truncated so a
-// verbose header (e.g. X-Envoy-Peer-Metadata, a base64 proto blob) does not
-// dominate the log line.
+// verbose metadata header does not dominate the log line.
 const maxValueLen = 256
 
 var sensitiveHeaders = map[string]struct{}{

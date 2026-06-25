@@ -7,8 +7,9 @@ extended to other inference protocols. Each step performs one unit of
 work (download media, tokenize, encode, prefill, decode). The pre-processing steps call
 side services directly (media download, and the render service for tokenization); the
 encode, prefill, and decode steps forward sub-requests to vLLM worker pools through an
-Envoy Gateway. An Endpoint Picker (EPP) sitting behind Envoy selects the concrete pod
-for each phase, so the coordinator orchestrates the phases without knowing pod addresses.
+Inference Gateway that conforms to Gateway API Inference Extension (GAIE). An Endpoint
+Picker (EPP) behind the gateway selects the concrete pod for each phase, so the
+coordinator orchestrates the phases without knowing pod addresses.
 
 The coordinator is stateless: all per-request state lives on a `RequestContext` that
 exists only for the lifetime of that request, and nothing is shared or persisted across
@@ -82,7 +83,7 @@ absorb further processing modes as they are added.
 
 A client sends an inference request to the coordinator. The coordinator pre-processes the
 request (media download, tokenization) against side services, then makes one inference
-call per phase to the Envoy Gateway. The Gateway consults the per-phase EPP
+call per phase to the Inference Gateway. The Gateway consults the per-phase EPP
 (Encode / Prefill / Decode), which picks a vLLM pod from that phase's pool. State that
 must survive across phases (token IDs, multimodal hashes, KV/EC transfer descriptors)
 lives on a per-request context held by the coordinator, not in a sidecar on the decode
@@ -98,8 +99,8 @@ pod.
           |
           |  one call per phase, tagged EPP-Phase: encode | prefill | decode
           v
-     Envoy Gateway
-          |  ext_proc
+     Inference Gateway
+          |  endpoint picker protocol
           +-------------------+-------------------+
           v                   v                   v
       Encode EPP          Prefill EPP         Decode EPP    (per-phase endpoint picker)
@@ -115,14 +116,14 @@ In short:
                          one request+response per phase (encode, prefill, decode)
                         +---------------------------------------------------------+
                         |                                                         v
-Client  <-->  Coordinator  -->  Envoy Gateway  -->  EPP (ext_proc)  -->  vLLM worker pool
+Client  <-->  Coordinator  -->  Inference Gateway  -->  EPP -->  vLLM worker pool
                         ^                                                         |
                         +---------------------------------------------------------+
                                           response streamed/returned
 ```
 
 The client opens a single connection to the coordinator. Behind it, the coordinator
-issues several requests to the Envoy Gateway and consumes each response before issuing
+issues several requests to the Inference Gateway and consumes each response before issuing
 the next: it is an active client of the Gateway, not a one-shot proxy. A single step
 can also fan out into several parallel requests: `replace-media-urls` downloads media
 concurrently (to the source URLs), and `encode` issues one Gateway request per
@@ -146,7 +147,7 @@ completions prompt is already a token array). See
 | Entry server | [pkg/server/](../pkg/server/) | chi HTTP server. Accepts `/v1/chat/completions` and `/v1/completions`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`. |
 | Pipeline | [pkg/pipeline/](../pkg/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/steps/](../pkg/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
-| Gateway client | [pkg/gateway/](../pkg/gateway/) | HTTP client with a keep-alive pool to Envoy, path/format helpers, and the `EPP-Phase` header constants. |
+| Gateway client | [pkg/gateway/](../pkg/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `EPP-Phase` header constants. |
 | Connectors | [pkg/connectors/](../pkg/connectors/) | KV and EC transfer protocols. Selected by name at config time; control the `kv_transfer_params` / `ec_transfer_params` wire shapes. |
 | Config | [pkg/config/](../pkg/config/) | Viper-backed YAML + env loader. |
 | Entrypoint | [cmd/coordinator/](../cmd/coordinator/) | Wires config to the pipeline: builds each step, merges connector defaults, injects the gateway client. |
@@ -198,7 +199,7 @@ it as the base header set, then stamp the request ID and `EPP-Phase`.
 ### EPP-Phase routing
 
 Every coordinator-to-worker call carries an `EPP-Phase` header (`encode`, `prefill`, or
-`decode`) so Envoy routes to the correct pool. The constants live in
+`decode`) so the gateway routes to the correct pool. The constants live in
 [pkg/gateway/paths.go](../pkg/gateway/paths.go). The request path is either the client's
 original OpenAI path or the internal `/inference/v1/generate` path, depending on
 `use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)). Other
@@ -206,13 +207,14 @@ paths can be added later as new protocols are supported.
 
 ## EPP integration
 
-The Endpoint Picker (EPP) is an Envoy `ext_proc` extension that selects the concrete
-vLLM pod for a request. The coordinator never addresses pods directly: it sends each
-phase call to Envoy, and the per-phase EPP picks the pod from that phase's pool.
+The Endpoint Picker (EPP) selects the concrete vLLM pod for a request through the GAIE
+[endpoint picker protocol](https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/docs/proposals/004-endpoint-picker-protocol). The coordinator never addresses pods directly: it sends each
+phase call to the configured gateway, and the per-phase EPP picks the pod from that
+phase's pool.
 
 ### Per-phase model
 
-Each Envoy route maps to a dedicated EPP instance configured for a single phase. The
+Each Gateway route maps to a dedicated EPP instance configured for a single phase. The
 coordinator drives the cascade across phases; each EPP call is single-phase scheduling.
 
 | Phase | EPP instance | Role |
@@ -301,7 +303,7 @@ State produced by one phase and consumed by a later one is carried on the
 
 The coordinator is an alternative to the disaggregation orchestration in
 [llm-d-router](https://github.com/llm-d/llm-d-router). Both route inference through the
-same Inference Gateway (Envoy) and the same EPP scheduling machinery; they differ in
+same Inference Gateway and the same EPP scheduling machinery; they differ in
 **where disaggregation is orchestrated** and **where tokenization happens**.
 
 ### The sidecar model (llm-d-router)
@@ -309,13 +311,14 @@ same Inference Gateway (Envoy) and the same EPP scheduling machinery; they diffe
 In llm-d-router, orchestration lives in a **vLLM sidecar that runs only on the decode
 worker**. No sidecar or coordination logic runs on the prefill or encode nodes. The flow:
 
-1. A request reaches Envoy and the EPP runs its `disagg-profile-handler` plugin. In a
-   **single scheduling cycle** it selects pods for every phase the request needs, in a
-   fixed order: decode (always), then encode (if multimodal content is detected), then
-   prefill (if the P/D decider judges it beneficial).
+1. A request reaches the Inference Gateway and the EPP runs its
+   `disagg-profile-handler` plugin. In a **single scheduling cycle** it selects pods for
+   every phase the request needs, in a fixed order: decode (always), then encode (if
+   multimodal content is detected), then prefill (if the P/D decider judges it
+   beneficial).
 2. The EPP communicates the selected pods to the decode sidecar as **request headers**:
    `x-prefiller-host-port` (the selected prefill worker) and `x-encoder-hosts-ports` (one
-   or more encode workers). Envoy then forwards the request to the decode pod.
+   or more encode workers). The gateway then forwards the request to the decode pod.
 3. The sidecar orchestrates the cascade: it dispatches multimodal content to the encode
    workers, sends a remote prefill request (`max_tokens=1`) to the prefill worker,
    collects the returned KV parameters, and finally launches the local decode, which
@@ -328,11 +331,11 @@ KV connector protocol is selected on the sidecar with `--kv-connector` (`nixlv2`
 ### The coordinator model
 
 The coordinator removes the sidecar entirely and pulls orchestration out to a standalone
-service in front of Envoy:
+service in front of the Inference Gateway:
 
 1. The client request reaches the **coordinator**.
 2. The coordinator tokenizes once via the render service, then makes **one
-   EPP-mediated call per phase** to Envoy, tagging each with the `EPP-Phase` header.
+   EPP-mediated call per phase** to the gateway, tagging each with the `EPP-Phase` header.
    Each EPP call is single-phase scheduling, not a one-cycle selection of all phases.
 3. Cross-phase state (token IDs, multimodal hashes, EC and KV transfer descriptors)
    lives on the coordinator's per-request `RequestContext`, not in headers handed to a
@@ -344,7 +347,7 @@ service in front of Envoy:
 
 | Dimension | llm-d-router (sidecar) | Coordinator |
 | :---- | :---- | :---- |
-| Orchestration location | vLLM sidecar on the decode pod | Standalone coordinator service in front of Envoy |
+| Orchestration location | vLLM sidecar on the decode pod | Standalone coordinator service in front of the Inference Gateway |
 | Sidecar required | Yes (decode pod only) | No |
 | Pipeline versatility | Fixed E/P/D orchestration baked into the sidecar | Configurable pipeline of independent, reorderable plugin steps; new stages added without touching existing ones |
 | EPP scheduling | One cycle selects all phases (`disagg-profile-handler`) | One EPP call per phase, coordinator drives the cascade |
@@ -551,8 +554,8 @@ server:               # inbound HTTP listener
   read_timeout: 30s
   write_timeout: 120s
 
-gateway:              # outbound client to Envoy
-  address: "http://envoy-gateway:80"
+gateway:              # outbound client to the Inference Gateway
+  address: "http://inference-gateway:80"
   max_idle_conns_per_host: 100
   idle_conn_timeout: 90s
   timeout: 60s

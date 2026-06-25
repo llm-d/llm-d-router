@@ -35,7 +35,7 @@ import (
 	"github.com/llm-d/coordinator/pkg/config"
 )
 
-// Client is an HTTP client configured for persistent connections to the Envoy Gateway.
+// Client is an HTTP client configured for persistent connections to the Inference Gateway.
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
@@ -122,7 +122,7 @@ func (c *Client) Post(ctx context.Context, path string, body []byte, headers map
 	return c.Request(ctx, http.MethodPost, path, body, headers)
 }
 
-// BaseURL returns the gateway base URL (e.g. "http://envoy-gateway:80").
+// BaseURL returns the gateway base URL (e.g. "http://inference-gateway:80").
 func (c *Client) BaseURL() string {
 	return c.baseURL
 }

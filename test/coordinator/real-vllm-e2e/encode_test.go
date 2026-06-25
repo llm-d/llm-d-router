@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package e2e — encoder end-to-end tests against a real Envoy Gateway.
+// Package e2e — encoder end-to-end tests against a real Inference Gateway.
 //
 // To run:
 //

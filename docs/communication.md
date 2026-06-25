@@ -946,7 +946,7 @@ data: [DONE]
 
 ## EPP-Phase Header and Routing
 
-The coordinator uses the `EPP-Phase` HTTP header to identify the pipeline stage of each request sent to workers through the Envoy gateway. The gateway uses this header for routing to the correct worker pool.
+The coordinator uses the `EPP-Phase` HTTP header to identify the pipeline stage of each request sent to workers through the Inference Gateway. The gateway uses this header for routing to the correct worker pool.
 
 | Stage             | EPP-Phase Header Value | Request Path              |
 |-------------------|----------------------|---------------------------|

@@ -1,11 +1,11 @@
 # LLM-D Coordinator
 
-A Go service that orchestrates multi-phase LLM inference pipelines (Encode/Prefill/Decode) across specialized worker pools. It exposes OpenAI-compatible APIs and routes requests through an Envoy Gateway to disaggregated vLLM workers.
+A Go service that orchestrates multi-phase LLM inference pipelines (Encode/Prefill/Decode) across specialized worker pools. It exposes OpenAI-compatible APIs and routes requests through an Inference Gateway to disaggregated vLLM workers.
 
 ## Architecture
 
 ```
-Client -> Coordinator -> Envoy Gateway -> EPP (ext_proc) -> vLLM Workers
+Client -> Coordinator -> Inference Gateway -> EPP -> vLLM Workers
 ```
 
 The Coordinator processes each request through a configurable pipeline of steps:
@@ -47,11 +47,11 @@ server:
 
 ### Gateway
 
-Connection settings for the Envoy Gateway that routes to vLLM worker pools:
+Connection settings for the Inference Gateway that routes to vLLM worker pools:
 
 ```yaml
 gateway:
-  address: "http://envoy-gateway:80"
+  address: "http://inference-gateway:80"
   max_idle_conns_per_host: 100   # Connection pool size
   idle_conn_timeout: 90s
   timeout: 60s                   # Per-request timeout

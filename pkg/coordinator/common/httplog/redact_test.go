@@ -91,12 +91,12 @@ func TestRedactedHeaders_TruncatesLongValue(t *testing.T) {
 	long := strings.Repeat("a", maxValueLen+10)
 	const phase = "decode"
 	out := RedactedHeaders(http.Header{
-		"X-Envoy-Peer-Metadata": {long},
-		"Epp-Phase":             {phase},
+		"X-Gateway-Peer-Metadata": {long},
+		"Epp-Phase":               {phase},
 	})
 
 	want := long[:maxValueLen] + "...[truncated]"
-	if got := out["x-envoy-peer-metadata"]; got != want {
+	if got := out["x-gateway-peer-metadata"]; got != want {
 		t.Errorf("long value not truncated:\n got %q\nwant %q", got, want)
 	}
 	if got := out["epp-phase"]; got != phase {
