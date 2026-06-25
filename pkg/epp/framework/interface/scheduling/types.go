@@ -45,6 +45,8 @@ type RequestObjectives struct {
 type InferenceRequest struct {
 	// RequestID is the Envoy generated Id for the request being processed
 	RequestID string
+	// IncomingModel is the model named in the request body, before any traffic split.
+	IncomingModel string
 	// TargetModel is the final target model after traffic split.
 	TargetModel string
 	// Data contains the request-body fields that we parse out as user input.

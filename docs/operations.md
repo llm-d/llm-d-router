@@ -17,7 +17,7 @@ The EPP acts as the routing intelligence engine. Its resource usage scales prima
 - **Idle CPU Scaling**: Idle CPU usage of the EPP container scales with the number of model-serving pods in the cluster due to continuous metric scraping. For example, in a cluster with 100 model-serving pods, the idle CPU usage of the EPP container grows to approximately **7.5 cores**.
 
 #### Memory Allocation
-- **Base Memory**: EPP memory usage is relatively low and stable with small output token requests, but scales with the number of concurrent inflight requests.
+- **Base Memory**: EPP memory usage is relatively low and stable with small output token requests.
 - **Inflight Requests Impact**: Memory usage increases with the number of concurrent inflight requests and the output (decode) token length.
 - **Sizing Guidelines**:
   - For a request rate of 50 to 100 requests/second with 1k output tokens, EPP requires between **4 GiB and 6 GiB** of memory.
@@ -45,7 +45,7 @@ The EPP's scaling behavior and effectiveness are highly dependent on the configu
 The following tables present empirical benchmark results for EPP running with llm-d-simulator simulating Qwen/Qwen3-8B.
 
 #### Throughput and Prefix Block Sizing
-This table shows peak CPU and memory utilization for EPP under a 100k token workload (95k system prompt, 5k question prompt, and 1k output tokens) when using approximate prefix caching across 100 model-serving pods.
+This table shows peak CPU and memory utilization for EPP under a 100k input token workload (95k system prompt and 5k question prompt) with 1k output tokens when using approximate prefix caching across 100 model-serving pods.
 
 | Configuration | Request Rate (Req/s) | maxPrefixBlocksToMatch | Peak CPU (Cores) | Peak Memory (GiB) | Scheduler P50 Latency (s) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
