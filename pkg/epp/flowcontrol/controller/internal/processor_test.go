@@ -1230,6 +1230,67 @@ func TestShardProcessor(t *testing.T) {
 				assert.Equal(t, int32(numQueues), processedCount.Load(),
 					"The number of processed queues should match the number created")
 			})
+
+			t.Run("should resolve ManagedQueue eagerly so late GC does not skip work", func(t *testing.T) {
+				t.Parallel()
+				// --- ARRANGE ---
+				// Regression test: ManagedQueue must be resolved during IterateQueues
+				// (Phase 1), not deferred to Phase 3 workers. A deferred lookup
+				// races with flow GC which can delete the flow after collection.
+				//
+				// Strategy: ManagedQueueFunc succeeds while IterateQueues is running
+				// and fails after it returns — simulating GC firing between phases.
+				//
+				// With eager resolution (Phase 1): ManagedQueue resolved inside
+				//   IterateQueues callback -> succeeds -> processFn called.
+				// With deferred resolution (Phase 3, regression): ManagedQueue
+				//   resolved in worker after IterateQueues returns -> fails ->
+				//   processFn NOT called.
+				h := newTestHarness(t, testCleanupTick)
+				h.addQueue(testFlow)
+
+				var iteratingDone atomic.Bool
+				h.PriorityBandAccessorFunc = func(p int) (flowcontrol.PriorityBandAccessor, error) {
+					h.mu.Lock()
+					flowKeys := h.priorityFlows[p]
+					h.mu.Unlock()
+
+					band := &fwkfcmocks.MockPriorityBandAccessor{PriorityV: p}
+					band.IterateQueuesFunc = func(cb func(fqa flowcontrol.FlowQueueAccessor) bool) {
+						for _, key := range flowKeys {
+							q, err := h.managedQueue(key)
+							if err == nil && q != nil {
+								mq := q.(*mocks.MockManagedQueue)
+								if !cb(mq.FlowQueueAccessor()) {
+									break
+								}
+							}
+						}
+						iteratingDone.Store(true)
+					}
+					return band, nil
+				}
+
+				h.ManagedQueueFunc = func(key flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
+					if iteratingDone.Load() {
+						return nil, fmt.Errorf("failed to get managed queue for flow %q: %w",
+							key, contracts.ErrFlowInstanceNotFound)
+					}
+					return h.managedQueue(key)
+				}
+
+				var processedCount atomic.Int32
+				processFn := func(mq contracts.ManagedQueue, logger logr.Logger) {
+					processedCount.Add(1)
+				}
+
+				// --- ACT ---
+				h.processor.processAllQueuesConcurrently("test-eager-resolve", processFn)
+
+				// --- ASSERT ---
+				assert.Equal(t, int32(1), processedCount.Load(),
+					"processFn must be called: ManagedQueue was resolved eagerly in Phase 1")
+			})
 		})
 	})
 
