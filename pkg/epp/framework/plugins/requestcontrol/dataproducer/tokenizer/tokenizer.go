@@ -67,13 +67,10 @@ const (
 )
 
 // tokenizerPluginConfig holds the configuration for the tokenizer plugin.
-//
-// Backend selection: `backend` explicitly selects the backend when set. When it
-// is omitted, existing configs continue to infer the backend from `estimate`,
-// `vllm`, `udsTokenizerConfig`, or `modelName`.
 type tokenizerPluginConfig struct {
 	// Backend explicitly selects "estimate", "vllm", or "uds". When omitted,
-	// the plugin infers the backend from legacy config fields.
+	// the plugin preserves legacy behavior by inferring the backend from
+	// existing config fields.
 	Backend tokenizerBackend `json:"backend,omitempty"`
 	// TokenizerConfig configures the deprecated gRPC-over-UDS backend.
 	//
@@ -82,8 +79,9 @@ type tokenizerPluginConfig struct {
 	TokenizerConfig tokenization.UdsTokenizerConfig `json:"udsTokenizerConfig,omitempty"`
 	// VLLM configures the vLLM /render backend.
 	VLLM *vllmConfig `json:"vllm,omitempty"`
-	// Estimate selects the tokenizer-free byte-packing backend; mutually
-	// exclusive with 'vllm'/'udsTokenizerConfig' and needs no 'modelName'.
+	// Estimate configures the tokenizer-free byte-packing backend. When
+	// backend is omitted, it selects the estimate backend and needs no
+	// 'modelName'.
 	Estimate *estimateConfig `json:"estimate,omitempty"`
 	// ModelName is the name of the model whose tokenizer should be loaded.
 	ModelName string `json:"modelName"`
