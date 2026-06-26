@@ -33,16 +33,7 @@ router:
       limits:
         memory: 16Gi
 
-    # Agentgateway-specific settings used by the built-in preset when
-    # proxyType=agentgateway. service.name is required.
-    agentgateway:
-      service:
-        create: true
-        name: ""
-        namespace: ""
-        # Must match inferencePool.targetPorts.
-        ports:
-          - 8000
+
 
     # Built-in standalone proxy presets. The selected preset is merged with the
     # top-level proxy.* fields below, so explicit user overrides still win.

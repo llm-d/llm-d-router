@@ -75,9 +75,9 @@ func runPickConformanceTests(t *testing.T, policy flowcontrol.FairnessPolicy) {
 
 	flowIDEmpty := "flow-empty"
 	mockQueueEmpty := &fwkfcmocks.MockFlowQueueAccessor{
-		LenV:      0,
-		PeekHeadV: nil,
-		FlowKeyV:  flowcontrol.FlowKey{ID: flowIDEmpty},
+		LenV:     0,
+		PeekV:    nil,
+		FlowKeyV: flowcontrol.FlowKey{ID: flowIDEmpty},
 	}
 
 	testCases := []struct {

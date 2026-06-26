@@ -25,7 +25,6 @@ spec:
         runAsNonRoot: true
       args:
         - "-port=8000"
-        - "-vllm-port=8200"
         - "-connector=nixlv2"
         - "-v=6"
       ports:

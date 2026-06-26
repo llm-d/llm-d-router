@@ -18,9 +18,12 @@ set -euox pipefail
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# shellcheck source=test/scripts/e2e-common.sh
+source "${DIR}/e2e-common.sh"
+
 EPP_IMAGE="${EPP_IMAGE:-ghcr.io/llm-d/llm-d-router-endpoint-picker:dev}"
 SIM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:v0.9.2}"
-MANIFEST_PATH="${MANIFEST_PATH:-${DIR}/../test/testdata/sim-deployment.yaml}"
+MANIFEST_PATH="${MANIFEST_PATH:-${DIR}/../testdata/sim-deployment.yaml}"
 USE_KIND="${USE_KIND:-true}"
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-mirror.gcr.io/kindest/node:v1.32.2}"
 
@@ -48,18 +51,11 @@ load_images() {
   CLUSTER_NAME="${cluster}" ./scripts/load_image.sh "${EPP_IMAGE}" "${SIM_IMAGE}"
 }
 
-cleanup() {
-  echo "Interrupted!"
-  if [ -n "${CREATED_CLUSTER}" ] && [ "${E2E_KEEP_CLUSTER_ON_FAILURE:-false}" != "true" ]; then
-    echo "Deleting kind cluster '${CREATED_CLUSTER}'"
-    kind delete cluster --name "${CREATED_CLUSTER}" 2>/dev/null || true
-  fi
-  exit 130  # SIGINT (Ctrl+C)
-}
-
 # Normally kind cluster cleanup is done by AfterSuite; this trap only fires on
 # interruption signals so that a Ctrl+C still cleans up the cluster we created.
-trap cleanup INT TERM
+# CREATED_CLUSTER is empty until we create a cluster ourselves, so an interrupt
+# before then deletes nothing.
+trap 'e2e_handle_interrupt "${CREATED_CLUSTER}"' INT TERM
 
 if [ "${USE_KIND}" = "true" ]; then
   install_kind
@@ -92,11 +88,5 @@ else
 fi
 
 echo "Running Go e2e tests in ./test/e2e/epp/..."
-if [ -n "${E2E_LABEL_FILTER:-}" ]; then
-  echo "Label filter: ${E2E_LABEL_FILTER}"
-  MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
-    go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
-else
-  MANIFEST_PATH="${MANIFEST_PATH}" E2E_IMAGE="${EPP_IMAGE}" \
-    go test "${DIR}/../test/e2e/epp/" -v -timeout 45m -ginkgo.v -ginkgo.fail-fast
-fi
+export MANIFEST_PATH E2E_IMAGE="${EPP_IMAGE}"
+run_ginkgo_suite "${DIR}/../e2e/epp/"

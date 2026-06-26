@@ -55,6 +55,7 @@ GIT_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null)
 # Match only root-level release tags (v[0-9]*) so submodule tags don't leak into image versions.
 ROOT_RELEASE_TAG_MATCH ?= v[0-9]*
 BUILD_REF ?= $(shell git describe --tags --match '$(ROOT_RELEASE_TAG_MATCH)' --abbrev=0 2>/dev/null)
+LATENCY_PREDICTOR_TAG ?= $(or $(EXTRA_TAG),$(BUILD_REF),latest)
 
 # Host directories for Go module and build caches, bind-mounted into the builder container.
 GO_MOD_CACHE_VOL ?= $(HOME)/.cache/llm-d-gomodcache
@@ -121,7 +122,7 @@ endif
 # Should we pass ALL env vars here?
 E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE VLLM_RENDER_IMAGE \
                E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT \
-               E2E_LABEL_FILTER LOAD_VLLM_RENDER_IMAGE
+               E2E_LABEL_FILTER LOAD_VLLM_RENDER_IMAGE HF_TOKEN
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
@@ -303,24 +304,24 @@ test-e2e-gaie-run: image-pull ## Ensure images are present, then run GAIE e2e te
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		-e EPP_IMAGE=$(GAIE_E2E_IMAGE) \
 		-e USE_KIND=true \
-		$(BUILDER_IMAGE) ./hack/test-e2e.sh
+		$(BUILDER_IMAGE) ./test/scripts/test-e2e-gaie.sh
 
 .PHONY: test-e2e-gaie
 test-e2e-gaie: image-build-builder image-build ## Build images and run GAIE e2e tests
 	$(MAKE) test-e2e-gaie-run
 
-.PHONY: test-e2e-scheduler-run
-test-e2e-scheduler-run: image-pull ## Ensure images are present, then run scheduler e2e tests
+.PHONY: test-e2e-router-run
+test-e2e-router-run: image-pull ## Ensure images are present, then run router e2e tests
 	@printf "\033[33;1m==== Running End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
-		$(BUILDER_IMAGE) ./test/scripts/run_e2e.sh
+		$(BUILDER_IMAGE) ./test/scripts/test-e2e-router.sh
 
-.PHONY: test-e2e-scheduler
-test-e2e-scheduler: image-build-builder image-build ## Build images and run scheduler e2e tests
-	$(MAKE) test-e2e-scheduler-run
+.PHONY: test-e2e-router
+test-e2e-router: image-build-builder image-build ## Build images and run router e2e tests
+	$(MAKE) test-e2e-router-run
 
 .PHONY: test-e2e
-test-e2e: test-e2e-gaie test-e2e-scheduler ## Run all end-to-end tests sequentially
+test-e2e: test-e2e-gaie test-e2e-router ## Run all end-to-end tests sequentially
 
 
 .PHONY: bench-tokenizer
@@ -348,7 +349,7 @@ verify-helm-charts: helm-install kubectl-validate ## Render and validate Helm ch
 .PHONY: helm-push
 helm-push: yq helm-install ## Package and push a specified Helm chart. Usage: make helm-push CHART=<chart_name>
 	@if [ -z "$(CHART)" ]; then echo "Error: CHART variable is required (e.g. CHART=llm-d-router-standalone)"; exit 1; fi
-	CHART=$(CHART) EXTRA_TAG="$(EXTRA_TAG)" CHART_SUFFIX="$(CHART_SUFFIX)" EPP_RELEASE_IMAGE_REPOSITORY="$(EPP_RELEASE_IMAGE_REPOSITORY)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
+	CHART=$(CHART) EXTRA_TAG="$(EXTRA_TAG)" CHART_SUFFIX="$(CHART_SUFFIX)" EPP_RELEASE_IMAGE_REPOSITORY="$(EPP_RELEASE_IMAGE_REPOSITORY)" LATENCY_PREDICTOR_TAG="$(LATENCY_PREDICTOR_TAG)" YQ="$(YQ)" HELM="$(HELM)" ./hack/push-chart.sh
 
 .PHONY: helm-push-gateway
 helm-push-gateway: ## Package and push the llm-d-router-gateway Helm chart.

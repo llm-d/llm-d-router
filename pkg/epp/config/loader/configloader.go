@@ -19,6 +19,8 @@ package loader
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/go-logr/logr"
@@ -46,7 +48,7 @@ import (
 var (
 	scheme                       = runtime.NewScheme()
 	registeredFeatureGatesMu     sync.RWMutex
-	registeredFeatureGates       = sets.New[string]()
+	registeredFeatureGates       = make(map[string]bool)
 	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: "v1alpha1"} // TODO: deprecated should be clean up
 )
 
@@ -68,10 +70,10 @@ func init() {
 }
 
 // RegisterFeatureGate registers a feature gate name for validation purposes.
-func RegisterFeatureGate(gate string) {
+func RegisterFeatureGate(gate string, isEnabledByDefault bool) {
 	registeredFeatureGatesMu.Lock()
 	defer registeredFeatureGatesMu.Unlock()
-	registeredFeatureGates.Insert(gate)
+	registeredFeatureGates[gate] = isEnabledByDefault
 }
 
 // LoadRawConfig parses the raw configuration bytes, applies initial defaults, and extracts feature gates.
@@ -132,7 +134,11 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 		return nil, nil, fmt.Errorf("feature gate validation failed: %w", err)
 	}
 
-	featureConfig := loadFeatureConfig(rawConfig.FeatureGates)
+	featureConfig, err := loadFeatureConfig(rawConfig.FeatureGates)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load feature gates: %w", err)
+	}
+
 	return rawConfig, featureConfig, nil
 }
 
@@ -162,7 +168,11 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("scheduler config build failed: %w", err)
 	}
 
-	featureGates := loadFeatureConfig(rawConfig.FeatureGates)
+	featureGates, err := loadFeatureConfig(rawConfig.FeatureGates)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load feature gates: %w", err)
+	}
+
 	dataConfig, err := buildDataLayerConfig(rawConfig.DataLayer, handle)
 	if err != nil {
 		return nil, fmt.Errorf("data layer config build failed: %w", err)
@@ -294,17 +304,26 @@ func buildSchedulerConfig(
 	return scheduling.NewSchedulerConfig(profileHandler, profiles), nil
 }
 
-func loadFeatureConfig(gates configapi.FeatureGates) map[string]bool {
+func loadFeatureConfig(gates configapi.FeatureGates) (map[string]bool, error) {
 	registeredFeatureGatesMu.RLock()
 	defer registeredFeatureGatesMu.RUnlock()
 	config := make(map[string]bool, len(registeredFeatureGates))
-	for gate := range registeredFeatureGates {
-		config[gate] = false
+	for gate, defaultValue := range registeredFeatureGates {
+		config[gate] = defaultValue
 	}
 	for _, gate := range gates {
-		config[gate] = true
+		value := true
+		parts := strings.Split(gate, "=")
+		if len(parts) > 1 {
+			var err error
+			value, err = strconv.ParseBool(strings.TrimSpace(strings.ToLower(parts[1])))
+			if err != nil {
+				return nil, err
+			}
+		}
+		config[parts[0]] = value
 	}
-	return config
+	return config, nil
 }
 
 func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {

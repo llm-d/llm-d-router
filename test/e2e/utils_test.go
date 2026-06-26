@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -193,9 +194,15 @@ func removeEmptyLabels(inputs []string) []string {
 }
 
 func isModelReal(modelName string) bool {
-	url := "https://huggingface.co/api/models/" + modelName
+	req, err := http.NewRequest("GET", "https://huggingface.co/api/models/"+modelName, nil)
+	if err != nil {
+		return false
+	}
+	if token := os.Getenv("HF_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
-	resp, err := http.Get(url)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false
 	}

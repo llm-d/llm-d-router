@@ -89,7 +89,7 @@ const (
 
 	// Defaults
 	defaultPort                  = "8000"
-	defaultVLLMPort              = "8001"
+	defaultVLLMPort              = "8200"
 	defaultDataParallelSize      = 1
 	defaultMooncakeBootstrapPort = 8998
 
