@@ -23,29 +23,40 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-// strategy constants define the supported gating strategies.
+// shape constants define the interpolation curve applied across the ceiling range.
+// Only "linear" is supported; additional shapes (sigmoid, exponential, step, etc.) may be added.
 const (
-	// strategyStepwiseSpread divides the [minCeiling, maxCeiling] range into equal steps based on
-	// the count of active priorities, ignoring their absolute numerical difference.
-	strategyStepwiseSpread = "stepwise-spread"
+	shapeLinear = "linear"
+)
 
-	// strategyLinearProportional scales ceilings linearly based on numerical priority values
-	// relative to the observed active range.
-	strategyLinearProportional = "linear-proportional"
+// domain constants define how priority levels are mapped to positions in the ceiling range.
+const (
+	// domainRank maps by ordinal rank, ignoring numerical priority values.
+	domainRank = "rank"
+	// domainValue maps proportionally to numerical priority values.
+	domainValue = "value"
 )
 
 const (
-	// defaultMaxCeiling allows the highest priority to use full capacity.
+	defaultShape              = shapeLinear
+	defaultDomain             = domainRank
 	defaultMaxCeiling float64 = 1.0
 )
 
 // apiConfig represents the external configuration schema for the priority holdback policy.
 // It is designed to be deserialized from JSON via the plugin's raw parameters.
 type apiConfig struct {
-	// Strategy selects the gating algorithm used to compute per-priority admission ceilings.
+	// Shape selects the interpolation curve used to distribute ceilings across the range.
 	//
-	// Required. Valid values: "stepwise-spread", "linear-proportional".
-	Strategy *string `json:"strategy"`
+	// Optional, defaults to "linear". Currently only "linear" is supported.
+	Shape *string `json:"shape,omitempty"`
+
+	// Domain selects how priority levels are mapped to positions in the ceiling range.
+	//   - "rank": equal spacing by ordinal rank, ignoring numerical values.
+	//   - "value": spacing proportional to numerical priority differences.
+	//
+	// Optional, defaults to "rank".
+	Domain *string `json:"domain,omitempty"`
 
 	// MinCeiling is the admission ceiling assigned to the lowest-priority traffic.
 	// Determines how aggressively the lowest priority is gated as saturation rises.
@@ -62,7 +73,8 @@ type apiConfig struct {
 
 // config is the internal, fully-validated configuration used by the policy.
 type config struct {
-	strategy   string
+	shape      string
+	domain     string
 	minCeiling float64
 	maxCeiling float64
 }
@@ -87,7 +99,8 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 	}
 
 	return &config{
-		strategy:   *safeCfg.Strategy,
+		shape:      *safeCfg.Shape,
+		domain:     *safeCfg.Domain,
 		minCeiling: *safeCfg.MinCeiling,
 		maxCeiling: *safeCfg.MaxCeiling,
 	}, nil
@@ -95,20 +108,20 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 
 // checkRequired verifies that mandatory fields are present before defaulting.
 func checkRequired(cfg *apiConfig) error {
-	var errs []error
-
-	if cfg.Strategy == nil {
-		errs = append(errs, fmt.Errorf("strategy is required"))
-	}
 	if cfg.MinCeiling == nil {
-		errs = append(errs, fmt.Errorf("minCeiling is required"))
+		return fmt.Errorf("minCeiling is required")
 	}
-
-	return errors.Join(errs...)
+	return nil
 }
 
 // applyDefaults populates unset optional fields with their standard defaults.
 func applyDefaults(cfg *apiConfig) {
+	if cfg.Shape == nil {
+		cfg.Shape = ptr.To(defaultShape)
+	}
+	if cfg.Domain == nil {
+		cfg.Domain = ptr.To(defaultDomain)
+	}
 	if cfg.MaxCeiling == nil {
 		cfg.MaxCeiling = ptr.To(defaultMaxCeiling)
 	}
@@ -119,12 +132,21 @@ func applyDefaults(cfg *apiConfig) {
 func validateConfig(cfg *apiConfig) error {
 	var errs []error
 
-	if cfg.Strategy != nil {
-		switch *cfg.Strategy {
-		case strategyStepwiseSpread, strategyLinearProportional:
+	if cfg.Shape != nil {
+		switch *cfg.Shape {
+		case shapeLinear:
 		default:
-			errs = append(errs, fmt.Errorf("unsupported strategy %q, must be one of: %q, %q",
-				*cfg.Strategy, strategyStepwiseSpread, strategyLinearProportional))
+			errs = append(errs, fmt.Errorf("unsupported shape %q, must be %q",
+				*cfg.Shape, shapeLinear))
+		}
+	}
+
+	if cfg.Domain != nil {
+		switch *cfg.Domain {
+		case domainRank, domainValue:
+		default:
+			errs = append(errs, fmt.Errorf("unsupported domain %q, must be one of: %q, %q",
+				*cfg.Domain, domainRank, domainValue))
 		}
 	}
 

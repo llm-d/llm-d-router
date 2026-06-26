@@ -12,13 +12,21 @@ Each active priority level receives an admission ceiling in [0.0, 1.0]. During e
 
 Higher-priority traffic continues to flow until saturation reaches its own (higher) ceiling, providing quality-of-service differentiation under load.
 
-## Strategies
+## Configuration
 
-Two strategies are available for computing per-priority ceilings. Both produce `maxCeiling` for the highest priority and `minCeiling` for the lowest.
+Behavior is configured via two independent parameters: `shape` and `domain`. The resulting ceilings always range from `maxCeiling` for the highest priority to `minCeiling` for the lowest.
 
-### `stepwise-spread`
+### `shape`
 
-Distributes ceilings in equal steps by rank, ignoring numerical priority values.
+The interpolation curve used to distribute ceilings across the range. Currently only `"linear"` is supported.
+
+### `domain`
+
+How priority levels are mapped to positions in the ceiling range.
+
+#### `rank` (default)
+
+Distributes ceilings in equal steps by ordinal rank, ignoring numerical priority values. Ceilings are evenly spaced across `[minCeiling, maxCeiling]`.
 
     c_i = maxCeiling - i * (maxCeiling - minCeiling) / (N - 1)
 
@@ -26,7 +34,7 @@ Where `i` is the index in descending priority order (0 = highest) and `N` is the
 
 Use when priorities represent ordinal categories (e.g., "critical", "normal", "batch") where the numerical values are arbitrary labels.
 
-### `linear-proportional`
+#### `value`
 
 Scales ceilings proportionally to the numerical priority value within the observed active range.
 
@@ -37,7 +45,8 @@ Use when the numerical spacing between priority values carries meaning and prior
 
 **Parameters:**
 
-- `strategy` (string, required, no default): Gating algorithm: `"stepwise-spread"` or `"linear-proportional"`.
+- `shape` (string, optional, default: `"linear"`): Interpolation curve. Currently only `"linear"` is supported.
+- `domain` (string, optional, default: `"rank"`): Priority mapping: `"rank"` or `"value"`.
 - `minCeiling` (float64, required, no default): Ceiling for the lowest priority. Must be in `[0.0, 1.0)`.
 - `maxCeiling` (float64, optional, default: `1.0`): Ceiling for the highest priority. Must be in `(0.0, 1.0]`.
 
@@ -49,7 +58,8 @@ plugins:
   - type: priority-holdback-policy
     name: my-holdback-policy
     parameters:
-      strategy: stepwise-spread
+      shape: linear
+      domain: rank
       minCeiling: 0.4
       maxCeiling: 0.9
 flowControl:

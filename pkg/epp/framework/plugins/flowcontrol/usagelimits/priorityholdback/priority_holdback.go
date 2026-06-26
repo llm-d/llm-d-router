@@ -2,9 +2,9 @@
 // ceilings per priority level. Lower-priority traffic is gated at lower saturation thresholds,
 // reserving capacity for higher-priority work as the pool approaches saturation.
 //
-// Two strategies are supported:
-//   - "stepwise-spread": equal ceiling spacing by rank, ignoring numerical priority values.
-//   - "linear-proportional": ceiling spacing proportional to numerical priority differences.
+// Behavior is configured via two independent parameters:
+//   - shape: the interpolation curve (currently "linear"; future: sigmoid, exponential, etc.).
+//   - domain: how priorities map to positions ("rank" for ordinal, "value" for proportional).
 package priorityholdback
 
 import (
@@ -47,10 +47,10 @@ var _ flowcontrol.UsageLimitPolicy = &priorityHoldbackPolicy{}
 
 func newPriorityHoldbackPolicy(cfg config) *priorityHoldbackPolicy {
 	var fn func(cMin, cMax float64, priorities []int) (ceilings []float64)
-	switch cfg.strategy {
-	case strategyStepwiseSpread:
+	switch cfg.domain {
+	case domainRank:
 		fn = computeLimitStepwiseSpread
-	case strategyLinearProportional:
+	case domainValue:
 		fn = computeLimitLinearProportional
 	}
 	return &priorityHoldbackPolicy{

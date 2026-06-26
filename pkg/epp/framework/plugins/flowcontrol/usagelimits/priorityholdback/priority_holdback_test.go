@@ -38,32 +38,37 @@ func TestPolicyFactory(t *testing.T) {
 		wantError bool
 	}{
 		{
-			name:      "valid stepwise-spread config",
-			config:    []byte(`{"strategy": "stepwise-spread", "minCeiling": 0.5}`),
+			name:      "valid rank domain config",
+			config:    []byte(`{"domain": "rank", "minCeiling": 0.5}`),
 			wantError: false,
 		},
 		{
-			name:      "valid linear-proportional config",
-			config:    []byte(`{"strategy": "linear-proportional", "minCeiling": 0.3, "maxCeiling": 0.9}`),
+			name:      "valid value domain config",
+			config:    []byte(`{"domain": "value", "minCeiling": 0.3, "maxCeiling": 0.9}`),
 			wantError: false,
 		},
 		{
 			name:      "valid config with explicit maxCeiling",
-			config:    []byte(`{"strategy": "stepwise-spread", "minCeiling": 0.2, "maxCeiling": 0.8}`),
+			config:    []byte(`{"domain": "rank", "minCeiling": 0.2, "maxCeiling": 0.8}`),
 			wantError: false,
 		},
 		{
-			name:      "missing strategy",
+			name:      "defaults applied for shape and domain",
 			config:    []byte(`{"minCeiling": 0.5}`),
-			wantError: true,
+			wantError: false,
+		},
+		{
+			name:      "explicit shape linear",
+			config:    []byte(`{"shape": "linear", "minCeiling": 0.5}`),
+			wantError: false,
 		},
 		{
 			name:      "missing minCeiling",
-			config:    []byte(`{"strategy": "stepwise-spread"}`),
+			config:    []byte(`{"domain": "rank"}`),
 			wantError: true,
 		},
 		{
-			name:      "missing both required fields",
+			name:      "empty config",
 			config:    []byte(`{}`),
 			wantError: true,
 		},
@@ -73,38 +78,43 @@ func TestPolicyFactory(t *testing.T) {
 			wantError: true,
 		},
 		{
-			name:      "unsupported strategy",
-			config:    []byte(`{"strategy": "unknown", "minCeiling": 0.5}`),
+			name:      "unsupported shape",
+			config:    []byte(`{"shape": "sigmoid", "minCeiling": 0.5}`),
+			wantError: true,
+		},
+		{
+			name:      "unsupported domain",
+			config:    []byte(`{"domain": "unknown", "minCeiling": 0.5}`),
 			wantError: true,
 		},
 		{
 			name:      "minCeiling negative",
-			config:    []byte(`{"strategy": "stepwise-spread", "minCeiling": -0.1}`),
+			config:    []byte(`{"minCeiling": -0.1}`),
 			wantError: true,
 		},
 		{
 			name:      "minCeiling equals 1.0",
-			config:    []byte(`{"strategy": "stepwise-spread", "minCeiling": 1.0}`),
+			config:    []byte(`{"minCeiling": 1.0}`),
 			wantError: true,
 		},
 		{
 			name:      "maxCeiling zero",
-			config:    []byte(`{"strategy": "stepwise-spread", "minCeiling": 0.5, "maxCeiling": 0.0}`),
+			config:    []byte(`{"minCeiling": 0.5, "maxCeiling": 0.0}`),
 			wantError: true,
 		},
 		{
 			name:      "maxCeiling exceeds 1.0",
-			config:    []byte(`{"strategy": "stepwise-spread", "minCeiling": 0.5, "maxCeiling": 1.1}`),
+			config:    []byte(`{"minCeiling": 0.5, "maxCeiling": 1.1}`),
 			wantError: true,
 		},
 		{
 			name:      "minCeiling equals maxCeiling",
-			config:    []byte(`{"strategy": "stepwise-spread", "minCeiling": 0.5, "maxCeiling": 0.5}`),
+			config:    []byte(`{"minCeiling": 0.5, "maxCeiling": 0.5}`),
 			wantError: true,
 		},
 		{
 			name:      "minCeiling greater than maxCeiling",
-			config:    []byte(`{"strategy": "stepwise-spread", "minCeiling": 0.8, "maxCeiling": 0.5}`),
+			config:    []byte(`{"minCeiling": 0.8, "maxCeiling": 0.5}`),
 			wantError: true,
 		},
 		{
@@ -114,7 +124,7 @@ func TestPolicyFactory(t *testing.T) {
 		},
 		{
 			name:      "minCeiling zero is valid",
-			config:    []byte(`{"strategy": "stepwise-spread", "minCeiling": 0.0}`),
+			config:    []byte(`{"minCeiling": 0.0}`),
 			wantError: false,
 		},
 	}
@@ -137,7 +147,7 @@ func TestPolicyFactory(t *testing.T) {
 func TestPolicyFactory_DefaultMaxCeiling(t *testing.T) {
 	t.Parallel()
 	p, err := PolicyFactory("test", fwkplugin.StrictDecoder(
-		[]byte(`{"strategy": "stepwise-spread", "minCeiling": 0.5}`)), nil)
+		[]byte(`{"minCeiling": 0.5}`)), nil)
 	require.NoError(t, err)
 
 	policy := p.(*priorityHoldbackPolicy)
@@ -147,7 +157,7 @@ func TestPolicyFactory_DefaultMaxCeiling(t *testing.T) {
 func TestPolicyFactory_TypedName(t *testing.T) {
 	t.Parallel()
 	p, err := PolicyFactory("my-policy", fwkplugin.StrictDecoder(
-		[]byte(`{"strategy": "stepwise-spread", "minCeiling": 0.5}`)), nil)
+		[]byte(`{"minCeiling": 0.5}`)), nil)
 	require.NoError(t, err)
 
 	tn := p.(interface{ TypedName() fwkplugin.TypedName }).TypedName()
@@ -162,7 +172,8 @@ func TestPolicyFactory_TypedName(t *testing.T) {
 func TestComputeLimit_EmptyPriorities(t *testing.T) {
 	t.Parallel()
 	policy := newPriorityHoldbackPolicy(config{
-		strategy:   strategyStepwiseSpread,
+		shape:      shapeLinear,
+		domain:     domainRank,
 		minCeiling: 0.5,
 		maxCeiling: 1.0,
 	})
@@ -176,20 +187,21 @@ func TestComputeLimit_SinglePriority(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		strategy string
-		cMax     float64
+		name   string
+		domain string
+		cMax   float64
 	}{
-		{"stepwise-spread", strategyStepwiseSpread, 1.0},
-		{"linear-proportional", strategyLinearProportional, 1.0},
-		{"custom maxCeiling", strategyStepwiseSpread, 0.9},
+		{"rank domain", domainRank, 1.0},
+		{"value domain", domainValue, 1.0},
+		{"custom maxCeiling", domainRank, 0.9},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			policy := newPriorityHoldbackPolicy(config{
-				strategy:   tc.strategy,
+				shape:      shapeLinear,
+				domain:     tc.domain,
 				minCeiling: 0.5,
 				maxCeiling: tc.cMax,
 			})
@@ -201,7 +213,7 @@ func TestComputeLimit_SinglePriority(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Stepwise-spread tests
+// Stepwise-spread tests (domain: rank)
 // ---------------------------------------------------------------------------
 
 func TestStepwiseSpread_TwoPriorities(t *testing.T) {
@@ -273,7 +285,7 @@ func TestStepwiseSpread_NarrowRange(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Linear-proportional tests
+// Linear-proportional tests (domain: value)
 // ---------------------------------------------------------------------------
 
 func TestLinearProportional_TwoPriorities(t *testing.T) {
@@ -361,41 +373,41 @@ func TestLinearProportional_BoundaryValues(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-strategy comparison
+// Cross-domain comparison
 // ---------------------------------------------------------------------------
 
-func TestStrategies_ConvergeOnEvenSpacing(t *testing.T) {
+func TestDomains_ConvergeOnEvenSpacing(t *testing.T) {
 	t.Parallel()
-	// When priorities are evenly distributed relative to their range, both strategies
+	// When priorities are evenly distributed relative to their range, both domains
 	// should produce the same ceilings.
 	priorities := []int{100, 55, 10}
-	stepwise := computeLimitStepwiseSpread(0.5, 1.0, priorities)
-	linear := computeLimitLinearProportional(0.5, 1.0, priorities)
+	rank := computeLimitStepwiseSpread(0.5, 1.0, priorities)
+	value := computeLimitLinearProportional(0.5, 1.0, priorities)
 
-	require.Len(t, stepwise, 3)
-	require.Len(t, linear, 3)
-	for i := range stepwise {
-		assert.InDelta(t, stepwise[i], linear[i], 1e-9,
-			"strategies should converge for evenly spaced priorities at index %d", i)
+	require.Len(t, rank, 3)
+	require.Len(t, value, 3)
+	for i := range rank {
+		assert.InDelta(t, rank[i], value[i], 1e-9,
+			"domains should converge for evenly spaced priorities at index %d", i)
 	}
 }
 
-func TestStrategies_DivergeOnSkewedSpacing(t *testing.T) {
+func TestDomains_DivergeOnSkewedSpacing(t *testing.T) {
 	t.Parallel()
-	// When priorities are skewed, linear should give the middle priority a different
-	// ceiling than stepwise.
+	// When priorities are skewed, value domain should give the middle priority a different
+	// ceiling than rank domain.
 	priorities := []int{100, 2, 1}
-	stepwise := computeLimitStepwiseSpread(0.5, 1.0, priorities)
-	linear := computeLimitLinearProportional(0.5, 1.0, priorities)
+	rank := computeLimitStepwiseSpread(0.5, 1.0, priorities)
+	value := computeLimitLinearProportional(0.5, 1.0, priorities)
 
 	// Endpoints should be the same.
-	assert.InDelta(t, stepwise[0], linear[0], 1e-9, "highest priority should match")
-	assert.InDelta(t, stepwise[2], linear[2], 1e-9, "lowest priority should match")
+	assert.InDelta(t, rank[0], value[0], 1e-9, "highest priority should match")
+	assert.InDelta(t, rank[2], value[2], 1e-9, "lowest priority should match")
 
-	// Middle priority should differ: stepwise gives 0.75, linear gives ~0.505.
-	assert.InDelta(t, 0.75, stepwise[1], 1e-9)
-	assert.Less(t, linear[1], 0.51, "linear should give priority 2 a ceiling near cMin")
-	assert.Greater(t, stepwise[1]-linear[1], 0.2, "strategies should meaningfully diverge")
+	// Middle priority should differ: rank gives 0.75, value gives ~0.505.
+	assert.InDelta(t, 0.75, rank[1], 1e-9)
+	assert.Less(t, value[1], 0.51, "value domain should give priority 2 a ceiling near cMin")
+	assert.Greater(t, rank[1]-value[1], 0.2, "domains should meaningfully diverge")
 }
 
 // ---------------------------------------------------------------------------
@@ -411,18 +423,13 @@ func TestBuildConfig_RequiredFields(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "both missing",
-			cfg:     apiConfig{},
-			wantErr: "strategy is required",
-		},
-		{
-			name:    "strategy missing",
-			cfg:     apiConfig{MinCeiling: ptrFloat(0.5)},
-			wantErr: "strategy is required",
-		},
-		{
 			name:    "minCeiling missing",
-			cfg:     apiConfig{Strategy: ptrStr("stepwise-spread")},
+			cfg:     apiConfig{},
+			wantErr: "minCeiling is required",
+		},
+		{
+			name:    "minCeiling missing with domain set",
+			cfg:     apiConfig{Domain: ptrStr("rank")},
 			wantErr: "minCeiling is required",
 		},
 	}
@@ -437,15 +444,6 @@ func TestBuildConfig_RequiredFields(t *testing.T) {
 	}
 }
 
-func TestBuildConfig_ValidationAggregatesErrors(t *testing.T) {
-	t.Parallel()
-	// Both required fields missing should report both errors.
-	_, err := buildConfig(&apiConfig{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "strategy is required")
-	assert.Contains(t, err.Error(), "minCeiling is required")
-}
-
 func TestBuildConfig_ValidConfigs(t *testing.T) {
 	t.Parallel()
 
@@ -454,28 +452,48 @@ func TestBuildConfig_ValidConfigs(t *testing.T) {
 		cfg        apiConfig
 		wantMin    float64
 		wantMax    float64
-		wantStrat  string
+		wantShape  string
+		wantDomain string
 	}{
 		{
-			name:      "stepwise with defaults",
-			cfg:       apiConfig{Strategy: ptrStr("stepwise-spread"), MinCeiling: ptrFloat(0.5)},
-			wantMin:   0.5,
-			wantMax:   1.0,
-			wantStrat: "stepwise-spread",
+			name:       "defaults for shape and domain",
+			cfg:        apiConfig{MinCeiling: ptrFloat(0.5)},
+			wantMin:    0.5,
+			wantMax:    1.0,
+			wantShape:  "linear",
+			wantDomain: "rank",
 		},
 		{
-			name:      "linear with explicit maxCeiling",
-			cfg:       apiConfig{Strategy: ptrStr("linear-proportional"), MinCeiling: ptrFloat(0.3), MaxCeiling: ptrFloat(0.9)},
-			wantMin:   0.3,
-			wantMax:   0.9,
-			wantStrat: "linear-proportional",
+			name:       "explicit rank domain",
+			cfg:        apiConfig{Domain: ptrStr("rank"), MinCeiling: ptrFloat(0.5)},
+			wantMin:    0.5,
+			wantMax:    1.0,
+			wantShape:  "linear",
+			wantDomain: "rank",
 		},
 		{
-			name:      "minCeiling at zero",
-			cfg:       apiConfig{Strategy: ptrStr("stepwise-spread"), MinCeiling: ptrFloat(0.0)},
-			wantMin:   0.0,
-			wantMax:   1.0,
-			wantStrat: "stepwise-spread",
+			name:       "value domain with explicit maxCeiling",
+			cfg:        apiConfig{Domain: ptrStr("value"), MinCeiling: ptrFloat(0.3), MaxCeiling: ptrFloat(0.9)},
+			wantMin:    0.3,
+			wantMax:    0.9,
+			wantShape:  "linear",
+			wantDomain: "value",
+		},
+		{
+			name:       "minCeiling at zero",
+			cfg:        apiConfig{MinCeiling: ptrFloat(0.0)},
+			wantMin:    0.0,
+			wantMax:    1.0,
+			wantShape:  "linear",
+			wantDomain: "rank",
+		},
+		{
+			name:       "explicit shape and domain",
+			cfg:        apiConfig{Shape: ptrStr("linear"), Domain: ptrStr("value"), MinCeiling: ptrFloat(0.4)},
+			wantMin:    0.4,
+			wantMax:    1.0,
+			wantShape:  "linear",
+			wantDomain: "value",
 		},
 	}
 
@@ -484,7 +502,8 @@ func TestBuildConfig_ValidConfigs(t *testing.T) {
 			t.Parallel()
 			cfg, err := buildConfig(&tc.cfg)
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantStrat, cfg.strategy)
+			assert.Equal(t, tc.wantShape, cfg.shape)
+			assert.Equal(t, tc.wantDomain, cfg.domain)
 			assert.Equal(t, tc.wantMin, cfg.minCeiling)
 			assert.Equal(t, tc.wantMax, cfg.maxCeiling)
 		})
