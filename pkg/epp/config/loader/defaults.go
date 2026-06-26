@@ -293,7 +293,7 @@ func ensureSaturationDetector(
 		}
 	}
 
-	if sd, ok := handle.GetAllPluginsWithNames()[sdConfig.PluginRef]; ok {
+	if sd, ok := allPlugins[sdConfig.PluginRef]; ok {
 		if _, isFilter := sd.(fwksched.Filter); isFilter {
 			injectFilterIntoProfiles(cfg.SchedulingProfiles, sdConfig.PluginRef)
 		}
