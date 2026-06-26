@@ -32,7 +32,6 @@ import (
 	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
-	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -67,6 +66,8 @@ const (
 	testProfileHandler = "test-profile-handler"
 	testSourceType     = "test-source"
 	testExtractorType  = "test-extractor"
+
+	testFeatureGate = "test-feature-gate"
 )
 
 // --- Test: Phase 1 (Raw Loading & Static Defaults) ---
@@ -75,19 +76,20 @@ func TestLoadRawConfiguration(t *testing.T) {
 	t.Parallel()
 
 	// Register known feature gates for validation.
-	RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	RegisterFeatureGate(flowcontrol.FeatureGate)
+	RegisterFeatureGate(testFeatureGate, true)
+	RegisterFeatureGate(flowcontrol.FeatureGate, false)
 
 	queueScorerWeight := 2.0
 	kvCacheUtilizationScorerWeight := 2.0
 	prefixCacheScorerWeight := 3.0
 
 	tests := []struct {
-		name       string
-		configText string
-		want       *configapi.EndpointPickerConfig
-		wantErr    bool
-		deprecated bool
+		name         string
+		configText   string
+		want         *configapi.EndpointPickerConfig
+		wantFeatures map[string]bool
+		wantErr      bool
+		deprecated   bool
 	}{
 		{
 			name:       "Success - Full Configuration",
@@ -114,7 +116,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 					},
 				},
 				FeatureGates: configapi.FeatureGates{
-					datalayer.ExperimentalDatalayerFeatureGate,
+					testFeatureGate,
 					flowcontrol.FeatureGate,
 				},
 				FlowControl: &configapi.FlowControlConfig{
@@ -122,6 +124,10 @@ func TestLoadRawConfiguration(t *testing.T) {
 						PluginRef: "utilization-detector",
 					},
 				},
+			},
+			wantFeatures: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: true,
 			},
 			wantErr:    false,
 			deprecated: false,
@@ -151,7 +157,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 					},
 				},
 				FeatureGates: configapi.FeatureGates{
-					datalayer.ExperimentalDatalayerFeatureGate,
+					testFeatureGate,
 					flowcontrol.FeatureGate,
 				},
 				FlowControl: &configapi.FlowControlConfig{
@@ -174,7 +180,13 @@ func TestLoadRawConfiguration(t *testing.T) {
 				Plugins: []configapi.PluginSpec{
 					{Name: "test1", Type: testPluginType, Parameters: json.RawMessage(`{"threshold":10}`)},
 				},
-				FeatureGates: configapi.FeatureGates{},
+				FeatureGates: configapi.FeatureGates{
+					testFeatureGate + "=false",
+				},
+			},
+			wantFeatures: map[string]bool{
+				testFeatureGate:         false,
+				flowcontrol.FeatureGate: false,
 			},
 			wantErr:    false,
 			deprecated: false,
@@ -239,6 +251,10 @@ func TestLoadRawConfiguration(t *testing.T) {
 						},
 					},
 				},
+			},
+			wantFeatures: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: false,
 			},
 			wantErr:    false,
 			deprecated: false,
@@ -322,6 +338,12 @@ func TestLoadRawConfiguration(t *testing.T) {
 			wantErr:    true,
 			deprecated: false,
 		},
+		{
+			name:       "Error - Bad Feature Gate",
+			configText: errorBadFeatureGateText,
+			wantErr:    true,
+			deprecated: false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -330,7 +352,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 			writer := &strings.Builder{}
 			logger := logging.NewTestLoggerWithWriter(writer)
 
-			got, _, err := LoadRawConfig([]byte(tc.configText), logger)
+			got, featureGates, err := LoadRawConfig([]byte(tc.configText), logger)
 
 			if tc.wantErr {
 				require.Error(t, err, "Expected LoadRawConfig to fail")
@@ -339,6 +361,11 @@ func TestLoadRawConfiguration(t *testing.T) {
 			require.NoError(t, err, "Expected LoadRawConfig to succeed")
 			diff := cmp.Diff(tc.want, got)
 			require.Empty(t, diff, "Config mismatch (-want +got):\n%s", diff)
+
+			if tc.wantFeatures != nil {
+				diff = cmp.Diff(tc.wantFeatures, featureGates)
+				require.Empty(t, diff, "Config feature gates mismatch (-want +got):\n%s", diff)
+			}
 
 			if strings.Contains(writer.String(), "deprecated") {
 				require.True(t, tc.deprecated, "Deprecated configuration wasn't marked as deprecated")
@@ -355,8 +382,8 @@ func TestInstantiateAndConfigure(t *testing.T) {
 	// Not parallel because it modifies global plugin registry.
 	registerTestPlugins(t)
 
-	RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	RegisterFeatureGate(flowcontrol.FeatureGate)
+	RegisterFeatureGate(testFeatureGate, true)
+	RegisterFeatureGate(flowcontrol.FeatureGate, false)
 
 	tests := []struct {
 		name       string

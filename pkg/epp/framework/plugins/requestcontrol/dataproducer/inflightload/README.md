@@ -28,6 +28,7 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. |
+| `outputRatio` | `float` | No | `1.5` | Estimated output-to-input token ratio applied when `addEstimatedOutputTokens` is true: estimated output = round(inputTokens * `outputRatio`). Computed against the full prompt, not the uncached portion. Must be non-negative. |
 
 ---
 
