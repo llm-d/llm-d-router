@@ -18,6 +18,7 @@ package roundrobin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -281,4 +282,45 @@ func TestRoundRobin_Pick_Concurrency(t *testing.T) {
 			t.Logf("Selection distribution: %s", countsStr)
 		})
 	}
+}
+
+func TestRoundRobin_DumpState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default name", func(t *testing.T) {
+		t.Parallel()
+		policy := newRoundRobin("")
+
+		payload, err := policy.DumpState()
+		require.NoError(t, err)
+		require.NotNil(t, payload)
+
+		var state roundRobinState
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.Equal(t, RoundRobinFairnessPolicyType, state.Plugin)
+		require.Equal(t, RoundRobinFairnessPolicyType, state.Type)
+	})
+
+	t.Run("custom name", func(t *testing.T) {
+		t.Parallel()
+		policy := newRoundRobin("my-rr-policy")
+
+		payload, err := policy.DumpState()
+		require.NoError(t, err)
+		require.NotNil(t, payload)
+
+		var state roundRobinState
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.Equal(t, "my-rr-policy", state.Plugin)
+		require.Equal(t, RoundRobinFairnessPolicyType, state.Type)
+	})
+
+	t.Run("valid json output", func(t *testing.T) {
+		t.Parallel()
+		policy := newRoundRobin("test")
+
+		payload, err := policy.DumpState()
+		require.NoError(t, err)
+		require.True(t, json.Valid(payload), "DumpState output should be valid JSON")
+	})
 }
