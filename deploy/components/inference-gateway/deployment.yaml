@@ -59,40 +59,9 @@ spec:
           mountPath: /etc/epp
         - name: cache
           mountPath: /cache
-      # vLLM render sidecar — exposes /v1/completions/render and
-      # /v1/chat/completions/render over loopback for the token-producer plugin.
-      - name: vllm-render
-        image: ${VLLM_RENDER_IMAGE}
-        imagePullPolicy: IfNotPresent
-        command: ["vllm", "launch", "render"]
-        args: ["${MODEL_NAME}", "--port=8000"]
-        ports:
-        - name: render-http
-          containerPort: 8000
-        startupProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 2
-          periodSeconds: 1
-          timeoutSeconds: 1
-          failureThreshold: 600
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          periodSeconds: 5
-          timeoutSeconds: 1
-          failureThreshold: 1
-        volumeMounts:
-        - name: model-cache
-          mountPath: /root/.cache/huggingface
       volumes:
       - name: epp-config
         configMap:
           name: epp-config
       - name: cache
-        emptyDir: {}
-      # HuggingFace cache for the render sidecar's model weights.
-      - name: model-cache
         emptyDir: {}

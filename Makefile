@@ -40,6 +40,8 @@ export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 # CPU-only vLLM image that exposes `vllm launch render` for the token-producer
 # plugin's HTTP backend.
 export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.21.0
+export VLLM_RENDER_PORT ?= 8082
+export VLLM_RENDER_URL ?= http://vllm-render:$(VLLM_RENDER_PORT)
 
 BUILDER_TAG ?= dev
 BUILDER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(BUILDER_IMAGE_NAME)

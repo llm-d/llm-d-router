@@ -50,6 +50,8 @@ const (
 	serviceAccountManifest = "../../deploy/components/inference-gateway/service-accounts.yaml"
 	// servicesManifest is the manifest for the EPP's service resources.
 	servicesManifest = "../../deploy/environments/dev/e2e-infra/services.yaml"
+	// renderManifest is the manifest for the standalone vLLM render deployment and service.
+	renderManifest = "../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
 
 	// CI shards scheduler e2e specs with label filters.
 	extendedTestLabel      = "Extended"
@@ -58,6 +60,9 @@ const (
 	metricsTestLabel       = "Metrics"
 	deprecatedPDTestLabel  = "DeprecatedPD"
 	disaggTestLabel        = "Disagg"
+
+	// images
+	simulatorImg = "ghcr.io/llm-d/llm-d-inference-sim:v0.9.2"
 )
 
 var (
@@ -72,9 +77,10 @@ var (
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
-	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.2", ginkgo.GinkgoLogr)
+	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", simulatorImg, ginkgo.GinkgoLogr)
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
-	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
+	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", simulatorImg, ginkgo.GinkgoLogr)
+	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
 	// nsName is the namespace in which the K8S objects will be created
 	nsName = env.GetEnvString("NAMESPACE", "default", ginkgo.GinkgoLogr)
@@ -90,6 +96,7 @@ var (
 	rbacObjects           []string
 	serviceAccountObjects []string
 	serviceObjects        []string
+	renderObjects         []string
 	infPoolObjects        []string
 	createdNameSpace      bool
 
@@ -121,6 +128,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
 	serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls)
 	serviceObjects = testutils.ApplyYAMLFile(testConfig, servicesManifest)
+	renderObjects = createRender()
 
 	// Prevent failure in tests due to InferencePool not existing before the test
 	infPoolObjects = createInferencePool(1, false)
@@ -170,6 +178,7 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 		} else {
 			ginkgo.By("Deleting created Kubernetes objects")
 			testutils.DeleteObjects(testConfig, infPoolObjects)
+			testutils.DeleteObjects(testConfig, renderObjects)
 			testutils.DeleteObjects(testConfig, serviceObjects)
 			testutils.DeleteObjects(testConfig, serviceAccountObjects)
 			testutils.DeleteObjects(testConfig, rbacObjects)
@@ -207,7 +216,7 @@ func setupK8sCluster() {
 	kindLoadImage(vllmSimImage)
 	kindLoadImage(eppImage)
 	kindLoadImage(sideCarImage)
-	if loadRenderImage {
+	if loadRenderImage && vllmRenderImage != vllmSimImage {
 		kindLoadImage(vllmRenderImage)
 	}
 }

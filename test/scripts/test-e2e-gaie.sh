@@ -89,4 +89,6 @@ fi
 
 echo "Running Go e2e tests in ./test/e2e/epp/..."
 export MANIFEST_PATH E2E_IMAGE="${EPP_IMAGE}"
+export VLLM_RENDER_IMAGE=${VLLM_IMAGE}
+
 run_ginkgo_suite "${DIR}/../e2e/epp/"
