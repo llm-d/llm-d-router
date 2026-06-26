@@ -27,6 +27,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -896,5 +897,49 @@ func TestInFlightLoadProducer_PanicSafety(t *testing.T) {
 		p, err := InFlightLoadProducerFactory("test", nil, nil)
 		require.Error(t, err)
 		require.Nil(t, p)
+	})
+}
+
+func TestInFlightLoadProducerFactory_OutputRatio(t *testing.T) {
+	t.Parallel()
+
+	newProducer := func(t *testing.T, cfg Config) (*InFlightLoadProducer, error) {
+		raw, err := json.Marshal(cfg)
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		p, err := InFlightLoadProducerFactory("inflight-load-producer",
+			json.NewDecoder(bytes.NewReader(raw)), testutils.NewTestHandle(ctx))
+		if err != nil {
+			return nil, err
+		}
+		return p.(*InFlightLoadProducer), nil
+	}
+
+	t.Run("default when unset", func(t *testing.T) {
+		t.Parallel()
+		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true})
+		require.NoError(t, err)
+		require.Equal(t, int64(15), p.tokenEstimator.EstimateOutput(10)) // 10 * 1.5
+	})
+
+	t.Run("custom ratio applied", func(t *testing.T) {
+		t.Parallel()
+		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, OutputRatio: ptr.To(2.0)})
+		require.NoError(t, err)
+		require.Equal(t, int64(20), p.tokenEstimator.EstimateOutput(10)) // 10 * 2.0
+	})
+
+	t.Run("zero ratio is valid", func(t *testing.T) {
+		t.Parallel()
+		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, OutputRatio: ptr.To(0.0)})
+		require.NoError(t, err)
+		require.Equal(t, int64(0), p.tokenEstimator.EstimateOutput(10))
+	})
+
+	t.Run("negative ratio rejected", func(t *testing.T) {
+		t.Parallel()
+		_, err := newProducer(t, Config{AddEstimatedOutputTokens: true, OutputRatio: ptr.To(-1.0)})
+		require.Error(t, err)
 	})
 }

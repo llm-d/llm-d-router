@@ -536,9 +536,14 @@ func (sp *Processor) processAllQueuesConcurrently(
 ) {
 	logger := sp.logger.WithName(ctxName)
 
-	// Phase 1: Collect all queues to be processed into a single slice.
+	type resolvedQueue struct {
+		mq     contracts.ManagedQueue
+		logger logr.Logger
+	}
+
+	// Phase 1: Collect all queues and resolve ManagedQueue handles in one pass.
 	// This avoids holding locks on the shard while processing, and allows us to determine the optimal number of workers.
-	var queuesToProcess []flowcontrol.FlowQueueAccessor
+	var resolvedQueues []resolvedQueue
 	for _, priority := range sp.registry.AllOrderedPriorityLevels() {
 		band, err := sp.registry.PriorityBandAccessor(priority)
 		if err != nil {
@@ -546,45 +551,46 @@ func (sp *Processor) processAllQueuesConcurrently(
 			continue
 		}
 		band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
-			queuesToProcess = append(queuesToProcess, queue)
-			return true // Continue iterating.
+			key := queue.FlowKey()
+			mq, err := sp.registry.ManagedQueue(key)
+			if err != nil {
+				logger.V(logutil.DEBUG).Info("Skipping queue; ManagedQueue no longer resolvable",
+					"flowKey", key, "err", err)
+				return true
+			}
+			resolvedQueues = append(resolvedQueues, resolvedQueue{
+				mq: mq,
+				logger: logger.WithValues(
+					"flowKey", key,
+					"flowID", key.ID,
+					"flowPriority", key.Priority),
+			})
+			return true
 		})
 	}
 
-	if len(queuesToProcess) == 0 {
+	if len(resolvedQueues) == 0 {
 		return
 	}
 
 	// Phase 2: Determine the optimal number of workers.
-	// We cap the number of workers to a reasonable fixed number to avoid overwhelming the scheduler when many shards are
-	// running. We also don't need more workers than there are queues.
-	numWorkers := min(maxCleanupWorkers, len(queuesToProcess))
+	numWorkers := min(maxCleanupWorkers, len(resolvedQueues))
 
-	// Phase 3: Create a worker pool to process the queues.
-	tasks := make(chan flowcontrol.FlowQueueAccessor)
+	// Phase 3: Create a worker pool to process the resolved queues.
+	tasks := make(chan resolvedQueue)
 
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Go(func() {
-			for q := range tasks {
-				key := q.FlowKey()
-				queueLogger := logger.WithValues(
-					"flowKey", key,
-					"flowID", key.ID,
-					"flowPriority", key.Priority)
-				managedQ, err := sp.registry.ManagedQueue(key)
-				if err != nil {
-					queueLogger.Error(err, "Failed to get ManagedQueue")
-					continue
-				}
-				processFn(managedQ, queueLogger)
+			for task := range tasks {
+				processFn(task.mq, task.logger)
 			}
 		})
 	}
 
 	// Feed the channel with all the queues to be processed.
-	for _, q := range queuesToProcess {
-		tasks <- q
+	for _, task := range resolvedQueues {
+		tasks <- task
 	}
 	close(tasks) // Close the channel to signal workers to exit.
 	wg.Wait()    // Wait for all workers to finish.

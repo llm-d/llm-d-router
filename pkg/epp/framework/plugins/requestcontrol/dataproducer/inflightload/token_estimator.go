@@ -32,16 +32,26 @@ type TokenEstimator interface {
 	EstimateOutput(inputTokens int64) int64
 }
 
+// DefaultOutputRatio is the estimated output-to-input token ratio used when no
+// ratio is configured.
+const DefaultOutputRatio = 1.5
+
 // SimpleTokenEstimator derives input tokens from the tokenized prompt and
 // estimates output tokens as inputTokens * OutputRatio.
 type SimpleTokenEstimator struct {
 	OutputRatio float64
 }
 
-// NewSimpleTokenEstimator returns a SimpleTokenEstimator with default output ratio.
+// NewSimpleTokenEstimator returns a SimpleTokenEstimator with the default output ratio.
 func NewSimpleTokenEstimator() TokenEstimator {
+	return NewSimpleTokenEstimatorWithRatio(DefaultOutputRatio)
+}
+
+// NewSimpleTokenEstimatorWithRatio returns a SimpleTokenEstimator that estimates
+// output tokens as round(inputTokens * ratio).
+func NewSimpleTokenEstimatorWithRatio(ratio float64) TokenEstimator {
 	return &SimpleTokenEstimator{
-		OutputRatio: 1.5,
+		OutputRatio: ratio,
 	}
 }
 
