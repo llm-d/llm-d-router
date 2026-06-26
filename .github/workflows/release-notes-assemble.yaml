@@ -31,7 +31,7 @@ jobs:
         # Check out the tagged commit (not main HEAD) so a fragment merged
         # into main between the tag push and this workflow's run is not
         # accidentally rolled into the wrong release.
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           token: ${{ steps.app-token.outputs.token }}

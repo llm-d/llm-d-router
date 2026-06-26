@@ -88,19 +88,19 @@ func TestGlobalStrict_Pick(t *testing.T) {
 
 	queue1 := &mocks.MockFlowQueueAccessor{
 		LenV:            1,
-		PeekHeadV:       itemBetter,
+		PeekV:           itemBetter,
 		FlowKeyV:        flow1Key,
 		OrderingPolicyV: newTestOrderingPolicy(),
 	}
 	queue2 := &mocks.MockFlowQueueAccessor{
 		LenV:            1,
-		PeekHeadV:       itemWorse,
+		PeekV:           itemWorse,
 		FlowKeyV:        flow2Key,
 		OrderingPolicyV: newTestOrderingPolicy(),
 	}
 	queueEmpty := &mocks.MockFlowQueueAccessor{
 		LenV:            0,
-		PeekHeadV:       nil,
+		PeekV:           nil,
 		FlowKeyV:        flowcontrol.FlowKey{ID: "flowEmpty"},
 		OrderingPolicyV: newTestOrderingPolicy(),
 	}
@@ -131,9 +131,9 @@ func TestGlobalStrict_Pick(t *testing.T) {
 			name: "OrderingPolicyCompatibility",
 			band: newTestBand(
 				&mocks.MockFlowQueueAccessor{
-					LenV:      1,
-					PeekHeadV: itemBetter,
-					FlowKeyV:  flow1Key,
+					LenV:     1,
+					PeekV:    itemBetter,
+					FlowKeyV: flow1Key,
 					OrderingPolicyV: &mocks.MockOrderingPolicy{
 						TypedNameV: plugin.TypedName{Type: "typeA"},
 						LessFunc: func(a, b flowcontrol.QueueItemAccessor) bool {
@@ -142,9 +142,9 @@ func TestGlobalStrict_Pick(t *testing.T) {
 					},
 				},
 				&mocks.MockFlowQueueAccessor{
-					LenV:      1,
-					PeekHeadV: itemWorse,
-					FlowKeyV:  flow2Key,
+					LenV:     1,
+					PeekV:    itemWorse,
+					FlowKeyV: flow2Key,
 					OrderingPolicyV: &mocks.MockOrderingPolicy{
 						TypedNameV: plugin.TypedName{Type: "typeB"},
 						LessFunc: func(a, b flowcontrol.QueueItemAccessor) bool {
@@ -160,7 +160,7 @@ func TestGlobalStrict_Pick(t *testing.T) {
 			band: newTestBand(
 				&mocks.MockFlowQueueAccessor{
 					LenV:            1,
-					PeekHeadV:       itemBetter,
+					PeekV:           itemBetter,
 					FlowKeyV:        flow1Key,
 					OrderingPolicyV: nil,
 				},
@@ -174,7 +174,7 @@ func TestGlobalStrict_Pick(t *testing.T) {
 				queueEmpty,
 				&mocks.MockFlowQueueAccessor{
 					LenV:            0,
-					PeekHeadV:       nil,
+					PeekV:           nil,
 					FlowKeyV:        flowcontrol.FlowKey{ID: "flowEmpty2"},
 					OrderingPolicyV: newTestOrderingPolicy(),
 				},

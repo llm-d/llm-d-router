@@ -83,9 +83,9 @@ func TestPick_SingleNonEmptyQueue_StashesEnqueueTime(t *testing.T) {
 		OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{InferenceRequestV: req},
 	}
 	queue := &fwkfcmocks.MockFlowQueueAccessor{
-		LenV:      1,
-		FlowKeyV:  flowcontrol.FlowKey{ID: "alpha"},
-		PeekHeadV: item,
+		LenV:     1,
+		FlowKeyV: flowcontrol.FlowKey{ID: "alpha"},
+		PeekV:    item,
 	}
 	band := &fwkfcmocks.MockPriorityBandAccessor{
 		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) { cb(queue) },

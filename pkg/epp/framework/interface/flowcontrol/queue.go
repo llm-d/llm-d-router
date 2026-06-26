@@ -23,12 +23,11 @@ type QueueCapability string
 
 const (
 	// CapabilityFIFO indicates that the queue operates in a First-In, First-Out manner.
-	// PeekHead() will return the oldest item (by logical enqueue time).
+	// Peek() will return the oldest item (by logical enqueue time).
 	CapabilityFIFO QueueCapability = "FIFO"
 
 	// CapabilityPriorityConfigurable indicates that the queue's ordering is determined by an ItemComparator.
-	// PeekHead() will return the highest priority item, and PeekTail() will return the lowest priority item according to
-	// this comparator.
+	// Peek() will return the highest priority item according to this comparator.
 	CapabilityPriorityConfigurable QueueCapability = "PriorityConfigurable"
 )
 
@@ -46,13 +45,8 @@ type QueueInspectionMethods interface {
 	// ByteSize returns the current total byte size of all items in the queue.
 	ByteSize() uint64
 
-	// PeekHead returns the item at the "head" of the queue (the item with the highest priority according to the queue's
+	// Peek returns the item at the "head" of the queue (the item with the highest priority according to the queue's
 	// ordering) without removing it.
 	// Returns nil if the queue is empty.
-	PeekHead() QueueItemAccessor
-
-	// PeekTail returns the item at the "tail" of the queue (the item with the lowest priority according to the queue's
-	// ordering) without removing it.
-	// Returns nil if the queue is empty.
-	PeekTail() QueueItemAccessor
+	Peek() QueueItemAccessor
 }

@@ -306,3 +306,4 @@ Enable chunked decode via the pd-sidecar flag:
 
 - [GIE Spec](../README.md#relation-to-gie-igw)
 - [Envoy External Processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)
+- [EPP Container Sizing Guide](./operations.md)
