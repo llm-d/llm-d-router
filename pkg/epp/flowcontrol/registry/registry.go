@@ -556,12 +556,6 @@ func (fr *FlowRegistry) buildFlowComponents(key flowcontrol.FlowKey) (*flowCompo
 	if !ok {
 		return nil, fmt.Errorf("priority band %d not found: %w", key.Priority, contracts.ErrPriorityBandNotFound)
 	}
-
-	// Defense in depth: config validation guarantees a non-nil policy, but a corrupted config would
-	// otherwise surface as a nil-pointer panic when the queue first compares items.
-	if bandConfig.OrderingPolicy == nil {
-		return nil, fmt.Errorf("priority band %d has no ordering policy for flow %s", key.Priority, key)
-	}
 	components := &flowComponents{
 		policy: bandConfig.OrderingPolicy,
 		queue:  queue.New(bandConfig.OrderingPolicy),

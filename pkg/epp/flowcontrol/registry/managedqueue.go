@@ -93,10 +93,7 @@ func newManagedQueue(
 	logger logr.Logger,
 	onStatsDelta propagateStatsDeltaFunc,
 ) *managedQueue {
-	mqLogger := logger.WithName("managed-queue").WithValues(
-		"flowKey", key,
-		"queueType", queue.Name(),
-	)
+	mqLogger := logger.WithName("managed-queue").WithValues("flowKey", key)
 	mq := &managedQueue{
 		queue:        queue,
 		policy:       policy,
@@ -223,7 +220,6 @@ type flowQueueAccessor struct {
 var _ flowcontrol.FlowQueueAccessor = &flowQueueAccessor{}
 
 // --- Read-only pass-through methods to the underlying SafeQueue ---
-func (a *flowQueueAccessor) Name() string                        { return a.mq.queue.Name() }
 func (a *flowQueueAccessor) Peek() flowcontrol.QueueItemAccessor { return a.mq.queue.Peek() }
 
 // --- Read-only methods from the managedQueue wrapper ---

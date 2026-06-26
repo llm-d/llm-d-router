@@ -26,7 +26,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
-// PriorityQueueName is the name reported by this queue implementation.
+// PriorityQueueName identifies the priority queue implementation (used for benchmark labels).
 //
 // This queue provides a concurrent-safe priority queue whose ordering is maintained by an internal
 // container/heap. Items are ordered by the configured OrderingPolicy, with the highest-priority
@@ -119,11 +119,6 @@ func newPriorityQueue(policy flowcontrol.OrderingPolicy) *priorityQueue {
 }
 
 // --- SafeQueue Interface Implementation ---
-
-// Name returns the name of the queue.
-func (pq *priorityQueue) Name() string {
-	return PriorityQueueName
-}
 
 // Len returns the number of items in the queue.
 func (pq *priorityQueue) Len() int {
