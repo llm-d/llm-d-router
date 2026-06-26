@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package queue provides the priority-ordered SafeQueue used by flow control.
 package queue
 
 import (
@@ -25,7 +26,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
-// PriorityQueueName is the name of the priority queue implementation.
+// PriorityQueueName is the name reported by this queue implementation.
 //
 // This queue provides a concurrent-safe priority queue whose ordering is maintained by an internal
 // container/heap. Items are ordered by the configured OrderingPolicy, with the highest-priority
@@ -34,11 +35,10 @@ import (
 // Each item's position in the heap is tracked on its handle, enabling O(log n) targeted removal.
 const PriorityQueueName = "PriorityQueue"
 
-func init() {
-	MustRegisterQueue(RegisteredQueueName(PriorityQueueName),
-		func(policy flowcontrol.OrderingPolicy) (contracts.SafeQueue, error) {
-			return newPriorityQueue(policy), nil
-		})
+// New creates a SafeQueue ordered by the given OrderingPolicy. Peek returns the highest-priority
+// item per the policy.
+func New(policy flowcontrol.OrderingPolicy) contracts.SafeQueue {
+	return newPriorityQueue(policy)
 }
 
 // heapItem holds a queued item together with its current position in the heap. It doubles as the

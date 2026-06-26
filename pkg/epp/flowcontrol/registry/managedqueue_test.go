@@ -60,9 +60,7 @@ func newRealMqHarness(t *testing.T, key flowcontrol.FlowKey) *mqTestHarness {
 			return a.EnqueueTime().Before(b.EnqueueTime())
 		},
 	}
-	q, err := queue.NewQueueFromName(queue.PriorityQueueName, policy)
-	require.NoError(t, err, "Test setup: creating a real PriorityQueue implementation should not fail")
-	return newMqHarness(t, q, key)
+	return newMqHarness(t, queue.New(policy), key)
 }
 
 // newMqHarness is the base constructor for the test harness.

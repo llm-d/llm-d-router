@@ -149,388 +149,386 @@ func testLifecycleAndOrdering(
 	assert.Nil(t, peeked, "[%s] Peek on an empty queue should return a nil item again", comparatorName)
 }
 
-// TestQueueConformance is the main conformance test suite for SafeQueue implementations.
-// It iterates over all queue implementations registered via `queue.MustRegisterQueue` and runs a series of sub-tests to
-// ensure they adhere to the SafeQueue contract.
+// TestQueueConformance is the main conformance test suite for the SafeQueue implementation.
+// It runs a series of sub-tests to ensure the queue adheres to the SafeQueue contract.
 func TestQueueConformance(t *testing.T) {
 	t.Parallel()
 
-	for queueName, constructor := range RegisteredQueues {
-		t.Run(string(queueName), func(t *testing.T) {
-			t.Parallel()
-			flowKey := flowcontrol.FlowKey{ID: "test-flow-1", Priority: 0}
-
-			t.Run("Initialization", func(t *testing.T) {
-				t.Parallel()
-				q, err := constructor(enqueueTimePolicy)
-				require.NoError(t, err, "Setup: creating queue for test should not fail")
-
-				require.NotNil(t, q, "Constructor should return a non-nil queue instance")
-				assert.Zero(t, q.Len(), "A new queue should have a length of 0")
-				assert.Zero(t, q.ByteSize(), "A new queue should have a byte size of 0")
-				assert.Equal(t, string(queueName), q.Name(), "Name() should return the registered name of the queue")
-			})
-
-			t.Run("LifecycleAndOrdering_DefaultFIFO", func(t *testing.T) {
-				t.Parallel()
-				q, err := constructor(enqueueTimePolicy)
-				require.NoError(t, err, "Setup: creating queue with enqueueTimePolicy should not fail")
-
-				now := time.Now()
-
-				item1 := mocks.NewMockQueueItemAccessor(100, "item1_fifo", flowKey)
-				item1.EnqueueTimeV = now.Add(-2 * time.Second) // Earliest
-				item2 := mocks.NewMockQueueItemAccessor(50, "item2_fifo", flowKey)
-				item2.EnqueueTimeV = now.Add(-1 * time.Second) // Middle
-				item3 := mocks.NewMockQueueItemAccessor(20, "item3_fifo", flowKey)
-				item3.EnqueueTimeV = now // Latest
-
-				itemsInFIFOOrder := []*mocks.MockQueueItemAccessor{item1, item2, item3}
-				testLifecycleAndOrdering(t, q, itemsInFIFOOrder, "DefaultFIFO")
-			})
-
-			t.Run("LifecycleAndOrdering_PriorityConfigurable_ByteSize", func(t *testing.T) {
-				t.Parallel()
-				q, err := constructor(byteSizePolicy)
-				require.NoError(t, err, "Setup: creating queue with byteSizePolicy should not fail")
-
-				itemLarge := mocks.NewMockQueueItemAccessor(100, "itemLarge_prio", flowKey)
-				itemSmall := mocks.NewMockQueueItemAccessor(20, "itemSmall_prio", flowKey)
-				itemMedium := mocks.NewMockQueueItemAccessor(50, "itemMedium_prio", flowKey)
-
-				itemsInByteSizeOrder := []*mocks.MockQueueItemAccessor{itemSmall, itemMedium, itemLarge}
-				testLifecycleAndOrdering(t, q, itemsInByteSizeOrder, "PriorityByteSize")
-			})
-
-			t.Run("LifecycleAndOrdering_PriorityConfigurable_LIFO", func(t *testing.T) {
-				t.Parallel()
-				q, err := constructor(reverseEnqueueTimePolicy)
-				require.NoError(t, err, "Setup: creating queue with reverseEnqueueTimePolicy should not fail")
-
-				now := time.Now()
-				item1 := mocks.NewMockQueueItemAccessor(100, "item1_lifo", flowKey)
-				item1.EnqueueTimeV = now.Add(-2 * time.Second) // Earliest
-				item2 := mocks.NewMockQueueItemAccessor(50, "item2_lifo", flowKey)
-				item2.EnqueueTimeV = now.Add(-1 * time.Second) // Middle
-				item3 := mocks.NewMockQueueItemAccessor(20, "item3_lifo", flowKey)
-				item3.EnqueueTimeV = now // Latest
-
-				itemsInLIFOOrder := []*mocks.MockQueueItemAccessor{item3, item2, item1}
-				testLifecycleAndOrdering(t, q, itemsInLIFOOrder, "PriorityLIFO")
-			})
-
-			t.Run("Remove_InvalidHandle", func(t *testing.T) {
-				t.Parallel()
-				q, err := constructor(enqueueTimePolicy)
-				require.NoError(t, err, "Setup: creating queue for test should not fail")
-
-				item := mocks.NewMockQueueItemAccessor(100, "item", flowKey)
-				q.Add(item)
-
-				otherQ, err := constructor(enqueueTimePolicy) // A different queue instance
-				require.NoError(t, err, "Setup: creating otherQ should succeed")
-				otherItem := mocks.NewMockQueueItemAccessor(10, "other_item", flowcontrol.FlowKey{ID: "other-flow"})
-				otherQ.Add(otherItem)
-				alienHandle := otherItem.Handle()
-				require.NotNil(t, alienHandle, "Setup: alien handle should not be nil")
-
-				invalidatedHandle := &mocks.MockQueueItemHandle{}
-				invalidatedHandle.Invalidate()
-
-				foreignHandle := &mocks.MockQueueItemHandle{} // Different type
-
-				testCases := []struct {
-					name      string
-					handle    flowcontrol.QueueItemHandle
-					expectErr error
-				}{
-					{name: "nil handle", handle: nil, expectErr: contracts.ErrInvalidQueueItemHandle},
-					{name: "invalidated handle", handle: invalidatedHandle, expectErr: contracts.ErrInvalidQueueItemHandle},
-					{name: "alien handle from other queue", handle: alienHandle, expectErr: contracts.ErrQueueItemNotFound},
-					{name: "foreign handle type", handle: foreignHandle, expectErr: contracts.ErrInvalidQueueItemHandle},
-				}
-
-				for _, tc := range testCases {
-					t.Run(tc.name, func(t *testing.T) {
-						t.Parallel()
-						currentLen := q.Len()
-						currentByteSize := q.ByteSize()
-
-						_, removeErr := q.Remove(tc.handle)
-						assert.ErrorIs(t, removeErr, tc.expectErr, "Remove with %s should produce %v", tc.name, tc.expectErr)
-						assert.Equal(t, currentLen, q.Len(), "The queue's length must not change after a failed Remove with %s",
-							tc.name)
-						assert.Equal(t, currentByteSize, q.ByteSize(),
-							"The queue's byte size must not change after a failed Remove with %s", tc.name)
-					})
-				}
-			})
-
-			t.Run("Remove_NonHead", func(t *testing.T) {
-				t.Parallel()
-				q, err := constructor(enqueueTimePolicy)
-				require.NoError(t, err, "Setup: creating queue for test should not fail")
-
-				now := time.Now()
-				item1 := mocks.NewMockQueueItemAccessor(10, "item1_nonhead", flowKey)
-				item1.EnqueueTimeV = now.Add(-3 * time.Second)
-				item2 := mocks.NewMockQueueItemAccessor(20, "item2_nonhead_TARGET", flowKey)
-				item2.EnqueueTimeV = now.Add(-2 * time.Second)
-				item3 := mocks.NewMockQueueItemAccessor(30, "item3_nonhead", flowKey)
-				item3.EnqueueTimeV = now.Add(-1 * time.Second)
-
-				q.Add(item1)
-				q.Add(item2)
-				q.Add(item3)
-				require.Equal(t, 3, q.Len(), "Queue should have 3 items before removing non-head")
-				handleNonHead := item2.Handle()
-
-				removed, err := q.Remove(handleNonHead)
-				require.NoError(t, err, "It should be possible to remove an item that is not the head")
-				require.NotNil(t, removed, "Remove should return the removed item")
-				assert.Equal(t, item2.OriginalRequest().ID(), removed.OriginalRequest().ID(),
-					"Remove should return the correct item (item2)")
-				assert.True(t, handleNonHead.IsInvalidated(), "Remove must invalidate the handle of the removed item")
-				assert.Equal(t, 2, q.Len(), "Queue length should be 2 after removing non-head")
-				assert.Equal(t, item1.OriginalRequest().ByteSize()+item3.OriginalRequest().ByteSize(), q.ByteSize(),
-					"Byte size should be correct after removing non-head")
-
-				// Attempt to remove again with the now-stale handle
-				_, errStaleNonHead := q.Remove(handleNonHead)
-				assert.ErrorIs(t, errStaleNonHead, contracts.ErrInvalidQueueItemHandle,
-					"Removing with a stale handle must fail with ErrInvalidQueueItemHandle")
-			})
-
-			predicateRemoveOddSizes := func(item flowcontrol.QueueItemAccessor) bool {
-				return item.OriginalRequest().ByteSize()%2 != 0
-			}
-
-			t.Run("Cleanup_EmptyQueue", func(t *testing.T) {
-				t.Parallel()
-				emptyQ, _ := constructor(enqueueTimePolicy)
-				cleanedItems := emptyQ.Cleanup(predicateRemoveOddSizes)
-				assert.Empty(t, cleanedItems, "Cleanup on an empty queue should return an empty slice")
-				assert.Zero(t, emptyQ.Len(), "Len() should be 0 after Cleanup on an empty queue")
-				assert.Zero(t, emptyQ.ByteSize(), "ByteSize() should be 0 after Cleanup on an empty queue")
-			})
-
-			t.Run("Cleanup_PredicateMatchesNone", func(t *testing.T) {
-				t.Parallel()
-				q, _ := constructor(enqueueTimePolicy)
-				itemK1 := mocks.NewMockQueueItemAccessor(10, "k1_matchNone", flowKey)
-				itemK2 := mocks.NewMockQueueItemAccessor(12, "k2_matchNone", flowKey)
-				q.Add(itemK1)
-				q.Add(itemK2)
-				initialLen := q.Len()
-				initialBs := q.ByteSize()
-
-				cleanedItems := q.Cleanup(func(item flowcontrol.QueueItemAccessor) bool { return false })
-				assert.Empty(t, cleanedItems, "Cleanup should return an empty slice when no items match the predicate")
-				assert.Equal(t, initialLen, q.Len(), "Len() should not change after Cleanup when no items match thepredicate")
-				assert.Equal(t, initialBs, q.ByteSize(),
-					"ByteSize() should not change after Cleanup when no items match the predicate")
-				assert.False(t, itemK1.Handle().IsInvalidated(), "Handle for kept item 1 must NOT be invalidated")
-				assert.False(t, itemK2.Handle().IsInvalidated(), "Handle for kept item 2 must NOT be invalidated")
-			})
-
-			t.Run("Cleanup_PredicateMatchesAll", func(t *testing.T) {
-				t.Parallel()
-				q, _ := constructor(enqueueTimePolicy)
-				itemR1 := mocks.NewMockQueueItemAccessor(11, "r1_matchAll", flowKey)
-				itemR2 := mocks.NewMockQueueItemAccessor(13, "r2_matchAll", flowKey)
-				q.Add(itemR1)
-				q.Add(itemR2)
-
-				cleanedItems := q.Cleanup(func(item flowcontrol.QueueItemAccessor) bool { return true })
-				assert.Len(t, cleanedItems, 2, "Cleanup should return all items that matched the predicate")
-				assert.Zero(t, q.Len(), "Len() should be 0 after Cleanup")
-				assert.Zero(t, q.ByteSize(), "ByteSize() should be 0 after Cleanup")
-				assert.True(t, itemR1.Handle().IsInvalidated(), "Handle for removed item 1 must be invalidated")
-				assert.True(t, itemR2.Handle().IsInvalidated(), "Handle for removed item 2 must be invalidated")
-			})
-
-			t.Run("Cleanup_PredicateMatchesSubset_VerifyHandles", func(t *testing.T) {
-				t.Parallel()
-				q, _ := constructor(enqueueTimePolicy)
-				iK1 := mocks.NewMockQueueItemAccessor(20, "k1_subset", flowKey)
-				iR1 := mocks.NewMockQueueItemAccessor(11, "r1_subset", flowKey)
-				iK2 := mocks.NewMockQueueItemAccessor(22, "k2_subset", flowKey)
-				iR2 := mocks.NewMockQueueItemAccessor(33, "r2_subset", flowKey)
-				q.Add(iK1)
-				q.Add(iR1)
-				q.Add(iK2)
-				q.Add(iR2)
-
-				expectedKeptByteSize := iK1.OriginalRequest().ByteSize() + iK2.OriginalRequest().ByteSize()
-
-				cleanedItems := q.Cleanup(predicateRemoveOddSizes)
-				assert.Len(t, cleanedItems, 2, "Cleanup should return 2 items that matched the predicate")
-				assert.Equal(t, 2, q.Len(), "Len() should be 2 after Cleanup")
-				assert.Equal(t, expectedKeptByteSize, q.ByteSize(), "ByteSize() should be sum of kept items after Cleanup")
-
-				foundR1, foundR2 := false, false
-				for _, item := range cleanedItems {
-					if item.OriginalRequest().ID() == iR1.OriginalRequest().ID() {
-						foundR1 = true
-						assert.True(t, iR1.Handle().IsInvalidated(), "Handle for removed item iR1 must be invalidated")
-					}
-					if item.OriginalRequest().ID() == iR2.OriginalRequest().ID() {
-						foundR2 = true
-						assert.True(t, iR2.Handle().IsInvalidated(), "Handle for removed item iR2 must be invalidated")
-					}
-				}
-				assert.True(t, foundR1, "iR1 should have been returned by Cleanup")
-				assert.True(t, foundR2, "iR2 should have been returned by Cleanup")
-
-				assert.False(t, iK1.Handle().IsInvalidated(), "Handle for kept item iK1 must NOT be invalidated")
-				assert.False(t, iK2.Handle().IsInvalidated(), "Handle for kept item iK2 must NOT be invalidated")
-
-				// Verify remaining items are correct
-				var remainingIDs []string
-				for q.Len() > 0 {
-					peeked := q.Peek()
-					item, _ := q.Remove(peeked.Handle())
-					remainingIDs = append(remainingIDs, item.OriginalRequest().ID())
-				}
-				sort.Strings(remainingIDs) // Sort for stable comparison
-				expectedRemainingIDs := []string{iK1.OriginalRequest().ID(), iK2.OriginalRequest().ID()}
-				sort.Strings(expectedRemainingIDs)
-				assert.Equal(t, expectedRemainingIDs, remainingIDs, "Remaining items in queue are not as expected")
-			})
-
-			t.Run("Drain_NonEmptyQueue_VerifyHandles", func(t *testing.T) {
-				t.Parallel()
-				q, err := constructor(enqueueTimePolicy)
-				require.NoError(t, err, "Setup: creating queue for drain test should not fail")
-
-				itemD1 := mocks.NewMockQueueItemAccessor(10, "ditem1", flowKey)
-				itemD2 := mocks.NewMockQueueItemAccessor(20, "ditem2", flowKey)
-				q.Add(itemD1)
-				q.Add(itemD2)
-
-				drainedItems := q.Drain()
-				assert.Len(t, drainedItems, 2, "Drain should return all items that were in the queue")
-				assert.Zero(t, q.Len(), "Queue length must be 0 after Drain")
-				assert.Zero(t, q.ByteSize(), "Queue byte size must be 0 after Drain")
-
-				assert.True(t, itemD1.Handle().IsInvalidated(), "Handle for drained itemD1 must be invalidated")
-				assert.True(t, itemD2.Handle().IsInvalidated(), "Handle for drained itemD2 must be invalidated")
-
-				var foundD1, foundD2 bool
-				for _, item := range drainedItems {
-					if item.OriginalRequest().ID() == itemD1.OriginalRequest().ID() {
-						foundD1 = true
-					}
-					if item.OriginalRequest().ID() == itemD2.OriginalRequest().ID() {
-						foundD2 = true
-					}
-				}
-				assert.True(t, foundD1, "itemD1 should be in drainedItems")
-				assert.True(t, foundD2, "itemD2 should be in drainedItems")
-			})
-
-			t.Run("Drain_EmptyQueue_DrainTwice", func(t *testing.T) {
-				t.Parallel()
-				q, err := constructor(enqueueTimePolicy)
-				require.NoError(t, err, "Setup: creating queue for empty drain test should not fail")
-
-				drainedItems := q.Drain() // First drain on empty
-				assert.Empty(t, drainedItems, "Drain on an empty queue should return an empty slice")
-
-				drainedAgain := q.Drain() // Second drain on already empty
-				assert.Empty(t, drainedAgain, "Second drain on an already empty queue should return an empty slice")
-				assert.Zero(t, q.Len())
-				assert.Zero(t, q.ByteSize())
-			})
-
-			t.Run("Concurrency", func(t *testing.T) {
-				t.Parallel()
-				q, err := constructor(enqueueTimePolicy)
-				require.NoError(t, err, "Setup: creating queue for concurrency test should not fail")
-
-				const (
-					numGoroutines   = 10
-					initialItems    = 200
-					opsPerGoroutine = 50
-				)
-
-				// handleChan acts as a concurrent-safe pool of handles that goroutines can pull from to test Remove.
-				handleChan := make(chan flowcontrol.QueueItemHandle, initialItems+(numGoroutines*opsPerGoroutine))
-
-				// Pre-populate the queue with an initial set of items.
-				for i := range initialItems {
-					item := mocks.NewMockQueueItemAccessor(1, fmt.Sprintf("%s_conc_init_%d", flowKey, i), flowKey)
-					q.Add(item)
-					require.NoError(t, err, "Setup: pre-populating the queue should not fail")
-					handleChan <- item.Handle()
-				}
-
-				var wg sync.WaitGroup
-				wg.Add(numGoroutines)
-				var successfulAdds, successfulRemoves atomic.Uint64
-
-				// Start goroutines to perform a mix of concurrent operations.
-				for i := range numGoroutines {
-					go func(routineID int) {
-						defer wg.Done()
-						for j := range opsPerGoroutine {
-							opType := (j + routineID) % 4 // Vary operations more across goroutines
-							switch opType {
-							case 0: // Add
-								item := mocks.NewMockQueueItemAccessor(1,
-									fmt.Sprintf("%s_conc_init_%d_%d", flowKey, routineID, j), flowKey)
-								q.Add(item)
-								successfulAdds.Add(1)
-								handleChan <- item.Handle()
-							case 1: // Remove
-								select {
-								case handle := <-handleChan:
-									if handle != nil && !handle.IsInvalidated() { // Check before trying to prevent known-to-fail calls
-										_, removeErr := q.Remove(handle)
-										if removeErr == nil {
-											successfulRemoves.Add(1)
-										} else {
-											// It's okay if it's ErrInvalidQueueItemHandle or ErrQueueItemNotFound due to races
-											assert.ErrorIs(t, removeErr, contracts.ErrInvalidQueueItemHandle,
-												"Expected invalid handle or not found if raced")
-										}
-									}
-								default:
-									// No handles available to remove
-								}
-							case 2: // Inspect
-								_ = q.Len()
-								_ = q.ByteSize()
-								peeked := q.Peek()
-								if q.Len() == 0 {
-									assert.Nil(t, peeked, "Peek on empty queue expected nil")
-								}
-							case 3: // Cleanup
-								q.Cleanup(func(item flowcontrol.QueueItemAccessor) bool { return false })
-							}
-						}
-					}(i)
-				}
-
-				wg.Wait()
-				close(handleChan)
-
-				// Drain the queue to verify all handles are invalidated and to count remaining items accurately.
-				drainedItems := q.Drain()
-
-				for _, item := range drainedItems {
-					require.True(t, item.Handle().IsInvalidated(), "All handles from final drain must be invalidated")
-				}
-
-				// The number of items successfully added minus those successfully removed should equal the number of items
-				// drained.
-				assert.Equal(t, int(initialItems)+int(successfulAdds.Load())-int(successfulRemoves.Load()), len(drainedItems),
-					"Number of items drained (%d) should match initial (%d) + successful adds (%d) - successful removes (%d).",
-					len(drainedItems), initialItems, successfulAdds.Load(), successfulRemoves.Load())
-
-				assert.Zero(t, q.Len(), "Queue length should be 0 after final drain")
-				assert.Zero(t, q.ByteSize(), "Queue byte size should be 0 after final drain")
-			})
-		})
+	queueName := PriorityQueueName
+	constructor := func(policy flowcontrol.OrderingPolicy) (contracts.SafeQueue, error) {
+		return New(policy), nil
 	}
+	flowKey := flowcontrol.FlowKey{ID: "test-flow-1", Priority: 0}
+
+	t.Run("Initialization", func(t *testing.T) {
+		t.Parallel()
+		q, err := constructor(enqueueTimePolicy)
+		require.NoError(t, err, "Setup: creating queue for test should not fail")
+
+		require.NotNil(t, q, "Constructor should return a non-nil queue instance")
+		assert.Zero(t, q.Len(), "A new queue should have a length of 0")
+		assert.Zero(t, q.ByteSize(), "A new queue should have a byte size of 0")
+		assert.Equal(t, queueName, q.Name(), "Name() should return the name of the queue")
+	})
+
+	t.Run("LifecycleAndOrdering_DefaultFIFO", func(t *testing.T) {
+		t.Parallel()
+		q, err := constructor(enqueueTimePolicy)
+		require.NoError(t, err, "Setup: creating queue with enqueueTimePolicy should not fail")
+
+		now := time.Now()
+
+		item1 := mocks.NewMockQueueItemAccessor(100, "item1_fifo", flowKey)
+		item1.EnqueueTimeV = now.Add(-2 * time.Second) // Earliest
+		item2 := mocks.NewMockQueueItemAccessor(50, "item2_fifo", flowKey)
+		item2.EnqueueTimeV = now.Add(-1 * time.Second) // Middle
+		item3 := mocks.NewMockQueueItemAccessor(20, "item3_fifo", flowKey)
+		item3.EnqueueTimeV = now // Latest
+
+		itemsInFIFOOrder := []*mocks.MockQueueItemAccessor{item1, item2, item3}
+		testLifecycleAndOrdering(t, q, itemsInFIFOOrder, "DefaultFIFO")
+	})
+
+	t.Run("LifecycleAndOrdering_PriorityConfigurable_ByteSize", func(t *testing.T) {
+		t.Parallel()
+		q, err := constructor(byteSizePolicy)
+		require.NoError(t, err, "Setup: creating queue with byteSizePolicy should not fail")
+
+		itemLarge := mocks.NewMockQueueItemAccessor(100, "itemLarge_prio", flowKey)
+		itemSmall := mocks.NewMockQueueItemAccessor(20, "itemSmall_prio", flowKey)
+		itemMedium := mocks.NewMockQueueItemAccessor(50, "itemMedium_prio", flowKey)
+
+		itemsInByteSizeOrder := []*mocks.MockQueueItemAccessor{itemSmall, itemMedium, itemLarge}
+		testLifecycleAndOrdering(t, q, itemsInByteSizeOrder, "PriorityByteSize")
+	})
+
+	t.Run("LifecycleAndOrdering_PriorityConfigurable_LIFO", func(t *testing.T) {
+		t.Parallel()
+		q, err := constructor(reverseEnqueueTimePolicy)
+		require.NoError(t, err, "Setup: creating queue with reverseEnqueueTimePolicy should not fail")
+
+		now := time.Now()
+		item1 := mocks.NewMockQueueItemAccessor(100, "item1_lifo", flowKey)
+		item1.EnqueueTimeV = now.Add(-2 * time.Second) // Earliest
+		item2 := mocks.NewMockQueueItemAccessor(50, "item2_lifo", flowKey)
+		item2.EnqueueTimeV = now.Add(-1 * time.Second) // Middle
+		item3 := mocks.NewMockQueueItemAccessor(20, "item3_lifo", flowKey)
+		item3.EnqueueTimeV = now // Latest
+
+		itemsInLIFOOrder := []*mocks.MockQueueItemAccessor{item3, item2, item1}
+		testLifecycleAndOrdering(t, q, itemsInLIFOOrder, "PriorityLIFO")
+	})
+
+	t.Run("Remove_InvalidHandle", func(t *testing.T) {
+		t.Parallel()
+		q, err := constructor(enqueueTimePolicy)
+		require.NoError(t, err, "Setup: creating queue for test should not fail")
+
+		item := mocks.NewMockQueueItemAccessor(100, "item", flowKey)
+		q.Add(item)
+
+		otherQ, err := constructor(enqueueTimePolicy) // A different queue instance
+		require.NoError(t, err, "Setup: creating otherQ should succeed")
+		otherItem := mocks.NewMockQueueItemAccessor(10, "other_item", flowcontrol.FlowKey{ID: "other-flow"})
+		otherQ.Add(otherItem)
+		alienHandle := otherItem.Handle()
+		require.NotNil(t, alienHandle, "Setup: alien handle should not be nil")
+
+		invalidatedHandle := &mocks.MockQueueItemHandle{}
+		invalidatedHandle.Invalidate()
+
+		foreignHandle := &mocks.MockQueueItemHandle{} // Different type
+
+		testCases := []struct {
+			name      string
+			handle    flowcontrol.QueueItemHandle
+			expectErr error
+		}{
+			{name: "nil handle", handle: nil, expectErr: contracts.ErrInvalidQueueItemHandle},
+			{name: "invalidated handle", handle: invalidatedHandle, expectErr: contracts.ErrInvalidQueueItemHandle},
+			{name: "alien handle from other queue", handle: alienHandle, expectErr: contracts.ErrQueueItemNotFound},
+			{name: "foreign handle type", handle: foreignHandle, expectErr: contracts.ErrInvalidQueueItemHandle},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				currentLen := q.Len()
+				currentByteSize := q.ByteSize()
+
+				_, removeErr := q.Remove(tc.handle)
+				assert.ErrorIs(t, removeErr, tc.expectErr, "Remove with %s should produce %v", tc.name, tc.expectErr)
+				assert.Equal(t, currentLen, q.Len(), "The queue's length must not change after a failed Remove with %s",
+					tc.name)
+				assert.Equal(t, currentByteSize, q.ByteSize(),
+					"The queue's byte size must not change after a failed Remove with %s", tc.name)
+			})
+		}
+	})
+
+	t.Run("Remove_NonHead", func(t *testing.T) {
+		t.Parallel()
+		q, err := constructor(enqueueTimePolicy)
+		require.NoError(t, err, "Setup: creating queue for test should not fail")
+
+		now := time.Now()
+		item1 := mocks.NewMockQueueItemAccessor(10, "item1_nonhead", flowKey)
+		item1.EnqueueTimeV = now.Add(-3 * time.Second)
+		item2 := mocks.NewMockQueueItemAccessor(20, "item2_nonhead_TARGET", flowKey)
+		item2.EnqueueTimeV = now.Add(-2 * time.Second)
+		item3 := mocks.NewMockQueueItemAccessor(30, "item3_nonhead", flowKey)
+		item3.EnqueueTimeV = now.Add(-1 * time.Second)
+
+		q.Add(item1)
+		q.Add(item2)
+		q.Add(item3)
+		require.Equal(t, 3, q.Len(), "Queue should have 3 items before removing non-head")
+		handleNonHead := item2.Handle()
+
+		removed, err := q.Remove(handleNonHead)
+		require.NoError(t, err, "It should be possible to remove an item that is not the head")
+		require.NotNil(t, removed, "Remove should return the removed item")
+		assert.Equal(t, item2.OriginalRequest().ID(), removed.OriginalRequest().ID(),
+			"Remove should return the correct item (item2)")
+		assert.True(t, handleNonHead.IsInvalidated(), "Remove must invalidate the handle of the removed item")
+		assert.Equal(t, 2, q.Len(), "Queue length should be 2 after removing non-head")
+		assert.Equal(t, item1.OriginalRequest().ByteSize()+item3.OriginalRequest().ByteSize(), q.ByteSize(),
+			"Byte size should be correct after removing non-head")
+
+		// Attempt to remove again with the now-stale handle
+		_, errStaleNonHead := q.Remove(handleNonHead)
+		assert.ErrorIs(t, errStaleNonHead, contracts.ErrInvalidQueueItemHandle,
+			"Removing with a stale handle must fail with ErrInvalidQueueItemHandle")
+	})
+
+	predicateRemoveOddSizes := func(item flowcontrol.QueueItemAccessor) bool {
+		return item.OriginalRequest().ByteSize()%2 != 0
+	}
+
+	t.Run("Cleanup_EmptyQueue", func(t *testing.T) {
+		t.Parallel()
+		emptyQ, _ := constructor(enqueueTimePolicy)
+		cleanedItems := emptyQ.Cleanup(predicateRemoveOddSizes)
+		assert.Empty(t, cleanedItems, "Cleanup on an empty queue should return an empty slice")
+		assert.Zero(t, emptyQ.Len(), "Len() should be 0 after Cleanup on an empty queue")
+		assert.Zero(t, emptyQ.ByteSize(), "ByteSize() should be 0 after Cleanup on an empty queue")
+	})
+
+	t.Run("Cleanup_PredicateMatchesNone", func(t *testing.T) {
+		t.Parallel()
+		q, _ := constructor(enqueueTimePolicy)
+		itemK1 := mocks.NewMockQueueItemAccessor(10, "k1_matchNone", flowKey)
+		itemK2 := mocks.NewMockQueueItemAccessor(12, "k2_matchNone", flowKey)
+		q.Add(itemK1)
+		q.Add(itemK2)
+		initialLen := q.Len()
+		initialBs := q.ByteSize()
+
+		cleanedItems := q.Cleanup(func(item flowcontrol.QueueItemAccessor) bool { return false })
+		assert.Empty(t, cleanedItems, "Cleanup should return an empty slice when no items match the predicate")
+		assert.Equal(t, initialLen, q.Len(), "Len() should not change after Cleanup when no items match thepredicate")
+		assert.Equal(t, initialBs, q.ByteSize(),
+			"ByteSize() should not change after Cleanup when no items match the predicate")
+		assert.False(t, itemK1.Handle().IsInvalidated(), "Handle for kept item 1 must NOT be invalidated")
+		assert.False(t, itemK2.Handle().IsInvalidated(), "Handle for kept item 2 must NOT be invalidated")
+	})
+
+	t.Run("Cleanup_PredicateMatchesAll", func(t *testing.T) {
+		t.Parallel()
+		q, _ := constructor(enqueueTimePolicy)
+		itemR1 := mocks.NewMockQueueItemAccessor(11, "r1_matchAll", flowKey)
+		itemR2 := mocks.NewMockQueueItemAccessor(13, "r2_matchAll", flowKey)
+		q.Add(itemR1)
+		q.Add(itemR2)
+
+		cleanedItems := q.Cleanup(func(item flowcontrol.QueueItemAccessor) bool { return true })
+		assert.Len(t, cleanedItems, 2, "Cleanup should return all items that matched the predicate")
+		assert.Zero(t, q.Len(), "Len() should be 0 after Cleanup")
+		assert.Zero(t, q.ByteSize(), "ByteSize() should be 0 after Cleanup")
+		assert.True(t, itemR1.Handle().IsInvalidated(), "Handle for removed item 1 must be invalidated")
+		assert.True(t, itemR2.Handle().IsInvalidated(), "Handle for removed item 2 must be invalidated")
+	})
+
+	t.Run("Cleanup_PredicateMatchesSubset_VerifyHandles", func(t *testing.T) {
+		t.Parallel()
+		q, _ := constructor(enqueueTimePolicy)
+		iK1 := mocks.NewMockQueueItemAccessor(20, "k1_subset", flowKey)
+		iR1 := mocks.NewMockQueueItemAccessor(11, "r1_subset", flowKey)
+		iK2 := mocks.NewMockQueueItemAccessor(22, "k2_subset", flowKey)
+		iR2 := mocks.NewMockQueueItemAccessor(33, "r2_subset", flowKey)
+		q.Add(iK1)
+		q.Add(iR1)
+		q.Add(iK2)
+		q.Add(iR2)
+
+		expectedKeptByteSize := iK1.OriginalRequest().ByteSize() + iK2.OriginalRequest().ByteSize()
+
+		cleanedItems := q.Cleanup(predicateRemoveOddSizes)
+		assert.Len(t, cleanedItems, 2, "Cleanup should return 2 items that matched the predicate")
+		assert.Equal(t, 2, q.Len(), "Len() should be 2 after Cleanup")
+		assert.Equal(t, expectedKeptByteSize, q.ByteSize(), "ByteSize() should be sum of kept items after Cleanup")
+
+		foundR1, foundR2 := false, false
+		for _, item := range cleanedItems {
+			if item.OriginalRequest().ID() == iR1.OriginalRequest().ID() {
+				foundR1 = true
+				assert.True(t, iR1.Handle().IsInvalidated(), "Handle for removed item iR1 must be invalidated")
+			}
+			if item.OriginalRequest().ID() == iR2.OriginalRequest().ID() {
+				foundR2 = true
+				assert.True(t, iR2.Handle().IsInvalidated(), "Handle for removed item iR2 must be invalidated")
+			}
+		}
+		assert.True(t, foundR1, "iR1 should have been returned by Cleanup")
+		assert.True(t, foundR2, "iR2 should have been returned by Cleanup")
+
+		assert.False(t, iK1.Handle().IsInvalidated(), "Handle for kept item iK1 must NOT be invalidated")
+		assert.False(t, iK2.Handle().IsInvalidated(), "Handle for kept item iK2 must NOT be invalidated")
+
+		// Verify remaining items are correct
+		var remainingIDs []string
+		for q.Len() > 0 {
+			peeked := q.Peek()
+			item, _ := q.Remove(peeked.Handle())
+			remainingIDs = append(remainingIDs, item.OriginalRequest().ID())
+		}
+		sort.Strings(remainingIDs) // Sort for stable comparison
+		expectedRemainingIDs := []string{iK1.OriginalRequest().ID(), iK2.OriginalRequest().ID()}
+		sort.Strings(expectedRemainingIDs)
+		assert.Equal(t, expectedRemainingIDs, remainingIDs, "Remaining items in queue are not as expected")
+	})
+
+	t.Run("Drain_NonEmptyQueue_VerifyHandles", func(t *testing.T) {
+		t.Parallel()
+		q, err := constructor(enqueueTimePolicy)
+		require.NoError(t, err, "Setup: creating queue for drain test should not fail")
+
+		itemD1 := mocks.NewMockQueueItemAccessor(10, "ditem1", flowKey)
+		itemD2 := mocks.NewMockQueueItemAccessor(20, "ditem2", flowKey)
+		q.Add(itemD1)
+		q.Add(itemD2)
+
+		drainedItems := q.Drain()
+		assert.Len(t, drainedItems, 2, "Drain should return all items that were in the queue")
+		assert.Zero(t, q.Len(), "Queue length must be 0 after Drain")
+		assert.Zero(t, q.ByteSize(), "Queue byte size must be 0 after Drain")
+
+		assert.True(t, itemD1.Handle().IsInvalidated(), "Handle for drained itemD1 must be invalidated")
+		assert.True(t, itemD2.Handle().IsInvalidated(), "Handle for drained itemD2 must be invalidated")
+
+		var foundD1, foundD2 bool
+		for _, item := range drainedItems {
+			if item.OriginalRequest().ID() == itemD1.OriginalRequest().ID() {
+				foundD1 = true
+			}
+			if item.OriginalRequest().ID() == itemD2.OriginalRequest().ID() {
+				foundD2 = true
+			}
+		}
+		assert.True(t, foundD1, "itemD1 should be in drainedItems")
+		assert.True(t, foundD2, "itemD2 should be in drainedItems")
+	})
+
+	t.Run("Drain_EmptyQueue_DrainTwice", func(t *testing.T) {
+		t.Parallel()
+		q, err := constructor(enqueueTimePolicy)
+		require.NoError(t, err, "Setup: creating queue for empty drain test should not fail")
+
+		drainedItems := q.Drain() // First drain on empty
+		assert.Empty(t, drainedItems, "Drain on an empty queue should return an empty slice")
+
+		drainedAgain := q.Drain() // Second drain on already empty
+		assert.Empty(t, drainedAgain, "Second drain on an already empty queue should return an empty slice")
+		assert.Zero(t, q.Len())
+		assert.Zero(t, q.ByteSize())
+	})
+
+	t.Run("Concurrency", func(t *testing.T) {
+		t.Parallel()
+		q, err := constructor(enqueueTimePolicy)
+		require.NoError(t, err, "Setup: creating queue for concurrency test should not fail")
+
+		const (
+			numGoroutines   = 10
+			initialItems    = 200
+			opsPerGoroutine = 50
+		)
+
+		// handleChan acts as a concurrent-safe pool of handles that goroutines can pull from to test Remove.
+		handleChan := make(chan flowcontrol.QueueItemHandle, initialItems+(numGoroutines*opsPerGoroutine))
+
+		// Pre-populate the queue with an initial set of items.
+		for i := range initialItems {
+			item := mocks.NewMockQueueItemAccessor(1, fmt.Sprintf("%s_conc_init_%d", flowKey, i), flowKey)
+			q.Add(item)
+			require.NoError(t, err, "Setup: pre-populating the queue should not fail")
+			handleChan <- item.Handle()
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+		var successfulAdds, successfulRemoves atomic.Uint64
+
+		// Start goroutines to perform a mix of concurrent operations.
+		for i := range numGoroutines {
+			go func(routineID int) {
+				defer wg.Done()
+				for j := range opsPerGoroutine {
+					opType := (j + routineID) % 4 // Vary operations more across goroutines
+					switch opType {
+					case 0: // Add
+						item := mocks.NewMockQueueItemAccessor(1,
+							fmt.Sprintf("%s_conc_init_%d_%d", flowKey, routineID, j), flowKey)
+						q.Add(item)
+						successfulAdds.Add(1)
+						handleChan <- item.Handle()
+					case 1: // Remove
+						select {
+						case handle := <-handleChan:
+							if handle != nil && !handle.IsInvalidated() { // Check before trying to prevent known-to-fail calls
+								_, removeErr := q.Remove(handle)
+								if removeErr == nil {
+									successfulRemoves.Add(1)
+								} else {
+									// It's okay if it's ErrInvalidQueueItemHandle or ErrQueueItemNotFound due to races
+									assert.ErrorIs(t, removeErr, contracts.ErrInvalidQueueItemHandle,
+										"Expected invalid handle or not found if raced")
+								}
+							}
+						default:
+							// No handles available to remove
+						}
+					case 2: // Inspect
+						_ = q.Len()
+						_ = q.ByteSize()
+						peeked := q.Peek()
+						if q.Len() == 0 {
+							assert.Nil(t, peeked, "Peek on empty queue expected nil")
+						}
+					case 3: // Cleanup
+						q.Cleanup(func(item flowcontrol.QueueItemAccessor) bool { return false })
+					}
+				}
+			}(i)
+		}
+
+		wg.Wait()
+		close(handleChan)
+
+		// Drain the queue to verify all handles are invalidated and to count remaining items accurately.
+		drainedItems := q.Drain()
+
+		for _, item := range drainedItems {
+			require.True(t, item.Handle().IsInvalidated(), "All handles from final drain must be invalidated")
+		}
+
+		// The number of items successfully added minus those successfully removed should equal the number of items
+		// drained.
+		assert.Equal(t, int(initialItems)+int(successfulAdds.Load())-int(successfulRemoves.Load()), len(drainedItems),
+			"Number of items drained (%d) should match initial (%d) + successful adds (%d) - successful removes (%d).",
+			len(drainedItems), initialItems, successfulAdds.Load(), successfulRemoves.Load())
+
+		assert.Zero(t, q.Len(), "Queue length should be 0 after final drain")
+		assert.Zero(t, q.ByteSize(), "Queue byte size should be 0 after final drain")
+	})
 }

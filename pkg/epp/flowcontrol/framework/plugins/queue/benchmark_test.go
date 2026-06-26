@@ -28,33 +28,27 @@ import (
 
 var benchmarkFlowKey = flowcontrol.FlowKey{ID: "benchmark-flow"}
 
-// BenchmarkQueues runs a series of benchmarks against all registered queue implementations.
+// BenchmarkQueues runs a series of benchmarks against the priority queue implementation.
 func BenchmarkQueues(b *testing.B) {
-	for queueName, constructor := range RegisteredQueues {
-		b.Run(string(queueName), func(b *testing.B) {
-			// All queue implementations must support the default enqueue time comparator.
-			q, err := constructor(enqueueTimePolicy)
-			if err != nil {
-				b.Fatalf("Failed to construct queue '%s': %v", queueName, err)
-			}
+	b.Run(PriorityQueueName, func(b *testing.B) {
+		q := New(enqueueTimePolicy)
 
-			b.Run("AddRemove", func(b *testing.B) {
-				benchmarkAddRemove(b, q)
-			})
-
-			b.Run("AddPeekRemove", func(b *testing.B) {
-				benchmarkAddPeekRemove(b, q)
-			})
-
-			b.Run("BulkAddThenBulkRemove", func(b *testing.B) {
-				benchmarkBulkAddThenBulkRemove(b, q)
-			})
-
-			b.Run("HighContention", func(b *testing.B) {
-				benchmarkHighContention(b, q)
-			})
+		b.Run("AddRemove", func(b *testing.B) {
+			benchmarkAddRemove(b, q)
 		})
-	}
+
+		b.Run("AddPeekRemove", func(b *testing.B) {
+			benchmarkAddPeekRemove(b, q)
+		})
+
+		b.Run("BulkAddThenBulkRemove", func(b *testing.B) {
+			benchmarkBulkAddThenBulkRemove(b, q)
+		})
+
+		b.Run("HighContention", func(b *testing.B) {
+			benchmarkHighContention(b, q)
+		})
+	})
 }
 
 // benchmarkAddRemove measures the throughput of tightly coupled Add and Remove operations in parallel. This is a good
