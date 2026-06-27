@@ -136,6 +136,10 @@ type RequestContext struct {
 	RequestDroppedReason errcommon.RequestDroppedReason
 	modelServerStreaming bool
 
+	// responseProcessingDuration accumulates the time EPP spends in its response
+	// handlers across all response events, excluding model server generation time.
+	responseProcessingDuration time.Duration
+
 	Response *Response
 
 	reqHeaderResp  *extProcPb.ProcessingResponse
@@ -264,6 +268,17 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			Headers: make(map[string]string),
 		},
 	}
+
+	// Record EPP response processing latency once when the stream ends. Using a
+	// defer (rather than emitting on end-of-stream) ensures aborted streams
+	// (client cancel or upstream error before EOS) are also recorded, so the
+	// metric is not biased toward fully streamed responses. The guard skips
+	// requests that never reached the response phase.
+	defer func() {
+		if reqCtx.responseProcessingDuration > 0 {
+			metrics.RecordResponseProcessingLatency(reqCtx.responseProcessingDuration)
+		}
+	}()
 
 	buf := s.bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
@@ -465,6 +480,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		case *extProcPb.ProcessingRequest_RequestTrailers:
 			// This is currently unused.
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
+			respHeaderStart := time.Now()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
 				value := string(header.RawValue)
 				loggerTrace.Info("header", "key", header.Key, "value", value)
@@ -478,12 +494,14 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			reqCtx.RequestState = ResponseReceived
 			reqCtx = s.HandleResponseHeaders(ctx, reqCtx, v)
 			reqCtx.respHeaderResp = s.generateResponseHeaderResponse(reqCtx)
+			reqCtx.responseProcessingDuration += time.Since(respHeaderStart)
 
 		case *extProcPb.ProcessingRequest_ResponseBody:
 			endOfStream := v.ResponseBody.EndOfStream
 			chunk := v.ResponseBody.Body
 
 			if reqCtx.modelServerStreaming {
+				respBodyStart := time.Now()
 				if endOfStream {
 					reqCtx.ResponseComplete = true
 					reqCtx.ResponseCompleteTimestamp = time.Now()
@@ -493,6 +511,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				chunk = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
+				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
 			} else {
 				respBody = append(respBody, chunk...)
 				if endOfStream {
@@ -553,6 +572,7 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 		return
 	}
 
+	start := time.Now()
 	reqCtx.ResponseComplete = true
 	reqCtx.ResponseCompleteTimestamp = time.Now()
 	reqCtx = s.HandleResponseBody(ctx, reqCtx, body, true)
@@ -562,6 +582,7 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 		// For non-streaming response, we send response back to envoy after receiving all the response body.
 		reqCtx.respBodyResp = generateResponseBodyResponses(body, setEos, reqCtx.Response.DynamicMetadata)
 	}
+	reqCtx.responseProcessingDuration += time.Since(start)
 }
 
 // rewriteModelName replaces occurrences of the target (internal) model name with the
