@@ -55,6 +55,11 @@ func PrefixBasedPDDeciderPluginFactory(name string, rawParameters *json.Decoder,
 			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PrefixBasedPDDeciderPluginType, err)
 		}
 	}
+	if handle != nil {
+		if err := registerMetrics(handle.Metrics()); err != nil {
+			return nil, err
+		}
+	}
 
 	decider, err := NewPrefixBasedPDDecider(config)
 	if err != nil {
@@ -96,22 +101,32 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 	logger := log.FromContext(ctx)
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 
+	modelName := ""
+	if request != nil {
+		modelName = request.TargetModel
+	}
+	deciderName := d.typedName.Type
+
 	// NonCachedTokens defines the minimum number of non-cached tokens required
 	// to trigger disaggregated PD. A value of 0 disables disaggregation.
 	if d.config.NonCachedTokens == 0 {
+		recordDeciderEvaluation(modelName, deciderName, deciderReasonDisabled)
 		return false
 	}
 	if endpoint == nil {
 		logger.Error(nil, "prefix decider: endpoint is nil")
+		recordDeciderEvaluation(modelName, deciderName, deciderReasonError)
 		return false
 	}
 	inputTokens, err := getUserInputLenInTokens(request)
 	if err != nil {
 		logger.Error(err, "prefix decider: failed to get user input length in tokens")
+		recordDeciderEvaluation(modelName, deciderName, deciderReasonError)
 		return false
 	}
 	if inputTokens < d.config.NonCachedTokens {
 		debugLogger.Info("Input is shorter than the nonCachedToken, no disaggregated PD")
+		recordDeciderEvaluation(modelName, deciderName, deciderReasonInputTooShort)
 		return false
 	}
 	// inspect the decode endpoint to disaggregate if prefill should run or not.
@@ -119,11 +134,13 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 	prefixInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String())
 	if !ok || prefixInfoRaw == nil {
 		logger.Error(nil, "unable to read prefix cache state")
+		recordDeciderEvaluation(modelName, deciderName, deciderReasonError)
 		return false
 	}
 	prefixCacheMatchInfo, ok := prefixInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
 	if !ok {
 		logger.Error(nil, "wrong type of prefix cache match info")
+		recordDeciderEvaluation(modelName, deciderName, deciderReasonError)
 		return false
 	}
 
@@ -141,9 +158,11 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 
 	if nonCachedTokens < d.config.NonCachedTokens {
 		debugLogger.Info("Non-cached suffix is smaller than threshold, using decode profile only")
+		recordDeciderEvaluation(modelName, deciderName, deciderReasonSuffixCached)
 		return false // do not run prefill
 	}
 
+	recordDeciderEvaluation(modelName, deciderName, deciderReasonDisaggregated)
 	return true
 }
 
