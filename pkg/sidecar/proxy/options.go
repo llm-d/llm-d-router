@@ -491,6 +491,29 @@ func validateWideEPHosts(flag string, hosts []string, dpSize, dpLocal int) error
 // Validate checks the Options for invalid or conflicting values.
 // Complete must be called before Validate.
 func (opts *Options) Validate() error {
+	// Validate Port
+	portNum, err := strconv.Atoi(opts.Port)
+	if err != nil {
+		return fmt.Errorf("--port must be a valid integer, got %q", opts.Port)
+	}
+	if portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("--port must be between 1 and 65535, got %d", portNum)
+	}
+
+	// Validate vllmPort
+	vllmPortNum, err := strconv.Atoi(opts.vllmPort)
+	if err != nil {
+		return fmt.Errorf("--vllm-port must be a valid integer, got %q", opts.vllmPort)
+	}
+	if vllmPortNum < 1 || vllmPortNum > 65535 {
+		return fmt.Errorf("--vllm-port must be between 1 and 65535, got %d", vllmPortNum)
+	}
+
+	// Validate data parallel size
+	if opts.DataParallelSize < 1 {
+		return fmt.Errorf("--data-parallel-size must be a positive integer, got %d", opts.DataParallelSize)
+	}
+
 	// Validate KV connector
 	if _, ok := supportedKVConnectors[opts.KVConnector]; !ok {
 		return fmt.Errorf("--kv-connector must be one of: %s", supportedKVConnectorNamesStr)
