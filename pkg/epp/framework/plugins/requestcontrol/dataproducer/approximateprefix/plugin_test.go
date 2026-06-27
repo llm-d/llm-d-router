@@ -32,6 +32,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 )
 
 func testHandle() plugin.Handle {
@@ -138,7 +139,7 @@ func TestPreRequest(t *testing.T) {
 		p.wg.Wait()
 
 		// 4. Verify indexer was updated
-		perPromptHashes := getBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks)
+		perPromptHashes := prefixhash.GetBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks)
 		for _, promptHashes := range perPromptHashes {
 			for _, hash := range promptHashes {
 				pods := p.indexer().Get(hash)
@@ -182,7 +183,7 @@ func TestPreRequest(t *testing.T) {
 			p.PreRequest(context.Background(), req, res)
 			p.wg.Wait()
 
-			perPromptHashes := getBlockHashes(context.Background(), req, config.BlockSizeTokens, defaultMaxPrefixBlocks)
+			perPromptHashes := prefixhash.GetBlockHashes(context.Background(), req, config.BlockSizeTokens, defaultMaxPrefixBlocks)
 			allHashes = append(allHashes, perPromptHashes[0])
 		}
 
