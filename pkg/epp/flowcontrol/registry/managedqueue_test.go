@@ -50,12 +50,18 @@ func newMockedMqHarness(t *testing.T, queue *mocks.MockSafeQueue, key flowcontro
 	return newMqHarness(t, queue, key)
 }
 
-// newRealMqHarness creates a harness that uses a real "ListQueue" implementation.
+// newRealMqHarness creates a harness that uses a real "PriorityQueue" implementation.
 // This is essential for integration and concurrency tests.
 func newRealMqHarness(t *testing.T, key flowcontrol.FlowKey) *mqTestHarness {
 	t.Helper()
-	q, err := queue.NewQueueFromName(queue.ListQueueName, nil)
-	require.NoError(t, err, "Test setup: creating a real ListQueue implementation should not fail")
+	// The priority queue orders by the policy's comparator; order by enqueue time for FCFS-like behavior.
+	policy := &fwkfcmocks.MockOrderingPolicy{
+		LessFunc: func(a, b flowcontrol.QueueItemAccessor) bool {
+			return a.EnqueueTime().Before(b.EnqueueTime())
+		},
+	}
+	q, err := queue.NewQueueFromName(queue.PriorityQueueName, policy)
+	require.NoError(t, err, "Test setup: creating a real PriorityQueue implementation should not fail")
 	return newMqHarness(t, q, key)
 }
 
@@ -329,15 +335,12 @@ func TestManagedQueue_FlowQueueAccessor(t *testing.T) {
 		item := fwkfcmocks.NewMockQueueItemAccessor(100, "req-1", flowKey)
 		q.PeekV = item
 		q.NameV = "MockQueue"
-		q.CapabilitiesV = []flowcontrol.QueueCapability{flowcontrol.CapabilityFIFO}
 		require.NoError(t, harness.mq.Add(item), "Test setup: Adding an item must succeed")
 
 		accessor := harness.mq.FlowQueueAccessor()
 		require.NotNil(t, accessor, "FlowQueueAccessor must return a non-nil instance (guaranteed by contract)")
 
 		assert.Equal(t, harness.mq.queue.Name(), accessor.Name(), "Accessor Name() must proxy the underlying queue's name")
-		assert.Equal(t, harness.mq.queue.Capabilities(), accessor.Capabilities(),
-			"Accessor Capabilities() must proxy the underlying queue's capabilities")
 		assert.Equal(t, harness.mq.Len(), accessor.Len(), "Accessor Len() must reflect the managed queue's current length")
 		assert.Equal(t, harness.mq.ByteSize(), accessor.ByteSize(),
 			"Accessor ByteSize() must reflect the managed queue's current byte size")
