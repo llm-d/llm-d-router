@@ -259,7 +259,9 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 
 	tp, err := p.backend.produce(ctx, request.Body)
 	if err != nil {
-		return err
+		log.FromContext(ctx).WithName(p.typedName.String()).Error(err, "tokenization failed")
+		// skip error otherwise other PrepareRequestData plugins will not run
+		return nil
 	}
 	if tp == nil || tp.TokenCount() == 0 {
 		return nil
