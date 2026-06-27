@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -59,6 +60,7 @@ var (
 	_ requestcontrol.DataProducer = &Producer{}
 	_ requestcontrol.PreRequest   = &Producer{}
 	_ fwkdl.EndpointExtractor     = &Producer{}
+	_ plugin.StateDumper          = &Producer{}
 )
 
 // Parameters configures the multimodal encoder-cache data producer.
@@ -170,6 +172,48 @@ func (p *Producer) cleanupLoop(ctx context.Context) {
 // TypedName returns the plugin type/name.
 func (p *Producer) TypedName() plugin.TypedName {
 	return p.typedName
+}
+
+const maxDebugDumpPods = 100
+
+// encoderCacheState is the sanitized snapshot returned by DumpState: per-pod
+// cached-item counts only. The multimodal content hashes are never exposed.
+type encoderCacheState struct {
+	Pods      []podItemCount `json:"pods"`
+	TotalPods int            `json:"totalPods"`
+	MaxPods   int            `json:"maxPods"`
+	Truncated bool           `json:"truncated"`
+}
+
+type podItemCount struct {
+	Pod   string `json:"pod"`
+	Items int    `json:"items"`
+}
+
+// DumpState reports how many encoder-cache items are tracked per pod, ordered by
+// count (most first) and capped to maxDebugDumpPods so the payload stays bounded.
+// Only pod names and counts are exposed; the content hashes are never included.
+func (p *Producer) DumpState() (json.RawMessage, error) {
+	p.mutex.RLock()
+	state := encoderCacheState{MaxPods: maxDebugDumpPods, TotalPods: len(p.caches)}
+	pods := make([]podItemCount, 0, len(p.caches))
+	for pod, cache := range p.caches {
+		pods = append(pods, podItemCount{Pod: pod, Items: cache.Len()})
+	}
+	p.mutex.RUnlock()
+
+	sort.SliceStable(pods, func(a, b int) bool {
+		if pods[a].Items != pods[b].Items {
+			return pods[a].Items > pods[b].Items
+		}
+		return pods[a].Pod < pods[b].Pod
+	})
+	if len(pods) > maxDebugDumpPods {
+		pods = pods[:maxDebugDumpPods]
+		state.Truncated = true
+	}
+	state.Pods = pods
+	return json.Marshal(state)
 }
 
 // Produces returns the data keys this plugin produces.
