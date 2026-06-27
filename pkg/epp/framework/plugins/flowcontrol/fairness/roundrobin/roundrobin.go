@@ -126,3 +126,26 @@ func (p *roundRobin) Pick(
 	c.lastSelected = nil
 	return nil, nil //nolint:nilnil
 }
+// roundRobinState is the JSON payload returned by DumpState.
+type roundRobinState struct {
+	Plugin string `json:"plugin"`
+	Type   string `json:"type"`
+}
+
+// DumpState implements [fwkplugin.StateDumper].
+// The round-robin cursor is stored per priority band on the band's PolicyState,
+// not on the plugin itself, so there is no centralized mutable state to snapshot.
+// This dump returns plugin identity information only.
+func (p *roundRobin) DumpState() (json.RawMessage, error) {
+	return json.Marshal(roundRobinState{
+		Plugin: p.name,
+		Type:   RoundRobinFairnessPolicyType,
+	})
+}
+
+// Ensure roundRobin implements StateDumper.
+var _ fwkplugin.StateDumper = &roundRobin{}
+
+
+
+
