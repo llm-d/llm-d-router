@@ -64,7 +64,19 @@ type PluginConfig struct {
 	SpeculativeTTL string `json:"speculativeTTL"`
 }
 
-var _ requestcontrol.DataProducer = &Producer{}
+var (
+	_ requestcontrol.DataProducer = &Producer{}
+	_ plugin.StateDumper          = &Producer{}
+)
+
+// subscriberManager is the subset of kvevents.SubscriberManager the producer
+// relies on, narrowed so tests can substitute a fake.
+type subscriberManager interface {
+	EnsureSubscriber(ctx context.Context, podIdentifier, endpoint, topicFilter string, remoteSocket bool) error
+	RemoveSubscriber(ctx context.Context, podIdentifier string)
+	GetActiveSubscribers() ([]string, []string)
+	Shutdown(ctx context.Context)
+}
 
 // Producer is a DataProducer plugin that maintains a KV-block prefix-cache
 // index by subscribing to vLLM KV-events and writes per-endpoint
@@ -78,7 +90,7 @@ type Producer struct {
 	typedName      plugin.TypedName
 	kvCacheIndexer kvCacheIndexer
 
-	subscribersManager *kvevents.SubscriberManager
+	subscribersManager subscriberManager
 	kvEventsConfig     *kvevents.Config
 
 	kvBlockScorer kvcache.KVBlockScorer
@@ -200,6 +212,38 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 // TypedName returns the plugin's registered type and name.
 func (p *Producer) TypedName() plugin.TypedName {
 	return p.typedName
+}
+
+// precisePrefixState is the sanitized snapshot returned by DumpState. The
+// KV-block index is keyed by prompt-derived block hashes and is not enumerable,
+// so only these bounded, non-sensitive aggregates are reported.
+type precisePrefixState struct {
+	ActiveSubscribers   int  `json:"activeSubscribers"`
+	SpeculativeIndexing bool `json:"speculativeIndexing"`
+	SpeculativeEntries  int  `json:"speculativeEntries"`
+	BlockSizeTokens     int  `json:"blockSizeTokens"`
+}
+
+// DumpState reports the producer's bounded operational state: how many KV-event
+// subscribers are active, whether speculative indexing is on and how many
+// speculative entries are live, and the block size in tokens. Subscriber
+// identities and the prompt-derived block index are not exposed.
+func (p *Producer) DumpState() (json.RawMessage, error) {
+	activeSubscribers := 0
+	if p.subscribersManager != nil {
+		ids, _ := p.subscribersManager.GetActiveSubscribers()
+		activeSubscribers = len(ids)
+	}
+	speculativeEntries := 0
+	if p.speculativeCache != nil {
+		speculativeEntries = p.speculativeCache.Len()
+	}
+	return json.Marshal(precisePrefixState{
+		ActiveSubscribers:   activeSubscribers,
+		SpeculativeIndexing: p.speculativeEnabled,
+		SpeculativeEntries:  speculativeEntries,
+		BlockSizeTokens:     p.blockSizeTokens,
+	})
 }
 
 // Produces declares the PrefixCacheMatchInfoDataKey published per endpoint,

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
@@ -599,4 +600,60 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 			assert.Equal(t, 1, info.TotalBlocks())
 		})
 	}
+}
+
+type fakeSubscriberManager struct {
+	ids       []string
+	endpoints []string
+}
+
+func (f *fakeSubscriberManager) EnsureSubscriber(_ context.Context, _, _, _ string, _ bool) error {
+	return nil
+}
+func (f *fakeSubscriberManager) RemoveSubscriber(_ context.Context, _ string) {}
+func (f *fakeSubscriberManager) GetActiveSubscribers() ([]string, []string) {
+	return f.ids, f.endpoints
+}
+func (f *fakeSubscriberManager) Shutdown(_ context.Context) {}
+
+func TestDumpState(t *testing.T) {
+	// Start() is intentionally not called: NoTTL entries never expire, and Len()
+	// works on an unstarted cache.
+	specCache := ttlcache.New[string, *speculativeEntries]()
+	specCache.Set("req-1", &speculativeEntries{}, ttlcache.NoTTL)
+	specCache.Set("req-2", &speculativeEntries{}, ttlcache.NoTTL)
+
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: "x"},
+		subscribersManager: &fakeSubscriberManager{ids: []string{"ns/pod-a", "ns/pod-b"}},
+		speculativeCache:   specCache,
+		speculativeEnabled: true,
+		blockSizeTokens:    64,
+	}
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+	// Subscribers are summarized to a count, not enumerated, so identities stay out of the dump.
+	assert.NotContains(t, string(payload), "ns/pod-a")
+
+	var state precisePrefixState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Equal(t, precisePrefixState{
+		ActiveSubscribers:   2,
+		SpeculativeIndexing: true,
+		SpeculativeEntries:  2,
+		BlockSizeTokens:     64,
+	}, state)
+}
+
+func TestDumpStateEmpty(t *testing.T) {
+	p := &Producer{}
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+	assert.True(t, json.Valid(payload))
+
+	var state precisePrefixState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Equal(t, precisePrefixState{}, state)
 }
