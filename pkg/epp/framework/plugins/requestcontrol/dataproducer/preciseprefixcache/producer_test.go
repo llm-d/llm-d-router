@@ -19,8 +19,10 @@ package preciseprefixcache
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
@@ -599,4 +601,100 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 			assert.Equal(t, 1, info.TotalBlocks())
 		})
 	}
+}
+
+type fakeSubscriberManager struct {
+	ids       []string
+	endpoints []string
+}
+
+func (f *fakeSubscriberManager) EnsureSubscriber(_ context.Context, _, _, _ string, _ bool) error {
+	return nil
+}
+func (f *fakeSubscriberManager) RemoveSubscriber(_ context.Context, _ string) {}
+func (f *fakeSubscriberManager) GetActiveSubscribers() ([]string, []string) {
+	return f.ids, f.endpoints
+}
+func (f *fakeSubscriberManager) Shutdown(_ context.Context) {}
+
+func TestDumpState(t *testing.T) {
+	// Start() is intentionally not called: NoTTL entries never expire, and the
+	// enumeration helpers work on an unstarted cache.
+	specCache := ttlcache.New[string, *speculativeEntries]()
+	specCache.Set("req-2", &speculativeEntries{}, ttlcache.NoTTL)
+	specCache.Set("req-1", &speculativeEntries{}, ttlcache.NoTTL)
+
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: "x"},
+		subscribersManager: &fakeSubscriberManager{ids: []string{"ns/pod-b", "ns/pod-a"}},
+		speculativeCache:   specCache,
+		speculativeEnabled: true,
+		blockSizeTokens:    64,
+	}
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+	// Subscriber pod identities and live request ids are enumerated for debugging.
+	assert.Contains(t, string(payload), "ns/pod-a")
+
+	var state precisePrefixState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Equal(t, precisePrefixState{
+		Subscribers:             []string{"ns/pod-a", "ns/pod-b"},
+		TotalSubscribers:        2,
+		MaxSubscribers:          maxDumpSubscribers,
+		SpeculativeIndexing:     true,
+		SpeculativeEntries:      []string{"req-1", "req-2"},
+		TotalSpeculativeEntries: 2,
+		MaxSpeculativeEntries:   maxDumpSpeculativeEntries,
+		BlockSizeTokens:         64,
+	}, state)
+}
+
+func TestDumpStateEmpty(t *testing.T) {
+	p := &Producer{}
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+	assert.True(t, json.Valid(payload))
+	// Empty lists serialize as [] not null, matching the documented response shape.
+	assert.Contains(t, string(payload), `"subscribers":[]`)
+	assert.Contains(t, string(payload), `"speculativeEntries":[]`)
+
+	var state precisePrefixState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Equal(t, precisePrefixState{
+		Subscribers:           []string{},
+		SpeculativeEntries:    []string{},
+		MaxSubscribers:        maxDumpSubscribers,
+		MaxSpeculativeEntries: maxDumpSpeculativeEntries,
+	}, state)
+}
+
+func TestDumpStateCaps(t *testing.T) {
+	specCache := ttlcache.New[string, *speculativeEntries]()
+	ids := make([]string, 0, maxDumpSubscribers+5)
+	for i := 0; i < maxDumpSubscribers+5; i++ {
+		ids = append(ids, fmt.Sprintf("ns/pod-%03d", i))
+	}
+	for i := 0; i < maxDumpSpeculativeEntries+7; i++ {
+		specCache.Set(fmt.Sprintf("req-%04d", i), &speculativeEntries{}, ttlcache.NoTTL)
+	}
+
+	p := &Producer{
+		subscribersManager: &fakeSubscriberManager{ids: ids},
+		speculativeCache:   specCache,
+	}
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+
+	var state precisePrefixState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	// Lists are capped, but the totals report the full counts so a consumer can
+	// tell the dump is partial from totalX > maxX.
+	assert.Len(t, state.Subscribers, maxDumpSubscribers)
+	assert.Equal(t, maxDumpSubscribers+5, state.TotalSubscribers)
+	assert.Len(t, state.SpeculativeEntries, maxDumpSpeculativeEntries)
+	assert.Equal(t, maxDumpSpeculativeEntries+7, state.TotalSpeculativeEntries)
 }
