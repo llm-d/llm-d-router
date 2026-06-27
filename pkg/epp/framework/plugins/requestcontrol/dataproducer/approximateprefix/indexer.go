@@ -195,3 +195,15 @@ func (i *indexer) Pods() []ServerID {
 	}
 	return pods
 }
+
+// PodBlockCounts returns the number of cached blocks currently tracked per pod.
+func (i *indexer) PodBlockCounts() map[ServerID]int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	counts := make(map[ServerID]int, len(i.podToLRU))
+	for pod, lruCache := range i.podToLRU {
+		counts[pod] = lruCache.Len()
+	}
+	return counts
+}
