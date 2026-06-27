@@ -59,7 +59,43 @@ spec:
         portSpecification: "USE_FIXED_PORT"
         port: {{ $eppHealthPort }}
 {{- end }}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict }}
+{{- if $gkePB.enabled }}
+{{- $preferredReplicas := $gkePB.preferredReplicas | default 1 | int }}
+{{- $defaultReplicas := $gkePB.defaultReplicas | default 1 | int }}
+{{- $totalReplicas := add $preferredReplicas $defaultReplicas }}
+{{- range $i := untilStep 1 (int $totalReplicas) 1 }}
+{{- $serviceName := printf "%s-preferred-%d" (include "llm-d-router.name" $) (int $i) }}
+{{- if ge (int $i) (int $preferredReplicas) }}
+  {{- if eq (int $i) (int $preferredReplicas) }}
+    {{- $serviceName = printf "%s-backup" (include "llm-d-router.name" $) }}
+  {{- else }}
+    {{- $serviceName = printf "%s-backup-%d" (include "llm-d-router.name" $) (sub (int $i) (int $preferredReplicas)) }}
+  {{- end }}
+{{- end }}
 ---
+kind: HealthCheckPolicy
+apiVersion: networking.gke.io/v1
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" $ | nindent 4 }}
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: {{ $serviceName }}
+  default:
+    config:
+      type: GRPC
+      grpcHealthCheck:
+        portSpecification: "USE_FIXED_PORT"
+        port: {{ $eppHealthPort }}
+{{- end }}
+{{- end }}
+---
+{{- if not $gkePB.enabled }}
 apiVersion: networking.gke.io/v1
 kind: GCPBackendPolicy
 metadata:
@@ -78,4 +114,51 @@ spec:
       enabled: true    # log all requests by default
 ---
 {{- end }}
+{{- if $gkePB.enabled }}
+{{- $preferredReplicas := $gkePB.preferredReplicas | default 1 | int }}
+{{- $defaultReplicas := $gkePB.defaultReplicas | default 1 | int }}
+{{- $totalReplicas := add $preferredReplicas $defaultReplicas }}
+{{- range $i := untilStep 0 (int $totalReplicas) 1 }}
+{{- $serviceName := printf "%s-preferred-%d" (include "llm-d-router.name" $) (int $i) }}
+{{- $policyName := printf "%s-preferred-%d" $.Release.Name (int $i) }}
+{{- $pref := "PREFERRED" }}
+{{- if eq (int $i) 0 }}
+  {{- $serviceName = include "llm-d-router.name" $ }}
+  {{- $policyName = $.Release.Name }}
+{{- else if ge (int $i) (int $preferredReplicas) }}
+  {{- $pref = "DEFAULT" }}
+  {{- if eq (int $i) (int $preferredReplicas) }}
+    {{- $serviceName = printf "%s-backup" (include "llm-d-router.name" $) }}
+    {{- $policyName = printf "%s-backup" $.Release.Name }}
+  {{- else }}
+    {{- $serviceName = printf "%s-backup-%d" (include "llm-d-router.name" $) (sub (int $i) (int $preferredReplicas)) }}
+    {{- $policyName = printf "%s-backup-%d" $.Release.Name (sub (int $i) (int $preferredReplicas)) }}
+  {{- end }}
+{{- end }}
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: {{ $policyName }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: {{ $serviceName }}
+  default:
+    timeoutSec: 300
+    backendPreference: {{ $pref }}
+    {{- if $gkePB.balancingMode }}
+    balancingMode: {{ $gkePB.balancingMode }}
+    {{- end }}
+    {{- if $gkePB.maxRatePerEndpoint }}
+    maxRatePerEndpoint: {{ $gkePB.maxRatePerEndpoint }}
+    {{- end }}
+    {{- if $gkePB.capacityScalerPercent }}
+    capacityScalerPercent: {{ $gkePB.capacityScalerPercent }}
+    {{- end }}
+---
+{{- end }}
+{{- end }}
 {{- include "llm-d-router.gke" . -}}
+{{- end }}
