@@ -832,3 +832,77 @@ func TestPrefixPluginMatchesSameTokens(t *testing.T) {
 
 	assert.Equal(t, state1.PerPromptHashes, state2.PerPromptHashes, "identical token IDs must produce identical hashes")
 }
+
+func TestDumpState(t *testing.T) {
+	idx := newIndexer(context.Background(), 100, "test-name", "test-type")
+	podA := server{ServerID: ServerID{Namespace: "ns", Name: "pod-a"}}
+	podB := server{ServerID: ServerID{Namespace: "ns", Name: "pod-b"}}
+	idx.Add([]blockHash{1001, 1002, 1003}, podA)
+	idx.Add([]blockHash{2001, 2002}, podB)
+
+	p := &dataProducer{indexerInst: idx}
+	payload, err := p.DumpState()
+	assert.NoError(t, err)
+	// Block hashes are derived from prompt content and must never reach the dump.
+	assert.NotContains(t, string(payload), "1001")
+
+	var got prefixIndexState
+	assert.NoError(t, json.Unmarshal(payload, &got))
+	assert.Equal(t, prefixIndexState{
+		Pods: []podBlockCount{
+			{Pod: "ns/pod-a", Blocks: 3},
+			{Pod: "ns/pod-b", Blocks: 2},
+		},
+		TotalPods: 2,
+		MaxPods:   maxDebugDumpPods,
+	}, got)
+}
+
+func TestDumpStateCapsPods(t *testing.T) {
+	idx := newIndexer(context.Background(), 1000, "test-name", "test-type")
+	const extra = 5
+	for i := 0; i < maxDebugDumpPods+extra; i++ {
+		pod := server{ServerID: ServerID{Namespace: "ns", Name: fmt.Sprintf("pod-%03d", i)}}
+		hashes := make([]blockHash, i+1)
+		for j := range hashes {
+			hashes[j] = blockHash(i*1000 + j)
+		}
+		idx.Add(hashes, pod)
+	}
+
+	p := &dataProducer{indexerInst: idx}
+	payload, err := p.DumpState()
+	assert.NoError(t, err)
+
+	var got prefixIndexState
+	assert.NoError(t, json.Unmarshal(payload, &got))
+	assert.True(t, got.Truncated)
+	assert.Equal(t, maxDebugDumpPods+extra, got.TotalPods)
+	assert.Len(t, got.Pods, maxDebugDumpPods)
+	// The pod holding the most blocks is listed first.
+	assert.Equal(t, "ns/pod-104", got.Pods[0].Pod)
+	assert.Equal(t, maxDebugDumpPods+extra, got.Pods[0].Blocks)
+}
+
+func TestDumpStateEmpty(t *testing.T) {
+	// A nil indexer should still produce valid JSON instead of panicking.
+	p := &dataProducer{}
+	payload, err := p.DumpState()
+	assert.NoError(t, err)
+	assert.True(t, json.Valid(payload))
+
+	var got prefixIndexState
+	assert.NoError(t, json.Unmarshal(payload, &got))
+	assert.Empty(t, got.Pods)
+	assert.Equal(t, maxDebugDumpPods, got.MaxPods)
+
+	// A live indexer with nothing tracked yet reports zero pods.
+	p.indexerInst = newIndexer(context.Background(), 100, "test-name", "test-type")
+	payload, err = p.DumpState()
+	assert.NoError(t, err)
+
+	got = prefixIndexState{}
+	assert.NoError(t, json.Unmarshal(payload, &got))
+	assert.Equal(t, 0, got.TotalPods)
+	assert.Empty(t, got.Pods)
+}
