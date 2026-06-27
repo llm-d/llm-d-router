@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -33,12 +34,18 @@ import (
 type Config struct {
 	// The name of the data producer that produces PrefixCacheMatchInfo.
 	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
+	// The weight of the absolute prefix length in the score, between 0.0 and 1.0.
+	PrefixLengthWeight float64 `json:"prefixLengthWeight,omitempty"`
+	// The number of tokens at which prefill performance saturates.
+	PrefillSaturationTokens int `json:"prefillSaturationTokens,omitempty"`
 }
 
 // Plugin implements the prefix cache aware scoring logic.
 type Plugin struct {
-	typedName          plugin.TypedName
-	prefixMatchDataKey plugin.DataKey
+	typedName               plugin.TypedName
+	prefixMatchDataKey      plugin.DataKey
+	prefixLengthWeight      float64
+	prefillSaturationTokens int
 }
 
 // compile-time type assertions
@@ -49,11 +56,18 @@ var (
 const (
 	// Type is the unique identifier for the prefix cache scorer plugin.
 	PrefixCacheScorerPluginType = "prefix-cache-scorer"
+	// The default weight of the absolute prefix length in the score.
+	defaultPrefixLengthWeight = 0.0
+	// Default number of tokens at which prefill value saturates.
+	defaultPrefillSaturationTokens = 8192
 )
 
 // PrefixCachePluginFactory defines the factory function for the Prefix plugin.
 func PrefixCachePluginFactory(name string, decoder *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
-	var cfg Config
+	cfg := Config{
+		PrefixLengthWeight:      defaultPrefixLengthWeight,
+		PrefillSaturationTokens: defaultPrefillSaturationTokens,
+	}
 	if decoder != nil {
 		if err := decoder.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to decode prefix cache scorer parameters: %w", err)
@@ -64,6 +78,17 @@ func PrefixCachePluginFactory(name string, decoder *json.Decoder, handle plugin.
 	if err != nil {
 		return nil, err
 	}
+
+	if cfg.PrefixLengthWeight < 0.0 || cfg.PrefixLengthWeight > 1.0 {
+		return nil, fmt.Errorf("prefixLengthWeight must be between 0.0 and 1.0, got %f", cfg.PrefixLengthWeight)
+	}
+	p.prefixLengthWeight = cfg.PrefixLengthWeight
+
+	if p.prefixLengthWeight > 0.0 && cfg.PrefillSaturationTokens <= 0 {
+		return nil, fmt.Errorf("prefillSaturationTokens must be greater than 0 when prefixLengthWeight is greater than 0, got %d", cfg.PrefillSaturationTokens)
+	}
+	p.prefillSaturationTokens = cfg.PrefillSaturationTokens
+
 	return p, nil
 }
 
@@ -114,13 +139,31 @@ func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 			continue
 		}
 
-		if prefixMatchInfo, ok := info.(*attrprefix.PrefixCacheMatchInfo); ok {
-			if prefixMatchInfo.TotalBlocks() != 0 {
-				scores[endpoint] = float64(prefixMatchInfo.MatchBlocks()) / float64(prefixMatchInfo.TotalBlocks())
-			}
-		} else {
+		prefixMatchInfo, ok := info.(*attrprefix.PrefixCacheMatchInfo)
+		if !ok {
 			logger.V(logutil.DEFAULT).Error(nil, "PrefixCacheMatchInfo has unexpected type, assigning score 0", "endpoint", endpoint)
+			continue
 		}
+
+		matchBlocks := prefixMatchInfo.MatchBlocks()
+		totalBlocks := prefixMatchInfo.TotalBlocks()
+		if totalBlocks == 0 {
+			logger.V(logutil.DEFAULT).Error(nil, "totalBlocks is set to 0, assigning score 0", "endpoint", endpoint)
+			continue
+		}
+
+		matchLengthRatio := 0.0
+		matchRatio := float64(matchBlocks) / float64(totalBlocks)
+		blockSize := prefixMatchInfo.BlockSizeTokens()
+		if blockSize > 0 && p.prefillSaturationTokens > 0 {
+			// (matchBlocks * blockSize / prefillSaturationTokens) ^ 2
+			// Capped at 1.0 as the normalized score term cannot be greater than 1.
+			ratio := float64(matchBlocks) * float64(blockSize) / float64(p.prefillSaturationTokens)
+			matchLengthRatio = math.Min(1.0, ratio)
+			matchLengthRatio *= matchLengthRatio
+		}
+		scores[endpoint] += p.prefixLengthWeight * matchLengthRatio
+		scores[endpoint] += (1.0 - p.prefixLengthWeight) * matchRatio
 	}
 	return scores
 }
