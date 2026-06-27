@@ -166,6 +166,21 @@ func (m *mockAdmissionPlugin) Admit(ctx context.Context, request *fwksched.Infer
 	return m.denialError
 }
 
+type mockRequestHeaderPlugin struct {
+	name           string
+	attributeKey   string
+	attributeValue string
+}
+
+func (m *mockRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.name, Type: "mock-request-header"}
+}
+
+func (m *mockRequestHeaderPlugin) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
+	request.PutAttribute(m.attributeKey, m.attributeValue)
+	return nil
+}
+
 type mockPreRequestPlugin struct {
 	name     string
 	modifyFn func(request *fwksched.InferenceRequest)
@@ -363,6 +378,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		admitRequestDenialError error                    // Expected denial error from admission plugin
 		dataProducerPlugin      *mockDataProducerPlugin
 		preRequestPlugin        *mockPreRequestPlugin
+		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
@@ -424,6 +440,45 @@ func TestDirector_HandleRequest(t *testing.T) {
 			initialTargetModelName: model,
 			inferenceObjectiveName: objectiveName,
 			wantFairnessID:         metadata.DefaultFairnessID,
+		},
+		{
+			name: "fairness ID derived from agent-identity attribute",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-identity",
+				attributeKey:   AgentIdentityKey,
+				attributeValue: "session-abc",
+			},
+			wantFairnessID: "session-abc",
+		},
+		{
+			name: "explicit fairness header takes precedence over agent-identity attribute",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "explicit-id",
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-identity",
+				attributeKey:   AgentIdentityKey,
+				attributeValue: "session-abc",
+			},
+			wantFairnessID: "explicit-id",
 		},
 		{
 			name: "successful request with preRequest plugin adding key",
@@ -847,6 +902,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				}
 				if test.preRequestPlugin != nil {
 					config = config.WithPreRequestPlugins(test.preRequestPlugin)
+				}
+				if test.requestHeaderPlugin != nil {
+					config = config.WithRequestHeaderPlugins(test.requestHeaderPlugin)
 				}
 				config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
 
