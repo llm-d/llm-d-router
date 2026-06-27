@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
@@ -76,11 +77,17 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 
 // Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
 // the token-producer before this producer runs and auto-creates one when none
-// is configured.
+// is configured. When auto-tuning the cap, it also requires the /v1/models
+// attribute so the default once-per-endpoint models producer is wired in; the
+// attribute is not requested otherwise since Produce never reads it then.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
-	return plugin.DataDependencies{
+	deps := plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{}},
 	}
+	if p.config.autoTuneMaxPrefixTokens {
+		deps.Required[attrmodels.ModelsAttributeKey] = attrmodels.ModelDataCollection{}
+	}
+	return deps
 }
 
 // newDataProducer returns a new DataProducer plugin.
@@ -117,6 +124,10 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	}
 
 	indexer := newIndexer(ctx, config.LRUCapacityPerServer, name, ApproxPrefixCachePluginType)
+
+	// Auto-tune the cap from max_model_len only when AutoTune is on and the
+	// operator left MaxPrefixTokensToMatch at its default (no explicit cap).
+	config.autoTuneMaxPrefixTokens = config.AutoTune && config.MaxPrefixTokensToMatch == defaultMaxPrefixTokens
 
 	p := &dataProducer{
 		typedName: plugin.TypedName{
@@ -175,9 +186,18 @@ func (p *dataProducer) PluginState() *plugin.PluginState {
 // Produce is called by the director before scheduling requests.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
 	blockSize := p.GetBlockSize(pods)
+	maxTokens := p.config.MaxPrefixTokensToMatch
+	// Raise the cap to the model's full context window when max_model_len is known.
+	// Candidate pods serve the same model, so the first pod's value is
+	// representative; fall back to the default when it isn't reported.
+	if p.config.autoTuneMaxPrefixTokens && len(pods) > 0 {
+		if modelLen := maxModelLen(pods[0]); modelLen > 0 {
+			maxTokens = modelLen
+		}
+	}
 	maxBlocks := p.config.MaxPrefixBlocksToMatch
-	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
-		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
+	if maxTokens > 0 && blockSize > 0 {
+		maxBlocks = maxTokens / blockSize
 	}
 	perPromptHashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
 
@@ -305,6 +325,26 @@ func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
 		return minBlockSizeTokens
 	}
 	return blockSize
+}
+
+// maxModelLen returns the largest max_model_len reported for ep via the
+// /v1/models attribute, or 0 when absent or non-positive.
+func maxModelLen(ep fwksched.Endpoint) int {
+	val, ok := ep.Get(attrmodels.ModelsAttributeKey.String())
+	if !ok {
+		return 0
+	}
+	models, ok := val.(attrmodels.ModelDataCollection)
+	if !ok {
+		return 0
+	}
+	maxLen := 0
+	for i := range models {
+		if models[i].MaxModelLen > maxLen {
+			maxLen = models[i].MaxModelLen
+		}
+	}
+	return maxLen
 }
 
 // ApproxPrefixCacheFactory is the factory function for the prefix cache data producer plugin.

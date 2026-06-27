@@ -106,3 +106,32 @@ func TestExtractorExtract(t *testing.T) {
 		})
 	}
 }
+
+// TestExtractorCapturesMaxModelLen verifies the extractor surfaces max_model_len
+// from the /v1/models payload onto the endpoint attribute.
+func TestExtractorCapturesMaxModelLen(t *testing.T) {
+	ctx := context.Background()
+	extPlugin, err := ModelServerExtractorFactory("test-extractor", nil, nil)
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+	extractor := extPlugin.(*ModelExtractor)
+	ep := fwkdl.NewEndpoint(nil, nil)
+
+	resp := &ModelResponse{Data: []attrmodels.ModelData{{ID: "m", MaxModelLen: 131072}}}
+	if err := extractor.Extract(ctx, fwkdl.PollInput[*ModelResponse]{Payload: resp, Endpoint: ep}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	val, ok := ep.GetAttributes().Get(attrmodels.ModelsAttributeKey.String())
+	if !ok {
+		t.Fatal("expected models attribute to be set")
+	}
+	models, ok := val.(attrmodels.ModelDataCollection)
+	if !ok {
+		t.Fatalf("unexpected attribute type %T", val)
+	}
+	if len(models) != 1 || models[0].MaxModelLen != 131072 {
+		t.Errorf("expected max_model_len 131072, got %+v", models)
+	}
+}
