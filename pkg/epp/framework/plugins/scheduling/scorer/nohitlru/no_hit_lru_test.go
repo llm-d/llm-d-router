@@ -3,7 +3,9 @@ package nohitlru_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -494,4 +496,135 @@ func TestNoHitLRUPrefillDecodeTracking(t *testing.T) {
 		}
 		scorer.PreRequest(ctx, req, result)
 	})
+}
+
+// dumpedLRUState mirrors the unexported noHitLRUState; keep the JSON tags in sync.
+type dumpedLRUState struct {
+	Endpoints      []string `json:"endpoints"`
+	TotalEndpoints int      `json:"totalEndpoints"`
+	MaxEndpoints   int      `json:"maxEndpoints"`
+	Truncated      bool     `json:"truncated"`
+}
+
+// seedCold drives one cold request whose target is the given endpoint, which
+// adds the endpoint to the scorer's cold-request LRU. The RequestID must be
+// unique per call when reusing the same scorer.
+func seedCold(ctx context.Context, scorer *nohitlru.NoHitLRU, target scheduling.Endpoint, id string) {
+	req := &scheduling.InferenceRequest{RequestID: id}
+	scorer.Score(ctx, req, []scheduling.Endpoint{target})
+	scorer.PreRequest(ctx, req, &scheduling.SchedulingResult{
+		PrimaryProfileName: "p",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"p": {TargetEndpoints: []scheduling.Endpoint{target}},
+		},
+	})
+}
+
+func dumpLRU(t *testing.T, scorer *nohitlru.NoHitLRU) dumpedLRUState {
+	t.Helper()
+	payload, err := scorer.DumpState()
+	if err != nil {
+		t.Fatalf("DumpState: %v", err)
+	}
+	if !json.Valid(payload) {
+		t.Fatalf("DumpState returned invalid JSON: %s", payload)
+	}
+	var state dumpedLRUState
+	if err := json.Unmarshal(payload, &state); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return state
+}
+
+func TestDumpState(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
+
+	seedCold(ctx, scorer, newColdNS("pod-a"), "cold-a")
+	seedCold(ctx, scorer, newColdNS("pod-b"), "cold-b")
+
+	state := dumpLRU(t, scorer)
+
+	// LRU order is least-recently-used first: pod-a was used before pod-b.
+	if diff := cmp.Diff([]string{"default/pod-a", "default/pod-b"}, state.Endpoints); diff != "" {
+		t.Errorf("endpoints mismatch (-want +got):\n%s", diff)
+	}
+	if state.TotalEndpoints != 2 {
+		t.Errorf("totalEndpoints = %d, want 2", state.TotalEndpoints)
+	}
+	if state.MaxEndpoints != 100 {
+		t.Errorf("maxEndpoints = %d, want 100", state.MaxEndpoints)
+	}
+	if state.Truncated {
+		t.Errorf("truncated = true, want false")
+	}
+}
+
+func TestDumpStateCaps(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
+
+	const total = 105 // greater than the 100-endpoint dump cap
+	for i := 0; i < total; i++ {
+		name := fmt.Sprintf("pod-%03d", i)
+		seedCold(ctx, scorer, newColdNS(name), name)
+	}
+
+	state := dumpLRU(t, scorer)
+
+	if !state.Truncated {
+		t.Errorf("truncated = false, want true")
+	}
+	if state.TotalEndpoints != total {
+		t.Errorf("totalEndpoints = %d, want %d", state.TotalEndpoints, total)
+	}
+	if len(state.Endpoints) != state.MaxEndpoints {
+		t.Errorf("len(endpoints) = %d, want %d", len(state.Endpoints), state.MaxEndpoints)
+	}
+	// LRU order keeps the least-recently-used (earliest-seeded) endpoints.
+	if state.Endpoints[0] != "default/pod-000" {
+		t.Errorf("endpoints[0] = %q, want default/pod-000", state.Endpoints[0])
+	}
+	if last := state.Endpoints[len(state.Endpoints)-1]; last != "default/pod-099" {
+		t.Errorf("endpoints[last] = %q, want default/pod-099", last)
+	}
+}
+
+func TestDumpStateEmpty(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	// Fresh scorer: empty LRU.
+	scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
+	if state := dumpLRU(t, scorer); state.TotalEndpoints != 0 || len(state.Endpoints) != 0 || state.MaxEndpoints != 100 {
+		t.Errorf("fresh scorer dump = %+v, want empty with maxEndpoints 100", state)
+	}
+
+	// Zero-value scorer: a nil LRU must not panic.
+	if state := dumpLRU(t, &nohitlru.NoHitLRU{}); state.TotalEndpoints != 0 || len(state.Endpoints) != 0 {
+		t.Errorf("zero-value scorer dump = %+v, want empty", state)
+	}
+}
+
+func TestDumpStateConcurrentWithPreRequest(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			name := fmt.Sprintf("pod-%03d", i)
+			seedCold(ctx, scorer, newColdNS(name), name)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if _, err := scorer.DumpState(); err != nil {
+				t.Errorf("DumpState returned error: %v", err)
+			}
+		}
+	}()
+	wg.Wait()
 }

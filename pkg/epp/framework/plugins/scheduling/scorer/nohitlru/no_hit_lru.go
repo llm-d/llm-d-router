@@ -33,6 +33,7 @@ const (
 var _ scheduling.Scorer = &NoHitLRU{}
 var _ requestcontrol.PreRequest = &NoHitLRU{}
 var _ plugin.ConsumerPlugin = &NoHitLRU{}
+var _ plugin.StateDumper = &NoHitLRU{}
 
 // Parameters defines the parameters for the NoHitLRU scorer.
 type Parameters struct {
@@ -120,6 +121,41 @@ func (s *NoHitLRU) TypedName() plugin.TypedName {
 // Category returns the preference the scorer applies when scoring candidate endpoints.
 func (s *NoHitLRU) Category() scheduling.ScorerCategory {
 	return scheduling.Distribution
+}
+
+const maxDebugDumpEndpoints = 100
+
+// noHitLRUState is the sanitized snapshot returned by DumpState: the endpoint
+// identities tracked in the cold-request LRU, nothing else.
+type noHitLRUState struct {
+	Endpoints      []string `json:"endpoints"`
+	TotalEndpoints int      `json:"totalEndpoints"`
+	MaxEndpoints   int      `json:"maxEndpoints"`
+	Truncated      bool     `json:"truncated"`
+}
+
+// DumpState reports the endpoints currently tracked in the cold-request LRU,
+// ordered least-recently-used first (the order the scorer favors for the next
+// cold request) and capped to maxDebugDumpEndpoints so the payload stays bounded.
+// No extra lock is needed: lru.Cache is internally synchronized, so Keys() is
+// safe to call concurrently with PreRequest's Add().
+func (s *NoHitLRU) DumpState() (json.RawMessage, error) {
+	state := noHitLRUState{MaxEndpoints: maxDebugDumpEndpoints}
+	// A constructed scorer always has a cache; this guards zero-value use.
+	if s.lruCache == nil {
+		return json.Marshal(state)
+	}
+
+	// Keys returns a fresh slice, least-recently-used first, safe to truncate.
+	// https://pkg.go.dev/github.com/hashicorp/golang-lru/v2#Cache.Keys
+	keys := s.lruCache.Keys()
+	state.TotalEndpoints = len(keys)
+	if len(keys) > maxDebugDumpEndpoints {
+		keys = keys[:maxDebugDumpEndpoints]
+		state.Truncated = true
+	}
+	state.Endpoints = keys
+	return json.Marshal(state)
 }
 
 func (s *NoHitLRU) Consumes() plugin.DataDependencies {
