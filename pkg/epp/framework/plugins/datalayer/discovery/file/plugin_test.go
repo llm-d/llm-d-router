@@ -19,6 +19,7 @@ package file
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -291,4 +292,81 @@ endpoints:
 
 	cancel()
 	assert.NoError(t, <-done)
+}
+
+func TestDumpState(t *testing.T) {
+	f := &FileDiscovery{
+		endpoints: map[types.NamespacedName]struct{}{
+			{Namespace: "default", Name: "pod-b"}: {},
+			{Namespace: "default", Name: "pod-a"}: {},
+		},
+	}
+
+	payload, err := f.DumpState()
+	require.NoError(t, err)
+
+	var state discoveryState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Equal(t, []string{"default/pod-a", "default/pod-b"}, state.Endpoints)
+	assert.Equal(t, 2, state.TotalEndpoints)
+	assert.Equal(t, maxDebugDumpEndpoints, state.MaxEndpoints)
+	assert.False(t, state.Truncated)
+}
+
+func TestDumpStateCaps(t *testing.T) {
+	eps := make(map[types.NamespacedName]struct{}, maxDebugDumpEndpoints+5)
+	for i := 0; i < maxDebugDumpEndpoints+5; i++ {
+		eps[types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("pod-%03d", i)}] = struct{}{}
+	}
+	f := &FileDiscovery{endpoints: eps}
+
+	payload, err := f.DumpState()
+	require.NoError(t, err)
+
+	var state discoveryState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.True(t, state.Truncated)
+	assert.Equal(t, maxDebugDumpEndpoints+5, state.TotalEndpoints)
+	assert.Len(t, state.Endpoints, maxDebugDumpEndpoints)
+	// Sorted ascending, then capped, so the first maxDebugDumpEndpoints names are kept.
+	assert.Equal(t, "default/pod-000", state.Endpoints[0])
+	assert.Equal(t, fmt.Sprintf("default/pod-%03d", maxDebugDumpEndpoints-1), state.Endpoints[maxDebugDumpEndpoints-1])
+}
+
+func TestDumpStateConcurrentWithLoad(t *testing.T) {
+	path := writeTemp(t, "endpoints:\n- name: ep1\n  address: 10.0.0.1\n  port: \"8000\"\n")
+	f := &FileDiscovery{path: path, endpoints: map[types.NamespacedName]struct{}{}}
+	notifier := &recordingNotifier{}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			_ = f.load(notifier)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if _, err := f.DumpState(); err != nil {
+				t.Errorf("DumpState returned error: %v", err)
+			}
+		}
+	}()
+	wg.Wait()
+}
+
+func TestDumpStateEmpty(t *testing.T) {
+	f := &FileDiscovery{endpoints: map[types.NamespacedName]struct{}{}}
+
+	payload, err := f.DumpState()
+	require.NoError(t, err)
+	assert.True(t, json.Valid(payload))
+
+	var state discoveryState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Empty(t, state.Endpoints)
+	assert.Equal(t, 0, state.TotalEndpoints)
+	assert.Equal(t, maxDebugDumpEndpoints, state.MaxEndpoints)
 }
