@@ -367,7 +367,7 @@ binds:
         policies:
           inferenceRouting:
             endpointPicker:
-              host: {{ printf "127.0.0.1:%v" (.Values.router.epp.extProcPort | default 9002) | quote }}
+              host: {{ printf "%s:%v" (include "llm-d-router.proxy.extProcHost" .) (.Values.router.epp.extProcPort | default 9002) | quote }}
             destinationMode: passthrough
 services:
 - name: {{ $serviceName | quote }}
