@@ -21,6 +21,8 @@ upstream list shape, sorted by placeholder offset.
 
 Backend selection:
 
+- Set **`backend: estimate|vllm|uds`** to select a backend explicitly.
+  When omitted, the plugin keeps the legacy inference rules below.
 - **`estimate`** (default): tokenizer-free byte-packing — no model, no service.
   Selected when no backend is set, and auto-created by the framework for any
   config whose plugins consume `TokenizedPrompt` (prefix cache, context-length,
@@ -48,7 +50,8 @@ Backend selection:
 
 | Parameter        | Default                 | Description                                                       |
 | ---------------- | ----------------------- | ----------------------------------------------------------------- |
-| `modelName`      | – (required for `vllm`) | Model whose tokenizer should be loaded / sent in render requests. |
+| `backend`        | inferred                | Explicit backend selector: `estimate`, `vllm`, or `uds`.          |
+| `modelName`      | – (required for `vllm`/`uds`) | Model whose tokenizer should be loaded / sent in render requests. |
 | `vllm.url`       | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).         |
 | `vllm.timeout`   | `5s`                    | Per-request timeout for text-only requests.                       |
 | `vllm.mmTimeout` | `30s`                   | Per-request timeout for multimodal requests.                      |
@@ -93,6 +96,7 @@ Plugin config — sidecar (loopback):
 ```yaml
 - type: token-producer
   parameters:
+    backend: vllm
     modelName: "${MODEL_NAME}"
     vllm:
       url: "http://localhost:8000"       # optional; this is the default
@@ -103,6 +107,7 @@ Plugin config — dedicated render Service:
 ```yaml
 - type: token-producer
   parameters:
+    backend: vllm
     modelName: "${MODEL_NAME}"
     vllm:
       url: "http://vllm-render.default.svc.cluster.local:8000"
@@ -122,6 +127,7 @@ Before:
 ```yaml
 - type: token-producer
   parameters:
+    backend: uds
     modelName: "${MODEL_NAME}"
     udsTokenizerConfig:
       socketFile: /tmp/tokenizer/tokenizer-uds.socket
@@ -132,6 +138,7 @@ After:
 ```yaml
 - type: token-producer
   parameters:
+    backend: vllm
     modelName: "${MODEL_NAME}"
     vllm:
       url: "http://localhost:8000"   # or a shared render Service
