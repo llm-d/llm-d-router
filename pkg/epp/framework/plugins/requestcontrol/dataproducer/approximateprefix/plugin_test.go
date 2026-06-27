@@ -52,7 +52,7 @@ func disableMinBlockSizeClamp(t *testing.T) {
 // tokenizedBody returns a request body carrying only a tokenized prompt.
 func tokenizedBody(tokenIDs []uint32) *fwkrh.InferenceRequestBody {
 	return &fwkrh.InferenceRequestBody{
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokenIDs}},
+		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}},
 	}
 }
 
@@ -628,8 +628,8 @@ func TestProduce_MultiPrompt(t *testing.T) {
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{{1, 2, 3}, {4, 5}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
 			},
 		},
 	}
@@ -671,8 +671,8 @@ func TestMultiPromptMatchAggregation(t *testing.T) {
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{{1, 2, 3}, {4, 5}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
 			},
 		},
 	}
@@ -690,8 +690,8 @@ func TestMultiPromptMatchAggregation(t *testing.T) {
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{{1, 2, 3}, {4, 5}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
 			},
 		},
 	}
@@ -724,8 +724,8 @@ func TestMultiPromptPartialMatch(t *testing.T) {
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{{1, 2}, {3, 4}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{3, 4}}},
 			},
 		},
 	}
@@ -743,8 +743,8 @@ func TestMultiPromptPartialMatch(t *testing.T) {
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{{1, 2}, {5, 6}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{5, 6}}},
 			},
 		},
 	}

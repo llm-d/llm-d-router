@@ -223,9 +223,11 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 				Prompt: fwkrh.Prompt{TokenIDs: copiedTokenIDsInt},
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens:    [][]uint32{copiedTokenIDsInt},
-				MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					TokenIDs:           copiedTokenIDsInt,
+					MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
+				}},
 			},
 		}
 	default:

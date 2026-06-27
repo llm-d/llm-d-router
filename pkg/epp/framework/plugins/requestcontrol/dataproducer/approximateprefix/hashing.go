@@ -46,11 +46,11 @@ func (b HashBlock) Hash() uint64 {
 }
 
 // getBlockHashes divides the tokenized prompt into blocks and calculates a
-// prefix cache hash for each block. Each prompt in PerPromptTokens is hashed
+// prefix cache hash for each block. Each prompt in Prompts is hashed
 // independently so cross-prompt block adjacency is avoided. The first block
 // hash of every prompt includes the model name and cache salt (if provided).
 // For subsequent blocks, the hash is calculated as: hash(block i content, hash(i-1)).
-// It requires request.Body.TokenizedPrompt to be populated by a token-producer backend.
+// It requires request.Body.TokenizedRequest to be populated by a token-producer backend.
 func getBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) [][]blockHash {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	if request == nil || request.Body == nil {
@@ -58,15 +58,15 @@ func getBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, b
 		return nil
 	}
 
-	tp := request.Body.TokenizedPrompt
+	tp := request.Body.TokenizedRequest
 	if tp == nil || tp.TokenCount() == 0 {
-		loggerDebug.Info("TokenizedPrompt is empty, skipping hashing")
+		loggerDebug.Info("TokenizedRequest is empty, skipping hashing")
 		return nil
 	}
 
 	var result [][]blockHash
-	for _, tokens := range tp.PerPromptTokens {
-		seq := getKVCacheBlocksFromTokens(tokens, blockSizeTokens)
+	for _, p := range tp.Prompts {
+		seq := getKVCacheBlocksFromTokens(p.TokenIDs, blockSizeTokens)
 		hashes := computeBlockHashes(seq, request, maxPrefixBlocks)
 		if len(hashes) > 0 {
 			result = append(result, hashes)
@@ -86,7 +86,7 @@ func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRe
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.
 	_, _ = h.Write([]byte(request.TargetModel))
-	if cacheSalt := request.Body.TokenizedPrompt.CacheSalt; cacheSalt != "" {
+	if cacheSalt := request.Body.TokenizedRequest.CacheSalt; cacheSalt != "" {
 		_, _ = h.Write([]byte(cacheSalt))
 	}
 

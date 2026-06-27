@@ -117,7 +117,7 @@ func (pl *PredictedLatency) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			pl.prefixMatchDataKey:                attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{},
+			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{},
 		},
 	}
 }

@@ -32,7 +32,7 @@ type Modality = fwkrh.Modality
 
 const ModalityImage = fwkrh.ModalityImage
 
-type TokenizedPrompt = fwkrh.TokenizedPrompt
+type TokenizedRequest = fwkrh.TokenizedRequest
 
 type MultiModalFeature = fwkrh.MultiModalFeature
 
