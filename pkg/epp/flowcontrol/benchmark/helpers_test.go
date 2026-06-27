@@ -14,47 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package benchmark implements a synchronous steady-state pipeline for load-testing the Flow
-// Control layer.
-//
-// Benchmarking Flow Control is challenging. Data plane routing is fast, while downstream inference
-// is slow. Simulating downstream latency with thread sleeps skews CPU profiles by parking
-// goroutines, which measures Go scheduler overhead rather than computational throughput.
-//
-// This harness avoids sleeps by using a synchronous pipeline:
-//
-//  1. Intentional Backpressure (W > L): Ingress Concurrency (W) is driven higher than the Capacity
-//     Limit (L), forcing requests to queue.
-//  2. Strict Capacity Checking: A mock SaturationDetector atomically grants capacity only when
-//     evaluated, preventing race conditions where dispatch outruns clients.
-//  3. Immediate Draining: When a client unblocks, it immediately frees its capacity slot,
-//     triggering the next dispatch and keeping the system continuously active.
-//  4. Consistent Queue Depth: Maintaining a fixed, deep queue forces continuous evaluation of
-//     fairness and ordering policies at limits, isolating CPU performance.
-//
-// # Interpreting Metrics in b.RunParallel
-//
-// In a highly concurrent queuing system, standard Go benchmark metrics require careful
-// interpretation:
-//
-//  1. ns/op (system-wide amortized time): Because this uses b.RunParallel, ns/op represents inverse
-//     throughput, not latency. If the system processes 1,000,000 requests in 1 second, it reports
-//     1,000,000 ns/op. (The d/s custom metric converts this to RPS automatically).
-//  2. ops (the definition of an operation): One "op" is the complete lifecycle of a single
-//     simulated request: Ingress, queuing, policy evaluation, and egress.
-//  3. allocs/op and B/op (GC Pressure): High allocations per request mean the Go Garbage Collector
-//     will thrash under load, causing latency jitter.
-//  4. Saturated Coordinates (W > L): When Concurrency (W) exceeds Capacity (L), EnqueueAndWait
-//     blocks. Because we immediately release capacity upon dispatch, the duration of an "op" is
-//     strictly governed by the Flow Control layer's CPU overhead.
-//
-// # Custom Metrics Reported
-//
-//   - d/s:                  (Dispatches/sec) The primary throughput metric.
-//   - r/s:                  (Rejects/sec) Rate of requests rejected due to capacity or timeouts.
-//   - errors:               Total unexpected runtime errors encountered.
-//   - zombies/s:            Rate of requests hitting context deadlines/TTLs.
-//   - burst_dispatches/sec: Drain rate when capacity is instantaneously freed.
 package benchmark
 
 import (
@@ -68,16 +27,22 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	k8stypes "k8s.io/apimachinery/pkg/types"
+
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -120,37 +85,84 @@ type testDetector interface {
 	Release()
 }
 
-// benchDetector models target saturation based strictly on active request counts.
+// benchDetector is a mock SaturationDetector that models a strict concurrency limit (L) without
+// parking goroutines. The processor's dispatch loop calls Saturation once per cycle and then
+// dispatches at most one item; the benchmark worker calls Release after that item is dispatched.
+//
+// Saturation optimistically reserves a permit (inFlight++); Release frees it. Under the matrix's
+// W>L load the queue is always full, so every grant leads to a dispatch and a Release: inFlight
+// accumulates to L and Saturation reports 1.0 once exceeded, which is the backpressure the matrix
+// measures.
+//
+// The complication: the processor also runs dispatchCycle on a 1ms ticker when the queue is EMPTY
+// (notably at startup). Those idle grants never dispatch and so are never Released; a naive detector
+// would latch saturated forever and deadlock every request until its TTL. We distinguish leaked
+// idle grants from genuine load saturation with releaseCount: while releases are
+// flowing the saturation is real; if two consecutive saturated reads see zero releases between them
+// the outstanding grants are leaked idle permits, so we reclaim one. The 1.0/0.99 split sits below
+// usagelimits.DefaultPolicy's 1.0 ceiling, so a grant never trips head-of-line gating.
+//
+// stuckReads and lastReleaseCount are touched only by the single-threaded dispatch loop (Saturation)
+// and so need no synchronization; inFlight and releaseCount are atomic (Release runs on workers).
 type benchDetector struct {
 	flowcontrol.SaturationDetector
 	concurrencyLimit atomic.Int64
-	// _ prevents false sharing between atomic counters on multicore CPU cache lines.
-	_        [56]byte
-	inFlight atomic.Int64
+	// _ prevents false sharing between concurrencyLimit and the hot atomic counters below.
+	_            [48]byte
+	inFlight     atomic.Int64
+	releaseCount atomic.Int64
+
+	stuckReads       int
+	lastReleaseCount int64
 }
 
-// Release frees one unit of capacity.
+// stuckReadThreshold is the number of consecutive saturated reads with zero intervening releases
+// after which the detector treats the outstanding grants as leaked idle permits and reclaims one.
+// >1 so that a single slow Release under load does not cause a spurious reclaim.
+const stuckReadThreshold = 2
+
+// Release frees the permit held by the dispatch that just completed.
 func (d *benchDetector) Release() {
-	if d.concurrencyLimit.Load() > 0 {
-		d.inFlight.Add(-1)
+	if d.concurrencyLimit.Load() <= 0 {
+		return
 	}
+	d.inFlight.Add(-1)
+	d.releaseCount.Add(1)
 }
 
-// Saturation reserves a concurrency slot atomically to guarantee the queues remain strictly at the
-// target depth.
+// Saturation reserves a permit for this cycle, reporting saturated once the limit is exceeded and
+// self-healing leaked idle grants (see the type doc).
 func (d *benchDetector) Saturation(ctx context.Context, candidates []fwkdl.Endpoint) float64 {
 	limit := d.concurrencyLimit.Load()
 	if limit <= 0 {
 		return 0.0 // Free-flow
 	}
 
-	// Optimistic increment to reserve a slot
+	// Optimistically reserve a permit for this cycle.
 	if d.inFlight.Add(1) <= limit {
+		d.stuckReads = 0
 		return 0.99 // Return < 1.0 so the dispatcher proceeds.
 	}
 
-	// Capacity exceeded; rollback the optimistic increment.
+	// Capacity exceeded; roll back the speculative reservation.
 	d.inFlight.Add(-1)
+
+	rc := d.releaseCount.Load()
+	if rc != d.lastReleaseCount {
+		// Releases are flowing: this is genuine load saturation, not a leak.
+		d.lastReleaseCount = rc
+		d.stuckReads = 0
+		return 1.0
+	}
+
+	// No releases since the last saturated read. After a couple of these the outstanding grants must
+	// be leaked idle permits (an empty-queue dispatch tick reserved but never dispatched), so reclaim
+	// one to keep the detector from latching.
+	d.stuckReads++
+	if d.stuckReads >= stuckReadThreshold {
+		d.inFlight.Add(-1)
+		d.stuckReads = 0
+	}
 	return 1.0 // Saturated - forces the Flow Control layer to hold the item.
 }
 
@@ -218,17 +230,15 @@ func setupRegistry(
 	return reg
 }
 
-// setupBenchmarkHarness creates the standard SUT environment.
-func setupBenchmarkHarness(
-	ctx context.Context,
+// setupRegistryWithDefaultPolicies registers the default FCFS ordering and global-strict fairness
+// policies on the handle, then provisions a FlowRegistry with `p` priority bands using them as the
+// per-band defaults. Shared by every benchmark harness so the policy wiring lives in one place.
+func setupRegistryWithDefaultPolicies(
 	b *testing.B,
+	handle fwkplugin.Handle,
 	p priorityLevels,
-	limit egressConcurrencyLimit,
-	customDetector testDetector,
-	customCfg *controller.Config,
-) (*controller.FlowController, testDetector) {
+) contracts.FlowRegistry {
 	b.Helper()
-	handle := testutils.NewTestHandle(ctx)
 
 	fPolicy, err := globalstrict.GlobalStrictFairnessPolicyFactory(registry.DefaultFairnessPolicyRef, nil, handle)
 	if err != nil {
@@ -247,7 +257,22 @@ func setupBenchmarkHarness(
 		FairnessPolicy: fPolicy.(flowcontrol.FairnessPolicy),
 	}
 
-	reg := setupRegistry(b, defaults, p)
+	return setupRegistry(b, defaults, p)
+}
+
+// setupBenchmarkHarness creates the standard SUT environment.
+func setupBenchmarkHarness(
+	ctx context.Context,
+	b *testing.B,
+	p priorityLevels,
+	limit egressConcurrencyLimit,
+	customDetector testDetector,
+	customCfg *controller.Config,
+) (*controller.FlowController, testDetector) {
+	b.Helper()
+	handle := testutils.NewTestHandle(ctx)
+
+	reg := setupRegistryWithDefaultPolicies(b, handle, p)
 
 	detector := customDetector
 	if detector == nil {
@@ -275,8 +300,89 @@ func setupBenchmarkHarness(
 	return fc, detector
 }
 
-// benchmarkTelemetry aggregates benchmark statistics lock-free.
-// Threads mutate local structs and commit totals once at the end.
+// fullPathBenchHarness holds shared setup state for full-path benchmarks that wire a real
+// InFlightLoadProducer, real concurrency detector, and real persistent endpoints into the
+// FlowController.
+type fullPathBenchHarness struct {
+	fc       *controller.FlowController
+	producer *inflightload.InFlightLoadProducer
+	epMeta   *fwkdl.EndpointMetadata
+	schedEp  scheduling.Endpoint
+}
+
+// setupFullPathBenchmark creates the shared harness for benchmarks that exercise
+// the complete flow control data path: producer -> detector -> controller -> cleanup.
+func setupFullPathBenchmark(ctx context.Context, b *testing.B, name string, numPriorities int) *fullPathBenchHarness {
+	b.Helper()
+	if numPriorities < 1 {
+		numPriorities = 1
+	}
+	handle := testutils.NewTestHandle(ctx)
+
+	producerName := name + "-producer"
+	producerPlugin, err := inflightload.InFlightLoadProducerFactory(
+		producerName, fwkplugin.StrictDecoder([]byte(`{}`)), handle,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	producer := producerPlugin.(*inflightload.InFlightLoadProducer)
+
+	detectorPlugin, err := concurrency.ConcurrencyDetectorFactory(
+		name+"-detector",
+		fwkplugin.StrictDecoder([]byte(fmt.Sprintf(
+			`{"maxConcurrency": 100, "inFlightLoadProducerName": %q}`, producerName,
+		))),
+		handle,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	realDetector := detectorPlugin.(flowcontrol.SaturationDetector)
+
+	epMeta := &fwkdl.EndpointMetadata{
+		NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "default"},
+	}
+	ep := fwkdl.NewEndpoint(epMeta, fwkdl.NewMetrics())
+	if err := producer.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: ep,
+	}); err != nil {
+		b.Fatal(err)
+	}
+
+	reg := setupRegistryWithDefaultPolicies(b, handle, priorityLevels(numPriorities))
+
+	fc := controller.NewFlowController(ctx, name+"-bench", &controller.Config{
+		DefaultRequestTTL:        5 * time.Minute,
+		ExpiryCleanupInterval:    1 * time.Hour,
+		EnqueueChannelBufferSize: 2000,
+	}, controller.Deps{
+		Registry:           reg,
+		SaturationDetector: realDetector,
+		EndpointCandidates: &mocks.MockEndpointCandidates{Candidates: []fwkdl.Endpoint{ep}},
+		UsageLimitPolicy:   usagelimits.DefaultPolicy(),
+	})
+
+	schedEp := scheduling.NewEndpoint(epMeta, fwkdl.NewMetrics(), nil)
+
+	// Warm up: block on one request until it's dispatched, proving the dispatch loop is live before
+	// timing. It exercises only the FlowController, not the producer, so no in-flight load is left
+	// behind.
+	warmup := &benchRequest{key: flowcontrol.FlowKey{ID: "warmup", Priority: 0}, byteSize: 512}
+	if outcome, _ := fc.EnqueueAndWait(ctx, warmup); outcome != types.QueueOutcomeDispatched {
+		b.Fatalf("full-path warmup did not dispatch: %v", outcome)
+	}
+
+	return &fullPathBenchHarness{
+		fc:       fc,
+		producer: producer,
+		epMeta:   epMeta,
+		schedEp:  schedEp,
+	}
+}
+
+// benchmarkTelemetry aggregates benchmark statistics lock-free: threads mutate local structs and
+// commit totals once at the end.
 type benchmarkTelemetry struct {
 	errorCount    atomic.Int64
 	dispatchCount atomic.Int64
@@ -323,8 +429,7 @@ func (t *benchmarkTelemetry) commit(local *threadTelemetry) {
 	}
 }
 
-// report aggregates the committed globals and issues standard b.ReportMetric calls into the Go
-// benchmarking framework.
+// report aggregates the committed globals and issues the standard b.ReportMetric calls.
 func (t *benchmarkTelemetry) report(b *testing.B, elapsed float64) {
 	if elapsed <= 0 {
 		return
