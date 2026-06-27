@@ -26,6 +26,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -71,6 +72,8 @@ type FileDiscovery struct {
 	typedName fwkplugin.TypedName
 	path      string
 	watchFile bool
+	// mu guards endpoints, which DumpState reads concurrently with load.
+	mu sync.RWMutex
 	// endpoints is the set of endpoint identities applied to the datastore
 	// from the last successful load. Used as a key set only -- values are
 	// zero-byte structs. Compared against the entries parsed during a
@@ -81,7 +84,10 @@ type FileDiscovery struct {
 	readyOnce sync.Once
 }
 
-var _ fwkdl.EndpointDiscovery = (*FileDiscovery)(nil)
+var (
+	_ fwkdl.EndpointDiscovery = (*FileDiscovery)(nil)
+	_ fwkplugin.StateDumper   = (*FileDiscovery)(nil)
+)
 
 // Factory is the plugin factory for file-discovery.
 func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -107,6 +113,41 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 }
 
 func (f *FileDiscovery) TypedName() fwkplugin.TypedName { return f.typedName }
+
+const maxDebugDumpEndpoints = 100
+
+// discoveryState is the sanitized snapshot returned by DumpState: discovered
+// endpoint identities only, never their addresses or labels.
+type discoveryState struct {
+	Endpoints      []string `json:"endpoints"`
+	TotalEndpoints int      `json:"totalEndpoints"`
+	MaxEndpoints   int      `json:"maxEndpoints"`
+	Truncated      bool     `json:"truncated"`
+}
+
+// DumpState reports the endpoint identities currently loaded from the file,
+// sorted and capped to maxDebugDumpEndpoints so the payload stays bounded. The
+// set is snapshotted under a read lock, so a concurrent reload may not yet be
+// reflected; best-effort visibility is enough for a debug endpoint.
+func (f *FileDiscovery) DumpState() (json.RawMessage, error) {
+	f.mu.RLock()
+	names := make([]string, 0, len(f.endpoints))
+	for id := range f.endpoints {
+		names = append(names, id.String())
+	}
+	f.mu.RUnlock()
+
+	total := len(names)
+	sort.Strings(names)
+
+	state := discoveryState{TotalEndpoints: total, MaxEndpoints: maxDebugDumpEndpoints}
+	if len(names) > maxDebugDumpEndpoints {
+		names = names[:maxDebugDumpEndpoints]
+		state.Truncated = true
+	}
+	state.Endpoints = names
+	return json.Marshal(state)
+}
 
 // Ready returns a channel closed after the first successful load of the
 // endpoints file. See EndpointDiscovery.Ready for the contract.
@@ -222,11 +263,15 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 		notifier.Upsert(meta)
 	}
 
-	for id := range f.endpoints {
+	f.mu.Lock()
+	old := f.endpoints
+	f.endpoints = incoming
+	f.mu.Unlock()
+
+	for id := range old {
 		if _, ok := incoming[id]; !ok {
 			notifier.Delete(id)
 		}
 	}
-	f.endpoints = incoming
 	return errors.Join(errs...)
 }
