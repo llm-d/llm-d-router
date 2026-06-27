@@ -1,0 +1,45 @@
+# EPP configuration for Data Parallel with KV-cache-aware rank routing.
+#
+# This config enables cache-aware DP rank routing for vLLM Internal LB and
+# Hybrid LB modes. The precise-prefix-cache-scorer tracks which DP rank has
+# the best KV cache match per pod, and the dp-rank-header-handler PreRequest
+# plugin injects the X-data-parallel-rank header so vLLM pins the request
+# to the optimal rank (bypassing its internal queue-based LB).
+#
+# Works with the recommended single-profile-handler (Istio >= 1.28.1).
+# No sidecar workaround needed for rank routing.
+#
+# For External LB mode (each DP rank is a separate pod), use this same config.
+# The dp-rank-header-handler is a no-op when no @dpN suffixes are present.
+#
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: precise-prefix-cache-scorer
+  parameters:
+    kvEventsConfig:
+      zmqEndpoint: tcp://0.0.0.0:5557        # global ZMQ socket (single-pod or aggregator)
+      discoverPods: true                      # auto-subscribe to per-pod ZMQ events
+      podDiscoveryConfig:
+        socketPort: 5557                      # ZMQ port on each vLLM pod (rank 0 port; rank N = port + N)
+    indexerConfig:
+      tokenProcessorConfig:
+        blockSize: 16                         # must match vLLM block size if not default (16)
+        hashSeed: "42"                        # must match PYTHONHASHSEED in vLLM pods
+      tokenizersPoolConfig:
+        modelName: Qwen/Qwen2.5-1.5B-Instruct  # replace with your model name
+        hf:
+          tokenizersCacheDir: "/cache/tokenizers"
+      kvBlockIndexConfig:
+        enableMetrics: false                  # enable kv-block index metrics (prometheus)
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+- type: dp-rank-header-handler                # injects X-data-parallel-rank after scheduling
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: precise-prefix-cache-scorer
+    weight: 10
