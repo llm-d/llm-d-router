@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -38,6 +37,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	latencyproducerconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/constants"
@@ -72,48 +72,35 @@ type PredictedLatency struct {
 	runningRequestLists          sync.Map                                      // Key: types.NamespacedName, Value: *requestPriorityQueue
 	sloContextStore              *ttlcache.Cache[string, *predictedLatencyCtx] // TTL cache for request contexts
 	config                       Config
-	prefillTokensInFlight        sync.Map // Key: endpoint NamespacedName.String(), Value: *atomic.Int64
 	prefixMatchDataKey           plugin.DataKey
+	inFlightLoadDataKey          plugin.DataKey
 	latencyPredictionInfoDataKey plugin.DataKey
 }
 
-// endpointCounter returns the atomic counter for the given endpoint key, creating it if necessary.
-func (pl *PredictedLatency) endpointCounter(m *sync.Map, key string) *atomic.Int64 {
-	v, _ := m.LoadOrStore(key, new(atomic.Int64))
-	return v.(*atomic.Int64)
+// endpointInFlightLoad reads the InFlightLoad attribute published by the
+// configured InFlightLoadProducer for the endpoint. The producer discounts the
+// already-cached prompt prefix, so Tokens reflects the uncached prefill work in
+// flight and Requests the active request count. Returns false when the
+// attribute is absent (e.g. an endpoint added before the producer injected it).
+func (pl *PredictedLatency) endpointInFlightLoad(endpoint fwksched.Endpoint) (*attrconcurrency.InFlightLoad, bool) {
+	if raw, ok := endpoint.Get(pl.inFlightLoadDataKey.String()); ok {
+		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
+			return load, true
+		}
+	}
+	return nil, false
 }
 
-// decrementEndpointCounter subtracts delta from the counter at key with a hard
-// floor at zero, and removes the entry from the map once the counter reaches
-// zero. This is the only sanctioned way to decrement prefillTokensInFlight
-// (or any counter with the same shape): a naive Add(-delta) can drift the
-// counter negative if callers race (e.g. Produce publishing an SLO
-// context after PreRequest already skipped the increment)
-// break prediction requests with `greater_than_equal: 0` validation errors.
-// Decrementing a missing key is a no-op and does not create a zero entry.
-func (pl *PredictedLatency) decrementEndpointCounter(m *sync.Map, key string, delta int64) {
-	v, ok := m.Load(key)
-	if !ok {
+// snapshotInFlightLoad records the endpoint's in-flight token and request load
+// at dispatch into the provided fields. The request count falls back to the
+// endpoint's vLLM metrics when the InFlightLoad attribute is absent.
+func (pl *PredictedLatency) snapshotInFlightLoad(endpoint fwksched.Endpoint, tokens *int64, requests *int) {
+	if load, ok := pl.endpointInFlightLoad(endpoint); ok {
+		*tokens = load.Tokens
+		*requests = int(load.Requests)
 		return
 	}
-	counter := v.(*atomic.Int64)
-	for {
-		current := counter.Load()
-		if current <= 0 {
-			// Already at or below zero; clamp and don't over-decrement.
-			return
-		}
-		next := current - delta
-		if next < 0 {
-			next = 0
-		}
-		if counter.CompareAndSwap(current, next) {
-			if next == 0 {
-				m.Delete(key)
-			}
-			return
-		}
-	}
+	*requests = endpoint.GetMetrics().RunningRequestsSize
 }
 
 type Config struct {
@@ -129,6 +116,10 @@ type Config struct {
 	// sidecar for predictions. Default: true.
 	PredictInProduce            bool   `json:"predictInProduce,omitempty"`
 	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
+	// InFlightLoadProducerName selects which InFlightLoadProducer's per-endpoint
+	// load to read for the prefill-tokens-in-flight and active-request-count
+	// features. Empty defaults to the auto-created producer.
+	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -194,6 +185,7 @@ func NewPredictedLatency(name string, config Config, predictor latencypredictor.
 		latencypredictor:             predictor,
 		config:                       config,
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
+		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
@@ -207,14 +199,6 @@ func NewPredictedLatency(name string, config Config, predictor latencypredictor.
 		}
 		plCtx := item.Value()
 		predictedLatency.removeRequestFromQueue(item.Key(), plCtx)
-		if plCtx.prefillTargetMetadata != nil && plCtx.ttft == 0 && plCtx.prefillTokensAtDispatchOnPrefill > 0 {
-			prefillEndpointKey := plCtx.prefillTargetMetadata.NamespacedName.String()
-			predictedLatency.decrementEndpointCounter(&predictedLatency.prefillTokensInFlight, prefillEndpointKey, int64(plCtx.inputTokenCount))
-		}
-		if plCtx.targetMetadata != nil && plCtx.prefillTokensAtDispatch > 0 {
-			decodeEndpointKey := plCtx.targetMetadata.NamespacedName.String()
-			predictedLatency.decrementEndpointCounter(&predictedLatency.prefillTokensInFlight, decodeEndpointKey, int64(plCtx.inputTokenCount))
-		}
 	})
 
 	go predictedLatency.sloContextStore.Start()
@@ -281,6 +265,9 @@ type predictedLatencyCtx struct {
 	prefillTokensAtDispatch          int64
 	prefillTokensAtDispatchOnPrefill int64
 	decodeTokensAtDispatch           int64
+
+	requestsAtDispatch          int
+	requestsAtDispatchOnPrefill int
 }
 
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
