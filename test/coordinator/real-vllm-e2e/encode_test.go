@@ -49,11 +49,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/llm-d/coordinator/pkg/config"
 	"github.com/llm-d/coordinator/pkg/connectors/ec"
@@ -145,7 +143,7 @@ func newGatewayClient() *gateway.Client {
 
 func newEncodeStepFor(t *testing.T, gw *gateway.Client, useOpenAIFormat bool) *steps.EncodeStep {
 	t.Helper()
-	step, err := steps.NewEncodeStep(map[string]any{
+	step, err := steps.NewEncodeStep(gw, map[string]any{
 		"use_openai_format":    useOpenAIFormat,
 		"max_parallel":         4,
 		steps.ParamECConnector: ecConnectorName(),
@@ -153,9 +151,7 @@ func newEncodeStepFor(t *testing.T, gw *gateway.Client, useOpenAIFormat bool) *s
 	if err != nil {
 		t.Fatalf("NewEncodeStep: %v", err)
 	}
-	es := step.(*steps.EncodeStep)
-	es.SetGatewayClient(gw)
-	return es
+	return step.(*steps.EncodeStep)
 }
 
 // TestE2E_Encode_Synthetic drives the encoder with hand-crafted multimodal
@@ -536,7 +532,13 @@ func TestE2E_Encode_DiagnoseGenerateFailure(t *testing.T) {
 	}
 
 	// Build an EncodeStep that sends through a capturing transport.
-	es, err := steps.NewEncodeStep(map[string]any{
+	captured := &capturingTransport{wrapped: &http.Transport{
+		MaxIdleConnsPerHost:   32,
+		IdleConnTimeout:       30 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+	}}
+	gw := gateway.NewWithTransport(captured, gatewayURL())
+	es, err := steps.NewEncodeStep(gw, map[string]any{
 		"use_openai_format":    false, // Generate variant
 		"max_parallel":         1,
 		steps.ParamECConnector: ecConnectorName(),
@@ -544,17 +546,6 @@ func TestE2E_Encode_DiagnoseGenerateFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEncodeStep: %v", err)
 	}
-	captured := &capturingTransport{wrapped: http.DefaultTransport}
-	gw := gateway.New(config.GatewayConfig{
-		Address:             gatewayURL(),
-		MaxIdleConnsPerHost: 32,
-		IdleConnTimeout:     30 * time.Second,
-		Timeout:             60 * time.Second,
-	})
-	// Replace the gateway's transport with our capturing one. The Client
-	// type doesn't expose a setter, so we splice in a custom http.Client.
-	patchGatewayClientTransport(gw, &http.Client{Transport: captured})
-	es.(*steps.EncodeStep).SetGatewayClient(gw)
 
 	execErr := es.Execute(ctx, reqCtx)
 
@@ -622,23 +613,6 @@ func (c *capturingTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	c.requests = append(c.requests, cap)
 	return resp, err
-}
-
-// patchGatewayClientTransport replaces the unexported httpClient inside
-// gateway.Client by re-creating it with our custom transport. We
-// accomplish this via the package's exposed New() then mutate via the
-// Transport accessor. Since gateway.Client doesn't expose a setter, we
-// instead build a parallel client and rely on the encode step calling
-// Post -> Request -> httpClient.Do; the only seam is constructing the
-// gateway with a pre-built http.Client. Currently gateway.New always
-// builds a fresh transport. Workaround: use reflection.
-func patchGatewayClientTransport(gw *gateway.Client, c *http.Client) {
-	v := reflect.ValueOf(gw).Elem().FieldByName("httpClient")
-	if !v.IsValid() {
-		return
-	}
-	ptr := unsafe.Pointer(v.UnsafeAddr())
-	reflect.NewAt(v.Type(), ptr).Elem().Set(reflect.ValueOf(c))
 }
 
 func redactKwargsInJSON(body []byte) string {

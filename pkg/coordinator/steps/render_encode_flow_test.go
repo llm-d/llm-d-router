@@ -72,7 +72,7 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
 
 	// Run render step
-	renderStep, _ := NewRenderStep(map[string]any{})
+	renderStep, _ := NewRenderStep(nil, map[string]any{})
 	renderStep.(*RenderStep).SetServiceAddress(renderServer.URL)
 
 	reqCtx := &pipeline.RequestContext{
@@ -103,11 +103,10 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 	}
 
 	// Run encode step (nixl EC connector merges per-hash ec_transfer_params)
-	encodeStep, _ := NewEncodeStep(map[string]any{
+	encodeStep, _ := NewEncodeStep(gwClient, map[string]any{
 		"use_openai_format": false,
 		ParamECConnector:    ec.NIXL,
 	})
-	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
 	err = encodeStep.Execute(context.Background(), reqCtx)
 	if err != nil {

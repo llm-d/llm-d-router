@@ -48,7 +48,7 @@ type RenderStep struct {
 	client                    *http.Client
 }
 
-func NewRenderStep(params map[string]any) (pipeline.Step, error) {
+func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, error) {
 	timeout := 30 * time.Second
 	if v, ok, err := paramDuration(params, "timeout"); err != nil {
 		return nil, err

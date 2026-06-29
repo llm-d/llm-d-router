@@ -117,12 +117,9 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 
 			pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
 			for _, sc := range stepConfigs {
-				step, err := pipeline.Build(sc.Type, sc.Params)
+				step, err := pipeline.Build(sc.Type, gwClient, sc.Params)
 				if err != nil {
 					t.Fatalf("building step %s: %v", sc.Type, err)
-				}
-				if ga, ok := step.(gateway.ClientAware); ok {
-					ga.SetGatewayClient(gwClient)
 				}
 				if ra, ok := step.(renderAware); ok {
 					ra.SetServiceAddress(renderServer.URL)
@@ -252,14 +249,11 @@ func TestFullPipeline_Integration(t *testing.T) {
 
 	pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
 	for _, sc := range stepConfigs {
-		step, err := pipeline.Build(sc.Type, sc.Params)
+		step, err := pipeline.Build(sc.Type, gwClient, sc.Params)
 		if err != nil {
 			t.Fatalf("building step %s: %v", sc.Type, err)
 		}
 
-		if ga, ok := step.(gateway.ClientAware); ok {
-			ga.SetGatewayClient(gwClient)
-		}
 		if ra, ok := step.(renderAware); ok {
 			ra.SetServiceAddress(renderServer.URL)
 		}

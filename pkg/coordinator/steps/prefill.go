@@ -19,6 +19,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 
@@ -47,7 +48,10 @@ type PrefillStep struct {
 	ec              ec.Connector
 }
 
-func NewPrefillStep(params map[string]any) (pipeline.Step, error) {
+func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
+	if gwClient == nil {
+		return nil, errors.New("prefill: gateway client is required")
+	}
 	useOpenAI := parseUseOpenAIFormat(params)
 	kvName, _ := params[ParamKVConnector].(string)
 	kvConn, err := kv.Build(kvName)
@@ -59,11 +63,7 @@ func NewPrefillStep(params map[string]any) (pipeline.Step, error) {
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	return &PrefillStep{useOpenAIFormat: useOpenAI, kv: kvConn, ec: ecConn}, nil
-}
-
-func (s *PrefillStep) SetGatewayClient(c *gateway.Client) {
-	s.gwClient = c
+	return &PrefillStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn, ec: ecConn}, nil
 }
 
 func (s *PrefillStep) Name() string { return PrefillStepName }

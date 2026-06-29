@@ -165,14 +165,9 @@ func buildPipeline(cfg *config.Config, gwClient *gateway.Client) ([]pipeline.Ste
 		if _, ok := params["use_openai_format"]; !ok {
 			params["use_openai_format"] = cfg.Pipeline.UseOpenAIFormat
 		}
-		step, err := pipeline.Build(stepCfg.Type, params)
+		step, err := pipeline.Build(stepCfg.Type, gwClient, params)
 		if err != nil {
 			return nil, err
-		}
-
-		// Inject the gateway client into steps that need it.
-		if ga, ok := step.(gateway.ClientAware); ok {
-			ga.SetGatewayClient(gwClient)
 		}
 
 		steps = append(steps, step)

@@ -107,11 +107,10 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, err := NewDecodeStep(map[string]any{ParamKVConnector: kv.NIXL})
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*DecodeStep).SetGatewayClient(gwClient)
 
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
@@ -169,11 +168,10 @@ func TestDecodeStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(map[string]any{})
+	step, err := NewDecodeStep(gwClient, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*DecodeStep).SetGatewayClient(gwClient)
 
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
@@ -223,8 +221,7 @@ func TestDecodeStep_Streaming(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, _ := NewDecodeStep(map[string]any{})
-	step.(*DecodeStep).SetGatewayClient(gwClient)
+	step, _ := NewDecodeStep(gwClient, map[string]any{})
 
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
@@ -269,8 +266,7 @@ func TestDecodeStep_GatewayError(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, _ := NewDecodeStep(map[string]any{})
-	step.(*DecodeStep).SetGatewayClient(gwClient)
+	step, _ := NewDecodeStep(gwClient, map[string]any{})
 
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{

@@ -16,7 +16,11 @@ limitations under the License.
 
 package pipeline
 
-import "context"
+import (
+	"context"
+
+	"github.com/llm-d/coordinator/pkg/gateway"
+)
 
 // Step is the fundamental unit of work in the coordinator pipeline.
 type Step interface {
@@ -24,5 +28,7 @@ type Step interface {
 	Execute(ctx context.Context, reqCtx *RequestContext) error
 }
 
-// StepFactory creates a Step from YAML configuration parameters.
-type StepFactory func(params map[string]any) (Step, error)
+// StepFactory creates a Step from the gateway client and YAML configuration
+// parameters. Steps that issue upstream requests store the client at
+// construction; steps that do not need it ignore the argument.
+type StepFactory func(gwClient *gateway.Client, params map[string]any) (Step, error)

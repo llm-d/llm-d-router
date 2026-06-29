@@ -51,8 +51,7 @@ func TestECTransferParams_NotForwardedToDecodeBackend(t *testing.T) {
 	defer gwServer.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
-	decodeStep, _ := NewDecodeStep(map[string]any{ParamKVConnector: kv.NIXL})
-	decodeStep.(*DecodeStep).SetGatewayClient(gwClient)
+	decodeStep, _ := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "test-no-ec",
@@ -122,8 +121,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
 
 	// Run prefill step
-	prefillStep, _ := NewPrefillStep(map[string]any{ParamKVConnector: kv.NIXL})
-	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
+	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "test-flow",
@@ -165,8 +163,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	}
 
 	// Run decode step
-	decodeStep, _ := NewDecodeStep(map[string]any{ParamKVConnector: kv.NIXL})
-	decodeStep.(*DecodeStep).SetGatewayClient(gwClient)
+	decodeStep, _ := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
 
 	recorder := httptest.NewRecorder()
 	reqCtx.ResponseWriter = recorder

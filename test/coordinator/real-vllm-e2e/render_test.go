@@ -71,7 +71,7 @@ func modelName() string {
 
 func newRenderStep(t *testing.T, address string) *steps.RenderStep {
 	t.Helper()
-	step, err := steps.NewRenderStep(map[string]any{"timeout": "30s"})
+	step, err := steps.NewRenderStep(nil, map[string]any{"timeout": "30s"})
 	if err != nil {
 		t.Fatalf("NewRenderStep: %v", err)
 	}

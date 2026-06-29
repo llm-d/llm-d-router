@@ -35,6 +35,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
+	"github.com/llm-d/coordinator/pkg/gateway"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"golang.org/x/sync/errgroup"
 )
@@ -60,7 +61,7 @@ type ReplaceMediaURLsStep struct {
 	client                 *http.Client
 }
 
-func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
+func NewReplaceMediaURLsStep(_ *gateway.Client, params map[string]any) (pipeline.Step, error) {
 	timeout := 10 * time.Second
 	if v, ok, err := paramDuration(params, "download_timeout"); err != nil {
 		return nil, err

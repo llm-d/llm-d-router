@@ -78,11 +78,10 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	}
 
 	// Run encode step
-	encodeStep, _ := NewEncodeStep(map[string]any{
+	encodeStep, _ := NewEncodeStep(gwClient, map[string]any{
 		"use_openai_format": false,
 		ParamECConnector:    ec.NIXL,
 	})
-	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 
 	err := encodeStep.Execute(context.Background(), reqCtx)
 	if err != nil {
@@ -95,11 +94,10 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	}
 
 	// Run prefill step
-	prefillStep, _ := NewPrefillStep(map[string]any{
+	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{
 		"use_openai_format": false,
 		ParamECConnector:    ec.NIXL,
 	})
-	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 
 	err = prefillStep.Execute(context.Background(), reqCtx)
 	if err != nil {
@@ -223,11 +221,10 @@ func TestEncodeToPrefill_PartialECResponse(t *testing.T) {
 		KVTransferParams: make(map[string]any),
 	}
 
-	encodeStep, _ := NewEncodeStep(map[string]any{
+	encodeStep, _ := NewEncodeStep(gwClient, map[string]any{
 		"use_openai_format": false,
 		ParamECConnector:    ec.NIXL,
 	})
-	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
 	if err := encodeStep.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("encode failed: %v", err)
 	}
@@ -238,11 +235,10 @@ func TestEncodeToPrefill_PartialECResponse(t *testing.T) {
 			len(reqCtx.ECTransferParams), reqCtx.ECTransferParams)
 	}
 
-	prefillStep, _ := NewPrefillStep(map[string]any{
+	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{
 		"use_openai_format": false,
 		ParamECConnector:    ec.NIXL,
 	})
-	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
 	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("prefill failed: %v", err)
 	}

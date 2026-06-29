@@ -18,6 +18,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -41,18 +42,17 @@ type DecodeStep struct {
 	kv              kv.Connector
 }
 
-func NewDecodeStep(params map[string]any) (pipeline.Step, error) {
+func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
+	if gwClient == nil {
+		return nil, errors.New("decode: gateway client is required")
+	}
 	useOpenAI := parseUseOpenAIFormat(params)
 	kvName, _ := params[ParamKVConnector].(string)
 	kvConn, err := kv.Build(kvName)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{useOpenAIFormat: useOpenAI, kv: kvConn}, nil
-}
-
-func (s *DecodeStep) SetGatewayClient(c *gateway.Client) {
-	s.gwClient = c
+	return &DecodeStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn}, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }

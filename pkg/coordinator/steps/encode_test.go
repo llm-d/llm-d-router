@@ -89,7 +89,7 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, err := NewEncodeStep(map[string]any{
+	step, err := NewEncodeStep(gwClient, map[string]any{
 		"use_openai_format": false,
 		"max_parallel":      4,
 		ParamECConnector:    ec.NIXL,
@@ -97,7 +97,6 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*EncodeStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-1",
@@ -169,14 +168,13 @@ func TestEncodeStep_SkipsInvalidECTransferParams(t *testing.T) {
 			}))
 			defer server.Close()
 
-			step, err := NewEncodeStep(map[string]any{
+			step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
 				"use_openai_format": false,
 				ParamECConnector:    ec.NIXL,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			step.(*EncodeStep).SetGatewayClient(gateway.New(config.GatewayConfig{Address: server.URL}))
 
 			reqCtx := &pipeline.RequestContext{
 				RequestID: "req-1",
@@ -223,8 +221,7 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, _ := NewEncodeStep(map[string]any{"max_parallel": 1, "use_openai_format": false})
-	step.(*EncodeStep).SetGatewayClient(gwClient)
+	step, _ := NewEncodeStep(gwClient, map[string]any{"max_parallel": 1, "use_openai_format": false})
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-2",
@@ -269,13 +266,12 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewEncodeStep(map[string]any{
+	step, err := NewEncodeStep(gwClient, map[string]any{
 		ParamECConnector: ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*EncodeStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat",
@@ -367,11 +363,10 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewEncodeStep(map[string]any{ParamECConnector: ec.NIXL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*EncodeStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:         "req-text-only",
@@ -407,14 +402,13 @@ func TestEncodeStep_EncoderReturnsNoECParams(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewEncodeStep(map[string]any{
+	step, err := NewEncodeStep(gwClient, map[string]any{
 		"use_openai_format": false,
 		ParamECConnector:    ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*EncodeStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-no-ec",
@@ -458,8 +452,7 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, _ := NewEncodeStep(map[string]any{"use_openai_format": false})
-	step.(*EncodeStep).SetGatewayClient(gwClient)
+	step, _ := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false})
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-tok",

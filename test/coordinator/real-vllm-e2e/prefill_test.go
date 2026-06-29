@@ -64,7 +64,7 @@ func kvConnectorName() string {
 
 func newPrefillStepFor(t *testing.T, gw *gateway.Client, useOpenAIFormat bool) *steps.PrefillStep {
 	t.Helper()
-	step, err := steps.NewPrefillStep(map[string]any{
+	step, err := steps.NewPrefillStep(gw, map[string]any{
 		"use_openai_format":    useOpenAIFormat,
 		steps.ParamECConnector: ecConnectorName(),
 		steps.ParamKVConnector: kvConnectorName(),
@@ -72,9 +72,7 @@ func newPrefillStepFor(t *testing.T, gw *gateway.Client, useOpenAIFormat bool) *
 	if err != nil {
 		t.Fatalf("NewPrefillStep: %v", err)
 	}
-	ps := step.(*steps.PrefillStep)
-	ps.SetGatewayClient(gw)
-	return ps
+	return step.(*steps.PrefillStep)
 }
 
 // logPrefillResult logs what prefill returned. We don't strictly assert that

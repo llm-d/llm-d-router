@@ -20,6 +20,9 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/coordinator/pkg/gateway"
 )
 
 func TestParamInt(t *testing.T) {
@@ -111,7 +114,7 @@ func TestParamDuration(t *testing.T) {
 // A float-formatted limit (as a YAML decoder may produce) must still apply,
 // not silently fall through to the default. This is the regression T1 covers.
 func TestNewRenderStep_FloatFormattedLimit(t *testing.T) {
-	step, err := NewRenderStep(map[string]any{"max_total_tokens": 5.0})
+	step, err := NewRenderStep(nil, map[string]any{"max_total_tokens": 5.0})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -122,19 +125,19 @@ func TestNewRenderStep_FloatFormattedLimit(t *testing.T) {
 }
 
 func TestNewRenderStep_UnparsableTimeout(t *testing.T) {
-	if _, err := NewRenderStep(map[string]any{"timeout": "30"}); err == nil {
+	if _, err := NewRenderStep(nil, map[string]any{"timeout": "30"}); err == nil {
 		t.Fatal("expected error for timeout without a unit")
 	}
 }
 
 func TestNewReplaceMediaURLsStep_UnparsableTimeout(t *testing.T) {
-	if _, err := NewReplaceMediaURLsStep(map[string]any{"download_timeout": "abc"}); err == nil {
+	if _, err := NewReplaceMediaURLsStep(nil, map[string]any{"download_timeout": "abc"}); err == nil {
 		t.Fatal("expected error for unparsable download_timeout")
 	}
 }
 
 func TestNewReplaceMediaURLsStep_FloatFormattedLimit(t *testing.T) {
-	step, err := NewReplaceMediaURLsStep(map[string]any{"max_download_size": 1024.0})
+	step, err := NewReplaceMediaURLsStep(nil, map[string]any{"max_download_size": 1024.0})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -145,7 +148,7 @@ func TestNewReplaceMediaURLsStep_FloatFormattedLimit(t *testing.T) {
 }
 
 func TestNewEncodeStep_FloatFormattedLimit(t *testing.T) {
-	step, err := NewEncodeStep(map[string]any{"max_parallel": 4.0})
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{}), map[string]any{"max_parallel": 4.0})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

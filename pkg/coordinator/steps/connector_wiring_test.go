@@ -74,14 +74,13 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 			defer srv.Close()
 
 			gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
-			step, err := NewPrefillStep(map[string]any{
+			step, err := NewPrefillStep(gwClient, map[string]any{
 				"use_openai_format": false,
 				ParamKVConnector:    tc.connector,
 			})
 			if err != nil {
 				t.Fatalf("NewPrefillStep: %v", err)
 			}
-			step.(*PrefillStep).SetGatewayClient(gwClient)
 
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req",
@@ -175,11 +174,10 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 			defer srv.Close()
 
 			gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
-			step, err := NewDecodeStep(map[string]any{ParamKVConnector: tc.connector})
+			step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: tc.connector})
 			if err != nil {
 				t.Fatalf("NewDecodeStep: %v", err)
 			}
-			step.(*DecodeStep).SetGatewayClient(gwClient)
 
 			recorder := httptest.NewRecorder()
 			reqCtx := &pipeline.RequestContext{
@@ -212,13 +210,15 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 }
 
 func TestPrefillStep_UnknownConnectorRejected(t *testing.T) {
-	if _, err := NewPrefillStep(map[string]any{ParamKVConnector: "bogus"}); err == nil {
+	gwClient := gateway.New(config.GatewayConfig{})
+	if _, err := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: "bogus"}); err == nil {
 		t.Fatal("expected error for unknown connector")
 	}
 }
 
 func TestDecodeStep_UnknownConnectorRejected(t *testing.T) {
-	if _, err := NewDecodeStep(map[string]any{ParamKVConnector: "bogus"}); err == nil {
+	gwClient := gateway.New(config.GatewayConfig{})
+	if _, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: "bogus"}); err == nil {
 		t.Fatal("expected error for unknown connector")
 	}
 }

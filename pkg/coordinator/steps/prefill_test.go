@@ -57,14 +57,13 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, err := NewPrefillStep(map[string]any{
+	step, err := NewPrefillStep(gwClient, map[string]any{
 		"use_openai_format": false,
 		ParamECConnector:    ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*PrefillStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-1",
@@ -190,11 +189,10 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewPrefillStep(map[string]any{})
+	step, err := NewPrefillStep(gwClient, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*PrefillStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:         "req-compl",
@@ -243,11 +241,10 @@ func TestPrefillStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewPrefillStep(map[string]any{})
+	step, err := NewPrefillStep(gwClient, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*PrefillStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-compl",
@@ -286,13 +283,12 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewPrefillStep(map[string]any{
+	step, err := NewPrefillStep(gwClient, map[string]any{
 		ParamECConnector: ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*PrefillStep).SetGatewayClient(gwClient)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat",
@@ -406,14 +402,13 @@ func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 			}))
 			defer server.Close()
 
-			step, err := NewPrefillStep(map[string]any{
+			step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
 				"use_openai_format": tc.useOpenAI,
 				ParamECConnector:    ec.SharedStorage,
 			})
 			if err != nil {
 				t.Fatalf("NewPrefillStep: %v", err)
 			}
-			step.(*PrefillStep).SetGatewayClient(gateway.New(config.GatewayConfig{Address: server.URL}))
 
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req",
@@ -452,14 +447,13 @@ func TestPrefillStep_ConflictingECParams_RejectsRequest(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, err := NewPrefillStep(map[string]any{
+	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
 		"use_openai_format": false,
 		ParamECConnector:    ec.NIXL,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*PrefillStep).SetGatewayClient(gateway.New(config.GatewayConfig{Address: server.URL}))
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-conflict",
@@ -492,8 +486,7 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
 
-	step, _ := NewPrefillStep(map[string]any{})
-	step.(*PrefillStep).SetGatewayClient(gwClient)
+	step, _ := NewPrefillStep(gwClient, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID: "req-1",
@@ -539,7 +532,7 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 			}))
 			defer server.Close()
 
-			step, err := NewPrefillStep(map[string]any{
+			step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
 				"use_openai_format": false,
 				ParamKVConnector:    kv.NIXL,
 				ParamECConnector:    ec.NIXL,
@@ -547,7 +540,6 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			step.(*PrefillStep).SetGatewayClient(gateway.New(config.GatewayConfig{Address: server.URL}))
 
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req-1",

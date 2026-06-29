@@ -60,11 +60,10 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	defer srv.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
-	step, err := NewConditionalDecodeStep(nil)
+	step, err := NewConditionalDecodeStep(gwClient, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	step.(*ConditionalDecodeStep).SetGatewayClient(gwClient)
 
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
@@ -133,8 +132,7 @@ func TestConditionalDecodeStep_CacheHit_Streaming(t *testing.T) {
 	defer srv.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
-	step, _ := NewConditionalDecodeStep(nil)
-	step.(*ConditionalDecodeStep).SetGatewayClient(gwClient)
+	step, _ := NewConditionalDecodeStep(gwClient, nil)
 
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
@@ -172,8 +170,7 @@ func TestConditionalDecodeStep_CacheMiss_412(t *testing.T) {
 	defer srv.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
-	step, _ := NewConditionalDecodeStep(nil)
-	step.(*ConditionalDecodeStep).SetGatewayClient(gwClient)
+	step, _ := NewConditionalDecodeStep(gwClient, nil)
 
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
@@ -206,8 +203,7 @@ func TestConditionalDecodeStep_ServerError(t *testing.T) {
 	defer srv.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
-	step, _ := NewConditionalDecodeStep(nil)
-	step.(*ConditionalDecodeStep).SetGatewayClient(gwClient)
+	step, _ := NewConditionalDecodeStep(gwClient, nil)
 
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{

@@ -36,7 +36,7 @@ import (
 // tests that talk to a local server must opt loopback back in.
 func newLoopbackStep(t *testing.T, params map[string]any) *ReplaceMediaURLsStep {
 	t.Helper()
-	step, err := NewReplaceMediaURLsStep(params)
+	step, err := NewReplaceMediaURLsStep(nil, params)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestReplaceMediaURLsStep_DownloadsAndInlines(t *testing.T) {
 }
 
 func TestReplaceMediaURLsStep_NoImages(t *testing.T) {
-	step, _ := NewReplaceMediaURLsStep(map[string]any{})
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
 		Body: map[string]any{
@@ -121,7 +121,7 @@ func TestReplaceMediaURLsStep_DownloadFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, _ := NewReplaceMediaURLsStep(map[string]any{})
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
 		Body: map[string]any{
@@ -146,7 +146,7 @@ func TestReplaceMediaURLsStep_DownloadFailure(t *testing.T) {
 }
 
 func TestReplaceMediaURLsStep_DataURIInput(t *testing.T) {
-	step, _ := NewReplaceMediaURLsStep(map[string]any{})
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 
 	const dataURI = "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
 	reqCtx := &pipeline.RequestContext{
@@ -340,7 +340,7 @@ func TestReplaceMediaURLsStep_RejectsTooManyEntries(t *testing.T) {
 	}))
 	defer imageServer.Close()
 
-	step, err := NewReplaceMediaURLsStep(map[string]any{"max_multimodal_entries": 2})
+	step, err := NewReplaceMediaURLsStep(nil, map[string]any{"max_multimodal_entries": 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestReplaceMediaURLsStep_RejectsTooManyEntries(t *testing.T) {
 }
 
 func TestReplaceMediaURLsStep_RejectsNegativeMaxEntries(t *testing.T) {
-	_, err := NewReplaceMediaURLsStep(map[string]any{"max_multimodal_entries": -1})
+	_, err := NewReplaceMediaURLsStep(nil, map[string]any{"max_multimodal_entries": -1})
 	if err == nil {
 		t.Fatal("expected error for negative max_multimodal_entries")
 	}
@@ -465,17 +465,17 @@ func TestReplaceMediaURLsStep_MultipleImages(t *testing.T) {
 
 func TestReplaceMediaURLsStep_RejectsNonPositiveMaxConcurrent(t *testing.T) {
 	for _, v := range []int{0, -1} {
-		if _, err := NewReplaceMediaURLsStep(map[string]any{"max_concurrent_downloads": v}); err == nil {
+		if _, err := NewReplaceMediaURLsStep(nil, map[string]any{"max_concurrent_downloads": v}); err == nil {
 			t.Fatalf("expected error for max_concurrent_downloads=%d", v)
 		}
 	}
-	if _, err := NewReplaceMediaURLsStep(map[string]any{"max_concurrent_downloads": 5}); err != nil {
+	if _, err := NewReplaceMediaURLsStep(nil, map[string]any{"max_concurrent_downloads": 5}); err != nil {
 		t.Fatalf("unexpected error for positive max_concurrent_downloads: %v", err)
 	}
 }
 
 func TestReplaceMediaURLsStep_Name(t *testing.T) {
-	step, err := NewReplaceMediaURLsStep(map[string]any{})
+	step, err := NewReplaceMediaURLsStep(nil, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,7 +528,7 @@ func TestReplaceMediaURLsStep_MalformedBody(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			step, _ := NewReplaceMediaURLsStep(map[string]any{})
+			step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 			reqCtx := &pipeline.RequestContext{Body: tt.body}
 			if err := step.Execute(context.Background(), reqCtx); err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -541,7 +541,7 @@ func TestReplaceMediaURLsStep_MalformedBody(t *testing.T) {
 }
 
 func TestReplaceMediaURLsStep_InvalidDataURI(t *testing.T) {
-	step, _ := NewReplaceMediaURLsStep(map[string]any{})
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
 		Body: map[string]any{
 			"messages": []any{
@@ -638,7 +638,7 @@ func TestReplaceMediaURLsStep_DownloadUnreachable(t *testing.T) {
 // pkg/gateway/client.go) would silently bypass the proxy; this test fails if
 // that regression is introduced here.
 func TestReplaceMediaURLsStep_ClientPreservesProxy(t *testing.T) {
-	step, err := NewReplaceMediaURLsStep(map[string]any{})
+	step, err := NewReplaceMediaURLsStep(nil, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +656,7 @@ func TestReplaceMediaURLsStep_ClientPreservesProxy(t *testing.T) {
 }
 
 func TestReplaceMediaURLsStep_DownloadInvalidURL(t *testing.T) {
-	step, _ := NewReplaceMediaURLsStep(map[string]any{})
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 	rmu := step.(*ReplaceMediaURLsStep)
 
 	// 0x7f (DEL) is an invalid control character in a URL; NewRequestWithContext
@@ -802,7 +802,7 @@ func TestReplaceMediaURLsStep_RejectsInvalidMaxDownloadSize(t *testing.T) {
 	// download() cannot overflow to a negative limit (which io.LimitReader
 	// would treat as immediate EOF, accepting an oversized body as empty).
 	for _, v := range []int{0, -1, math.MaxInt} {
-		if _, err := NewReplaceMediaURLsStep(map[string]any{"max_download_size": v}); err == nil {
+		if _, err := NewReplaceMediaURLsStep(nil, map[string]any{"max_download_size": v}); err == nil {
 			t.Fatalf("expected error for max_download_size=%d", v)
 		}
 	}
@@ -966,7 +966,7 @@ func TestReplaceMediaURLsStep_BlocksHostnameResolvingToPrivate(t *testing.T) {
 	}
 
 	// Default guard: loopback blocked. "localhost" resolves to 127.0.0.1/::1.
-	built, err := NewReplaceMediaURLsStep(map[string]any{"download_timeout": "2s"})
+	built, err := NewReplaceMediaURLsStep(nil, map[string]any{"download_timeout": "2s"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1012,7 +1012,7 @@ func TestReplaceMediaURLsStep_DomainAllowlist(t *testing.T) {
 
 // allowed_domains entries must be strings.
 func TestReplaceMediaURLsStep_RejectsNonStringAllowedDomain(t *testing.T) {
-	_, err := NewReplaceMediaURLsStep(map[string]any{"allowed_domains": []any{123}})
+	_, err := NewReplaceMediaURLsStep(nil, map[string]any{"allowed_domains": []any{123}})
 	if err == nil {
 		t.Fatal("expected error for non-string allowed_domains entry")
 	}
@@ -1021,7 +1021,7 @@ func TestReplaceMediaURLsStep_RejectsNonStringAllowedDomain(t *testing.T) {
 // A list arriving as []string (a programmatic caller, not the YAML path) must
 // build the allowlist, not silently fall back to allow-all.
 func TestReplaceMediaURLsStep_AllowedDomainsStringSlice(t *testing.T) {
-	step, err := NewReplaceMediaURLsStep(map[string]any{"allowed_domains": []string{"images.example.com"}})
+	step, err := NewReplaceMediaURLsStep(nil, map[string]any{"allowed_domains": []string{"images.example.com"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1037,7 +1037,7 @@ func TestReplaceMediaURLsStep_AllowedDomainsStringSlice(t *testing.T) {
 // An allowed_domains value of an unsupported type must error, not silently
 // disable the allowlist.
 func TestReplaceMediaURLsStep_RejectsNonListAllowedDomains(t *testing.T) {
-	_, err := NewReplaceMediaURLsStep(map[string]any{"allowed_domains": "images.example.com"})
+	_, err := NewReplaceMediaURLsStep(nil, map[string]any{"allowed_domains": "images.example.com"})
 	if err == nil {
 		t.Fatal("expected error for non-list allowed_domains")
 	}

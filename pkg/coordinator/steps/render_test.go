@@ -57,7 +57,7 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, err := NewRenderStep(map[string]any{})
+	step, err := NewRenderStep(nil, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, _ := NewRenderStep(map[string]any{})
+	step, _ := NewRenderStep(nil, map[string]any{})
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
@@ -153,7 +153,7 @@ func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, _ := NewRenderStep(map[string]any{})
+	step, _ := NewRenderStep(nil, map[string]any{})
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
@@ -186,7 +186,7 @@ func TestRenderStep_CompletionsTextPrompt_CallsRender(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, _ := NewRenderStep(map[string]any{})
+	step, _ := NewRenderStep(nil, map[string]any{})
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
@@ -229,7 +229,7 @@ func TestRenderStep_RejectsTooManyTotalTokens_ChatCompletions(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, _ := NewRenderStep(map[string]any{"max_total_tokens": 5})
+	step, _ := NewRenderStep(nil, map[string]any{"max_total_tokens": 5})
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
@@ -257,7 +257,7 @@ func TestRenderStep_RejectsTooManyTotalTokens_CompletionsString(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, _ := NewRenderStep(map[string]any{"max_total_tokens": 4})
+	step, _ := NewRenderStep(nil, map[string]any{"max_total_tokens": 4})
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
@@ -275,7 +275,7 @@ func TestRenderStep_RejectsTooManyTotalTokens_CompletionsString(t *testing.T) {
 }
 
 func TestRenderStep_RejectsTooManyTotalTokens_CompletionsTokenArray(t *testing.T) {
-	step, _ := NewRenderStep(map[string]any{"max_total_tokens": 2})
+	step, _ := NewRenderStep(nil, map[string]any{"max_total_tokens": 2})
 	step.(*RenderStep).SetServiceAddress("http://unused")
 
 	reqCtx := &pipeline.RequestContext{
@@ -301,7 +301,7 @@ func TestRenderStep_UpstreamErrorCarriesStatus(t *testing.T) {
 			w.WriteHeader(status)
 		}))
 
-		step, _ := NewRenderStep(nil)
+		step, _ := NewRenderStep(nil, nil)
 		step.(*RenderStep).SetServiceAddress(server.URL)
 
 		reqCtx := &pipeline.RequestContext{
@@ -343,7 +343,7 @@ func TestRenderStep_RejectsTooManyPlaceholderTokens(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, _ := NewRenderStep(map[string]any{"max_total_placeholder_tokens": 5})
+	step, _ := NewRenderStep(nil, map[string]any{"max_total_placeholder_tokens": 5})
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
@@ -380,7 +380,7 @@ func TestRenderStep_AllowsAtPlaceholderLimit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, _ := NewRenderStep(map[string]any{"max_total_placeholder_tokens": 3})
+	step, _ := NewRenderStep(nil, map[string]any{"max_total_placeholder_tokens": 3})
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
@@ -395,10 +395,10 @@ func TestRenderStep_AllowsAtPlaceholderLimit(t *testing.T) {
 }
 
 func TestRenderStep_RejectsNegativeLimits(t *testing.T) {
-	if _, err := NewRenderStep(map[string]any{"max_total_tokens": -1}); err == nil {
+	if _, err := NewRenderStep(nil, map[string]any{"max_total_tokens": -1}); err == nil {
 		t.Fatal("expected error for negative max_total_tokens")
 	}
-	if _, err := NewRenderStep(map[string]any{"max_total_placeholder_tokens": -1}); err == nil {
+	if _, err := NewRenderStep(nil, map[string]any{"max_total_placeholder_tokens": -1}); err == nil {
 		t.Fatal("expected error for negative max_total_placeholder_tokens")
 	}
 }
@@ -410,7 +410,7 @@ func TestRenderStep_ServiceError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, _ := NewRenderStep(map[string]any{})
+	step, _ := NewRenderStep(nil, map[string]any{})
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{

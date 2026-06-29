@@ -79,8 +79,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
 
 	// --- Encode step ---
-	encodeStep, _ := NewEncodeStep(map[string]any{})
-	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
+	encodeStep, _ := NewEncodeStep(gwClient, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-path-test",
@@ -115,8 +114,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	}
 
 	// --- Prefill step ---
-	prefillStep, _ := NewPrefillStep(map[string]any{})
-	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
+	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{})
 
 	err = prefillStep.Execute(context.Background(), reqCtx)
 	if err != nil {
@@ -124,8 +122,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	}
 
 	// --- Decode step ---
-	decodeStep, _ := NewDecodeStep(map[string]any{})
-	decodeStep.(*DecodeStep).SetGatewayClient(gwClient)
+	decodeStep, _ := NewDecodeStep(gwClient, map[string]any{})
 
 	recorder := httptest.NewRecorder()
 	reqCtx.ResponseWriter = recorder
@@ -198,14 +195,12 @@ func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T)
 		Body:             map[string]any{"model": "test-model", "stream": false, "prompt": "hello"},
 	}
 
-	encodeStep, _ := NewEncodeStep(map[string]any{"use_openai_format": false})
-	encodeStep.(*EncodeStep).SetGatewayClient(gwClient)
+	encodeStep, _ := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false})
 	if err := encodeStep.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("encode failed: %v", err)
 	}
 
-	prefillStep, _ := NewPrefillStep(map[string]any{"use_openai_format": false})
-	prefillStep.(*PrefillStep).SetGatewayClient(gwClient)
+	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{"use_openai_format": false})
 	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("prefill failed: %v", err)
 	}
@@ -213,8 +208,7 @@ func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T)
 	recorder := httptest.NewRecorder()
 	reqCtx.ResponseWriter = recorder
 
-	decodeStep, _ := NewDecodeStep(map[string]any{"use_openai_format": false})
-	decodeStep.(*DecodeStep).SetGatewayClient(gwClient)
+	decodeStep, _ := NewDecodeStep(gwClient, map[string]any{"use_openai_format": false})
 	if err := decodeStep.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("decode failed: %v", err)
 	}
@@ -242,8 +236,7 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
 
-	decodeStep, _ := NewDecodeStep(map[string]any{})
-	decodeStep.(*DecodeStep).SetGatewayClient(gwClient)
+	decodeStep, _ := NewDecodeStep(gwClient, map[string]any{})
 
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{

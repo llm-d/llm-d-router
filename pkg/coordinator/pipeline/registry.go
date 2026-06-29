@@ -16,7 +16,11 @@ limitations under the License.
 
 package pipeline
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/llm-d/coordinator/pkg/gateway"
+)
 
 var registry = map[string]StepFactory{}
 
@@ -25,11 +29,12 @@ func Register(typeName string, factory StepFactory) {
 	registry[typeName] = factory
 }
 
-// Build instantiates a step by type name and parameters.
-func Build(typeName string, params map[string]any) (Step, error) {
+// Build instantiates a step by type name, injecting the gateway client and
+// parameters.
+func Build(typeName string, gwClient *gateway.Client, params map[string]any) (Step, error) {
 	factory, ok := registry[typeName]
 	if !ok {
 		return nil, fmt.Errorf("unknown step type: %s", typeName)
 	}
-	return factory(params)
+	return factory(gwClient, params)
 }
