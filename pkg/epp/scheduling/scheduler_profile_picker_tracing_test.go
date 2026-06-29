@@ -18,6 +18,7 @@ package scheduling
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -142,31 +143,38 @@ func TestRunPickerPluginSingleSpan(t *testing.T) {
 	if got := attrs["llm_d.epp.picker.candidate_endpoints"].AsInt64(); got != 3 {
 		t.Errorf("candidate_endpoints = %d, want 3", got)
 	}
-	if got := attrs["llm_d.epp.picker.selected_endpoints"].AsInt64(); got != 1 {
-		t.Errorf("selected_endpoints = %d, want 1", got)
+	// newWeightedScores assigns score i to the i-th name, so the span records
+	// candidates highest score first.
+	if got, want := attrs["llm_d.epp.picker.top_endpoints"].AsStringSlice(), []string{"/pod3", "/pod2", "/pod1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("top_endpoints = %v, want %v", got, want)
+	}
+	if got, want := attrs["llm_d.epp.picker.top_scores"].AsFloat64Slice(), []float64{2, 1, 0}; !reflect.DeepEqual(got, want) {
+		t.Errorf("top_scores = %v, want %v", got, want)
 	}
 }
 
-func TestRunPickerPluginMultipleSelected(t *testing.T) {
+func TestRunPickerPluginTopScoresCapped(t *testing.T) {
 	recorder := setupPickerSpanRecorder(t)
 
 	picker := &fakePicker{typedName: fwkplugin.TypedName{Type: "max-score", Name: "multi"}, selected: 2}
 	profile := NewSchedulerProfile().WithPicker(picker)
-	scores := newWeightedScores("pod1", "pod2", "pod3")
+	// Seven candidates (scores 0..6) exceed the cap of five.
+	scores := newWeightedScores("pod1", "pod2", "pod3", "pod4", "pod5", "pod6", "pod7")
 
 	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
-	result := profile.runPickerPlugin(ctx, &fwksched.InferenceRequest{}, scores)
+	profile.runPickerPlugin(ctx, &fwksched.InferenceRequest{}, scores)
 	root.End()
 
-	if result == nil || len(result.TargetEndpoints) != 2 {
-		t.Fatalf("runPickerPlugin returned %v, want 2 targets", result)
-	}
 	spans := findPickerSpans(recorder.Ended(), "pick_endpoints")
 	if len(spans) != 1 {
 		t.Fatalf("got %d pick_endpoints spans, want 1", len(spans))
 	}
-	if got := pickerSpanAttributes(spans[0])["llm_d.epp.picker.selected_endpoints"].AsInt64(); got != 2 {
-		t.Errorf("selected_endpoints = %d, want 2 (len(TargetEndpoints))", got)
+	attrs := pickerSpanAttributes(spans[0])
+	if got, want := attrs["llm_d.epp.picker.top_endpoints"].AsStringSlice(), []string{"/pod7", "/pod6", "/pod5", "/pod4", "/pod3"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("top_endpoints = %v, want the 5 highest-scoring %v", got, want)
+	}
+	if got, want := attrs["llm_d.epp.picker.top_scores"].AsFloat64Slice(), []float64{6, 5, 4, 3, 2}; !reflect.DeepEqual(got, want) {
+		t.Errorf("top_scores = %v, want %v", got, want)
 	}
 }
 
@@ -188,8 +196,10 @@ func TestRunPickerPluginNilResult(t *testing.T) {
 	if len(spans) != 1 {
 		t.Fatalf("got %d pick_endpoints spans, want 1 (span must end on nil result)", len(spans))
 	}
-	if got := pickerSpanAttributes(spans[0])["llm_d.epp.picker.selected_endpoints"].AsInt64(); got != 0 {
-		t.Errorf("selected_endpoints = %d, want 0", got)
+	// Scores are captured from the candidates before Pick, so they are recorded
+	// even when the picker selects nothing.
+	if got, want := pickerSpanAttributes(spans[0])["llm_d.epp.picker.top_scores"].AsFloat64Slice(), []float64{1, 0}; !reflect.DeepEqual(got, want) {
+		t.Errorf("top_scores = %v, want %v", got, want)
 	}
 }
 

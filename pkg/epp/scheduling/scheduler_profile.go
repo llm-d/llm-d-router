@@ -19,6 +19,7 @@ package scheduling
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -214,6 +215,17 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	defer span.End()
 
 	span.SetAttributes(attribute.Int("llm_d.epp.picker.candidate_endpoints", len(scoredEndpoints)))
+	// The picker almost always returns a single target, so its count carries
+	// little signal. The score distribution across the strongest candidates is
+	// what explains why an endpoint was chosen, so record the highest-scoring
+	// few (names with their weighted scores). Captured before Pick because
+	// pickers reorder scoredEndpoints in place.
+	if names, scores := topScoredEndpoints(scoredEndpoints, maxTracedEndpointScores); len(names) > 0 {
+		span.SetAttributes(
+			attribute.StringSlice("llm_d.epp.picker.top_endpoints", names),
+			attribute.Float64Slice("llm_d.epp.picker.top_scores", scores),
+		)
+	}
 	if request != nil {
 		if request.TargetModel != "" {
 			span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
@@ -228,13 +240,32 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	metrics.RecordPluginProcessingLatency(pickerExtensionPoint, p.picker.TypedName().Type, p.picker.TypedName().Name, time.Since(before))
 	logger.V(logutil.DEBUG).Info("Completed running picker plugin successfully", "plugin", p.picker.TypedName(), "result", result)
 
-	selected := 0
-	if result != nil {
-		selected = len(result.TargetEndpoints)
-	}
-	span.SetAttributes(attribute.Int("llm_d.epp.picker.selected_endpoints", selected))
-
 	return result
+}
+
+// topScoredEndpoints returns the names and weighted scores of the highest
+// scoring candidates, ordered by descending score with the endpoint name as a
+// stable tiebreaker and capped at limit. The returned slices are index-aligned.
+func topScoredEndpoints(scored []*fwksched.ScoredEndpoint, limit int) ([]string, []float64) {
+	ranked := make([]*fwksched.ScoredEndpoint, len(scored))
+	copy(ranked, scored)
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].Score != ranked[j].Score {
+			return ranked[i].Score > ranked[j].Score
+		}
+		return ranked[i].GetMetadata().NamespacedName.String() <
+			ranked[j].GetMetadata().NamespacedName.String()
+	})
+	if limit < len(ranked) {
+		ranked = ranked[:limit]
+	}
+	names := make([]string, len(ranked))
+	scores := make([]float64, len(ranked))
+	for i, se := range ranked {
+		names[i] = se.GetMetadata().NamespacedName.String()
+		scores[i] = se.Score
+	}
+	return names, scores
 }
 
 func enforceScoreRange(score float64) float64 {
