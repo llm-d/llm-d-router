@@ -288,10 +288,15 @@ func TestParseDataURI(t *testing.T) {
 			wantPayload: "iVBORw0K",
 		},
 		{
-			name:        "missing media type defaults to octet-stream",
-			uri:         "data:;base64,YWJj",
-			wantType:    defaultContentType,
-			wantPayload: "YWJj",
+			name:    "missing media type",
+			uri:     "data:;base64,YWJj",
+			wantErr: true,
+		},
+		{
+			name:        "content type normalized to lowercase and trimmed",
+			uri:         "data:IMAGE/PNG ;base64,iVBORw0K",
+			wantType:    "image/png",
+			wantPayload: "iVBORw0K",
 		},
 		{
 			name:    "missing comma",
@@ -1040,5 +1045,82 @@ func TestReplaceMediaURLsStep_RejectsNonListAllowedDomains(t *testing.T) {
 	_, err := NewReplaceMediaURLsStep(nil, map[string]any{"allowed_domains": "images.example.com"})
 	if err == nil {
 		t.Fatal("expected error for non-list allowed_domains")
+	}
+}
+
+func TestReplaceMediaURLsStep_RejectsNonImageDataURI(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "image_url",
+							"image_url": map[string]any{"url": "data:text/html;base64,PGgxPmhpPC9oMT4="},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for non-image data URI content type")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+func TestReplaceMediaURLsStep_RejectsMissingMediaType(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "image_url",
+							"image_url": map[string]any{"url": "data:;base64,AAAA"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for data URI missing media type")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+func TestReplaceMediaURLsStep_CancelledContextSkipsDataURIParse(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(map[string]any{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "image_url",
+							"image_url": map[string]any{"url": "data:image/jpeg,raw"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := step.Execute(ctx, reqCtx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
