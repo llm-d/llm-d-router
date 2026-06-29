@@ -1,31 +1,4 @@
-{{- define "llm-d-epp.deployment" -}}
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {{ include "llm-d-router.name" . }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "llm-d-router.labels" . | nindent 4 }}
-    {{- include "llm-d-router.modeLabels" . | nindent 4 }}
-spec:
-  replicas: {{ .Values.router.epp.replicas | default 1 }}
-  strategy:
-    # The current recommended EPP deployment pattern is to have a single active replica. This ensures
-    # optimal performance of the stateful operations such prefix cache aware scorer.
-    # The Recreate strategy the old replica is killed immediately, and allow the new replica(s) to
-    # quickly take over. This is particularly important in the high availability set up with leader
-    # election, as the rolling update strategy would prevent the old leader being killed because
-    # otherwise the maxUnavailable would be 100%.
-    type: Recreate
-  selector:
-    matchLabels:
-      {{- include "llm-d-router.selectorLabels" . | nindent 6 }}
-  template:
-    metadata:
-      labels:
-        {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
-        {{- include "llm-d-router.modeLabels" . | nindent 8 }}
-    spec:
+{{- define "llm-d-epp.deployment-pod-spec" -}}
       {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict }}
       {{- $proxyType := include "llm-d-router.proxyType" . | trim }}
       {{- $proxyMode := include "llm-d-router.proxyMode" . | trim }}
@@ -128,8 +101,8 @@ spec:
               - --zap-encoder
               - "json"
               - --config-file
-              - "/config/{{ .Values.router.epp.pluginsConfigFile }}"
-          {{- if gt (.Values.router.epp.replicas | int) 1 }}
+          {{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict }}
+          {{- if and (gt (.Values.router.epp.replicas | int) 1) (not $gkePB.enabled) }}
               - --ha-enable-leader-election
           {{- end }}
           {{- $grpcHealthPort := .Values.router.epp.grpcHealthPort | default 9003 }}
@@ -305,5 +278,60 @@ spec:
       tolerations:
         {{- toYaml .Values.router.epp.tolerations | nindent 8 }}
       {{- end }}
+{{- end }}
+
+{{- define "llm-d-epp.deployment" -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- if $gkePB.enabled }}
+{{- $preferredReplicas := $gkePB.preferredReplicas | default 1 | int }}
+{{- $defaultReplicas := $gkePB.defaultReplicas | default 1 | int }}
+{{- $totalReplicas := add $preferredReplicas $defaultReplicas }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "llm-d-router.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- include "llm-d-router.modeLabels" . | nindent 4 }}
+spec:
+  replicas: {{ $totalReplicas }}
+  serviceName: {{ include "llm-d-router.name" . }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "llm-d-router.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
+        {{- include "llm-d-router.modeLabels" . | nindent 8 }}
+    spec:
+{{ include "llm-d-epp.deployment-pod-spec" . }}
 ---
+{{- else }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-d-router.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- include "llm-d-router.modeLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.router.epp.replicas | default 1 }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "llm-d-router.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
+        {{- include "llm-d-router.modeLabels" . | nindent 8 }}
+    spec:
+{{ include "llm-d-epp.deployment-pod-spec" . }}
+---
+{{- end }}
 {{- end }}

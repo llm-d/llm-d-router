@@ -395,13 +395,37 @@ EPP resource validations
 {{- end -}}
 
 {{/*
+Helper to retrieve GKE preferredBackends configuration safely across chart contexts.
+*/}}
+{{- define "llm-d-router.gkePreferredBackends" -}}
+{{- $provider := .Values.provider | default dict -}}
+{{- $gke := index $provider "gke" | default dict -}}
+{{- index $gke "preferredBackends" | default dict | toYaml -}}
+{{- end -}}
+
+{{/*
 EPP generic validations
 */}}
+{{- define "llm-d-router.validations.epp.preferredBackends" -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- if $gkePB.enabled }}
+  {{- $preferredReplicas := $gkePB.preferredReplicas | default 1 | int }}
+  {{- $defaultReplicas := $gkePB.defaultReplicas | default 1 | int }}
+  {{- if lt $preferredReplicas 1 }}
+    {{- fail ".Values.provider.gke.preferredBackends.preferredReplicas must be at least 1 when preferredBackends.enabled is true" }}
+  {{- end }}
+  {{- if lt $defaultReplicas 1 }}
+    {{- fail ".Values.provider.gke.preferredBackends.defaultReplicas must be at least 1 when preferredBackends.enabled is true" }}
+  {{- end }}
+{{- end }}
+{{- end -}}
+
 {{- define "llm-d-router.validations.epp" -}}
 {{- include "llm-d-router.validations.deprecations" . }}
 {{- include "llm-d-router.validations.epp.resources" . }}
 {{- include "llm-d-router.validations.epp.inferenceObjectives" . }}
 {{- include "llm-d-router.validations.epp.tokenizer" . }}
+{{- include "llm-d-router.validations.epp.preferredBackends" . }}
 {{- end -}}
 
 {{/*

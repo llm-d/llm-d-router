@@ -26,7 +26,12 @@ spec:
       {{- end }}
       {{- end }}
   endpointPickerRef:
+    {{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict }}
+    {{- if $gkePB.enabled }}
+    name: {{ printf "%s-backup" (include "llm-d-router.name" .) }}
+    {{- else }}
     name: {{ include "llm-d-router.name" . }}
+    {{- end }}
     port:
       number: {{ .Values.router.epp.extProcPort | default 9002 }}
     failureMode: {{ .Values.router.inferencePool.failureMode | default "FailOpen" }}
