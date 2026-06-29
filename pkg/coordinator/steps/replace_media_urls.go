@@ -178,15 +178,26 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		return fmt.Errorf("too many multimodal entries: got %d, max %d: %w", len(imageURLs), s.maxMultimodalEntries, pipeline.ErrBadRequest)
 	}
 
+	// Cancel any in-flight downloads when Execute returns early (cancelled
+	// context or a rejected data URI), so goroutines do not outlive the step.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxConcurrentDownloads)
 
 	results := make([]downloadResult, len(imageURLs))
 	for i, ref := range imageURLs {
+		if err := gCtx.Err(); err != nil {
+			break
+		}
 		if strings.HasPrefix(ref.url, "data:") {
 			contentType, b64, err := parseDataURI(ref.url)
 			if err != nil {
 				return fmt.Errorf("parsing data URI at message %d part %d: %w: %w", ref.msgIdx, ref.partIdx, err, pipeline.ErrBadRequest)
+			}
+			if !allowedImageContentType(contentType) {
+				return fmt.Errorf("data URI content type %q not allowed at message %d part %d: %w", contentType, ref.msgIdx, ref.partIdx, pipeline.ErrBadRequest)
 			}
 			results[i] = downloadResult{ref: ref, base64Data: b64, contentType: contentType}
 			continue
@@ -210,6 +221,9 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 	logger.V(logutil.TRACE).Info("downloading images", "count", len(imageURLs), "http_proxy_set", os.Getenv("HTTP_PROXY") != "", "https_proxy_set", os.Getenv("HTTPS_PROXY") != "")
 
 	if err := g.Wait(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
@@ -289,6 +303,21 @@ type downloadResult struct {
 	contentType string
 }
 
+// allowedImageContentTypes is the set of data URI media types a vision model
+// accepts. Non-image payloads (HTML, SVG, scripts, audio, video) are rejected
+// so they are not inlined and forwarded downstream.
+var allowedImageContentTypes = map[string]struct{}{
+	"image/jpeg": {},
+	"image/png":  {},
+	"image/gif":  {},
+	"image/webp": {},
+}
+
+func allowedImageContentType(contentType string) bool {
+	_, ok := allowedImageContentTypes[strings.ToLower(strings.TrimSpace(contentType))]
+	return ok
+}
+
 func parseDataURI(uri string) (contentType, b64 string, err error) {
 	rest := strings.TrimPrefix(uri, "data:")
 	meta, payload, ok := strings.Cut(rest, ",")
@@ -307,9 +336,9 @@ func parseDataURI(uri string) (contentType, b64 string, err error) {
 		return "", "", errors.New("data URI must be base64-encoded")
 	}
 	if ct == "" {
-		ct = defaultContentType
+		return "", "", errors.New("data URI missing media type")
 	}
-	return ct, payload, nil
+	return strings.ToLower(strings.TrimSpace(ct)), payload, nil
 }
 
 // addressGuard enforces SSRF protections for outbound image downloads. The IP
