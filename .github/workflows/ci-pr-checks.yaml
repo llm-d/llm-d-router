@@ -80,7 +80,7 @@ jobs:
           echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
 
       - name: Cache Go modules and build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ${{ steps.go-cache.outputs.mod }}
@@ -93,7 +93,7 @@ jobs:
       # components as new and exits 0.
       - name: Restore main branch coverage baseline
         if: github.event_name == 'pull_request'
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: coverage/baseline
           key: coverage-main
@@ -179,7 +179,7 @@ jobs:
 
       - name: Save coverage baseline (main branch only)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: coverage/baseline
           key: coverage-main
