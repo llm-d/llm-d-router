@@ -362,8 +362,11 @@ helm-push-standalone: ## Package and push the llm-d-router-standalone Helm chart
 
 ##@ Release
 
+BUNDLE_VERSION ?= main-dev
+export BUNDLE_VERSION
+
 .PHONY: artifacts
-artifacts: yq check-kustomize ## Generate release artifacts (CRD manifests)
+artifacts: generate yq check-kustomize ## Generate release artifacts (CRD manifests).
 	if [ -d artifacts ]; then rm -rf artifacts; fi
 	mkdir -p artifacts
 	kubectl kustomize config/crd > artifacts/manifests_all.yaml

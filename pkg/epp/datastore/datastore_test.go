@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -45,6 +46,18 @@ import (
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
+
+var endpointPoolCmpOpts = []cmp.Option{
+	cmp.Comparer(func(a, b labels.Selector) bool {
+		if a == nil && b == nil {
+			return true
+		}
+		if a == nil || b == nil {
+			return false
+		}
+		return a.String() == b.String()
+	}),
+}
 
 // mockEndpointFactory is a minimal EndpointFactory for EndpointUpsert/Delete tests.
 // When returnNil is true, NewEndpoint returns nil (simulating a duplicate-start race).
@@ -78,7 +91,7 @@ func (f *mockEndpointFactory) updateEvents() []fwkdl.Endpoint {
 func TestPoolGet_NoDeadlockWithConcurrentWrite(t *testing.T) {
 	pool := &datalayer.EndpointPool{
 		Namespace:   "default",
-		Selector:    map[string]string{"app": "vllm"},
+		Selector:    labels.SelectorFromSet(labels.Set{"app": "vllm"}),
 		TargetPorts: []int{8000},
 	}
 	ds := &datastore{pool: pool}
@@ -161,7 +174,7 @@ func TestPool(t *testing.T) {
 				if diff := cmp.Diff(tt.wantErr, gotErr, cmpopts.EquateErrors()); diff != "" {
 					t.Errorf("Unexpected error diff (+got/-want): %s", diff)
 				}
-				if diff := cmp.Diff(poolutil.InferencePoolToEndpointPool(tt.wantPool), gotPool); diff != "" {
+				if diff := cmp.Diff(poolutil.InferencePoolToEndpointPool(tt.wantPool), gotPool, endpointPoolCmpOpts...); diff != "" {
 					t.Errorf("Unexpected pool diff (+got/-want): %s", diff)
 				}
 				gotSynced := ds.PoolHasSynced()

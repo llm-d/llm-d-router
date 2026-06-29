@@ -44,7 +44,7 @@ schedulingProfiles:
     weight: 50
   - pluginRef: testPicker
 featureGates:
-- dataLayer
+- test-feature-gate
 - flowControl
 flowControl:
   saturationDetector:
@@ -76,7 +76,7 @@ schedulingProfiles:
     weight: 50
   - pluginRef: testPicker
 featureGates:
-- dataLayer
+- test-feature-gate
 - flowControl
 flowControl:
   saturationDetector:
@@ -93,6 +93,8 @@ plugins:
   type: test-plugin
   parameters:
     threshold: 10
+featureGates:
+- test-feature-gate=false
 `
 
 // successSchedulerConfigText represents a complex scheduler setup.
@@ -124,7 +126,7 @@ dataLayer:
     extractors:
     - pluginRef: testExtractor
 featureGates:
-- dataLayer
+- test-feature-gate
 - flowControl
 `
 
@@ -360,6 +362,19 @@ featureGates:
 - unknown-gate
 `
 
+// errorBadFeatureGateText includes a feature gate with an invalid value
+const errorBadFeatureGateText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: test1
+  type: test-plugin
+  parameters:
+    threshold: 10
+featureGates:
+- flowControl=qwerty
+`
+
 // --- Invalid Configurations (Logical/Architectural) ---
 
 // errorNoProfileNameText is missing the required profile name.
@@ -585,7 +600,7 @@ dataLayer:
     extractors:
     - pluginRef: testExtractor
 featureGates:
-- dataLayer
+- test-feature-gate
 `
 
 // errorBadSourceReferenceText has a bad DataSource plugin reference
@@ -605,7 +620,7 @@ dataLayer:
   sources:
   - pluginRef: test-one
 featureGates:
-- dataLayer
+- test-feature-gate
 - flowControl
 `
 
@@ -629,7 +644,7 @@ dataLayer:
     extractors:
     - test-one
 featureGates:
-- dataLayer
+- test-feature-gate
 - flowControl
 `
 

@@ -22,8 +22,9 @@ SCRIPT_ROOT=$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CODEGEN_PKG=${1:-"${SCRIPT_ROOT}/bin"}
 THIS_PKG="github.com/llm-d/llm-d-router"
 
-echo "Generating CRDs"
-(cd "${SCRIPT_ROOT}" && go run ./pkg/generator)
+BUNDLE_VERSION="${BUNDLE_VERSION:-main-dev}"
+echo "Generating CRDs bundle-version=${BUNDLE_VERSION}"
+(cd "${SCRIPT_ROOT}" && go run -ldflags "-X github.com/llm-d/llm-d-router/version.BundleVersion=${BUNDLE_VERSION}" ./pkg/generator)
 
 source "${CODEGEN_PKG}/kube_codegen.sh"
 

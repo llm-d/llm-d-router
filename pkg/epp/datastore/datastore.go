@@ -168,7 +168,7 @@ func (ds *datastore) PoolSet(ctx context.Context, reader client.Reader, endpoint
 	oldEndpointPool := ds.pool
 	ds.pool = endpointPool
 
-	selectorChanged := oldEndpointPool == nil || !labels.Equals(oldEndpointPool.Selector, endpointPool.Selector)
+	selectorChanged := oldEndpointPool == nil || !selectorEqual(oldEndpointPool.Selector, endpointPool.Selector)
 	targetPortsChanged := oldEndpointPool != nil && !slices.Equal(oldEndpointPool.TargetPorts, endpointPool.TargetPorts)
 
 	if selectorChanged || targetPortsChanged {
@@ -207,12 +207,10 @@ func (ds *datastore) PoolHasSynced() bool {
 func (ds *datastore) PoolLabelsMatch(podLabels map[string]string) bool {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
-	if ds.pool == nil {
+	if ds.pool == nil || ds.pool.Selector == nil {
 		return false
 	}
-	poolSelector := labels.SelectorFromSet(ds.pool.Selector)
-	podSet := labels.Set(podLabels)
-	return poolSelector.Matches(podSet)
+	return ds.pool.Selector.Matches(labels.Set(podLabels))
 }
 
 // /// InferenceObjective APIs ///
@@ -415,7 +413,7 @@ func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) err
 	logger := log.FromContext(ctx)
 	podList := &corev1.PodList{}
 	if err := reader.List(ctx, podList, &client.ListOptions{
-		LabelSelector: labels.SelectorFromSet(ds.pool.Selector),
+		LabelSelector: ds.pool.Selector,
 		Namespace:     ds.pool.Namespace,
 	}); err != nil {
 		return fmt.Errorf("failed to list pods - %w", err)
@@ -486,4 +484,14 @@ func createEndpointNamespacedName(pod *corev1.Pod, idx int) types.NamespacedName
 		Name:      pod.Name + "-rank-" + strconv.Itoa(idx),
 		Namespace: pod.Namespace,
 	}
+}
+
+func selectorEqual(a, b labels.Selector) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.String() == b.String()
 }
