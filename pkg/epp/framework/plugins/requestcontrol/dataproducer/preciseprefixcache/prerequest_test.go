@@ -48,6 +48,7 @@ func newProducerForPreRequest(ctx context.Context, speculativeEnabled bool, idx 
 		speculativeTTL:     time.Minute,
 		speculativeEnabled: speculativeEnabled,
 		pluginState:        plugin.NewPluginState(ctx),
+		healthMonitor:      NewKVEventsHealthMonitor(true),
 	}
 }
 

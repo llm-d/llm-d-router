@@ -51,6 +51,7 @@ func newExtractorProducer(discoverPods bool) *Producer {
 		kvEventsConfig:     cfg,
 		kvCacheIndexer:     &fakeKVCacheIndexer{index: &fakeKVBlockIndex{}},
 		subscriberCtx:      context.Background(),
+		healthMonitor:      NewKVEventsHealthMonitor(discoverPods),
 	}
 }
 
@@ -241,6 +242,7 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 		kvEventsConfig:     cfg,
 		kvCacheIndexer:     fakeIndexer,
 		subscriberCtx:      context.Background(),
+		healthMonitor:      NewKVEventsHealthMonitor(true),
 	}
 	defer p.subscribersManager.Shutdown(ctx)
 
