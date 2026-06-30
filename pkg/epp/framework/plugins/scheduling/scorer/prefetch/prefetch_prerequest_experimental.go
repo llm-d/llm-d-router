@@ -11,10 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -150,12 +152,52 @@ func prefetchFile(ctx context.Context, filePath string, buffer []byte) error {
 		// yet, or the operator-supplied digest/sizes don't match what's on
 		// disk. Treat it as a benign skip rather than a prefetch failure.
 		if errors.Is(err, os.ErrNotExist) {
-			log.FromContext(ctx).V(2).Info("prefetchFile: file not present, skipping", "path", filePath)
+			log.FromContext(ctx).V(logging.DEFAULT).Info("prefetchFile: file not present, skipping", "path", filePath)
 			return nil
 		}
 		return fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
+
+	finfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat file: %w", err)
+	}
+	// finfo.Size() is the logical object size as known from the remote object
+	// store; st_blocks*512 is how many bytes are actually resident in the local
+	// storage cache. A not-yet-fetched stub reports the full logical size but
+	// near-zero allocated blocks.
+	var allocated int64
+	if st, ok := finfo.Sys().(*syscall.Stat_t); ok {
+		allocated = st.Blocks * 512 // st_blocks is always counted in 512-byte units
+	}
+	log.FromContext(ctx).V(logging.VERBOSE).Info("prefetchFile: file stat",
+		"path", filePath, "size", finfo.Size(), "allocated", allocated, "bufferSize", len(buffer), "modTime", finfo.ModTime())
+
+	// A prefetch is a single buffer-sized read whose only purpose is to fault
+	// the object in from the remote object store into the local storage cache.
+	// This experimental plugin is tested against IBM Storage Scale with AFM
+	// (Active File Management): reading the first buffer (the configured number
+	// of blocks) is enough to trigger AFM to fetch the whole object from the
+	// remote store, so a single read warms the entire file regardless of size.
+	//
+	// Skip the read when the object is already cached. The test depends on size
+	// because a resident object has the whole file faulted in by AFM:
+	//   - size <= bufferSize: the object fits within one read, so it is cached
+	//     iff fully resident, i.e. allocated covers the logical size.
+	//   - size  > bufferSize: a resident object has far more than a buffer's
+	//     worth allocated, so allocated > bufferSize means AFM already pulled it.
+	var cached bool
+	if finfo.Size() <= int64(len(buffer)) {
+		cached = allocated >= finfo.Size()
+	} else {
+		cached = allocated > int64(len(buffer))
+	}
+	if cached {
+		log.FromContext(ctx).V(logging.DEBUG).Info("prefetchFile: object already resident in storage cache, skipping",
+			"path", filePath, "size", finfo.Size(), "allocated", allocated, "bufferSize", len(buffer))
+		return nil
+	}
 
 	n, err := file.Read(buffer)
 	if err != nil && err != io.EOF {
@@ -163,10 +205,10 @@ func prefetchFile(ctx context.Context, filePath string, buffer []byte) error {
 	}
 
 	if err == io.EOF || n < len(buffer) {
-		log.FromContext(ctx).V(4).Info("prefetchFile: read partial file",
+		log.FromContext(ctx).V(logging.DEBUG).Info("prefetchFile: read partial file",
 			"path", filePath, "requestedBytes", len(buffer), "actualBytes", n)
 	} else {
-		log.FromContext(ctx).V(4).Info("prefetchFile: read complete",
+		log.FromContext(ctx).V(logging.DEBUG).Info("prefetchFile: read complete",
 			"path", filePath, "bytes", n)
 	}
 
