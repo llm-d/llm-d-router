@@ -615,6 +615,48 @@ func TestShardProcessor(t *testing.T) {
 					},
 				},
 				{
+					name: "should reject item as no-endpoints when at capacity with an empty pool",
+					setupHarness: func(h *testHarness) {
+						h.addQueue(testFlow)
+						// Pool scaled to zero: the queue acts as a scale-from-zero waiting room.
+						h.endpointCandidates.Candidates = nil
+						// Prime poolEmpty via a dispatch cycle, mirroring the Run loop's periodic dispatch.
+						h.processor.dispatchCycle(context.Background())
+						h.StatsFunc = func() contracts.AggregateStats {
+							return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+								testFlow.Priority: {CapacityBytes: 50}, // 50 is less than item size of 100
+							}}
+						}
+					},
+					assert: func(t *testing.T, h *testHarness, item *FlowItem) {
+						assert.Equal(t, types.QueueOutcomeRejectedNoEndpoints, item.FinalState().Outcome,
+							"Outcome should be RejectedNoEndpoints when the pool is empty")
+						require.Error(t, item.FinalState().Err, "A no-endpoints rejection should produce an error")
+						assert.ErrorIs(t, item.FinalState().Err, types.ErrNoEndpoints, "The error should wrap ErrNoEndpoints")
+						assert.ErrorIs(t, item.FinalState().Err, types.ErrRejected, "The error should wrap ErrRejected")
+					},
+				},
+				{
+					name: "should reject item as capacity when at capacity with a non-empty pool",
+					setupHarness: func(h *testHarness) {
+						h.addQueue(testFlow)
+						// Non-empty pool (harness default): a capacity rejection is backpressure, not unavailability.
+						h.processor.dispatchCycle(context.Background())
+						h.StatsFunc = func() contracts.AggregateStats {
+							return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+								testFlow.Priority: {CapacityBytes: 50}, // 50 is less than item size of 100
+							}}
+						}
+					},
+					assert: func(t *testing.T, h *testHarness, item *FlowItem) {
+						assert.Equal(t, types.QueueOutcomeRejectedCapacity, item.FinalState().Outcome,
+							"Outcome should be RejectedCapacity when the pool is non-empty")
+						require.Error(t, item.FinalState().Err, "A capacity rejection should produce an error")
+						assert.ErrorIs(t, item.FinalState().Err, types.ErrQueueAtCapacity,
+							"The error should wrap ErrQueueAtCapacity")
+					},
+				},
+				{
 					name: "should ignore an already-finalized item",
 					setupHarness: func(h *testHarness) {
 						mockQueue := h.addQueue(testFlow)

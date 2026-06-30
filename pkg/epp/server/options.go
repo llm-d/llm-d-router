@@ -25,6 +25,7 @@ import (
 
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -72,9 +73,9 @@ type Options struct {
 	//
 	// Endpoints (in lieu of using an InferencePool for service discovery).
 	//
-	EndpointSelector            string // Selector to filter model server pods on, only 'key=value' pairs are supported. (TODO: k8s.Selector, pflag.StringSlice?)
-	EndpointTargetPorts         []int  // Target ports of model server pods.
-	DisableEndpointSubsetFilter bool   // Disables respecting destination endpoint subset metadata in EPP.
+	EndpointSelector            labels.Selector // Parsed selector to filter model server pods on. Set via --endpoint-selector flag and parsed in Complete().
+	EndpointTargetPorts         []int           // Target ports of model server pods.
+	DisableEndpointSubsetFilter bool            // Disables respecting destination endpoint subset metadata in EPP.
 	//
 	// MSP metrics scraping.
 	//
@@ -111,7 +112,8 @@ type Options struct {
 	ConfigText string // The configuration specified as text, in lieu of a file.
 
 	// internal
-	fs *pflag.FlagSet // FlagSet used in AddFlags() and consulted in Validate()
+	fs                  *pflag.FlagSet // FlagSet used in AddFlags() and consulted in Validate()
+	endpointSelectorStr string         // Raw string from --endpoint-selector flag, parsed to EndpointSelector in Complete()
 }
 
 // NewOptions returns a new Options struct initialized with the default values.
@@ -158,9 +160,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.PoolNamespace, "pool-namespace", opts.PoolNamespace,
 		"Namespace of the InferencePool this Endpoint Picker is associated with.")
 	fs.StringVar(&opts.PoolName, "pool-name", opts.PoolName, "Name of the InferencePool this Endpoint Picker is associated with.")
-	fs.StringVar(&opts.EndpointSelector, "endpoint-selector", opts.EndpointSelector,
-		"Selector to filter model server pods on, only 'key=value' pairs are supported. "+
-			"Format: a comma-separated list of key=value pairs without whitespace (e.g., 'app=vllm-qwen3-32b,env=prod').")
+	fs.StringVar(&opts.endpointSelectorStr, "endpoint-selector", opts.endpointSelectorStr,
+		"Selector to filter model server pods on. "+
+			"Supports Kubernetes label selector syntax: equality-based (e.g., 'app=vllm,env=prod'), "+
+			"set-based (e.g., 'env in (prod,staging),tier!=frontend'), and existence (e.g., 'key,!deprecated').")
 	fs.IntSliceVar(&opts.EndpointTargetPorts, "endpoint-target-ports", opts.EndpointTargetPorts, "Target ports of model server pods. "+
 		"Format: a comma-separated list of numbers without whitespace (e.g., '3000,3001,3002').")
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
@@ -222,8 +225,13 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 }
 
 func (opts *Options) Complete() error {
-	// TODO: postprocessing or command line arguments. For example, convert EndpointSelector
-	// from raw string to k8s.LabelSelector, load ConfigFile into ConfigText, etc.
+	if opts.endpointSelectorStr != "" {
+		selector, err := labels.Parse(opts.endpointSelectorStr)
+		if err != nil {
+			return fmt.Errorf("invalid endpoint-selector %q: %w", opts.endpointSelectorStr, err)
+		}
+		opts.EndpointSelector = selector
+	}
 
 	opts.EndpointTargetPorts = removeDuplicatePorts(opts.EndpointTargetPorts)
 
@@ -269,10 +277,10 @@ func (opts *Options) Complete() error {
 }
 
 func (opts *Options) Validate() error {
-	if (opts.PoolName != "" && opts.EndpointSelector != "") || (opts.PoolName == "" && opts.EndpointSelector == "") {
+	if (opts.PoolName != "" && opts.EndpointSelector != nil) || (opts.PoolName == "" && opts.EndpointSelector == nil) {
 		return errors.New("either pool-name or endpoint-selector must be set")
 	}
-	if opts.EndpointSelector != "" {
+	if opts.EndpointSelector != nil {
 		if len(opts.EndpointTargetPorts) == 0 || len(opts.EndpointTargetPorts) > 8 {
 			return fmt.Errorf("flag %q should have length from 1 to 8", "endpoint-target-ports")
 		}

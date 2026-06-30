@@ -78,7 +78,7 @@ jobs:
           echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
 
       - name: Cache Go modules and build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ${{ steps.go-cache.outputs.mod }}

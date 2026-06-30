@@ -227,6 +227,9 @@ func translateFlowControlOutcome(outcome types.QueueOutcome, err error) error {
 		return nil
 	case types.QueueOutcomeRejectedCapacity:
 		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}}
+	case types.QueueOutcomeRejectedNoEndpoints:
+		// No serving capacity exists (e.g. pool scaled to zero): signal genuine unavailability rather than backpressure.
+		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no endpoints available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
 	case types.QueueOutcomeEvictedTTL:
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)}}
 	case types.QueueOutcomeEvictedContextCancelled:

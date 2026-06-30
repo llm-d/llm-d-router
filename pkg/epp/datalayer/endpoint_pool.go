@@ -17,11 +17,12 @@ limitations under the License.
 package datalayer
 
 import (
+	"k8s.io/apimachinery/pkg/labels"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
 type EndpointPool struct {
-	Selector    map[string]string
+	Selector    labels.Selector
 	TargetPorts []int
 	Namespace   string
 	Name        string
@@ -31,7 +32,7 @@ type EndpointPool struct {
 // NewEndpointPool creates and returns a new empty instance of EndpointPool.
 func NewEndpointPool(namespace string, name string) *EndpointPool {
 	return &EndpointPool{
-		Selector:    make(map[string]string),
+		Selector:    labels.Everything(),
 		TargetPorts: []int{},
 		Namespace:   namespace,
 		Name:        name,
