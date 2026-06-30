@@ -38,10 +38,13 @@ import (
 type TestConfig = igwtestutils.TestConfig
 
 var (
-	NewTestConfig      = igwtestutils.NewTestConfig
-	ApplyYAMLFile      = igwtestutils.ApplyYAMLFile
-	CreateObjsFromYaml = igwtestutils.CreateObjsFromYaml
-	ReadYaml           = igwtestutils.ReadYaml
+	NewTestConfig          = igwtestutils.NewTestConfig
+	ApplyYAMLFile          = igwtestutils.ApplyYAMLFile
+	CreateObjsFromYaml     = igwtestutils.CreateObjsFromYaml
+	CreateObjsWithVerifier = igwtestutils.CreateObjsWithVerifier
+	CreateUnstructuredObjs = igwtestutils.CreateUnstructuredObjs
+	ReadYaml               = igwtestutils.ReadYaml
+	EventuallyExists       = igwtestutils.EventuallyExists
 )
 
 // DeleteObjects deletes a set of Kubernetes objects in the form of kind/name.

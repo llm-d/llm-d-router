@@ -17,6 +17,7 @@ limitations under the License.
 package pool
 
 import (
+	"k8s.io/apimachinery/pkg/labels"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -31,12 +32,12 @@ func InferencePoolToEndpointPool(inferencePool *v1.InferencePool) *datalayer.End
 		targetPorts = append(targetPorts, int(p.Number))
 
 	}
-	selector := make(map[string]string, len(inferencePool.Spec.Selector.MatchLabels))
+	selectorMap := make(map[string]string, len(inferencePool.Spec.Selector.MatchLabels))
 	for k, v := range inferencePool.Spec.Selector.MatchLabels {
-		selector[string(k)] = string(v)
+		selectorMap[string(k)] = string(v)
 	}
 	endpointPool := &datalayer.EndpointPool{
-		Selector:    selector,
+		Selector:    labels.SelectorFromSet(labels.Set(selectorMap)),
 		TargetPorts: targetPorts,
 		Namespace:   inferencePool.Namespace,
 		Name:        inferencePool.Name,

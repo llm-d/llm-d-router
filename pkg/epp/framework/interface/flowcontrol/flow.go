@@ -45,7 +45,7 @@ type FlowKey struct {
 }
 
 func (k FlowKey) String() string {
-	return k.ID + ":" + strconv.FormatUint(uint64(k.Priority), 10)
+	return k.ID + ":" + strconv.Itoa(k.Priority)
 }
 
 // Compare provides a stable comparison function for two FlowKey instances, suitable for use with sorting algorithms.

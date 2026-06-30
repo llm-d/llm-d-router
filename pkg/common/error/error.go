@@ -35,6 +35,7 @@ type RequestDroppedReason string
 const (
 	// Rejected — request never reached an inference server.
 	RequestDroppedReasonSaturated        RequestDroppedReason = "rejected-saturated"
+	RequestDroppedReasonNoEndpoints      RequestDroppedReason = "rejected-no-endpoints"
 	RequestDroppedReasonTTLExpired       RequestDroppedReason = "rejected-ttl-expired"
 	RequestDroppedReasonContextCancelled RequestDroppedReason = "rejected-context-cancelled"
 	RequestDroppedReasonShuttingDown     RequestDroppedReason = "rejected-shutting-down"

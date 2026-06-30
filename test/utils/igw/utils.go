@@ -395,14 +395,30 @@ func EventuallyExists(testConfig *TestConfig, getResource func() error) {
 }
 
 func CreateAndVerifyObjs(testConfig *TestConfig, objs []*unstructured.Unstructured) []string {
-	objNames := make([]string, 0, len(objs))
-	for _, unstrObj := range objs {
+	objNames := CreateObjsWithVerifier(testConfig, objs,
+		func(kind string, clientObj client.Object) {
+			switch kind {
+			case "CustomResourceDefinition":
+				CRDEstablished(testConfig, clientObj.(*apiextv1.CustomResourceDefinition))
+			case "Deployment":
+				DeploymentAvailable(testConfig, clientObj.(*appsv1.Deployment))
+			case "Pod":
+				PodReady(testConfig, clientObj.(*corev1.Pod))
+			}
+		})
+
+	return objNames
+}
+
+func CreateObjsWithVerifier(testConfig *TestConfig, objs []*unstructured.Unstructured, verifier func(kind string, clientObj client.Object)) []string {
+	objNames := make([]string, len(objs))
+	for idx, unstrObj := range objs {
 		ginkgo.By(fmt.Sprintf("Processing GVK: %s", unstrObj.GroupVersionKind()))
 		unstrObj.SetNamespace(testConfig.NsName)
 
 		kind := unstrObj.GetKind()
 		name := unstrObj.GetName()
-		objNames = append(objNames, kind+"/"+name)
+		objNames[idx] = kind + "/" + name
 
 		err := testConfig.K8sClient.Create(testConfig.Context, unstrObj, &client.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
@@ -418,14 +434,7 @@ func CreateAndVerifyObjs(testConfig *TestConfig, objs []*unstructured.Unstructur
 				types.NamespacedName{Namespace: testConfig.NsName, Name: name}, clientObj)
 		})
 
-		switch kind {
-		case "CustomResourceDefinition":
-			CRDEstablished(testConfig, clientObj.(*apiextv1.CustomResourceDefinition))
-		case "Deployment":
-			DeploymentAvailable(testConfig, clientObj.(*appsv1.Deployment))
-		case "Pod":
-			PodReady(testConfig, clientObj.(*corev1.Pod))
-		}
+		verifier(kind, clientObj)
 	}
 	return objNames
 }
@@ -477,6 +486,12 @@ func ProcessKustomize(testConfig *TestConfig, kustomizePath string, action func(
 
 // CreateObjsFromYaml creates K8S objects from yaml and waits for them to be instantiated
 func CreateObjsFromYaml(testConfig *TestConfig, docs []string) []string {
+	objs := CreateUnstructuredObjs(testConfig, docs)
+	return CreateAndVerifyObjs(testConfig, objs)
+}
+
+// CreateUnstructuredObjs creates K8S UnstructuredObject structs from an array of YAMLs
+func CreateUnstructuredObjs(testConfig *TestConfig, docs []string) []*unstructured.Unstructured {
 	objs := make([]*unstructured.Unstructured, 0, len(docs))
 	decoder := serializer.NewCodecFactory(testConfig.Scheme).UniversalDeserializer()
 
@@ -502,7 +517,7 @@ func CreateObjsFromYaml(testConfig *TestConfig, docs []string) []string {
 		}
 		objs = append(objs, unstrObj)
 	}
-	return CreateAndVerifyObjs(testConfig, objs)
+	return objs
 }
 
 // ApplyYAMLFile reads a file containing YAML (possibly multiple docs)

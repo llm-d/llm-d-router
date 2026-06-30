@@ -122,6 +122,10 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 		Generate: &generate,
 		Payload:  fwkrh.PayloadMap(bodyMap),
 	}
+	// max_tokens lives under sampling_params in the generate wire format.
+	if sp, ok := bodyMap["sampling_params"].(map[string]any); ok {
+		body.MaxOutputTokens = fwkrh.MaxOutputTokensFromPayload(sp, "max_tokens")
+	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		body.Stream = true
 	}

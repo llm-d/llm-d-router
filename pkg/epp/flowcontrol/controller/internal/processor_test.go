@@ -615,6 +615,48 @@ func TestShardProcessor(t *testing.T) {
 					},
 				},
 				{
+					name: "should reject item as no-endpoints when at capacity with an empty pool",
+					setupHarness: func(h *testHarness) {
+						h.addQueue(testFlow)
+						// Pool scaled to zero: the queue acts as a scale-from-zero waiting room.
+						h.endpointCandidates.Candidates = nil
+						// Prime poolEmpty via a dispatch cycle, mirroring the Run loop's periodic dispatch.
+						h.processor.dispatchCycle(context.Background())
+						h.StatsFunc = func() contracts.AggregateStats {
+							return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+								testFlow.Priority: {CapacityBytes: 50}, // 50 is less than item size of 100
+							}}
+						}
+					},
+					assert: func(t *testing.T, h *testHarness, item *FlowItem) {
+						assert.Equal(t, types.QueueOutcomeRejectedNoEndpoints, item.FinalState().Outcome,
+							"Outcome should be RejectedNoEndpoints when the pool is empty")
+						require.Error(t, item.FinalState().Err, "A no-endpoints rejection should produce an error")
+						assert.ErrorIs(t, item.FinalState().Err, types.ErrNoEndpoints, "The error should wrap ErrNoEndpoints")
+						assert.ErrorIs(t, item.FinalState().Err, types.ErrRejected, "The error should wrap ErrRejected")
+					},
+				},
+				{
+					name: "should reject item as capacity when at capacity with a non-empty pool",
+					setupHarness: func(h *testHarness) {
+						h.addQueue(testFlow)
+						// Non-empty pool (harness default): a capacity rejection is backpressure, not unavailability.
+						h.processor.dispatchCycle(context.Background())
+						h.StatsFunc = func() contracts.AggregateStats {
+							return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+								testFlow.Priority: {CapacityBytes: 50}, // 50 is less than item size of 100
+							}}
+						}
+					},
+					assert: func(t *testing.T, h *testHarness, item *FlowItem) {
+						assert.Equal(t, types.QueueOutcomeRejectedCapacity, item.FinalState().Outcome,
+							"Outcome should be RejectedCapacity when the pool is non-empty")
+						require.Error(t, item.FinalState().Err, "A capacity rejection should produce an error")
+						assert.ErrorIs(t, item.FinalState().Err, types.ErrQueueAtCapacity,
+							"The error should wrap ErrQueueAtCapacity")
+					},
+				},
+				{
 					name: "should ignore an already-finalized item",
 					setupHarness: func(h *testHarness) {
 						mockQueue := h.addQueue(testFlow)
@@ -1229,6 +1271,62 @@ func TestShardProcessor(t *testing.T) {
 				// --- ASSERT ---
 				assert.Equal(t, int32(numQueues), processedCount.Load(),
 					"The number of processed queues should match the number created")
+			})
+
+			t.Run("should resolve ManagedQueue eagerly so late GC does not skip work", func(t *testing.T) {
+				t.Parallel()
+				// --- ARRANGE ---
+				// Regression test: ManagedQueue must be resolved during IterateQueues
+				// (Phase 1), not deferred to Phase 3 workers. A deferred lookup
+				// races with flow GC which can delete the flow after collection.
+				//
+				// ManagedQueueFunc succeeds while IterateQueues is running and fails
+				// after it returns, simulating GC firing between phases. With eager
+				// resolution processFn is called; with deferred resolution it is not.
+				h := newTestHarness(t, testCleanupTick)
+				h.addQueue(testFlow)
+
+				var iteratingDone atomic.Bool
+				h.PriorityBandAccessorFunc = func(p int) (flowcontrol.PriorityBandAccessor, error) {
+					h.mu.Lock()
+					flowKeys := h.priorityFlows[p]
+					h.mu.Unlock()
+
+					band := &fwkfcmocks.MockPriorityBandAccessor{PriorityV: p}
+					band.IterateQueuesFunc = func(cb func(fqa flowcontrol.FlowQueueAccessor) bool) {
+						for _, key := range flowKeys {
+							q, err := h.managedQueue(key)
+							if err == nil && q != nil {
+								mq := q.(*mocks.MockManagedQueue)
+								if !cb(mq.FlowQueueAccessor()) {
+									break
+								}
+							}
+						}
+						iteratingDone.Store(true)
+					}
+					return band, nil
+				}
+
+				h.ManagedQueueFunc = func(key flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
+					if iteratingDone.Load() {
+						return nil, fmt.Errorf("failed to get managed queue for flow %q: %w",
+							key, contracts.ErrFlowInstanceNotFound)
+					}
+					return h.managedQueue(key)
+				}
+
+				var processedCount atomic.Int32
+				processFn := func(mq contracts.ManagedQueue, logger logr.Logger) {
+					processedCount.Add(1)
+				}
+
+				// --- ACT ---
+				h.processor.processAllQueuesConcurrently("test-eager-resolve", processFn)
+
+				// --- ASSERT ---
+				assert.Equal(t, int32(1), processedCount.Load(),
+					"processFn must be called: ManagedQueue was resolved eagerly in Phase 1")
 			})
 		})
 	})

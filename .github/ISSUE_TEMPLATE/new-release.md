@@ -70,7 +70,8 @@ This document defines the process for releasing llm-d-router.
      A release branch should already exist. In this case, check out the existing branch:
 
      ```shell
-     git checkout release-${BRANCH_VERSION} ${REMOTE}/release-${BRANCH_VERSION}
+     git fetch ${REMOTE}
+     git reset --hard ${REMOTE}/release-${BRANCH_VERSION}
      ```
 
 1. By default, `LATENCY_PREDICTOR_TAG` in the `Makefile` resolves from the router release tag (via `BUILD_REF`). If the latency predictor tag does **not** align with the router version, update the default value of `LATENCY_PREDICTOR_TAG` in the `Makefile` to match your exported `${LATENCY_PREDICTOR_TAG}`.
