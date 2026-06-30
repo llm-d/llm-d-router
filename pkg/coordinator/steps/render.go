@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -56,6 +57,23 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 		timeout = v
 	}
 
+	maxIdleConnsPerHost := 100
+	if v, ok, err := paramInt(params, "max_idle_conns_per_host"); err != nil {
+		return nil, err
+	} else if ok {
+		if v < 0 {
+			return nil, fmt.Errorf("max_idle_conns_per_host must be non-negative, got %d", v)
+		}
+		maxIdleConnsPerHost = v
+	}
+
+	idleConnTimeout := 90 * time.Second
+	if v, ok, err := paramDuration(params, "idle_conn_timeout"); err != nil {
+		return nil, err
+	} else if ok {
+		idleConnTimeout = v
+	}
+
 	address, _ := params["address"].(string)
 
 	maxTokens := 0
@@ -78,11 +96,21 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 		maxPlaceholders = v
 	}
 
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+		IdleConnTimeout:     idleConnTimeout,
+		ForceAttemptHTTP2:   true,
+	}
+
 	return &RenderStep{
 		serviceAddress:            address,
 		maxTotalTokens:            maxTokens,
 		maxTotalPlaceholderTokens: maxPlaceholders,
-		client:                    &http.Client{Timeout: timeout},
+		client:                    &http.Client{Timeout: timeout, Transport: transport},
 	}, nil
 }
 
