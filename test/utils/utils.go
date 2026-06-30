@@ -17,7 +17,6 @@ limitations under the License.
 package utils
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -39,14 +38,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/remotecommand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	"sigs.k8s.io/kustomize/api/krusty"
-	"sigs.k8s.io/kustomize/kyaml/filesys"
 
-	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
 )
 
@@ -127,111 +122,6 @@ func (testConfig *TestConfig) CreateCli() {
 	testConfig.K8sClient, err = client.New(testConfig.RestConfig, client.Options{Scheme: testConfig.Scheme})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(testConfig.K8sClient).NotTo(gomega.BeNil())
-}
-
-// DeleteClusterResources deletes all cluster-scoped objects the tests typically create.
-func DeleteClusterResources(testConfig *TestConfig) error {
-	binding := &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "auth-reviewer-binding",
-		},
-	}
-	err := testConfig.K8sClient.Delete(testConfig.Context, binding, client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	role := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "auth-reviewer",
-		},
-	}
-	err = testConfig.K8sClient.Delete(testConfig.Context, role, client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	metricsReaderBinding := &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "inference-gateway-sa-metrics-reader-role-binding",
-		},
-	}
-	err = testConfig.K8sClient.Delete(testConfig.Context, metricsReaderBinding, client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	metricsReaderRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "inference-gateway-metrics-reader",
-		},
-	}
-	err = testConfig.K8sClient.Delete(testConfig.Context, metricsReaderRole, client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	ProcessKustomize(testConfig, "../../../config/crd/", DeleteAndVerifyObjs)
-	return nil
-}
-
-// DeleteNamespacedResources deletes all namespace-scoped objects the tests typically create.
-// The given namespace will also be deleted if it's not "default".
-func DeleteNamespacedResources(testConfig *TestConfig) error {
-	if testConfig.NsName == "" {
-		return nil
-	}
-	err := testConfig.K8sClient.DeleteAllOf(testConfig.Context, &appsv1.Deployment{}, client.InNamespace(testConfig.NsName), client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	err = testConfig.K8sClient.DeleteAllOf(testConfig.Context, &corev1.Service{}, client.InNamespace(testConfig.NsName), client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	err = testConfig.K8sClient.DeleteAllOf(testConfig.Context, &corev1.Pod{}, client.InNamespace(testConfig.NsName), client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	err = testConfig.K8sClient.DeleteAllOf(testConfig.Context, &corev1.ConfigMap{}, client.InNamespace(testConfig.NsName), client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	err = testConfig.K8sClient.DeleteAllOf(testConfig.Context, &corev1.Secret{}, client.InNamespace(testConfig.NsName), client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	err = testConfig.K8sClient.DeleteAllOf(testConfig.Context, &corev1.ServiceAccount{}, client.InNamespace(testConfig.NsName), client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	err = testConfig.K8sClient.DeleteAllOf(testConfig.Context, &v1.InferencePool{}, client.InNamespace(testConfig.NsName), client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	err = testConfig.K8sClient.DeleteAllOf(testConfig.Context, &v1alpha2.InferenceObjective{}, client.InNamespace(testConfig.NsName), client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	if testConfig.NsName != "default" {
-		ns := &corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: testConfig.NsName,
-			},
-		}
-		if err := testConfig.K8sClient.Delete(testConfig.Context, ns, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
-}
-
-// DeleteInferenceObjectiveResources deletes all InferenceObjective objects in the given namespace.
-func DeleteInferenceObjectiveResources(testConfig *TestConfig) error {
-	if testConfig.NsName == "" {
-		return nil
-	}
-	err := testConfig.K8sClient.DeleteAllOf(testConfig.Context, &v1alpha2.InferenceObjective{}, client.InNamespace(testConfig.NsName), client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	return nil
 }
 
 // PodReady checks if the given Pod reports the "Ready" status condition before the given timeout.
@@ -343,49 +233,6 @@ func checkCrdStatus(
 	return found == len(conditions), nil
 }
 
-// ExecCommandInPod runs a command in a given container of a given Pod, returning combined stdout+stderr.
-func ExecCommandInPod(testConfig *TestConfig, podName, containerName string, cmd []string) (string, error) {
-	parameterCodec := runtime.NewParameterCodec(testConfig.Scheme)
-
-	// construct REST request to the API server.
-	// podName is curl, that is where this is being sent.
-	req := testConfig.KubeCli.CoreV1().RESTClient().
-		Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(testConfig.NsName).
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: containerName,
-			Command:   cmd,
-			Stdin:     false,
-			Stdout:    true,
-			Stderr:    true,
-			TTY:       false,
-		}, parameterCodec)
-
-	// req.URL() contains the request above
-	exec, err := remotecommand.NewSPDYExecutor(testConfig.RestConfig, "POST", req.URL())
-	if err != nil {
-		return "", fmt.Errorf("could not initialize executor: %w", err)
-	}
-
-	// Stream the data using the executor and stream result
-	var stdout, stderr bytes.Buffer
-	execErr := exec.StreamWithContext(testConfig.Context, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	})
-
-	combinedOutput := stdout.String() + stderr.String()
-
-	if execErr != nil {
-		return combinedOutput, fmt.Errorf("exec dial command %v failed: %w", cmd, execErr)
-	}
-
-	return combinedOutput, nil
-}
-
 // EventuallyExists checks if a Kubernetes resource exists and returns nil if successful.
 // It takes a function `getResource` which retrieves the resource and returns an error if it doesn't exist.
 func EventuallyExists(testConfig *TestConfig, getResource func() error) {
@@ -439,51 +286,6 @@ func CreateObjsWithVerifier(testConfig *TestConfig, objs []*unstructured.Unstruc
 	return objNames
 }
 
-func DeleteAndVerifyObjs(testConfig *TestConfig, objs []*unstructured.Unstructured) []string {
-	objNames := make([]string, 0, len(objs))
-	for _, unstrObj := range objs {
-		ginkgo.By(fmt.Sprintf("Deleting GVK: %s", unstrObj.GroupVersionKind()))
-		unstrObj.SetNamespace(testConfig.NsName)
-
-		kind := unstrObj.GetKind()
-		name := unstrObj.GetName()
-		objNames = append(objNames, kind+"/"+name)
-		err := testConfig.K8sClient.Delete(testConfig.Context, unstrObj, client.PropagationPolicy(metav1.DeletePropagationForeground))
-		if err != nil && !apierrors.IsNotFound(err) {
-			gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("Failed to delete %s %s", kind, name))
-		}
-
-		clientObj := getClientObject(kind)
-		gomega.Eventually(func() bool {
-			err := testConfig.K8sClient.Get(testConfig.Context,
-				types.NamespacedName{Namespace: testConfig.NsName, Name: name}, clientObj)
-			return apierrors.IsNotFound(err)
-		}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.BeTrue(), fmt.Sprintf("Timed out waiting for %s %s to be deleted", kind, name))
-	}
-	return objNames
-}
-
-func ProcessKustomize(testConfig *TestConfig, kustomizePath string, action func(*TestConfig, []*unstructured.Unstructured) []string) []string {
-	ginkgo.By("Running Kustomize build on: " + kustomizePath)
-
-	fSys := filesys.MakeFsOnDisk()
-	opts := krusty.MakeDefaultOptions()
-	opts.PluginConfig = krusty.MakeDefaultOptions().PluginConfig
-	k := krusty.MakeKustomizer(opts)
-
-	resMap, err := k.Run(fSys, kustomizePath)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Failed to run kustomize build")
-
-	resources := resMap.Resources()
-	objs := make([]*unstructured.Unstructured, 0, len(resources))
-	for _, res := range resources {
-		resMap, err := res.Map()
-		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Failed to run kustomize get map")
-		objs = append(objs, &unstructured.Unstructured{Object: resMap})
-	}
-	return action(testConfig, objs)
-}
-
 // CreateObjsFromYaml creates K8S objects from yaml and waits for them to be instantiated
 func CreateObjsFromYaml(testConfig *TestConfig, docs []string) []string {
 	objs := CreateUnstructuredObjs(testConfig, docs)
@@ -518,6 +320,25 @@ func CreateUnstructuredObjs(testConfig *TestConfig, docs []string) []*unstructur
 		objs = append(objs, unstrObj)
 	}
 	return objs
+}
+
+// DeleteObjects deletes a set of Kubernetes objects in the form of kind/name.
+func DeleteObjects(testConfig *TestConfig, kindAndNames []string) {
+	for _, kindAndName := range kindAndNames {
+		split := strings.Split(kindAndName, "/")
+		clientObj := getClientObject(split[0])
+		err := testConfig.K8sClient.Get(testConfig.Context,
+			types.NamespacedName{Namespace: testConfig.NsName, Name: split[1]}, clientObj)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		err = testConfig.K8sClient.Delete(testConfig.Context, clientObj)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Eventually(func() bool {
+			clientObj := getClientObject(split[0])
+			err := testConfig.K8sClient.Get(testConfig.Context,
+				types.NamespacedName{Namespace: testConfig.NsName, Name: split[1]}, clientObj)
+			return apierrors.IsNotFound(err)
+		}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.BeTrue())
+	}
 }
 
 // ApplyYAMLFile reads a file containing YAML (possibly multiple docs)
