@@ -37,12 +37,16 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics/collectors"
 )
 
 const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
 	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
+	// requestInflightStateKey holds the single per-request entry whose OnEvicted
+	// decrements the request_inflight gauge exactly once.
+	requestInflightStateKey fwkplugin.StateKey = "inflight-request-gauge"
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
@@ -97,7 +101,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
 	}
 
-	return &InFlightLoadProducer{
+	producer := &InFlightLoadProducer{
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:           newConcurrencyTracker(),
 		tokenTracker:             newConcurrencyTracker(),
@@ -107,7 +111,15 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		uncachedRequestTokensDk:  attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name),
 		PluginState:              fwkplugin.NewPluginState(ctx),
-	}, nil
+	}
+
+	// Own the in-flight metrics: the per-model gauge and the per-endpoint
+	// collector are registered through the plugin's metrics recorder.
+	if err := registerMetrics(handle.Metrics(), collectors.NewInFlightLoadCollector(name, producer)); err != nil {
+		return nil, err
+	}
+
+	return producer, nil
 }
 
 var (
@@ -176,6 +188,31 @@ func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
 	}
 	if e.requests.Swap(0) != 0 {
 		decrementClamped(e.requestCounter, 1)
+	}
+}
+
+// requestInflightEntry decrements the per-model request_inflight gauge once when
+// the request leaves the picker. The decremented guard makes OnEvicted safe to
+// fire from both the end-of-stream Delete and the janitor reaper.
+type requestInflightEntry struct {
+	labels      requestInflightLabels
+	decremented atomic.Bool
+}
+
+var _ fwkplugin.EvictableStateData = (*requestInflightEntry)(nil)
+
+func (e *requestInflightEntry) Clone() fwkplugin.StateData {
+	if e == nil {
+		return nil
+	}
+	clone := &requestInflightEntry{labels: e.labels}
+	clone.decremented.Store(e.decremented.Load())
+	return clone
+}
+
+func (e *requestInflightEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
+	if e.decremented.CompareAndSwap(false, true) {
+		decRequestInflight(e.labels)
 	}
 }
 
@@ -352,6 +389,13 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	if p.PluginState == nil {
 		log.FromContext(ctx).V(logutil.VERBOSE).Info("Skipping in-flight load tracking: PluginState is nil", "requestID", request.RequestID)
 		return
+	}
+
+	// One per-model gauge increment per request; the state entry's OnEvicted
+	// decrements it exactly once on completion or reaper cleanup.
+	if labels := newRequestInflightLabels(request); labels.modelName != "" {
+		incRequestInflight(labels)
+		p.PluginState.Write(request.RequestID, requestInflightStateKey, &requestInflightEntry{labels: labels})
 	}
 
 	inputTokens := p.tokenEstimator.EstimateInput(request)
@@ -594,6 +638,25 @@ func (p *InFlightLoadProducer) GetTokens(eid string) int64 {
 
 func (p *InFlightLoadProducer) GetRequests(eid string) int64 {
 	return p.requestTracker.get(eid)
+}
+
+// InFlightRequestsSnapshot returns a copy of the per-endpoint in-flight request
+// counts, keyed by the endpoint's "namespace/name". For Prometheus collection.
+func (p *InFlightLoadProducer) InFlightRequestsSnapshot() map[string]int64 {
+	if p.requestTracker == nil {
+		return nil
+	}
+	return p.requestTracker.snapshot()
+}
+
+// InFlightTokensSnapshot returns a copy of the per-endpoint in-flight token
+// counts (uncached prompt tokens, optionally plus estimated output), keyed by
+// the endpoint's "namespace/name". For Prometheus collection.
+func (p *InFlightLoadProducer) InFlightTokensSnapshot() map[string]int64 {
+	if p.tokenTracker == nil {
+		return nil
+	}
+	return p.tokenTracker.snapshot()
 }
 
 // concurrencyTracker manages thread-safe counters for inflight requests.
