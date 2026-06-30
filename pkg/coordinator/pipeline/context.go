@@ -19,6 +19,7 @@ package pipeline
 import (
 	"net/http"
 	"strings"
+	"time"
 )
 
 var hopByHopHeaders = map[string]bool{
@@ -67,6 +68,11 @@ type RequestContext struct {
 	Body            map[string]any
 	Model           string
 	Stream          bool
+
+	// ParseDuration is the time the server spent reading and JSON-parsing the
+	// request body before the pipeline ran. Execute reports it as the first
+	// entry in the step-timing summary.
+	ParseDuration time.Duration
 
 	TokenIDs          []int
 	MultimodalEntries []MultimodalEntry

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -64,12 +65,31 @@ func New(steps []Step) *Pipeline {
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	logger := log.FromContext(ctx)
 
+	type stepTiming struct {
+		name     string
+		duration time.Duration
+	}
+	timings := make([]stepTiming, 0, len(p.steps)+1)
+	if reqCtx.ParseDuration > 0 {
+		timings = append(timings, stepTiming{name: "parse", duration: reqCtx.ParseDuration})
+	}
+	defer func() {
+		stats := make([]any, 0, len(timings)*2)
+		for _, t := range timings {
+			stats = append(stats, t.name, t.duration.String())
+		}
+		logger.V(logutil.DEFAULT).Info("pipeline step timings", stats...)
+	}()
+
 	for _, step := range p.steps {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("pipeline cancelled: %w", err)
 		}
 		logger.V(logutil.TRACE).Info("step starting", "step", step.Name())
-		if err := step.Execute(ctx, reqCtx); err != nil {
+		start := time.Now()
+		err := step.Execute(ctx, reqCtx)
+		timings = append(timings, stepTiming{name: step.Name(), duration: time.Since(start)})
+		if err != nil {
 			if errors.Is(err, ErrPipelineDone) {
 				return nil
 			}

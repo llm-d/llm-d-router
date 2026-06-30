@@ -44,6 +44,7 @@ import (
 var validRequestID = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,128}$`)
 
 func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
+	parseStart := time.Now()
 	body, err := io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
@@ -63,6 +64,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
+	parseDuration := time.Since(parseStart)
 
 	stream, _ := parsed["stream"].(bool)
 	model, _ := parsed["model"].(string)
@@ -84,6 +86,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		Stream:           stream,
 		KVTransferParams: make(map[string]any),
 		ResponseWriter:   w,
+		ParseDuration:    parseDuration,
 	}
 
 	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
