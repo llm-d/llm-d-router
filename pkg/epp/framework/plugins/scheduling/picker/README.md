@@ -2,10 +2,11 @@
 
 Scheduling Pickers represent the final phase of the scheduling cycle in the Gateway API Inference Extension. After candidate endpoints have been filtered and scored by preceding plugins, the Picker is responsible for selecting the final subset of endpoints (typically just one) to receive the request.
 
-The framework provides three standard picker implementations:
+The framework provides the following picker implementations:
 - [Max Score Picker](maxscore/README.md)
 - [Random Picker](random/README.md)
 - [Weighted Random Picker](weightedrandom/README.md)
+- [Load-Aware Picker](loadaware/README.md)
 
 All pickers share a common configuration structure and accept the `maxNumOfEndpoints` parameter.
 
