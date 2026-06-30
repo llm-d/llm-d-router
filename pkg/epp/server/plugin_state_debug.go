@@ -40,7 +40,7 @@ type pluginStateDebugResponse struct {
 }
 
 type pluginStateDebugEntry struct {
-	Plugin  string          `json:"plugin"`
+	Name  string          `json:"name"`
 	Type    string          `json:"type"`
 	State   json.RawMessage `json:"state,omitempty"`
 	Message string          `json:"message,omitempty"`
