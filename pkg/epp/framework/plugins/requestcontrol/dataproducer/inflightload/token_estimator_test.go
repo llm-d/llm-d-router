@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -141,24 +142,46 @@ func TestSimpleTokenEstimator_EstimateInput(t *testing.T) {
 }
 
 func TestSimpleTokenEstimator_EstimateOutput(t *testing.T) {
-	estimator := &SimpleTokenEstimator{OutputRatio: 2.0}
-
 	testCases := []struct {
 		name        string
+		ratio       float64
+		operatorCap *int64
 		inputTokens int64
+		clientCap   *int64
 		expected    int64
 	}{
-		{name: "Zero input", inputTokens: 0, expected: 0},
-		{name: "Negative input", inputTokens: -5, expected: 0},
-		{name: "Positive input", inputTokens: 8, expected: 16},
+		{name: "Zero input", ratio: 2.0, inputTokens: 0, expected: 0},
+		{name: "Negative input", ratio: 2.0, inputTokens: -5, expected: 0},
+		{name: "Positive input, no caps", ratio: 2.0, inputTokens: 8, expected: 16},
+		{name: "Zero ratio", ratio: 0.0, inputTokens: 100, expected: 0},
+		{name: "Client cap binds", ratio: 1.5, inputTokens: 100, clientCap: ptr.To(int64(50)), expected: 50},
+		{name: "Client cap looser than estimate", ratio: 1.5, inputTokens: 100, clientCap: ptr.To(int64(500)), expected: 150},
+		{name: "Client cap zero binds", ratio: 1.5, inputTokens: 100, clientCap: ptr.To(int64(0)), expected: 0},
+		{name: "Negative client cap ignored", ratio: 1.5, inputTokens: 100, clientCap: ptr.To(int64(-10)), expected: 150},
+		{name: "Operator cap binds", ratio: 1.5, operatorCap: ptr.To(int64(40)), inputTokens: 100, expected: 40},
+		{name: "Both caps, client tighter", ratio: 1.5, operatorCap: ptr.To(int64(80)), inputTokens: 100, clientCap: ptr.To(int64(30)), expected: 30},
+		{name: "Both caps, operator tighter", ratio: 1.5, operatorCap: ptr.To(int64(30)), inputTokens: 100, clientCap: ptr.To(int64(80)), expected: 30},
+		{name: "Both caps, estimate tightest", ratio: 1.5, operatorCap: ptr.To(int64(500)), inputTokens: 100, clientCap: ptr.To(int64(500)), expected: 150},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := estimator.EstimateOutput(tc.inputTokens)
-			require.Equal(t, tc.expected, actual)
+			estimator := &SimpleTokenEstimator{OutputRatio: tc.ratio, MaxEstimatedOutputTokens: tc.operatorCap}
+			require.Equal(t, tc.expected, estimator.EstimateOutput(tc.inputTokens, tc.clientCap))
 		})
 	}
+}
+
+func TestSimpleTokenEstimator_Estimate_HonorsClientCap(t *testing.T) {
+	estimator := NewSimpleTokenEstimator() // ratio 1.5, no operator cap
+
+	// 10 input tokens, client caps output at 3 -> 10 + min(15, 3) = 13.
+	req := tokenizedRequest(10)
+	req.Body.MaxOutputTokens = ptr.To(int64(3))
+	require.Equal(t, int64(13), estimator.Estimate(req))
+
+	// Without a client cap, the full ratio applies -> 10 + 15 = 25.
+	require.Equal(t, int64(25), estimator.Estimate(tokenizedRequest(10)))
 }
 
 func TestSimpleTokenEstimator_Estimate_CustomConfig(t *testing.T) {

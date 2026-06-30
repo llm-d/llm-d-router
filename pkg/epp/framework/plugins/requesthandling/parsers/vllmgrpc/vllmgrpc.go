@@ -234,6 +234,11 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 		return nil, errors.New("not supported request inputType")
 	}
 	body.Stream = pbReq.GetStream()
+	// Pointer-check so an explicit max_tokens of 0 is preserved (distinct from unset).
+	if sp := pbReq.GetSamplingParams(); sp != nil && sp.MaxTokens != nil {
+		v := int64(*sp.MaxTokens)
+		body.MaxOutputTokens = &v
+	}
 	return body, nil
 }
 

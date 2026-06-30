@@ -287,7 +287,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		return nil, nil, err
 	}
 
-	startCrdReconcilers := opts.EndpointSelector == "" // If endpointSelector is empty, it means it's not in the standalone mode. Then we should start the inferencePool and other CRD Reconciler.
+	startCrdReconcilers := opts.EndpointSelector == nil // If endpointSelector is nil, it means it's not in the standalone mode. Then we should start the inferencePool and other CRD Reconciler.
 	controllerCfg := runserver.NewControllerConfig(startCrdReconcilers)
 	if err := controllerCfg.PopulateControllerConfig(cfg); err != nil {
 		setupLog.Error(err, "Failed to populate controller config")
@@ -433,38 +433,31 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 func NewEndpointPoolFromOptions(
 	namespace string,
 	name string,
-	endpointSelector string,
+	endpointSelector labels.Selector,
 	endpointTargetPorts []int,
 ) (*datalayer.EndpointPool, error) {
-	// namespace is from epp namespace in standalone mode without inference api support
 	if namespace == "" {
 		return nil, errors.New("namespace must not be empty")
 	}
-	// name is from epp name in standalone mode without inference api support
 	if name == "" {
 		return nil, errors.New("name must not be empty")
 	}
-	if endpointSelector == "" {
-		return nil, errors.New("endpoint selector must not be empty")
+	if endpointSelector == nil {
+		return nil, errors.New("endpoint selector must not be nil")
 	}
 	if len(endpointTargetPorts) == 0 {
 		return nil, errors.New("endpoint target ports must not be empty")
 	}
 
-	selectorMap, err := labels.ConvertSelectorToLabelsMap(endpointSelector)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse endpoint selector %q: %w", endpointSelector, err)
-	}
-
 	pool := datalayer.NewEndpointPool(namespace, name)
-	pool.Selector = selectorMap
+	pool.Selector = endpointSelector
 	pool.TargetPorts = append(pool.TargetPorts, endpointTargetPorts...)
 
 	return pool, nil
 }
 
 func setupDatastore(ctx context.Context, epFactory datalayer.EndpointFactory, modelServerMetricsPort int32,
-	startCrdReconcilers bool, namespace, name, endpointSelector string, endpointTargetPorts []int) (datastore.Datastore, error) {
+	startCrdReconcilers bool, namespace, name string, endpointSelector labels.Selector, endpointTargetPorts []int) (datastore.Datastore, error) {
 
 	if startCrdReconcilers {
 		return datastore.NewDatastore(ctx, epFactory, modelServerMetricsPort), nil
@@ -744,9 +737,8 @@ func extractDeploymentName(podName string) (string, error) {
 	return "", fmt.Errorf("failed to parse deployment name from pod name %s", podName)
 }
 
-func extractGKNN(poolName, poolGroup, poolNamespace, endpointSelector string) (*common.GKNN, error) {
+func extractGKNN(poolName, poolGroup, poolNamespace string, endpointSelector labels.Selector) (*common.GKNN, error) {
 	if poolName != "" {
-		// Determine pool namespace: if --pool-namespace is non-empty, use it; else NAMESPACE env var; else default
 		resolvedPoolNamespace := resolvePoolNamespace(poolNamespace)
 		poolNamespacedName := types.NamespacedName{
 			Name:      poolName,
@@ -762,10 +754,8 @@ func extractGKNN(poolName, poolGroup, poolNamespace, endpointSelector string) (*
 		}, nil
 	}
 
-	if endpointSelector != "" {
-		// Determine EPP namespace: NAMESPACE env var; else default
+	if endpointSelector != nil {
 		resolvedPoolNamespace := resolvePoolNamespace(poolNamespace)
-		// Determine EPP name: POD_NAME env var
 		eppPodNameEnv := os.Getenv("POD_NAME")
 		if eppPodNameEnv == "" {
 			return nil, errors.New("failed to get environment variable POD_NAME")

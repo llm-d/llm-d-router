@@ -49,6 +49,7 @@ func newExtractorProducer(discoverPods bool) *Producer {
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
 		subscribersManager: kvevents.NewSubscriberManager(kvevents.NewPool(cfg, nil, nil, nil)),
 		kvEventsConfig:     cfg,
+		kvCacheIndexer:     &fakeKVCacheIndexer{index: &fakeKVBlockIndex{}},
 		subscriberCtx:      context.Background(),
 	}
 }
@@ -214,6 +215,51 @@ func TestProducer_ExtractEndpoint_SingleRankUsesBaseSocketPort(t *testing.T) {
 	_, zmqEndpoints := p.subscribersManager.GetActiveSubscribers()
 	assert.Equal(t, []string{"tcp://10.0.0.1:5557"}, zmqEndpoints,
 		"single-rank pod (RankIndex=0) must dial the base SocketPort")
+}
+
+// EventDelete clears index entries for the removed pod's address.
+func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
+	ctx := discardCtx(t)
+
+	var clearedPod string
+	fakeIndex := &fakeKVBlockIndex{
+		clearFn: func(_ context.Context, podIdentifier string) error {
+			clearedPod = podIdentifier
+			return nil
+		},
+	}
+	fakeIndexer := &fakeKVCacheIndexer{index: fakeIndex}
+
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: kvevents.NewSubscriberManager(kvevents.NewPool(cfg, nil, nil, nil)),
+		kvEventsConfig:     cfg,
+		kvCacheIndexer:     fakeIndexer,
+		subscriberCtx:      context.Background(),
+	}
+	defer p.subscribersManager.Shutdown(ctx)
+
+	ep := newEndpoint("pod-clear", "10.0.0.99")
+
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type:     fwkdl.EventAddOrUpdate,
+		Endpoint: ep,
+	}))
+
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: ep,
+	}))
+
+	assert.Equal(t, "10.0.0.99:8080", clearedPod, "index should be cleared using pod IP:Port matching PodIdentifier format")
+
+	ids, _ := p.subscribersManager.GetActiveSubscribers()
+	assert.Empty(t, ids)
 }
 
 // Delete by NamespacedName must work even when the event has no address.

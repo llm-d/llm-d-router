@@ -37,6 +37,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	metricsutils "k8s.io/component-base/metrics/testutil"
@@ -204,7 +205,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 	eppOptions := defaultEppServerOptions(t, testNamespaceName, configText)
 	if config.runMode == modeStandalone && config.standaloneStrategy == strategyNoCRD {
 		// Only standalone EPP without crd need to set the EndpointSelector.
-		eppOptions.EndpointSelector = "app=" + testPoolName
+		eppOptions.EndpointSelector = labels.SelectorFromSet(labels.Set{"app": testPoolName})
 	}
 
 	// Shorten the Prometheus refresh interval so WaitForReadyPodsMetric (10s timeout)
