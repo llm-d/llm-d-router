@@ -481,6 +481,7 @@ if [ "${PROM_ENABLED}" == "true" ]; then
     --set kubeScheduler.enabled=false \
     --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
     --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+    --set prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues=false \
     --set prometheus.prometheusSpec.resources.requests.memory=512Mi \
     --set prometheus.prometheusSpec.resources.limits.memory=1Gi \
     --set prometheus.service.type=NodePort \
