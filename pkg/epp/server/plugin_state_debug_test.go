@@ -79,9 +79,9 @@ func TestPluginStateDebugHandlerIncludesPlugins(t *testing.T) {
 	require.JSONEq(t, `{
 		"timestamp": "2025-01-02T03:04:05Z",
 		"plugins": {
-			"a-dumper": {"plugin":"a-dumper","type":"test-type","state":{"value":"first"}},
-			"skip": {"plugin":"skip","type":"skip-type","message":"plugin does not support state collection"},
-			"z-dumper": {"plugin":"z-dumper","type":"test-type","state":{"count":2}}
+			"a-dumper": {"name":"a-dumper","type":"test-type","state":{"value":"first"}},
+			"skip": {"name":"skip","type":"skip-type","message":"plugin does not support state collection"},
+			"z-dumper": {"name":"z-dumper","type":"test-type","state":{"count":2}}
 		}
 	}`, recorder.Body.String())
 
