@@ -19,13 +19,17 @@ package scheduling
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -122,7 +126,7 @@ func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceR
 	// if we got here, there is at least one endpoint to score
 	weightedScorePerEndpoint := p.runScorerPlugins(ctx, request, endpoints)
 
-	result := p.runPickerPlugin(ctx, weightedScorePerEndpoint)
+	result := p.runPickerPlugin(ctx, request, weightedScorePerEndpoint)
 
 	return result, nil
 }
@@ -184,7 +188,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	return weightedScorePerEndpoint
 }
 
-func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, weightedScorePerEndpoint map[fwksched.Endpoint]float64) *fwksched.ProfileRunResult {
+func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksched.InferenceRequest, weightedScorePerEndpoint map[fwksched.Endpoint]float64) *fwksched.ProfileRunResult {
 	logger := log.FromContext(ctx)
 
 	// Allocate the ScoredEndpoint values as a single contiguous backing array
@@ -204,12 +208,64 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, weightedScorePer
 	}
 	logger.V(logutil.VERBOSE).Info("Running picker plugin", "plugin", p.picker.TypedName())
 	logger.V(logutil.DEBUG).Info("Candidate pods for picking", "endpoints-weighted-score", scoredEndpoints)
+
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "pick_endpoints",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+
+	span.SetAttributes(attribute.Int("llm_d.epp.picker.candidate_endpoints", len(scoredEndpoints)))
+	// The picker almost always returns a single target, so its count carries
+	// little signal. The score distribution across the strongest candidates is
+	// what explains why an endpoint was chosen, so record the highest-scoring
+	// few (names with their weighted scores). Captured before Pick because
+	// pickers reorder scoredEndpoints in place.
+	if names, scores := topScoredEndpoints(scoredEndpoints, maxTracedEndpointScores); len(names) > 0 {
+		span.SetAttributes(
+			attribute.StringSlice("llm_d.epp.picker.top_endpoints", names),
+			attribute.Float64Slice("llm_d.epp.picker.top_scores", scores),
+		)
+	}
+	if request != nil {
+		if request.TargetModel != "" {
+			span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+		}
+		if request.RequestID != "" {
+			span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+		}
+	}
+
 	before := time.Now()
 	result := p.picker.Pick(ctx, scoredEndpoints)
 	metrics.RecordPluginProcessingLatency(pickerExtensionPoint, p.picker.TypedName().Type, p.picker.TypedName().Name, time.Since(before))
 	logger.V(logutil.DEBUG).Info("Completed running picker plugin successfully", "plugin", p.picker.TypedName(), "result", result)
 
 	return result
+}
+
+// topScoredEndpoints returns the names and weighted scores of the highest
+// scoring candidates, ordered by descending score with the endpoint name as a
+// stable tiebreaker and capped at limit. The returned slices are index-aligned.
+func topScoredEndpoints(scored []*fwksched.ScoredEndpoint, limit int) ([]string, []float64) {
+	ranked := make([]*fwksched.ScoredEndpoint, len(scored))
+	copy(ranked, scored)
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].Score != ranked[j].Score {
+			return ranked[i].Score > ranked[j].Score
+		}
+		return ranked[i].GetMetadata().NamespacedName.String() <
+			ranked[j].GetMetadata().NamespacedName.String()
+	})
+	if limit < len(ranked) {
+		ranked = ranked[:limit]
+	}
+	names := make([]string, len(ranked))
+	scores := make([]float64, len(ranked))
+	for i, se := range ranked {
+		names[i] = se.GetMetadata().NamespacedName.String()
+		scores[i] = se.Score
+	}
+	return names, scores
 }
 
 func enforceScoreRange(score float64) float64 {
