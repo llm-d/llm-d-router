@@ -119,7 +119,7 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugRespons
 		}
 		if !json.Valid(state) {
 			response.Plugins[name] = pluginStateDebugEntry{
-				Plugin : name,
+				Name : name,
 				Type:    plugin.TypedName().Type,
 				Message: "plugin returned invalid JSON state",
 			}
