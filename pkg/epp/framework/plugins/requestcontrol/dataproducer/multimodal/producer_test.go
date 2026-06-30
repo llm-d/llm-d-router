@@ -53,15 +53,17 @@ func TestFactory(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestExtractMMItemsFromTokenizedPrompt(t *testing.T) {
+func TestExtractMMItemsFromTokenizedRequest(t *testing.T) {
 	items := ExtractMMItems(&scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				MultiModalFeatures: []fwkrh.MultiModalFeature{
-					{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 576},
-					{Modality: fwkrh.ModalityImage, Hash: "image-b", Length: 0},
-					{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 144},
-				},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					MultiModalFeatures: []fwkrh.MultiModalFeature{
+						{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 576},
+						{Modality: fwkrh.ModalityImage, Hash: "image-b", Length: 0},
+						{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 144},
+					},
+				}},
 			},
 		},
 	})
@@ -72,7 +74,7 @@ func TestExtractMMItemsFromTokenizedPrompt(t *testing.T) {
 	}, items)
 }
 
-func TestExtractMMItemsNilTokenizedPromptReturnsNil(t *testing.T) {
+func TestExtractMMItemsNilTokenizedRequestReturnsNil(t *testing.T) {
 	items := ExtractMMItems(&scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{},
 	})
@@ -82,7 +84,7 @@ func TestExtractMMItemsNilTokenizedPromptReturnsNil(t *testing.T) {
 func TestExtractMMItemsEmptyMultiModalFeaturesReturnsNil(t *testing.T) {
 	items := ExtractMMItems(&scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{},
+			TokenizedRequest: &fwkrh.TokenizedRequest{},
 		},
 	})
 	assert.Nil(t, items)
@@ -266,7 +268,7 @@ func requestWithHashes(requestID string, hashToWeight map[string]int) *schedulin
 	return &scheduling.InferenceRequest{
 		RequestID: requestID,
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{MultiModalFeatures: features},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: features}}},
 		},
 	}
 }

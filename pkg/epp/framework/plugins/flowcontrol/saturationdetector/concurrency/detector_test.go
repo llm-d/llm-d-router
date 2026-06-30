@@ -697,7 +697,7 @@ func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequ
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, inputTokens)}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}}},
 		},
 	}
 }

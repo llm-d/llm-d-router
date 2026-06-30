@@ -148,7 +148,7 @@ func newProducerWithIndexer(ctx context.Context, idx kvCacheIndexer, scorer kvca
 }
 
 // Tokens present → Produce hashes and writes per-endpoint match info.
-func TestProduce_UsesTokenizedPrompt(t *testing.T) {
+func TestProduce_UsesTokenizedRequest(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	tokens := []uint32{10, 20, 30, 40, 50}
@@ -181,7 +181,7 @@ func TestProduce_UsesTokenizedPrompt(t *testing.T) {
 		RequestID:   "req-1",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}}},
 		},
 	}
 
@@ -226,7 +226,7 @@ func TestProduce_NoTokens_NoOp(t *testing.T) {
 }
 
 // Empty TokenIDs → no-op.
-func TestProduce_EmptyTokenizedPrompt_NoOp(t *testing.T) {
+func TestProduce_EmptyTokenizedRequest_NoOp(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	idx := &fakeKVCacheIndexer{
 		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
@@ -241,8 +241,8 @@ func TestProduce_EmptyTokenizedPrompt_NoOp(t *testing.T) {
 		RequestID:   "req-3",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "p"}},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{{}}},
+			Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "p"}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{}}}},
 		},
 	}
 	require.NoError(t, p.Produce(ctx, req, testEndpoints))
@@ -283,8 +283,8 @@ func TestProduce_MultiPromptEmptyBlockKeys_NoOp(t *testing.T) {
 		RequestID:   "req-multi-empty",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{promptA, promptB},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: promptA}, {TokenIDs: promptB}},
 			},
 		},
 	}
@@ -341,8 +341,8 @@ func TestProduce_MultiPromptSkipsEmptyPromptKeys(t *testing.T) {
 		RequestID:   "req-multi-mixed",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{shortPrompt, fullPrompt},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: shortPrompt}, {TokenIDs: fullPrompt}},
 			},
 		},
 	}
@@ -395,11 +395,11 @@ func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 		RequestID:   "req-mm",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{tokens},
-				MultiModalFeatures: []fwkrh.MultiModalFeature{
-					{Modality: fwkrh.ModalityImage, Hash: "abc", Offset: 2, Length: 4},
-				},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					TokenIDs:           tokens,
+					MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "abc", Offset: 2, Length: 4}},
+				}},
 			},
 		},
 	}
@@ -451,10 +451,9 @@ func TestProduce_FoldsCacheSalt(t *testing.T) {
 				RequestID:   "req-salt",
 				TargetModel: "test-model",
 				Body: &fwkrh.InferenceRequestBody{
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{
-						PerPromptTokens:    [][]uint32{tokens},
-						MultiModalFeatures: tc.mm,
-						CacheSalt:          "s3cr3t",
+					TokenizedRequest: &fwkrh.TokenizedRequest{
+						Prompts:   []fwkrh.PromptTokens{{TokenIDs: tokens, MultiModalFeatures: tc.mm}},
+						CacheSalt: "s3cr3t",
 					},
 				},
 			}
@@ -489,7 +488,7 @@ func TestProduce_NoCacheSalt_NoExtraFeatures(t *testing.T) {
 		RequestID:   "req-nosalt",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}}},
 		},
 	}
 
@@ -535,7 +534,7 @@ func TestProduces_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 	require.True(t, ok)
 }
 
-func TestConsumes_DeclaresTokenizedPrompt(t *testing.T) {
+func TestConsumes_DeclaresTokenizedRequest(t *testing.T) {
 	p := &Producer{typedName: plugin.TypedName{Type: PluginType, Name: "x"}}
 	expected := plugin.NewDataKey("TokenizedPrompt", "token-producer")
 	_, ok := p.Consumes().Required[expected]
@@ -586,7 +585,7 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 				RequestID:   "r",
 				TargetModel: "m",
 				Body: &fwkrh.InferenceRequestBody{
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}},
+					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}}},
 				},
 			}
 			require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{endpoint}))

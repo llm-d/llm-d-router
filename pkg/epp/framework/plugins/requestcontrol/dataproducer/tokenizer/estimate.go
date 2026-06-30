@@ -43,27 +43,30 @@ type estimateBackend struct {
 	img imageEstimator
 }
 
-func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
+func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
 	// Pre-tokenized inputs are already real tokens; pass them through unchanged
 	// rather than byte-estimating. Token-ID inputs are valid for generate,
 	// /v1/completions, and /v1/embeddings.
 	switch {
 	case body.Generate != nil:
-		return &fwkrh.TokenizedPrompt{
-			PerPromptTokens:    [][]uint32{body.Generate.TokenIDs},
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
-		}, nil
+		}}}, nil
 	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{body.Completions.Prompt.TokenIDs}}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: body.Completions.Prompt.TokenIDs}}}, nil
 	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{body.Embeddings.Input.TokenIDs}}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: body.Embeddings.Input.TokenIDs}}}, nil
 	}
 
 	// Chat and Anthropic messages fold multimodal placeholders into the stream
 	// and report them as features.
 	if body.ChatCompletions != nil {
 		raw, features := b.chatCompletionsBytes(body.ChatCompletions)
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}, MultiModalFeatures: features}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           packBytes(raw),
+			MultiModalFeatures: features,
+		}}}, nil
 	}
 	if body.Messages != nil {
 		raw, features := b.messagesBytes(body.Messages)
@@ -75,7 +78,10 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 			"mmFeatureCount", len(features),
 			"mmFeatures", features,
 		)
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}, MultiModalFeatures: features}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           tokens,
+			MultiModalFeatures: features,
+		}}}, nil
 	}
 
 	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {
@@ -86,16 +92,16 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}}, nil
+	return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: packBytes(raw)}}}, nil
 }
 
-func estimateMultiStringCompletions(req *fwkrh.CompletionsRequest) (*fwkrh.TokenizedPrompt, error) {
-	allTokenIDs := make([][]uint32, 0, len(req.Prompt.Strings))
+func estimateMultiStringCompletions(req *fwkrh.CompletionsRequest) (*fwkrh.TokenizedRequest, error) {
+	prompts := make([]fwkrh.PromptTokens, 0, len(req.Prompt.Strings))
 	for _, s := range req.Prompt.Strings {
 		ids := packBytes([]byte(s))
-		allTokenIDs = append(allTokenIDs, ids)
+		prompts = append(prompts, fwkrh.PromptTokens{TokenIDs: ids})
 	}
-	return &fwkrh.TokenizedPrompt{PerPromptTokens: allTokenIDs}, nil
+	return &fwkrh.TokenizedRequest{Prompts: prompts}, nil
 }
 
 // estimateBytes serializes the user input of a non-chat request body to a byte
