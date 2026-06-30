@@ -18,6 +18,7 @@ package preciseprefixcache
 
 import (
 	"context"
+	"sort"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 
@@ -32,25 +33,23 @@ type kvCacheIndexer interface {
 	KVBlockIndex() kvblock.Index
 }
 
-// computeBlockKeys hashes the request's TokenizedPrompt into KV-block keys.
-// When PerPromptTokens has more than one entry (multi-prompt completions),
-// each prompt is hashed independently so cross-prompt block adjacency (which
-// never exists in the model server cache) is avoided. Single-prompt requests
-// produce a length-1 outer slice. A non-empty CacheSalt is folded into each
-// prompt's first block. Returns nil when the request carries no tokens or no
-// prompt produces full KV blocks.
+// computeBlockKeys hashes the request's TokenizedPrompt into per-prompt
+// KV-block keys, folding CacheSalt into each prompt's first block. MM features
+// apply only to single-prompt requests; mmBlockIndices (block indices spanned
+// by MM content) is populated only in that case for hit attribution.
 func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	request *scheduling.InferenceRequest, blockSizeTokens int,
-) ([][]kvblock.BlockHash, error) {
+) ([][]kvblock.BlockHash, []int, error) {
 	if request == nil || request.Body == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	tp := request.Body.TokenizedPrompt
 	if tp == nil || len(tp.PerPromptTokens) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var result [][]kvblock.BlockHash
+	var mmBlockIndices []int
 	for _, tokens := range tp.PerPromptTokens {
 		if len(tokens) == 0 {
 			continue
@@ -61,29 +60,77 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 		if len(tp.PerPromptTokens) == 1 {
 			mmf = tp.MultiModalFeatures
 		}
-		keys, err := computeBlockKeysForTokens(ctx, idx, tokens, mmf, tp.CacheSalt, request.TargetModel, blockSizeTokens)
+		keys, mmIdx, err := computeBlockKeysForTokens(ctx, idx, tokens, mmf, tp.CacheSalt, request.TargetModel, blockSizeTokens)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if len(keys) == 0 {
 			continue
 		}
 		result = append(result, keys)
+		if len(tp.PerPromptTokens) == 1 {
+			mmBlockIndices = mmIdx
+		}
 	}
-	return result, nil
+	return result, mmBlockIndices, nil
 }
 
 func computeBlockKeysForTokens(ctx context.Context, idx kvCacheIndexer,
 	tokens []uint32, mmFeatures []fwkrh.MultiModalFeature, cacheSalt, model string, blockSizeTokens int,
-) ([]kvblock.BlockHash, error) {
+) ([]kvblock.BlockHash, []int, error) {
 	var extraFeatures []*kvblock.BlockExtraFeatures
+	var mmBlockIndices []int
 	if len(mmFeatures) > 0 {
 		mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(mmFeatures)
 		extraFeatures = kvblock.ComputeBlockExtraFeatures(
 			mmHashes, mmPlaceholders, blockSizeTokens, len(tokens))
+		mmBlockIndices = multimodalBlockIndices(mmFeatures, blockSizeTokens)
 	}
 	extraFeatures = foldCacheSalt(extraFeatures, cacheSalt, len(tokens)/blockSizeTokens)
-	return idx.ComputeBlockKeysFromTokens(ctx, tokens, model, extraFeatures)
+	keys, err := idx.ComputeBlockKeysFromTokens(ctx, tokens, model, extraFeatures)
+	return keys, mmBlockIndices, err
+}
+
+// countMMMatchedBlocks counts entries in (sorted) mmBlockIndices that are
+// strictly less than matchLen.
+func countMMMatchedBlocks(mmBlockIndices []int, matchLen int) int {
+	if matchLen <= 0 || len(mmBlockIndices) == 0 {
+		return 0
+	}
+	for i, idx := range mmBlockIndices {
+		if idx >= matchLen {
+			return i
+		}
+	}
+	return len(mmBlockIndices)
+}
+
+// multimodalBlockIndices returns the sorted unique block indices spanned by
+// any of the given features.
+func multimodalBlockIndices(features []fwkrh.MultiModalFeature, blockSizeTokens int) []int {
+	if blockSizeTokens <= 0 || len(features) == 0 {
+		return nil
+	}
+	seen := map[int]struct{}{}
+	for _, f := range features {
+		if f.Length <= 0 {
+			continue
+		}
+		start := f.Offset / blockSizeTokens
+		end := (f.Offset + f.Length - 1) / blockSizeTokens
+		for i := start; i <= end; i++ {
+			seen[i] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(seen))
+	for i := range seen {
+		out = append(out, i)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // foldCacheSalt appends the cache salt to the first block's extra keys, after
