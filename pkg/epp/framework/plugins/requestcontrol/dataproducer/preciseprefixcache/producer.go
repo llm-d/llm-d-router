@@ -93,6 +93,14 @@ type Producer struct {
 
 	blockSizeTokens int
 
+	// healthMonitor tracks per-endpoint KV-events pipeline health by
+	// recording the last time a confirmed (non-speculative) entry was
+	// observed in an index lookup and the last time a request was routed
+	// to each endpoint. Data-collection only here; the eventual consumer
+	// (dynamic speculative TTL) is tracked in
+	// https://github.com/llm-d/llm-d-kv-cache/issues/544.
+	healthMonitor *KVEventsHealthMonitor
+
 	// Plugin-lifetime, not request-scoped: SubscriberManager binds each
 	// subscriber's goroutine to the ctx passed at registration.
 	subscriberCtx context.Context
@@ -181,6 +189,9 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		return nil, err
 	}
 
+	hasKVEventsCfg := config.KVEventsConfig != nil &&
+		(config.KVEventsConfig.ZMQEndpoint != "" || config.KVEventsConfig.DiscoverPods)
+
 	return &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: name},
 		kvCacheIndexer:     indexer,
@@ -192,6 +203,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		speculativeCache:   speculativeCache,
 		speculativeTTL:     speculativeTTL,
 		speculativeEnabled: config.SpeculativeIndexing,
+		healthMonitor:      NewKVEventsHealthMonitor(hasKVEventsCfg),
 		blockSizeTokens:    tokenProcessor.BlockSize(),
 		subscriberCtx:      ctx,
 	}, nil
@@ -272,6 +284,16 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("failed to lookup block keys: %w", err)
+		}
+		// Confirmed (non-speculative) entries in the lookup result mean KV events
+		// for those endpoints are flowing — surface that to the health monitor so
+		// it can distinguish broken pipelines from genuine idle.
+		for _, pods := range keyToPods {
+			for _, pod := range pods {
+				if !pod.Speculative {
+					p.healthMonitor.RecordConfirmedEntry(pod.PodIdentifier)
+				}
+			}
 		}
 		scores, err := p.kvBlockScorer.Score(ctx, blockKeys, keyToPods)
 		if err != nil {
