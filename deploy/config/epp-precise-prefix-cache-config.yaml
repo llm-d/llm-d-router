@@ -5,6 +5,7 @@ kind: EndpointPickerConfig
 plugins:
   - type: token-producer
     parameters:
+      backend: vllm
       modelName: hf-repo/model-name           # set to the model used in the vLLM deployment
       vllm:
         url: http://localhost:8000

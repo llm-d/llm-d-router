@@ -316,7 +316,7 @@ router:
 
 Runs a tokenizer sidecar that EPP queries to tokenize incoming requests, enabling precise, token-count-aware routing policies (e.g., precise prefix-cache matching).
 
-The sidecar runs vLLM's `vllm launch render <modelName>` and exposes `/v1/completions/render` and `/v1/chat/completions/render` over loopback HTTP. Wire EPP to it via `router.epp.pluginsCustomConfig` with `type: token-producer` and `vllm:`.
+The sidecar runs vLLM's `vllm launch render <modelName>` and exposes `/v1/completions/render` and `/v1/chat/completions/render` over loopback HTTP. Wire EPP to it via `router.epp.pluginsCustomConfig` with `type: token-producer`, `backend: vllm`, and `vllm:`.
 
 #### Tokenizer Sidecar Parameters
 
@@ -420,8 +420,8 @@ spec:
 
 **Step 2 — point EPP at the socket.** Configure the tokenizer plugin via
 `router.epp.pluginsCustomConfig` (the chart writes this into the EPP config
-mounted at `/config`). Select the deprecated UDS backend with
-`udsTokenizerConfig`:
+mounted at `/config`). Select the deprecated UDS backend with `backend: uds`
+and point it at the socket with `udsTokenizerConfig`:
 
 ```yaml
 router:
@@ -431,6 +431,7 @@ router:
         plugins:
           - type: token-producer
             parameters:
+              backend: uds
               modelName: "Qwen/Qwen3-32B"
               udsTokenizerConfig:
                 socketFile: /tmp/tokenizer/tokenizer-uds.socket
