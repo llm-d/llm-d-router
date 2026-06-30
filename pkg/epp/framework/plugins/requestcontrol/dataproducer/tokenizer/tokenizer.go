@@ -226,6 +226,35 @@ func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
+// Kind names a token-producer backend internally so consumers can whitelist
+// the backends they accept. The names are stable code identifiers, not
+// user-settable config strings.
+type Kind string
+
+const (
+	// KindRender is the engine-aligned tokenizer backend (vllm /render and the
+	// deprecated UDS gRPC both render real token IDs).
+	KindRender Kind = "render"
+	// KindEstimate is the byte-packing pseudo-token backend used when no real
+	// tokenizer is configured.
+	KindEstimate Kind = "estimate"
+)
+
+// BackendKind reports which backend drives this plugin. Downstream consumers
+// that need engine-aligned token IDs (e.g. precise-prefix-cache, whose
+// KV-block hashes must match the model server) check the kind at startup
+// against an explicit whitelist.
+func (p *Plugin) BackendKind() Kind {
+	switch p.backend.(type) {
+	case renderBackend:
+		return KindRender
+	case estimateBackend:
+		return KindEstimate
+	default:
+		return ""
+	}
+}
+
 // Produces returns the data keys this plugin produces.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedPrompt{}}
