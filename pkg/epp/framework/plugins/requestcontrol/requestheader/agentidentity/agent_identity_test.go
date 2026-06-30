@@ -28,7 +28,7 @@ import (
 )
 
 // newDefaultPlugin builds a Plugin with no parameters — the built-in defaults.
-// All PreAdmit tests below use this so they exercise the same code
+// All RequestHeader tests below use this so they exercise the same code
 // path as production-default configs.
 func newDefaultPlugin(t *testing.T) *Plugin {
 	t.Helper()
@@ -39,122 +39,116 @@ func newDefaultPlugin(t *testing.T) *Plugin {
 	return pi.(*Plugin)
 }
 
-func TestPreAdmit(t *testing.T) {
+func TestRequestHeader(t *testing.T) {
 	p := newDefaultPlugin(t)
 
 	tests := []struct {
-		name           string
-		fairnessID     string
-		headers        map[string]string
-		body           *fwkrh.InferenceRequestBody
-		wantFairnessID string
+		name          string
+		headers       map[string]string
+		body          *fwkrh.InferenceRequestBody
+		wantIdentity  string
+		wantAttrFound bool
 	}{
 		{
-			name:           "explicit fairness ID is preserved",
-			fairnessID:     "my-explicit-id",
-			headers:        map[string]string{ClaudeCodeSessionHeader: "session-abc"},
-			wantFairnessID: "my-explicit-id",
+			name:          "claude code session header",
+			headers:       map[string]string{ClaudeCodeSessionHeader: "session-abc"},
+			wantIdentity:  "session-abc",
+			wantAttrFound: true,
 		},
 		{
-			name:           "claude code session header used when fairness ID is empty",
-			fairnessID:     "",
-			headers:        map[string]string{ClaudeCodeSessionHeader: "session-abc"},
-			wantFairnessID: "session-abc",
+			name:          "opencode session header",
+			headers:       map[string]string{OpenCodeSessionHeader: "oc-session-1"},
+			wantIdentity:  "oc-session-1",
+			wantAttrFound: true,
 		},
 		{
-			name:           "opencode session header",
-			fairnessID:     "",
-			headers:        map[string]string{OpenCodeSessionHeader: "oc-session-1"},
-			wantFairnessID: "oc-session-1",
+			name:          "codex session header (hyphenated, >= 0.131.0)",
+			headers:       map[string]string{CodexSessionHeader: "codex-session-1"},
+			wantIdentity:  "codex-session-1",
+			wantAttrFound: true,
 		},
 		{
-			name:           "codex session header (hyphenated, >= 0.131.0)",
-			fairnessID:     "",
-			headers:        map[string]string{CodexSessionHeader: "codex-session-1"},
-			wantFairnessID: "codex-session-1",
+			name:          "codex legacy session header (underscored, <= 0.130.x)",
+			headers:       map[string]string{CodexSessionHeaderLegacy: "codex-legacy-1"},
+			wantIdentity:  "codex-legacy-1",
+			wantAttrFound: true,
 		},
 		{
-			name:           "codex legacy session header (underscored, <= 0.130.x)",
-			fairnessID:     "",
-			headers:        map[string]string{CodexSessionHeaderLegacy: "codex-legacy-1"},
-			wantFairnessID: "codex-legacy-1",
-		},
-		{
-			name:       "priority order: codex hyphenated wins over legacy underscored",
-			fairnessID: "",
+			name: "priority order: codex hyphenated wins over legacy underscored",
 			headers: map[string]string{
 				CodexSessionHeader:       "codex-new",
 				CodexSessionHeaderLegacy: "codex-old",
 			},
-			wantFairnessID: "codex-new",
+			wantIdentity:  "codex-new",
+			wantAttrFound: true,
 		},
 		{
-			name:       "priority order: claude code wins over opencode",
-			fairnessID: "",
+			name: "priority order: claude code wins over opencode",
 			headers: map[string]string{
 				ClaudeCodeSessionHeader: "session-abc",
 				OpenCodeSessionHeader:   "oc-session-1",
 			},
-			wantFairnessID: "session-abc",
+			wantIdentity:  "session-abc",
+			wantAttrFound: true,
 		},
 		{
-			name:       "priority order: opencode wins over codex",
-			fairnessID: "",
+			name: "priority order: opencode wins over codex",
 			headers: map[string]string{
 				OpenCodeSessionHeader: "oc-session-1",
 				CodexSessionHeader:    "codex-session-1",
 			},
-			wantFairnessID: "oc-session-1",
+			wantIdentity:  "oc-session-1",
+			wantAttrFound: true,
 		},
 		{
-			name:       "previous_response_id in body is ignored",
-			fairnessID: "",
-			headers:    map[string]string{},
-			body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.PayloadMap{"previous_response_id": "resp-456"},
-			},
-			wantFairnessID: "",
+			name:          "previous_response_id in body is ignored",
+			headers:       map[string]string{},
+			body:          &fwkrh.InferenceRequestBody{Payload: fwkrh.PayloadMap{"previous_response_id": "resp-456"}},
+			wantAttrFound: false,
 		},
 		{
-			name:           "nil body does not panic",
-			fairnessID:     "",
-			headers:        map[string]string{},
-			body:           nil,
-			wantFairnessID: "",
+			name:          "nil body does not panic",
+			headers:       map[string]string{},
+			body:          nil,
+			wantAttrFound: false,
 		},
 		{
-			name:           "no matching headers leaves fairness ID empty",
-			fairnessID:     "",
-			headers:        map[string]string{"x-unrelated": "value"},
-			wantFairnessID: "",
+			name:          "no matching headers leaves no attribute",
+			headers:       map[string]string{"x-unrelated": "value"},
+			wantAttrFound: false,
 		},
 		{
-			name:           "empty headers leaves fairness ID empty",
-			fairnessID:     "",
-			headers:        map[string]string{},
-			wantFairnessID: "",
+			name:          "empty headers leaves no attribute",
+			headers:       map[string]string{},
+			wantAttrFound: false,
 		},
 		{
-			name:           "nil headers does not panic",
-			fairnessID:     "",
-			headers:        nil,
-			wantFairnessID: "",
+			name:          "nil headers does not panic",
+			headers:       nil,
+			wantAttrFound: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := &scheduling.InferenceRequest{
-				FairnessID: tt.fairnessID,
-				Headers:    tt.headers,
-				Body:       tt.body,
+				Headers: tt.headers,
+				Body:    tt.body,
 			}
-			err := p.PreAdmit(context.Background(), req)
+			err := p.RequestHeader(context.Background(), req)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if req.FairnessID != tt.wantFairnessID {
-				t.Errorf("FairnessID = %q, want %q", req.FairnessID, tt.wantFairnessID)
+			got, ok := scheduling.ReadRequestAttribute[string](req, AgentIdentityAttributeKey)
+			if ok != tt.wantAttrFound {
+				t.Errorf("attribute found = %v, want %v", ok, tt.wantAttrFound)
+			}
+			if ok && got != tt.wantIdentity {
+				t.Errorf("agent identity = %q, want %q", got, tt.wantIdentity)
+			}
+			// FairnessID must never be set by the plugin.
+			if req.FairnessID != "" {
+				t.Errorf("FairnessID = %q, want empty (plugin must not set FairnessID)", req.FairnessID)
 			}
 		})
 	}
@@ -214,9 +208,9 @@ func TestPluginFactory_PriorityHeaders(t *testing.T) {
 	}
 }
 
-// TestPreAdmit_CustomHeader proves end-to-end that a header added
+// TestRequestHeader_CustomHeader proves end-to-end that a header added
 // via additionalSessionHeaders is honored at request time.
-func TestPreAdmit_CustomHeader(t *testing.T) {
+func TestRequestHeader_CustomHeader(t *testing.T) {
 	pi, err := PluginFactory("test",
 		fwkplugin.StrictDecoder(json.RawMessage(`{"additionalSessionHeaders":["x-tenant-id"]}`)), nil)
 	if err != nil {
@@ -227,11 +221,15 @@ func TestPreAdmit_CustomHeader(t *testing.T) {
 	req := &scheduling.InferenceRequest{
 		Headers: map[string]string{"x-tenant-id": "tenant-42"},
 	}
-	if err := p.PreAdmit(context.Background(), req); err != nil {
-		t.Fatalf("PreAdmit: %v", err)
+	if err := p.RequestHeader(context.Background(), req); err != nil {
+		t.Fatalf("RequestHeader: %v", err)
 	}
-	if req.FairnessID != "tenant-42" {
-		t.Errorf("FairnessID = %q, want %q", req.FairnessID, "tenant-42")
+	got, ok := scheduling.ReadRequestAttribute[string](req, AgentIdentityAttributeKey)
+	if !ok {
+		t.Fatal("agent-identity attribute not found")
+	}
+	if got != "tenant-42" {
+		t.Errorf("agent identity = %q, want %q", got, "tenant-42")
 	}
 
 	// And it wins over a default-bucket header (because it is prepended).
@@ -241,10 +239,14 @@ func TestPreAdmit_CustomHeader(t *testing.T) {
 			ClaudeCodeSessionHeader: "claude-session",
 		},
 	}
-	if err := p.PreAdmit(context.Background(), req2); err != nil {
-		t.Fatalf("PreAdmit: %v", err)
+	if err := p.RequestHeader(context.Background(), req2); err != nil {
+		t.Fatalf("RequestHeader: %v", err)
 	}
-	if req2.FairnessID != "tenant-42" {
-		t.Errorf("FairnessID = %q, want %q (custom should win)", req2.FairnessID, "tenant-42")
+	got2, ok2 := scheduling.ReadRequestAttribute[string](req2, AgentIdentityAttributeKey)
+	if !ok2 {
+		t.Fatal("agent-identity attribute not found")
+	}
+	if got2 != "tenant-42" {
+		t.Errorf("agent identity = %q, want %q (custom should win)", got2, "tenant-42")
 	}
 }

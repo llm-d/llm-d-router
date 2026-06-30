@@ -59,6 +59,9 @@ const (
 	// producer overrides it by implementing requestcontrol.TimeoutAwareProducer.
 	dataProducerTimeout       = 400 * time.Millisecond
 	responseBodyQueueCapacity = 100
+	// AgentIdentityKey is the request attribute key used by the agent-identity
+	// header processor and read by the Director to derive FairnessID.
+	AgentIdentityKey = "agent-identity"
 )
 
 // primaryEndpointHasCachedPrefix reports whether the primary profile's chosen
@@ -276,8 +279,14 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
-	if err := d.runPreAdmissionPlugins(ctx, reqCtx.SchedulingRequest); err != nil {
+	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
+	}
+	// Derive FairnessID from agent-identity attribute if not already set by explicit header.
+	if reqCtx.SchedulingRequest.FairnessID == "" {
+		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, AgentIdentityKey); ok && agentID != "" {
+			reqCtx.SchedulingRequest.FairnessID = agentID
+		}
 	}
 	if reqCtx.SchedulingRequest.FairnessID == "" {
 		reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
@@ -590,19 +599,19 @@ func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.I
 	}
 }
 
-func (d *Director) runPreAdmissionPlugins(ctx context.Context, request *fwksched.InferenceRequest) error {
-	if len(d.requestControlPlugins.preAdmissionPlugins) == 0 {
+func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwksched.InferenceRequest) error {
+	if len(d.requestControlPlugins.requestHeaderPlugins) == 0 {
 		return nil
 	}
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
-	for _, plugin := range d.requestControlPlugins.preAdmissionPlugins {
-		loggerDebug.Info("Running PreAdmitter plugin", "plugin", plugin.TypedName())
+	for _, plugin := range d.requestControlPlugins.requestHeaderPlugins {
+		loggerDebug.Info("Running RequestHeaderProcessor plugin", "plugin", plugin.TypedName())
 		before := time.Now()
-		if err := plugin.PreAdmit(ctx, request); err != nil {
+		if err := plugin.RequestHeader(ctx, request); err != nil {
 			return err
 		}
-		metrics.RecordPluginProcessingLatency(fwkrc.PreAdmissionExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
-		loggerDebug.Info("Completed running PreAdmitter plugin successfully", "plugin", plugin.TypedName())
+		metrics.RecordPluginProcessingLatency(fwkrc.RequestHeaderExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		loggerDebug.Info("Completed running RequestHeaderProcessor plugin successfully", "plugin", plugin.TypedName())
 	}
 	return nil
 }
