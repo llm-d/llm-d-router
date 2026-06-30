@@ -77,6 +77,7 @@ var _ requestcontrol.DataProducer = &Producer{}
 type Producer struct {
 	typedName      plugin.TypedName
 	kvCacheIndexer kvCacheIndexer
+	tokenProcessor kvblock.TokenProcessor
 
 	subscribersManager *kvevents.SubscriberManager
 	kvEventsConfig     *kvevents.Config
@@ -184,6 +185,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	return &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: name},
 		kvCacheIndexer:     indexer,
+		tokenProcessor:     tokenProcessor,
 		kvBlockScorer:      kvBlockScorer,
 		subscribersManager: subscribersManager,
 		kvEventsConfig:     config.KVEventsConfig,
@@ -195,6 +197,29 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		blockSizeTokens:    tokenProcessor.BlockSize(),
 		subscriberCtx:      ctx,
 	}, nil
+}
+
+// GetEngineKeysForRequest computes the KV-block engine keys (uint64 block
+// hashes) for the request's tokenized prompt, flattened across all prompts.
+// Returns nil when the request carries no tokens or produces no full blocks.
+func (p *Producer) GetEngineKeysForRequest(ctx context.Context,
+	request *scheduling.InferenceRequest) ([]uint64, error) {
+	engineKeys, _, err := p.GetEngineKeysAndDigestsForRequest(ctx, request)
+	return engineKeys, err
+}
+
+// GetEngineKeysAndDigestsForRequest returns the per-block uint64 engine keys
+// (used for index lookup and wire compatibility) alongside the full-width hash
+// digests (used by the prefetch plugin to build vLLM fs-connector filenames:
+// 32 bytes for sha256_cbor, 8 bytes for fnv64a). Both slices are flattened
+// across prompts and aligned index-for-index.
+func (p *Producer) GetEngineKeysAndDigestsForRequest(_ context.Context,
+	request *scheduling.InferenceRequest) ([]uint64, [][]byte, error) {
+	engineKeys, digests, err := computeBlockKeysWithDigests(p.tokenProcessor, request, p.blockSizeTokens)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to compute engine keys: %w", err)
+	}
+	return engineKeys, digests, nil
 }
 
 // TypedName returns the plugin's registered type and name.
