@@ -19,6 +19,7 @@ package logger
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -117,11 +118,15 @@ func refreshPrometheusMetrics(logger logr.Logger, datastore datalayer.PoolInfo, 
 		return
 	}
 
-	totals := calculateTotals(podMetrics)
+	summary := calculateSummary(podMetrics)
 
-	metrics.RecordInferencePoolAvgKVCache(pool.Name, totals.kvCache/float64(podCount))
-	metrics.RecordInferencePoolAvgQueueSize(pool.Name, float64(totals.queueSize)/float64(podCount))
-	metrics.RecordInferencePoolAvgRunningRequests(pool.Name, float64(totals.runningRequests)/float64(podCount))
+	metrics.RecordInferencePoolAvgKVCache(pool.Name, summary.kvCache.mean)
+	metrics.RecordInferencePoolAvgQueueSize(pool.Name, summary.queueSize.mean)
+	metrics.RecordInferencePoolAvgRunningRequests(pool.Name, summary.runningRequests.mean)
+
+	metrics.RecordInferencePoolStdDevKVCache(pool.Name, summary.kvCache.stdv)
+	metrics.RecordInferencePoolStdDevQueueSize(pool.Name, summary.queueSize.stdv)
+	metrics.RecordInferencePoolStdDevRunningRequests(pool.Name, summary.runningRequests.stdv)
 }
 
 // totals holds aggregated metric values
@@ -139,5 +144,49 @@ func calculateTotals(endpoints []fwkdl.Endpoint) totals {
 		result.queueSize += metrics.WaitingQueueSize
 		result.runningRequests += metrics.RunningRequestsSize
 	}
+	return result
+}
+
+// stats holds aggregated metric values
+type stats struct {
+	mean float64 // average
+	stdv float64 // standard deviation
+	vrce float64 // variance
+}
+
+type summary struct {
+	kvCache         stats
+	queueSize       stats
+	runningRequests stats
+}
+
+func calculateSummary(endpoints []fwkdl.Endpoint) summary {
+	var result summary
+	size := float64(len(endpoints))
+	totals := calculateTotals(endpoints)
+
+	result.kvCache.mean = totals.kvCache / size
+	result.queueSize.mean = float64(totals.queueSize) / size
+	result.runningRequests.mean = float64(totals.runningRequests) / size
+
+	for _, pod := range endpoints {
+		metrics := pod.GetMetrics()
+		result.kvCache.vrce += (metrics.KVCacheUsagePercent - result.kvCache.mean) * (metrics.KVCacheUsagePercent - result.kvCache.mean)
+		result.queueSize.vrce += (float64(metrics.WaitingQueueSize) - result.queueSize.mean) * (float64(metrics.WaitingQueueSize) - result.queueSize.mean)
+		result.runningRequests.vrce += (float64(metrics.RunningRequestsSize) - result.runningRequests.mean) * (float64(metrics.RunningRequestsSize) - result.runningRequests.mean)
+	}
+
+	var num = 1.0
+	if size > 2 {
+		num = size - 1
+	}
+	result.kvCache.vrce /= num
+	result.queueSize.vrce /= num
+	result.runningRequests.vrce /= num
+
+	result.kvCache.stdv = math.Sqrt(result.kvCache.vrce)
+	result.queueSize.stdv = math.Sqrt(result.queueSize.vrce)
+	result.runningRequests.stdv = math.Sqrt(result.runningRequests.vrce)
+
 	return result
 }
