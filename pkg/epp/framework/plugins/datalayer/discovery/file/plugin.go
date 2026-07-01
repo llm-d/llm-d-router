@@ -28,6 +28,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
@@ -41,13 +42,22 @@ import (
 
 const PluginType = "file-discovery"
 
+var (
+	ErrInvalidMetricsAddress = errors.New("invalid metricsAddress")
+	ErrInvalidMetricsPort    = errors.New("invalid metricsPort")
+)
+
 // EndpointEntry is the YAML/JSON representation of a single endpoint.
 type EndpointEntry struct {
-	Name      string            `json:"name"                yaml:"name"`
-	Namespace string            `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Address   string            `json:"address"             yaml:"address"`
-	Port      string            `json:"port"                yaml:"port"`
-	Labels    map[string]string `json:"labels,omitempty"    yaml:"labels,omitempty"`
+	Name      string `json:"name"                yaml:"name"`
+	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Address   string `json:"address"             yaml:"address"`
+	Port      string `json:"port"                yaml:"port"`
+	// MetricsAddress overrides the scrape host (may be a hostname); defaults to Address.
+	MetricsAddress string `json:"metricsAddress,omitempty" yaml:"metricsAddress,omitempty"`
+	// MetricsPort overrides the scrape port; defaults to Port.
+	MetricsPort string            `json:"metricsPort,omitempty" yaml:"metricsPort,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"      yaml:"labels,omitempty"`
 }
 
 // EndpointsFile is the top-level structure of the endpoints YAML/JSON file.
@@ -210,6 +220,14 @@ func (f *FileDiscovery) Start(ctx context.Context, notifier fwkdl.DiscoveryNotif
 
 const maxEndpointsFileSize = 1 << 20 // 1 MiB
 
+// validatePort reports an error if s is not a valid TCP port (1-65535).
+func validatePort(s string) error {
+	if n, err := strconv.Atoi(s); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("invalid port %q", s)
+	}
+	return nil
+}
+
 func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 	fh, err := os.Open(f.path)
 	if err != nil {
@@ -242,9 +260,25 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			errs = append(errs, fmt.Errorf("endpoint %q: invalid IPv4 address %q", e.Name, e.Address))
 			continue
 		}
-		if portNum, err := strconv.Atoi(e.Port); err != nil || portNum < 1 || portNum > 65535 {
-			errs = append(errs, fmt.Errorf("endpoint %q: invalid port %q", e.Name, e.Port))
+		if err := validatePort(e.Port); err != nil {
+			errs = append(errs, fmt.Errorf("endpoint %q: %w", e.Name, err))
 			continue
+		}
+		metricsAddr, metricsPort := e.Address, e.Port
+		if e.MetricsAddress != "" {
+			// MetricsAddress lands in the scrape URL host; reject URL metacharacters.
+			if strings.ContainsAny(e.MetricsAddress, "/@#? \t\r\n") {
+				errs = append(errs, fmt.Errorf("endpoint %q: %w %q", e.Name, ErrInvalidMetricsAddress, e.MetricsAddress))
+				continue
+			}
+			metricsAddr = e.MetricsAddress
+		}
+		if e.MetricsPort != "" {
+			if validatePort(e.MetricsPort) != nil {
+				errs = append(errs, fmt.Errorf("endpoint %q: %w %q", e.Name, ErrInvalidMetricsPort, e.MetricsPort))
+				continue
+			}
+			metricsPort = e.MetricsPort
 		}
 		ns := e.Namespace
 		if ns == "" {
@@ -255,7 +289,7 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			PodName:        e.Name,
 			Address:        e.Address,
 			Port:           e.Port,
-			MetricsHost:    net.JoinHostPort(e.Address, e.Port),
+			MetricsHost:    net.JoinHostPort(metricsAddr, metricsPort),
 			Labels:         e.Labels,
 		}
 		incoming[meta.NamespacedName] = struct{}{}
