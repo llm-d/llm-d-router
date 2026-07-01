@@ -182,6 +182,65 @@ endpoints:
 	assert.Equal(t, "10.0.0.1:8000", notifier.upserted[0].MetricsHost)
 }
 
+func TestStart_MetricsAddress(t *testing.T) {
+	tests := []struct {
+		name            string
+		metricsAddress  string
+		metricsPort     string
+		wantMetricsHost string
+		wantErr         error
+	}{
+		{
+			name:            "override host and port",
+			metricsAddress:  "metrics.spoke.example.com",
+			metricsPort:     "9090",
+			wantMetricsHost: "metrics.spoke.example.com:9090",
+		},
+		{
+			name:            "override host defaults port to serving",
+			metricsAddress:  "metrics.spoke.example.com",
+			wantMetricsHost: "metrics.spoke.example.com:8000",
+		},
+		{
+			name:           "reject metricsAddress with URL metacharacter",
+			metricsAddress: "evil.example.com/inject",
+			wantErr:        ErrInvalidMetricsAddress,
+		},
+		{
+			name:        "reject out-of-range metricsPort",
+			metricsPort: "99999",
+			wantErr:     ErrInvalidMetricsPort,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ep := "endpoints:\n  - name: ep1\n    address: \"10.0.0.1\"\n    port: \"8000\"\n"
+			if tt.metricsAddress != "" {
+				ep += fmt.Sprintf("    metricsAddress: %q\n", tt.metricsAddress)
+			}
+			if tt.metricsPort != "" {
+				ep += fmt.Sprintf("    metricsPort: %q\n", tt.metricsPort)
+			}
+			notifier := &recordingNotifier{}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			err := newFD(writeTemp(t, ep), false).Start(ctx, notifier)
+			switch {
+			case tt.wantErr != nil:
+				assert.ErrorIs(t, err, tt.wantErr)
+			default:
+				require.NoError(t, err)
+				require.Len(t, notifier.upserted, 1)
+				// forward keeps the IP; scrape uses the override
+				assert.Equal(t, "10.0.0.1", notifier.upserted[0].Address)
+				assert.Equal(t, tt.wantMetricsHost, notifier.upserted[0].MetricsHost)
+			}
+		})
+	}
+}
+
 func TestStart_MissingFile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
