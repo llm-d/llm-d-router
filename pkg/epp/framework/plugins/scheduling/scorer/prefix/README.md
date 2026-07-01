@@ -2,13 +2,16 @@
 
 **Type:** `prefix-cache-scorer`
 
-Scores candidate endpoints using `PrefixCacheMatchInfo` prepared earlier in the request pipeline. By default, the score is the ratio of matched blocks to total blocks. Optionally, it can also factor in the absolute length of the prefix.
+Scores candidate endpoints based on how much of the request's prefix is already cached. It can consider both the *ratio* of the prefix matched and the *absolute length* of the match.
 
 ## What it does
 
-For each candidate endpoint, the scorer reads the `PrefixCacheMatchInfo` attribute and computes a score.
+The scorer computes a score between `0.0` and `1.0` for each endpoint using a weighted combination of two metrics:
 
-The score is computed as:
+1.  **Match Ratio**: The proportion of the request prefix that is cached.
+2.  **Match Length**: The absolute number of cached tokens, normalized against a scale factor.
+
+### Scoring Formula
 
 ```text
 score = 0
@@ -17,18 +20,19 @@ score += (1.0 - prefixLengthWeight) * matchRatio
 ```
 
 Where:
-- `matchRatio = matchBlocks / totalBlocks` (the fraction of the request prefix matched)
-- `matchLengthRatio = min(1.0, matchedBlocks * blockSize / prefillSaturationTokens) ^ 2` (square of normalized matched tokens relative to `prefillSaturationTokens`)
+*   **`matchRatio`** = `matchBlocks` / `totalBlocks`
+*   **`matchLengthRatio`** = `min(1.0, matchedTokens / matchLengthScaleTokens) ^ 2`
+    *   `matchedTokens` = `matchBlocks` * `blockSize`
+    *   **`matchLengthScaleTokens`** is the scaling factor.
 
-If `prefixLengthWeight` is `0.0` (the default), the score simplifies to just the `matchRatio`.
+If `matchLengthWeight` is `0.0` (default), the score simplifies to just the `matchRatio`.
 
 If the attribute is missing, has the wrong type, or `totalBlocks` is zero, the endpoint receives score `0`.
 
-The square introduces a non-linearity motivated by the fact that attention computation grows quadratically as a function of prompt length. This ensures that the scoring function assigns a higher priority to longer requests, where the computational and latency savings of KV-cache reuse are significantly more critical.
+### Why the Quadratic Term?
 
-## Inputs consumed
-
-This scorer consumes:
+The squaring of `matchLengthRatio` introduces a non-linearity motivated by the fact that attention computation grows quadratically as a function of prompt length. This ensures that the scoring function assigns a higher priority to longer requests, where the computational and latency savings of KV-cache reuse are significantly more critical.
+## Inputs Consumed
 
 - `PrefixCacheMatchInfo`
 
@@ -36,27 +40,22 @@ The attribute is typically produced by the approximate prefix cache data produce
 
 ## Configuration
 
-This plugin supports the following optional configuration parameters:
-
 | Parameter | Type | Description | Default |
 | :--- | :--- | :--- | :--- |
-| `prefixLengthWeight` | float | Weight of the absolute prefix length in the score. Must be between `0.0` and `1.0`. | `0.0` |
-| `prefillSaturationTokens` | integer | The number of tokens at which the value of KV cache saturates. Required if `prefixLengthWeight` > `0.0`. | `8192` |
+| `matchLengthWeight` | float | Weight of the absolute prefix length in the score. Must be between `0.0` and `1.0`. | `0.0` |
+| `matchLengthScaleTokens` | integer | The number of tokens used to normalize `matchLengthRatio`. | `8192` |
 
-Example configuration:
+### Example
 
 ```yaml
 plugins:
 - type: prefix-cache-scorer
   parameters:
-    prefixLengthWeight: 0.5
-    prefillSaturationTokens: 16384
+    matchLengthWeight: 0.5
+    matchLengthScaleTokens: 16384
 ```
 
-## Operational notes
+## Operational Notes
 
-- The scorer itself does not hash prompts or maintain cache state.
-- It only converts previously prepared prefix match data into endpoint scores.
-- To be useful, it should be used together with a data producer that populates `PrefixCacheMatchInfo`.
-- `prefillSaturationTokens` should be tuned to match a specific workload. The general recommendation is to set this value to the P95 prompt length of the workload.
-- Do not set `prefillSaturationTokens` to the model's maximum context limit if the actual workload lengths are much lower.
+*   **Tuning `matchLengthScaleTokens`**: This should be set to reflect your workload. A good rule of thumb is to set it to the **P95 prompt length** of your typical requests. Setting it too high (e.g., to the model's maximum limit when actual requests are short) will compress the score range and make the scorer less effective.
+*   The scorer is stateless; it does not manage cache state or hash prompts itself. It relies entirely on the data producer.

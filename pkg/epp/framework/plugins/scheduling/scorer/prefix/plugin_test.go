@@ -52,10 +52,10 @@ func TestPrefixPluginScore(t *testing.T) {
 
 func TestPrefixPluginScoreWithWeights(t *testing.T) {
 	producerName := "approx-prefix-cache-producer"
-	// prefixLengthWeight = 0.5, prefillSaturationTokens = 100
+	// matchLengthWeight = 0.5, matchLengthScaleTokens = 100
 	p, _ := New(context.Background(), PrefixCacheScorerPluginType, producerName)
-	p.prefixLengthWeight = 0.5
-	p.prefillSaturationTokens = 100
+	p.matchLengthWeight = 0.5
+	p.matchLengthScaleTokens = 100
 
 	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
 
@@ -83,54 +83,54 @@ func TestPrefixPluginScoreWithWeights(t *testing.T) {
 
 func TestPrefixPluginFactoryValidation(t *testing.T) {
 	tests := []struct {
-		name                   string
-		config                 string
-		expectErr              bool
-		wantPrefixLengthWeight float64
-		wantPrefillSaturation  int
+		name                  string
+		config                string
+		expectErr             bool
+		wantMatchLengthWeight float64
+		wantMatchLengthScale  int
 	}{
 		{
-			name:                   "valid config with defaults",
-			config:                 `{}`,
-			expectErr:              false,
-			wantPrefixLengthWeight: defaultPrefixLengthWeight,
-			wantPrefillSaturation:  defaultPrefillSaturationTokens,
+			name:                  "valid config with defaults",
+			config:                `{}`,
+			expectErr:             false,
+			wantMatchLengthWeight: defaultMatchLengthWeight,
+			wantMatchLengthScale:  defaultMatchLengthScaleTokens,
 		},
 		{
-			name:                   "valid config with custom values",
-			config:                 `{"prefixLengthWeight": 0.5, "prefillSaturationTokens": 100}`,
-			expectErr:              false,
-			wantPrefixLengthWeight: 0.5,
-			wantPrefillSaturation:  100,
+			name:                  "valid config with custom values",
+			config:                `{"matchLengthWeight": 0.5, "matchLengthScaleTokens": 100}`,
+			expectErr:             false,
+			wantMatchLengthWeight: 0.5,
+			wantMatchLengthScale:  100,
 		},
 		{
-			name:      "invalid prefixLengthWeight < 0",
-			config:    `{"prefixLengthWeight": -0.1, "prefillSaturationTokens": 100}`,
+			name:      "invalid matchLengthWeight < 0",
+			config:    `{"matchLengthWeight": -0.1, "matchLengthScaleTokens": 100}`,
 			expectErr: true,
 		},
 		{
-			name:      "invalid prefixLengthWeight > 1",
-			config:    `{"prefixLengthWeight": 1.1, "prefillSaturationTokens": 100}`,
+			name:      "invalid matchLengthWeight > 1",
+			config:    `{"matchLengthWeight": 1.1, "matchLengthScaleTokens": 100}`,
 			expectErr: true,
 		},
 		{
-			name:      "invalid prefillSaturationTokens <= 0",
-			config:    `{"prefixLengthWeight": 0.5, "prefillSaturationTokens": 0}`,
+			name:      "invalid matchLengthScaleTokens <= 0",
+			config:    `{"matchLengthWeight": 0.5, "matchLengthScaleTokens": 0}`,
 			expectErr: true,
 		},
 		{
-			name:                   "missing prefillSaturationTokens when prefixLengthWeight > 0 uses default",
-			config:                 `{"prefixLengthWeight": 0.5}`,
-			expectErr:              false,
-			wantPrefixLengthWeight: 0.5,
-			wantPrefillSaturation:  defaultPrefillSaturationTokens,
+			name:                  "missing matchLengthScaleTokens when matchLengthWeight > 0 uses default",
+			config:                `{"matchLengthWeight": 0.5}`,
+			expectErr:             false,
+			wantMatchLengthWeight: 0.5,
+			wantMatchLengthScale:  defaultMatchLengthScaleTokens,
 		},
 		{
-			name:                   "zero prefixLengthWeight doesn't require prefillSaturationTokens",
-			config:                 `{"prefixLengthWeight": 0.0}`,
-			expectErr:              false,
-			wantPrefixLengthWeight: 0.0,
-			wantPrefillSaturation:  defaultPrefillSaturationTokens,
+			name:                  "zero matchLengthWeight doesn't require matchLengthScaleTokens",
+			config:                `{"matchLengthWeight": 0.0}`,
+			expectErr:             false,
+			wantMatchLengthWeight: 0.0,
+			wantMatchLengthScale:  defaultMatchLengthScaleTokens,
 		},
 	}
 
@@ -141,11 +141,17 @@ func TestPrefixPluginFactoryValidation(t *testing.T) {
 			if tt.config != "" {
 				decoder = json.NewDecoder(strings.NewReader(tt.config))
 			}
-			_, err := PrefixCachePluginFactory("test", decoder, handle)
+			p, err := PrefixCachePluginFactory("test", decoder, handle)
 			if tt.expectErr {
 				assert.Error(t, err)
+				assert.Nil(t, p)
 			} else {
 				assert.NoError(t, err)
+				prefixPlugin, ok := p.(*Plugin)
+				if assert.True(t, ok, "plugin must be of type *Plugin") {
+					assert.Equal(t, tt.wantMatchLengthWeight, prefixPlugin.matchLengthWeight)
+					assert.Equal(t, tt.wantMatchLengthScale, prefixPlugin.matchLengthScaleTokens)
+				}
 			}
 		})
 	}
