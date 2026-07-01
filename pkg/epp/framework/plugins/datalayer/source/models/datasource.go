@@ -28,13 +28,15 @@ type modelsDatasourceParams struct {
 	Path string `json:"path"`
 	// InsecureSkipVerify defines whether model server certificate should be verified or not.
 	InsecureSkipVerify bool `json:"insecureSkipVerify"`
+	// CACertPath is an optional PEM CA bundle to verify the scrape target cert.
+	CACertPath string `json:"caCertPath"`
 }
 
 // NewHTTPModelsDataSource constructs a ModelsDataSource with the given scheme and path.
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
 func NewHTTPModelsDataSource(scheme, path, name string) (*http.HTTPDataSource[*extmodels.ModelResponse], error) {
-	return http.NewHTTPDataSource(scheme, path, defaultModelsInsecureSkipVerify,
+	return http.NewHTTPDataSource(scheme, path, defaultModelsInsecureSkipVerify, "",
 		ModelsDataSourceType, name, parseModels)
 }
 
@@ -51,7 +53,7 @@ func ModelDataSourceFactory(name string, parameters *json.Decoder, _ plugin.Hand
 		return nil, fmt.Errorf("unsupported scheme: %s", cfg.Scheme)
 	}
 
-	ds, err := http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify,
+	ds, err := http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify, cfg.CACertPath,
 		ModelsDataSourceType, name, parseModels)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP data source: %w", err)
