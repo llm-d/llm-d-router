@@ -123,7 +123,6 @@ func refreshPrometheusMetrics(logger logr.Logger, datastore datalayer.PoolInfo, 
 	metrics.RecordInferencePoolAvgKVCache(pool.Name, summary.kvCache.mean)
 	metrics.RecordInferencePoolAvgQueueSize(pool.Name, summary.queueSize.mean)
 	metrics.RecordInferencePoolAvgRunningRequests(pool.Name, summary.runningRequests.mean)
-
 	metrics.RecordInferencePoolStdDevKVCache(pool.Name, summary.kvCache.stdv)
 	metrics.RecordInferencePoolStdDevQueueSize(pool.Name, summary.queueSize.stdv)
 	metrics.RecordInferencePoolStdDevRunningRequests(pool.Name, summary.runningRequests.stdv)
@@ -165,9 +164,11 @@ func calculateSummary(endpoints []fwkdl.Endpoint) summary {
 	size := float64(len(endpoints))
 	totals := calculateTotals(endpoints)
 
-	result.kvCache.mean = totals.kvCache / size
-	result.queueSize.mean = float64(totals.queueSize) / size
-	result.runningRequests.mean = float64(totals.runningRequests) / size
+	if size > 0 {
+		result.kvCache.mean = math.Round((totals.kvCache/size)*100) / 100
+		result.queueSize.mean = math.Round((float64(totals.queueSize)/size)*100) / 100
+		result.runningRequests.mean = math.Round((float64(totals.runningRequests)/size)*100) / 100
+	}
 
 	for _, pod := range endpoints {
 		metrics := pod.GetMetrics()
@@ -180,13 +181,15 @@ func calculateSummary(endpoints []fwkdl.Endpoint) summary {
 	if size > 2 {
 		num = size - 1
 	}
-	result.kvCache.vrce /= num
-	result.queueSize.vrce /= num
-	result.runningRequests.vrce /= num
+	if size > 0 {
+		result.kvCache.vrce = math.Round((result.kvCache.vrce/num)*100) / 100
+		result.queueSize.vrce = math.Round((result.queueSize.vrce/num)*100) / 100
+		result.runningRequests.vrce = math.Round((result.runningRequests.vrce/num)*100) / 100
 
-	result.kvCache.stdv = math.Sqrt(result.kvCache.vrce)
-	result.queueSize.stdv = math.Sqrt(result.queueSize.vrce)
-	result.runningRequests.stdv = math.Sqrt(result.runningRequests.vrce)
+		result.kvCache.stdv = math.Round(math.Sqrt(result.kvCache.vrce)*100) / 100
+		result.queueSize.stdv = math.Round(math.Sqrt(result.queueSize.vrce)*100) / 100
+		result.runningRequests.stdv = math.Round(math.Sqrt(result.runningRequests.vrce)*100) / 100
+	}
 
 	return result
 }
