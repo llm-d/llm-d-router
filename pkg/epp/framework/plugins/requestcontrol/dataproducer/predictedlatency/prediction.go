@@ -53,6 +53,7 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 	generatedTokenCounts := make([]int, len(candidateEndpoints))
 	prefixCacheScores := make([]float64, len(candidateEndpoints))
 	prefillTokensInFlights := make([]int64, len(candidateEndpoints))
+	numRequestRunnings := make([]int, len(candidateEndpoints))
 
 	for i, endpoint := range candidateEndpoints {
 		logger.V(logutil.TRACE).Info("Candidate pod for scheduling", "endpoint", endpoint.GetMetadata().String(), "metrics", endpoint.GetMetrics().String())
@@ -68,12 +69,18 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 		generatedTokenCounts[i] = 1
 		prefixCacheScores[i] = prefixCacheScore
 
-		podKey := endpoint.GetMetadata().NamespacedName.String()
-		prefillTokensInFlights[i] = pl.endpointCounter(&pl.prefillTokensInFlight, podKey).Load()
+		// In-flight load (cache-discounted prefill tokens and active request
+		// count) comes from the InFlightLoadProducer. Fall back to vLLM metrics
+		// for the request count when the attribute is not yet present.
+		numRequestRunnings[i] = endpoint.GetMetrics().RunningRequestsSize
+		if load, ok := pl.endpointInFlightLoad(endpoint); ok {
+			prefillTokensInFlights[i] = load.Tokens
+			numRequestRunnings[i] = int(load.Requests)
+		}
 	}
 
 	// Bulk predict
-	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, inputTokenLengths, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights)
+	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, inputTokenLengths, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights, numRequestRunnings)
 	if err != nil {
 		logger.V(logutil.DEBUG).Error(err, "Bulk prediction failed")
 		return nil, err

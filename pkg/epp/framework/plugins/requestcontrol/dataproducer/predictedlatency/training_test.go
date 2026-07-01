@@ -54,7 +54,7 @@ func TestBulkPredictWithMetrics(t *testing.T) {
 	generatedTokenCounts := []int{1, 1}
 	prefixCacheScores := []float64{0.0, 0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 2)
@@ -81,7 +81,7 @@ func TestBulkPredictWithMetrics_Error(t *testing.T) {
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)
@@ -99,7 +99,7 @@ func TestBulkPredictWithMetrics_InputMismatch(t *testing.T) {
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)
@@ -132,7 +132,7 @@ func TestBulkPredictWithMetrics_WithPredictedLatencyCtx(t *testing.T) {
 		incomingModelName: "incoming-model",
 	}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", plCtx, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", plCtx, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 1)
@@ -156,7 +156,7 @@ func TestBulkPredictWithMetrics_ChatCompletionsInputTokenLength(t *testing.T) {
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mp, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, []int64{0})
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mp, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, []int64{0}, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 1)
@@ -175,7 +175,7 @@ func TestBulkPredictWithMetrics_NilMetricsState(t *testing.T) {
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)
