@@ -94,7 +94,7 @@ func newRegistryTestHarness(t *testing.T, opts harnessOptions) *registryTestHarn
 	}
 }
 
-// assertFlowExists synchronously checks if a flow's queue exists on the first shard.
+// assertFlowExists synchronously checks if a flow's queue exists.
 func (h *registryTestHarness) assertFlowExists(key flowcontrol.FlowKey, msgAndArgs ...any) {
 	h.t.Helper()
 	_, err := h.fr.ManagedQueue(key)
@@ -196,7 +196,7 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 		assert.ErrorContains(t, err, "no SafeQueue registered", "The returned error must propagate the reason")
 	})
 
-	t.Run("Handle_Shards_ShouldReturnAllActiveShardsAndBeACopy", func(t *testing.T) {
+	t.Run("Handle_GetDataPlane_ShouldReturnNonNil", func(t *testing.T) {
 		t.Parallel()
 		// Create a registry
 		h := newRegistryTestHarness(t, harnessOptions{})
@@ -1001,12 +1001,12 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 		assert.False(t, exists3, "Band 3 should be collected")
 	})
 
-	t.Run("ShouldCollectBand_AcrossMultipleShards", func(t *testing.T) {
+	t.Run("ShouldCollectBand_AfterFlowIdle", func(t *testing.T) {
 		t.Parallel()
 		h := newRegistryTestHarness(t, harnessOptions{})
 		key := flowcontrol.FlowKey{ID: "test-flow", Priority: dynamicPrio}
 
-		// Create flow on all shards
+		// Create flow
 		h.openConnectionOnFlow(key)
 		// Verify band exists
 		_, ok := h.fr.priorityBands.Load(dynamicPrio)

@@ -14,11 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package controller contains the implementation of the FlowController engine.
-//
-// The FlowController is the central processing engine of the Flow Control layer. It is a high-throughput
-// component responsible for managing the lifecycle of all incoming requests. It achieves this by acting as a stateless
-// supervisor that orchestrates a stateful worker (Processor).
 package controller
 
 import (
@@ -46,7 +41,7 @@ type registryClient interface {
 	contracts.FlowRegistryDataPlane
 }
 
-// processor is the minimal internal interface that the FlowController requires from its workers.
+// processor is the minimal internal interface that the FlowController requires from its worker.
 type processor interface {
 	Run(ctx context.Context)
 	Submit(item *internal.FlowItem) error
@@ -70,8 +65,8 @@ type processorFactory func(
 var _ processor = &internal.Processor{}
 
 // FlowController is the central, high-throughput engine of the Flow Control layer.
-// It is designed as a stateless distributor that orchestrates a stateful worker (Processor), following a
-// supervisor-worker pattern.
+// It is the request-facing front end that hands each request to a single stateful worker (the Processor) and blocks
+// until the request reaches a terminal outcome.
 //
 // Request Lifecycle Management:
 //
@@ -332,7 +327,7 @@ func (fc *FlowController) withConnectionWithFallback(
 	})
 }
 
-// tryDistribution handles a single attempt to select a shard and submit a request.
+// tryDistribution handles a single attempt to submit a request to the processor.
 // It uses the provided `conn` to access the registry data plane.
 // If this function returns an error, it guarantees that the provided `item` has been finalized.
 func (fc *FlowController) tryDistribution(
@@ -424,21 +419,19 @@ func (fc *FlowController) createRequestContext(
 	return reqCtx, cancel, enqueueTime
 }
 
-// distributeRequest implements a flow-aware, two-phase "Join-Shortest-Queue-by-Bytes" (JSQ-Bytes) distribution strategy
-// with graceful backpressure. It attempts to submit an item to the best-ranked candidate from the provided list.
+// distributeRequest submits an item to the processor with graceful backpressure.
 //
-// The algorithm operates as follows:
-//  1. Phase 1 (Non-blocking Fast Failover): It iterates through the ranked candidates and attempts a non-blocking
-//     submission. The first successful submission wins.
-//  2. Phase 2 (Blocking Fallback): If all non-blocking attempts fail, it performs a single blocking submission to the
-//     least-loaded candidate, providing backpressure.
+// It operates in two phases:
+//  1. Non-blocking submit: a fast Submit that succeeds immediately if the processor's enqueue channel has capacity.
+//  2. Blocking fallback: if the processor is busy, a single blocking SubmitOrBlock that applies backpressure until the
+//     item is accepted, the context expires, or the processor shuts down.
 //
 // The provided context (ctx) is used for the blocking submission phase (SubmitOrBlock).
 //
 // Ownership Contract:
-//   - Returns nil: Success. Ownership transferred to Processor.
-//   - Returns error: Failure (Context expiry, shutdown,, etc.).
-//     Ownership retained by Controller. The Controller MUST finalize the item.
+//   - Returns nil: Success. Ownership transferred to the Processor.
+//   - Returns error: Failure (context expiry, shutdown, etc.).
+//     Ownership retained by the Controller, which MUST finalize the item.
 func (fc *FlowController) distributeRequest(
 	ctx context.Context,
 	item *internal.FlowItem,

@@ -112,13 +112,13 @@ type PriorityBandPolicyDefaults struct {
 // Config holds the master configuration for the entire FlowRegistry.
 // It serves as the top-level blueprint, defining global settings and the templates for its priority bands.
 type Config struct {
-	// MaxBytes defines an optional, global maximum total byte size limit aggregated across all priority bands and shards.
+	// MaxBytes defines an optional, global maximum total byte size limit aggregated across all priority bands.
 	// The `controller.FlowController` enforces this limit in addition to per-band capacity limits.
 	// A value of 0 signifies that this global limit is ignored, and only per-band limits apply.
 	// Optional: Defaults to 0.
 	MaxBytes uint64
 
-	// MaxRequests defines an optional, global maximum total request count aggregated across all priority bands and shards.
+	// MaxRequests defines an optional, global maximum total request count aggregated across all priority bands.
 	// The `controller.FlowController` enforces this limit in addition to per-band capacity limits.
 	// A value of 0 signifies that this global limit is ignored, and only per-band limits apply.
 	// Optional: Defaults to 0.
@@ -145,7 +145,7 @@ type Config struct {
 	FlowGCTimeout time.Duration
 
 	// PriorityBandGCTimeout defines the duration of inactivity after which a dynamically provisioned priority band
-	// is garbage collected. A band is considered idle when it has no flows and no buffered requests across all shards.
+	// is garbage collected. A band is considered idle when it has no flows and no buffered requests.
 	// Must be >= FlowGCTimeout to ensure flows are collected before bands.
 	// Optional: Defaults to `defaultPriorityBandGCTimeout` (10 minutes).
 	PriorityBandGCTimeout time.Duration
@@ -188,11 +188,11 @@ type PriorityBandConfig struct {
 	// Optional: Defaults to defaultQueue ("ListQueue").
 	Queue queue.RegisteredQueueName
 
-	// MaxBytes defines the maximum total byte size for this priority band, aggregated across all shards.
+	// MaxBytes defines the maximum total byte size for this priority band.
 	// Optional: Defaults to defaultPriorityBandMaxBytes (1 GB).
 	MaxBytes uint64
 
-	// MaxRequests defines the maximum total request count for this priority band, aggregated across all shards.
+	// MaxRequests defines the maximum total request count for this priority band.
 	// A value of 0 signifies no request-count limit is enforced.
 	// Optional: Defaults to defaultPriorityBandMaxRequests (5000).
 	MaxRequests uint64

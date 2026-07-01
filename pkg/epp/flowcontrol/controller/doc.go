@@ -18,30 +18,29 @@ limitations under the License.
 //
 // # Overview
 //
-// The FlowController is the central processing engine of the Flow Control layer. It acts as a stateless supervisor that
-// orchestrates a pool of stateful workers (internal.ShardProcessor), managing the lifecycle of all incoming requests
-// from initial submission to a terminal outcome (dispatch, rejection, or eviction).
+// The FlowController is the central processing engine of the Flow Control layer. It manages the lifecycle of all
+// incoming requests from initial submission to a terminal outcome (dispatch, rejection, or eviction).
 //
-// # Architecture: Supervisor-Worker Pattern
+// # Architecture
 //
-// This package implements a supervisor-worker pattern to achieve high throughput and dynamic scalability.
+// The engine is split into two cooperating roles:
 //
-//   - The FlowController (Supervisor): The public-facing API of the system. Its primary responsibilities are to execute
-//     a distribution algorithm to select the optimal worker for a new request and to manage the lifecycle of the worker
-//     pool, ensuring it stays synchronized with the underlying shard topology defined by the contracts.FlowRegistry.
-//   - The internal.ShardProcessor (Worker): A stateful, single-goroutine actor responsible for the entire lifecycle of
-//     requests on a single shard. The supervisor manages a pool of these workers, one for each contracts.RegistryShard.
+//   - The FlowController: The public-facing API of the system. Each call to EnqueueAndWait runs on its own (caller)
+//     goroutine: it acquires a flow lease from the contracts.FlowRegistry, hands the request to the Processor, and
+//     blocks until the request is finalized. It owns asynchronous finalization driven by the request Context
+//     (TTL/cancellation) and queue occupancy metrics.
+//   - The internal.Processor (Worker): A single, stateful, single-goroutine actor that owns the request data plane. It
+//     runs the dispatch loop, performs capacity checks, sweeps externally finalized items, and finalizes requests
+//     synchronously (dispatch, capacity rejection, shutdown).
 //
 // # Concurrency Model
 //
-// The FlowController is designed to be highly concurrent and thread-safe. It acts primarily as a stateless distributor.
+// The FlowController is designed to be highly concurrent and thread-safe.
 //
-//   - EnqueueAndWait: Can be called concurrently by many goroutines.
-//   - Worker Management: Uses a sync.Map (workers) for concurrent access and lazy initialization of workers.
-//   - Supervision: A single background goroutine (run) manages the worker pool lifecycle (garbage collection).
-//
-// It achieves high throughput by minimizing shared state and relying on the internal ShardProcessors to handle state
-// mutations serially (using an actor model).
+//   - EnqueueAndWait: Can be called concurrently by many goroutines, each handing its item to the single Processor over
+//     a buffered channel.
+//   - Single-Writer Actor: Routing all state mutations through the Processor's single Run goroutine makes complex
+//     transactions (such as capacity checks) inherently atomic without coarse-grained locks.
 //
 // # Request Lifecycle and Ownership
 //

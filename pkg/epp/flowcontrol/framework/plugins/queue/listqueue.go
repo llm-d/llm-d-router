@@ -35,7 +35,7 @@ import (
 // # Behavioral Guarantees
 //
 // The core guarantee of this queue is strict physical First-In, First-Out (FIFO) ordering. It processes items in the
-// exact order they are added to the queue on a specific shard.
+// exact order they are added to the queue.
 //
 // # Performance and Trade-offs
 //

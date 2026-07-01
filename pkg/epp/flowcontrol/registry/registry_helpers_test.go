@@ -94,7 +94,7 @@ func (h *testHarness) synchronizeFlow(key flowcontrol.FlowKey) {
 	h.registry.synchronizeFlow(key, policy, q)
 }
 
-// addItem adds an item to a specific flow's queue on the shard.
+// addItem adds an item to a specific flow's queue.
 func (h *testHarness) addItem(key flowcontrol.FlowKey, size uint64) flowcontrol.QueueItemAccessor {
 	h.t.Helper()
 	mq, err := h.registry.ManagedQueue(key)
@@ -115,7 +115,7 @@ func (h *testHarness) removeItem(key flowcontrol.FlowKey, item flowcontrol.Queue
 
 // --- Basic Tests ---
 
-func TestShard_New(t *testing.T) {
+func TestRegistry_New(t *testing.T) {
 	t.Parallel()
 
 	t.Run("ShouldInitializeCorrectly_WithDefaultConfig", func(t *testing.T) {
@@ -134,7 +134,7 @@ func TestShard_New(t *testing.T) {
 	})
 }
 
-func TestShard_Stats(t *testing.T) {
+func TestRegistry_Stats(t *testing.T) {
 	t.Parallel()
 	h := newTestHarness(t)
 	h.addItem(h.highPriorityKey1, 100)
@@ -152,7 +152,7 @@ func TestShard_Stats(t *testing.T) {
 		"Priority band byte size must reflect the items queued at that level")
 }
 
-func TestShard_Accessors(t *testing.T) {
+func TestRegistry_Accessors(t *testing.T) {
 	t.Parallel()
 
 	t.Run("SuccessPaths", func(t *testing.T) {
@@ -223,7 +223,7 @@ func TestShard_Accessors(t *testing.T) {
 	})
 }
 
-func TestShard_PriorityBandAccessor(t *testing.T) {
+func TestRegistry_PriorityBandAccessor(t *testing.T) {
 	t.Parallel()
 
 	t.Run("ShouldFail_WhenPriorityDoesNotExist", func(t *testing.T) {
@@ -352,7 +352,7 @@ func TestShard_PriorityBandAccessor(t *testing.T) {
 
 // --- Lifecycle and State Management Tests ---
 
-func TestShard_SynchronizeFlow(t *testing.T) {
+func TestRegistry_SynchronizeFlow(t *testing.T) {
 	t.Parallel()
 	h := newTestHarness(t)
 	flowKey := flowcontrol.FlowKey{ID: "flow1", Priority: highPriority}
@@ -367,7 +367,7 @@ func TestShard_SynchronizeFlow(t *testing.T) {
 	assert.Same(t, mq1, mq2, "Idempotent synchronization must not replace the existing queue instance")
 }
 
-func TestShard_DeleteFlow(t *testing.T) {
+func TestRegistry_DeleteFlow(t *testing.T) {
 	t.Parallel()
 	h := newTestHarness(t)
 	_, err := h.registry.ManagedQueue(h.highPriorityKey1)
@@ -383,7 +383,7 @@ func TestShard_DeleteFlow(t *testing.T) {
 		"Accessing a deleted flow must return ErrFlowInstanceNotFound")
 }
 
-func TestShard_DynamicProvisioning(t *testing.T) {
+func TestRegistry_DynamicProvisioning(t *testing.T) {
 	t.Parallel()
 
 	t.Run("ShouldAddBandDynamically", func(t *testing.T) {
@@ -437,7 +437,7 @@ func TestShard_DynamicProvisioning(t *testing.T) {
 		t.Parallel()
 		h := newTestHarness(t)
 
-		// Try to add a band that is not in h.shard.config.
+		// Try to add a band that is not in the registry config.
 		assert.Panics(t, func() { h.registry.addPriorityBand(nonExistentPriority) },
 			"Should fail if the definition layer hasn't been updated first")
 	})
@@ -445,11 +445,11 @@ func TestShard_DynamicProvisioning(t *testing.T) {
 
 // --- Concurrency Test ---
 
-// TestShard_Concurrency_MixedWorkload is a general stability test that simulates a realistic workload by having
-// concurrent readers (e.g., dispatchers) and writers operating on the same shard.
+// TestRegistry_Concurrency_MixedWorkload is a general stability test that simulates a realistic workload by having
+// concurrent readers (e.g., dispatchers) and writers operating on the same registry.
 // It provides high confidence that the fine-grained locking strategy is free of deadlocks and data races under
 // sustained, mixed contention.
-func TestShard_Concurrency_MixedWorkload(t *testing.T) {
+func TestRegistry_Concurrency_MixedWorkload(t *testing.T) {
 	t.Parallel()
 	const (
 		numReaders   = 5
@@ -512,10 +512,10 @@ func TestShard_Concurrency_MixedWorkload(t *testing.T) {
 	assert.Zero(t, finalStats.TotalByteSize, "After all paired add/remove operations, the total byte size should be zero")
 }
 
-// TestShard_Concurrency_AllOrderedPriorityLevels_RaceSafety verifies that AllOrderedPriorityLevels() is safe to call
+// TestRegistry_Concurrency_AllOrderedPriorityLevels_RaceSafety verifies that AllOrderedPriorityLevels() is safe to call
 // concurrently with addPriorityBand() and deletePriorityBand(). This test is designed to trigger the Go race detector
 // if the implementation returns the internal slice without proper synchronization.
-func TestShard_Concurrency_AllOrderedPriorityLevels_RaceSafety(t *testing.T) {
+func TestRegistry_Concurrency_AllOrderedPriorityLevels_RaceSafety(t *testing.T) {
 	t.Parallel()
 	const (
 		numReaders = 5
