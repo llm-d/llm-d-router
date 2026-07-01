@@ -1,0 +1,15 @@
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: ${POOL_NAME}-decode
+spec:
+  selector:
+    matchLabels:
+      llm-d.ai/role: decode
+  endpointPickerRef:
+    name: ${EPP_NAME}-decode
+    kind: Service
+    port:
+      number: 9002
+  targetPorts:
+  - number: 8000
