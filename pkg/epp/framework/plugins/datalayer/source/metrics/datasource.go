@@ -48,13 +48,15 @@ type metricsDatasourceParams struct {
 	Path string `json:"path"`
 	// InsecureSkipVerify defines whether model server certificate should be verified or not.
 	InsecureSkipVerify bool `json:"insecureSkipVerify"`
+	// CACertPath is an optional PEM CA bundle to verify the scrape target cert.
+	CACertPath string `json:"caCertPath"`
 }
 
 // NewHTTPMetricsDataSource constructs a MetricsDataSource with the given scheme and path.
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
 func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
-	return http.NewHTTPDataSource(scheme, path, defaultMetricsInsecureSkipVerify,
+	return http.NewHTTPDataSource(scheme, path, defaultMetricsInsecureSkipVerify, "",
 		MetricsDataSourceType, name, parseMetrics)
 }
 
@@ -72,7 +74,7 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		}
 	}
 
-	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify,
+	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify, cfg.CACertPath,
 		MetricsDataSourceType, name, parseMetrics)
 }
 

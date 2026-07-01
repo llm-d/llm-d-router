@@ -19,11 +19,13 @@ package http
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"runtime/debug"
 	"slices"
@@ -60,8 +62,9 @@ type HTTPDataSource[T any] struct {
 	exts []fwkdl.PollingExtractor[T]
 }
 
-// NewHTTPDataSource constructs a typed polling dispatcher.
-func NewHTTPDataSource[T any](scheme, path string, skipCertVerification bool,
+// NewHTTPDataSource constructs a typed polling dispatcher. For https, an
+// optional caCertPath PEM CA bundle verifies the scrape target's cert.
+func NewHTTPDataSource[T any](scheme, path string, skipCertVerification bool, caCertPath string,
 	pluginType, pluginName string, parser func(io.Reader) (T, error)) (*HTTPDataSource[T], error) {
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
@@ -73,8 +76,16 @@ func NewHTTPDataSource[T any](scheme, path string, skipCertVerification bool,
 		},
 	}
 	if scheme == "https" {
+		tlsCfg := &tls.Config{InsecureSkipVerify: skipCertVerification}
+		if caCertPath != "" {
+			pool, err := caCertPool(caCertPath)
+			if err != nil {
+				return nil, err
+			}
+			tlsCfg.RootCAs = pool
+		}
 		httpsTransport := baseTransport.Clone()
-		httpsTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: skipCertVerification}
+		httpsTransport.TLSClientConfig = tlsCfg
 		cl.Transport = httpsTransport
 	}
 	return &HTTPDataSource[T]{
@@ -84,6 +95,19 @@ func NewHTTPDataSource[T any](scheme, path string, skipCertVerification bool,
 		client:    cl,
 		parser:    parser,
 	}, nil
+}
+
+// caCertPool loads a PEM CA bundle for TLS verification.
+func caCertPool(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading CA cert %s: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no valid CA certs in %s", path)
+	}
+	return pool, nil
 }
 
 func (s *HTTPDataSource[T]) TypedName() fwkplugin.TypedName { return s.typedName }
