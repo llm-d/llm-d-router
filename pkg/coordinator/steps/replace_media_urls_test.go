@@ -28,8 +28,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/llm-d/coordinator/pkg/config"
-	"github.com/llm-d/coordinator/pkg/pipeline"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 // newLoopbackStep builds a step whose SSRF guard permits loopback. httptest

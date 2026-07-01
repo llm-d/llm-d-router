@@ -29,8 +29,8 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
-	"github.com/llm-d/coordinator/pkg/config"
-	"github.com/llm-d/coordinator/pkg/pipeline"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 type stubStep struct {

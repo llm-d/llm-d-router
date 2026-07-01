@@ -26,8 +26,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/llm-d/coordinator/pkg/gateway"
-	"github.com/llm-d/coordinator/pkg/pipeline"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 func TestRenderStep_ParsesFullResponse(t *testing.T) {

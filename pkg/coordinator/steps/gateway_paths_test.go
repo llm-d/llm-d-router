@@ -25,9 +25,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/llm-d/coordinator/pkg/config"
-	"github.com/llm-d/coordinator/pkg/gateway"
-	"github.com/llm-d/coordinator/pkg/pipeline"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {

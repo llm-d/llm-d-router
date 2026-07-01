@@ -19,7 +19,7 @@ package ec
 import (
 	"context"
 
-	"github.com/llm-d/coordinator/pkg/pipeline"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 // sharedStorageEC is the EC connector for the ec-shared-storage topology. Encoder

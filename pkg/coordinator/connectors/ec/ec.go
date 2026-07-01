@@ -23,7 +23,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/llm-d/coordinator/pkg/pipeline"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 // DefaultECConnectorName is the EC connector selected when an empty string is
