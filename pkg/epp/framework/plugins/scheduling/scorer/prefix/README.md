@@ -15,8 +15,8 @@ The scorer computes a score between `0.0` and `1.0` for each endpoint using a we
 
 ```text
 score = 0
-score += prefixLengthWeight * matchLengthRatio
-score += (1.0 - prefixLengthWeight) * matchRatio
+score += matchLengthWeight * matchLengthRatio
+score += (1.0 - matchLengthWeight) * matchRatio
 ```
 
 Where:
