@@ -142,6 +142,65 @@ func TestCalculateTotals(t *testing.T) {
 	}
 }
 
+func TestCalculateSummary(t *testing.T) {
+	tests := []struct {
+		name      string
+		endpoints []fwkdl.Endpoint
+		want      summary
+	}{
+		{
+			name:      "empty list",
+			endpoints: []fwkdl.Endpoint{},
+			want:      summary{},
+		},
+		{
+			name: "single endpoint",
+			endpoints: []fwkdl.Endpoint{
+				fwkdl.NewEndpoint(pod1, &fwkdl.Metrics{
+					KVCacheUsagePercent: 50.0,
+					WaitingQueueSize:    3,
+					RunningRequestsSize: 5,
+					UpdateTime:          time.Now(),
+				}),
+			},
+			want: summary{
+				kvCache:         stats{mean: 50.0, stdv: 0, vrce: 0},
+				queueSize:       stats{mean: 3.0, stdv: 0, vrce: 0},
+				runningRequests: stats{mean: 5.0, stdv: 0, vrce: 0},
+			},
+		},
+		{
+			name: "multiple endpoints aggregated",
+			endpoints: []fwkdl.Endpoint{
+				fwkdl.NewEndpoint(pod1, &fwkdl.Metrics{
+					KVCacheUsagePercent: 30.0,
+					WaitingQueueSize:    2,
+					RunningRequestsSize: 1,
+					UpdateTime:          time.Now(),
+				}),
+				fwkdl.NewEndpoint(pod2, &fwkdl.Metrics{
+					KVCacheUsagePercent: 70.0,
+					WaitingQueueSize:    5,
+					RunningRequestsSize: 3,
+					UpdateTime:          time.Now(),
+				}),
+			},
+			want: summary{
+				kvCache:         stats{mean: 50.0, stdv: 28.28, vrce: 800.0},
+				queueSize:       stats{mean: 3.5, stdv: 2.12, vrce: 4.5},
+				runningRequests: stats{mean: 2.0, stdv: 1.41, vrce: 2.0},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calculateSummary(tt.endpoints)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestRefreshPrometheusMetricsAvgValues(t *testing.T) {
 	metrics.Register()
 	metrics.Reset()

@@ -19,6 +19,7 @@ package logger
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -117,11 +118,14 @@ func refreshPrometheusMetrics(logger logr.Logger, datastore datalayer.PoolInfo, 
 		return
 	}
 
-	totals := calculateTotals(podMetrics)
+	summary := calculateSummary(podMetrics)
 
-	metrics.RecordInferencePoolAvgKVCache(pool.Name, totals.kvCache/float64(podCount))
-	metrics.RecordInferencePoolAvgQueueSize(pool.Name, float64(totals.queueSize)/float64(podCount))
-	metrics.RecordInferencePoolAvgRunningRequests(pool.Name, float64(totals.runningRequests)/float64(podCount))
+	metrics.RecordInferencePoolAvgKVCache(pool.Name, summary.kvCache.mean)
+	metrics.RecordInferencePoolAvgQueueSize(pool.Name, summary.queueSize.mean)
+	metrics.RecordInferencePoolAvgRunningRequests(pool.Name, summary.runningRequests.mean)
+	metrics.RecordInferencePoolStdDevKVCache(pool.Name, summary.kvCache.stdv)
+	metrics.RecordInferencePoolStdDevQueueSize(pool.Name, summary.queueSize.stdv)
+	metrics.RecordInferencePoolStdDevRunningRequests(pool.Name, summary.runningRequests.stdv)
 }
 
 // totals holds aggregated metric values
@@ -139,5 +143,53 @@ func calculateTotals(endpoints []fwkdl.Endpoint) totals {
 		result.queueSize += metrics.WaitingQueueSize
 		result.runningRequests += metrics.RunningRequestsSize
 	}
+	return result
+}
+
+// stats holds aggregated metric values
+type stats struct {
+	mean float64 // average
+	stdv float64 // standard deviation
+	vrce float64 // variance
+}
+
+type summary struct {
+	kvCache         stats
+	queueSize       stats
+	runningRequests stats
+}
+
+func calculateSummary(endpoints []fwkdl.Endpoint) summary {
+	var result summary
+	size := float64(len(endpoints))
+	totals := calculateTotals(endpoints)
+
+	if size > 0 {
+		result.kvCache.mean = math.Round((totals.kvCache/size)*100) / 100
+		result.queueSize.mean = math.Round((float64(totals.queueSize)/size)*100) / 100
+		result.runningRequests.mean = math.Round((float64(totals.runningRequests)/size)*100) / 100
+	}
+
+	for _, pod := range endpoints {
+		metrics := pod.GetMetrics()
+		result.kvCache.vrce += (metrics.KVCacheUsagePercent - result.kvCache.mean) * (metrics.KVCacheUsagePercent - result.kvCache.mean)
+		result.queueSize.vrce += (float64(metrics.WaitingQueueSize) - result.queueSize.mean) * (float64(metrics.WaitingQueueSize) - result.queueSize.mean)
+		result.runningRequests.vrce += (float64(metrics.RunningRequestsSize) - result.runningRequests.mean) * (float64(metrics.RunningRequestsSize) - result.runningRequests.mean)
+	}
+
+	var num = 1.0
+	if size > 2 {
+		num = size - 1
+	}
+	if size > 0 {
+		result.kvCache.vrce = math.Round((result.kvCache.vrce/num)*100) / 100
+		result.queueSize.vrce = math.Round((result.queueSize.vrce/num)*100) / 100
+		result.runningRequests.vrce = math.Round((result.runningRequests.vrce/num)*100) / 100
+
+		result.kvCache.stdv = math.Round(math.Sqrt(result.kvCache.vrce)*100) / 100
+		result.queueSize.stdv = math.Round(math.Sqrt(result.queueSize.vrce)*100) / 100
+		result.runningRequests.stdv = math.Round(math.Sqrt(result.runningRequests.vrce)*100) / 100
+	}
+
 	return result
 }
