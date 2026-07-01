@@ -32,6 +32,7 @@ If the attribute is missing, has the wrong type, or `totalBlocks` is zero, the e
 ### Why the Quadratic Term?
 
 The squaring of `matchLengthRatio` introduces a non-linearity motivated by the fact that attention computation grows quadratically as a function of prompt length. This ensures that the scoring function assigns a higher priority to longer requests, where the computational and latency savings of KV-cache reuse are significantly more critical.
+
 ## Inputs Consumed
 
 - `PrefixCacheMatchInfo`
@@ -42,7 +43,7 @@ The attribute is typically produced by the approximate prefix cache data produce
 
 | Parameter | Type | Description | Default |
 | :--- | :--- | :--- | :--- |
-| `matchLengthWeight` | float | Weight of the absolute prefix length in the score. Must be between `0.0` and `1.0`. | `0.0` |
+| `matchLengthWeight` | float | Weight of the absolute match length in the score. Must be between `0.0` and `1.0`. | `0.0` |
 | `matchLengthScaleTokens` | integer | The number of tokens used to normalize `matchLengthRatio`. | `8192` |
 
 ### Example
