@@ -27,6 +27,5 @@ limitations under the License.
 //   - IntraFlowDispatchPolicy: (Deprecated) Legacy interface for intra-flow ordering. Replaced by OrderingPolicy.
 //   - ItemComparator: (Deprecated) Legacy interface for exposing ordering logic. Replaced by OrderingPolicy.
 //
-// These components are linked by QueueCapability, which allows policies to declare their queue requirements (e.g.,
-// FIFO or priority-based ordering).
+// An OrderingPolicy supplies the comparator (Less) that determines dispatch order within a flow's queue.
 package flowcontrol
