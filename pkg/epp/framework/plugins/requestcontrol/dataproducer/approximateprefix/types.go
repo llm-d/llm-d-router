@@ -22,6 +22,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 )
 
 // indexerInterface maintains an LRU cache of prompt prefix hashes and the server(s) that might have that
@@ -36,8 +37,9 @@ type indexerInterface interface {
 // podSet holds a set of pods that may have a specific prefix hash.
 type podSet map[ServerID]struct{}
 
-// blockHash is a hash of a block of request data.
-type blockHash uint64
+// blockHash is a hash of a block of request data. It aliases prefixhash.BlockHash
+// so this package and other prefix-aware producers share one block-hash type.
+type blockHash = prefixhash.BlockHash
 
 // server contains information about a specific server/pod and its cache capacity.
 type server struct {
