@@ -3,6 +3,8 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -19,6 +21,20 @@ var _ fwkdl.PollingExtractor[*ModelResponse] = &ModelExtractor{}
 type ModelResponse struct {
 	Object string                 `json:"object"`
 	Data   []attrmodels.ModelData `json:"data"`
+}
+
+// ParseModels decodes a /v1/models response body into a ModelResponse. It is the
+// shared parser for both the polling source and the once-per-endpoint extractor.
+func ParseModels(data io.Reader) (*ModelResponse, error) {
+	body, err := io.ReadAll(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+	var modelsResponse ModelResponse
+	if err := json.Unmarshal(body, &modelsResponse); err != nil {
+		return nil, err
+	}
+	return &modelsResponse, nil
 }
 
 // ModelExtractor implements the models extraction.

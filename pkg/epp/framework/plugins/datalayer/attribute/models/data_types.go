@@ -37,6 +37,9 @@ type ModelDataCollection []ModelData
 type ModelData struct {
 	ID     string `json:"id"`
 	Parent string `json:"parent,omitempty"`
+	// MaxModelLen is the model's context window in tokens as reported by the
+	// model server; zero when the server does not report it.
+	MaxModelLen int `json:"max_model_len,omitempty"`
 }
 
 // String returns a string representation of the model info

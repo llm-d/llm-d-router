@@ -27,3 +27,26 @@ modelData, ok := attr.(models.ModelDataCollection)
 ## Configuration
 
 No configuration parameters.
+
+## Once-per-endpoint variant
+
+**Type:** `models-endpoint-extractor`
+
+`ModelEndpointExtractor` produces the same `ModelsAttributeKey` attribute but is
+driven by endpoint lifecycle events instead of a poll loop. On endpoint add it
+fetches `/v1/models` once and stores the parsed `ModelDataCollection`; the model
+list is fixed for an endpoint's lifetime, so it is not re-fetched on a timer. A
+failed fetch is logged and skipped, leaving the attribute unset so consumers fall
+back to their default.
+
+It is registered as the default producer of `ModelsAttributeKey` and self-wires
+to an `endpoint-notification-source` (auto-created when absent), so any consumer
+that declares the attribute as a dependency gets it without extra configuration.
+
+### Configuration
+
+| Field | Default | Description |
+|---|---|---|
+| `scheme` | `http` | Scheme used to reach the model server. |
+| `path` | `/v1/models` | Path fetched on the model server. |
+| `insecureSkipVerify` | `true` | Skip TLS verification when `scheme` is `https`. |
