@@ -19,8 +19,8 @@ package main
 import (
 	"testing"
 
-	"github.com/llm-d/coordinator/pkg/config"
-	"github.com/llm-d/coordinator/pkg/steps"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 )
 
 func TestValidatePipeline(t *testing.T) {

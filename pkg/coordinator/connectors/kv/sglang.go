@@ -26,8 +26,8 @@ import (
 	"github.com/google/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/coordinator/pkg/pipeline"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 const (

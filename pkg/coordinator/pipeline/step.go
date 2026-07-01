@@ -19,7 +19,7 @@ package pipeline
 import (
 	"context"
 
-	"github.com/llm-d/coordinator/pkg/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 )
 
 // Step is the fundamental unit of work in the coordinator pipeline.

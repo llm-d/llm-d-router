@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	inferenceapi "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/coordinator/test/e2e/internal/e2eutil"
+	"github.com/llm-d/llm-d-router/test/coordinator/e2e/internal/e2eutil"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 

@@ -47,10 +47,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/llm-d/coordinator/pkg/connectors/kv"
-	"github.com/llm-d/coordinator/pkg/gateway"
-	"github.com/llm-d/coordinator/pkg/pipeline"
-	"github.com/llm-d/coordinator/pkg/steps"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 )
 
 const defaultKVName = kv.NIXL

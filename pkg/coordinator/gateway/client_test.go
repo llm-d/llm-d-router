@@ -32,7 +32,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
-	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 )
 
 // The gateway reaches in-cluster destinations (Inference Gateway, EPP, model-serving pods).

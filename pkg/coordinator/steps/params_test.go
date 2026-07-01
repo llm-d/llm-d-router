@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/llm-d/coordinator/pkg/config"
-	"github.com/llm-d/coordinator/pkg/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 )
 
 func TestParamInt(t *testing.T) {

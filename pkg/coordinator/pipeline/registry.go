@@ -19,7 +19,7 @@ package pipeline
 import (
 	"fmt"
 
-	"github.com/llm-d/coordinator/pkg/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 )
 
 var registry = map[string]StepFactory{}

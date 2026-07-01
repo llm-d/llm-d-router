@@ -31,8 +31,8 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
-	"github.com/llm-d/coordinator/pkg/common/httplog"
-	"github.com/llm-d/coordinator/pkg/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 )
 
 // Client is an HTTP client configured for persistent connections to the Inference Gateway.
