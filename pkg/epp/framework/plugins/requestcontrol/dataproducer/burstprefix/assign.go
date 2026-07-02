@@ -195,7 +195,12 @@ func assign(entries []*entry, k, minColocateBlocks int) {
 
 	idx := newBatchIndex()
 	load := map[string]int{} // batch-wide samples assigned per replica
-	for _, key := range append(groupUnits, singleUnits...) {
+	// Groups first, then prefix-sharing singletons: same order as before, without
+	// allocating a combined slice.
+	for _, key := range groupUnits {
+		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, idx, load)
+	}
+	for _, key := range singleUnits {
 		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, idx, load)
 	}
 }
