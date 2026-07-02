@@ -94,3 +94,39 @@ func TestMatchedBlockCount(t *testing.T) {
 		})
 	}
 }
+
+func TestCalculateMatchLengthStats(t *testing.T) {
+	tests := []struct {
+		name       string
+		matchLens  []int
+		wantAvg    float64
+		wantStdDev float64
+	}{
+		{
+			name:       "empty slice yields zero",
+			matchLens:  []int{},
+			wantAvg:    0,
+			wantStdDev: 0,
+		},
+		{
+			name:       "single value yields zero stddev",
+			matchLens:  []int{5},
+			wantAvg:    5,
+			wantStdDev: 0,
+		},
+		{
+			name:       "multiple values yield correct avg and stddev",
+			matchLens:  []int{2, 4, 4, 4, 5, 5, 7, 9},
+			wantAvg:    5,
+			wantStdDev: 2.14,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			avg, stddev := calculateMatchLengthStats(tt.matchLens)
+			assert.InDelta(t, tt.wantAvg, avg, 1e-9)
+			assert.InDelta(t, tt.wantStdDev, stddev, 1e-9)
+		})
+	}
+}

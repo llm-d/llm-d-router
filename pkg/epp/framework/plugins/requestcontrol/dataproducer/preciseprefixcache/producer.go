@@ -127,6 +127,13 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		return nil, errors.New("tokenizersPoolConfig is not supported; configure a token-producer plugin instead")
 	}
 
+	if handle == nil {
+		return nil, errors.New("plugin handle is required")
+	}
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
+	}
+
 	p, err := New(handle.Context(), name, parameters)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create %s plugin: %w", PluginType, err)
@@ -286,6 +293,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	maxMatch := 0
+	matchLengths := make([]int, 0, len(endpoints))
 	for _, ep := range endpoints {
 		md := ep.GetMetadata()
 		if md == nil {
@@ -293,6 +301,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		}
 		addr := fmt.Sprintf("%s:%s", md.Address, md.Port)
 		matchLen := int(aggregatedScores[addr])
+		matchLengths = append(matchLengths, matchLen)
 		if matchLen > maxMatch {
 			maxMatch = matchLen
 		}
@@ -303,6 +312,11 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		ep.Put(p.dk.String(),
 			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).WithCachedBlockCount(cachedBlocks))
 	}
+
+	avgMatchLength, stdDevMatchLength := calculateMatchLengthStats(matchLengths)
+	recordPrefixCacheMaxMatch(p.typedName.Name, p.typedName.Type, maxMatch, totalBlocks)
+	recordPrefixCacheAvgMatch(p.typedName.Name, p.typedName.Type, avgMatchLength, totalBlocks)
+	recordPrefixCacheStdDevMatch(p.typedName.Name, p.typedName.Type, stdDevMatchLength, totalBlocks)
 
 	if p.speculativeEnabled {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,
