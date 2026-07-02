@@ -323,7 +323,11 @@ func pickLeastLoaded(replicas []fwksched.Endpoint, perReplica map[string]int, k 
 }
 
 // less reports whether replica a should be preferred over replica b: fewer
-// assigned samples first, then fewer running requests, then lower name.
+// assigned samples first, then fewer running requests, then lower name. The
+// batch-local assigned-sample count (load) is the primary signal; running
+// requests only break ties within a batch and deliberately differ from the
+// load-aware-scorer's WaitingQueueSize signal, since placement balances work
+// already committed in this window rather than queue depth observed downstream.
 func less(a fwksched.Endpoint, aName string, load map[string]int, b fwksched.Endpoint, bName string) bool {
 	if load[aName] != load[bName] {
 		return load[aName] < load[bName]
