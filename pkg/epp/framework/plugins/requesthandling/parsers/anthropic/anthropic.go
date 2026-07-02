@@ -108,8 +108,9 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	}
 
 	result := &fwkrh.InferenceRequestBody{
-		Messages: &messagesReq,
-		Payload:  fwkrh.PayloadMap(bodyMap),
+		Messages:        &messagesReq,
+		Payload:         fwkrh.PayloadMap(bodyMap),
+		MaxOutputTokens: fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
 	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		result.Stream = true

@@ -28,6 +28,15 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. |
+| `outputRatio` | `float` | No | `1.5` | Estimated output-to-input token ratio applied when `addEstimatedOutputTokens` is true: estimated output = round(inputTokens * `outputRatio`). Computed against the full prompt, not the uncached portion. Must be non-negative. |
+| `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the estimated output tokens added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. |
+
+When `addEstimatedOutputTokens` is true, the estimated output added per request is
+`min(round(inputTokens * outputRatio), clientMaxOutputTokens?, maxEstimatedOutputTokens?)`.
+The client cap is the request's own output limit (`max_tokens` /
+`max_completion_tokens` / `max_output_tokens` depending on the API), applied only
+when the client specified one. This keeps estimates realistic for high-input /
+low-output workloads, where a fixed ratio would otherwise overstate output.
 
 ---
 
