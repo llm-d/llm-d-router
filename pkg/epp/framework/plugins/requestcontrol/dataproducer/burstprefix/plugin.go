@@ -103,6 +103,9 @@ func newDataProducer(_ context.Context, name string, cfg config) (*dataProducer,
 	if cfg.MinColocateBlocks < 0 {
 		return nil, fmt.Errorf("invalid configuration: minColocateBlocks must be >= 0 (current value: %d)", cfg.MinColocateBlocks)
 	}
+	if cfg.MaxBatchSize != unlimitedBatchSize && cfg.MaxBatchSize < 1 {
+		return nil, fmt.Errorf("invalid configuration: maxBatchSize must be -1 (unlimited) or >= 1 (current value: %d)", cfg.MaxBatchSize)
+	}
 
 	maxBlocks := defaultMaxPrefixBlocks
 	if cfg.MaxPrefixTokensToMatch > 0 {
@@ -132,6 +135,10 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		time.AfterFunc(p.window, func() { p.seal(b) })
 	}
 	b := p.batch
+	if p.config.MaxBatchSize != unlimitedBatchSize && len(b.entries) >= p.config.MaxBatchSize {
+		p.mu.Unlock()
+		return fmt.Errorf("burst prefix batch full: maxBatchSize %d reached", p.config.MaxBatchSize)
+	}
 	b.entries = append(b.entries, e)
 	p.mu.Unlock()
 

@@ -29,10 +29,15 @@ const (
 	// per-replica cap, sending every sample of a group to a single replica.
 	unlimitedPerReplica = -1
 
+	// unlimitedBatchSize is the MaxBatchSize sentinel that disables the
+	// per-window cap on accumulated requests.
+	unlimitedBatchSize = -1
+
 	defaultWindowDurationMs  = 100
 	defaultMaxPerReplica     = unlimitedPerReplica
 	defaultBlockSizeTokens   = 64
 	defaultMinColocateBlocks = 0
+	defaultMaxBatchSize      = 1000
 
 	// defaultMaxPrefixBlocks caps how many leading blocks form a group key.
 	// Two prompts identical up to this many blocks are treated as one group.
@@ -62,6 +67,10 @@ type config struct {
 	// bounded by a per-replica fair-share cap, so raising this never lets
 	// prefix-sharing units stampede onto one replica.
 	MinColocateBlocks int `json:"minColocateBlocks"`
+	// MaxBatchSize caps how many requests one window may accumulate. Once the cap
+	// is reached, Produce returns an error instead of letting a sustained burst or
+	// a long window grow the batch unbounded. -1 disables the cap.
+	MaxBatchSize int `json:"maxBatchSize"`
 }
 
 // defaultConfig provides sensible defaults for the burst prefix cache producer.
@@ -71,6 +80,7 @@ var defaultConfig = config{
 	BlockSizeTokens:        defaultBlockSizeTokens,
 	MaxPrefixTokensToMatch: 0,
 	MinColocateBlocks:      defaultMinColocateBlocks,
+	MaxBatchSize:           defaultMaxBatchSize,
 }
 
 // entry is one request collected into a batch window.
