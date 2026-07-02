@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package e2eutil holds helpers shared across coordinator e2e test suites.
-// The internal/ path prevents import from outside test/e2e/.
+// The internal/ path prevents import from outside test/coordinator/e2e/.
 package e2eutil
 
 import (

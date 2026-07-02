@@ -139,7 +139,7 @@ build: image-build-builder ## Build the coordinator binary
 	@printf "\033[33;1m==== Building coordinator ====\033[0m\n"
 	$(BUILDER_RUN) 'go build -ldflags "$(LDFLAGS)" -o bin/coordinator ./cmd/coordinator/...'
 
-COORDINATOR_CONFIG ?= configs/coordinator.yaml
+COORDINATOR_CONFIG ?= config/coordinator/coordinator.yaml
 .PHONY: run
 run: build ## Build and run the coordinator with $(COORDINATOR_CONFIG)
 	./bin/coordinator --config $(COORDINATOR_CONFIG)

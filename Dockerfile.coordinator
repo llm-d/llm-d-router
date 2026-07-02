@@ -25,10 +25,10 @@ RUN go mod download
 # Copy the go source
 COPY cmd/ cmd/
 COPY pkg/ pkg/
-COPY configs/ configs/
+COPY config/coordinator/ config/coordinator/
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
-    -ldflags="${LDFLAGS} -X github.com/llm-d/coordinator/pkg/version.CommitSHA=${COMMIT_SHA} -X github.com/llm-d/coordinator/pkg/version.BuildRef=${BUILD_REF}" \
+    -ldflags="${LDFLAGS}" \
     -o bin/coordinator ./cmd/coordinator/...
 
 # Runtime stage
@@ -36,12 +36,12 @@ FROM ${BASE_IMAGE}
 
 WORKDIR /
 COPY --from=builder /workspace/bin/coordinator /coordinator
-COPY --from=builder /workspace/configs/ /configs/
+COPY --from=builder /workspace/config/coordinator/ /config/coordinator/
 
 USER 65532:65532
 
 EXPOSE 8080
 
-ENTRYPOINT ["/coordinator", "--config", "/configs/coordinator.yaml"]
+ENTRYPOINT ["/coordinator", "--config", "/config/coordinator/coordinator.yaml"]
 
 # Made with Bob
