@@ -65,7 +65,7 @@ func TestNew_RejectsInvalidConfig(t *testing.T) {
 }
 
 func TestProduce_ColocatesIdenticalPromptBurst(t *testing.T) {
-	p, err := newDataProducer(context.Background(), "burst", config{WindowDurationMs: 100, MaxPerReplica: unlimitedPerReplica, BlockSizeTokens: 4})
+	p, err := newDataProducer(context.Background(), "burst", config{WindowDurationMs: 100, MaxPerReplica: unlimitedPerReplica, BlockSizeTokens: 4, MaxBatchSize: unlimitedBatchSize})
 	require.NoError(t, err)
 
 	const samples = 8
@@ -93,7 +93,7 @@ func TestProduce_ColocatesIdenticalPromptBurst(t *testing.T) {
 }
 
 func TestProduce_SingletonHasNoAffinity(t *testing.T) {
-	p, err := newDataProducer(context.Background(), "burst", config{WindowDurationMs: 50, MaxPerReplica: unlimitedPerReplica, BlockSizeTokens: 4})
+	p, err := newDataProducer(context.Background(), "burst", config{WindowDurationMs: 50, MaxPerReplica: unlimitedPerReplica, BlockSizeTokens: 4, MaxBatchSize: unlimitedBatchSize})
 	require.NoError(t, err)
 
 	endpoints := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
