@@ -248,3 +248,34 @@ func TestAssign_SharedPrefixBelowThresholdDoesNotColocate(t *testing.T) {
 		"a shared prefix below minColocateBlocks must not co-locate")
 	assert.Equal(t, map[string]int{"pod1": 4, "pod2": 4}, counts(entries))
 }
+
+func TestAssign_SingleReplicaPlacesEverything(t *testing.T) {
+	replicas := []fwksched.Endpoint{testEndpoint("pod1")}
+	// Distinct groups that would normally spread across replicas; with a single
+	// replica the fair-share and load logic has nowhere else to send them.
+	groupA := group(4, []prefixhash.BlockHash{1, 2, 3}, replicas)
+	groupB := group(4, []prefixhash.BlockHash{9, 9, 9}, replicas)
+	entries := concat(groupA, groupB)
+
+	assign(entries, unlimitedPerReplica, 2)
+
+	for _, e := range entries {
+		assert.Equal(t, "pod1", assignedName(e), "with a single replica every request must land on it")
+	}
+}
+
+func TestAssign_OverflowGuardBalancesBeyondCap(t *testing.T) {
+	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
+	// One group of 8 with k=2 over 2 replicas: k*replicas = 4 < 8, so the
+	// per-replica cap cannot hold the whole group. The capLeft overflow guard must
+	// still place every member and keep the batch balanced.
+	entries := group(8, []prefixhash.BlockHash{1, 2, 3}, replicas)
+
+	assign(entries, 2, 0)
+
+	for _, e := range entries {
+		assert.NotNil(t, e.assigned, "the overflow guard must still assign every member")
+	}
+	assert.Equal(t, map[string]int{"pod1": 4, "pod2": 4}, counts(entries),
+		"members beyond k*replicas must rebalance evenly rather than drop")
+}
