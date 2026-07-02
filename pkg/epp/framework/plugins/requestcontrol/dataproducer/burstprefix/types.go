@@ -17,6 +17,8 @@ limitations under the License.
 package burstprefix
 
 import (
+	"time"
+
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 )
@@ -87,6 +89,8 @@ var defaultConfig = config{
 type entry struct {
 	hashes [][]prefixhash.BlockHash
 	pods   []fwksched.Endpoint
+	// enqueued is when the request joined the batch, used to report the window wait.
+	enqueued time.Time
 	// assigned is the replica this request is steered to, filled when the batch
 	// is sealed. nil means no affinity (singleton group or empty prompt): the
 	// request is scored 0 on every endpoint so other scorers decide.

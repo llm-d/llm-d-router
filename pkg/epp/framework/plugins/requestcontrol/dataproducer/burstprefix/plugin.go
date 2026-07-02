@@ -126,7 +126,7 @@ func newDataProducer(_ context.Context, name string, cfg config) (*dataProducer,
 // assignment: a full match on the assigned replica and zero elsewhere.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
 	hashes := prefixhash.GetBlockHashes(ctx, request, p.config.BlockSizeTokens, p.maxBlocks)
-	e := &entry{hashes: hashes, pods: pods}
+	e := &entry{hashes: hashes, pods: pods, enqueued: time.Now()}
 
 	p.mu.Lock()
 	if p.batch == nil {
@@ -148,6 +148,8 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		// Timed out or cancelled before the batch sealed; leave no affinity.
 		return ctx.Err()
 	}
+
+	log.FromContext(ctx).V(logutil.DEBUG).Info("burst batch sealed", "wait_ms", time.Since(e.enqueued).Milliseconds())
 
 	total := totalBlocks(hashes)
 	matched := false
