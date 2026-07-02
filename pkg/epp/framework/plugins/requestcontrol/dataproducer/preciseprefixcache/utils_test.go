@@ -185,7 +185,7 @@ func TestMatchedBlockCountByTier(t *testing.T) {
 		})
 	}
 }
-  
+
 func TestCalculateHitRatioStats(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -214,7 +214,7 @@ func TestCalculateHitRatioStats(t *testing.T) {
 			wantMax:    9,
 			wantAvg:    5,
 			wantStdDev: 2.14,
-     },
+		},
 	}
 
 	for _, tt := range tests {

@@ -127,3 +127,32 @@ func matchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblock.Blo
 	}
 	return counts
 }
+
+func calculateMatchLengthStats(matchLens []int) (avgMatch float64, stdDevMatch float64) {
+	if len(matchLens) == 0 {
+		return 0, 0
+	}
+
+	sum := 0
+	for _, matchLen := range matchLens {
+		sum += matchLen
+	}
+	avgMatch = float64(sum) / float64(len(matchLens))
+
+	varianceSum := 0.0
+	for _, matchLen := range matchLens {
+		diff := float64(matchLen) - avgMatch
+		varianceSum += diff * diff
+	}
+	stdDevMatch = 0.0
+	if len(matchLens) > 1 {
+		stdDevMatch = varianceSum / float64(len(matchLens)-1)
+		stdDevMatch = math.Sqrt(stdDevMatch)
+	}
+
+	// Round to two decimal places for consistency in metrics reporting
+	avgMatch = math.Round(avgMatch*100) / 100
+	stdDevMatch = math.Round(stdDevMatch*100) / 100
+
+	return avgMatch, stdDevMatch
+}
