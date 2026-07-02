@@ -498,10 +498,11 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(random.RandomPickerType, random.RandomPickerFactory)
 	fwkplugin.Register(weightedrandom.WeightedRandomPickerType, weightedrandom.WeightedRandomPickerFactory)
 	fwkplugin.Register(single.SingleProfileHandlerType, single.SingleProfileHandlerFactory)
-	fwkplugin.Register(disagg.DisaggHeadersHandlerType, disagg.HeadersHandlerFactory) //nolint:staticcheck // intentional: keep backward compatibility
-	fwkplugin.Register(disagg.PrefillHeaderHandlerType, disagg.HeadersHandlerFactory) //nolint:staticcheck // intentional: keep backward compatibility
-	fwkplugin.Register(disagg.PdProfileHandlerType, disagg.PdProfileHandlerFactory)   //nolint:staticcheck // intentional: keep backward compatibility
-	fwkplugin.Register(disagg.DisaggProfileHandlerType, disagg.HandlerFactory)
+	fwkplugin.Register(disagg.DisaggHeadersHandlerType, disagg.HeadersHandlerFactory)                     //nolint:staticcheck // intentional: keep backward compatibility
+	fwkplugin.Register(disagg.PrefillHeaderHandlerType, disagg.HeadersHandlerFactory)                     //nolint:staticcheck // intentional: keep backward compatibility
+	fwkplugin.RegisterWithPluginDependencies(disagg.PdProfileHandlerType, disagg.PdProfileHandlerFactory, //nolint:staticcheck // intentional: keep backward compatibility
+		disagg.PdProfileHandlerConfigParser)
+	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
 	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, disagg.AlwaysDisaggPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, disagg.PrefixBasedPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.AlwaysDisaggMulimodalPluginType, disagg.AlwaysDisaggMulimodalDeciderPluginFactory)
