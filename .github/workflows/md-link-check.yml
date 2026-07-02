@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   
-  check-changes:
+  check-for-markdown-files:
     runs-on: ubuntu-latest
     outputs:
       src: ${{ steps.filter.outputs.src }}
@@ -35,7 +35,7 @@ jobs:
 
   lychee:
     name: Check Markdown Links
-    needs: check-changes
+    needs: check-for-markdown-files
     # pull_request_target fires even when GITHUB_TOKEN creates the PR (e.g. the
     # release-notes bot). pull_request does not. We register pull_request_target
     # so bot-created PRs get a "skipped" conclusion that satisfies branch
