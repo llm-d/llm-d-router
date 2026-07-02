@@ -2,26 +2,38 @@
 
 **Type:** `prefix-cache-scorer`
 
-Scores candidate endpoints using `PrefixCacheMatchInfo` prepared earlier in the request pipeline.
+Scores candidate endpoints based on how much of the request's prefix is already cached. It can consider both the *ratio* of the prefix matched and the *absolute length* of the match. By default it only considers the ratio of prefix matched.
 
 ## What it does
 
-For each candidate endpoint, the scorer reads the `PrefixCacheMatchInfo` attribute and computes:
+The scorer computes a score between `0.0` and `1.0` for each endpoint using a weighted combination of two metrics:
+
+1.  **Match Ratio**: The proportion of the request prefix that is cached.
+2.  **Match Length**: The absolute number of cached tokens, normalized against a scale factor.
+
+### Scoring Formula
 
 ```text
-score = matchBlocks / totalBlocks
+score = 0
+score += matchLengthWeight * matchLengthRatio
+score += (1.0 - matchLengthWeight) * matchRatio
 ```
 
-This produces a normalized score in the range `[0, 1]`:
+Where:
+*   **`matchRatio`** = `matchBlocks` / `totalBlocks`
+*   **`matchLengthRatio`** = `min(1.0, matchedTokens / matchLengthScaleTokens) ^ 2`
+    *   `matchedTokens` = `matchBlocks` * `blockSize`
+    *   **`matchLengthScaleTokens`** is the scaling factor.
 
-- higher score: more of the request prefix is expected to be reusable from cache
-- lower score: less prefix cache reuse is expected
+If `matchLengthWeight` is `0.0` (default), the score simplifies to just the `matchRatio`.
 
 If the attribute is missing, has the wrong type, or `totalBlocks` is zero, the endpoint receives score `0`.
 
-## Inputs consumed
+### Why the Quadratic Term?
 
-This scorer consumes:
+The squaring of `matchLengthRatio` introduces a non-linearity motivated by the fact that attention computation grows quadratically as a function of prompt length. This ensures that the scoring function assigns a higher priority to longer requests, where the computational and latency savings of KV-cache reuse are significantly more critical.
+
+## Inputs Consumed
 
 - `PrefixCacheMatchInfo`
 
@@ -29,10 +41,22 @@ The attribute is typically produced by the approximate prefix cache data produce
 
 ## Configuration
 
-This plugin does not define any plugin-specific parameters.
+| Parameter | Type | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `matchLengthWeight` | float | Weight of the absolute match length in the score. Must be between `0.0` and `1.0`. | `0.0` |
+| `matchLengthScaleTokens` | integer | The number of tokens used to normalize `matchLengthRatio`. | `8192` |
 
-## Operational notes
+### Example
 
-- The scorer itself does not hash prompts or maintain cache state.
-- It only converts previously prepared prefix match data into endpoint scores.
-- To be useful, it should be used together with a data producer that populates `PrefixCacheMatchInfo`.
+```yaml
+plugins:
+- type: prefix-cache-scorer
+  parameters:
+    matchLengthWeight: 0.5
+    matchLengthScaleTokens: 16384
+```
+
+## Operational Notes
+
+*   **Tuning `matchLengthScaleTokens`**: This should be set to reflect your workload. A good rule of thumb is to set it to the **P95 prompt length** of your typical requests. Setting it too high (e.g., to the model's maximum limit when actual requests are short) will compress the score range and make the scorer less effective.
+*   The scorer is stateless; it does not manage cache state or hash prompts itself. It relies entirely on the data producer.
