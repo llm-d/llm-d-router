@@ -44,6 +44,11 @@ const (
 	// defaultMaxPrefixBlocks caps how many leading blocks form a group key.
 	// Two prompts identical up to this many blocks are treated as one group.
 	defaultMaxPrefixBlocks = 2048
+
+	// maxWindowDurationMs bounds the batch window. Every request waits up to this
+	// long, so a misconfigured large value is rejected at construction rather than
+	// stalling every request.
+	maxWindowDurationMs = 10000
 )
 
 // config defines the configuration for the burst prefix cache producer.

@@ -55,11 +55,12 @@ This producer emits `PrefixCacheMatchInfo`; it does not score. Reuse the
 
 | field | default | meaning |
 |---|---|---|
-| `windowDurationMs` | 100 | batch window T in milliseconds |
+| `windowDurationMs` | 100 | batch window T in milliseconds; must be in `1..10000`. Every request waits up to this long, so keep it small relative to other request processing times. |
 | `maxPerReplica` | -1 | max samples of one group per replica (k); -1 = unlimited (whole group to one replica) |
 | `blockSizeTokens` | 64 | token block size for prefix hashing |
-| `maxPrefixTokensToMatch` | 0 | cap on matched prefix tokens; 0 uses the default block cap |
+| `maxPrefixTokensToMatch` | 0 | cap on matched prefix tokens; 0 uses the default block cap. A positive value must be >= `blockSizeTokens`, otherwise it yields zero prefix blocks. |
 | `minColocateBlocks` | 0 | min shared leading blocks for inter-unit co-location and for a single request to gain an affinity; 0 disables both (only identical groups are placed, purely load-balanced) |
+| `maxBatchSize` | 1000 | max requests one window may accumulate; Produce returns an error once reached. -1 = unlimited. |
 
 ## Operational notes
 

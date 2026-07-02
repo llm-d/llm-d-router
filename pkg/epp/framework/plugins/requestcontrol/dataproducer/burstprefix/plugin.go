@@ -91,6 +91,9 @@ func newDataProducer(_ context.Context, name string, cfg config) (*dataProducer,
 	if cfg.WindowDurationMs <= 0 {
 		return nil, fmt.Errorf("invalid configuration: windowDurationMs must be > 0 (current value: %d)", cfg.WindowDurationMs)
 	}
+	if cfg.WindowDurationMs > maxWindowDurationMs {
+		return nil, fmt.Errorf("invalid configuration: windowDurationMs must be <= %d (current value: %d)", maxWindowDurationMs, cfg.WindowDurationMs)
+	}
 	if cfg.MaxPerReplica != unlimitedPerReplica && cfg.MaxPerReplica < 1 {
 		return nil, fmt.Errorf("invalid configuration: maxPerReplica must be -1 (unlimited) or >= 1 (current value: %d)", cfg.MaxPerReplica)
 	}
@@ -99,6 +102,9 @@ func newDataProducer(_ context.Context, name string, cfg config) (*dataProducer,
 	}
 	if cfg.MaxPrefixTokensToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: maxPrefixTokensToMatch must be >= 0 (current value: %d)", cfg.MaxPrefixTokensToMatch)
+	}
+	if cfg.MaxPrefixTokensToMatch > 0 && cfg.MaxPrefixTokensToMatch < cfg.BlockSizeTokens {
+		return nil, fmt.Errorf("invalid configuration: maxPrefixTokensToMatch (%d) must be 0 or >= blockSizeTokens (%d); a smaller positive value yields zero prefix blocks", cfg.MaxPrefixTokensToMatch, cfg.BlockSizeTokens)
 	}
 	if cfg.MinColocateBlocks < 0 {
 		return nil, fmt.Errorf("invalid configuration: minColocateBlocks must be >= 0 (current value: %d)", cfg.MinColocateBlocks)
