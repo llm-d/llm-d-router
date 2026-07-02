@@ -2,7 +2,7 @@
 
 **Type:** `prefix-cache-scorer`
 
-Scores candidate endpoints based on how much of the request's prefix is already cached. It can consider both the *ratio* of the prefix matched and the *absolute length* of the match.
+Scores candidate endpoints based on how much of the request's prefix is already cached. It can consider both the *ratio* of the prefix matched and the *absolute length* of the match. By default it only considers the ratio of prefix matched.
 
 ## What it does
 

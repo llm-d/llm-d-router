@@ -34,9 +34,10 @@ import (
 type Config struct {
 	// The name of the data producer that produces PrefixCacheMatchInfo.
 	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
-	// The weight of the absolute prefix length in the score, between 0.0 and 1.0.
+	// The weight assigned to match length, between 0.0 and 1.0.
 	MatchLengthWeight float64 `json:"matchLengthWeight,omitempty"`
-	// The number of tokens at which prefill performance saturates.
+	// Normalization factor for match length in terms of tokens.
+	// Used only when MatchLengthWeight > 0.
 	MatchLengthScaleTokens int `json:"matchLengthScaleTokens,omitempty"`
 }
 
@@ -57,6 +58,7 @@ const (
 	// Type is the unique identifier for the prefix cache scorer plugin.
 	PrefixCacheScorerPluginType = "prefix-cache-scorer"
 	// The default weight of the absolute match length in the score.
+	// Set to 0 so by default only the match ratio is considered.
 	defaultMatchLengthWeight = 0.0
 	// Default number of tokens used as a scaling factor.
 	defaultMatchLengthScaleTokens = 8192
