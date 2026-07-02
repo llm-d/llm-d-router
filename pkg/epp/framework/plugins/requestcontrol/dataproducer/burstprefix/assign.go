@@ -17,7 +17,6 @@ limitations under the License.
 package burstprefix
 
 import (
-	"encoding/binary"
 	"sort"
 	"strings"
 
@@ -46,11 +45,10 @@ func encodePrefix(hashes [][]prefixhash.BlockHash, n int) string {
 			if count >= n {
 				return b.String()
 			}
-			binary.LittleEndian.PutUint64(buf[:], uint64(h))
+			prefixhash.PutBlockHash(buf[:], h)
 			b.Write(buf[:])
 			count++
 		}
-		b.WriteByte('|')
 	}
 	return b.String()
 }

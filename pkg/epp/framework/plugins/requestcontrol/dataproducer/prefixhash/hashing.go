@@ -118,8 +118,15 @@ func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRe
 
 func toBytes(i BlockHash) []byte {
 	bytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(bytes, uint64(i))
+	PutBlockHash(bytes, i)
 	return bytes
+}
+
+// PutBlockHash writes h into the first 8 bytes of buf in little-endian order.
+// buf must have length at least 8. It lets callers serialize block hashes into
+// a reused buffer without allocating per hash.
+func PutBlockHash(buf []byte, h BlockHash) {
+	binary.LittleEndian.PutUint64(buf, uint64(h))
 }
 
 func getKVCacheBlocksFromTokens(ids []uint32, blockSizeTokens int) iter.Seq[HashBlock] {
