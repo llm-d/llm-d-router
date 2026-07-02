@@ -42,6 +42,7 @@ type healthServer struct {
 	isLeader              *atomic.Bool
 	leaderElectionEnabled bool
 	supporters            []appProtocolSupporter
+	draining              *atomic.Bool // nil or false: not draining. Set on SIGTERM during graceful shutdown.
 }
 
 const (
@@ -52,11 +53,16 @@ const (
 func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckRequest) (*healthPb.HealthCheckResponse, error) {
 	isLive := s.datastore.PoolHasSynced()
 	protocolMatches := s.checkProtocolSupport(isLive)
+	// While draining (graceful shutdown), every non-liveness check reports
+	// NOT_SERVING so Kubernetes removes the pod from the Service endpoints, while
+	// the ext_proc server keeps serving. Liveness stays SERVING to avoid a
+	// restart mid-drain.
+	draining := s.draining != nil && s.draining.Load()
 
 	// If leader election is disabled, use current logic: all checks are based on whether the pool has synced.
 	if !s.leaderElectionEnabled {
-		if !isLive || !protocolMatches {
-			s.logger.Error(nil, "gRPC health check not serving (leader election disabled)", "service", in.Service, "isLive", isLive, "protocolMatches", protocolMatches)
+		if !isLive || !protocolMatches || draining {
+			s.logger.Error(nil, "gRPC health check not serving (leader election disabled)", "service", in.Service, "isLive", isLive, "protocolMatches", protocolMatches, "draining", draining)
 			return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_NOT_SERVING}, nil
 		}
 		s.logger.V(logutil.TRACE).Info("gRPC health check serving (leader election disabled)", "service", in.Service)
@@ -71,22 +77,23 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 	switch in.Service {
 	case ReadinessCheckService:
 		checkName = "readiness"
-		isPassing = isLive && s.isLeader.Load() && protocolMatches
+		isPassing = isLive && s.isLeader.Load() && protocolMatches && !draining
 	case "": // Handle overall server health for load balancers that use an empty service name.
 		checkName = "empty service name (considered as overall health)"
 		// The overall health for a load balancer should reflect readiness to accept traffic,
 		// which is true only for the leader pod that has synced its data.
-		isPassing = isLive && s.isLeader.Load() && protocolMatches
+		isPassing = isLive && s.isLeader.Load() && protocolMatches && !draining
 	case LivenessCheckService:
 		checkName = "liveness"
 		// Any pod that is running and can respond to this gRPC check is considered "live".
 		// The datastore sync status should not affect liveness, only readiness.
-		// This is to prevent the non-leader node from continuous restarts
+		// This is to prevent the non-leader node from continuous restarts.
+		// Liveness stays SERVING while draining so we are not restarted mid-drain.
 		isPassing = true
 	case extProcPb.ExternalProcessor_ServiceDesc.ServiceName:
 		// The main service is considered ready only on the leader.
 		checkName = "ext_proc"
-		isPassing = isLive && s.isLeader.Load() && protocolMatches
+		isPassing = isLive && s.isLeader.Load() && protocolMatches && !draining
 	default:
 		s.logger.Error(nil, "gRPC health check requested unknown service", "available-services", []string{LivenessCheckService, ReadinessCheckService, extProcPb.ExternalProcessor_ServiceDesc.ServiceName}, "requested-service", in.Service)
 		return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_SERVICE_UNKNOWN}, nil

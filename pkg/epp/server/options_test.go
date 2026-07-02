@@ -18,6 +18,7 @@ package server
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
@@ -244,5 +245,25 @@ func TestValidateDirectValues(t *testing.T) {
 	opts.GRPCMaxSendMsgSize = -5
 	if err := opts.Validate(); err == nil {
 		t.Errorf("Expected Validate() to fail for negative GRPCMaxSendMsgSize, but it succeeded")
+	}
+}
+
+func TestDrainTimeoutFlag(t *testing.T) {
+	// Defaults to 0 (graceful drain disabled → upstream behavior).
+	def := NewOptions()
+	def.AddFlags(pflag.NewFlagSet("default", pflag.ContinueOnError))
+	if def.DrainTimeout != 0 {
+		t.Errorf("DrainTimeout default = %v, want 0", def.DrainTimeout)
+	}
+
+	// The flag parses a duration.
+	opts := NewOptions()
+	fs := pflag.NewFlagSet("set", pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	if err := fs.Parse([]string{"--drain-timeout=30s"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	if opts.DrainTimeout != 30*time.Second {
+		t.Errorf("DrainTimeout = %v, want 30s", opts.DrainTimeout)
 	}
 }
