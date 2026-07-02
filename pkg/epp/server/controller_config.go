@@ -35,11 +35,12 @@ var (
 )
 
 type ControllerConfig struct {
-	startCrdReconcilers       bool
-	hasInferenceObjective     bool
-	hasInferenceModelRewrites bool
-	InferenceObjectiveGV      schema.GroupVersion
-	InferenceModelRewriteGV   schema.GroupVersion
+	startCrdReconcilers        bool
+	hasInferenceObjective      bool
+	hasInferenceModelRewrites  bool
+	InferenceObjectiveGV       schema.GroupVersion
+	InferenceModelRewriteGV    schema.GroupVersion
+	PopulateNonLeaderDatastore bool
 }
 
 func NewControllerConfig(startCrdReconcilers bool) ControllerConfig {
