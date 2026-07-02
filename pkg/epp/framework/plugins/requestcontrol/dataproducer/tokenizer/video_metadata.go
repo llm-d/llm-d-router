@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,15 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package approximateprefix
+package tokenizer
 
 import (
 	"encoding/binary"
 	"errors"
 )
 
-// videoMetadata holds the metadata read directly from a video container, as opposed to
-// configured fallback values.
+// videoMetadata holds metadata read directly from a video container.
 type videoMetadata struct {
 	Duration float64 // seconds
 	FPS      float64
@@ -31,7 +30,7 @@ type videoMetadata struct {
 }
 
 // parseMP4Metadata reads duration, fps, and resolution from the first video track of an
-// ISO base media file (MP4) by walking its box structure. It reads only the box headers and
+// ISO base media file (MP4) by walking its box structure. It reads only box headers and
 // the small fixed-size boxes under moov/trak/mdia, not the sample data itself.
 func parseMP4Metadata(data []byte) (*videoMetadata, error) {
 	moov, ok := findBox(data, "moov")
@@ -62,8 +61,6 @@ func parseMP4Metadata(data []byte) (*videoMetadata, error) {
 	return meta, nil
 }
 
-// parseVideoTrak parses a single trak box, returning an error if it is not a video track or
-// its timing/sample metadata is missing or malformed.
 func parseVideoTrak(trak []byte) (*videoMetadata, error) {
 	mdia, ok := findBox(trak, "mdia")
 	if !ok {
@@ -115,7 +112,6 @@ func parseVideoTrak(trak []byte) (*videoMetadata, error) {
 	}, nil
 }
 
-// parseMdhd extracts timescale and duration from an mdhd box payload (version 0 or 1).
 func parseMdhd(mdhd []byte) (timescale uint32, duration uint64, err error) {
 	if len(mdhd) < 1 {
 		return 0, 0, errors.New("mdhd box too short")
@@ -136,8 +132,6 @@ func parseMdhd(mdhd []byte) (timescale uint32, duration uint64, err error) {
 	return timescale, duration, nil
 }
 
-// parseStszSampleCount extracts the sample count from an stsz box payload. For a video track,
-// the sample count equals the number of frames.
 func parseStszSampleCount(stsz []byte) (uint32, error) {
 	if len(stsz) < 12 {
 		return 0, errors.New("stsz box too short")
@@ -145,8 +139,6 @@ func parseStszSampleCount(stsz []byte) (uint32, error) {
 	return binary.BigEndian.Uint32(stsz[8:12]), nil
 }
 
-// parseTkhdDimensions extracts width and height from a tkhd box payload. Width and height are
-// always the last two 16.16 fixed-point fields of the box, regardless of version.
 func parseTkhdDimensions(tkhd []byte) (int, int, error) {
 	if len(tkhd) < 8 {
 		return 0, 0, errors.New("tkhd box too short")
@@ -156,8 +148,6 @@ func parseTkhdDimensions(tkhd []byte) (int, int, error) {
 	return int(width), int(height), nil
 }
 
-// findBox returns the payload (content after the box header) of the first direct child box of
-// the given type within data.
 func findBox(data []byte, boxType string) ([]byte, bool) {
 	var payload []byte
 	found := false
@@ -171,8 +161,6 @@ func findBox(data []byte, boxType string) ([]byte, bool) {
 	return payload, found
 }
 
-// iterateBoxes walks the direct child boxes within data, calling fn with each box's type and
-// payload. Iteration stops early if fn returns false.
 func iterateBoxes(data []byte, fn func(boxType string, payload []byte) bool) {
 	i := 0
 	for i+8 <= len(data) {

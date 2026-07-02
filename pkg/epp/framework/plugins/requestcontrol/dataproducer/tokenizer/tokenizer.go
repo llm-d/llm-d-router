@@ -79,11 +79,23 @@ type tokenizerPluginConfig struct {
 	ModelName string `json:"modelName"`
 }
 
-// estimateConfig configures the estimation backend. Multimodal image estimation
-// is the only tunable; an empty config uses built-in defaults.
+// estimateConfig configures the estimation backend. An empty config uses built-in defaults.
 type estimateConfig struct {
 	// Image tunes multimodal image placeholder-token estimation.
 	Image *imageEstimateConfig `json:"image,omitempty"`
+	// Video tunes multimodal video placeholder-token estimation.
+	Video *videoEstimateConfig `json:"video,omitempty"`
+}
+
+// videoEstimateConfig tunes how a video's placeholder-token count is estimated.
+// Empty fields fall back to built-in defaults (16s duration, 2fps, dynamic frame estimation).
+type videoEstimateConfig struct {
+	// Duration is the fallback clip length in seconds when metadata cannot be read from the request.
+	Duration float64 `json:"duration,omitempty"`
+	// FPS is the fallback frame rate when metadata cannot be read from the request.
+	FPS float64 `json:"fps,omitempty"`
+	// Frame configures per-frame token estimation; defaults to the image estimator config.
+	Frame *imageEstimateConfig `json:"frame,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.
@@ -193,7 +205,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		backend = renderBackend{tk: renderer}
 	default:
-		backend = estimateBackend{img: newImageEstimator(config.Estimate)}
+		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
 	}
 
 	p := &Plugin{

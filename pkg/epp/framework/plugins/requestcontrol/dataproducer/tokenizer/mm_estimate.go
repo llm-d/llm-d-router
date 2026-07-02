@@ -148,3 +148,88 @@ func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool
 	}
 	return cfg.Width, cfg.Height, true
 }
+
+const (
+	// defaultVideoDuration is the fallback clip length when metadata cannot be read.
+	// 32 frames at 2 fps = 16 s matches vLLM's VideoMediaIO 32-frame cap.
+	defaultVideoDuration = 16.0
+	// defaultVideoFPS is the fallback frame rate when metadata cannot be read.
+	defaultVideoFPS = 2.0
+
+	minVideoFrames = 4
+	maxVideoFrames = 768
+)
+
+// videoEstimator estimates placeholder-token count for a video URL.
+type videoEstimator struct {
+	defDuration float64
+	defFPS      float64
+	frame       imageEstimator
+}
+
+// newVideoEstimator resolves an estimateConfig into a videoEstimator.
+func newVideoEstimator(cfg *estimateConfig) videoEstimator {
+	e := videoEstimator{
+		defDuration: defaultVideoDuration,
+		defFPS:      defaultVideoFPS,
+		frame:       newImageEstimator(cfg),
+	}
+	if cfg != nil && cfg.Video != nil {
+		if cfg.Video.Duration > 0 {
+			e.defDuration = cfg.Video.Duration
+		}
+		if cfg.Video.FPS > 0 {
+			e.defFPS = cfg.Video.FPS
+		}
+		if cfg.Video.Frame != nil {
+			e.frame = newImageEstimatorFromImageCfg(cfg.Video.Frame)
+		}
+	}
+	return e
+}
+
+// placeholderCount estimates placeholder tokens for a video URL. Base64 data URLs
+// are decoded for duration, fps, and resolution; other URLs fall back to defaults.
+func (e videoEstimator) placeholderCount(url string) int {
+	duration, fps := e.defDuration, e.defFPS
+	frameW, frameH := 0, 0
+
+	if strings.HasPrefix(url, "data:video/") && strings.Contains(url, "base64,") {
+		idx := strings.Index(url, "base64,")
+		decoded, err := base64.StdEncoding.DecodeString(url[idx+len("base64,"):])
+		if err == nil {
+			if meta, err := parseMP4Metadata(decoded); err == nil {
+				duration, fps = meta.Duration, meta.FPS
+				frameW, frameH = meta.Width, meta.Height
+			}
+		}
+	}
+
+	numFrames := int(duration * fps)
+	if numFrames < minVideoFrames {
+		numFrames = minVideoFrames
+	} else if numFrames > maxVideoFrames {
+		numFrames = maxVideoFrames
+	}
+
+	tokensPerFrame := e.frame.countFromDims(frameW, frameH, frameW > 0 && frameH > 0)
+	return numFrames * tokensPerFrame
+}
+
+// newImageEstimatorFromImageCfg builds an imageEstimator directly from an imageEstimateConfig.
+func newImageEstimatorFromImageCfg(cfg *imageEstimateConfig) imageEstimator {
+	if cfg == nil {
+		return imageEstimator{}
+	}
+	est := imageEstimator{mode: cfg.Mode}
+	if cfg.DefaultResolution != nil {
+		est.defWidth, est.defHeight = cfg.DefaultResolution.Width, cfg.DefaultResolution.Height
+	}
+	if cfg.Dynamic != nil {
+		est.factor = cfg.Dynamic.Factor
+	}
+	if cfg.Static != nil {
+		est.staticToken = cfg.Static.StaticToken
+	}
+	return est
+}
