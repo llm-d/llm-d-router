@@ -56,23 +56,23 @@ const (
 	poolNameBase = "qwen3-vl-2b-instruct-inference-pool"
 	eppName      = "e2e-epp"
 
-	encodeEPPManifest   = "../../../deploy/components/inference-gateway/epd-pools/encode/epp.yaml"
-	encodePoolManifest  = "../../../deploy/components/inference-gateway/epd-pools/encode/inference-pool.yaml"
-	prefillEPPManifest  = "../../../deploy/components/inference-gateway/epd-pools/prefill/epp.yaml"
-	prefillPoolManifest = "../../../deploy/components/inference-gateway/epd-pools/prefill/inference-pool.yaml"
-	decodeEPPManifest   = "../../../deploy/components/inference-gateway/epd-pools/decode/epp.yaml"
-	decodePoolManifest  = "../../../deploy/components/inference-gateway/epd-pools/decode/inference-pool.yaml"
+	encodeEPPManifest   = "../../../deploy/coordinator/components/inference-gateway/epd-pools/encode/epp.yaml"
+	encodePoolManifest  = "../../../deploy/coordinator/components/inference-gateway/epd-pools/encode/inference-pool.yaml"
+	prefillEPPManifest  = "../../../deploy/coordinator/components/inference-gateway/epd-pools/prefill/epp.yaml"
+	prefillPoolManifest = "../../../deploy/coordinator/components/inference-gateway/epd-pools/prefill/inference-pool.yaml"
+	decodeEPPManifest   = "../../../deploy/coordinator/components/inference-gateway/epd-pools/decode/epp.yaml"
+	decodePoolManifest  = "../../../deploy/coordinator/components/inference-gateway/epd-pools/decode/inference-pool.yaml"
 
-	epdPoolsKustomizeDir    = "../../../deploy/environments/dev/epd-pools"
-	coordinatorComponentDir = "../../../deploy/components/coordinator"
-	rendererComponentDir    = "../../../deploy/components/vllm-render"
+	epdPoolsKustomizeDir    = "../../../deploy/coordinator/environments/dev/epd-pools"
+	coordinatorComponentDir = "../../../deploy/coordinator/components/coordinator"
+	rendererComponentDir    = "../../../deploy/coordinator/components/vllm-render"
 
 	envoyManifest = "testdata/envoy.yaml"
 
-	crdGatewayAPIPath = "../../../deploy/components/crds-gateway-api"
-	crdGIEPath        = "../../../deploy/components/crds-gie"
+	crdGatewayAPIPath = "../../../deploy/coordinator/components/crds-gateway-api"
+	crdGIEPath        = "../../../deploy/coordinator/components/crds-gie"
 
-	baseRbacManifest = "../../../deploy/components/inference-gateway/base/rbac.yaml"
+	baseRbacManifest = "../../../deploy/coordinator/components/inference-gateway/base/rbac.yaml"
 )
 
 var (

@@ -132,7 +132,7 @@ test-unit: image-build-builder
 
 .PHONY: test-e2e-coordinator
 test-e2e-coordinator: image-build-coordinator image-build-epp image-build-builder image-pull ## Run coordinator e2e tests against a new kind cluster
-	test/scripts/run_e2e_coordinator.sh
+	test/coordinator/scripts/run_e2e_coordinator.sh
 
 .PHONY: build
 build: image-build-builder ## Build the coordinator binary
