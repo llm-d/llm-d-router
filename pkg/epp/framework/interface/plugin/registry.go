@@ -60,7 +60,7 @@ func RegisterAsDefaultProducer(pluginType string, factory FactoryFunc, key DataK
 }
 
 // RegisterWithPluginDependencies registers a factory for the given plugin type and records it as dependent on
-// other plugins referenced in the provided instance of the configuration struct used by the plugin.
+// other plugins referenced in the configuration struct returned by the plugin's configuration parser function.
 func RegisterWithPluginDependencies(pluginType string, factory FactoryFunc, parser ConfigParserFunc) {
 	Register(pluginType, factory)
 	PluginsWithPluginDependencies[pluginType] = parser
