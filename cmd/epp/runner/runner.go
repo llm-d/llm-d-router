@@ -108,6 +108,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/dataparallel"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/acceleratorcapabilityaware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/activerequest"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/contextlengthaware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
@@ -487,6 +488,7 @@ func (r *Runner) registerInTreePlugins() {
 	// extra scheduling scorers
 	fwkplugin.Register(loadaware.LoadAwareType, loadaware.Factory)
 	fwkplugin.Register(sessionaffinity.SessionAffinityType, sessionaffinity.Factory)
+	fwkplugin.Register(acceleratorcapabilityaware.Type, acceleratorcapabilityaware.Factory)
 	fwkplugin.Register(contextlengthaware.ContextLengthAwareType, contextlengthaware.Factory)
 
 	// data layer models source/extractor
