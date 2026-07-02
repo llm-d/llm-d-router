@@ -126,11 +126,12 @@ func (b *batchIndex) add(hashes [][]prefixhash.BlockHash, replica string) {
 // replica already holds (summed across prompts) - the shared-prefix length.
 func (b *batchIndex) longestPrefix(hashes [][]prefixhash.BlockHash) map[string]int {
 	res := map[string]int{}
+outer:
 	for _, ph := range hashes {
 		for _, h := range ph {
 			holders := b.holders[h]
 			if len(holders) == 0 {
-				break
+				break outer
 			}
 			for name := range holders {
 				res[name]++
