@@ -17,7 +17,8 @@ limitations under the License.
 package burstprefix
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"strings"
 
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -167,14 +168,17 @@ func assign(entries []*entry, k, minColocateBlocks int) {
 
 	shared := sharedPrefixKeys(groups, order, minColocateBlocks)
 	var groupUnits, singleUnits []string
+	counts := map[string]int{} // prefix-block count per placed unit, computed once
 	total := 0
 	for _, key := range order {
 		switch {
 		case len(groups[key]) >= 2:
 			groupUnits = append(groupUnits, key)
+			counts[key] = totalBlocks(groups[key][0].hashes)
 			total += len(groups[key])
 		case shared[key]:
 			singleUnits = append(singleUnits, key)
+			counts[key] = totalBlocks(groups[key][0].hashes)
 			total += len(groups[key])
 		}
 	}
@@ -184,8 +188,8 @@ func assign(entries []*entry, k, minColocateBlocks int) {
 
 	// Longest-prefix first within each tier: a longer prefix seeds more blocks in
 	// the index, so shorter units match against the richest set of placed blocks.
-	sortByPrefixLen(groupUnits, groups)
-	sortByPrefixLen(singleUnits, groups)
+	sortByPrefixLen(groupUnits, counts)
+	sortByPrefixLen(singleUnits, counts)
 
 	maxShare := (total + len(replicas) - 1) / len(replicas) // ceil: equal samples per replica
 
@@ -197,9 +201,9 @@ func assign(entries []*entry, k, minColocateBlocks int) {
 }
 
 // sortByPrefixLen orders keys by descending prefix-block count (stable).
-func sortByPrefixLen(keys []string, groups map[string][]*entry) {
-	sort.SliceStable(keys, func(i, j int) bool {
-		return totalBlocks(groups[keys[i]][0].hashes) > totalBlocks(groups[keys[j]][0].hashes)
+func sortByPrefixLen(keys []string, counts map[string]int) {
+	slices.SortStableFunc(keys, func(a, b string) int {
+		return cmp.Compare(counts[b], counts[a])
 	})
 }
 
