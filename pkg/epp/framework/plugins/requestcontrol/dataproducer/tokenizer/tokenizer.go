@@ -90,32 +90,30 @@ type estimateConfig struct {
 // videoEstimateConfig tunes how a video's placeholder-token count is estimated.
 // All fields are optional; unset fields use built-in defaults calibrated for Qwen3-VL / Gemma4.
 type videoEstimateConfig struct {
-	// MaxFrames is the vLLM frame cap: any video with more total frames is
-	// pre-sampled to this count before token estimation. Default: 32.
+	// MaxFrames is the vLLM frame cap: videos with more total frames are
+	// pre-sampled to this count before token estimation.
 	MaxFrames int `json:"maxFrames,omitempty"`
-	// SampleFPS is used to resample short videos (total frames <= MaxFrames).
-	// Default: 2.0.
+	// SampleFPS is the target frame rate used to resample short videos
+	// (total frames <= MaxFrames).
 	SampleFPS float64 `json:"sampleFPS,omitempty"`
-	// PatchSize is the ViT vision-encoder patch size in pixels. Default: 16.
+	// PatchSize is the ViT vision-encoder patch size in pixels.
 	PatchSize int `json:"patchSize,omitempty"`
-	// MergeSize is the spatial merge factor applied after patch encoding. Default: 2.
+	// MergeSize is the spatial merge factor applied after patch encoding.
 	MergeSize int `json:"mergeSize,omitempty"`
-	// TemporalPatch is the temporal grouping factor. Default: 2.
+	// TemporalPatch is the temporal grouping factor.
 	TemporalPatch int `json:"temporalPatch,omitempty"`
 	// MaxPixels is the total pixel budget across all frames used by smart_resize.
-	// Default: 25165824.
 	MaxPixels int `json:"maxPixels,omitempty"`
-	// DefaultDuration is the fallback clip length in seconds when metadata cannot
-	// be extracted from the request. Default: 16.0.
+	// DefaultDuration is the fallback clip length in seconds when metadata
+	// cannot be extracted from the request.
 	DefaultDuration float64 `json:"defaultDuration,omitempty"`
 	// DefaultFPS is the fallback frame rate when metadata cannot be extracted.
-	// Default: 2.0.
 	DefaultFPS float64 `json:"defaultFPS,omitempty"`
-	// DefaultWidth is the fallback frame width in pixels when metadata cannot be
-	// extracted. Default: 640.
+	// DefaultWidth is the fallback frame width in pixels when metadata cannot
+	// be extracted.
 	DefaultWidth int `json:"defaultWidth,omitempty"`
-	// DefaultHeight is the fallback frame height in pixels when metadata cannot be
-	// extracted. Default: 360.
+	// DefaultHeight is the fallback frame height in pixels when metadata cannot
+	// be extracted.
 	DefaultHeight int `json:"defaultHeight,omitempty"`
 }
 

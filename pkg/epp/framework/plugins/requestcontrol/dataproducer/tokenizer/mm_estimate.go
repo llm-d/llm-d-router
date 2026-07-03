@@ -160,7 +160,6 @@ const (
 	defaultVideoMaxPixels     = 25_165_824 // total pixel budget across all frames
 
 	// Fallback values when MP4 metadata cannot be extracted.
-	// 16 s at 2 fps = 32 frames = defaultVideoMaxFrames.
 	defaultVideoFallbackDuration = 16.0
 	defaultVideoFallbackFPS      = 2.0
 	defaultVideoFallbackWidth    = 640

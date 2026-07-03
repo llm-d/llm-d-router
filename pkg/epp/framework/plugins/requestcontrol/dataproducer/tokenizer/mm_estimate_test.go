@@ -84,9 +84,9 @@ func TestVideoEstimator_SmartResize(t *testing.T) {
 	}
 }
 
-// TestVideoEstimator_Qwen3VLFormula verifies the full visual-token count against
-// the benchmark in docs/multimodal/video_token_benchmark.py. The benchmark adds
-// PROMPT_OVERHEAD=13 on top; our placeholderCount emits only visual tokens.
+// TestVideoEstimator_Qwen3VLFormula verifies the full visual-token count for
+// the Qwen3-VL formula (frame cap, smart_resize, patch grid, timestamp overhead).
+// These values exclude the chat-template prompt overhead, which is request-specific.
 func TestVideoEstimator_Qwen3VLFormula(t *testing.T) {
 	e := newVideoEstimator(nil)
 	for _, tc := range []struct {
@@ -94,12 +94,12 @@ func TestVideoEstimator_Qwen3VLFormula(t *testing.T) {
 		totalFrames int
 		srcFPS      float64
 		h, w        int
-		want        int // = benchmark - 13 (prompt overhead excluded)
+		want        int
 	}{
-		// Long videos (>32 frames): benchmark 3675 and 3677 respectively.
+		// Long videos capped at 32 frames.
 		{"640x360/74s/30fps", 2220, 30, 360, 640, 3662},
 		{"640x360/113s/25fps", 2825, 25, 360, 640, 3664},
-		// Short video: totalFrames=2 < 32 -> resample path, clamped to 4 frames.
+		// Short video: resampled to sampleFPS, clamped to minVideoFrames.
 		{"short/1s/2fps", 2, 2, 360, 640, 456},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
