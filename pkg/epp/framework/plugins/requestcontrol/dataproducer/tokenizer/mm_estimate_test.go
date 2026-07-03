@@ -44,7 +44,7 @@ func TestRoundHalfEven(t *testing.T) {
 // TestVideoEstimator_SampleFrames verifies the frame-count logic:
 // videos with more than maxFrames are capped; shorter ones are resampled.
 func TestVideoEstimator_SampleFrames(t *testing.T) {
-	e := newVideoEstimator(nil)
+	e := newVideoEstimator()
 	for _, tc := range []struct {
 		totalFrames int
 		srcFPS      float64
@@ -64,7 +64,7 @@ func TestVideoEstimator_SampleFrames(t *testing.T) {
 
 // TestVideoEstimator_SmartResize verifies pixel-budget scaling and patch rounding.
 func TestVideoEstimator_SmartResize(t *testing.T) {
-	e := newVideoEstimator(nil)
+	e := newVideoEstimator()
 	for _, tc := range []struct {
 		nframes, h, w, wantH, wantW int
 	}{
@@ -88,7 +88,7 @@ func TestVideoEstimator_SmartResize(t *testing.T) {
 // the Qwen3-VL formula (frame cap, smart_resize, patch grid, timestamp overhead).
 // These values exclude the chat-template prompt overhead, which is request-specific.
 func TestVideoEstimator_Qwen3VLFormula(t *testing.T) {
-	e := newVideoEstimator(nil)
+	e := newVideoEstimator()
 	for _, tc := range []struct {
 		name        string
 		totalFrames int

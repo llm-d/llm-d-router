@@ -80,41 +80,11 @@ type tokenizerPluginConfig struct {
 }
 
 // estimateConfig configures the estimation backend. An empty config uses built-in defaults.
+// Video placeholder-token estimation is not configurable: its parameters are
+// Qwen3-VL/vLLM architecture constants, not per-deployment tuning knobs.
 type estimateConfig struct {
 	// Image tunes multimodal image placeholder-token estimation.
 	Image *imageEstimateConfig `json:"image,omitempty"`
-	// Video tunes multimodal video placeholder-token estimation.
-	Video *videoEstimateConfig `json:"video,omitempty"`
-}
-
-// videoEstimateConfig tunes how a video's placeholder-token count is estimated.
-// All fields are optional; unset fields use built-in defaults calibrated for Qwen3-VL / Gemma4.
-type videoEstimateConfig struct {
-	// MaxFrames is the vLLM frame cap: videos with more total frames are
-	// pre-sampled to this count before token estimation.
-	MaxFrames int `json:"maxFrames,omitempty"`
-	// SampleFPS is the target frame rate used to resample short videos
-	// (total frames <= MaxFrames).
-	SampleFPS float64 `json:"sampleFPS,omitempty"`
-	// PatchSize is the ViT vision-encoder patch size in pixels.
-	PatchSize int `json:"patchSize,omitempty"`
-	// MergeSize is the spatial merge factor applied after patch encoding.
-	MergeSize int `json:"mergeSize,omitempty"`
-	// TemporalPatch is the temporal grouping factor.
-	TemporalPatch int `json:"temporalPatch,omitempty"`
-	// MaxPixels is the total pixel budget across all frames used by smart_resize.
-	MaxPixels int `json:"maxPixels,omitempty"`
-	// DefaultDuration is the fallback clip length in seconds when metadata
-	// cannot be extracted from the request.
-	DefaultDuration float64 `json:"defaultDuration,omitempty"`
-	// DefaultFPS is the fallback frame rate when metadata cannot be extracted.
-	DefaultFPS float64 `json:"defaultFPS,omitempty"`
-	// DefaultWidth is the fallback frame width in pixels when metadata cannot
-	// be extracted.
-	DefaultWidth int `json:"defaultWidth,omitempty"`
-	// DefaultHeight is the fallback frame height in pixels when metadata cannot
-	// be extracted.
-	DefaultHeight int `json:"defaultHeight,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.
@@ -224,7 +194,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		backend = renderBackend{tk: renderer}
 	default:
-		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
+		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator()}
 	}
 
 	p := &Plugin{
