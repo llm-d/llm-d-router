@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"image"
+	"math"
 	"strings"
 
 	// Registers decoders so image.DecodeConfig can read dimensions.
@@ -150,40 +151,87 @@ func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool
 }
 
 const (
-	// defaultVideoDuration is the fallback clip length when metadata cannot be read.
-	// 32 frames at 2 fps = 16 s matches vLLM's VideoMediaIO 32-frame cap.
-	defaultVideoDuration = 16.0
-	// defaultVideoFPS is the fallback frame rate when metadata cannot be read.
-	defaultVideoFPS = 2.0
+	// Qwen3-VL / Gemma4 model defaults — also match vLLM VideoMediaIO defaults.
+	defaultVideoMaxFrames     = 32         // vLLM pre-sampling cap
+	defaultVideoSampleFPS     = 2.0        // fps used for short-video resampling
+	defaultVideoPatchSize     = 16         // ViT patch size in pixels
+	defaultVideoMergeSize     = 2          // spatial merge factor
+	defaultVideoTemporalPatch = 2          // temporal grouping factor
+	defaultVideoMaxPixels     = 25_165_824 // total pixel budget across all frames
+
+	// Fallback values when MP4 metadata cannot be extracted.
+	// 16 s at 2 fps = 32 frames = defaultVideoMaxFrames.
+	defaultVideoFallbackDuration = 16.0
+	defaultVideoFallbackFPS      = 2.0
+	defaultVideoFallbackWidth    = 640
+	defaultVideoFallbackHeight   = 360
 
 	minVideoFrames = 4
 	maxVideoFrames = 768
 )
 
-// videoEstimator estimates placeholder-token count for a video URL.
+// videoEstimator implements the Qwen3-VL-accurate token estimation:
+// vLLM frame cap, smart_resize, temporal patch grouping, and per-grid timestamp tokens.
 type videoEstimator struct {
-	defDuration float64
-	defFPS      float64
-	frame       imageEstimator
+	maxFrames     int
+	sampleFPS     float64
+	patchSize     int
+	mergeSize     int
+	temporalPatch int
+	maxPixels     int
+	defDuration   float64
+	defFPS        float64
+	defWidth      int
+	defHeight     int
 }
 
 // newVideoEstimator resolves an estimateConfig into a videoEstimator.
 func newVideoEstimator(cfg *estimateConfig) videoEstimator {
 	e := videoEstimator{
-		defDuration: defaultVideoDuration,
-		defFPS:      defaultVideoFPS,
-		frame:       newImageEstimator(cfg),
+		maxFrames:     defaultVideoMaxFrames,
+		sampleFPS:     defaultVideoSampleFPS,
+		patchSize:     defaultVideoPatchSize,
+		mergeSize:     defaultVideoMergeSize,
+		temporalPatch: defaultVideoTemporalPatch,
+		maxPixels:     defaultVideoMaxPixels,
+		defDuration:   defaultVideoFallbackDuration,
+		defFPS:        defaultVideoFallbackFPS,
+		defWidth:      defaultVideoFallbackWidth,
+		defHeight:     defaultVideoFallbackHeight,
 	}
-	if cfg != nil && cfg.Video != nil {
-		if cfg.Video.Duration > 0 {
-			e.defDuration = cfg.Video.Duration
-		}
-		if cfg.Video.FPS > 0 {
-			e.defFPS = cfg.Video.FPS
-		}
-		if cfg.Video.Frame != nil {
-			e.frame = newImageEstimatorFromImageCfg(cfg.Video.Frame)
-		}
+	if cfg == nil || cfg.Video == nil {
+		return e
+	}
+	v := cfg.Video
+	if v.MaxFrames > 0 {
+		e.maxFrames = v.MaxFrames
+	}
+	if v.SampleFPS > 0 {
+		e.sampleFPS = v.SampleFPS
+	}
+	if v.PatchSize > 0 {
+		e.patchSize = v.PatchSize
+	}
+	if v.MergeSize > 0 {
+		e.mergeSize = v.MergeSize
+	}
+	if v.TemporalPatch > 0 {
+		e.temporalPatch = v.TemporalPatch
+	}
+	if v.MaxPixels > 0 {
+		e.maxPixels = v.MaxPixels
+	}
+	if v.DefaultDuration > 0 {
+		e.defDuration = v.DefaultDuration
+	}
+	if v.DefaultFPS > 0 {
+		e.defFPS = v.DefaultFPS
+	}
+	if v.DefaultWidth > 0 {
+		e.defWidth = v.DefaultWidth
+	}
+	if v.DefaultHeight > 0 {
+		e.defHeight = v.DefaultHeight
 	}
 	return e
 }
@@ -191,45 +239,227 @@ func newVideoEstimator(cfg *estimateConfig) videoEstimator {
 // placeholderCount estimates placeholder tokens for a video URL. Base64 data URLs
 // are decoded for duration, fps, and resolution; other URLs fall back to defaults.
 func (e videoEstimator) placeholderCount(url string) int {
-	duration, fps := e.defDuration, e.defFPS
-	frameW, frameH := 0, 0
+	duration, fps, width, height := e.effectiveDefaults()
 
 	if strings.HasPrefix(url, "data:video/") && strings.Contains(url, "base64,") {
 		idx := strings.Index(url, "base64,")
 		decoded, err := base64.StdEncoding.DecodeString(url[idx+len("base64,"):])
 		if err == nil {
 			if meta, err := parseMP4Metadata(decoded); err == nil {
-				duration, fps = meta.Duration, meta.FPS
-				frameW, frameH = meta.Width, meta.Height
+				duration = meta.Duration
+				fps = meta.FPS
+				if meta.Width > 0 {
+					width = meta.Width
+				}
+				if meta.Height > 0 {
+					height = meta.Height
+				}
 			}
 		}
 	}
 
-	numFrames := int(duration * fps)
-	if numFrames < minVideoFrames {
-		numFrames = minVideoFrames
-	} else if numFrames > maxVideoFrames {
-		numFrames = maxVideoFrames
-	}
-
-	tokensPerFrame := e.frame.countFromDims(frameW, frameH, frameW > 0 && frameH > 0)
-	return numFrames * tokensPerFrame
+	totalFrames := int(duration * fps)
+	nframes := e.sampleFrames(totalFrames, fps)
+	hBar, wBar := e.smartResize(nframes, height, width)
+	return e.visualTokens(totalFrames, fps, nframes, hBar, wBar)
 }
 
-// newImageEstimatorFromImageCfg builds an imageEstimator directly from an imageEstimateConfig.
-func newImageEstimatorFromImageCfg(cfg *imageEstimateConfig) imageEstimator {
-	if cfg == nil {
-		return imageEstimator{}
+func (e videoEstimator) effectiveMaxFrames() int {
+	if e.maxFrames > 0 {
+		return e.maxFrames
 	}
-	est := imageEstimator{mode: cfg.Mode}
-	if cfg.DefaultResolution != nil {
-		est.defWidth, est.defHeight = cfg.DefaultResolution.Width, cfg.DefaultResolution.Height
+	return defaultVideoMaxFrames
+}
+
+func (e videoEstimator) effectiveSampleFPS() float64 {
+	if e.sampleFPS > 0 {
+		return e.sampleFPS
 	}
-	if cfg.Dynamic != nil {
-		est.factor = cfg.Dynamic.Factor
+	return defaultVideoSampleFPS
+}
+
+func (e videoEstimator) effectivePatchSize() int {
+	if e.patchSize > 0 {
+		return e.patchSize
 	}
-	if cfg.Static != nil {
-		est.staticToken = cfg.Static.StaticToken
+	return defaultVideoPatchSize
+}
+
+func (e videoEstimator) effectiveMergeSize() int {
+	if e.mergeSize > 0 {
+		return e.mergeSize
 	}
-	return est
+	return defaultVideoMergeSize
+}
+
+func (e videoEstimator) effectiveTemporalPatch() int {
+	if e.temporalPatch > 0 {
+		return e.temporalPatch
+	}
+	return defaultVideoTemporalPatch
+}
+
+func (e videoEstimator) effectiveMaxPixels() int {
+	if e.maxPixels > 0 {
+		return e.maxPixels
+	}
+	return defaultVideoMaxPixels
+}
+
+func (e videoEstimator) effectiveDefaults() (duration, fps float64, width, height int) {
+	duration = e.defDuration
+	if duration <= 0 {
+		duration = defaultVideoFallbackDuration
+	}
+	fps = e.defFPS
+	if fps <= 0 {
+		fps = defaultVideoFallbackFPS
+	}
+	width = e.defWidth
+	if width <= 0 {
+		width = defaultVideoFallbackWidth
+	}
+	height = e.defHeight
+	if height <= 0 {
+		height = defaultVideoFallbackHeight
+	}
+	return
+}
+
+// sampleFrames mirrors the vLLM VideoMediaIO frame-selection logic:
+// videos with more than maxFrames total frames are pre-sampled to exactly
+// maxFrames; shorter videos are resampled to sampleFPS and clamped.
+func (e videoEstimator) sampleFrames(totalFrames int, srcFPS float64) int {
+	maxF := e.effectiveMaxFrames()
+	if totalFrames > maxF {
+		return maxF
+	}
+	sampleFPS := e.effectiveSampleFPS()
+	if srcFPS <= 0 {
+		srcFPS = defaultVideoFallbackFPS
+	}
+	n := int(float64(totalFrames) / srcFPS * sampleFPS)
+	if n < minVideoFrames {
+		return minVideoFrames
+	}
+	if n > maxVideoFrames {
+		return maxVideoFrames
+	}
+	return n
+}
+
+// smartResize scales h and w to fit within the per-frame pixel budget and rounds
+// each dimension to the nearest patchSize multiple using banker's rounding
+// (round half to even) to match Python's round() and the HF transformers output.
+func (e videoEstimator) smartResize(nframes, h, w int) (int, int) {
+	maxPix := e.effectiveMaxPixels()
+	patchSize := e.effectivePatchSize()
+	pixPerFrame := maxPix / nframes
+	if pixPerFrame < 1 {
+		pixPerFrame = 1
+	}
+	if h*w > pixPerFrame {
+		scale := math.Sqrt(float64(pixPerFrame) / float64(h*w))
+		h = int(math.Round(float64(h) * scale))
+		w = int(math.Round(float64(w) * scale))
+	}
+	hBar := roundHalfEven(h, patchSize)
+	wBar := roundHalfEven(w, patchSize)
+	if hBar < patchSize {
+		hBar = patchSize
+	}
+	if wBar < patchSize {
+		wBar = patchSize
+	}
+	return hBar, wBar
+}
+
+// roundHalfEven rounds n to the nearest multiple of factor using banker's
+// rounding (round half to nearest even quotient), matching Python's round().
+func roundHalfEven(n, factor int) int {
+	q := n / factor
+	rem := n % factor
+	half := factor / 2
+	switch {
+	case rem < half:
+		return q * factor
+	case rem > half:
+		return (q + 1) * factor
+	default: // rem == half: round to nearest even quotient
+		if q%2 == 0 {
+			return q * factor
+		}
+		return (q + 1) * factor
+	}
+}
+
+// visualTokens computes the total visual placeholder count:
+// patch tokens + 2 boundary tokens per temporal grid cell + timestamp overhead.
+func (e videoEstimator) visualTokens(totalFrames int, srcFPS float64, nframes, hBar, wBar int) int {
+	tp := e.effectiveTemporalPatch()
+	ms := e.effectiveMergeSize()
+	ps := e.effectivePatchSize()
+	tBar := ((nframes + tp - 1) / tp) * tp
+	gridT := tBar / tp
+	gridH := hBar / ps
+	gridW := wBar / ps
+	patchTokens := gridT * gridH * gridW / (ms * ms)
+	return patchTokens + gridT*2 + e.timestampTokens(totalFrames, srcFPS, nframes, gridT)
+}
+
+// timestampTokens computes the "<X.X seconds>" token overhead per temporal grid
+// cell. Each timestamp costs 6 tokens plus 1 for two-digit seconds and 1 more
+// for three-digit seconds, mirroring the Qwen3-VL chat-template formatting.
+func (e videoEstimator) timestampTokens(totalFrames int, srcFPS float64, nframes, gridT int) int {
+	timestamps := make([]float64, 0, gridT)
+	tp := e.effectiveTemporalPatch()
+	if totalFrames > e.effectiveMaxFrames() {
+		// vLLM pre-sampled nframes evenly from [0, totalFrames-1]; average pairs.
+		frameIdx := videoLinspace(0, totalFrames-1, nframes)
+		rawTS := make([]float64, nframes)
+		for i, idx := range frameIdx {
+			rawTS[i] = float64(idx) / srcFPS
+		}
+		for j := 0; j < gridT; j++ {
+			base := j * tp
+			var sum float64
+			for k := 0; k < tp; k++ {
+				sum += rawTS[base+k]
+			}
+			timestamps = append(timestamps, sum/float64(tp))
+		}
+	} else {
+		duration := float64(totalFrames) / srcFPS
+		for i := 0; i < gridT; i++ {
+			timestamps = append(timestamps, (float64(i)+0.5)*duration/float64(gridT))
+		}
+	}
+	total := 0
+	for _, t := range timestamps {
+		total += 6
+		if t >= 10 {
+			total++
+		}
+		if t >= 100 {
+			total++
+		}
+	}
+	return total
+}
+
+// videoLinspace returns n evenly spaced integer indices from start to end inclusive,
+// matching numpy.linspace(start, end, n, dtype=int).
+func videoLinspace(start, end, n int) []int {
+	if n <= 0 {
+		return nil
+	}
+	result := make([]int, n)
+	if n == 1 {
+		result[0] = start
+		return result
+	}
+	for i := range result {
+		result[i] = start + int(math.Round(float64(i)*float64(end-start)/float64(n-1)))
+	}
+	return result
 }
