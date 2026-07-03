@@ -74,7 +74,11 @@ func mp4Box(boxType string, payload []byte) []byte {
 }
 
 func concatBoxes(boxes ...[]byte) []byte {
-	var out []byte
+	total := 0
+	for _, b := range boxes {
+		total += len(b)
+	}
+	out := make([]byte, 0, total)
 	for _, b := range boxes {
 		out = append(out, b...)
 	}

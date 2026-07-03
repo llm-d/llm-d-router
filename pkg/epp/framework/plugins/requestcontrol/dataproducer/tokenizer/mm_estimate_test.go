@@ -29,13 +29,13 @@ func TestRoundHalfEven(t *testing.T) {
 	for _, tc := range []struct {
 		n, factor, want int
 	}{
-		{360, 16, 352},  // 360/16 = 22.5, 22 is even -> round down
-		{368, 16, 368},  // exact multiple
-		{640, 16, 640},  // exact multiple
-		{634, 16, 640},  // 634/16 = 39.625 -> round up to 40*16
-		{0, 16, 0},      // zero
-		{8, 16, 0},      // 8/16 = 0.5, 0 is even -> round down
-		{24, 16, 32},    // 24/16 = 1.5, 1 is odd -> round up to 2*16
+		{360, 16, 352}, // 360/16 = 22.5, 22 is even -> round down
+		{368, 16, 368}, // exact multiple
+		{640, 16, 640}, // exact multiple
+		{634, 16, 640}, // 634/16 = 39.625 -> round up to 40*16
+		{0, 16, 0},     // zero
+		{8, 16, 0},     // 8/16 = 0.5, 0 is even -> round down
+		{24, 16, 32},   // 24/16 = 1.5, 1 is odd -> round up to 2*16
 	} {
 		assert.Equal(t, tc.want, roundHalfEven(tc.n, tc.factor),
 			"roundHalfEven(%d, %d)", tc.n, tc.factor)
@@ -51,12 +51,12 @@ func TestVideoEstimator_SampleFrames(t *testing.T) {
 		srcFPS      float64
 		want        int
 	}{
-		{2220, 30, 32},  // long video (>32): cap at maxFrames
-		{2825, 25, 32},  // long video (>32): cap at maxFrames
-		{60, 30, 32},    // 60 > 32: cap at maxFrames
-		{32, 30, 4},     // exactly at cap (not >): resample 32/30*2=2 -> clamp to min 4
-		{2, 2, 4},       // 2/2*2=2 -> clamped to minVideoFrames
-		{1536, 2, 32},   // cap at maxFrames=32
+		{2220, 30, 32}, // long video (>32): cap at maxFrames
+		{2825, 25, 32}, // long video (>32): cap at maxFrames
+		{60, 30, 32},   // 60 > 32: cap at maxFrames
+		{32, 30, 4},    // exactly at cap (not >): resample 32/30*2=2 -> clamp to min 4
+		{2, 2, 4},      // 2/2*2=2 -> clamped to minVideoFrames
+		{1536, 2, 32},  // cap at maxFrames=32
 	} {
 		assert.Equal(t, tc.want, e.sampleFrames(tc.totalFrames, tc.srcFPS),
 			"sampleFrames(%d, %.1f)", tc.totalFrames, tc.srcFPS)
@@ -70,12 +70,12 @@ func TestVideoEstimator_SmartResize(t *testing.T) {
 		nframes, h, w, wantH, wantW int
 	}{
 		// No scaling needed (within budget); only rounding applies.
-		{32, 360, 640, 352, 640},  // 360/16=22.5 rounds to 352 (22 even)
-		{32, 360, 634, 352, 640},  // 634/16=39.625 rounds up to 640
-		{32, 480, 640, 480, 640},  // 480/16=30 exact
+		{32, 360, 640, 352, 640}, // 360/16=22.5 rounds to 352 (22 even)
+		{32, 360, 634, 352, 640}, // 634/16=39.625 rounds up to 640
+		{32, 480, 640, 480, 640}, // 480/16=30 exact
 		// Scaling required: high-resolution 4K video (3840x2160) with 32 frames.
-		// pixPerFrame = 25165824/32 = 786432; 3840*2160 = 8294400 > 786432 -> scale
-		// scale = sqrt(786432/8294400) ~= 0.3078; h=2160*0.3078~=665, w=3840*0.3078~=1182
+		// pixPerFrame = 25165824/32 = 786432; 3840*2160 = 8294400 > 786432, so downscale.
+		// factor = sqrt(786432/8294400) ~= 0.3078; h=2160*0.3078~=665, w=3840*0.3078~=1182
 		// roundHalfEven(665,16)=672 (665/16=41.5625->42*16=672), roundHalfEven(1182,16)=1184 (1182/16=73.875->74*16=1184)
 		{32, 2160, 3840, 672, 1184},
 	} {

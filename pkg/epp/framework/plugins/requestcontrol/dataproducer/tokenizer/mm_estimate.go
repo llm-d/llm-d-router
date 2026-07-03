@@ -152,19 +152,42 @@ func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool
 
 const (
 	// Qwen3-VL / Gemma4 model defaults — also match vLLM VideoMediaIO defaults.
-	defaultVideoMaxFrames     = 32         // vLLM pre-sampling cap
-	defaultVideoSampleFPS     = 2.0        // fps used for short-video resampling
-	defaultVideoPatchSize     = 16         // ViT patch size in pixels
-	defaultVideoMergeSize     = 2          // NxN patches merge into 1 visual token
-	defaultVideoTemporalPatch = 2          // N sampled frames merge into 1 time step
-	defaultVideoMaxPixels     = 25_165_824 // total pixel budget across all frames
+	// vLLM never feeds the model more than defaultVideoMaxFrames raw frames: a
+	// video decoded to more frames than this is pre-sampled down to exactly
+	// defaultVideoMaxFrames (see sampleFrames), so estimation must reproduce
+	// that cap rather than the source frame count.
+	defaultVideoMaxFrames = 32
+	// defaultVideoSampleFPS is the resampling rate applied to videos that decode
+	// to defaultVideoMaxFrames or fewer frames: vLLM re-derives the frame count
+	// as roughly totalFrames/srcFPS*defaultVideoSampleFPS instead of using the
+	// source fps directly (see sampleFrames).
+	defaultVideoSampleFPS = 2.0
+	// defaultVideoPatchSize is the ViT patch edge in pixels: smartResize rounds
+	// each frame's height and width to a multiple of this before computing grids.
+	defaultVideoPatchSize = 16
+	// defaultVideoMergeSize is the spatial merge window: an NxN block of patches
+	// (N = defaultVideoMergeSize) collapses into a single visual token.
+	defaultVideoMergeSize = 2
+	// defaultVideoTemporalPatch is the temporal merge window: this many
+	// consecutive sampled frames collapse into a single time step (grid cell)
+	// for both patch counting and timestamp averaging.
+	defaultVideoTemporalPatch = 2
+	// defaultVideoMaxPixels is the total pixel budget shared across all sampled
+	// frames: smartResize divides it by nframes to get a per-frame budget, then
+	// downscales height/width to fit before rounding to the patch grid.
+	defaultVideoMaxPixels = 25_165_824
 
-	// Fallback values when MP4 metadata cannot be extracted.
+	// Fallback values used when MP4 metadata (duration, fps, resolution)
+	// cannot be extracted from the payload, so totalFrames = duration*fps and
+	// the resolution passed to smartResize both fall back to model-typical values.
 	defaultVideoFallbackDuration = 16.0
 	defaultVideoFallbackFPS      = 2.0
 	defaultVideoFallbackWidth    = 640
 	defaultVideoFallbackHeight   = 360
 
+	// minVideoFrames and maxVideoFrames clamp the resampled frame count
+	// (see sampleFrames) so extremely short or long videos still produce a
+	// sane number of temporal grid cells.
 	minVideoFrames = 4
 	maxVideoFrames = 768
 )
@@ -173,6 +196,8 @@ const (
 // vLLM frame cap, smart_resize, temporal patch grouping, and per-grid timestamp tokens.
 // It has no tunable fields: every parameter is a Qwen3-VL/vLLM architecture
 // constant, not a per-deployment setting.
+// Validated against live Qwen3-VL-30B-A3B-Instruct API responses on the
+// Video-MME dataset: github.com/llm-d/llm-d-router/pull/1408#issuecomment-4697915077
 type videoEstimator struct{}
 
 // newVideoEstimator returns a videoEstimator using built-in constants.
