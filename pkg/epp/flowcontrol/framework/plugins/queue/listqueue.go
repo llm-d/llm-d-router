@@ -202,8 +202,8 @@ func (lq *listQueue) ByteSize() uint64 {
 	return lq.byteSize.Load()
 }
 
-// PeekHead returns the item at the front of the queue without removing it.
-func (lq *listQueue) PeekHead() flowcontrol.QueueItemAccessor {
+// Peek returns the item at the front of the queue without removing it.
+func (lq *listQueue) Peek() flowcontrol.QueueItemAccessor {
 	lq.mu.RLock()
 	defer lq.mu.RUnlock()
 
@@ -211,17 +211,5 @@ func (lq *listQueue) PeekHead() flowcontrol.QueueItemAccessor {
 		return nil
 	}
 	element := lq.requests.Front()
-	return element.Value.(flowcontrol.QueueItemAccessor)
-}
-
-// PeekTail returns the item at the back of the queue without removing it.
-func (lq *listQueue) PeekTail() flowcontrol.QueueItemAccessor {
-	lq.mu.RLock()
-	defer lq.mu.RUnlock()
-
-	if lq.requests.Len() == 0 {
-		return nil
-	}
-	element := lq.requests.Back()
 	return element.Value.(flowcontrol.QueueItemAccessor)
 }

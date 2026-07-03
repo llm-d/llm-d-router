@@ -394,7 +394,7 @@ dataLayer:
 					// Labels are empty because we skipped the Request phase.
 					wantMetrics: map[string]string{
 						"inference_objective_input_tokens": cleanMetric(`
-              # HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_epp_input_tokens] Inference objective input token count distribution for requests in each model.
+              # HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_epp_request_input_tokens] Inference objective input token count distribution for requests in each model.
               # TYPE inference_objective_input_tokens histogram
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8"} 1
