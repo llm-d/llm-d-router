@@ -41,14 +41,7 @@ var _ = Describe("P2P Connector", func() {
 	It("should send concurrent requests with correct p2p kv_transfer_params", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		body := `{
-				"model": "Qwen/Qwen2-0.5B",
-				"messages": [
-				  {"role": "user", "content": "Hello"}
-				],
-				"max_tokens": 50,
-				"max_completion_tokens": 100
-			}`
+		body := chatCompletionsRequestBodyWithMaxCompletionTokens
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
