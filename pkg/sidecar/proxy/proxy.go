@@ -90,10 +90,17 @@ const (
 	// Mooncake transfer fields
 	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 
+	// P2PConnector kv_transfer_params fields. The role is encoded by the
+	// nesting key: "decode" on the prefiller leg, "prefill" on the decoder leg.
+	requestFieldP2PDecodeParams  = "decode"
+	requestFieldP2PPrefillParams = "prefill"
+	requestFieldKVRequestID      = "kv_request_id"
+
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
 	KVConnectorSGLang        = constants.KVConnectorSGLang
 	KVConnectorMooncake      = constants.KVConnectorMooncake
+	KVConnectorP2P           = constants.KVConnectorP2P
 	ECExampleConnector       = constants.ECExampleConnector
 	ECConnectorNIXL          = constants.ECConnectorNIXL
 )
@@ -196,6 +203,11 @@ type Config struct {
 
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
 	MooncakeBootstrapPort int
+
+	// P2PConnectorPort is the prefiller's P2PConnector listening port, injected
+	// as remote_port on the decode leg so the decoder can pull KV from it.
+	// Only meaningful with --kv-connector=p2p.
+	P2PConnectorPort int
 
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
@@ -447,6 +459,10 @@ func (s *Server) setKVConnector() {
 	case KVConnectorMooncake:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
 			s.handleMooncake(w, r, host)
+		}
+	case KVConnectorP2P:
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+			s.handleP2P(w, r, host)
 		}
 	case KVConnectorNIXLV2:
 		fallthrough

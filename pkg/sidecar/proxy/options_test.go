@@ -595,6 +595,30 @@ func TestNewOptionsWithEnvVars(t *testing.T) {
 	}
 }
 
+func TestP2PConnectorPort(t *testing.T) {
+	t.Run("defaults to 7777", func(t *testing.T) {
+		opts := NewOptions()
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.Equal(t, defaultP2PConnectorPort, opts.P2PConnectorPort)
+	})
+
+	t.Run("env var overrides default", func(t *testing.T) {
+		t.Setenv(envP2PConnectorPort, "9500")
+		opts := NewOptions()
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.Equal(t, 9500, opts.P2PConnectorPort)
+	})
+
+	t.Run("rejects out-of-range port", func(t *testing.T) {
+		opts := NewOptions()
+		opts.P2PConnectorPort = 70000
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--p2p-connector-port must be between 1 and 65535")
+	})
+}
+
 func TestValidateConnector(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -605,6 +629,7 @@ func TestValidateConnector(t *testing.T) {
 		{"valid shared-storage", KVConnectorSharedStorage, false},
 		{"valid sglang", KVConnectorSGLang, false},
 		{"valid mooncake", KVConnectorMooncake, false},
+		{"valid p2p", KVConnectorP2P, false},
 		{"invalid connector", "invalid", true},
 	}
 

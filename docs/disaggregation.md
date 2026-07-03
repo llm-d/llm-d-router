@@ -529,6 +529,25 @@ Specifies which KV transfer protocol the sidecar uses to coordinate prefill/deco
 | `shared-storage` | `SharedStorageConnector` | KV transfer via shared filesystem |
 | `sglang` | — | SGLang disaggregation protocol |
 | `mooncake` | `MooncakeConnector` | [Mooncake](https://github.com/kvcache-ai/Mooncake) KV transfer using RDMA |
+| `p2p` | `OffloadingConnector` | P2P KV transfer over the vLLM CPU offloading tier. The decoder pulls KV from the prefiller via the `p2p` secondary tier. |
+
+With `p2p`, the sidecar dispatches prefill and decode concurrently. It injects role-keyed `kv_transfer_params`: the prefiller receives `{"decode": {"kv_request_id": <id>}}` (no peer address), and the decoder receives `{"prefill": {"kv_request_id": <id>, "remote_host": <prefiller host>, "remote_port": <p2p-connector-port>}}` so it can pull KV from the prefiller. The prefiller host comes from the `x-prefiller-host-port` header; the port is `--p2p-connector-port`.
+
+The vLLM-side connector for `p2p` is `OffloadingConnector` (not `P2PConnector`). Both prefill and decode pods require the following `--kv-transfer-config`:
+
+```json
+{
+  "kv_connector": "OffloadingConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "spec_name": "TieringOffloadingSpec",
+    "cpu_bytes_to_use": <bytes>,
+    "secondary_tiers": [{"type": "p2p", "host": "<POD_IP>", "port": <p2p-connector-port>}]
+  }
+}
+```
+
+`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
 
 ### General Sidecar Flags
 
@@ -545,6 +564,7 @@ Specifies which KV transfer protocol the sidecar uses to coordinate prefill/deco
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
+| `p2p` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's P2PConnector listening port, injected as `remote_port` on the decode leg so the decoder can pull KV. |
 
 ---
 
@@ -555,3 +575,4 @@ Specifies which KV transfer protocol the sidecar uses to coordinate prefill/deco
 - vLLM: [[RFC]: Prototype Separating Vision Encoder to Its Own Worker](https://github.com/vllm-project/vllm/issues/20799)
 - vLLM: [Encoder Disaggregation for Scalable Multimodal Model Serving](https://vllm.ai/blog/vllm-epd)
 - Mooncake: [MooncakeConnector Usage Guide](https://github.com/vllm-project/vllm/blob/main/docs/features/mooncake_connector_usage.md)
+- vLLM: [OffloadingConnector / P2P secondary tier (PR #42285)](https://github.com/vllm-project/vllm/pull/42285)
