@@ -67,6 +67,11 @@ epp:
   affinity: {}
   tolerations: []
 
+  # Annotations added to the EPP pod template. Useful for clusters that rely on
+  # annotation-based Prometheus scraping (prometheus.io/{scrape,port,path}) or
+  # Istio metrics-merging, rather than a ServiceMonitor or GMP.
+  podAnnotations: {}
+
 # By default no proxy is configured
 proxy:
   enabled: false    
@@ -130,11 +135,6 @@ monitoring:
       secretName: inference-gateway-sa-metrics-reader-secret
     # additional labels for the ServiceMonitor
     extraLabels: {}
-
-# Annotations added to the EPP pod template. Useful for clusters that rely on
-# annotation-based Prometheus scraping (prometheus.io/{scrape,port,path}) or
-# Istio metrics-merging, rather than a ServiceMonitor or GMP.
-podAnnotations: {}
 
 tracing:
   enabled: false
