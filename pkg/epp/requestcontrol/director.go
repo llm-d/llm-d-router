@@ -59,9 +59,6 @@ const (
 	// producer overrides it by implementing requestcontrol.TimeoutAwareProducer.
 	dataProducerTimeout       = 400 * time.Millisecond
 	responseBodyQueueCapacity = 100
-	// AgentIdentityKey is the request attribute key used by the agent-identity
-	// header processor and read by the Director to derive FairnessID.
-	AgentIdentityKey = "agent-identity"
 )
 
 // primaryEndpointHasCachedPrefix reports whether the primary profile's chosen
@@ -284,7 +281,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 	// Derive FairnessID from agent-identity attribute if not already set by explicit header.
 	if reqCtx.SchedulingRequest.FairnessID == "" {
-		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, AgentIdentityKey); ok && agentID != "" {
+		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, fwkrc.AgentIdentityKey); ok && agentID != "" {
 			reqCtx.SchedulingRequest.FairnessID = agentID
 		}
 	}

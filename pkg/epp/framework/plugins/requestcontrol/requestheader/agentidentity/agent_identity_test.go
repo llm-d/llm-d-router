@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -139,7 +140,7 @@ func TestRequestHeader(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			got, ok := scheduling.ReadRequestAttribute[string](req, AgentIdentityAttributeKey)
+			got, ok := scheduling.ReadRequestAttribute[string](req, fwkrc.AgentIdentityKey)
 			if ok != tt.wantAttrFound {
 				t.Errorf("attribute found = %v, want %v", ok, tt.wantAttrFound)
 			}
@@ -224,7 +225,7 @@ func TestRequestHeader_CustomHeader(t *testing.T) {
 	if err := p.RequestHeader(context.Background(), req); err != nil {
 		t.Fatalf("RequestHeader: %v", err)
 	}
-	got, ok := scheduling.ReadRequestAttribute[string](req, AgentIdentityAttributeKey)
+	got, ok := scheduling.ReadRequestAttribute[string](req, fwkrc.AgentIdentityKey)
 	if !ok {
 		t.Fatal("agent-identity attribute not found")
 	}
@@ -242,7 +243,7 @@ func TestRequestHeader_CustomHeader(t *testing.T) {
 	if err := p.RequestHeader(context.Background(), req2); err != nil {
 		t.Fatalf("RequestHeader: %v", err)
 	}
-	got2, ok2 := scheduling.ReadRequestAttribute[string](req2, AgentIdentityAttributeKey)
+	got2, ok2 := scheduling.ReadRequestAttribute[string](req2, fwkrc.AgentIdentityKey)
 	if !ok2 {
 		t.Fatal("agent-identity attribute not found")
 	}

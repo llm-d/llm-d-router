@@ -31,11 +31,7 @@ import (
 )
 
 const (
-	// AgentIdentityAttributeKey is the request attribute key under which the
-	// resolved agent identity is stored. The Director reads this attribute to
-	// derive FairnessID when no explicit fairness header is present.
-	AgentIdentityAttributeKey = "agent-identity"
-	PluginType                = "agent-identity"
+	PluginType = "agent-identity"
 
 	ClaudeCodeSessionHeader = "x-claude-code-session-id"
 	OpenCodeSessionHeader   = "x-session-affinity"
@@ -113,7 +109,7 @@ func (p *Plugin) TypedName() plugin.TypedName {
 func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceRequest) error {
 	for _, header := range p.priorityHeaders {
 		if id := request.Headers[header]; id != "" {
-			request.PutAttribute(AgentIdentityAttributeKey, id)
+			request.PutAttribute(requestcontrol.AgentIdentityKey, id)
 			return nil
 		}
 	}

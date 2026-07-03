@@ -455,7 +455,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName: objectiveName,
 			requestHeaderPlugin: &mockRequestHeaderPlugin{
 				name:           "agent-identity",
-				attributeKey:   AgentIdentityKey,
+				attributeKey:   fwkrc.AgentIdentityKey,
 				attributeValue: "session-abc",
 			},
 			wantFairnessID: "session-abc",
@@ -475,7 +475,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			fairnessIDHeader:       "explicit-id",
 			requestHeaderPlugin: &mockRequestHeaderPlugin{
 				name:           "agent-identity",
-				attributeKey:   AgentIdentityKey,
+				attributeKey:   fwkrc.AgentIdentityKey,
 				attributeValue: "session-abc",
 			},
 			wantFairnessID: "explicit-id",
