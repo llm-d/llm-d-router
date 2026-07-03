@@ -17,6 +17,7 @@ limitations under the License.
 package tokenizer
 
 import (
+	"encoding/base64"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -109,4 +110,34 @@ func TestVideoEstimator_Qwen3VLFormula(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// TestVideoEstimator_PlaceholderCount_Base64 exercises placeholderCount's
+// base64 decode + MP4 metadata path end to end, rather than the formula
+// stages in isolation like the tests above.
+func TestVideoEstimator_PlaceholderCount_Base64(t *testing.T) {
+	e := newVideoEstimator()
+	data := buildTestMP4(t, 10.0, 25.0, 640, 360)
+	url := "data:video/mp4;base64," + base64.StdEncoding.EncodeToString(data)
+
+	got := e.placeholderCount(url)
+
+	totalFrames := int(10.0 * 25.0)
+	nframes := e.sampleFrames(totalFrames, 25.0)
+	hBar, wBar := e.smartResize(nframes, 360, 640)
+	want := e.visualTokens(totalFrames, 25.0, nframes, hBar, wBar)
+	assert.Equal(t, want, got)
+}
+
+// TestVideoEstimator_PlaceholderCount_Fallback verifies a non-base64 URL
+// falls back to the default duration/fps/resolution.
+func TestVideoEstimator_PlaceholderCount_Fallback(t *testing.T) {
+	e := newVideoEstimator()
+	got := e.placeholderCount("https://example.com/clip.mp4")
+
+	totalFrames := int(defaultVideoFallbackDuration * defaultVideoFallbackFPS)
+	nframes := e.sampleFrames(totalFrames, defaultVideoFallbackFPS)
+	hBar, wBar := e.smartResize(nframes, defaultVideoFallbackHeight, defaultVideoFallbackWidth)
+	want := e.visualTokens(totalFrames, defaultVideoFallbackFPS, nframes, hBar, wBar)
+	assert.Equal(t, want, got)
 }

@@ -155,8 +155,8 @@ const (
 	defaultVideoMaxFrames     = 32         // vLLM pre-sampling cap
 	defaultVideoSampleFPS     = 2.0        // fps used for short-video resampling
 	defaultVideoPatchSize     = 16         // ViT patch size in pixels
-	defaultVideoMergeSize     = 2          // spatial merge factor
-	defaultVideoTemporalPatch = 2          // temporal grouping factor
+	defaultVideoMergeSize     = 2          // NxN patches merge into 1 visual token
+	defaultVideoTemporalPatch = 2          // N sampled frames merge into 1 time step
 	defaultVideoMaxPixels     = 25_165_824 // total pixel budget across all frames
 
 	// Fallback values when MP4 metadata cannot be extracted.
