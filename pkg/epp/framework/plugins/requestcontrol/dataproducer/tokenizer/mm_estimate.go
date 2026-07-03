@@ -296,8 +296,12 @@ func roundHalfEven(n, factor int) int {
 	}
 }
 
-// visualTokens computes the total visual placeholder count:
-// patch tokens + 2 boundary tokens per temporal grid cell + timestamp overhead.
+// visualTokens computes the total visual placeholder count.
+//
+// Formula, with gridT = ceil(nframes/temporalPatch) and hBar, wBar the
+// smartResize output:
+//
+//	tokens = floor(gridT*(hBar/patchSize)*(wBar/patchSize)/mergeSize^2) + 2*gridT + timestampTokens(gridT)
 func (e videoEstimator) visualTokens(totalFrames int, srcFPS float64, nframes, hBar, wBar int) int {
 	tp := defaultVideoTemporalPatch
 	ms := defaultVideoMergeSize
