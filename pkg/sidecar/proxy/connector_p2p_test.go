@@ -83,7 +83,7 @@ var _ = Describe("P2P Connector", func() {
 		Expect(preq[requestFieldStream]).To(BeFalse())
 
 		// Decode leg: kv_transfer_params.prefill carries the prefiller's
-		// P2PConnector address plus the matching kv_request_id.
+		// OffloadingConnector P2P tier address plus the matching kv_request_id.
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))

@@ -89,7 +89,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		v.Info("prefill request body", "body", string(prefillBody))
 	}
 
-	// Decode leg: pull KV from the prefiller's P2PConnector. Original body
+	// Decode leg: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
 	// (streaming, token limits) is preserved.
 	decodeData := make(map[string]any, len(requestData)+1)
 	for k, v := range requestData {
