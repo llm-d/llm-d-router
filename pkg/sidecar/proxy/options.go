@@ -269,7 +269,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MooncakeBootstrapPort, mooncakeBootstrapPortFlag, opts.MooncakeBootstrapPort,
 		"the port used to query the Mooncake bootstrap endpoint on prefill pods (only used with --kv-connector=mooncake)")
 	fs.IntVar(&opts.P2PConnectorPort, p2pConnectorPortFlag, opts.P2PConnectorPort,
-		"the prefiller's P2PConnector listening port, injected as remote_port on the decode leg (only used with --kv-connector=p2p)")
+		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode leg (only used with --kv-connector=offloading)")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Enables secure proxy. Defaults to true.")
 	fs.StringVar(&opts.CertPath, certPath, opts.CertPath, "The path to the certificate for secure proxy. The certificate and private key files are assumed to be named tls.crt and tls.key, respectively. If not set, and secureProxy is enabled, then a self-signed certificate is used (for testing).")
 	fs.BoolVar(&opts.EnableSSRFProtection, enableSSRFProtection, opts.EnableSSRFProtection, "enable SSRF protection using InferencePool allowlisting")

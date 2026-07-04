@@ -32,9 +32,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
-// handleP2P implements the vLLM P2PConnector orchestration contract. The
+// handleP2P implements the vLLM OffloadingConnector P2P orchestration contract. The
 // prefiller stores KV under a kv_request_id with no peer address; the decoder
-// pulls it using the prefiller's P2PConnector host/port. Both legs are
+// pulls it using the prefiller's OffloadingConnector P2P tier host/port. Both legs are
 // dispatched concurrently: the connector parks any KV blocks stored before the
 // decoder's fetch binds the session, so ordering between the legs is safe.
 func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
