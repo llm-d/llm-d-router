@@ -132,7 +132,7 @@ func (s *Server) handleP2PConcurrentRequests(w http.ResponseWriter, r *http.Requ
 	)
 	prefillSpan.SetAttributes(
 		attribute.String("llm_d.pd_proxy.prefill_target", prefillHost),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorP2P),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorOffloading),
 		attribute.Bool("llm_d.pd_proxy.prefill.async", true),
 	)
 	prefillStart := time.Now()
@@ -174,7 +174,7 @@ func (s *Server) handleP2PConcurrentRequests(w http.ResponseWriter, r *http.Requ
 	defer decodeSpan.End()
 
 	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorP2P),
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorOffloading),
 		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", true),
 	)
 	decodeStart := time.Now()

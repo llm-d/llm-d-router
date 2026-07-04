@@ -629,7 +629,7 @@ func TestValidateConnector(t *testing.T) {
 		{"valid shared-storage", KVConnectorSharedStorage, false},
 		{"valid sglang", KVConnectorSGLang, false},
 		{"valid mooncake", KVConnectorMooncake, false},
-		{"valid p2p", KVConnectorP2P, false},
+		{"valid offloading", KVConnectorOffloading, false},
 		{"invalid connector", "invalid", true},
 	}
 

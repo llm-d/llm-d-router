@@ -100,7 +100,7 @@ const (
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
 	KVConnectorSGLang        = constants.KVConnectorSGLang
 	KVConnectorMooncake      = constants.KVConnectorMooncake
-	KVConnectorP2P           = constants.KVConnectorP2P
+	KVConnectorOffloading    = constants.KVConnectorOffloading
 	ECExampleConnector       = constants.ECExampleConnector
 	ECConnectorNIXL          = constants.ECConnectorNIXL
 )
@@ -460,7 +460,7 @@ func (s *Server) setKVConnector() {
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
 			s.handleMooncake(w, r, host)
 		}
-	case KVConnectorP2P:
+	case KVConnectorOffloading:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
 			s.handleP2P(w, r, host)
 		}

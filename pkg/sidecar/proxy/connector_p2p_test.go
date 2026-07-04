@@ -34,7 +34,7 @@ var _ = Describe("P2P Connector", func() {
 	const p2pConnectorPort = 7777
 
 	BeforeEach(func() {
-		testInfo = sidecarConnectionTestSetup(KVConnectorP2P)
+		testInfo = sidecarConnectionTestSetup(KVConnectorOffloading)
 		testInfo.proxy.config.P2PConnectorPort = p2pConnectorPort
 	})
 

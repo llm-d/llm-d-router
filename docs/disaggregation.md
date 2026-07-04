@@ -529,11 +529,11 @@ Specifies which KV transfer protocol the sidecar uses to coordinate prefill/deco
 | `shared-storage` | `SharedStorageConnector` | KV transfer via shared filesystem |
 | `sglang` | — | SGLang disaggregation protocol |
 | `mooncake` | `MooncakeConnector` | [Mooncake](https://github.com/kvcache-ai/Mooncake) KV transfer using RDMA |
-| `p2p` | `OffloadingConnector` | P2P KV transfer over the vLLM CPU offloading tier. The decoder pulls KV from the prefiller via the `p2p` secondary tier. |
+| `offloading` | `OffloadingConnector` | KV transfer over the vLLM CPU offloading tier. The decoder pulls KV from the prefiller via the `p2p` secondary tier. |
 
-With `p2p`, the sidecar dispatches prefill and decode concurrently. It injects role-keyed `kv_transfer_params`: the prefiller receives `{"decode": {"kv_request_id": <id>}}` (no peer address), and the decoder receives `{"prefill": {"kv_request_id": <id>, "remote_host": <prefiller host>, "remote_port": <p2p-connector-port>}}` so it can pull KV from the prefiller. The prefiller host comes from the `x-prefiller-host-port` header; the port is `--p2p-connector-port`.
+With `offloading`, the sidecar dispatches prefill and decode concurrently. It injects role-keyed `kv_transfer_params`: the prefiller receives `{"decode": {"kv_request_id": <id>}}` (no peer address), and the decoder receives `{"prefill": {"kv_request_id": <id>, "remote_host": <prefiller host>, "remote_port": <p2p-connector-port>}}` so it can pull KV from the prefiller. The prefiller host comes from the `x-prefiller-host-port` header; the port is `--p2p-connector-port`.
 
-The vLLM-side connector for `p2p` is `OffloadingConnector` (not `P2PConnector`). Both prefill and decode pods require the following `--kv-transfer-config`:
+Both prefill and decode pods require the following `--kv-transfer-config`:
 
 ```json
 {
