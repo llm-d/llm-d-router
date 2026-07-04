@@ -566,6 +566,12 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--p2p-connector-port must be between 1 and 65535, got %d", opts.P2PConnectorPort)
 	}
 
+	// offloading does not support wide-EP: every DP rank would bind the same
+	// POD_IP:<p2p-connector-port>. DP-aware support is not yet implemented.
+	if opts.KVConnector == KVConnectorOffloading && opts.DataParallelSize > 1 {
+		return fmt.Errorf("--kv-connector=offloading does not support --data-parallel-size > 1 (got %d)", opts.DataParallelSize)
+	}
+
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
 		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {

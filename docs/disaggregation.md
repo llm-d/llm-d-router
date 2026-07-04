@@ -549,6 +549,8 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
 
 `host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
 
+**Restriction:** `--kv-connector=offloading` requires `--data-parallel-size=1`. Wide-EP pods (DP > 1) are rejected at startup: every DP rank would bind the same `POD_IP:<p2p-connector-port>`. DP-aware support is not yet implemented.
+
 ### General Sidecar Flags
 
 | Flag | Env var | Values | Default | Description |
@@ -564,7 +566,7 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
-| `p2p` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's P2PConnector listening port, injected as `remote_port` on the decode leg so the decoder can pull KV. |
+| `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's P2PConnector listening port, injected as `remote_port` on the decode leg so the decoder can pull KV. |
 
 ---
 
