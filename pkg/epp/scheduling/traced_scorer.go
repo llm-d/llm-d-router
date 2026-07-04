@@ -19,28 +19,24 @@ package scheduling
 import (
 	"context"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
-	scorerSpanNamePrefix        = "llm_d.epp.scorer."
-	scorerTypeAttribute         = "llm_d.scorer.type"
-	scorerNameAttribute         = "llm_d.scorer.name"
-	scorerWeightAttribute       = "llm_d.scorer.weight"
-	scorerCandidateAttribute    = "llm_d.scorer.candidate_count"
-	scorerEndpointsAttribute    = "llm_d.scorer.endpoints_scored"
-	scorerMaxScoreAttribute     = "llm_d.scorer.score.max"
-	scorerAverageScoreAttribute = "llm_d.scorer.score.avg"
+	scorerSpanName              = "score_endpoints"
+	scorerTypeAttribute         = "llm_d.epp.scorer.type"
+	scorerNameAttribute         = "llm_d.epp.scorer.name"
+	scorerWeightAttribute       = "llm_d.epp.scorer.weight"
+	scorerCandidateAttribute    = "llm_d.epp.scorer.candidate_endpoints"
+	scorerEndpointsAttribute    = "llm_d.epp.scorer.scored_endpoints"
+	scorerMaxScoreAttribute     = "llm_d.epp.scorer.max_score"
+	scorerAverageScoreAttribute = "llm_d.epp.scorer.average_score"
 )
-
-func schedulerTracer() trace.Tracer {
-	return otel.Tracer(schedulerInstrumentationName)
-}
 
 // TracedScorer decorates a scorer with request-local OpenTelemetry spans.
 type TracedScorer struct {
@@ -66,20 +62,30 @@ func (s *TracedScorer) Category() fwksched.ScorerCategory {
 
 func (s *TracedScorer) Score(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	typedName := s.TypedName()
-	ctx, span := schedulerTracer().Start(ctx, scorerSpanNamePrefix+typedName.Type,
+	attrs := []attribute.KeyValue{
+		attribute.String(scorerTypeAttribute, typedName.Type),
+		attribute.String(scorerNameAttribute, typedName.Name),
+		attribute.Float64(scorerWeightAttribute, s.weight),
+		attribute.Int(scorerCandidateAttribute, len(endpoints)),
+	}
+	if request != nil {
+		if request.TargetModel != "" {
+			attrs = append(attrs, attribute.String("gen_ai.request.model", request.TargetModel))
+		}
+		if request.RequestID != "" {
+			attrs = append(attrs, attribute.String("gen_ai.request.id", request.RequestID))
+		}
+	}
+
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, scorerSpanName,
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(
-			attribute.String(scorerTypeAttribute, typedName.Type),
-			attribute.String(scorerNameAttribute, typedName.Name),
-			attribute.Float64(scorerWeightAttribute, s.weight),
-			attribute.Int(scorerCandidateAttribute, len(endpoints)),
-		),
+		trace.WithAttributes(attrs...),
 	)
 	defer span.End()
 
 	scores := s.scorer.Score(ctx, request, endpoints)
 
-	attrs := []attribute.KeyValue{
+	attrs = []attribute.KeyValue{
 		attribute.Int(scorerEndpointsAttribute, len(scores)),
 	}
 	if len(scores) > 0 {

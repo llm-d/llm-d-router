@@ -19,24 +19,21 @@ package scheduling
 import (
 	"context"
 	"math"
-	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
-	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-func TestSchedulerProfileCreatesScheduleAndScorerSpans(t *testing.T) {
-	exporter := installTraceExporter(t)
+func TestSchedulerProfileCreatesScorerSpans(t *testing.T) {
+	recorder := setupSpanRecorder(t)
 
 	scorerA := &recordingScorer{
 		typedName: fwkplugin.TypedName{Type: "type-a", Name: "scorer-a"},
@@ -46,43 +43,52 @@ func TestSchedulerProfileCreatesScheduleAndScorerSpans(t *testing.T) {
 		typedName: fwkplugin.TypedName{Type: "type-b", Name: "scorer-b"},
 		scores:    []float64{0.5, 0.4},
 	}
-	profile := NewSchedulerProfile().
-		WithScorers(NewWeightedScorer(scorerA, 2), NewWeightedScorer(scorerB, 3)).
+	profile := NewSchedulerProfile(WithScorerTracing(true)).
 		WithPicker(&firstEndpointPicker{typedName: fwkplugin.TypedName{Type: "test-picker", Name: "picker"}})
+	if err := profile.AddPlugins(NewWeightedScorer(scorerA, 2), NewWeightedScorer(scorerB, 3)); err != nil {
+		t.Fatalf("AddPlugins() error = %v", err)
+	}
+	if _, ok := profile.scorers[0].Scorer.(*TracedScorer); !ok {
+		t.Fatal("profile scorer was not wrapped at profile creation")
+	}
+	if _, ok := profile.scorers[1].Scorer.(*TracedScorer); !ok {
+		t.Fatal("profile scorer was not wrapped at profile creation")
+	}
 
-	ctx, rootSpan := schedulerTracer().Start(context.Background(), "gateway.request_orchestration")
-	_, err := profile.Run(ctx, &fwksched.InferenceRequest{RequestID: "request-1", TargetModel: "model-a"}, testEndpoints())
+	ctx, rootSpan := tracing.Tracer(TracerScope).Start(context.Background(), "gateway_request_orchestration")
+	_, err := profile.Run(ctx, &fwksched.InferenceRequest{RequestID: "request-1", TargetModel: "model-a"}, newTestEndpoints("pod-a", "pod-b", "pod-c"))
 	rootSpan.End()
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	spans := exporter.GetSpans()
-	root := findSpan(t, spans, "gateway.request_orchestration")
-	schedule := findSpan(t, spans, scheduleSpanName)
-	scorerASpan := findSpan(t, spans, scorerSpanNamePrefix+"type-a")
-	scorerBSpan := findSpan(t, spans, scorerSpanNamePrefix+"type-b")
+	spans := recorder.Ended()
+	root := findSpan(t, spans, "gateway_request_orchestration")
+	scorerASpan := findScorerSpan(t, spans, "type-a", "scorer-a")
+	scorerBSpan := findScorerSpan(t, spans, "type-b", "scorer-b")
 
-	if schedule.Parent.SpanID() != root.SpanContext.SpanID() {
-		t.Fatalf("schedule span parent = %s, want %s", schedule.Parent.SpanID(), root.SpanContext.SpanID())
+	if scorerASpan.Parent().SpanID() != root.SpanContext().SpanID() {
+		t.Fatalf("scorer A span parent = %s, want %s", scorerASpan.Parent().SpanID(), root.SpanContext().SpanID())
 	}
-	if scorerASpan.Parent.SpanID() != schedule.SpanContext.SpanID() {
-		t.Fatalf("scorer A span parent = %s, want %s", scorerASpan.Parent.SpanID(), schedule.SpanContext.SpanID())
+	if scorerBSpan.Parent().SpanID() != root.SpanContext().SpanID() {
+		t.Fatalf("scorer B span parent = %s, want %s", scorerBSpan.Parent().SpanID(), root.SpanContext().SpanID())
 	}
-	if scorerBSpan.Parent.SpanID() != schedule.SpanContext.SpanID() {
-		t.Fatalf("scorer B span parent = %s, want %s", scorerBSpan.Parent.SpanID(), schedule.SpanContext.SpanID())
+	if scorerA.activeSpan.SpanID() != scorerASpan.SpanContext().SpanID() {
+		t.Fatalf("scorer A active span = %s, want %s", scorerA.activeSpan.SpanID(), scorerASpan.SpanContext().SpanID())
 	}
-	if scorerA.activeSpan.SpanID() != scorerASpan.SpanContext.SpanID() {
-		t.Fatalf("scorer A active span = %s, want %s", scorerA.activeSpan.SpanID(), scorerASpan.SpanContext.SpanID())
+	if scorerB.activeSpan.SpanID() != scorerBSpan.SpanContext().SpanID() {
+		t.Fatalf("scorer B active span = %s, want %s", scorerB.activeSpan.SpanID(), scorerBSpan.SpanContext().SpanID())
 	}
-	if scorerB.activeSpan.SpanID() != scorerBSpan.SpanContext.SpanID() {
-		t.Fatalf("scorer B active span = %s, want %s", scorerB.activeSpan.SpanID(), scorerBSpan.SpanContext.SpanID())
+	if scorerASpan.InstrumentationScope().Name != TracerScope {
+		t.Fatalf("scorer span scope = %q, want %q", scorerASpan.InstrumentationScope().Name, TracerScope)
 	}
 
 	attrsA := spanAttributes(scorerASpan)
 	assertStringAttribute(t, attrsA, scorerTypeAttribute, "type-a")
 	assertStringAttribute(t, attrsA, scorerNameAttribute, "scorer-a")
 	assertFloatAttribute(t, attrsA, scorerWeightAttribute, 2)
+	assertStringAttribute(t, attrsA, "gen_ai.request.model", "model-a")
+	assertStringAttribute(t, attrsA, "gen_ai.request.id", "request-1")
 
 	attrsB := spanAttributes(scorerBSpan)
 	assertStringAttribute(t, attrsB, scorerTypeAttribute, "type-b")
@@ -91,7 +97,7 @@ func TestSchedulerProfileCreatesScheduleAndScorerSpans(t *testing.T) {
 }
 
 func TestTracedScorerRecordsScoreAttributes(t *testing.T) {
-	exporter := installTraceExporter(t)
+	recorder := setupSpanRecorder(t)
 
 	scorer := &recordingScorer{
 		typedName: fwkplugin.TypedName{Type: "score-type", Name: "score-name"},
@@ -100,13 +106,13 @@ func TestTracedScorerRecordsScoreAttributes(t *testing.T) {
 	scores := NewTracedScorer(scorer, 4).Score(
 		context.Background(),
 		&fwksched.InferenceRequest{RequestID: "request-2", TargetModel: "model-b"},
-		testEndpoints(),
+		newTestEndpoints("pod-a", "pod-b", "pod-c"),
 	)
 	if len(scores) != 3 {
 		t.Fatalf("Score() returned %d scores, want 3", len(scores))
 	}
 
-	span := findSpan(t, exporter.GetSpans(), scorerSpanNamePrefix+"score-type")
+	span := findSpan(t, recorder.Ended(), scorerSpanName)
 	attrs := spanAttributes(span)
 
 	assertOnlyAttributes(t, span, []attribute.Key{
@@ -117,6 +123,8 @@ func TestTracedScorerRecordsScoreAttributes(t *testing.T) {
 		scorerEndpointsAttribute,
 		scorerMaxScoreAttribute,
 		scorerAverageScoreAttribute,
+		"gen_ai.request.model",
+		"gen_ai.request.id",
 	})
 	assertStringAttribute(t, attrs, scorerTypeAttribute, "score-type")
 	assertStringAttribute(t, attrs, scorerNameAttribute, "score-name")
@@ -125,14 +133,16 @@ func TestTracedScorerRecordsScoreAttributes(t *testing.T) {
 	assertIntAttribute(t, attrs, scorerEndpointsAttribute, 3)
 	assertFloatAttribute(t, attrs, scorerMaxScoreAttribute, 0.9)
 	assertFloatAttribute(t, attrs, scorerAverageScoreAttribute, 0.5)
+	assertStringAttribute(t, attrs, "gen_ai.request.model", "model-b")
+	assertStringAttribute(t, attrs, "gen_ai.request.id", "request-2")
 }
 
-func TestSchedulerProfileWithZeroScorersCreatesOnlyScheduleSpan(t *testing.T) {
-	exporter := installTraceExporter(t)
+func TestSchedulerProfileWithZeroScorersCreatesNoScorerSpans(t *testing.T) {
+	recorder := setupSpanRecorder(t)
 
-	profile := NewSchedulerProfile().
+	profile := NewSchedulerProfile(WithScorerTracing(true)).
 		WithPicker(&firstEndpointPicker{typedName: fwkplugin.TypedName{Type: "test-picker", Name: "picker"}})
-	endpoints := testEndpoints()[:2]
+	endpoints := newTestEndpoints("pod-a", "pod-b")
 
 	weightedScores := profile.runScorerPlugins(context.Background(), &fwksched.InferenceRequest{RequestID: "request-3"}, endpoints)
 	if len(weightedScores) != len(endpoints) {
@@ -148,13 +158,39 @@ func TestSchedulerProfileWithZeroScorersCreatesOnlyScheduleSpan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
+	if spans := findSpans(recorder.Ended(), scorerSpanName); len(spans) != 0 {
+		t.Fatalf("got %d scorer spans, want 0", len(spans))
+	}
+}
 
-	spans := exporter.GetSpans()
-	findSpan(t, spans, scheduleSpanName)
-	for _, span := range spans {
-		if strings.HasPrefix(span.Name, scorerSpanNamePrefix) {
-			t.Fatalf("unexpected scorer span %q", span.Name)
-		}
+func TestSchedulerProfileWithScorerTracingDisabledDoesNotWrapScorers(t *testing.T) {
+	recorder := setupSpanRecorder(t)
+
+	scorer := &recordingScorer{
+		typedName: fwkplugin.TypedName{Type: "disabled-type", Name: "disabled-name"},
+		scores:    []float64{0.4},
+	}
+	profile := NewSchedulerProfile(WithScorerTracing(false)).
+		WithScorers(NewWeightedScorer(scorer, 2))
+	if _, ok := profile.scorers[0].Scorer.(*TracedScorer); ok {
+		t.Fatal("profile scorer was wrapped with tracing disabled")
+	}
+	endpoints := newTestEndpoints("pod-a")
+
+	ctx, rootSpan := otel.Tracer("test").Start(context.Background(), "root")
+	weightedScores := profile.runScorerPlugins(ctx, &fwksched.InferenceRequest{RequestID: "request-4"}, endpoints)
+	rootSpan.End()
+	if scorer.callCount != 1 {
+		t.Fatalf("Score() call count = %d, want 1", scorer.callCount)
+	}
+	if math.Abs(weightedScores[endpoints[0]]-0.8) > 1e-9 {
+		t.Fatalf("weighted score = %v, want 0.8", weightedScores[endpoints[0]])
+	}
+	if scorer.activeSpan.SpanID() != rootSpan.SpanContext().SpanID() {
+		t.Fatalf("scorer active span = %s, want root span %s", scorer.activeSpan.SpanID(), rootSpan.SpanContext().SpanID())
+	}
+	if spans := findSpans(recorder.Ended(), scorerSpanName); len(spans) != 0 {
+		t.Fatalf("got %d scorer spans, want 0", len(spans))
 	}
 }
 
@@ -169,11 +205,11 @@ func TestTracedScorerNoopTracerProvider(t *testing.T) {
 		typedName: fwkplugin.TypedName{Type: "noop-type", Name: "noop-name"},
 		scores:    []float64{0.4},
 	}
-	profile := NewSchedulerProfile().
+	profile := NewSchedulerProfile(WithScorerTracing(true)).
 		WithScorers(NewWeightedScorer(scorer, 2))
-	endpoints := testEndpoints()[:1]
+	endpoints := newTestEndpoints("pod-a")
 
-	weightedScores := profile.runScorerPlugins(context.Background(), &fwksched.InferenceRequest{RequestID: "request-4"}, endpoints)
+	weightedScores := profile.runScorerPlugins(context.Background(), &fwksched.InferenceRequest{RequestID: "request-5"}, endpoints)
 	if scorer.callCount != 1 {
 		t.Fatalf("Score() call count = %d, want 1", scorer.callCount)
 	}
@@ -224,66 +260,50 @@ func (p *firstEndpointPicker) Pick(_ context.Context, scoredEndpoints []*fwksche
 	return &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{scoredEndpoints[0]}}
 }
 
-func testEndpoints() []fwksched.Endpoint {
-	return []fwksched.Endpoint{
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-a"}}, nil, nil),
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-b"}}, nil, nil),
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-c"}}, nil, nil),
-	}
-}
-
-func installTraceExporter(t *testing.T) *tracetest.InMemoryExporter {
+func findScorerSpan(t *testing.T, spans []sdktrace.ReadOnlySpan, scorerType, scorerName string) sdktrace.ReadOnlySpan {
 	t.Helper()
-	exporter := tracetest.NewInMemoryExporter()
-	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	previous := otel.GetTracerProvider()
-	otel.SetTracerProvider(provider)
-	t.Cleanup(func() {
-		_ = provider.Shutdown(context.Background())
-		otel.SetTracerProvider(previous)
-	})
-	return exporter
+	for _, span := range findSpans(spans, scorerSpanName) {
+		attrs := spanAttributes(span)
+		if attrs[scorerTypeAttribute].AsString() == scorerType && attrs[scorerNameAttribute].AsString() == scorerName {
+			return span
+		}
+	}
+	t.Fatalf("scorer span %q/%q not found in %v", scorerType, scorerName, spanNames(spans))
+	return nil
 }
 
-func findSpan(t *testing.T, spans tracetest.SpanStubs, name string) tracetest.SpanStub {
+func findSpan(t *testing.T, spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
 	t.Helper()
 	for _, span := range spans {
-		if span.Name == name {
+		if span.Name() == name {
 			return span
 		}
 	}
 	t.Fatalf("span %q not found in %v", name, spanNames(spans))
-	return tracetest.SpanStub{}
+	return nil
 }
 
-func spanNames(spans tracetest.SpanStubs) []string {
+func spanNames(spans []sdktrace.ReadOnlySpan) []string {
 	names := make([]string, 0, len(spans))
 	for _, span := range spans {
-		names = append(names, span.Name)
+		names = append(names, span.Name())
 	}
 	return names
 }
 
-func spanAttributes(span tracetest.SpanStub) map[attribute.Key]attribute.Value {
-	attrs := make(map[attribute.Key]attribute.Value, len(span.Attributes))
-	for _, attr := range span.Attributes {
-		attrs[attr.Key] = attr.Value
-	}
-	return attrs
-}
-
-func assertOnlyAttributes(t *testing.T, span tracetest.SpanStub, keys []attribute.Key) {
+func assertOnlyAttributes(t *testing.T, span sdktrace.ReadOnlySpan, keys []attribute.Key) {
 	t.Helper()
 	expected := make(map[attribute.Key]struct{}, len(keys))
 	for _, key := range keys {
 		expected[key] = struct{}{}
 	}
-	if len(span.Attributes) != len(expected) {
-		t.Fatalf("span %q has %d attributes, want %d: %v", span.Name, len(span.Attributes), len(expected), span.Attributes)
+	attrs := span.Attributes()
+	if len(attrs) != len(expected) {
+		t.Fatalf("span %q has %d attributes, want %d: %v", span.Name(), len(attrs), len(expected), attrs)
 	}
-	for _, attr := range span.Attributes {
+	for _, attr := range attrs {
 		if _, ok := expected[attr.Key]; !ok {
-			t.Fatalf("span %q has unexpected attribute %q", span.Name, attr.Key)
+			t.Fatalf("span %q has unexpected attribute %q", span.Name(), attr.Key)
 		}
 	}
 }
