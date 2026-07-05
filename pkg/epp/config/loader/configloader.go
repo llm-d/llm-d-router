@@ -302,17 +302,18 @@ func findPluginDependencies(params any) []string {
 			} else {
 				_, ok := field.Tag.Lookup("pluginRef")
 				if ok {
-					if (value.Kind() == reflect.Slice || value.Kind() == reflect.Array) && field.Type.Elem().Kind() == reflect.String {
+					switch {
+					case (value.Kind() == reflect.Slice || value.Kind() == reflect.Array) && field.Type.Elem().Kind() == reflect.String:
 						for idx := range value.Len() {
 							if dependency := value.Index(idx).String(); len(dependency) != 0 {
 								dependencies = append(dependencies, dependency)
 							}
 						}
-					} else if value.Kind() == reflect.String {
+					case value.Kind() == reflect.String:
 						if dependency := value.String(); len(dependency) != 0 {
 							dependencies = append(dependencies, dependency)
 						}
-					} else if value.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.String {
+					case value.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.String:
 						if dependency := value.Elem().String(); len(dependency) != 0 {
 							dependencies = append(dependencies, dependency)
 						}
