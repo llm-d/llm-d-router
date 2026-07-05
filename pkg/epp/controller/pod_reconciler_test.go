@@ -175,8 +175,7 @@ func TestPodReconciler(t *testing.T) {
 				},
 			},
 			incomingPod: testutil.FromBase(basePod1).
-				Labels(map[string]string{"some-wrong-key": "some-val"}).
-				ReadyCondition().ObjRef(),
+				Labels(map[string]string{"some-key": "some-val"}).ObjRef(),
 			wantPods: []*corev1.Pod{basePod2},
 		},
 	}
