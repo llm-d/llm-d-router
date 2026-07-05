@@ -32,6 +32,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -103,6 +104,28 @@ func (m *mockPredictor) HealthCheck() error {
 
 func (m *mockPredictor) GetServerStatus(ctx context.Context) (*latencypredictor.ServerStatusResponse, error) {
 	return &latencypredictor.ServerStatusResponse{}, nil
+}
+
+func TestSnapshotInFlightLoad(t *testing.T) {
+	pl := &PredictedLatency{inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey}
+
+	// Fallback path (no InFlightLoad attribute): tokens must be zeroed even when
+	// the caller passes a stale non-zero value, and requests fall back to metrics.
+	ep := createTestEndpoint("pod1", 0.5, 5, 0)
+	tokens := int64(999)
+	requests := -1
+	pl.snapshotInFlightLoad(ep, &tokens, &requests)
+	assert.Equal(t, int64(0), tokens, "tokens must be zeroed on the fallback path")
+	assert.Equal(t, 5, requests, "requests falls back to metrics RunningRequestsSize")
+
+	// Attribute present: both fields come from InFlightLoad.
+	epWithLoad := createTestEndpoint("pod2", 0.5, 5, 0)
+	epWithLoad.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 42, Requests: 3})
+	tokens = 999
+	requests = -1
+	pl.snapshotInFlightLoad(epWithLoad, &tokens, &requests)
+	assert.Equal(t, int64(42), tokens)
+	assert.Equal(t, 3, requests)
 }
 
 func createTestEndpoint(name string, kvCacheUsage float64, runningRequestsSize, waitingQueueSize int) fwksched.Endpoint {

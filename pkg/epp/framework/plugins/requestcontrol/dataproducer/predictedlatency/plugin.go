@@ -92,14 +92,18 @@ func (pl *PredictedLatency) endpointInFlightLoad(endpoint fwksched.Endpoint) (*a
 }
 
 // snapshotInFlightLoad records the endpoint's in-flight token and request load
-// at dispatch into the provided fields. The request count falls back to the
-// endpoint's vLLM metrics when the InFlightLoad attribute is absent.
+// at dispatch into the provided fields. When the InFlightLoad attribute is
+// absent, tokens is zeroed (no in-flight token signal available) and the request
+// count falls back to the endpoint's vLLM metrics. Both fields are always
+// written so the snapshot is deterministic regardless of the caller's prior
+// values.
 func (pl *PredictedLatency) snapshotInFlightLoad(endpoint fwksched.Endpoint, tokens *int64, requests *int) {
 	if load, ok := pl.endpointInFlightLoad(endpoint); ok {
 		*tokens = load.Tokens
 		*requests = int(load.Requests)
 		return
 	}
+	*tokens = 0
 	*requests = endpoint.GetMetrics().RunningRequestsSize
 }
 
