@@ -671,9 +671,7 @@ schedulingProfiles:
   - pluginRef: maxScore
 `
 
-// pluginsRefedByPointerText represents a valid config with a plugin that is dependent
-// on another plugin. In this case the dependent plugin is before the dependency and is
-// referenced via a pointer
+// errorPluginsRefedInLoopText has a cycle in the plugin dependencies and should fail due to cycle detection
 const errorPluginsRefedInLoopText = `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig

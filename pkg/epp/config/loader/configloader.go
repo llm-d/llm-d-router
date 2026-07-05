@@ -229,7 +229,7 @@ func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error
 func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle) error {
 	orderedPlugins, err := buildPluginDAG(configuredPlugins, handle)
 	if err != nil {
-		return fmt.Errorf("cycle in dependencies between plugins: %w", err)
+		return fmt.Errorf("failed to build plugin dependency graph: %w", err)
 	}
 
 	for _, spec := range orderedPlugins {
@@ -252,8 +252,8 @@ func buildPluginDAG(configuredPlugins []configapi.PluginSpec, handle fwkplugin.H
 
 	for _, spec := range configuredPlugins {
 		if parserFunc, ok := fwkplugin.PluginsWithPluginDependencies[spec.Type]; !ok {
-			// All plugins that don't have dependencies should be instantiated first
-			orderedPlugins = append(orderedPlugins, spec)
+			// Add plugins that don't have dependencies to the graph
+			graph[spec.Name] = []string{}
 		} else {
 			// Ignore extra fields.
 			configStruct, err := parserFunc(fwkplugin.StrictDecoder(spec.Parameters), handle)
@@ -271,7 +271,11 @@ func buildPluginDAG(configuredPlugins []configapi.PluginSpec, handle fwkplugin.H
 	}
 
 	for _, pluginName := range sortedGraph {
-		orderedPlugins = append(orderedPlugins, pluginMap[pluginName])
+		if spec, ok := pluginMap[pluginName]; ok {
+			orderedPlugins = append(orderedPlugins, spec)
+		} else {
+			return nil, fmt.Errorf("a plugin has a dependency on the unregistered plugin %s", pluginName)
+		}
 	}
 
 	return orderedPlugins, nil
