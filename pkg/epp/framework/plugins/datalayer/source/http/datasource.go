@@ -23,12 +23,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"reflect"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -52,6 +54,11 @@ type HTTPDataSource[T any] struct {
 	typedName fwkplugin.TypedName
 	scheme    string
 	path      string
+	// portOverride, when non-zero, replaces the port in the endpoint's
+	// MetricsHost with this value. This allows a source to target a
+	// different port on the same pod (e.g. DCGM Exporter on :9400)
+	// without changing the endpoint metadata set by the discovery layer.
+	portOverride int
 
 	client Client
 	// parser converts the response body to T. MUST NOT return (zero, nil) for nilable T;
@@ -76,13 +83,34 @@ type TLSOptions struct {
 	ClientKeyPath  string
 }
 
+// Option configures optional behaviour on an HTTPDataSource.
+type Option func(*options)
+
+type options struct {
+	portOverride int
+}
+
+// WithPortOverride makes the source scrape podIP:port instead of the
+// endpoint's MetricsHost. Use this when a sidecar (e.g. DCGM Exporter)
+// listens on a different port than the inference server.
+func WithPortOverride(port int) Option {
+	return func(o *options) { o.portOverride = port }
+}
+
 // NewHTTPDataSource constructs a typed polling dispatcher. For https, tlsOpts configures
 // server verification (CACertPath) and optional mTLS (ClientCertPath/ClientKeyPath).
 func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
-	pluginType, pluginName string, parser func(io.Reader) (T, error)) (*HTTPDataSource[T], error) {
+	pluginType, pluginName string, parser func(io.Reader) (T, error),
+	opts ...Option) (*HTTPDataSource[T], error) {
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
 	}
+
+	var cfg options
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	cl := &client{
 		Client: http.Client{
 			Timeout:   timeout,
@@ -99,11 +127,12 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		cl.Transport = httpsTransport
 	}
 	return &HTTPDataSource[T]{
-		typedName: fwkplugin.TypedName{Type: pluginType, Name: pluginName},
-		scheme:    scheme,
-		path:      path,
-		client:    cl,
-		parser:    parser,
+		typedName:    fwkplugin.TypedName{Type: pluginType, Name: pluginName},
+		scheme:       scheme,
+		path:         path,
+		portOverride: cfg.portOverride,
+		client:       cl,
+		parser:       parser,
 	}, nil
 }
 
@@ -231,5 +260,9 @@ func (s *HTTPDataSource[T]) AppendExtractor(ext fwkplugin.Plugin) error {
 }
 
 func (s *HTTPDataSource[T]) getEndpoint(ep Addressable) *url.URL {
-	return &url.URL{Scheme: s.scheme, Host: ep.GetMetricsHost(), Path: s.path}
+	host := ep.GetMetricsHost()
+	if s.portOverride > 0 {
+		host = net.JoinHostPort(ep.GetIPAddress(), strconv.Itoa(s.portOverride))
+	}
+	return &url.URL{Scheme: s.scheme, Host: host, Path: s.path}
 }

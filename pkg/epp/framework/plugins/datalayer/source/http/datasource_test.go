@@ -213,6 +213,42 @@ func (c *cancelOnExtract) Extract(ctx context.Context, in fwkdl.PollInput[int]) 
 	return err
 }
 
+func TestGetEndpoint_PortOverride(t *testing.T) {
+	parser := func(r io.Reader) (int, error) { return 0, nil }
+	ep := &fwkdl.EndpointMetadata{
+		Address:     "10.0.0.1",
+		MetricsHost: "10.0.0.1:8000",
+	}
+
+	cases := []struct {
+		name     string
+		opts     []Option
+		wantHost string
+	}{
+		{
+			name:     "no option uses MetricsHost as-is",
+			opts:     nil,
+			wantHost: "10.0.0.1:8000",
+		},
+		{
+			name:     "WithPortOverride overrides port with pod IP",
+			opts:     []Option{WithPortOverride(9400)},
+			wantHost: "10.0.0.1:9400",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := NewHTTPDataSource("http", "/metrics", TLSOptions{SkipVerify: true}, "test", "test", parser, tc.opts...)
+			assert.NoError(t, err)
+			got := s.getEndpoint(ep)
+			assert.Equal(t, tc.wantHost, got.Host)
+			assert.Equal(t, "http", got.Scheme)
+			assert.Equal(t, "/metrics", got.Path)
+		})
+	}
+}
+
 func TestAppendExtractor(t *testing.T) {
 	cases := []struct {
 		name      string
