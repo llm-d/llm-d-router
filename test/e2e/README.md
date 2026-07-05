@@ -59,7 +59,7 @@ Follow these steps to run the end-to-end tests:
      ```
 
    - **Keep the cluster available after a failure**: Normally the cluster is deleted after the end to end tests run. To keep the cluster
-     available after the tests have failed, useful for debugging the state of the cluster after the test has run, set the `environment
+     available after the tests have failed, useful for debugging the state of the cluster after the test has run, set the environment
      variable `E2E_KEEP_CLUSTER_ON_FAILURE` to `true`.
 
 1. **Run the Tests**: Run the `test-e2e` target:
