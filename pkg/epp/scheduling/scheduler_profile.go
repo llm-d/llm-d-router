@@ -34,20 +34,35 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
+// SchedulerProfileOption configures a SchedulerProfile.
+type SchedulerProfileOption func(*SchedulerProfile)
+
+// WithScorerTracing controls whether scorer plugins are wrapped with tracing spans.
+func WithScorerTracing(enabled bool) SchedulerProfileOption {
+	return func(p *SchedulerProfile) {
+		p.traceScorers = enabled
+	}
+}
+
 // NewSchedulerProfile creates a new SchedulerProfile object and returns its pointer.
-func NewSchedulerProfile() *SchedulerProfile {
-	return &SchedulerProfile{
+func NewSchedulerProfile(options ...SchedulerProfileOption) *SchedulerProfile {
+	profile := &SchedulerProfile{
 		filters: []fwksched.Filter{},
 		scorers: []*WeightedScorer{},
 		// picker remains nil since profile doesn't support multiple pickers
 	}
+	for _, option := range options {
+		option(profile)
+	}
+	return profile
 }
 
 // SchedulerProfile provides a profile configuration for the scheduler which influence routing decisions.
 type SchedulerProfile struct {
-	filters []fwksched.Filter
-	scorers []*WeightedScorer
-	picker  fwksched.Picker
+	filters      []fwksched.Filter
+	scorers      []*WeightedScorer
+	picker       fwksched.Picker
+	traceScorers bool
 }
 
 // WithFilters sets the given filter plugins as the Filter plugins.
@@ -60,7 +75,10 @@ func (p *SchedulerProfile) WithFilters(filters ...fwksched.Filter) *SchedulerPro
 // WithScorers sets the given scorer plugins as the Scorer plugins.
 // if the SchedulerProfile has Scorer plugins, this call replaces the existing plugins with the given ones.
 func (p *SchedulerProfile) WithScorers(scorers ...*WeightedScorer) *SchedulerProfile {
-	p.scorers = scorers
+	p.scorers = make([]*WeightedScorer, 0, len(scorers))
+	for _, scorer := range scorers {
+		p.scorers = append(p.scorers, p.wrapScorer(scorer))
+	}
 	return p
 }
 
@@ -79,7 +97,7 @@ func (p *SchedulerProfile) WithPicker(picker fwksched.Picker) *SchedulerProfile 
 func (p *SchedulerProfile) AddPlugins(pluginObjects ...plugin.Plugin) error {
 	for _, plugin := range pluginObjects {
 		if weightedScorer, ok := plugin.(*WeightedScorer); ok {
-			p.scorers = append(p.scorers, weightedScorer)
+			p.scorers = append(p.scorers, p.wrapScorer(weightedScorer))
 			plugin = weightedScorer.Scorer // if we got WeightedScorer, unwrap the plugin
 		} else if scorer, ok := plugin.(fwksched.Scorer); ok { // if we got a Scorer instead of WeightedScorer that's an error.
 			return fmt.Errorf("failed to register scorer '%s' without a weight. follow function documentation to register a scorer", scorer.TypedName())
@@ -95,6 +113,16 @@ func (p *SchedulerProfile) AddPlugins(pluginObjects ...plugin.Plugin) error {
 		}
 	}
 	return nil
+}
+
+func (p *SchedulerProfile) wrapScorer(scorer *WeightedScorer) *WeightedScorer {
+	if scorer == nil || !p.traceScorers {
+		return scorer
+	}
+	if _, ok := scorer.Scorer.(*TracedScorer); ok {
+		return scorer
+	}
+	return NewWeightedScorer(NewTracedScorer(scorer.Scorer, scorer.Weight()), scorer.Weight())
 }
 
 func (p *SchedulerProfile) String() string {

@@ -52,6 +52,20 @@ var (
 	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: "v1alpha1"} // TODO: deprecated should be clean up
 )
 
+type instantiateOptions struct {
+	traceScorers bool
+}
+
+// InstantiateOption configures InstantiateAndConfigure.
+type InstantiateOption func(*instantiateOptions)
+
+// WithScorerTracing controls whether scheduler scorers are wrapped with tracing spans.
+func WithScorerTracing(enabled bool) InstantiateOption {
+	return func(options *instantiateOptions) {
+		options.traceScorers = enabled
+	}
+}
+
 func init() {
 	// Support deprecated pseudo config CRD
 	var builder runtime.SchemeBuilder
@@ -148,7 +162,12 @@ func InstantiateAndConfigure(
 	rawConfig *configapi.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	logger logr.Logger,
+	options ...InstantiateOption,
 ) (*config.Config, error) {
+	opts := instantiateOptions{}
+	for _, option := range options {
+		option(&opts)
+	}
 
 	if err := instantiatePlugins(rawConfig.Plugins, handle); err != nil {
 		return nil, fmt.Errorf("plugin instantiation failed: %w", err)
@@ -163,7 +182,7 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
-	schedulerConfig, err := buildSchedulerConfig(rawConfig.SchedulingProfiles, handle)
+	schedulerConfig, err := buildSchedulerConfig(rawConfig.SchedulingProfiles, handle, opts.traceScorers)
 	if err != nil {
 		return nil, fmt.Errorf("scheduler config build failed: %w", err)
 	}
@@ -251,12 +270,13 @@ func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplug
 func buildSchedulerConfig(
 	configProfiles []configapi.SchedulingProfile,
 	handle fwkplugin.Handle,
+	traceScorers bool,
 ) (*scheduling.SchedulerConfig, error) {
 
 	profiles := make(map[string]fwksched.SchedulerProfile)
 
 	for _, cfgProfile := range configProfiles {
-		fwProfile := scheduling.NewSchedulerProfile()
+		fwProfile := scheduling.NewSchedulerProfile(scheduling.WithScorerTracing(traceScorers))
 
 		for _, pluginRef := range cfgProfile.Plugins {
 			plugin := handle.Plugin(pluginRef.PluginRef)
