@@ -297,7 +297,7 @@ func findPluginDependencies(params any) []string {
 			if (value.Kind() == reflect.Pointer && value.IsNil()) || !field.IsExported() {
 				continue
 			}
-			if value.Kind() == reflect.Pointer || value.Kind() == reflect.Struct {
+			if (value.Kind() == reflect.Pointer && field.Type.Elem().Kind() != reflect.String) || value.Kind() == reflect.Struct {
 				dependencies = append(dependencies, findPluginDependencies(value.Interface())...)
 			} else {
 				_, ok := field.Tag.Lookup("pluginRef")
@@ -310,6 +310,10 @@ func findPluginDependencies(params any) []string {
 						}
 					} else if value.Kind() == reflect.String {
 						if dependency := value.String(); len(dependency) != 0 {
+							dependencies = append(dependencies, dependency)
+						}
+					} else if value.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.String {
+						if dependency := value.Elem().String(); len(dependency) != 0 {
 							dependencies = append(dependencies, dependency)
 						}
 					}
