@@ -299,7 +299,7 @@ func (opts *Options) Validate() error {
 	}
 
 	if opts.ConfigText != "" && opts.ConfigFile != "" {
-		return fmt.Errorf("both the %q and %q flags can not be set at the same time", "configText", "configFile")
+		return fmt.Errorf("both the %q and %q flags can not be set at the same time", "config-file", "config-text")
 	}
 	if opts.ModelServerMetricsScheme != "http" && opts.ModelServerMetricsScheme != "https" {
 		return fmt.Errorf("unexpected %q value for %q flag, it can only be set to 'http' or 'https'",
