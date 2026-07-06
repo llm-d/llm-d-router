@@ -280,11 +280,9 @@ func substituteMany(inputs []string, substitutions map[string]string) []string {
 	return outputs
 }
 
-// getCounterMetric fetches the current value of a Prometheus counter metric from the given metrics URL.
+// getMetrics fetches the current Prometheus metrics from the given metrics URL.
 // Retries on transient connection errors (e.g. the previous EPP pod is still terminating).
-//
-//nolint:unparam // metricName may vary in future test cases
-func getCounterMetric(metricsURL, metricName, labelMatch string) int {
+func getMetrics(metricsURL string) []string {
 	var body []byte
 	gomega.Eventually(func() error {
 		resp, err := http.Get(metricsURL)
@@ -299,8 +297,15 @@ func getCounterMetric(metricsURL, metricName, labelMatch string) int {
 		return err
 	}, 10*time.Second, 1*time.Second).Should(gomega.Succeed())
 
-	metricsText := string(body)
-	for _, line := range strings.Split(metricsText, "\n") {
+	return strings.Split(string(body), "\n")
+}
+
+// getCounterMetric fetches the current value of a Prometheus counter metric from the given metrics URL.
+// Retries on transient connection errors (e.g. the previous EPP pod is still terminating).
+//
+//nolint:unparam // metricName may vary in future test cases
+func getCounterMetric(metricsURL, metricName, labelMatch string) int {
+	for _, line := range getMetrics(metricsURL) {
 		if strings.HasPrefix(line, metricName) && strings.Contains(line, labelMatch) {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {

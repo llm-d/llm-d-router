@@ -73,7 +73,7 @@ jobs:
 
       - name: Build Artifacts
         run: |
-          make artifacts
+          make artifacts BUNDLE_VERSION=${{ needs.set-params.outputs.tag }}
 
       - name: Upload Release Assets
         env:

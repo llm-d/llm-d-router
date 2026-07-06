@@ -25,7 +25,7 @@ EPP_IMAGE="${EPP_IMAGE:-ghcr.io/llm-d/llm-d-router-endpoint-picker:dev}"
 SIM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:v0.9.2}"
 MANIFEST_PATH="${MANIFEST_PATH:-${DIR}/../testdata/sim-deployment.yaml}"
 USE_KIND="${USE_KIND:-true}"
-KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-mirror.gcr.io/kindest/node:v1.32.2}"
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.12}"
 
 KIND_CLUSTER_NAME="inference-e2e"
 

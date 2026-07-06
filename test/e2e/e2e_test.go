@@ -2,10 +2,13 @@ package e2e
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -49,6 +52,9 @@ var (
 	prefillDecodeSelector = map[string]string{"llm-d.ai/role": "prefill-decode"}
 	encodeSelector        = map[string]string{"llm-d.ai/role": "encode"}
 	epdSingleSelector     = map[string]string{"llm-d.ai/role": "encode-prefill-decode"}
+
+	singleEmbedding = []string{"The food was delicious and the service was great."}
+	doubleEmbedding = []string{"First sentence to embed.", "Second sentence to embed."}
 )
 
 var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
@@ -60,20 +66,86 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			epp := createEndPointPicker(simpleConfig)
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
-			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
-			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
-
-			nsHdr, podHdr, _ := runCompletion(simplePrompt, simModelName)
-			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
-			gomega.Expect(podHdr).Should(gomega.Equal(decodePods[0]))
-
-			nsHdr, podHdr, _ = runChatCompletion(simplePrompt, simModelName)
-			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
-			gomega.Expect(podHdr).Should(gomega.Equal(decodePods[0]))
+			generateAndCheckLoad(5)
 
 			testutils.DeleteObjects(testConfig, epp)
 			testutils.DeleteObjects(testConfig, modelServers)
+		})
+
+		ginkgo.It("should report metrics", func() {
+			numTargetPorts := 1
+			infPoolObjects = createInferencePool(numTargetPorts, true)
+			temp := strings.Split(infPoolObjects[0], "/")
+			infPoolName := temp[1]
+
+			modelServers := createModelServersDecode(1)
+
+			epp := createEndPointPicker(simpleConfig)
+
+			verifyMetrics(infPoolName, numTargetPorts)
+
+			testutils.DeleteObjects(testConfig, epp)
+			testutils.DeleteObjects(testConfig, modelServers)
+		})
+	})
+
+	ginkgo.When("Running leader election", func() {
+		ginkgo.It("Should elect one leader and have other pods as not ready", func() {
+			numOfPods := 3
+			numTargetPorts := 1
+
+			infPoolObjects = createInferencePool(numTargetPorts, true)
+
+			modelServers := createModelServersDecode(1)
+
+			epp := createEndPointPickerHelper(simpleConfig, numOfPods, true, false)
+
+			ginkgo.By("Verifying that exactly one EPP pod is ready")
+			waitForReadyLeader(numOfPods)
+
+			testutils.DeleteObjects(testConfig, epp)
+			testutils.DeleteObjects(testConfig, modelServers)
+		})
+
+		ginkgo.It("Should successfully failover and serve traffic after the leader pod is deleted", func() {
+			numOfPods := 3
+			numTargetPorts := 1
+
+			infPoolObjects = createInferencePool(numTargetPorts, true)
+			temp := strings.Split(infPoolObjects[0], "/")
+			infPoolName := temp[1]
+
+			modelServers := createModelServersDecode(1)
+
+			epp := createEndPointPickerHelper(simpleConfig, numOfPods, true, false)
+
+			ginkgo.By("STEP 1: Verifying initial leader is working correctly before failover")
+			leaderPod := waitForReadyLeader(numOfPods)
+			generateAndCheckLoad(5)
+			verifyMetrics(infPoolName, numTargetPorts)
+
+			ginkgo.By("Found initial leader pod: " + leaderPod.Name)
+
+			ginkgo.By(fmt.Sprintf("Deleting leader pod %s to trigger failover", leaderPod.Name))
+			gomega.Expect(testConfig.K8sClient.Delete(testConfig.Context, leaderPod)).To(gomega.Succeed())
+
+			ginkgo.By("STEP 3: Waiting for a new and different leader to be elected")
+			// The deployment controller will create a new pod. We need to wait for the total number of pods
+			// to be back to 3, and for one of the other pods to become the new leader.
+			var newLeaderPod *corev1.Pod
+			gomega.Eventually(func(g gomega.Gomega) {
+				newLeaderPod = waitForReadyLeader(numOfPods)
+				g.Expect(newLeaderPod.Name).NotTo(gomega.Equal(leaderPod.Name), "The new leader should not be the same as the old deleted leader")
+			}, testConfig.ReadyTimeout, testConfig.Interval).Should(gomega.Succeed())
+			ginkgo.By("Found new leader pod: " + newLeaderPod.Name)
+
+			ginkgo.By("STEP 4: Verifying the new leader is working correctly after failover")
+			generateAndCheckLoad(5)
+			verifyMetrics(infPoolName, numTargetPorts)
+
+			testutils.DeleteObjects(testConfig, epp)
+			testutils.DeleteObjects(testConfig, modelServers)
+
 		})
 	})
 
@@ -862,3 +934,27 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 		})
 	})
 })
+
+func waitForReadyLeader(numOfPods int) *corev1.Pod {
+	var leaderPod *corev1.Pod
+	gomega.Eventually(func(g gomega.Gomega) {
+		podList := &corev1.PodList{}
+		err := testConfig.K8sClient.List(testConfig.Context, podList, client.InNamespace(testConfig.NsName), client.MatchingLabels{"app": eppName})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// The deployment should have 3 replicas for leader election.
+		g.Expect(podList.Items).To(gomega.HaveLen(numOfPods))
+
+		readyPods := 0
+		for _, pod := range podList.Items {
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+					readyPods++
+					leaderPod = &pod
+				}
+			}
+		}
+		g.Expect(readyPods).To(gomega.Equal(1), "Expected exactly one pod to be ready")
+	}, testConfig.ReadyTimeout, testConfig.Interval).Should(gomega.Succeed())
+	return leaderPod
+}

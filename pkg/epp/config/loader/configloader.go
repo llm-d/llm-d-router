@@ -19,6 +19,7 @@ package loader
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/sets"
 
 	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
@@ -43,6 +43,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/util"
 )
 
 var (
@@ -149,6 +150,9 @@ func InstantiateAndConfigure(
 	handle fwkplugin.Handle,
 	logger logr.Logger,
 ) (*config.Config, error) {
+	if err := validatePlugins(rawConfig.Plugins); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
 
 	if err := instantiatePlugins(rawConfig.Plugins, handle); err != nil {
 		return nil, fmt.Errorf("plugin instantiation failed: %w", err)
@@ -223,20 +227,13 @@ func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error
 }
 
 func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle) error {
-	pluginNames := sets.New[string]()
-	for _, spec := range configuredPlugins {
-		if spec.Type == "" {
-			return fmt.Errorf("plugin '%s' is missing a type", spec.Name)
-		}
-		if pluginNames.Has(spec.Name) {
-			return fmt.Errorf("duplicate plugin name '%s'", spec.Name)
-		}
-		pluginNames.Insert(spec.Name)
+	orderedPlugins, err := buildPluginDAG(configuredPlugins, handle)
+	if err != nil {
+		return fmt.Errorf("failed to build plugin dependency graph: %w", err)
+	}
 
-		factory, ok := fwkplugin.Registry[spec.Type]
-		if !ok {
-			return fmt.Errorf("plugin type '%s' is not registered", spec.Type)
-		}
+	for _, spec := range orderedPlugins {
+		factory := fwkplugin.Registry[spec.Type]
 		plugin, err := factory(spec.Name, fwkplugin.StrictDecoder(spec.Parameters), handle)
 		if err != nil {
 			return fmt.Errorf("failed to create plugin '%s' (type: %s): %w", spec.Name, spec.Type, err)
@@ -246,6 +243,86 @@ func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplug
 	}
 
 	return nil
+}
+
+func buildPluginDAG(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle) ([]configapi.PluginSpec, error) {
+	graph := map[string][]string{}
+	pluginMap := map[string]configapi.PluginSpec{}
+	orderedPlugins := []configapi.PluginSpec{}
+
+	for _, spec := range configuredPlugins {
+		if parserFunc, ok := fwkplugin.PluginsWithPluginDependencies[spec.Type]; !ok {
+			// Add plugins that don't have dependencies to the graph
+			graph[spec.Name] = []string{}
+		} else {
+			// Ignore extra fields.
+			configStruct, err := parserFunc(fwkplugin.StrictDecoder(spec.Parameters), handle)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse plugin parameters for %s (type: %s): %w", spec.Name, spec.Type, err)
+			}
+			graph[spec.Name] = findPluginDependencies(configStruct)
+		}
+		pluginMap[spec.Name] = spec
+	}
+
+	sortedGraph, err := util.TopologicalSort(graph)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, pluginName := range sortedGraph {
+		if spec, ok := pluginMap[pluginName]; ok {
+			orderedPlugins = append(orderedPlugins, spec)
+		} else {
+			return nil, fmt.Errorf("a plugin has a dependency on the unregistered plugin %s", pluginName)
+		}
+	}
+
+	return orderedPlugins, nil
+}
+
+func findPluginDependencies(params any) []string {
+	dependencies := []string{}
+
+	theType := reflect.TypeOf(params)
+	theValue := reflect.ValueOf(params)
+	if theType.Kind() == reflect.Pointer {
+		theType = theType.Elem()
+		theValue = theValue.Elem()
+	}
+	if theType.Kind() == reflect.Struct {
+		for idx := range theValue.NumField() {
+			field := theType.Field(idx)
+			value := theValue.Field(idx)
+			if (value.Kind() == reflect.Pointer && value.IsNil()) || !field.IsExported() {
+				continue
+			}
+			if (value.Kind() == reflect.Pointer && field.Type.Elem().Kind() != reflect.String) || value.Kind() == reflect.Struct {
+				dependencies = append(dependencies, findPluginDependencies(value.Interface())...)
+			} else {
+				_, ok := field.Tag.Lookup("pluginRef")
+				if ok {
+					switch {
+					case (value.Kind() == reflect.Slice || value.Kind() == reflect.Array) && field.Type.Elem().Kind() == reflect.String:
+						for idx := range value.Len() {
+							if dependency := value.Index(idx).String(); len(dependency) != 0 {
+								dependencies = append(dependencies, dependency)
+							}
+						}
+					case value.Kind() == reflect.String:
+						if dependency := value.String(); len(dependency) != 0 {
+							dependencies = append(dependencies, dependency)
+						}
+					case value.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.String:
+						if dependency := value.Elem().String(); len(dependency) != 0 {
+							dependencies = append(dependencies, dependency)
+						}
+					}
+				}
+			}
+		}
+	}
+	return dependencies
 }
 
 func buildSchedulerConfig(
