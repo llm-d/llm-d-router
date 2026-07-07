@@ -1,5 +1,7 @@
 package e2e
 
+import "fmt"
+
 // Simple EPP configuration for running without P/D
 const simpleConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
@@ -179,15 +181,17 @@ schedulingProfiles:
     weight: 2
 `
 
-// EPP config for running with precise prefix scoring (i.e. KV events).
-const kvConfig = `apiVersion: llm-d.ai/v1alpha1
+// kvConfig returns the EPP config for running with precise prefix scoring (i.e. KV events).
+// The render URL is built from vllmRenderPort so VLLM_RENDER_PORT is respected.
+func kvConfig() string {
+	return fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: token-producer
   parameters:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
-      url: http://vllm-render:8082
+      url: http://vllm-render:%s
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:
@@ -209,17 +213,20 @@ schedulingProfiles:
   - pluginRef: max-score-picker
   - pluginRef: precise-prefix-cache-scorer
     weight: 10
-`
+`, vllmRenderPort)
+}
 
-// Alias of kvConfig retained for tests that reference the external-tokenizer name.
-const kvExternalTokenizerConfig = `apiVersion: llm-d.ai/v1alpha1
+// kvExternalTokenizerConfig returns the EPP config for the external-tokenizer DataProducer variant.
+// The render URL is built from vllmRenderPort so VLLM_RENDER_PORT is respected.
+func kvExternalTokenizerConfig() string {
+	return fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: token-producer
   parameters:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
-      url: http://vllm-render:8082
+      url: http://vllm-render:%s
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:
@@ -240,7 +247,8 @@ schedulingProfiles:
   - pluginRef: max-score-picker
   - pluginRef: precise-prefix-cache-scorer
     weight: 10
-`
+`, vllmRenderPort)
+}
 
 // EPP configuration for running scale model server test
 const scaleConfig = `apiVersion: llm-d.ai/v1alpha1
