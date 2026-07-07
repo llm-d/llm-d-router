@@ -14,7 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package approximateprefix
+// Package prefixhash computes stable prefix block hashes for a tokenized
+// prompt. It is shared by the prefix-aware data producers so they derive
+// identical block hashes for the same request.
+package prefixhash
 
 import (
 	"context"
@@ -28,6 +31,9 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
+
+// BlockHash is a hash of a block of request data.
+type BlockHash uint64
 
 // HashBlock wraps a block of token IDs used for calculating prefix hashes.
 type HashBlock struct {
@@ -45,13 +51,13 @@ func (b HashBlock) Hash() uint64 {
 	return 0
 }
 
-// getBlockHashes divides the tokenized prompt into blocks and calculates a
+// GetBlockHashes divides the tokenized prompt into blocks and calculates a
 // prefix cache hash for each block. Each prompt in PerPromptTokens is hashed
 // independently so cross-prompt block adjacency is avoided. The first block
 // hash of every prompt includes the model name and cache salt (if provided).
 // For subsequent blocks, the hash is calculated as: hash(block i content, hash(i-1)).
 // It requires request.Body.TokenizedPrompt to be populated by a token-producer backend.
-func getBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) [][]blockHash {
+func GetBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) [][]BlockHash {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	if request == nil || request.Body == nil {
 		loggerDebug.Info("Request or request data is nil, skipping hashing")
@@ -64,7 +70,7 @@ func getBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, b
 		return nil
 	}
 
-	var result [][]blockHash
+	var result [][]BlockHash
 	for _, tokens := range tp.PerPromptTokens {
 		seq := getKVCacheBlocksFromTokens(tokens, blockSizeTokens)
 		hashes := computeBlockHashes(seq, request, maxPrefixBlocks)
@@ -80,8 +86,8 @@ func getBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, b
 }
 
 // computeBlockHashes calculates the hash for content blocks.
-func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []blockHash {
-	var blockHashes []blockHash
+func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []BlockHash {
+	var blockHashes []BlockHash
 
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.
@@ -90,7 +96,7 @@ func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRe
 		_, _ = h.Write([]byte(cacheSalt))
 	}
 
-	prevBlockHash := blockHash(h.Sum64())
+	prevBlockHash := BlockHash(h.Sum64())
 
 	count := 0
 	for block := range seq {
@@ -99,9 +105,9 @@ func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRe
 		}
 		h.Reset()
 		blockID := block.Hash()
-		_, _ = h.Write(toBytes(blockHash(blockID)))
+		_, _ = h.Write(toBytes(BlockHash(blockID)))
 		_, _ = h.Write(toBytes(prevBlockHash))
-		blockHashes = append(blockHashes, blockHash(h.Sum64()))
+		blockHashes = append(blockHashes, BlockHash(h.Sum64()))
 
 		prevBlockHash = blockHashes[len(blockHashes)-1]
 		count++
@@ -110,10 +116,17 @@ func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRe
 	return blockHashes
 }
 
-func toBytes(i blockHash) []byte {
+func toBytes(i BlockHash) []byte {
 	bytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(bytes, uint64(i))
+	PutBlockHash(bytes, i)
 	return bytes
+}
+
+// PutBlockHash writes h into the first 8 bytes of buf in little-endian order.
+// buf must have length at least 8. It lets callers serialize block hashes into
+// a reused buffer without allocating per hash.
+func PutBlockHash(buf []byte, h BlockHash) {
+	binary.LittleEndian.PutUint64(buf, uint64(h))
 }
 
 func getKVCacheBlocksFromTokens(ids []uint32, blockSizeTokens int) iter.Seq[HashBlock] {
