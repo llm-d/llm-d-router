@@ -198,10 +198,21 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	return nil
 }
 
-// getEngineTypeFromEndpoint extracts the engine type from endpoint metadata labels.
+// getEngineTypeFromEndpoint extracts the engine type from endpoint metadata.
+// Cluster endpoints (identified by empty PodName) automatically use SpokeEPPEngineType.
+// For pod endpoints, the engine type is determined by labels or falls back to default.
 func getEngineTypeFromEndpoint(ep fwkdl.Endpoint, labelKey string) string {
 	meta := ep.GetMetadata()
-	if meta == nil || meta.Labels == nil {
+	if meta == nil {
+		return DefaultEngineType
+	}
+
+	// Cluster endpoints have empty PodName (hostname-based address from file-discovery)
+	if meta.PodName == "" {
+		return SpokeEPPEngineType
+	}
+
+	if meta.Labels == nil {
 		return DefaultEngineType
 	}
 

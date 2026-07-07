@@ -104,6 +104,7 @@ func buildPipeline(t *testing.T, serverURL string, params *modelServerExtractorP
 // newEndpointAt creates a fwkdl.Endpoint with the given host (host:port) and optional labels.
 func newEndpointAt(host string, labels map[string]string) fwkdl.Endpoint {
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		PodName:     "test-pod",
 		MetricsHost: host,
 		Labels:      labels,
 	}, fwkdl.NewMetrics())
@@ -404,7 +405,8 @@ func TestMetricsExtractionCustomCounterFromConfig(t *testing.T) {
 	})
 
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		Labels: map[string]string{DefaultEngineTypeLabelKey: "vllm"},
+		PodName: "test-pod",
+		Labels:  map[string]string{DefaultEngineTypeLabelKey: "vllm"},
 	}, nil)
 	err := ext.Extract(context.Background(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
 		Endpoint: ep,

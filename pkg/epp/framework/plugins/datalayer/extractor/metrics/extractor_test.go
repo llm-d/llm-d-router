@@ -249,7 +249,8 @@ func TestExtractorMultiEngine(t *testing.T) {
 
 	// Case 1: Engine = vllm (uses default)
 	epVllm := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		Labels: map[string]string{DefaultEngineTypeLabelKey: "vllm"},
+		PodName: "vllm-pod",
+		Labels:  map[string]string{DefaultEngineTypeLabelKey: "vllm"},
 	}, nil)
 	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: epVllm})
 	if epVllm.GetMetrics().WaitingQueueSize != 10 {
@@ -258,7 +259,8 @@ func TestExtractorMultiEngine(t *testing.T) {
 
 	// Case 2: Engine = sglang (uses specific)
 	epSgl := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		Labels: map[string]string{DefaultEngineTypeLabelKey: "sglang"},
+		PodName: "sglang-pod",
+		Labels:  map[string]string{DefaultEngineTypeLabelKey: "sglang"},
 	}, nil)
 	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: epSgl})
 	if epSgl.GetMetrics().WaitingQueueSize != 20 {
@@ -287,8 +289,8 @@ func TestBackwardCompatibility(t *testing.T) {
 		},
 	}
 
-	// Case 1: No labels at all
-	epNone := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{Labels: nil}, nil)
+	// Case 1: No labels at all (but with PodName, so treated as pod)
+	epNone := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{PodName: "test-pod", Labels: nil}, nil)
 	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: epNone})
 	if epNone.GetMetrics().WaitingQueueSize != 100 {
 		t.Errorf("no labels: expected 100, got %v", epNone.GetMetrics().WaitingQueueSize)
@@ -296,11 +298,85 @@ func TestBackwardCompatibility(t *testing.T) {
 
 	// Case 2: Different label key or unknown value
 	epUnknown := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		Labels: map[string]string{DefaultEngineTypeLabelKey: "unknown-engine"},
+		PodName: "unknown-pod",
+		Labels:  map[string]string{DefaultEngineTypeLabelKey: "unknown-engine"},
 	}, nil)
 	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: epUnknown})
 	if epUnknown.GetMetrics().WaitingQueueSize != 100 {
 		t.Errorf("unknown label: expected 100, got %v", epUnknown.GetMetrics().WaitingQueueSize)
+	}
+}
+
+func TestSpokeEPPClusterEndpointExtraction(t *testing.T) {
+	ctx := context.Background()
+
+	registry := NewMappingRegistry()
+
+	// Register spoke-epp mapping for cluster endpoints
+	spokeMapping, err := NewMapping(
+		"llm_d_epp_average_queue_size",
+		"llm_d_epp_average_running_requests",
+		"llm_d_epp_average_kv_cache_utilization",
+		"", "")
+	if err != nil {
+		t.Fatalf("failed to create spoke-epp mapping: %v", err)
+	}
+	if err := registry.Register(SpokeEPPEngineType, spokeMapping); err != nil {
+		t.Fatalf("failed to register spoke-epp mapping: %v", err)
+	}
+
+	// Register default vLLM mapping for pods
+	vllmMapping, _ := NewMapping("vllm:num_requests_waiting", "", "", "", "")
+	_ = registry.Register(DefaultEngineType, vllmMapping)
+
+	extractor, _ := NewCoreMetricsExtractor(registry, "")
+
+	// Spoke EPP metrics (aggregated pool averages)
+	clusterData := sourcemetrics.PrometheusMetricMap{
+		"llm_d_epp_average_queue_size": &dto.MetricFamily{
+			Type: dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{
+				{Gauge: &dto.Gauge{Value: ptr.To(15.0)}},
+			},
+		},
+		"llm_d_epp_average_running_requests": &dto.MetricFamily{
+			Type: dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{
+				{Gauge: &dto.Gauge{Value: ptr.To(8.0)}},
+			},
+		},
+		"llm_d_epp_average_kv_cache_utilization": &dto.MetricFamily{
+			Type: dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{
+				{Gauge: &dto.Gauge{Value: ptr.To(0.72)}},
+			},
+		},
+	}
+
+	// Cluster endpoint: empty PodName (hostname-based address from file-discovery)
+	clusterEp := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		PodName: "", // Empty PodName identifies cluster endpoints
+		Address: "spoke-us-east.example.com",
+		Labels:  map[string]string{"region": "us-east"},
+	}, nil)
+
+	err = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+		Payload:  clusterData,
+		Endpoint: clusterEp,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error extracting cluster metrics: %v", err)
+	}
+
+	m := clusterEp.GetMetrics()
+	if m.WaitingQueueSize != 15 {
+		t.Errorf("cluster WaitingQueueSize: expected 15, got %d", m.WaitingQueueSize)
+	}
+	if m.RunningRequestsSize != 8 {
+		t.Errorf("cluster RunningRequestsSize: expected 8, got %d", m.RunningRequestsSize)
+	}
+	if m.KVCacheUsagePercent != 0.72 {
+		t.Errorf("cluster KVCacheUsagePercent: expected 0.72, got %f", m.KVCacheUsagePercent)
 	}
 }
 
@@ -720,24 +796,28 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 func TestGetEngineTypeFromEndpoint(t *testing.T) {
 	tests := []struct {
 		name     string
+		podName  string
 		labels   map[string]string
 		labelKey string
 		want     string
 	}{
 		{
 			name:     "new label key",
+			podName:  "test-pod",
 			labels:   map[string]string{DefaultEngineTypeLabelKey: "vllm"},
 			labelKey: DefaultEngineTypeLabelKey,
 			want:     "vllm",
 		},
 		{
 			name:     "legacy GAIE label key fallback",
+			podName:  "test-pod",
 			labels:   map[string]string{legacyGAIEEngineTypeLabelKey: "sglang"},
 			labelKey: DefaultEngineTypeLabelKey,
 			want:     "sglang",
 		},
 		{
-			name: "new label key takes precedence over legacy GAIE key",
+			name:    "new label key takes precedence over legacy GAIE key",
+			podName: "test-pod",
 			labels: map[string]string{
 				DefaultEngineTypeLabelKey:    "vllm",
 				legacyGAIEEngineTypeLabelKey: "sglang",
@@ -746,22 +826,38 @@ func TestGetEngineTypeFromEndpoint(t *testing.T) {
 			want:     "vllm",
 		},
 		{
-			name:     "no labels returns default",
+			name:     "no labels returns default for pod",
+			podName:  "test-pod",
 			labels:   map[string]string{},
 			labelKey: DefaultEngineTypeLabelKey,
 			want:     DefaultEngineType,
 		},
 		{
-			name:     "nil labels returns default",
+			name:     "nil labels returns default for pod",
+			podName:  "test-pod",
 			labels:   nil,
 			labelKey: DefaultEngineTypeLabelKey,
 			want:     DefaultEngineType,
+		},
+		{
+			name:     "empty PodName returns spoke-epp (cluster endpoint)",
+			podName:  "",
+			labels:   map[string]string{DefaultEngineTypeLabelKey: "vllm"},
+			labelKey: DefaultEngineTypeLabelKey,
+			want:     SpokeEPPEngineType,
+		},
+		{
+			name:     "empty PodName with nil labels returns spoke-epp",
+			podName:  "",
+			labels:   nil,
+			labelKey: DefaultEngineTypeLabelKey,
+			want:     SpokeEPPEngineType,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{Labels: tt.labels}, nil)
+			ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{PodName: tt.podName, Labels: tt.labels}, nil)
 			got := getEngineTypeFromEndpoint(ep, tt.labelKey)
 			if got != tt.want {
 				t.Errorf("getEngineTypeFromEndpoint() = %q, want %q", got, tt.want)

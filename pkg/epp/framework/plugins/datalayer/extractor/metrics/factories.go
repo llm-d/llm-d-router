@@ -143,6 +143,17 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheBlockSizeSpec:  "",
 		CacheNumBlocksSpec:  "",
 	},
+	// "spoke-epp" defines metrics for multi-cluster Hub-and-Spoke deployments where the Hub EPP
+	// scrapes pool-average metrics from Spoke EPPs. These are aggregated metrics exposed by each
+	// Spoke EPP representing the average state of its local pod pool.
+	{
+		Name:                SpokeEPPEngineType,
+		QueuedRequestsSpec:  "llm_d_epp_average_queue_size",
+		RunningRequestsSpec: "llm_d_epp_average_running_requests",
+		KVUsageSpec:         "llm_d_epp_average_kv_cache_utilization",
+		LoRASpec:            "",
+		CacheInfoSpec:       "",
+	},
 }
 
 // defaultEngineName is the default engine used when defaultEngine is not specified.
