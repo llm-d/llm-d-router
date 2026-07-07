@@ -38,6 +38,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	podutil "github.com/llm-d/llm-d-router/pkg/epp/util/pod"
 )
 
@@ -243,6 +244,9 @@ func (ds *datastore) ObjectiveGetAll() []*v1alpha2.InferenceObjective {
 }
 
 func (ds *datastore) ModelRewriteSet(infModelRewrite *v1alpha2.InferenceModelRewrite) {
+	// Configured model names always emit their real metric label; only
+	// unconfigured request-supplied names are subject to the cardinality cap.
+	metrics.PreAdmitModelLabels(configuredModelNames(infModelRewrite)...)
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.modelRewrites.set(infModelRewrite)
