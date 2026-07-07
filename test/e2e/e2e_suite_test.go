@@ -195,6 +195,21 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 
 // Create the Kubernetes cluster for the E2E tests and load the local images
 func setupK8sCluster() {
+	// extraPortMappings is substituted into `extraPortMappings: ${EXTRA_PORT_MAPPINGS}` in the Kind
+	// cluster configuration. Each item must use 2-space indentation to match that field's level in the
+	// YAML. If the field is ever reindented in inference-pools.yaml, update the format string here too.
+	var extraPortMappingsBuilder strings.Builder
+	for idx := range numProcesses {
+		inc := idx * 100
+		fmt.Fprintf(&extraPortMappingsBuilder, "\n  - containerPort: %d", 30080+inc)
+		fmt.Fprintf(&extraPortMappingsBuilder, "\n    hostPort: %d", basePort+inc)
+		fmt.Fprintf(&extraPortMappingsBuilder, "\n    protocol: TCP")
+		fmt.Fprintf(&extraPortMappingsBuilder, "\n  - containerPort: %d", 32090+inc)
+		fmt.Fprintf(&extraPortMappingsBuilder, "\n    hostPort: %d", baseMetricsPort+inc)
+		fmt.Fprintf(&extraPortMappingsBuilder, "\n    protocol: TCP")
+	}
+	extraPortMappings := extraPortMappingsBuilder.String()
+
 	command := exec.Command("kind", "create", "cluster", "--name", kindClusterName, "--config", "-")
 	stdin, err := command.StdinPipe()
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -203,8 +218,7 @@ func setupK8sCluster() {
 			err := stdin.Close()
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		}()
-		clusterConfig := strings.ReplaceAll(kindClusterConfig, "${PORT}", port)
-		clusterConfig = strings.ReplaceAll(clusterConfig, "${METRICS_PORT}", metricsPort)
+		clusterConfig := strings.ReplaceAll(kindClusterConfig, "${EXTRA_PORT_MAPPINGS}", extraPortMappings)
 		_, err := io.WriteString(stdin, clusterConfig)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	}()
@@ -387,14 +401,5 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - image: kindest/node:v1.31.12
-  extraPortMappings:
-  - containerPort: 30080
-    hostPort: ${PORT}
-    protocol: TCP
-  - containerPort: 30081
-    hostPort: 30081
-    protocol: TCP
-  - containerPort: 32090
-    hostPort: ${METRICS_PORT}
-    protocol: TCP
+  extraPortMappings:${EXTRA_PORT_MAPPINGS}
 `
