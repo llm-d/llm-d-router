@@ -1,0 +1,35 @@
+# Sample EPP config: burst prefix cache pipeline
+#   token-producer -> burst-prefix-cache-producer -> prefix-cache-scorer
+#
+# Co-locates bursts of prompt-sharing requests (e.g. RL rollout group samples)
+# onto shared replicas so a shared prefix is prefilled once instead of scattered
+# across replicas on a cold cache.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: hf-repo/model-name           # set to the model used in the vLLM deployment
+      vllm:
+        url: http://<vllm-service>.<namespace>.svc.cluster.local:8000
+  - type: single-profile-handler
+  - type: decode-filter
+  - type: burst-prefix-cache-producer
+    parameters:
+      windowDurationMs: 100       # batch window T
+      maxPerReplica: -1           # k; -1 sends all samples of a group to one replica
+      minColocateBlocks: 0        # >0 co-locates distinct groups sharing >= N leading blocks; 0 = load-balanced
+  - type: prefix-cache-scorer
+    parameters:
+      prefixMatchInfoProducerName: burst-prefix-cache-producer
+  - type: load-aware-scorer
+  - type: max-score-picker
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: decode-filter
+      - pluginRef: prefix-cache-scorer
+        weight: 2.0
+      - pluginRef: load-aware-scorer
+        weight: 1.0
+      - pluginRef: max-score-picker

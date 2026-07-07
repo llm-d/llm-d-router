@@ -83,6 +83,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/probabilisticadmitter"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/burstprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	mmproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/multimodal"
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
@@ -498,10 +499,11 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(random.RandomPickerType, random.RandomPickerFactory)
 	fwkplugin.Register(weightedrandom.WeightedRandomPickerType, weightedrandom.WeightedRandomPickerFactory)
 	fwkplugin.Register(single.SingleProfileHandlerType, single.SingleProfileHandlerFactory)
-	fwkplugin.Register(disagg.DisaggHeadersHandlerType, disagg.HeadersHandlerFactory) //nolint:staticcheck // intentional: keep backward compatibility
-	fwkplugin.Register(disagg.PrefillHeaderHandlerType, disagg.HeadersHandlerFactory) //nolint:staticcheck // intentional: keep backward compatibility
-	fwkplugin.Register(disagg.PdProfileHandlerType, disagg.PdProfileHandlerFactory)   //nolint:staticcheck // intentional: keep backward compatibility
-	fwkplugin.Register(disagg.DisaggProfileHandlerType, disagg.HandlerFactory)
+	fwkplugin.Register(disagg.DisaggHeadersHandlerType, disagg.HeadersHandlerFactory)                     //nolint:staticcheck // intentional: keep backward compatibility
+	fwkplugin.Register(disagg.PrefillHeaderHandlerType, disagg.HeadersHandlerFactory)                     //nolint:staticcheck // intentional: keep backward compatibility
+	fwkplugin.RegisterWithPluginDependencies(disagg.PdProfileHandlerType, disagg.PdProfileHandlerFactory, //nolint:staticcheck // intentional: keep backward compatibility
+		disagg.PdProfileHandlerConfigParser)
+	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
 	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, disagg.AlwaysDisaggPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, disagg.PrefixBasedPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.AlwaysDisaggMulimodalPluginType, disagg.AlwaysDisaggMulimodalDeciderPluginFactory)
@@ -513,6 +515,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(nohitlru.NoHitLRUType, nohitlru.Factory)
 	fwkplugin.Register(activerequest.ActiveRequestType, activerequest.Factory)
 	fwkplugin.Register(preciseprefixcache.PrecisePrefixCachePluginType, preciseprefixcache.PluginFactory)
+	fwkplugin.Register(burstprefix.PluginType, burstprefix.Factory)
 	fwkplugin.Register(mmcacheaffinity.Type, mmcacheaffinity.Factory)
 	fwkplugin.Register(preciseproducer.PluginType, preciseproducer.PluginFactory)
 
