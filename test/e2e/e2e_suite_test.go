@@ -79,8 +79,9 @@ var (
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
-	// nsName is the namespace in which the K8S objects will be created
-	nsName = env.GetEnvString("NAMESPACE", "default", ginkgo.GinkgoLogr)
+	numProcesses     = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
+	// baseNsName is the base of the namespace in which the K8S objects will be created
+	baseNsName = env.GetEnvString("NAMESPACE", getDefaultNsName(), ginkgo.GinkgoLogr)
 
 	// k8sContext is the Kubernetes context to work with
 	k8sContext = env.GetEnvString("K8S_CONTEXT", "", ginkgo.GinkgoLogr)
@@ -115,15 +116,16 @@ var _ = ginkgo.BeforeSuite(func() {
 	setupK8sClient()
 	setupNameSpace()
 	createCRDs()
-	createEnvoy()
+	nsName := getNamespace()
+	createEnvoy(nsName)
 	infraSubs := map[string]string{
 		"${EPP_NAME}": "e2e-epp",
 	}
 	rbacYamls := substituteMany(testutils.ReadYaml(rbacManifest), infraSubs)
-	rbacObjects = testutils.CreateObjsFromYaml(testConfig, rbacYamls)
+	rbacObjects = testutils.CreateObjsFromYaml(testConfig, rbacYamls, nsName)
 	saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
-	serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls)
-	serviceObjects = testutils.ApplyYAMLFile(testConfig, servicesManifest)
+	serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls, nsName)
+	serviceObjects = testutils.ApplyYAMLFile(testConfig, servicesManifest, nsName)
 
 	// Prevent failure in tests due to InferencePool not existing before the test
 	infPoolObjects = createInferencePool(1, false)
@@ -148,7 +150,9 @@ var _ = ginkgo.AfterSuite(func() {
 // ReportAfterEach only fires for individual specs and would miss setup/teardown failures.
 var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 	if !report.SuiteSucceeded {
-		dumpPodsAndLogs()
+		for idx := range numProcesses {
+			dumpPodsAndLogs(fmt.Sprintf("%s-%d", baseNsName, idx+1))
+		}
 	}
 
 	shouldKeep := keepClusterOnFailure && !report.SuiteSucceeded
@@ -171,17 +175,18 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 		if shouldKeep {
 			ginkgo.By("Keeping created Kubernetes objects due to suite failure (E2E_KEEP_CLUSTER_ON_FAILURE=true)")
 		} else {
+			nsName := getNamespace()
 			ginkgo.By("Deleting created Kubernetes objects")
-			testutils.DeleteObjects(testConfig, infPoolObjects)
-			testutils.DeleteObjects(testConfig, serviceObjects)
-			testutils.DeleteObjects(testConfig, serviceAccountObjects)
-			testutils.DeleteObjects(testConfig, rbacObjects)
-			testutils.DeleteObjects(testConfig, envoyObjects)
-			testutils.DeleteObjects(testConfig, crdObjects)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, serviceObjects, nsName)
+			testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
+			testutils.DeleteObjects(testConfig, rbacObjects, nsName)
+			testutils.DeleteObjects(testConfig, envoyObjects, nsName)
+			testutils.DeleteObjects(testConfig, crdObjects, "")
 
 			if createdNameSpace {
-				ginkgo.By("Deleting namespace " + nsName)
-				err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, nsName, metav1.DeleteOptions{})
+				ginkgo.By("Deleting namespace " + getNamespace())
+				err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, getNamespace(), metav1.DeleteOptions{})
 				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 			}
 		}
@@ -266,43 +271,40 @@ func setupK8sClient() {
 
 // setupNameSpace sets up the specified namespace if it doesn't exist
 func setupNameSpace() {
-	if nsName == "default" {
-		return
-	}
-	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
+	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, getNamespace(), metav1.GetOptions{})
 	if err == nil {
 		return
 	}
 	gomega.Expect(errors.IsNotFound(err)).To(gomega.BeTrue())
 
-	ginkgo.By("Creating namespace " + nsName)
+	ginkgo.By("Creating namespace " + getNamespace())
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: nsName,
+			Name: getNamespace(),
 		},
 	}
 	_, err = testConfig.KubeCli.CoreV1().Namespaces().Create(testConfig.Context, namespace, metav1.CreateOptions{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	createdNameSpace = true
 
-	ginkgo.By("Ensuring namespace exists: " + nsName)
+	ginkgo.By("Ensuring namespace exists: " + getNamespace())
 	testutils.EventuallyExists(testConfig, func() error {
 		return testConfig.K8sClient.Get(testConfig.Context,
-			types.NamespacedName{Name: nsName}, &corev1.Namespace{})
+			types.NamespacedName{Name: getNamespace()}, &corev1.Namespace{})
 	})
 }
 
 // createCRDs creates the Inference Extension CRDs used for testing.
 func createCRDs() {
 	crds := runKustomize(crdKustomizePath)
-	crdObjects = testutils.CreateObjsFromYaml(testConfig, crds)
+	crdObjects = testutils.CreateObjsFromYaml(testConfig, crds, "")
 }
 
-func createEnvoy() {
+func createEnvoy(nsName string) {
 	manifests := testutils.ReadYaml(envoyManifest)
 	manifests = substituteMany(manifests, map[string]string{"${NAMESPACE}": nsName})
 	ginkgo.By("Creating envoy proxy resources from manifest: " + envoyManifest)
-	envoyObjects = testutils.CreateObjsFromYaml(testConfig, manifests)
+	envoyObjects = testutils.CreateObjsFromYaml(testConfig, manifests, nsName)
 
 	if k8sContext != "" {
 		envoyName := ""
@@ -324,10 +326,11 @@ func createEnvoy() {
 
 func createInferencePool(numTargetPorts int, toDelete bool) []string {
 	poolName := simModelName + "-inference-pool"
+	nsName := getNamespace()
 
 	if toDelete {
 		objName := []string{"inferencepool/" + poolName}
-		testutils.DeleteObjects(testConfig, objName)
+		testutils.DeleteObjects(testConfig, objName, nsName)
 	}
 
 	infPoolYaml := testutils.ReadYaml(inferExtManifest)
@@ -346,11 +349,11 @@ func createInferencePool(numTargetPorts int, toDelete bool) []string {
 			"${TARGET_PORTS}": targetPorts,
 		})
 
-	return testutils.CreateObjsFromYaml(testConfig, infPoolYaml)
+	return testutils.CreateObjsFromYaml(testConfig, infPoolYaml, nsName)
 }
 
 func startEPPMetricsPortForward() {
-	pods, err := testConfig.KubeCli.CoreV1().Pods(nsName).List(testConfig.Context, metav1.ListOptions{
+	pods, err := testConfig.KubeCli.CoreV1().Pods(getNamespace()).List(testConfig.Context, metav1.ListOptions{
 		LabelSelector: "app=e2e-epp",
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -363,6 +366,20 @@ func startEPPMetricsPortForward() {
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	// Give it a moment to establish
 	time.Sleep(3 * time.Second)
+}
+
+func getNamespace() string {
+	if numProcesses == 1 {
+		return baseNsName
+	}
+	return fmt.Sprintf("%s-%d", baseNsName, ginkgo.GinkgoParallelProcess())
+}
+
+func getDefaultNsName() string {
+	if numProcesses == 1 {
+		return "default"
+	}
+	return "e2e"
 }
 
 const kindClusterConfig = `

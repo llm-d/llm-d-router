@@ -107,6 +107,8 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			epp := createEndPointPicker(simpleConfig)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp)
 
+			nsName := getNamespace()
+
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(2))
@@ -210,6 +212,8 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			epp := createEndPointPicker(simpleConfig)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp)
 
+			nsName := getNamespace()
+
 			_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -218,7 +222,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
 
 			ginkgo.By("Scaling deployment to zero")
-			scaleDeployment(modelServers, -1)
+			scaleDeployment(nsName, modelServers, -1)
 
 			ginkgo.By("Waiting for all pods to be removed")
 			gomega.Eventually(func() int {
@@ -236,7 +240,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			}, trafficProbeTimeout, 500*time.Millisecond).Should(gomega.Equal(http.StatusServiceUnavailable))
 
 			ginkgo.By("Scaling deployment back up")
-			scaleDeployment(modelServers, 1)
+			scaleDeployment(nsName, modelServers, 1)
 
 			ginkgo.By("Verifying requests succeed after recovery")
 			gomega.Eventually(func() string {
@@ -258,7 +262,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Verifying requests succeed before EPP disruption")
 			nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
-			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+			gomega.Expect(nsHdr).Should(gomega.Equal(getNamespace()))
 
 			ginkgo.By("Finding EPP pod")
 			eppPods := getPods(map[string]string{"app": "e2e-epp"})
@@ -298,6 +302,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 	ginkgo.When("Traffic is flowing during scale-to-zero and back", func() {
 		ginkgo.It("should return 503s when empty and recover when scaled back", func() {
 			infPoolObjects = createInferencePool(1, true)
+			nsName := getNamespace()
 
 			modelServers := createModelServersDecode(1)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers)
@@ -307,7 +312,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Verifying requests succeed before disruption")
 			nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
-			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+			gomega.Expect(nsHdr).Should(gomega.Equal(getNamespace()))
 
 			ginkgo.By("Starting background traffic")
 			ctx, cancel := context.WithCancel(context.Background())
@@ -319,7 +324,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			}()
 
 			ginkgo.By("Scaling to zero")
-			scaleDeployment(modelServers, -1)
+			scaleDeployment(nsName, modelServers, -1)
 
 			ginkgo.By("Waiting for all pods to be removed")
 			gomega.Eventually(func() int {
@@ -331,7 +336,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			gomega.Eventually(tc.failures, trafficProbeTimeout, 500*time.Millisecond).Should(gomega.BeNumerically(">", 0))
 
 			ginkgo.By("Scaling back to 1")
-			scaleDeployment(modelServers, 1)
+			scaleDeployment(nsName, modelServers, 1)
 
 			ginkgo.By("Waiting for traffic to observe recovery")
 			successBaseline := tc.successes()
@@ -418,7 +423,7 @@ func deletePodByName(podName string, gracePeriodSeconds int64) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
-			Namespace: nsName,
+			Namespace: getNamespace(),
 		},
 	}
 	opts := &client.DeleteOptions{

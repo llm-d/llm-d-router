@@ -239,8 +239,8 @@ func EventuallyExists(testConfig *TestConfig, getResource func() error) {
 	}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.Succeed())
 }
 
-func CreateAndVerifyObjs(testConfig *TestConfig, objs []*unstructured.Unstructured) []string {
-	objNames := CreateObjsWithVerifier(testConfig, objs,
+func CreateAndVerifyObjs(testConfig *TestConfig, objs []*unstructured.Unstructured, nsName string) []string {
+	objNames := CreateObjsWithVerifier(testConfig, objs, nsName,
 		func(kind string, clientObj client.Object) {
 			switch kind {
 			case "CustomResourceDefinition":
@@ -255,11 +255,11 @@ func CreateAndVerifyObjs(testConfig *TestConfig, objs []*unstructured.Unstructur
 	return objNames
 }
 
-func CreateObjsWithVerifier(testConfig *TestConfig, objs []*unstructured.Unstructured, verifier func(kind string, clientObj client.Object)) []string {
+func CreateObjsWithVerifier(testConfig *TestConfig, objs []*unstructured.Unstructured, nsName string, verifier func(kind string, clientObj client.Object)) []string {
 	objNames := make([]string, len(objs))
 	for idx, unstrObj := range objs {
 		ginkgo.By(fmt.Sprintf("Processing GVK: %s", unstrObj.GroupVersionKind()))
-		unstrObj.SetNamespace(testConfig.NsName)
+		unstrObj.SetNamespace(nsName)
 
 		kind := unstrObj.GetKind()
 		name := unstrObj.GetName()
@@ -276,7 +276,7 @@ func CreateObjsWithVerifier(testConfig *TestConfig, objs []*unstructured.Unstruc
 		clientObj := getClientObject(kind)
 		EventuallyExists(testConfig, func() error {
 			return testConfig.K8sClient.Get(testConfig.Context,
-				types.NamespacedName{Namespace: testConfig.NsName, Name: name}, clientObj)
+				types.NamespacedName{Namespace: nsName, Name: name}, clientObj)
 		})
 
 		verifier(kind, clientObj)
@@ -285,9 +285,9 @@ func CreateObjsWithVerifier(testConfig *TestConfig, objs []*unstructured.Unstruc
 }
 
 // CreateObjsFromYaml creates K8S objects from yaml and waits for them to be instantiated
-func CreateObjsFromYaml(testConfig *TestConfig, docs []string) []string {
+func CreateObjsFromYaml(testConfig *TestConfig, docs []string, nsName string) []string {
 	objs := CreateUnstructuredObjs(testConfig, docs)
-	return CreateAndVerifyObjs(testConfig, objs)
+	return CreateAndVerifyObjs(testConfig, objs, nsName)
 }
 
 // CreateUnstructuredObjs creates K8S UnstructuredObject structs from an array of YAMLs
@@ -321,19 +321,19 @@ func CreateUnstructuredObjs(testConfig *TestConfig, docs []string) []*unstructur
 }
 
 // DeleteObjects deletes a set of Kubernetes objects in the form of kind/name.
-func DeleteObjects(testConfig *TestConfig, kindAndNames []string) {
+func DeleteObjects(testConfig *TestConfig, kindAndNames []string, nsName string) {
 	for _, kindAndName := range kindAndNames {
 		split := strings.Split(kindAndName, "/")
 		clientObj := getClientObject(split[0])
 		err := testConfig.K8sClient.Get(testConfig.Context,
-			types.NamespacedName{Namespace: testConfig.NsName, Name: split[1]}, clientObj)
+			types.NamespacedName{Namespace: nsName, Name: split[1]}, clientObj)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		err = testConfig.K8sClient.Delete(testConfig.Context, clientObj)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Eventually(func() bool {
 			clientObj := getClientObject(split[0])
 			err := testConfig.K8sClient.Get(testConfig.Context,
-				types.NamespacedName{Namespace: testConfig.NsName, Name: split[1]}, clientObj)
+				types.NamespacedName{Namespace: nsName, Name: split[1]}, clientObj)
 			return apierrors.IsNotFound(err)
 		}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.BeTrue())
 	}
@@ -341,9 +341,9 @@ func DeleteObjects(testConfig *TestConfig, kindAndNames []string) {
 
 // ApplyYAMLFile reads a file containing YAML (possibly multiple docs)
 // and applies each object to the cluster.
-func ApplyYAMLFile(testConfig *TestConfig, filePath string) []string {
+func ApplyYAMLFile(testConfig *TestConfig, filePath string, nsName string) []string {
 	// Create the resources from the manifest file
-	return CreateObjsFromYaml(testConfig, ReadYaml(filePath))
+	return CreateObjsFromYaml(testConfig, ReadYaml(filePath), nsName)
 }
 
 // ReadYaml is a helper function to read in K8S YAML files and split by the --- separator
