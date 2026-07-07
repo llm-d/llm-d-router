@@ -341,11 +341,12 @@ func convertAnthropicContent(ac fwkrh.AnthropicContent) tokenizerTypes.Content {
 				Text: b.Text,
 			})
 		case "image":
-			blocks = append(blocks, tokenizerTypes.ContentBlock{
-				Type:     "image_url",
-				ImageURL: tokenizerTypes.ImageBlock{URL: anthropicImageToURL(b.Source)},
-			})
-		}
+			if url := anthropicImageToURL(b.Source); url != "" {
+				blocks = append(blocks, tokenizerTypes.ContentBlock{
+					Type:     "image_url",
+					ImageURL: tokenizerTypes.ImageBlock{URL: url},
+				})
+			}
 	}
 	return tokenizerTypes.Content{Structured: blocks}
 }
