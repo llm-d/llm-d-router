@@ -767,15 +767,23 @@ func TestMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 
 func TestProduce_MessagesRequest(t *testing.T) {
 	wantTokens := []uint32{100, 200, 300}
+	var gotPayload fwkrh.RequestPayload
 	tok := &mockTokenizer{
-		renderChatFunc: func(_ fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+		renderChatFunc: func(payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+			gotPayload = payload
 			return wantTokens, nil, nil
 		},
 	}
 	p := newTestPlugin(tok)
 
+	// Payload holds the raw request body; RenderChat must receive the converted
+	// /render body, not that raw payload.
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
+			Payload: fwkrh.PayloadMap{
+				"system":   "Be helpful.",
+				"messages": []any{map[string]any{"role": "user", "content": "Hi"}},
+			},
 			Messages: &fwkrh.MessagesRequest{
 				System:   fwkrh.AnthropicContent{Raw: "Be helpful."},
 				Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
@@ -785,4 +793,13 @@ func TestProduce_MessagesRequest(t *testing.T) {
 	require.NoError(t, p.Produce(context.Background(), req, nil))
 	require.NotNil(t, req.Body.TokenizedPrompt)
 	assert.Equal(t, [][]uint32{wantTokens}, req.Body.TokenizedPrompt.PerPromptTokens)
+
+	pm, ok := gotPayload.AsMap()
+	require.True(t, ok, "RenderChat payload must be a map")
+	assert.NotContains(t, pm, "system", "raw Anthropic top-level system must not reach /render")
+	msgs, ok := pm["messages"].([]any)
+	require.True(t, ok, "payload must carry the /render chat messages array")
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "system", msgs[0].(map[string]any)["role"])
+	assert.Equal(t, "user", msgs[1].(map[string]any)["role"])
 }

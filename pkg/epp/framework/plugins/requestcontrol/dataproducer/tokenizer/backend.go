@@ -169,15 +169,11 @@ func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 	return pm
 }
 
-// messagesPayload returns the payload for an Anthropic Messages request.
-// HTTP requests carry a raw map payload and return early;
-// gRPC requests fall back to constructing an OpenAI-shaped PayloadMap from the typed struct.
+// messagesPayload returns the payload for an Anthropic Messages request. The raw
+// body uses the Anthropic Messages schema (top-level system, source-based image
+// blocks), which vLLM /render does not accept, so the payload is always rebuilt
+// from the typed struct into the /render chat schema regardless of body.Payload.
 func messagesPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
-	if body.Payload != nil {
-		if _, ok := body.Payload.AsMap(); ok {
-			return body.Payload
-		}
-	}
 	data, _ := json.Marshal(buildChatRenderRequest("", MessagesToRenderChatRequest(body.Messages)))
 	var pm fwkrh.PayloadMap
 	_ = json.Unmarshal(data, &pm)
