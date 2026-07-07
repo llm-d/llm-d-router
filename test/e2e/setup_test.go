@@ -139,7 +139,7 @@ func createEndPointPicker(eppConfig string) []string {
 	// response (200 or 500-with-body) means EPP is reachable from Envoy.
 	ginkgo.By("Waiting for gateway to be ready")
 	gomega.Eventually(func() bool {
-		resp, err := http.Get(fmt.Sprintf("http://localhost:%s/v1/models", port))
+		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/v1/models", getPort()))
 		if err != nil {
 			return false
 		}

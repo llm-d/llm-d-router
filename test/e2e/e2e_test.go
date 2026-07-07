@@ -164,7 +164,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(deprecatedPdConfig)
 			nsName := getNamespace()
 
-			metricsURL := fmt.Sprintf("http://localhost:%s/metrics", metricsPort)
+			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
 			if k8sContext != "" {
 				// Use port-forward to access the EPP pod's metrics endpoint.
@@ -475,7 +475,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(pdConfig)
 			nsName := getNamespace()
 
-			metricsURL := fmt.Sprintf("http://localhost:%s/metrics", metricsPort)
+			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
 			if k8sContext != "" {
 				// Use port-forward to access the EPP pod's metrics endpoint.
@@ -572,7 +572,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(epdEncodeDecodeConfig)
 			nsName := getNamespace()
 
-			metricsURL := fmt.Sprintf("http://localhost:%s/metrics", metricsPort)
+			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 			if k8sContext != "" {
 				startEPPMetricsPortForward()
 			}
@@ -647,7 +647,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(epdConfig)
 			nsName := getNamespace()
 
-			metricsURL := fmt.Sprintf("http://localhost:%s/metrics", metricsPort)
+			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 			if k8sContext != "" {
 				startEPPMetricsPortForward()
 			}
@@ -733,7 +733,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(epdConfig)
 			nsName := getNamespace()
 
-			metricsURL := fmt.Sprintf("http://localhost:%s/metrics", metricsPort)
+			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 			if k8sContext != "" {
 				startEPPMetricsPortForward()
 			}
@@ -854,6 +854,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			modelServers := createModelServersDecode(1)
 
 			epp := createEndPointPicker(scaleConfig)
+			nsName := getNamespace()
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())

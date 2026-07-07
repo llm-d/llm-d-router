@@ -15,7 +15,7 @@ import (
 )
 
 func newOpenAIClient() *openai.Client {
-	c := openai.NewClient(option.WithBaseURL(fmt.Sprintf("http://localhost:%s/v1", port)))
+	c := openai.NewClient(option.WithBaseURL(fmt.Sprintf("http://localhost:%d/v1", getPort())))
 	return &c
 }
 
@@ -26,6 +26,7 @@ func extractInferenceHeaders(httpResp *http.Response) (string, string, string) {
 }
 
 func generateAndCheckLoad(count int) {
+	nsName := getNamespace()
 	for range count {
 		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 		gomega.Expect(prefillPods).Should(gomega.BeEmpty())
@@ -52,7 +53,7 @@ func generateAndCheckLoad(count int) {
 // doPost sends a POST request with a JSON body to the given path, asserts HTTP 200,
 // and returns the x-inference-namespace, x-inference-pod headers and the response body.
 func doPost(path, body string, extraHeaders map[string]string) (string, string, []byte) {
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%s%s", port, path), strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d%s", getPort(), path), strings.NewReader(body))
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range extraHeaders {
@@ -74,7 +75,7 @@ func doPost(path, body string, extraHeaders map[string]string) (string, string, 
 // doPostWithError sends a POST request with a JSON body to the given path
 // and returns the status code and the response body.
 func doPostWithError(path, body string, extraHeaders map[string]string) (int, []byte) {
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%s%s", port, path), strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d%s", getPort(), path), strings.NewReader(body))
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range extraHeaders {
@@ -102,7 +103,7 @@ func runCompletion(prompt string, theModel openai.CompletionNewParamsModel) (str
 		Model: theModel,
 	}
 
-	ginkgo.By(fmt.Sprintf("Sending Completion Request: (port %s) %#v", port, completionParams))
+	ginkgo.By(fmt.Sprintf("Sending Completion Request: (port %d) %#v", getPort(), completionParams))
 
 	resp, err := newOpenAIClient().Completions.New(testConfig.Context, completionParams, option.WithResponseInto(&httpResp), option.WithRequestTimeout(readyTimeout))
 
@@ -245,7 +246,7 @@ func runChatCompletionWithAudio() (string, string) {
 }
 
 func runStreamingCompletion(prompt string, theModel openai.CompletionNewParamsModel) (string, string) {
-	ginkgo.By(fmt.Sprintf("Sending Streaming Completion Request: (port %s) model=%s", port, theModel))
+	ginkgo.By(fmt.Sprintf("Sending Streaming Completion Request: (port %d) model=%s", getPort(), theModel))
 	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":50,"stream":true}`, theModel, prompt)
 	ns, pod, respBody := doPost("/v1/completions", body, nil)
 	ginkgo.By(fmt.Sprintf("Streaming Completion received response length: %d bytes", len(respBody)))
@@ -253,7 +254,7 @@ func runStreamingCompletion(prompt string, theModel openai.CompletionNewParamsMo
 }
 
 func runStreamingChatCompletion(prompt string) (string, string) {
-	ginkgo.By(fmt.Sprintf("Sending Streaming Chat Completion Request: (port %s)", port))
+	ginkgo.By(fmt.Sprintf("Sending Streaming Chat Completion Request: (port %d)", getPort()))
 	body := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"%s"}],"stream":true}`, simModelName, prompt)
 	ns, pod, respBody := doPost("/v1/chat/completions", body, nil)
 	ginkgo.By(fmt.Sprintf("Streaming Chat Completion received response length: %d bytes", len(respBody)))
@@ -301,7 +302,7 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 		doPostWithError("/v1/chat/completions", "an invalid body", nil)
 	}
 
-	metricsURL := fmt.Sprintf("http://localhost:%s/metrics", metricsPort)
+	metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
 	if k8sContext != "" {
 		// Use port-forward to access the EPP pod's metrics endpoint.

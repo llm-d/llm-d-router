@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -64,8 +65,8 @@ const (
 )
 
 var (
-	port        string = env.GetEnvString("E2E_PORT", "30080", ginkgo.GinkgoLogr)
-	metricsPort string = env.GetEnvString("E2E_METRICS_PORT", "32090", ginkgo.GinkgoLogr)
+	basePort        = env.GetEnvInt("E2E_PORT", 30080, ginkgo.GinkgoLogr)
+	baseMetricsPort = env.GetEnvInt("E2E_METRICS_PORT", 32090, ginkgo.GinkgoLogr)
 
 	testConfig *testutils.TestConfig
 
@@ -330,8 +331,8 @@ func createEnvoy(nsName string) {
 		}
 		gomega.Expect(envoyName).ToNot(gomega.BeEmpty())
 
-		command := exec.Command("kubectl", "port-forward", "deployment/"+envoyName, port+":8081",
-			"--context="+k8sContext, "--namespace="+nsName)
+		command := exec.Command("kubectl", "port-forward", "deployment/"+envoyName, strconv.Itoa(getPort())+":8081",
+			"--context="+k8sContext, "--namespace="+getNamespace())
 		var err error
 		portForwardSession, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -374,12 +375,20 @@ func startEPPMetricsPortForward() {
 	gomega.Expect(pods.Items).NotTo(gomega.BeEmpty())
 
 	eppPodName := pods.Items[0].Name
-	command := exec.Command("kubectl", "port-forward", "pod/"+eppPodName, metricsPort+":9090",
-		"--context="+k8sContext, "--namespace="+nsName)
+	command := exec.Command("kubectl", "port-forward", "pod/"+eppPodName, strconv.Itoa(getMetricsPort())+":9090",
+		"--context="+k8sContext, "--namespace="+getNamespace())
 	eppPortForwardSession, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	// Give it a moment to establish
 	time.Sleep(3 * time.Second)
+}
+
+func getPort() int {
+	return basePort + 100*(ginkgo.GinkgoParallelProcess()-1)
+}
+
+func getMetricsPort() int {
+	return baseMetricsPort + 100*(ginkgo.GinkgoParallelProcess()-1)
 }
 
 func getNamespace() string {
