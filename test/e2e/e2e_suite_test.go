@@ -111,7 +111,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	if k8sContext == "" {
 		setupK8sCluster()
 	}
-	testConfig = testutils.NewTestConfig(nsName, k8sContext)
+	testConfig = testutils.NewTestConfig(k8sContext)
 	setupK8sClient()
 	setupNameSpace()
 	createCRDs()

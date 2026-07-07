@@ -62,7 +62,6 @@ type TestConfig struct {
 	KubeCli           *kubernetes.Clientset
 	K8sClient         client.Client
 	RestConfig        *rest.Config
-	NsName            string
 	Scheme            *runtime.Scheme
 	ExistsTimeout     time.Duration
 	ReadyTimeout      time.Duration
@@ -71,7 +70,7 @@ type TestConfig struct {
 }
 
 // NewTestConfig creates a new TestConfig instance
-func NewTestConfig(nsName string, k8sContext string) *TestConfig {
+func NewTestConfig(k8sContext string) *TestConfig {
 	cfg, err := config.GetConfigWithContext(k8sContext)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(cfg).NotTo(gomega.BeNil())
@@ -106,7 +105,6 @@ func NewTestConfig(nsName string, k8sContext string) *TestConfig {
 	return &TestConfig{
 		Context:           context.Background(),
 		KubeCli:           kubeCli,
-		NsName:            nsName,
 		RestConfig:        cfg,
 		Scheme:            runtime.NewScheme(),
 		ExistsTimeout:     env.GetEnvDuration("EXISTS_TIMEOUT", defaultExistsTimeout, ginkgo.GinkgoLogr),
