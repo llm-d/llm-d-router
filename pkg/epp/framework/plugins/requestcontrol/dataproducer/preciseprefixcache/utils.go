@@ -56,31 +56,35 @@ func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash
 	return count
 }
 
-func calculateMatchLengthStats(matchLens []int) (avgMatch float64, stdDevMatch float64) {
-	if len(matchLens) == 0 {
-		return 0, 0
+func calculateHitRatioStats(hitRatios []float64) (maxRatio float64, avgRatio float64, stdDevRatio float64) {
+	if len(hitRatios) == 0 {
+		return 0, 0, 0
 	}
 
-	sum := 0
-	for _, matchLen := range matchLens {
-		sum += matchLen
+	sum := 0.0
+	maxRatio = 0.0
+	for _, hitRatio := range hitRatios {
+		sum += hitRatio
+		if hitRatio > maxRatio {
+			maxRatio = hitRatio
+		}
 	}
-	avgMatch = float64(sum) / float64(len(matchLens))
+	avgRatio = sum / float64(len(hitRatios))
 
 	varianceSum := 0.0
-	for _, matchLen := range matchLens {
-		diff := float64(matchLen) - avgMatch
+	for _, hitRatio := range hitRatios {
+		diff := hitRatio - avgRatio
 		varianceSum += diff * diff
 	}
-	stdDevMatch = 0.0
-	if len(matchLens) > 1 {
-		stdDevMatch = varianceSum / float64(len(matchLens)-1)
-		stdDevMatch = math.Sqrt(stdDevMatch)
+	stdDevRatio = 0.0
+	if len(hitRatios) > 1 {
+		stdDevRatio = varianceSum / float64(len(hitRatios)-1)
+		stdDevRatio = math.Sqrt(stdDevRatio)
 	}
 
 	// Round to two decimal places for consistency in metrics reporting
-	avgMatch = math.Round(avgMatch*100) / 100
-	stdDevMatch = math.Round(stdDevMatch*100) / 100
+	avgRatio = math.Round(avgRatio*100) / 100
+	stdDevRatio = math.Round(stdDevRatio*100) / 100
 
-	return avgMatch, stdDevMatch
+	return maxRatio, avgRatio, stdDevRatio
 }

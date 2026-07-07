@@ -78,14 +78,8 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	return nil
 }
 
-func recordPrefixCacheMaxMatch(pluginName, pluginType string, maxBlocks int, totalBlocks int) {
-	llmdPrefixCacheMaxHitRatio.WithLabelValues(pluginName, pluginType).Observe(float64(maxBlocks) / float64(totalBlocks))
-}
-
-func recordPrefixCacheAvgMatch(pluginName, pluginType string, avgBlocks float64, totalBlocks int) {
-	llmdPrefixCacheAvgHitRatio.WithLabelValues(pluginName, pluginType).Observe(avgBlocks / float64(totalBlocks))
-}
-
-func recordPrefixCacheStdDevMatch(pluginName, pluginType string, stdDevBlocks float64, totalBlocks int) {
-	llmdPrefixCacheStdDevHitRatio.WithLabelValues(pluginName, pluginType).Observe(stdDevBlocks / float64(totalBlocks))
+func recordPrefixCacheHitRatio(pluginName, pluginType string, maxHitRatio float64, avgHitRatio float64, stdDevHitRatio float64) {
+	llmdPrefixCacheMaxHitRatio.WithLabelValues(pluginName, pluginType).Observe(maxHitRatio)
+	llmdPrefixCacheAvgHitRatio.WithLabelValues(pluginName, pluginType).Observe(avgHitRatio)
+	llmdPrefixCacheStdDevHitRatio.WithLabelValues(pluginName, pluginType).Observe(stdDevHitRatio)
 }

@@ -37,64 +37,26 @@ func TestRegisterMetrics_NilRegisterer(t *testing.T) {
 	require.Error(t, registerMetrics(nil))
 }
 
-func TestRecordPrefixCacheMaxMatch(t *testing.T) {
-	resetMetrics()
-	t.Cleanup(resetMetrics)
-
-	recordPrefixCacheMaxMatch("test-plugin", "test-type", 5, 10)
-
-	h, err := getHistogram(llmdPrefixCacheMaxHitRatio, "test-plugin", "test-type")
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), h.GetSampleCount())
-	require.InDelta(t, 0.5, h.GetSampleSum(), 1e-9)
-}
-
-func TestRecordPrefixCacheAvgMatch(t *testing.T) {
-	resetMetrics()
-	t.Cleanup(resetMetrics)
-
-	recordPrefixCacheAvgMatch("test-plugin", "test-type", 4.0, 10)
-
-	h, err := getHistogram(llmdPrefixCacheAvgHitRatio, "test-plugin", "test-type")
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), h.GetSampleCount())
-	require.InDelta(t, 0.4, h.GetSampleSum(), 1e-9)
-}
-
-func TestRecordPrefixCacheStdDevMatch(t *testing.T) {
-	resetMetrics()
-	t.Cleanup(resetMetrics)
-
-	recordPrefixCacheStdDevMatch("test-plugin", "test-type", 2.0, 10)
-
-	h, err := getHistogram(llmdPrefixCacheStdDevHitRatio, "test-plugin", "test-type")
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), h.GetSampleCount())
-	require.InDelta(t, 0.2, h.GetSampleSum(), 1e-9)
-}
-
 func TestRecordPrefixCacheMatch_FullHit(t *testing.T) {
 	resetMetrics()
 	t.Cleanup(resetMetrics)
 
-	recordPrefixCacheMaxMatch("p", "t", 8, 8)
-	recordPrefixCacheAvgMatch("p", "t", 8.0, 8)
-	recordPrefixCacheStdDevMatch("p", "t", 0.0, 8)
+	recordPrefixCacheHitRatio("p", "t", 0.5, 0.4, 0.2)
 
 	maxH, err := getHistogram(llmdPrefixCacheMaxHitRatio, "p", "t")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), maxH.GetSampleCount())
-	require.InDelta(t, 1.0, maxH.GetSampleSum(), 1e-9)
+	require.InDelta(t, 0.5, maxH.GetSampleSum(), 1e-9)
 
 	avgH, err := getHistogram(llmdPrefixCacheAvgHitRatio, "p", "t")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), avgH.GetSampleCount())
-	require.InDelta(t, 1.0, avgH.GetSampleSum(), 1e-9)
+	require.InDelta(t, 0.4, avgH.GetSampleSum(), 1e-9)
 
 	stdDevH, err := getHistogram(llmdPrefixCacheStdDevHitRatio, "p", "t")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stdDevH.GetSampleCount())
-	require.InDelta(t, 0.0, stdDevH.GetSampleSum(), 1e-9)
+	require.InDelta(t, 0.2, stdDevH.GetSampleSum(), 1e-9)
 }
 
 func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*dto.Histogram, error) {

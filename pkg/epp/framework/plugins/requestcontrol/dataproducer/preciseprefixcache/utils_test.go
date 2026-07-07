@@ -95,28 +95,32 @@ func TestMatchedBlockCount(t *testing.T) {
 	}
 }
 
-func TestCalculateMatchLengthStats(t *testing.T) {
+func TestCalculateHitRatioStats(t *testing.T) {
 	tests := []struct {
 		name       string
-		matchLens  []int
+		matchLens  []float64
+		wantMax    float64
 		wantAvg    float64
 		wantStdDev float64
 	}{
 		{
 			name:       "empty slice yields zero",
-			matchLens:  []int{},
+			matchLens:  []float64{},
+			wantMax:    0,
 			wantAvg:    0,
 			wantStdDev: 0,
 		},
 		{
 			name:       "single value yields zero stddev",
-			matchLens:  []int{5},
+			matchLens:  []float64{5},
+			wantMax:    5,
 			wantAvg:    5,
 			wantStdDev: 0,
 		},
 		{
 			name:       "multiple values yield correct avg and stddev",
-			matchLens:  []int{2, 4, 4, 4, 5, 5, 7, 9},
+			matchLens:  []float64{2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0},
+			wantMax:    9,
 			wantAvg:    5,
 			wantStdDev: 2.14,
 		},
@@ -124,7 +128,8 @@ func TestCalculateMatchLengthStats(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			avg, stddev := calculateMatchLengthStats(tt.matchLens)
+			max, avg, stddev := calculateHitRatioStats(tt.matchLens)
+			assert.InDelta(t, tt.wantMax, max, 1e-9)
 			assert.InDelta(t, tt.wantAvg, avg, 1e-9)
 			assert.InDelta(t, tt.wantStdDev, stddev, 1e-9)
 		})

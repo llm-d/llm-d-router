@@ -293,7 +293,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	maxMatch := 0
-	matchLengths := make([]int, 0, len(endpoints))
+	endpointHitRatios := make([]float64, 0, len(endpoints))
 	for _, ep := range endpoints {
 		md := ep.GetMetadata()
 		if md == nil {
@@ -301,7 +301,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		}
 		addr := fmt.Sprintf("%s:%s", md.Address, md.Port)
 		matchLen := int(aggregatedScores[addr])
-		matchLengths = append(matchLengths, matchLen)
+		endpointHitRatios = append(endpointHitRatios, float64(matchLen)/float64(totalBlocks))
 		if matchLen > maxMatch {
 			maxMatch = matchLen
 		}
@@ -313,10 +313,8 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).WithCachedBlockCount(cachedBlocks))
 	}
 
-	avgMatchLength, stdDevMatchLength := calculateMatchLengthStats(matchLengths)
-	recordPrefixCacheMaxMatch(p.typedName.Name, p.typedName.Type, maxMatch, totalBlocks)
-	recordPrefixCacheAvgMatch(p.typedName.Name, p.typedName.Type, avgMatchLength, totalBlocks)
-	recordPrefixCacheStdDevMatch(p.typedName.Name, p.typedName.Type, stdDevMatchLength, totalBlocks)
+	max, avg, std := calculateHitRatioStats(endpointHitRatios)
+	recordPrefixCacheHitRatio(p.typedName.Name, p.typedName.Type, max, avg, std)
 
 	if p.speculativeEnabled {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,
