@@ -463,6 +463,24 @@ func TestVideoEstimator_NoHeadersUseDefaults(t *testing.T) {
 	assert.Equal(t, frames*tpf, tp.MultiModalFeatures[0].Length, "default video length")
 }
 
+// TestVideoEstimator_TemporalMergeAndMinFrames asserts sampled frames are floored
+// by minFrames and merged by temporalPatchSize (qwen3-vl shape). Static tpf=1
+// isolates the frame-group count.
+func TestVideoEstimator_TemporalMergeAndMinFrames(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		Frames:         &framesConfig{Mode: videoFramesModeSampled, SampleFPS: 2, MinFrames: 4, TemporalPatchSize: 2},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, StaticToken: 1},
+	}})}
+	// 10s: 10*2 = 20 sampled frames, /2 temporal merge = 10 groups.
+	long, err := b.produce(videoCtx(videoMetadata{duration: 10}), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	assert.Equal(t, 10, long.MultiModalFeatures[0].Length)
+	// 1s: 2 sampled frames floored to minFrames 4, /2 merge = 2 groups.
+	short, err := b.produce(videoCtx(videoMetadata{duration: 1}), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	assert.Equal(t, 2, short.MultiModalFeatures[0].Length)
+}
+
 // TestVideoEstimator_HeaderRespectsMaxVideoTokens asserts the overall cap still
 // bounds a count derived from header metadata.
 func TestVideoEstimator_HeaderRespectsMaxVideoTokens(t *testing.T) {

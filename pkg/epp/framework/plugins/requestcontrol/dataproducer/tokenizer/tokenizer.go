@@ -161,8 +161,14 @@ type framesConfig struct {
 	DefaultSourceFPS float64 `json:"defaultSourceFPS,omitempty"`
 	// FrameStride keeps every Nth source frame in strided mode.
 	FrameStride int `json:"frameStride,omitempty"`
-	// MaxFrames caps the frame count in strided mode. Zero means uncapped.
+	// MaxFrames caps the sampled/strided frame count. Zero means uncapped.
 	MaxFrames int `json:"maxFrames,omitempty"`
+	// MinFrames floors the sampled frame count (sampled mode). Zero means no floor.
+	MinFrames int `json:"minFrames,omitempty"`
+	// TemporalPatchSize merges every N sampled frames into one token group
+	// (sampled mode), modeling temporal patch merging (e.g. qwen3-vl uses 2).
+	// Values < 2 apply no merging.
+	TemporalPatchSize int `json:"temporalPatchSize,omitempty"`
 }
 
 // PluginFactory is the factory function for the tokenizer plugin.

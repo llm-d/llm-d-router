@@ -197,11 +197,13 @@ type videoEstimator struct {
 	factor      int
 	staticToken int
 
-	framesMode  string
-	sampleFPS   float64
-	sourceFPS   float64
-	frameStride int
-	maxFrames   int
+	framesMode        string
+	sampleFPS         float64
+	sourceFPS         float64
+	frameStride       int
+	maxFrames         int
+	minFrames         int
+	temporalPatchSize int
 
 	defWidth       int
 	defHeight      int
@@ -234,6 +236,8 @@ func newVideoEstimator(cfg *estimateConfig) videoEstimator {
 		est.sourceFPS = vid.Frames.DefaultSourceFPS
 		est.frameStride = vid.Frames.FrameStride
 		est.maxFrames = vid.Frames.MaxFrames
+		est.minFrames = vid.Frames.MinFrames
+		est.temporalPatchSize = vid.Frames.TemporalPatchSize
 	}
 	return est
 }
@@ -251,10 +255,13 @@ func (e videoEstimator) placeholderCount(meta videoMetadata) int {
 	return tokens
 }
 
-// frameCount returns the number of sampled frames. Sampled mode takes
-// duration*sampleFPS; strided mode takes min(duration*sourceFPS/frameStride, maxFrames).
-// A header-provided duration and source FPS take precedence over configuration.
-// sampleFPS is a model sampling rate, not a source property, so it is never overridden.
+// frameCount returns the number of frame token-groups. Sampled mode samples
+// duration*sampleFPS frames, clamps to [minFrames, maxFrames], then merges every
+// temporalPatchSize frames into one group (models e.g. qwen3-vl, which samples
+// ~2fps and merges frame pairs). Strided mode takes
+// min(duration*sourceFPS/frameStride, maxFrames). A header-provided duration and
+// source FPS take precedence over configuration. sampleFPS is a model sampling
+// rate, not a source property, so it is never overridden.
 func (e videoEstimator) frameCount(meta videoMetadata) int {
 	duration := meta.duration
 	if duration <= 0 {
@@ -285,7 +292,17 @@ func (e videoEstimator) frameCount(meta videoMetadata) int {
 	if fps <= 0 {
 		fps = defaultVideoSampleFPS
 	}
-	return int(duration * fps)
+	n := int(duration * fps)
+	if e.minFrames > 0 && n < e.minFrames {
+		n = e.minFrames
+	}
+	if e.maxFrames > 0 && n > e.maxFrames {
+		n = e.maxFrames
+	}
+	if e.temporalPatchSize > 1 {
+		n /= e.temporalPatchSize
+	}
+	return n
 }
 
 // tokensPerFrame returns the per-frame placeholder count: a fixed constant in

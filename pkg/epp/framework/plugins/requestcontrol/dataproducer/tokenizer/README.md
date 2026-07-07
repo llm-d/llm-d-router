@@ -83,11 +83,13 @@ apply to every video in the request.
 | `estimate.video.tokensPerFrame.mode`  | `dynamic` | `dynamic` (width×height/factor) or `static` (a constant per-frame count).       |
 | `estimate.video.tokensPerFrame.factor`| `1024`    | Dynamic-mode pixels-per-placeholder-token divisor.                              |
 | `estimate.video.tokensPerFrame.staticToken` | –   | Static-mode per-frame placeholder count.                                        |
-| `estimate.video.frames.mode`          | `sampled` | `sampled` (duration×sampleFPS) or `strided` (min(duration×sourceFPS/frameStride, maxFrames)). |
+| `estimate.video.frames.mode`          | `sampled` | `sampled` (clamp(duration×sampleFPS, minFrames, maxFrames) / temporalPatchSize) or `strided` (min(duration×defaultSourceFPS/frameStride, maxFrames)). |
 | `estimate.video.frames.sampleFPS`     | `1`       | Sampled-mode sampling rate.                                                      |
+| `estimate.video.frames.minFrames`     | –         | Sampled-mode frame floor (0 = none). Models a processor's minimum sampled frames. |
+| `estimate.video.frames.temporalPatchSize` | –     | Sampled-mode: merge every N sampled frames into one token group (qwen3-vl = 2; <2 = no merge). |
 | `estimate.video.frames.defaultSourceFPS` | `24`   | Strided-mode source frame rate; fallback for the `x-llm-d-video-fps` header.     |
 | `estimate.video.frames.frameStride`   | `1`       | Strided-mode divisor: keep every Nth source frame.                              |
-| `estimate.video.frames.maxFrames`     | –         | Strided-mode frame cap (0 = uncapped).                                          |
+| `estimate.video.frames.maxFrames`     | –         | Sampled/strided frame cap (0 = uncapped).                                        |
 | `estimate.video.defaultResolution`    | 640×360   | Per-frame resolution for dynamic tokens-per-frame; fallback for the `x-llm-d-video-resolution` header. |
 | `estimate.video.defaultDuration`      | `10`      | Video length in seconds for frame counting; fallback for the `x-llm-d-video-duration-seconds` header. |
 | `estimate.video.maxVideoTokens`       | –         | Overall placeholder cap for a video (0 = uncapped).                            |
