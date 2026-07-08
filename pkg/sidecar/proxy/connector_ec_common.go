@@ -283,7 +283,7 @@ func (s *Server) runPDPipeline(
 
 	if len(prefillEndPoint) > 0 {
 		s.logger.V(logging.DEBUG).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
-		s.handlePDConnector(w, pdRequest, prefillEndPoint, APITypeChatCompletions)
+		s.handlePDConnector(w, pdRequest, prefillEndPoint, "", APITypeChatCompletions)
 		return
 	}
 

@@ -533,6 +533,8 @@ Specifies which KV transfer protocol the sidecar uses to coordinate prefill/deco
 
 With `offloading`, the sidecar dispatches prefill and decode concurrently. It injects role-keyed `kv_transfer_params`: the prefiller receives `{"decode": {"kv_request_id": <id>}}` (no peer address), and the decoder receives `{"prefill": {"kv_request_id": <id>, "remote_host": <prefiller host>, "remote_port": <p2p-connector-port>}}` so it can pull KV from the prefiller. The prefiller host comes from the `x-prefiller-host-port` header; the port is `--p2p-connector-port`.
 
+When the request also carries the `x-kv-cache-source-host-port` header (set by the EPP `p2p-source-producer` to a peer holding more cached prefix than the pod computing the prefix), the sidecar injects an additional `p2p` key so vLLM pulls that cached prefix over the P2P tier instead of recomputing it. Under disaggregation the prefiller leg carries `{"decode": {...}, "p2p": {"kv_request_id": <own id>, "remote_host": <source host>, "remote_port": <p2p-connector-port>}}` (the only supported multi-key combination); without a prefiller the decoder-only request carries `{"p2p": {...}}` alone. A malformed or disallowed source header (or any source header when the connector is not `offloading`) is ignored and the request proceeds unchanged. For the pulled blocks to be servable, the source pod must offload its generated (decode-phase) KV: set `offload_prompt_only: false` in its `kv_connector_extra_config` (the default `true` offloads only prefill blocks).
+
 Both prefill and decode pods require the following `--kv-transfer-config`:
 
 ```json
