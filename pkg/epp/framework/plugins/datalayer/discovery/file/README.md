@@ -18,10 +18,10 @@ datastore on each change.
 ## How It Works
 
 - **Initial load.** On `Start`, the file is read once. Each entry is
-  validated (address must be a parseable IP, port must be in `[1, 65535]`)
-  and applied via `notifier.Upsert`. Per-entry validation errors are logged
-  and the entry is skipped; file-level problems (open, parse, size > 1 MiB)
-  abort startup.
+  validated (address must be a valid IPv4 or RFC 1123 hostname, port must be
+  in `[1, 65535]`) and applied via `notifier.Upsert`. Per-entry validation
+  errors are logged and the entry is skipped; file-level problems (open,
+  parse, size > 1 MiB) abort startup.
 - **Reload (optional).** When `watchFile: true`, fsnotify Write / Create /
   Remove events trigger a reload. After an atomic rename or ConfigMap-style
   symlink swap (which destroys the inode being watched), the watcher is
@@ -42,11 +42,26 @@ plugin's `path` parameter.
 endpoints:
   - name: <string>              # required -- unique within the file
     namespace: <string>         # optional -- defaults to "default"
-    address: <IPv4>             # required -- must be a valid IPv4 address
+    address: <string>           # required -- IPv4 address or RFC 1123 hostname
     port: <string>              # required -- integer 1-65535 as a string
+    metricsAddress: <string>    # optional -- metrics scrape hostname (defaults to address)
+    metricsPort: <string>       # optional -- metrics scrape port (defaults to port)
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
 ```
+
+Both IPv4 addresses and hostnames are accepted. `Name` is always set to the
+entry name regardless of address type.
+
+### Endpoint Type Label
+
+Each endpoint is tagged with the label `llm-d.ai/endpoint-type` so downstream
+plugins can distinguish pod endpoints from cluster endpoints explicitly. The
+label can be set in the endpoints file; when omitted, the plugin auto-detects
+it from the address format:
+
+- IPv4 address → `llm-d.ai/endpoint-type: pod`
+- Hostname → `llm-d.ai/endpoint-type: cluster`
 
 ## Configuration
 
@@ -75,7 +90,7 @@ dataLayer:
     pluginRef: file-discovery
 ```
 
-A two-endpoint file referenced by the config above:
+A two-endpoint file with pod IPs:
 
 ```yaml
 endpoints:
@@ -87,13 +102,38 @@ endpoints:
     port: "8000"
 ```
 
+A cluster endpoints file with host names instead of IP addresses.
+In multi-cluster deployments, `address` is typically a gateway that routes
+inference traffic, while metrics are scraped directly from the spoke EPP at
+a different host — hence `metricsAddress`:
+
+```yaml
+endpoints:
+  - name: cluster-us-east
+    address: gateway.apps.spoke-us-east.example.com
+    port: "443"
+    metricsAddress: epp.apps.spoke-us-east.example.com
+    metricsPort: "9090"
+    labels:
+      region: us-east
+  - name: cluster-eu-west
+    address: gateway.apps.spoke-eu-west.example.com
+    port: "443"
+    metricsAddress: epp.apps.spoke-eu-west.example.com
+    metricsPort: "9090"
+    labels:
+      region: eu-west
+```
+
 ## Limitations
 
 - The endpoints file is capped at 1 MiB.
-- `address` must be a literal IPv4 address. Hostnames are not resolved;
-  IPv6 is not supported.
-- Metrics are scraped from `address:port` (same host and port that serves
-  inference); separate metrics endpoints are not supported.
+- `address` must be a valid IPv4 address or an RFC 1123 hostname. IPv6 is
+  not supported. Hostnames are not resolved by the plugin; DNS resolution
+  happens at scrape/connect time.
+- Metrics are scraped from `metricsAddress:metricsPort`. When `metricsAddress`
+  is not set, it defaults to `address`. When `metricsPort` is not set, it
+  defaults to `port`.
 - File-discovery mode runs the EPP without a Kubernetes controller manager,
   so several K8s-only features are inactive: the `InferenceModelRewrite`
   and `InferenceObjective` reconcilers do not run, and any
