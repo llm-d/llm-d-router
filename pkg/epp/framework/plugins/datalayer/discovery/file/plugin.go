@@ -28,10 +28,12 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/yaml"
 
@@ -39,15 +41,23 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
-const PluginType = "file-discovery"
+const (
+	PluginType = "file-discovery"
+
+	// EndpointTypeLabel distinguishes pod from cluster endpoints.
+	EndpointTypeLabel   = "llm-d.ai/endpoint-type"
+	EndpointTypePod     = "pod"
+	EndpointTypeCluster = "cluster"
+)
 
 // EndpointEntry is the YAML/JSON representation of a single endpoint.
 type EndpointEntry struct {
-	Name      string            `json:"name"                yaml:"name"`
-	Namespace string            `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Address   string            `json:"address"             yaml:"address"`
-	Port      string            `json:"port"                yaml:"port"`
-	Labels    map[string]string `json:"labels,omitempty"    yaml:"labels,omitempty"`
+	Name        string            `json:"name"                    yaml:"name"`
+	Namespace   string            `json:"namespace,omitempty"     yaml:"namespace,omitempty"`
+	Address     string            `json:"address"                 yaml:"address"`
+	Port        string            `json:"port"                    yaml:"port"`
+	MetricsPort string            `json:"metricsPort,omitempty"   yaml:"metricsPort,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"        yaml:"labels,omitempty"`
 }
 
 // EndpointsFile is the top-level structure of the endpoints YAML/JSON file.
@@ -238,9 +248,12 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 	incoming := make(map[types.NamespacedName]struct{}, len(ef.Endpoints))
 	var errs []error
 	for _, e := range ef.Endpoints {
-		if ip := net.ParseIP(e.Address); ip == nil || ip.To4() == nil {
-			errs = append(errs, fmt.Errorf("endpoint %q: invalid IPv4 address %q", e.Name, e.Address))
-			continue
+		ip := net.ParseIP(e.Address)
+		if ip == nil || ip.To4() == nil {
+			if len(validation.IsDNS1123Subdomain(strings.ToLower(e.Address))) > 0 {
+				errs = append(errs, fmt.Errorf("endpoint %q: address %q is not a valid IPv4 or hostname", e.Name, e.Address))
+				continue
+			}
 		}
 		if portNum, err := strconv.Atoi(e.Port); err != nil || portNum < 1 || portNum > 65535 {
 			errs = append(errs, fmt.Errorf("endpoint %q: invalid port %q", e.Name, e.Port))
@@ -250,13 +263,32 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 		if ns == "" {
 			ns = "default"
 		}
+		podName := e.Name
+		if ip == nil {
+			podName = ""
+		}
+		mPort := e.Port
+		if e.MetricsPort != "" {
+			mPort = e.MetricsPort
+		}
+		labels := e.Labels
+		if labels == nil {
+			labels = make(map[string]string)
+		}
+		if v := labels[EndpointTypeLabel]; v != EndpointTypePod && v != EndpointTypeCluster {
+			if ip == nil {
+				labels[EndpointTypeLabel] = EndpointTypeCluster
+			} else {
+				labels[EndpointTypeLabel] = EndpointTypePod
+			}
+		}
 		meta := &fwkdl.EndpointMetadata{
 			NamespacedName: types.NamespacedName{Name: e.Name, Namespace: ns},
-			PodName:        e.Name,
+			PodName:        podName,
 			Address:        e.Address,
 			Port:           e.Port,
-			MetricsHost:    net.JoinHostPort(e.Address, e.Port),
-			Labels:         e.Labels,
+			MetricsHost:    net.JoinHostPort(e.Address, mPort),
+			Labels:         labels,
 		}
 		incoming[meta.NamespacedName] = struct{}{}
 		notifier.Upsert(meta)
