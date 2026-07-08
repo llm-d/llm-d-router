@@ -39,7 +39,6 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -166,8 +165,7 @@ type Runner struct {
 	// rawConfig caches the result of parseConfigurationPhaseOne.
 	rawConfig *configapi.EndpointPickerConfig
 
-	// Populated by setup() only when graceful drain is enabled
-	// (Options.DrainTimeout > 0); see runWithGracefulShutdown.
+	// Populated by setup(); see runWithGracefulShutdown.
 	serverRunner     *runserver.ExtProcServerRunner
 	healthGRPCServer *grpc.Server
 	healthGRPCPort   int
@@ -262,19 +260,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	if opts.DrainTimeout > 0 {
-		return r.runWithGracefulShutdown(ctx, mgr, opts.DrainTimeout)
-	}
-
-	// --- Start Manager ---
-	// This blocks until a signal is received.
-	setupLog.Info("Controller manager starting")
-	if err := mgr.Start(ctx); err != nil {
-		setupLog.Error(err, "Error starting controller manager")
-		return err
-	}
-	setupLog.Info("Controller manager terminated")
-	return nil
+	return r.runWithGracefulShutdown(ctx, mgr, opts.DrainTimeout)
 }
 
 // runWithGracefulShutdown runs the ext_proc and health servers on a context that
@@ -282,8 +268,8 @@ func (r *Runner) Run(ctx context.Context) error {
 // its leader lease, the pod is marked NotServing (so Kubernetes drains it from the
 // Service endpoints), and the ext_proc server keeps accepting requests for
 // drainTimeout so in-flight and pre-DNS-refresh requests are served rather than
-// rejected. Only used when Options.DrainTimeout > 0; setup() has stashed the
-// servers on r.
+// rejected. A drainTimeout of 0 stops the servers as soon as the manager
+// terminates. setup() has stashed the servers on r.
 func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, drainTimeout time.Duration) error {
 	// serveCtx is intentionally rooted at Background, not ctx, so SIGTERM does not
 	// immediately stop the ext_proc/health servers.
@@ -488,28 +474,16 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		supporters[i] = p
 	}
 
-	if opts.DrainTimeout > 0 {
-		// Graceful drain: keep the ext_proc and health servers OUT of the
-		// manager so they outlive it. Run() runs them on a context that is only
-		// cancelled after the drain window, so on SIGTERM the manager stops
-		// (releasing the leader lease) while these keep serving. `draining` is
-		// flipped by Run() so readiness/ext_proc health go NOT_SERVING and the
-		// pod is drained from the Service endpoints.
-		r.draining = &atomic.Bool{}
-		r.serverRunner = serverRunner
-		r.healthGRPCPort = opts.GRPCHealthPort
-		r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters)
-		return mgr, ds, nil
-	}
-
-	if err := registerHealthServer(mgr, ctrl.Log.WithName("health"), ds, opts.GRPCHealthPort, isLeader, nil, opts.EnableLeaderElection, supporters); err != nil {
-		return nil, nil, err
-	}
-
-	// Register ext-proc server.
-	if err := registerExtProcServer(mgr, serverRunner, ctrl.Log.WithName("ext-proc")); err != nil {
-		return nil, nil, err
-	}
+	// Keep the ext_proc and health servers OUT of the manager so they outlive
+	// it. Run() runs them on a context that is only cancelled after the drain
+	// window, so on SIGTERM the manager stops (releasing the leader lease) while
+	// these keep serving. `draining` is flipped by Run() so readiness/ext_proc
+	// health go NOT_SERVING and the pod is drained from the Service endpoints. A
+	// DrainTimeout of 0 stops them as soon as the manager terminates.
+	r.draining = &atomic.Bool{}
+	r.serverRunner = serverRunner
+	r.healthGRPCPort = opts.GRPCHealthPort
+	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters)
 	return mgr, ds, nil
 }
 
@@ -784,16 +758,6 @@ func (r *Runner) setupMetricsCollection(opts *runserver.Options) datalayer.Endpo
 	return r.dlRuntime
 }
 
-// registerExtProcServer adds the ExtProcServerRunner as a Runnable to the manager.
-func registerExtProcServer(mgr manager.Manager, runner *runserver.ExtProcServerRunner, logger logr.Logger) error {
-	if err := mgr.Add(runner.AsRunnable(logger)); err != nil {
-		setupLog.Error(err, "Failed to register ext-proc gRPC server runnable")
-		return err
-	}
-	setupLog.Info("ExtProc server runner added to manager.")
-	return nil
-}
-
 // newHealthGRPCServer builds the gRPC health server. draining may be nil (graceful
 // drain disabled); when non-nil and set, non-liveness checks report NOT_SERVING.
 func newHealthGRPCServer(logger logr.Logger, ds datastore.Datastore, isLeader, draining *atomic.Bool, leaderElectionEnabled bool, supporters []appProtocolSupporter) *grpc.Server {
@@ -807,17 +771,6 @@ func newHealthGRPCServer(logger logr.Logger, ds datastore.Datastore, isLeader, d
 		draining:              draining,
 	})
 	return srv
-}
-
-// registerHealthServer adds the Health gRPC server as a Runnable to the given manager.
-func registerHealthServer(mgr manager.Manager, logger logr.Logger, ds datastore.Datastore, port int, isLeader, draining *atomic.Bool, leaderElectionEnabled bool, supporters []appProtocolSupporter) error {
-	srv := newHealthGRPCServer(logger, ds, isLeader, draining, leaderElectionEnabled, supporters)
-	if err := mgr.Add(
-		runnable.NoLeaderElection(runnable.GRPCServer("health", srv, port))); err != nil {
-		setupLog.Error(err, "Failed to register health server")
-		return err
-	}
-	return nil
 }
 
 func extractDeploymentName(podName string) (string, error) {

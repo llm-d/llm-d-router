@@ -54,7 +54,7 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 	isLive := s.datastore.PoolHasSynced()
 	protocolMatches := s.checkProtocolSupport(isLive)
 	// While draining (graceful shutdown), every non-liveness check reports
-	// NOT_SERVING so Kubernetes removes the pod from the Service endpoints, while
+	// NOT_SERVING so Kubernetes removes the EPP from the Service endpoints, while
 	// the ext_proc server keeps serving. Liveness stays SERVING to avoid a
 	// restart mid-drain.
 	draining := s.draining != nil && s.draining.Load()

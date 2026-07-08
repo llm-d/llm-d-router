@@ -249,11 +249,11 @@ func TestValidateDirectValues(t *testing.T) {
 }
 
 func TestDrainTimeoutFlag(t *testing.T) {
-	// Defaults to 0 (graceful drain disabled → upstream behavior).
+	// Defaults to DefaultDrainTimeout.
 	def := NewOptions()
 	def.AddFlags(pflag.NewFlagSet("default", pflag.ContinueOnError))
-	if def.DrainTimeout != 0 {
-		t.Errorf("DrainTimeout default = %v, want 0", def.DrainTimeout)
+	if def.DrainTimeout != DefaultDrainTimeout {
+		t.Errorf("DrainTimeout default = %v, want %v", def.DrainTimeout, DefaultDrainTimeout)
 	}
 
 	// The flag parses a duration.
