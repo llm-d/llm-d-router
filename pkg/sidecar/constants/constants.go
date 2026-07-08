@@ -29,6 +29,9 @@ const (
 	// KVConnectorMooncake enables mooncake the P/D KV disaggregation protocol
 	KVConnectorMooncake = "mooncake"
 
+	// KVConnectorOffloading enables the OffloadingConnector P/D KV disaggregation protocol
+	KVConnectorOffloading = "offloading"
+
 	// ECExampleConnector enables the Encoder disaggregation protocol (E/PD, E/P/D)
 	ECExampleConnector = "ec-example"
 

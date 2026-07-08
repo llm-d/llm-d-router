@@ -232,6 +232,16 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
 		},
 		{
+			name:            "fc_reject_no_endpoints",
+			priority:        0,
+			fcOutcome:       fctypes.QueueOutcomeRejectedNoEndpoints,
+			fcErr:           fctypes.ErrNoEndpoints,
+			expectErr:       true,
+			expectErrCode:   errcommon.ServiceUnavailable,
+			expectErrSubstr: "no endpoints available",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+		},
+		{
 			name:            "fc_evict_ttl",
 			priority:        0,
 			fcOutcome:       fctypes.QueueOutcomeEvictedTTL,

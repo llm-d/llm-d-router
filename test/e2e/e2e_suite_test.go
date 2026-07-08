@@ -15,6 +15,7 @@ import (
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	k8slog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -28,6 +29,8 @@ import (
 const (
 	// kindClusterName is the name of the Kind cluster created for e2e tests.
 	kindClusterName = "e2e-tests"
+	// eppName is the value of the app label on the EPP pods
+	eppName = "e2e-epp"
 	// defaultReadyTimeout is the default timeout for a resource to report a ready state.
 	defaultReadyTimeout = 3 * time.Minute
 	// defaultInterval is the default interval to check if a resource exists or ready conditions.
@@ -281,6 +284,12 @@ func setupNameSpace() {
 	_, err = testConfig.KubeCli.CoreV1().Namespaces().Create(testConfig.Context, namespace, metav1.CreateOptions{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	createdNameSpace = true
+
+	ginkgo.By("Ensuring namespace exists: " + nsName)
+	testutils.EventuallyExists(testConfig, func() error {
+		return testConfig.K8sClient.Get(testConfig.Context,
+			types.NamespacedName{Name: nsName}, &corev1.Namespace{})
+	})
 }
 
 // createCRDs creates the Inference Extension CRDs used for testing.

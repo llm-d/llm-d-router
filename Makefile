@@ -122,17 +122,11 @@ endif
 # Should we pass ALL env vars here?
 E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE VLLM_RENDER_IMAGE \
                E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT \
-               E2E_LABEL_FILTER LOAD_VLLM_RENDER_IMAGE
+               E2E_LABEL_FILTER LOAD_VLLM_RENDER_IMAGE HF_TOKEN
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
 endif
-
-# GAIE e2e test variables (for test-e2e-gaie target).
-# GAIE_E2E_MANIFEST_PATH: path to the model server manifest inside the builder container
-# (/app/... prefix). Defaults to the sim-deployment in testdata. Override to use a GPU manifest.
-GAIE_E2E_MANIFEST_PATH ?=
-GAIE_E2E_IMAGE         ?= $(EPP_IMAGE)
 
 # When K8S_CONTEXT is set, mount the host kubeconfig so the e2e suite can call
 # config.GetConfigWithContext(K8S_CONTEXT) against an existing cluster instead of
@@ -298,30 +292,16 @@ test-integration-hermetic: image-build-builder ## Run hermetic integration tests
 	$(BUILDER_RUN) 'CGO_ENABLED=1 KUBEBUILDER_ASSETS="$$(setup-envtest use $$ENVTEST_K8S_VERSION --bin-dir $$ENVTEST_ASSETS_DIR -p path)" go test -v -race $(if $(PATTERN),-run "$(PATTERN)",) -coverprofile=$(COVERAGE_DIR)/integration-hermetic.out -covermode=atomic ./test/integration/...'
 	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/integration-hermetic.out | tail -1'
 
-.PHONY: test-e2e-gaie-run
-test-e2e-gaie-run: image-pull ## Ensure images are present, then run GAIE e2e tests
-	@printf "\033[33;1m==== Running GAIE End to End Tests ====\033[0m\n"
-	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
-		-e EPP_IMAGE=$(GAIE_E2E_IMAGE) \
-		-e USE_KIND=true \
-		$(BUILDER_IMAGE) ./test/scripts/test-e2e-gaie.sh
 
-.PHONY: test-e2e-gaie
-test-e2e-gaie: image-build-builder image-build ## Build images and run GAIE e2e tests
-	$(MAKE) test-e2e-gaie-run
-
-.PHONY: test-e2e-router-run
-test-e2e-router-run: image-pull ## Ensure images are present, then run router e2e tests
+.PHONY: test-e2e-run
+test-e2e-run: image-pull ## Ensure images are present, then run e2e tests
 	@printf "\033[33;1m==== Running End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		$(BUILDER_IMAGE) ./test/scripts/test-e2e-router.sh
 
-.PHONY: test-e2e-router
-test-e2e-router: image-build-builder image-build ## Build images and run router e2e tests
-	$(MAKE) test-e2e-router-run
-
 .PHONY: test-e2e
-test-e2e: test-e2e-gaie test-e2e-router ## Run all end-to-end tests sequentially
+test-e2e: image-build-builder image-build ## Build images and run e2e tests
+	$(MAKE) test-e2e-run
 
 
 .PHONY: bench-tokenizer
@@ -358,6 +338,22 @@ helm-push-gateway: ## Package and push the llm-d-router-gateway Helm chart.
 .PHONY: helm-push-standalone
 helm-push-standalone: ## Package and push the llm-d-router-standalone Helm chart.
 	$(MAKE) helm-push CHART=llm-d-router-standalone
+
+
+##@ Release
+
+BUNDLE_VERSION ?= main-dev
+export BUNDLE_VERSION
+
+.PHONY: artifacts
+artifacts: generate yq check-kustomize ## Generate release artifacts (CRD manifests).
+	if [ -d artifacts ]; then rm -rf artifacts; fi
+	mkdir -p artifacts
+	kubectl kustomize config/crd > artifacts/manifests_all.yaml
+	$(YQ) -P 'select(.spec.group == "llm-d.ai")' artifacts/manifests_all.yaml > artifacts/manifests.yaml
+	rm -f artifacts/manifests_all.yaml
+	$(YQ) -P 'select(.spec.versions | map(.name == "v1") | any)' artifacts/manifests.yaml > artifacts/v1-manifests.yaml
+	$(YQ) -P 'select(.spec.versions | map(.name != "v1") | all)' artifacts/manifests.yaml > artifacts/experimental-manifests.yaml
 
 
 ##@ Coverage

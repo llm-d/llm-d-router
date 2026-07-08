@@ -227,8 +227,7 @@ func (a *flowQueueAccessor) Name() string { return a.mq.queue.Name() }
 func (a *flowQueueAccessor) Capabilities() []flowcontrol.QueueCapability {
 	return a.mq.queue.Capabilities()
 }
-func (a *flowQueueAccessor) PeekHead() flowcontrol.QueueItemAccessor { return a.mq.queue.PeekHead() }
-func (a *flowQueueAccessor) PeekTail() flowcontrol.QueueItemAccessor { return a.mq.queue.PeekTail() }
+func (a *flowQueueAccessor) Peek() flowcontrol.QueueItemAccessor { return a.mq.queue.Peek() }
 
 // --- Read-only methods from the managedQueue wrapper ---
 func (a *flowQueueAccessor) Len() int                                   { return a.mq.Len() }
