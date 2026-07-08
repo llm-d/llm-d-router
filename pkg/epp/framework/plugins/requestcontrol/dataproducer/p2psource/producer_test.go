@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package kvcachesource
+package p2psource
 
 import (
 	"encoding/json"
@@ -56,24 +56,24 @@ func decodeOnly(ep scheduling.Endpoint) *scheduling.SchedulingResult {
 	}
 }
 
-// Factory defaults: delta 1, default PrefixCacheMatchInfo producer.
+// Factory defaults: token delta 1, default PrefixCacheMatchInfo producer.
 func TestPluginFactory_Defaults(t *testing.T) {
 	p, err := PluginFactory("test", nil, nil)
 	require.NoError(t, err)
 	producer := p.(*Producer)
-	assert.Equal(t, 1, producer.minCachedBlockDelta)
+	assert.Equal(t, 1, producer.minCachedTokenDelta)
 	assert.Equal(t, attrprefix.PrefixCacheMatchInfoDataKey.String(), producer.prefixMatchDataKey.String())
 }
 
-// Factory wires minCachedBlockDelta and binds the data key to the configured
+// Factory wires minCachedTokenDelta and binds the data key to the configured
 // producer name.
 func TestPluginFactory_WiresConfig(t *testing.T) {
 	dec := json.NewDecoder(strings.NewReader(
-		`{"prefixMatchInfoProducerName": "precise", "minCachedBlockDelta": 3}`))
+		`{"prefixMatchInfoProducerName": "precise", "minCachedTokenDelta": 33}`))
 	p, err := PluginFactory("test", dec, nil)
 	require.NoError(t, err)
 	producer := p.(*Producer)
-	assert.Equal(t, 3, producer.minCachedBlockDelta)
+	assert.Equal(t, 33, producer.minCachedTokenDelta)
 	assert.Equal(t,
 		attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("precise").String(),
 		producer.prefixMatchDataKey.String())
@@ -81,15 +81,15 @@ func TestPluginFactory_WiresConfig(t *testing.T) {
 
 // Factory rejects an explicit delta below 1.
 func TestPluginFactory_RejectsZeroDelta(t *testing.T) {
-	dec := json.NewDecoder(strings.NewReader(`{"minCachedBlockDelta": 0}`))
+	dec := json.NewDecoder(strings.NewReader(`{"minCachedTokenDelta": 0}`))
 	_, err := PluginFactory("test", dec, nil)
 	require.Error(t, err)
 }
 
-// Produce stashes the endpoint with the highest unweighted cached-block count.
+// Produce stashes the endpoint holding the most cached prompt tokens.
 func TestProduce_StashesBestMatchPeer(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	p := New("test", Config{MinCachedBlockDelta: 1})
+	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-stash"}
 	eps := []scheduling.Endpoint{
@@ -101,13 +101,13 @@ func TestProduce_StashesBestMatchPeer(t *testing.T) {
 	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
 	require.True(t, ok, "expected best-match attribute to be stashed")
 	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
-	assert.Equal(t, 3, best.cachedBlocks)
+	assert.Equal(t, 48, best.cachedTokens)
 }
 
 // No candidate holds any cached block: nothing to pull, no attribute.
 func TestProduce_NoCachedBlocks_NoStash(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	p := New("test", Config{MinCachedBlockDelta: 1})
+	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-nocache"}
 	eps := []scheduling.Endpoint{
@@ -123,7 +123,7 @@ func TestProduce_NoCachedBlocks_NoStash(t *testing.T) {
 // Endpoints without PrefixCacheMatchInfo are treated as holding 0 blocks.
 func TestProduce_MissingMatchInfo_TreatedAsZero(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	p := New("test", Config{MinCachedBlockDelta: 1})
+	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	bare := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
 		NamespacedName: k8stypes.NamespacedName{Name: "pod-bare"},
@@ -139,13 +139,13 @@ func TestProduce_MissingMatchInfo_TreatedAsZero(t *testing.T) {
 	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
 }
 
-// Best peer exceeds the decode pod's cached blocks by >= delta: header set.
+// Best peer exceeds the decode pod's cached tokens by >= delta: header set.
 func TestPreRequest_SetsKVCacheSourceHeader(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	p := New("test", Config{MinCachedBlockDelta: 1})
+	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-hdr", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedBlocks: 3})
+	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: 48})
 
 	p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1)))
 
@@ -155,10 +155,10 @@ func TestPreRequest_SetsKVCacheSourceHeader(t *testing.T) {
 // Delta below threshold: header not set.
 func TestPreRequest_DeltaBelowThreshold_NoHeader(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	p := New("test", Config{MinCachedBlockDelta: 2})
+	p := New("test", Config{MinCachedTokenDelta: 17})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-low", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedBlocks: 2})
+	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: 32})
 
 	p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1)))
 
@@ -168,10 +168,10 @@ func TestPreRequest_DeltaBelowThreshold_NoHeader(t *testing.T) {
 // The chosen decode pod is itself the best match: header not set.
 func TestPreRequest_BestIsChosen_NoHeader(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	p := New("test", Config{MinCachedBlockDelta: 1})
+	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-self", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.1:8080", cachedBlocks: 2})
+	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.1:8080", cachedTokens: 32})
 
 	p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 2)))
 
@@ -182,10 +182,10 @@ func TestPreRequest_BestIsChosen_NoHeader(t *testing.T) {
 // header is not set even if the decode pod holds fewer blocks.
 func TestPreRequest_PrefillProfile_BestIsPrefill_NoHeader(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	p := New("test", Config{MinCachedBlockDelta: 1})
+	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-pd-self", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedBlocks: 3})
+	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: 48})
 
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
@@ -202,10 +202,10 @@ func TestPreRequest_PrefillProfile_BestIsPrefill_NoHeader(t *testing.T) {
 // P/D: a third pod out-caches the chosen prefill pod by >= delta: header set.
 func TestPreRequest_PrefillProfile_HeaderFromThirdPod(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	p := New("test", Config{MinCachedBlockDelta: 1})
+	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-pd-third", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.3:8080", cachedBlocks: 4})
+	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.3:8080", cachedTokens: 64})
 
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
@@ -223,7 +223,7 @@ func TestPreRequest_PrefillProfile_HeaderFromThirdPod(t *testing.T) {
 // stashed.
 func TestPreRequest_DeletesInboundHeader(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	p := New("test", Config{MinCachedBlockDelta: 1})
+	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	req := &scheduling.InferenceRequest{
 		RequestID: "req-spoof",
@@ -238,7 +238,7 @@ func TestPreRequest_DeletesInboundHeader(t *testing.T) {
 // Consumes declares the PrefixCacheMatchInfo dependency name-bound to the
 // configured producer.
 func TestConsumes_DeclaresPrefixCacheMatchInfo(t *testing.T) {
-	p := New("test", Config{PrefixMatchInfoProducerName: "precise", MinCachedBlockDelta: 1})
+	p := New("test", Config{PrefixMatchInfoProducerName: "precise", MinCachedTokenDelta: 1})
 	deps := p.Consumes()
 	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("precise")
 	_, ok := deps.Required[key]

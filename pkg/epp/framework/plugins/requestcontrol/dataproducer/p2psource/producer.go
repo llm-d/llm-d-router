@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package kvcachesource emits the KV cache source header: the candidate pod
+// Package p2psource emits the KV cache source header: the candidate pod
 // holding the most cached prefix KV blocks for the request, for the routing
 // sidecar to pull from over the P2P connector instead of recomputing them.
-package kvcachesource
+package p2psource
 
 import (
 	"context"
@@ -35,25 +35,25 @@ import (
 )
 
 const (
-	// PluginType is the registered type name of the kv-cache-source-producer.
-	PluginType = "kv-cache-source-producer"
+	// PluginType is the registered type name of the p2p-source-producer.
+	PluginType = "p2p-source-producer"
 
 	// prefillProfile is the disaggregation prefill profile name; when its
 	// result carries an endpoint, that endpoint computes the prefix.
 	prefillProfile = "prefill"
 
-	defaultMinCachedBlockDelta = 1
+	defaultMinCachedTokenDelta = 1
 )
 
-// Config configures the kv-cache-source-producer.
+// Config configures the p2p-source-producer.
 type Config struct {
 	// PrefixMatchInfoProducerName is the name of the data producer that
 	// produces PrefixCacheMatchInfo. Empty selects the default producer.
 	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
-	// MinCachedBlockDelta is the minimum number of cached blocks the best
-	// peer must hold beyond the pod computing the prefix for the header to
-	// be set. Must be >= 1; defaults to 1.
-	MinCachedBlockDelta int `json:"minCachedBlockDelta,omitempty"`
+	// MinCachedTokenDelta is the minimum number of cached prompt tokens the
+	// best peer must hold beyond the pod computing the prefix for the header
+	// to be set. Must be >= 1; defaults to 1.
+	MinCachedTokenDelta int `json:"minCachedTokenDelta,omitempty"`
 }
 
 // compile-time type assertions
@@ -63,38 +63,38 @@ var (
 )
 
 // Producer stashes the candidate endpoint holding the most cached prefix
-// blocks during Produce, and in PreRequest sets routing.KVCacheSourceHeader
+// tokens during Produce, and in PreRequest sets routing.KVCacheSourceHeader
 // to that peer when it out-caches the pod computing the prefix (the prefill
 // endpoint under P/D disaggregation, the primary endpoint otherwise) by at
-// least minCachedBlockDelta blocks.
+// least minCachedTokenDelta tokens.
 type Producer struct {
 	typedName           plugin.TypedName
 	prefixMatchDataKey  plugin.DataKey
-	minCachedBlockDelta int
+	minCachedTokenDelta int
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
 // Producer.
 func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
-	cfg := Config{MinCachedBlockDelta: defaultMinCachedBlockDelta}
+	cfg := Config{MinCachedTokenDelta: defaultMinCachedTokenDelta}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PluginType, err)
 		}
 	}
-	if cfg.MinCachedBlockDelta < 1 {
-		return nil, fmt.Errorf("%s: minCachedBlockDelta must be >= 1, got %d", PluginType, cfg.MinCachedBlockDelta)
+	if cfg.MinCachedTokenDelta < 1 {
+		return nil, fmt.Errorf("%s: minCachedTokenDelta must be >= 1, got %d", PluginType, cfg.MinCachedTokenDelta)
 	}
 	return New(name, cfg), nil
 }
 
-// New constructs a kv-cache-source-producer bound to the configured
+// New constructs a p2p-source-producer bound to the configured
 // PrefixCacheMatchInfo producer name.
 func New(name string, cfg Config) *Producer {
 	return &Producer{
 		typedName:           plugin.TypedName{Type: PluginType, Name: name},
 		prefixMatchDataKey:  attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
-		minCachedBlockDelta: cfg.MinCachedBlockDelta,
+		minCachedTokenDelta: cfg.MinCachedTokenDelta,
 	}
 }
 
@@ -113,12 +113,12 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 	}
 }
 
-// bestMatchPeer is the candidate endpoint holding the highest unweighted
-// cached-block count for the request, stashed as a request attribute so
-// PreRequest can compare it against the scheduled endpoint.
+// bestMatchPeer is the candidate endpoint holding the most cached prompt
+// tokens for the request, stashed as a request attribute so PreRequest can
+// compare it against the scheduled endpoint.
 type bestMatchPeer struct {
 	hostPort     string
-	cachedBlocks int
+	cachedTokens int
 }
 
 // attrKey returns the request-attribute key carrying the best-match peer,
@@ -128,8 +128,8 @@ func (p *Producer) attrKey() string {
 }
 
 // Produce reads each candidate's PrefixCacheMatchInfo and stashes the
-// endpoint with the highest unweighted cached-block count on the request.
-// No-op when no candidate holds any cached block.
+// endpoint holding the most cached prompt tokens on the request. No-op when
+// no candidate holds any cached block.
 func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
 	best := bestMatchPeer{}
 	for _, ep := range endpoints {
@@ -137,25 +137,25 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		if md == nil {
 			continue
 		}
-		if cached := p.cachedBlockCount(ep); cached > best.cachedBlocks {
+		if cached := p.cachedTokenCount(ep); cached > best.cachedTokens {
 			best = bestMatchPeer{
 				hostPort:     fmt.Sprintf("%s:%s", md.Address, md.Port),
-				cachedBlocks: cached,
+				cachedTokens: cached,
 			}
 		}
 	}
-	if best.cachedBlocks > 0 {
+	if best.cachedTokens > 0 {
 		request.PutAttribute(p.attrKey(), &best)
 	}
 	log.FromContext(ctx).WithName(p.typedName.String()).V(logging.TRACE).Info("Produce completed",
 		"requestID", request.RequestID, "endpoints", len(endpoints),
-		"bestHostPort", best.hostPort, "bestCachedBlocks", best.cachedBlocks)
+		"bestHostPort", best.hostPort, "bestCachedTokens", best.cachedTokens)
 	return nil
 }
 
 // PreRequest sets routing.KVCacheSourceHeader to the best-match peer stashed
 // by Produce when it out-caches the pod computing the prefix by at least
-// minCachedBlockDelta blocks. Any inbound value of the header is removed.
+// minCachedTokenDelta tokens. Any inbound value of the header is removed.
 func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
 	logger := log.FromContext(ctx).WithName(p.typedName.String()).V(logging.TRACE)
 	delete(request.Headers, routing.KVCacheSourceHeader)
@@ -179,14 +179,14 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		return
 	}
 	computingHostPort := fmt.Sprintf("%s:%s", md.Address, md.Port)
-	computingCached := p.cachedBlockCount(endpoint)
+	computingCached := p.cachedTokenCount(endpoint)
 	logger.Info("evaluating KV cache source",
-		"requestID", request.RequestID, "best", best.hostPort, "bestCachedBlocks", best.cachedBlocks,
-		"computing", computingHostPort, "computingCachedBlocks", computingCached)
+		"requestID", request.RequestID, "best", best.hostPort, "bestCachedTokens", best.cachedTokens,
+		"computing", computingHostPort, "computingCachedTokens", computingCached)
 	if best.hostPort == computingHostPort {
 		return
 	}
-	if best.cachedBlocks-computingCached < p.minCachedBlockDelta {
+	if best.cachedTokens-computingCached < p.minCachedTokenDelta {
 		return
 	}
 
@@ -197,9 +197,10 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	logger.Info("set KV cache source header", "requestID", request.RequestID, "value", best.hostPort)
 }
 
-// cachedBlockCount returns the endpoint's unweighted cached-block count from
-// its PrefixCacheMatchInfo, or 0 when absent.
-func (p *Producer) cachedBlockCount(ep scheduling.Endpoint) int {
+// cachedTokenCount returns the endpoint's cached prompt tokens (unweighted
+// cached-block count times the block size) from its PrefixCacheMatchInfo,
+// or 0 when absent.
+func (p *Producer) cachedTokenCount(ep scheduling.Endpoint) int {
 	raw, ok := ep.Get(p.prefixMatchDataKey.String())
 	if !ok {
 		return 0
@@ -208,5 +209,5 @@ func (p *Producer) cachedBlockCount(ep scheduling.Endpoint) int {
 	if !ok {
 		return 0
 	}
-	return info.CachedBlockCount()
+	return info.CachedBlockCount() * info.BlockSizeTokens()
 }
