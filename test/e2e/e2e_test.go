@@ -90,6 +90,16 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 	})
 
 	ginkgo.When("Running leader election", func() {
+		// These specs delete the leader EPP and assert prompt failover to a new
+		// leader. Disable the graceful-drain window so the deleted leader stops
+		// serving immediately instead of lingering for the default drain period.
+		ginkgo.BeforeEach(func() {
+			eppExtraArgs = []string{"--drain-timeout=0"}
+		})
+		ginkgo.AfterEach(func() {
+			eppExtraArgs = nil
+		})
+
 		ginkgo.It("Should elect one leader and have other pods as not ready", func() {
 			numOfPods := 3
 			numTargetPorts := 1
