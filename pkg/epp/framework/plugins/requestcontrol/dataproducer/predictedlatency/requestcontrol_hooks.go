@@ -19,7 +19,6 @@ package predictedlatency
 import (
 	"context"
 	"errors"
-	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -162,7 +161,7 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 		if predictedLatencyCtx.ttft > 0 {
 			// In non-streaming mode, TTFT represents full e2e latency.
 			logger.V(logutil.TRACE).Info("Averages calculated", "avgActualTTFT", predictedLatencyCtx.ttft, "avgPredictedTTFT", predictedLatencyCtx.predictedTTFT)
-			recordRequestTTFT(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, request.FairnessID, strconv.Itoa(request.Objectives.Priority), predictedLatencyCtx.ttft/1000)
+			recordRequestTTFT(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft/1000)
 			recordRequestPredictedTTFT(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.predictedTTFT/1000)
 			if predictedLatencyCtx.ttftSLO > 0 {
 				recordRequestTTFTWithSLO(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx.incomingModelName, request.TargetModel, predictedLatencyCtx.ttft, predictedLatencyCtx.ttftSLO)

@@ -78,7 +78,7 @@ func TestStreamMetricsInterceptor_Propagation(t *testing.T) {
 // Bare ctx.Err() classifies as Canceled/DeadlineExceeded, not Unknown.
 func TestStreamMetricsInterceptor_ContextErrorClassification(t *testing.T) {
 	metrics.RegisterGRPCStreamMetrics()
-	const name = "llm_d_router_epp_extproc_streams_total"
+	const name = "llm_d_epp_extproc_streams_total"
 
 	for _, tc := range []struct {
 		in   error
@@ -101,7 +101,7 @@ func TestStreamMetricsInterceptor_ContextErrorClassification(t *testing.T) {
 // Only the ext_proc Process stream is recorded; health Watch passes through.
 func TestStreamMetricsInterceptor_MethodScope(t *testing.T) {
 	metrics.RegisterGRPCStreamMetrics()
-	const name = "llm_d_router_epp_extproc_streams_total"
+	const name = "llm_d_epp_extproc_streams_total"
 
 	before, err := promtestutil.GatherAndCount(ctrlmetrics.Registry, name)
 	require.NoError(t, err)

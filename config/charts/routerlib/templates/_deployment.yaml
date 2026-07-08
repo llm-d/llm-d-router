@@ -25,6 +25,10 @@ spec:
       labels:
         {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
         {{- include "llm-d-router.modeLabels" . | nindent 8 }}
+      {{- with .Values.router.epp.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict }}
       {{- $proxyType := include "llm-d-router.proxyType" . | trim }}
@@ -132,6 +136,9 @@ spec:
           {{- if gt (.Values.router.epp.replicas | int) 1 }}
               - --ha-enable-leader-election
           {{- end }}
+          {{- $grpcHealthPort := .Values.router.epp.grpcHealthPort | default 9003 }}
+              - --grpc-health-port
+              - "{{ $grpcHealthPort }}"
               # Pass additional flags via the router.epp.flags field in values.yaml.
               # Render them as --flag=value so boolean values are parsed correctly.
           {{- range $key, $value := $eppFlags }}
@@ -153,7 +160,7 @@ spec:
             - name: grpc
               containerPort: 9002
             - name: grpc-health
-              containerPort: 9003
+              containerPort: {{ $grpcHealthPort }}
             - name: metrics
               containerPort: 9090
         {{- if .Values.router.epp.extraContainerPorts }}
@@ -162,11 +169,11 @@ spec:
           livenessProbe:
           {{- if gt (.Values.router.epp.replicas | int) 1 }}
             grpc:
-              port: 9003
+              port: {{ $grpcHealthPort }}
               service: liveness
           {{- else }}
             grpc:
-              port: 9003
+              port: {{ $grpcHealthPort }}
               service: inference-extension
           {{- end }}
             initialDelaySeconds: 5
@@ -174,11 +181,11 @@ spec:
           readinessProbe:
           {{- if gt (.Values.router.epp.replicas | int) 1 }}
             grpc:
-              port: 9003
+              port: {{ $grpcHealthPort }}
               service: readiness
           {{- else }}
             grpc:
-              port: 9003
+              port: {{ $grpcHealthPort }}
               service: inference-extension
           {{- end }}
             periodSeconds: 2

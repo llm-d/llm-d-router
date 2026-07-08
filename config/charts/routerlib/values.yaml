@@ -11,7 +11,9 @@ epp:
     tag: main
     pullPolicy: Always
   extProcPort: 9002
-  
+  # gRPC port serving EPP liveness and readiness checks, 9003 if unset.
+  # grpcHealthPort: 9003
+
   parsers: [] # e.g. ["openai-parser", "anthropic-parser"], or empty for auto-selection
 
   # Metrics DataSource Configuration
@@ -57,13 +59,18 @@ epp:
   # EPP container resources: CPU limits unset for burst capacity, memory capped at 16Gi
   resources:
     requests:
-      cpu: "4"
+      cpu: "8"
       memory: 8Gi
     limits:
       memory: 16Gi
 
   affinity: {}
   tolerations: []
+
+  # Annotations added to the EPP pod template. Useful for clusters that rely on
+  # annotation-based Prometheus scraping (prometheus.io/{scrape,port,path}) or
+  # Istio metrics-merging, rather than a ServiceMonitor or GMP.
+  podAnnotations: {}
 
 # By default no proxy is configured
 proxy:
@@ -121,7 +128,8 @@ monitoring:
   prometheus:
     enabled: false
     auth:
-      # To allow unauthenticated /metrics access (e.g., for debugging with curl), set to false
+      # Set to false to allow unauthenticated /metrics access. Required for annotation-based
+      # Prometheus scraping and Istio metrics-merging, which do not send Bearer tokens.
       enabled: true
       # Service account token secret for authentication
       secretName: inference-gateway-sa-metrics-reader-secret
@@ -158,10 +166,9 @@ latencyPredictor:
   # Training Server Configuration
   trainingServer:
     image:
-      # TODO: Update this default once llm-d owns and publishes this image.
-      registry: us-central1-docker.pkg.dev/k8s-staging-images
-      repository: gateway-api-inference-extension/latency-training-server
-      tag: main
+      registry: ghcr.io/llm-d
+      repository: llm-d-latency-predictor-training-server-dev
+      tag: latest
       pullPolicy: Always
     port: 8000
     resources:
@@ -200,10 +207,9 @@ latencyPredictor:
     count: 1
     startPort: 8001
     image:
-      # TODO: Update this default once llm-d owns and publishes this image.
-      registry: us-central1-docker.pkg.dev/k8s-staging-images
-      repository: gateway-api-inference-extension/latency-prediction-server
-      tag: main
+      registry: ghcr.io/llm-d
+      repository: llm-d-latency-predictor-prediction-server-dev
+      tag: latest
       pullPolicy: Always
     resources:
       requests:

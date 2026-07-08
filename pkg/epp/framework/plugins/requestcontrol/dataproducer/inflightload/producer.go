@@ -50,6 +50,14 @@ type Config struct {
 	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
 	// the in-flight token counter. Defaults to false.
 	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
+	// OutputRatio is the estimated output-to-input token ratio used when
+	// AddEstimatedOutputTokens is true: estimated output = round(inputTokens * OutputRatio).
+	// Must be non-negative. Unset defaults to DefaultOutputRatio.
+	OutputRatio *float64 `json:"outputRatio,omitempty"`
+	// MaxEstimatedOutputTokens optionally caps the estimated output tokens added per
+	// request when AddEstimatedOutputTokens is true, regardless of input length or
+	// the client-requested output cap. Must be non-negative. Unset means no cap.
+	MaxEstimatedOutputTokens *int64 `json:"maxEstimatedOutputTokens,omitempty"`
 	// PrefixMatchInfoProducerName selects which prefix-cache producer's
 	// PrefixCacheMatchInfo to read for the cached-prefix discount. Empty defaults
 	// to the approximate-prefix producer; set it to a precise-prefix-cache
@@ -77,11 +85,23 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		}
 	}
 
+	outputRatio := DefaultOutputRatio
+	if cfg.OutputRatio != nil {
+		if *cfg.OutputRatio < 0 {
+			return nil, fmt.Errorf("outputRatio must be non-negative, got %v", *cfg.OutputRatio)
+		}
+		outputRatio = *cfg.OutputRatio
+	}
+
+	if cfg.MaxEstimatedOutputTokens != nil && *cfg.MaxEstimatedOutputTokens < 0 {
+		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
+	}
+
 	return &InFlightLoadProducer{
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:           newConcurrencyTracker(),
 		tokenTracker:             newConcurrencyTracker(),
-		tokenEstimator:           NewSimpleTokenEstimator(),
+		tokenEstimator:           NewSimpleTokenEstimatorWithConfig(outputRatio, cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
@@ -110,6 +130,7 @@ type InFlightLoadProducer struct {
 	dk                       fwkplugin.DataKey
 	prefixMatchInfoDK        fwkplugin.DataKey
 	uncachedRequestTokensDk  fwkplugin.DataKey
+	registeredEndpoints      sync.Map // key: string (NamespacedName), value: datalayer.Endpoint
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -119,58 +140,42 @@ type InFlightLoadProducer struct {
 // can race safely: whichever swaps first does the decrement, the other
 // sees 0 and is a no-op.
 type addedTokensEntry struct {
-	endpointID     string
-	tokens         atomic.Int64
-	tokenTracker   *concurrencyTracker
-	requestTracker *concurrencyTracker
+	tokens atomic.Int64
+	// tokenCounter and requestCounter point at the exact tracker counter instances this request
+	// incremented in PreRequest. A release decrements these instances directly, so it always lands
+	// on the counter that received the increment. If the endpoint flaps (delete + recreate under the
+	// same NamespacedName) between increment and release, the captured instance is the orphaned
+	// counter; decrementing it leaves the live counter untouched.
+	tokenCounter   *atomic.Int64
+	requestCounter *atomic.Int64
 	requests       atomic.Int32
 }
 
 var _ fwkplugin.EvictableStateData = (*addedTokensEntry)(nil)
 
-// Clone returns a distinct copy of the entry with the current atomic values.
-// The tracker references remain shared, but the cloned state object itself is
-// independent so later mutation or eviction of the clone does not alias the
-// original entry.
+// Clone returns a distinct copy of the entry with the current atomic values. The counter-instance
+// pointers stay shared (the clone releases against the same counters the original incremented), but
+// the cloned state object itself is independent so later mutation or eviction of the clone does not
+// alias the original entry.
 func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 	if e == nil {
 		return nil
 	}
 	clone := &addedTokensEntry{
-		endpointID:     e.endpointID,
-		tokenTracker:   e.tokenTracker,
-		requestTracker: e.requestTracker,
+		tokenCounter:   e.tokenCounter,
+		requestCounter: e.requestCounter,
 	}
 	clone.tokens.Store(e.tokens.Load())
 	clone.requests.Store(e.requests.Load())
 	return clone
 }
 
-// addIfPresent applies delta only when the endpoint is still tracked.
-// This avoids recreating a deleted endpoint with a negative in-flight count
-// during delayed eviction cleanup.
-func (t *concurrencyTracker) addIfPresent(endpointID string, delta int64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	counter, ok := t.counts[endpointID]
-	if !ok {
-		return
-	}
-	counter.Add(delta)
-}
-
-// decIfPresent decrements the endpoint only when it is still tracked.
-func (t *concurrencyTracker) decIfPresent(endpointID string) {
-	t.addIfPresent(endpointID, -1)
-}
-
 func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
 	if t := e.tokens.Swap(0); t != 0 {
-		e.tokenTracker.addIfPresent(e.endpointID, -t)
+		decrementClamped(e.tokenCounter, t)
 	}
 	if e.requests.Swap(0) != 0 {
-		e.requestTracker.decIfPresent(e.endpointID)
+		decrementClamped(e.requestCounter, 1)
 	}
 }
 
@@ -283,9 +288,19 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 
 	switch event.Type {
 	case datalayer.EventDelete:
+		// This guard assumes the datalayer delivers the same Endpoint pointer for
+		// delete as was used for the preceding add. If the datalayer ever
+		// reconstructs endpoint objects on delete, this check would need to use a
+		// generation counter instead of pointer identity.
+		if registered, ok := p.registeredEndpoints.Load(id); ok && registered != event.Endpoint {
+			log.FromContext(ctx).V(logutil.DEFAULT).Info("Ignoring stale delete for replaced endpoint", "endpoint", id)
+			break
+		}
+		p.registeredEndpoints.Delete(id)
 		p.DeleteEndpoint(id)
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
 	case datalayer.EventAddOrUpdate:
+		p.registeredEndpoints.Store(id, event.Endpoint)
 		event.Endpoint.GetAttributes().Put(p.dk.String(), &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{
@@ -310,7 +325,7 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 			continue
 		}
 		if request != nil {
-			tokens := p.estimateRequestTokens(e, inputTokens)
+			tokens := p.estimateRequestTokens(e, request, inputTokens)
 			e.Put(p.uncachedRequestTokensDk.String(), &attrconcurrency.UncachedRequestTokens{
 				Tokens: tokens,
 			})
@@ -351,20 +366,19 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			continue
 		}
 		eid := endpoint.GetMetadata().NamespacedName.String()
-		p.requestTracker.inc(eid)
+		requestCounter := p.requestTracker.inc(eid)
 
 		// Compute the uncached prompt portion this endpoint must actually compute.
 		// Prefer the prefix producer's view (real tokens) when available so the
 		// match-length and the input length are in the same units; fall back to
 		// the (estimated) input tokens otherwise.
-		tokens := p.estimateRequestTokens(endpoint, inputTokens)
+		tokens := p.estimateRequestTokens(endpoint, request, inputTokens)
 
-		p.tokenTracker.add(eid, tokens)
+		tokenCounter := p.tokenTracker.add(eid, tokens)
 
 		entry := &addedTokensEntry{
-			endpointID:     eid,
-			tokenTracker:   p.tokenTracker,
-			requestTracker: p.requestTracker,
+			tokenCounter:   tokenCounter,
+			requestCounter: requestCounter,
 		}
 		entry.tokens.Store(tokens)
 		entry.requests.Store(1)
@@ -376,12 +390,16 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	}
 }
 
-func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, inputTokens int64) int64 {
+func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK.String())
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
+		var maxOutputTokens *int64
+		if request != nil && request.Body != nil {
+			maxOutputTokens = request.Body.MaxOutputTokens
+		}
 		// Output tokens are based on the full input, not the cached portion.
-		tokens += p.tokenEstimator.EstimateOutput(inputTokens)
+		tokens += p.tokenEstimator.EstimateOutput(inputTokens, maxOutputTokens)
 	}
 	return tokens
 }
@@ -479,7 +497,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
 		if t := entry.tokens.Swap(0); t != 0 {
-			entry.tokenTracker.addIfPresent(entry.endpointID, -t)
+			decrementClamped(entry.tokenCounter, t)
 		}
 	}
 }
@@ -612,18 +630,22 @@ func (t *concurrencyTracker) snapshot() map[string]int64 {
 	return result
 }
 
-func (t *concurrencyTracker) inc(endpointID string) {
-	t.add(endpointID, 1)
+func (t *concurrencyTracker) inc(endpointID string) *atomic.Int64 {
+	return t.add(endpointID, 1)
 }
 
-func (t *concurrencyTracker) add(endpointID string, delta int64) {
+// add applies delta to the endpoint's counter, creating it if absent, and returns the exact
+// *atomic.Int64 instance that was mutated. Callers retain the returned pointer so the matching
+// decrement always lands on this same instance, even if the endpoint is later deleted (flap) and a
+// new counter is created under the same ID. See addedTokensEntry.
+func (t *concurrencyTracker) add(endpointID string, delta int64) *atomic.Int64 {
 	t.mu.RLock()
 	counter, exists := t.counts[endpointID]
 	t.mu.RUnlock()
 
 	if exists {
 		counter.Add(delta)
-		return
+		return counter
 	}
 
 	t.mu.Lock()
@@ -631,12 +653,39 @@ func (t *concurrencyTracker) add(endpointID string, delta int64) {
 
 	if counter, exists = t.counts[endpointID]; exists {
 		counter.Add(delta)
-		return
+		return counter
 	}
 
 	counter = &atomic.Int64{}
 	counter.Store(delta)
 	t.counts[endpointID] = counter
+	return counter
+}
+
+// decrementClamped subtracts delta from counter with a hard floor at zero, following the canonical
+// CAS-floor pattern of predictedlatency.decrementEndpointCounter. It takes a bare *atomic.Int64,
+// not a sync.Map entry, because callers decrement the captured counter instance for their request,
+// which may be an orphaned counter after an endpoint flap and so must not be looked up in or
+// deleted from the live map.
+//
+// The floor is defense-in-depth: the captured-instance routing already keeps a release on its own
+// counter, and the floor additionally guarantees a release can never drive a counter negative. The
+// CAS loop keeps the floor race-safe against a concurrent inc on the same live instance: a plain
+// Add then Store(0) could clobber that inc.
+func decrementClamped(counter *atomic.Int64, delta int64) {
+	for {
+		current := counter.Load()
+		if current <= 0 {
+			return
+		}
+		next := current - delta
+		if next < 0 {
+			next = 0
+		}
+		if counter.CompareAndSwap(current, next) {
+			return
+		}
+	}
 }
 
 func (t *concurrencyTracker) delete(endpointID string) {

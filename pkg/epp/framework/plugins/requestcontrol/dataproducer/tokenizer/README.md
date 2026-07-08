@@ -108,9 +108,7 @@ Plugin config — dedicated render Service:
       url: "http://vllm-render.default.svc.cluster.local:8000"
 ```
 
-A complete sample config that pairs this with `precise-prefix-cache-scorer`
-is at
-[`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
+A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
 
 ## Migration from `udsTokenizerConfig`
 

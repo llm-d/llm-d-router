@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sessionaffinity_test
 
 import (
@@ -32,16 +48,19 @@ func TestSessionAffinity_Score(t *testing.T) {
 	// valid session token for endpointB
 	validSessionTokenForEndpointB := base64.StdEncoding.EncodeToString([]byte(endpointB.GetMetadata().NamespacedName.String()))
 
-	sessionAffinityScorer := sessionaffinity.NewSessionAffinity()
+	sessionAffinityScorer := sessionaffinity.NewSessionAffinity("test-scorer", "", "")
+	customHeaderScorer := sessionaffinity.NewSessionAffinity("test-scorer", "x-custom-session", "")
 
 	tests := []struct {
 		name       string
+		scorer     *sessionaffinity.SessionAffinity
 		req        *scheduling.InferenceRequest
 		input      []scheduling.Endpoint
 		wantScores map[scheduling.Endpoint]float64
 	}{
 		{
-			name: "selects correct endpoint : endpointB",
+			name:   "selects correct endpoint : endpointB",
+			scorer: sessionAffinityScorer,
 			req: &scheduling.InferenceRequest{
 				Headers: map[string]string{"x-session-token": validSessionTokenForEndpointB},
 			},
@@ -52,7 +71,32 @@ func TestSessionAffinity_Score(t *testing.T) {
 			},
 		},
 		{
-			name: "no session token",
+			name:   "custom header selects endpointB",
+			scorer: customHeaderScorer,
+			req: &scheduling.InferenceRequest{
+				Headers: map[string]string{"x-custom-session": validSessionTokenForEndpointB},
+			},
+			input: inputEndpoints,
+			wantScores: map[scheduling.Endpoint]float64{
+				endpointA: 0.0,
+				endpointB: 1.0,
+			},
+		},
+		{
+			name:   "custom header ignores default header",
+			scorer: customHeaderScorer,
+			req: &scheduling.InferenceRequest{
+				Headers: map[string]string{"x-session-token": validSessionTokenForEndpointB},
+			},
+			input: inputEndpoints,
+			wantScores: map[scheduling.Endpoint]float64{
+				endpointA: 0.0,
+				endpointB: 0.0,
+			},
+		},
+		{
+			name:   "no session token",
+			scorer: sessionAffinityScorer,
 			req: &scheduling.InferenceRequest{
 				Headers: map[string]string{},
 			},
@@ -64,7 +108,8 @@ func TestSessionAffinity_Score(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid session token",
+			name:   "invalid session token",
+			scorer: sessionAffinityScorer,
 			req: &scheduling.InferenceRequest{
 				Headers: map[string]string{"x-session-token": "garbage-token"},
 			},
@@ -76,9 +121,10 @@ func TestSessionAffinity_Score(t *testing.T) {
 			},
 		},
 		{
-			name:  "no endpoints available",
-			req:   &scheduling.InferenceRequest{},
-			input: []scheduling.Endpoint{},
+			name:   "no endpoints available",
+			scorer: sessionAffinityScorer,
+			req:    &scheduling.InferenceRequest{},
+			input:  []scheduling.Endpoint{},
 			// returns empty score map
 			wantScores: map[scheduling.Endpoint]float64{},
 		},
@@ -86,7 +132,7 @@ func TestSessionAffinity_Score(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			gotScores := sessionAffinityScorer.Score(context.Background(), test.req, test.input)
+			gotScores := test.scorer.Score(context.Background(), test.req, test.input)
 
 			if diff := cmp.Diff(test.wantScores, gotScores); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
@@ -97,7 +143,7 @@ func TestSessionAffinity_Score(t *testing.T) {
 
 func TestSessionAffinity_ResponseHeader(t *testing.T) {
 	targetEndpoint := &fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Name: "pod1"},
+		NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "pod1"},
 		Address:        "1.2.3.4",
 	}
 
@@ -106,8 +152,11 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 
 	tests := []struct {
 		name            string
+		sessionHeader   string
+		profileName     string
 		initialResponse *requestcontrol.Response
 		targetPod       *fwkdl.EndpointMetadata
+		request         *scheduling.InferenceRequest
 		wantHeaders     map[string]string
 	}{
 		{
@@ -123,6 +172,13 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 			wantHeaders:     map[string]string{"x-session-token": wantToken},
 		},
 		{
+			name:            "custom header carries the token",
+			sessionHeader:   "x-custom-session",
+			initialResponse: &requestcontrol.Response{RequestID: "req-custom", Headers: make(map[string]string)},
+			targetPod:       targetEndpoint,
+			wantHeaders:     map[string]string{"x-custom-session": wantToken},
+		},
+		{
 			name:            "nil targetPod should do nothing",
 			initialResponse: &requestcontrol.Response{RequestID: "req-3", Headers: make(map[string]string)},
 			targetPod:       nil,
@@ -133,14 +189,86 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 			initialResponse: nil,
 			targetPod:       targetEndpoint,
 		},
+		{
+			name:            "prefill profile lookup",
+			sessionHeader:   "x-session-token-prefill",
+			profileName:     "prefill",
+			initialResponse: &requestcontrol.Response{RequestID: "req-prefill", Headers: make(map[string]string)},
+			targetPod:       targetEndpoint, // passed targetPod is decode pod, should be ignored
+			request: &scheduling.InferenceRequest{
+				RequestID: "req-prefill",
+				SchedulingResult: &scheduling.SchedulingResult{
+					ProfileResults: map[string]*scheduling.ProfileRunResult{
+						"prefill": {
+							TargetEndpoints: []scheduling.Endpoint{
+								scheduling.NewEndpoint(
+									&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"}},
+									&fwkdl.Metrics{},
+									nil,
+								),
+							},
+						},
+					},
+				},
+			},
+			wantHeaders: map[string]string{"x-session-token-prefill": base64.StdEncoding.EncodeToString([]byte("default/prefill-pod"))},
+		},
+		{
+			name:            "profile set but absent from results (decode-only) writes no header",
+			sessionHeader:   "x-session-token-prefill",
+			profileName:     "prefill",
+			initialResponse: &requestcontrol.Response{RequestID: "req-decode-only", Headers: make(map[string]string)},
+			targetPod:       targetEndpoint,
+			request: &scheduling.InferenceRequest{
+				RequestID: "req-decode-only",
+				SchedulingResult: &scheduling.SchedulingResult{
+					ProfileResults: map[string]*scheduling.ProfileRunResult{},
+				},
+			},
+			wantHeaders: map[string]string{},
+		},
+		{
+			name:            "profile set but TargetEndpoints empty writes no header",
+			sessionHeader:   "x-session-token-prefill",
+			profileName:     "prefill",
+			initialResponse: &requestcontrol.Response{RequestID: "req-empty-ep", Headers: make(map[string]string)},
+			targetPod:       targetEndpoint,
+			request: &scheduling.InferenceRequest{
+				RequestID: "req-empty-ep",
+				SchedulingResult: &scheduling.SchedulingResult{
+					ProfileResults: map[string]*scheduling.ProfileRunResult{
+						"prefill": {TargetEndpoints: []scheduling.Endpoint{}},
+					},
+				},
+			},
+			wantHeaders: map[string]string{},
+		},
+		{
+			name:            "profile set but nil SchedulingResult writes no header",
+			sessionHeader:   "x-session-token-prefill",
+			profileName:     "prefill",
+			initialResponse: &requestcontrol.Response{RequestID: "req-nil-sr", Headers: make(map[string]string)},
+			targetPod:       targetEndpoint,
+			request:         &scheduling.InferenceRequest{RequestID: "req-nil-sr"},
+			wantHeaders:     map[string]string{},
+		},
+		{
+			name:            "profile set but nil request writes no header",
+			sessionHeader:   "x-session-token-prefill",
+			profileName:     "prefill",
+			initialResponse: &requestcontrol.Response{RequestID: "req-nil-req", Headers: make(map[string]string)},
+			targetPod:       targetEndpoint,
+			request:         nil,
+			wantHeaders:     map[string]string{},
+		},
 	}
 
-	s := sessionaffinity.NewSessionAffinity()
 	ctx := utils.NewTestContext(t)
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s.ResponseHeader(ctx, nil, test.initialResponse, test.targetPod)
+			s := sessionaffinity.NewSessionAffinity("test-scorer", test.sessionHeader, test.profileName)
+			s.ResponseHeader(ctx, test.request, test.initialResponse, test.targetPod)
 
 			if test.initialResponse == nil {
 				return

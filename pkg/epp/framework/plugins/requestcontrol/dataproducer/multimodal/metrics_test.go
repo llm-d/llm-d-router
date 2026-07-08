@@ -20,7 +20,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -62,6 +64,23 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 	assert.Equal(t, initialHits+1, testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(ProducerType, testName, podKey, img)))
 }
 
+func TestRecordHitRatioMetrics(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+
+	initial, err := hitRatioHistogram()
+	require.NoError(t, err)
+
+	producer.recordHitRatio(3, 5)
+	producer.recordHitRatio(0, 2)
+	producer.recordHitRatio(0, 0) // requests with no items are not observed
+
+	got, err := hitRatioHistogram()
+	require.NoError(t, err)
+
+	assert.Equal(t, initial.GetSampleCount()+2, got.GetSampleCount())
+	assert.InDelta(t, initial.GetSampleSum()+0.6, got.GetSampleSum(), 0.001)
+}
+
 func TestRegisterEncoderCacheMetrics(t *testing.T) {
 	// registerEncoderCacheMetrics uses sync.Once, so multiple calls are safe.
 	// We can't easily verify registration against a mock registry because it uses the global metrics.Registry.
@@ -83,4 +102,16 @@ func TestProduceRecordsMetrics(t *testing.T) {
 	require.NoError(t, producer.Produce(context.Background(), request, nil))
 
 	assert.Equal(t, initialQueries+2, testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, img)))
+}
+
+func hitRatioHistogram() (*dto.Histogram, error) {
+	observer, err := encoderCacheHitRatio.GetMetricWithLabelValues(ProducerType, testName)
+	if err != nil {
+		return nil, err
+	}
+	metric := &dto.Metric{}
+	if err := observer.(prometheus.Histogram).Write(metric); err != nil {
+		return nil, err
+	}
+	return metric.GetHistogram(), nil
 }

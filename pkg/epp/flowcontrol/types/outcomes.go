@@ -41,6 +41,12 @@ const (
 	// The associated error will wrap `ErrQueueAtCapacity` (and `ErrRejected`).
 	QueueOutcomeRejectedCapacity
 
+	// QueueOutcomeRejectedNoEndpoints indicates rejection at the queue-capacity boundary while the candidate pool had no
+	// endpoints. It is distinguished from `QueueOutcomeRejectedCapacity` so the admission layer can surface genuine
+	// unavailability (HTTP 503) instead of backpressure (HTTP 429) when the pool has scaled to zero.
+	// The associated error will wrap `ErrNoEndpoints` (and `ErrRejected`).
+	QueueOutcomeRejectedNoEndpoints
+
 	// QueueOutcomeRejectedOther indicates rejection for reasons other than capacity before the request was formally
 	// enqueued.
 	// The specific underlying cause can be determined from the associated error (e.g., a nil request, an unregistered
@@ -76,6 +82,8 @@ func (o QueueOutcome) String() string {
 		return "Dispatched"
 	case QueueOutcomeRejectedCapacity:
 		return "RejectedCapacity"
+	case QueueOutcomeRejectedNoEndpoints:
+		return "RejectedNoEndpoints"
 	case QueueOutcomeRejectedOther:
 		return "RejectedOther"
 	case QueueOutcomeEvictedTTL:

@@ -24,6 +24,11 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
+const (
+	RequestParsingExtensionPoint  = "RequestParsing"
+	ResponseParsingExtensionPoint = "ResponseParsing"
+)
+
 // Parser defines the interface for parsing payload(requests and responses).
 type Parser interface {
 	fwkplugin.Plugin

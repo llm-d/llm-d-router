@@ -72,6 +72,7 @@ import (
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
+	programaware "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/program-aware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
@@ -82,6 +83,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/probabilisticadmitter"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/burstprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	mmproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/multimodal"
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
@@ -99,6 +101,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
+	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/random"
@@ -285,7 +288,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		return nil, nil, err
 	}
 
-	startCrdReconcilers := opts.EndpointSelector == "" // If endpointSelector is empty, it means it's not in the standalone mode. Then we should start the inferencePool and other CRD Reconciler.
+	startCrdReconcilers := opts.EndpointSelector == nil // If endpointSelector is nil, it means it's not in the standalone mode. Then we should start the inferencePool and other CRD Reconciler.
 	controllerCfg := runserver.NewControllerConfig(startCrdReconcilers)
 	if err := controllerCfg.PopulateControllerConfig(cfg); err != nil {
 		setupLog.Error(err, "Failed to populate controller config")
@@ -431,38 +434,31 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 func NewEndpointPoolFromOptions(
 	namespace string,
 	name string,
-	endpointSelector string,
+	endpointSelector labels.Selector,
 	endpointTargetPorts []int,
 ) (*datalayer.EndpointPool, error) {
-	// namespace is from epp namespace in standalone mode without inference api support
 	if namespace == "" {
 		return nil, errors.New("namespace must not be empty")
 	}
-	// name is from epp name in standalone mode without inference api support
 	if name == "" {
 		return nil, errors.New("name must not be empty")
 	}
-	if endpointSelector == "" {
-		return nil, errors.New("endpoint selector must not be empty")
+	if endpointSelector == nil {
+		return nil, errors.New("endpoint selector must not be nil")
 	}
 	if len(endpointTargetPorts) == 0 {
 		return nil, errors.New("endpoint target ports must not be empty")
 	}
 
-	selectorMap, err := labels.ConvertSelectorToLabelsMap(endpointSelector)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse endpoint selector %q: %w", endpointSelector, err)
-	}
-
 	pool := datalayer.NewEndpointPool(namespace, name)
-	pool.Selector = selectorMap
+	pool.Selector = endpointSelector
 	pool.TargetPorts = append(pool.TargetPorts, endpointTargetPorts...)
 
 	return pool, nil
 }
 
 func setupDatastore(ctx context.Context, epFactory datalayer.EndpointFactory, modelServerMetricsPort int32,
-	startCrdReconcilers bool, namespace, name, endpointSelector string, endpointTargetPorts []int) (datastore.Datastore, error) {
+	startCrdReconcilers bool, namespace, name string, endpointSelector labels.Selector, endpointTargetPorts []int) (datastore.Datastore, error) {
 
 	if startCrdReconcilers {
 		return datastore.NewDatastore(ctx, epFactory, modelServerMetricsPort), nil
@@ -484,6 +480,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(bylabel.EncodeRoleType, bylabel.EncodeRoleFactory)
 	fwkplugin.Register(bylabel.DecodeRoleType, bylabel.DecodeRoleFactory)
 	fwkplugin.Register(bylabel.PrefillRoleType, bylabel.PrefillRoleFactory)
+	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, sessionaffinityfilter.Factory)
 
 	// dataparallel profile handler
 	fwkplugin.Register(dataparallel.DataParallelProfileHandlerType, dataparallel.ProfileHandlerFactory)
@@ -502,10 +499,11 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(random.RandomPickerType, random.RandomPickerFactory)
 	fwkplugin.Register(weightedrandom.WeightedRandomPickerType, weightedrandom.WeightedRandomPickerFactory)
 	fwkplugin.Register(single.SingleProfileHandlerType, single.SingleProfileHandlerFactory)
-	fwkplugin.Register(disagg.DisaggHeadersHandlerType, disagg.HeadersHandlerFactory) //nolint:staticcheck // intentional: keep backward compatibility
-	fwkplugin.Register(disagg.PrefillHeaderHandlerType, disagg.HeadersHandlerFactory) //nolint:staticcheck // intentional: keep backward compatibility
-	fwkplugin.Register(disagg.PdProfileHandlerType, disagg.PdProfileHandlerFactory)   //nolint:staticcheck // intentional: keep backward compatibility
-	fwkplugin.Register(disagg.DisaggProfileHandlerType, disagg.HandlerFactory)
+	fwkplugin.Register(disagg.DisaggHeadersHandlerType, disagg.HeadersHandlerFactory)                     //nolint:staticcheck // intentional: keep backward compatibility
+	fwkplugin.Register(disagg.PrefillHeaderHandlerType, disagg.HeadersHandlerFactory)                     //nolint:staticcheck // intentional: keep backward compatibility
+	fwkplugin.RegisterWithPluginDependencies(disagg.PdProfileHandlerType, disagg.PdProfileHandlerFactory, //nolint:staticcheck // intentional: keep backward compatibility
+		disagg.PdProfileHandlerConfigParser)
+	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
 	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, disagg.AlwaysDisaggPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, disagg.PrefixBasedPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.AlwaysDisaggMulimodalPluginType, disagg.AlwaysDisaggMulimodalDeciderPluginFactory)
@@ -517,12 +515,14 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(nohitlru.NoHitLRUType, nohitlru.Factory)
 	fwkplugin.Register(activerequest.ActiveRequestType, activerequest.Factory)
 	fwkplugin.Register(preciseprefixcache.PrecisePrefixCachePluginType, preciseprefixcache.PluginFactory)
+	fwkplugin.Register(burstprefix.PluginType, burstprefix.Factory)
 	fwkplugin.Register(mmcacheaffinity.Type, mmcacheaffinity.Factory)
 	fwkplugin.Register(preciseproducer.PluginType, preciseproducer.PluginFactory)
 
 	// Flow Control plugins
 	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, globalstrict.GlobalStrictFairnessPolicyFactory)
 	fwkplugin.Register(roundrobin.RoundRobinFairnessPolicyType, roundrobin.RoundRobinFairnessPolicyFactory)
+	fwkplugin.Register(programaware.ProgramAwarePluginType, programaware.ProgramAwarePluginFactory)
 	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, fcfs.FCFSOrderingPolicyFactory)
 	fwkplugin.Register(edf.EDFOrderingPolicyType, edf.EDFOrderingPolicyFactory)
 	fwkplugin.Register(slodeadline.SLODeadlineOrderingPolicyType, slodeadline.SLODeadlineOrderingPolicyFactory)
@@ -598,8 +598,7 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 		}
 	}
 
-	loader.RegisterFeatureGate(datalayer.ExperimentalDatalayerFeatureGate)
-	loader.RegisterFeatureGate(flowcontrol.FeatureGate)
+	loader.RegisterFeatureGate(flowcontrol.FeatureGate, false)
 
 	r.registerInTreePlugins()
 
@@ -609,11 +608,6 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 	}
 
 	r.featureGates = featureGates
-
-	if r.featureGates[datalayer.ExperimentalDatalayerFeatureGate] {
-		setupLog.Info("The data layer is now enabled by default. " +
-			"Please remove the 'dataLayer' feature gate from your config.")
-	}
 
 	setupLog.Info("Data layer: ENABLED")
 
@@ -746,9 +740,8 @@ func extractDeploymentName(podName string) (string, error) {
 	return "", fmt.Errorf("failed to parse deployment name from pod name %s", podName)
 }
 
-func extractGKNN(poolName, poolGroup, poolNamespace, endpointSelector string) (*common.GKNN, error) {
+func extractGKNN(poolName, poolGroup, poolNamespace string, endpointSelector labels.Selector) (*common.GKNN, error) {
 	if poolName != "" {
-		// Determine pool namespace: if --pool-namespace is non-empty, use it; else NAMESPACE env var; else default
 		resolvedPoolNamespace := resolvePoolNamespace(poolNamespace)
 		poolNamespacedName := types.NamespacedName{
 			Name:      poolName,
@@ -764,10 +757,8 @@ func extractGKNN(poolName, poolGroup, poolNamespace, endpointSelector string) (*
 		}, nil
 	}
 
-	if endpointSelector != "" {
-		// Determine EPP namespace: NAMESPACE env var; else default
+	if endpointSelector != nil {
 		resolvedPoolNamespace := resolvePoolNamespace(poolNamespace)
-		// Determine EPP name: POD_NAME env var
 		eppPodNameEnv := os.Getenv("POD_NAME")
 		if eppPodNameEnv == "" {
 			return nil, errors.New("failed to get environment variable POD_NAME")

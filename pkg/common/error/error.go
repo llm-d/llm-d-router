@@ -35,8 +35,10 @@ type RequestDroppedReason string
 const (
 	// Rejected — request never reached an inference server.
 	RequestDroppedReasonSaturated        RequestDroppedReason = "rejected-saturated"
+	RequestDroppedReasonNoEndpoints      RequestDroppedReason = "rejected-no-endpoints"
 	RequestDroppedReasonTTLExpired       RequestDroppedReason = "rejected-ttl-expired"
 	RequestDroppedReasonContextCancelled RequestDroppedReason = "rejected-context-cancelled"
+	RequestDroppedReasonShuttingDown     RequestDroppedReason = "rejected-shutting-down"
 
 	// Evicted — request was dispatched to an inference server and then killed.
 	// The generic "evicted" reason is the current default used by ImmediateResponseEvictor.Evict().

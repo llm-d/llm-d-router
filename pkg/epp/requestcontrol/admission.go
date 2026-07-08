@@ -18,6 +18,7 @@ package requestcontrol
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -226,12 +227,17 @@ func translateFlowControlOutcome(outcome types.QueueOutcome, err error) error {
 		return nil
 	case types.QueueOutcomeRejectedCapacity:
 		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}}
+	case types.QueueOutcomeRejectedNoEndpoints:
+		// No serving capacity exists (e.g. pool scaled to zero): signal genuine unavailability rather than backpressure.
+		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no endpoints available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
 	case types.QueueOutcomeEvictedTTL:
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)}}
 	case types.QueueOutcomeEvictedContextCancelled:
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "client disconnected: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled)}}
 	case types.QueueOutcomeRejectedOther, types.QueueOutcomeEvictedOther:
-		// No x-removal-reason header: these are internal/unexpected failures, not a specific removal policy.
+		if errors.Is(err, types.ErrFlowControllerNotRunning) {
+			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "flow controller shutting down: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonShuttingDown)}}
+		}
 		return errcommon.Error{Code: errcommon.Internal, Msg: "internal flow control error: " + msg}
 	default:
 		return errcommon.Error{Code: errcommon.Internal, Msg: "unhandled flow control outcome: " + msg}

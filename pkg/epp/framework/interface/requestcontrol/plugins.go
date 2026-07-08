@@ -27,6 +27,8 @@ import (
 
 const (
 	PreAdmissionExtensionPoint      = "PreAdmission"
+	AdmissionExtensionPoint         = "Admission"
+	DataProducerExtensionPoint      = "DataProducer"
 	PreRequestExtensionPoint        = "PreRequest"
 	ResponseReceivedExtensionPoint  = "ResponseReceived"
 	ResponseStreamingExtensionPoint = "ResponseStreaming"

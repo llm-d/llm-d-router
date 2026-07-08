@@ -1,4 +1,4 @@
-# HELP inference_extension_flow_control_request_enqueue_duration_seconds [ALPHA] [Deprecated: Use llm_d_router_epp_flow_control_request_enqueue_duration_seconds] Distribution of time taken to enqueue requests into the Flow Control layer.
+# HELP inference_extension_flow_control_request_enqueue_duration_seconds [ALPHA] [Deprecated: Use llm_d_epp_flow_control_request_enqueue_duration_seconds] Distribution of time taken to enqueue requests into the Flow Control layer.
 # TYPE inference_extension_flow_control_request_enqueue_duration_seconds histogram
 inference_extension_flow_control_request_enqueue_duration_seconds_bucket{fairness_id="default-fairness",outcome="Dispatched",priority="1",le="0.0001"} 1
 inference_extension_flow_control_request_enqueue_duration_seconds_bucket{fairness_id="default-fairness",outcome="Dispatched",priority="1",le="0.0002"} 1

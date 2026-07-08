@@ -143,8 +143,7 @@ type MockFlowQueueAccessor struct {
 	NameV           string
 	LenV            int
 	ByteSizeV       uint64
-	PeekHeadV       flowcontrol.QueueItemAccessor
-	PeekTailV       flowcontrol.QueueItemAccessor
+	PeekV           flowcontrol.QueueItemAccessor
 	FlowKeyV        flowcontrol.FlowKey
 	OrderingPolicyV flowcontrol.OrderingPolicy
 	CapabilitiesV   []flowcontrol.QueueCapability
@@ -157,12 +156,8 @@ func (m *MockFlowQueueAccessor) OrderingPolicy() flowcontrol.OrderingPolicy  { r
 func (m *MockFlowQueueAccessor) FlowKey() flowcontrol.FlowKey                { return m.FlowKeyV }
 func (m *MockFlowQueueAccessor) Capabilities() []flowcontrol.QueueCapability { return m.CapabilitiesV }
 
-func (m *MockFlowQueueAccessor) PeekHead() flowcontrol.QueueItemAccessor {
-	return m.PeekHeadV
-}
-
-func (m *MockFlowQueueAccessor) PeekTail() flowcontrol.QueueItemAccessor {
-	return m.PeekTailV
+func (m *MockFlowQueueAccessor) Peek() flowcontrol.QueueItemAccessor {
+	return m.PeekV
 }
 
 var _ flowcontrol.FlowQueueAccessor = &MockFlowQueueAccessor{}

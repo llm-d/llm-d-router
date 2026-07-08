@@ -43,7 +43,7 @@ func createConfigWithValidYAML(t *testing.T) string {
 	t.Helper()
 	return writeTempYAML(t, "valid.yaml", fmt.Sprintf(`
 port: 8100
-vllm-port: 8200
+vllm-port: 8001
 data-parallel-size: 5
 kv-connector: %q
 connector: %q
@@ -74,7 +74,7 @@ func createConfigWithUnknownKeys(t *testing.T) string {
 	t.Helper()
 	return writeTempYAML(t, "valid.yaml", `
 port: 8100
-vllm-port: 8200
+vllm-port: 8001
 unknown-key: 1001
 `)
 }
@@ -183,7 +183,7 @@ func TestSidecarConfiguration(t *testing.T) {
 			},
 			expected: func(o *Options) {
 				o.Port = "8100"
-				o.vllmPort = "8200"
+				o.vllmPort = "8001"
 				o.DataParallelSize = 5
 				o.MaxIdleConnsPerHost = 300
 				o.MooncakeBootstrapPort = 9000
@@ -595,6 +595,48 @@ func TestNewOptionsWithEnvVars(t *testing.T) {
 	}
 }
 
+func TestP2PConnectorPort(t *testing.T) {
+	t.Run("defaults to 7777", func(t *testing.T) {
+		opts := NewOptions()
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.Equal(t, defaultP2PConnectorPort, opts.P2PConnectorPort)
+	})
+
+	t.Run("env var overrides default", func(t *testing.T) {
+		t.Setenv(envP2PConnectorPort, "9500")
+		opts := NewOptions()
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.Equal(t, 9500, opts.P2PConnectorPort)
+	})
+
+	t.Run("rejects out-of-range port", func(t *testing.T) {
+		opts := NewOptions()
+		opts.P2PConnectorPort = 70000
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--p2p-connector-port must be between 1 and 65535")
+	})
+}
+
+func TestValidateOffloadingDP(t *testing.T) {
+	t.Run("rejects offloading with data-parallel-size > 1", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 2
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--kv-connector=offloading does not support --data-parallel-size > 1")
+	})
+
+	t.Run("allows offloading with data-parallel-size 1", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 1
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+	})
+}
+
 func TestValidateConnector(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -605,6 +647,7 @@ func TestValidateConnector(t *testing.T) {
 		{"valid shared-storage", KVConnectorSharedStorage, false},
 		{"valid sglang", KVConnectorSGLang, false},
 		{"valid mooncake", KVConnectorMooncake, false},
+		{"valid offloading", KVConnectorOffloading, false},
 		{"invalid connector", "invalid", true},
 	}
 
@@ -728,6 +771,218 @@ func TestCompleteInferencePoolParsing(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestValidateWideEPHosts covers the multi-pod Wide-EP fan-out invariants
+// (2P2D DP=EP=16) introduced by the Wide-EP fan-out commit.  vLLM maps every
+// global DP rank to a pod via pod_idx = dp_rank / dp_size_local and indexes
+// hosts[pod_idx], so the helper must reject any host-list / dp-size-local
+// combination that would leave a DP rank unmapped or divide by zero -- while
+// tolerating the single-pod degenerate cases (0 or 1 host) so the same
+// templated flag works on a 1P1D overlay.
+func TestValidateWideEPHosts(t *testing.T) {
+	tests := []struct {
+		name    string
+		flag    string
+		hosts   []string
+		dpSize  int
+		dpLocal int
+		wantErr string // substring; "" means expect nil
+	}{
+		{
+			name:    "2P2D DP16 valid (2 pods, local 8)",
+			flag:    "--moriio-decode-hosts",
+			hosts:   []string{"10.0.1.1", "10.0.1.2"},
+			dpSize:  16,
+			dpLocal: 8,
+			wantErr: "",
+		},
+		{
+			name:    "empty host list is single-pod, skipped",
+			flag:    "--moriio-remote-hosts",
+			hosts:   nil,
+			dpSize:  8,
+			dpLocal: 0,
+			wantErr: "",
+		},
+		{
+			name:    "single host is degenerate, tolerated",
+			flag:    "--moriio-remote-hosts",
+			hosts:   []string{"10.0.0.1"},
+			dpSize:  8,
+			dpLocal: 0,
+			wantErr: "",
+		},
+		{
+			name:    "multi-pod missing dp-size-local",
+			flag:    "--moriio-remote-hosts",
+			hosts:   []string{"10.0.0.1", "10.0.0.2"},
+			dpSize:  16,
+			dpLocal: 0,
+			wantErr: "requires dp-size-local > 0",
+		},
+		{
+			name:    "dp-size not divisible by dp-size-local",
+			flag:    "--moriio-decode-hosts",
+			hosts:   []string{"10.0.1.1", "10.0.1.2"},
+			dpSize:  15,
+			dpLocal: 8,
+			wantErr: "must be divisible",
+		},
+		{
+			name:    "host count does not match pod count",
+			flag:    "--moriio-remote-hosts",
+			hosts:   []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+			dpSize:  16,
+			dpLocal: 8,
+			wantErr: "dp-size/dp-size-local = 2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateWideEPHosts(tt.flag, tt.hosts, tt.dpSize, tt.dpLocal)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.wantErr)
+			// Error text must name the offending flag so operators can act.
+			require.Contains(t, err.Error(), tt.flag[:len("--moriio-")])
+		})
+	}
+}
+
+// TestCompleteWideEPValidation drives the Wide-EP validation through
+// Options.Complete() to confirm BOTH host-list legs are checked and a valid
+// 2P2D config passes end-to-end.
+func TestCompleteWideEPValidation(t *testing.T) {
+	// Skip when MoRI-IO feature is dormant since all test cases set MoRI-IO
+	// flags that will be rejected by the dormant feature gate.
+	if !MoRIIOFeatureEnabled {
+		t.Skip("MoRI-IO feature is dormant; skipping Wide-EP validation tests")
+	}
+	tests := []struct {
+		name        string
+		remoteHosts []string
+		decodeHosts []string
+		dpSize      int
+		dpLocal     int
+		wantErr     string
+	}{
+		{
+			name:        "valid 2P2D DP16 both legs",
+			remoteHosts: []string{"10.0.0.1", "10.0.0.2"},
+			decodeHosts: []string{"10.0.1.1", "10.0.1.2"},
+			dpSize:      16,
+			dpLocal:     8,
+			wantErr:     "",
+		},
+		{
+			name:        "1P1D DP8 single-pod (no host lists) passes",
+			remoteHosts: nil,
+			decodeHosts: nil,
+			dpSize:      8,
+			dpLocal:     0,
+			wantErr:     "",
+		},
+		{
+			name:        "remote-hosts leg invalid",
+			remoteHosts: []string{"10.0.0.1", "10.0.0.2"},
+			decodeHosts: nil,
+			dpSize:      16,
+			dpLocal:     0,
+			wantErr:     "--moriio-remote-hosts",
+		},
+		{
+			name:        "decode-hosts leg invalid",
+			remoteHosts: nil,
+			decodeHosts: []string{"10.0.1.1", "10.0.1.2", "10.0.1.3"},
+			dpSize:      16,
+			dpLocal:     8,
+			wantErr:     "--moriio-decode-hosts",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.MoRIIORemoteHosts = tt.remoteHosts
+			opts.MoRIIODecodeHosts = tt.decodeHosts
+			opts.MoRIIODPSize = tt.dpSize
+			opts.MoRIIODPSizeLocal = tt.dpLocal
+
+			err := opts.Complete()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestCompleteMoRIIOWriteModeGuards covers the WRITE-mode / parallel-dispatch
+// preconditions added by the WRITE-mode sidecar commit: WRITE mode needs a
+// routable decode pod IP, and concurrent dispatch is WRITE-mode-only.
+func TestCompleteMoRIIOWriteModeGuards(t *testing.T) {
+	// When MoRIIOFeatureEnabled is false (dormant), ALL MoRI-IO flags should
+	// be rejected with the dormant feature message.
+	if !MoRIIOFeatureEnabled {
+		t.Run("dormant feature rejects write-mode", func(t *testing.T) {
+			opts := NewOptions()
+			opts.MoRIIOWriteMode = true
+			opts.MoRIIODecodePodIP = "10.0.1.1"
+			err := opts.Complete()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "not yet enabled")
+		})
+		t.Run("dormant feature rejects dp-size > 1", func(t *testing.T) {
+			opts := NewOptions()
+			opts.MoRIIODPSize = 8 // non-default, affects routing
+			err := opts.Complete()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "not yet enabled")
+		})
+		t.Run("dormant feature rejects remote-hosts", func(t *testing.T) {
+			opts := NewOptions()
+			opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2"}
+			opts.MoRIIODPSize = 16
+			opts.MoRIIODPSizeLocal = 8
+			err := opts.Complete()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "not yet enabled")
+		})
+		t.Run("dormant feature rejects dp-size-local > 0", func(t *testing.T) {
+			opts := NewOptions()
+			opts.MoRIIODPSizeLocal = 8
+			err := opts.Complete()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "not yet enabled")
+		})
+		t.Skip("MoRI-IO feature is dormant; skipping enabled-mode tests")
+	}
+
+	t.Run("write-mode without pod IP errors", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = ""
+		require.ErrorContains(t, opts.Complete(), "--moriio-local-pod-ip")
+	})
+
+	t.Run("write-mode with pod IP passes", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.1.1"
+		require.NoError(t, opts.Complete())
+	})
+
+	t.Run("parallel-dispatch requires write-mode", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOParallelDispatch = true
+		opts.MoRIIOWriteMode = false
+		require.ErrorContains(t, opts.Complete(), "--moriio-write-mode")
+	})
 }
 
 func TestCompleteTLSConfiguration(t *testing.T) {
