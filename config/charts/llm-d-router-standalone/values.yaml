@@ -214,14 +214,8 @@ router:
                         reuse_connection: true
                         grpc_health_check:
                           service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
-                        tls_options:
-                          alpn_protocols: ["h2"]
-                    transport_socket:
-                      name: "envoy.transport_sockets.tls"
-                      typed_config:
-                        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-                        common_tls_context:
-                          validation_context:
+              {{ include "llm-d-router.proxy.envoyExtProcTLSOptions" . | indent 10 }}
+              {{ include "llm-d-router.proxy.envoyExtProcTransportSocket" . | indent 6 }}
                     typed_extension_protocol_options:
                       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
                         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
