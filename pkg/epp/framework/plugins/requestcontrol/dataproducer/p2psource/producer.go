@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -38,9 +39,11 @@ const (
 	// PluginType is the registered type name of the p2p-source-producer.
 	PluginType = "p2p-source-producer"
 
-	// prefillProfile is the disaggregation prefill profile name; when its
-	// result carries an endpoint, that endpoint computes the prefix.
-	prefillProfile = "prefill"
+	// defaultPrefillProfile is the disaggregation prefill profile name; when
+	// that profile's result carries an endpoint, that endpoint computes the
+	// prefix. Operators who rename it (disagg-profile-handler profiles.prefill)
+	// must set prefillProfileName to match.
+	defaultPrefillProfile = "prefill"
 
 	defaultMinCachedTokenDelta = 1
 )
@@ -54,6 +57,10 @@ type Config struct {
 	// best peer must hold beyond the pod computing the prefix for the header
 	// to be set. Must be >= 1; defaults to 1.
 	MinCachedTokenDelta int `json:"minCachedTokenDelta,omitempty"`
+	// PrefillProfileName is the disaggregation prefill profile name, matching
+	// the disagg-profile-handler's profiles.prefill. Empty defaults to
+	// "prefill".
+	PrefillProfileName string `json:"prefillProfileName,omitempty"`
 }
 
 // compile-time type assertions
@@ -71,6 +78,8 @@ type Producer struct {
 	typedName           plugin.TypedName
 	prefixMatchDataKey  plugin.DataKey
 	minCachedTokenDelta int
+	prefillProfile      string
+	attrKeyValue        string
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
@@ -91,10 +100,16 @@ func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (p
 // New constructs a p2p-source-producer bound to the configured
 // PrefixCacheMatchInfo producer name.
 func New(name string, cfg Config) *Producer {
+	prefillProfile := cfg.PrefillProfileName
+	if prefillProfile == "" {
+		prefillProfile = defaultPrefillProfile
+	}
 	return &Producer{
 		typedName:           plugin.TypedName{Type: PluginType, Name: name},
 		prefixMatchDataKey:  attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		minCachedTokenDelta: cfg.MinCachedTokenDelta,
+		prefillProfile:      prefillProfile,
+		attrKeyValue:        fmt.Sprintf("%s/%s/best-match", PluginType, name),
 	}
 }
 
@@ -124,7 +139,7 @@ type bestMatchPeer struct {
 // attrKey returns the request-attribute key carrying the best-match peer,
 // name-bound to this plugin instance.
 func (p *Producer) attrKey() string {
-	return fmt.Sprintf("%s/%s/best-match", PluginType, p.typedName.Name)
+	return p.attrKeyValue
 }
 
 // Produce reads each candidate's PrefixCacheMatchInfo and stashes the
@@ -139,7 +154,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		}
 		if cached := p.cachedTokenCount(ep); cached > best.cachedTokens {
 			best = bestMatchPeer{
-				hostPort:     fmt.Sprintf("%s:%s", md.Address, md.Port),
+				hostPort:     net.JoinHostPort(md.Address, md.Port),
 				cachedTokens: cached,
 			}
 		}
@@ -167,7 +182,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	}
 
 	computing := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	if pr, exists := schedulingResult.ProfileResults[prefillProfile]; exists && pr != nil && len(pr.TargetEndpoints) > 0 {
+	if pr, exists := schedulingResult.ProfileResults[p.prefillProfile]; exists && pr != nil && len(pr.TargetEndpoints) > 0 {
 		computing = pr
 	}
 	if computing == nil || len(computing.TargetEndpoints) == 0 {
@@ -178,11 +193,14 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	if md == nil {
 		return
 	}
-	computingHostPort := fmt.Sprintf("%s:%s", md.Address, md.Port)
+	computingHostPort := net.JoinHostPort(md.Address, md.Port)
 	computingCached := p.cachedTokenCount(endpoint)
 	logger.Info("evaluating KV cache source",
 		"requestID", request.RequestID, "best", best.hostPort, "bestCachedTokens", best.cachedTokens,
 		"computing", computingHostPort, "computingCachedTokens", computingCached)
+	// Never emit the header pointing at the computing pod itself. Redundant
+	// with the delta check below while minCachedTokenDelta >= 1 (a self-match
+	// is delta 0), but explicit against a future lower floor.
 	if best.hostPort == computingHostPort {
 		return
 	}

@@ -18,6 +18,7 @@ package p2psource
 
 import (
 	"encoding/json"
+	"net"
 	"strings"
 	"testing"
 
@@ -190,8 +191,8 @@ func TestPreRequest_PrefillProfile_BestIsPrefill_NoHeader(t *testing.T) {
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			"decode":       {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-a", "10.0.0.1", 0)}},
-			prefillProfile: {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 3)}},
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-a", "10.0.0.1", 0)}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 3)}},
 		},
 	}
 	p.PreRequest(ctx, req, result)
@@ -210,8 +211,8 @@ func TestPreRequest_PrefillProfile_HeaderFromThirdPod(t *testing.T) {
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			"decode":       {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-a", "10.0.0.1", 0)}},
-			prefillProfile: {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 1)}},
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-a", "10.0.0.1", 0)}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 1)}},
 		},
 	}
 	p.PreRequest(ctx, req, result)
@@ -243,4 +244,68 @@ func TestConsumes_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("precise")
 	_, ok := deps.Required[key]
 	assert.True(t, ok)
+}
+
+// IPv6 endpoint addresses are emitted bracketed via net.JoinHostPort so the
+// sidecar's host:port validation accepts them.
+func TestPreRequest_IPv6HeaderBracketed(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	best := net.JoinHostPort("fd00::2", "8080")
+	req := &scheduling.InferenceRequest{RequestID: "req-ipv6", Headers: map[string]string{}}
+	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: best, cachedTokens: 48})
+
+	p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "fd00::1", 1)))
+
+	assert.Equal(t, best, req.Headers[routing.KVCacheSourceHeader])
+	// Round-trips through the same validation the sidecar applies.
+	_, _, err := net.SplitHostPort(req.Headers[routing.KVCacheSourceHeader])
+	assert.NoError(t, err)
+}
+
+// Produce emits a bracketed host:port for an IPv6 candidate.
+func TestProduce_IPv6BestMatchBracketed(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-ipv6-produce"}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{endpoint(p, "pod-a", "fd00::9", 2)}))
+
+	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	require.True(t, ok)
+	assert.Equal(t, net.JoinHostPort("fd00::9", "8080"), best.hostPort)
+}
+
+// A renamed prefill profile is honored: the comparison is against the prefill
+// pod under the configured name, not the primary decode pod.
+func TestPreRequest_ConfiguredPrefillProfileName(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, PrefillProfileName: "P"})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-custom-profile", Headers: map[string]string{}}
+	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: 48})
+
+	// Best match IS the renamed prefill pod -> pulling from self, no header.
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-a", "10.0.0.1", 0)}},
+			"P":      {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 3)}},
+		},
+	}
+	p.PreRequest(ctx, req, result)
+	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+}
+
+// Factory wires a custom prefillProfileName; default is "prefill".
+func TestPluginFactory_PrefillProfileName(t *testing.T) {
+	def, err := PluginFactory("d", nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "prefill", def.(*Producer).prefillProfile)
+
+	dec := json.NewDecoder(strings.NewReader(`{"prefillProfileName": "P"}`))
+	custom, err := PluginFactory("c", dec, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "P", custom.(*Producer).prefillProfile)
 }

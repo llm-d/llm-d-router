@@ -32,7 +32,7 @@ The framework resolves a DAG from each plugin's `Produces` and `Consumes` declar
 - `burst-prefix-cache-producer` **requires** `token-producer` upstream (it consumes `TokenizedPrompt`).
 - `mm-embeddings-cache-producer` **optionally** consumes `TokenizedPrompt`; configure `token-producer` first when multimodal features need tokenizer-derived hashes.
 - `inflight-load-producer` **optionally** consumes `PrefixCacheMatchInfo` from an approx or precise prefix producer; prefix-discounting is applied automatically when the attribute is present.
-- `p2p-source-producer` **requires** `PrefixCacheMatchInfo` from a prefix producer; set `prefixMatchInfoProducerName` to select a non-default producer instance.
+- `p2p-source-producer` **requires** `PrefixCacheMatchInfo` from a prefix producer; set `prefixMatchInfoProducerName` to select a non-default producer instance. Omitting it binds the default key, which auto-wires the approximate producer (no error) — set it explicitly for precise-only deployments. Set `prefillProfileName` to match a renamed `disagg-profile-handler` prefill profile.
 - `predicted-latency-producer` **optionally** consumes `PrefixCacheMatchInfo`; set `prefixMatchInfoProducerName` in its config to the name of the prefix producer instance.
 
 ## Related documentation
