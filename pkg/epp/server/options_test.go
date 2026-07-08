@@ -246,23 +246,3 @@ func TestValidateDirectValues(t *testing.T) {
 		t.Errorf("Expected Validate() to fail for negative GRPCMaxSendMsgSize, but it succeeded")
 	}
 }
-
-func TestHAPopulateNonLeaderDatastoreFlag(t *testing.T) {
-	// Defaults to false so upstream (leader-only) behavior is unchanged.
-	def := NewOptions()
-	def.AddFlags(pflag.NewFlagSet("default", pflag.ContinueOnError))
-	if def.HAPopulateNonLeaderDatastore {
-		t.Errorf("HAPopulateNonLeaderDatastore default = true, want false")
-	}
-
-	// The flag flips it on.
-	opts := NewOptions()
-	fs := pflag.NewFlagSet("set", pflag.ContinueOnError)
-	opts.AddFlags(fs)
-	if err := fs.Parse([]string{"--ha-populate-non-leader-datastore"}); err != nil {
-		t.Fatalf("Parse() failed: %v", err)
-	}
-	if !opts.HAPopulateNonLeaderDatastore {
-		t.Errorf("after --ha-populate-non-leader-datastore, HAPopulateNonLeaderDatastore = false, want true")
-	}
-}

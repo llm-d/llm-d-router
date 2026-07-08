@@ -25,6 +25,13 @@ import (
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
+// HAPopulateNonLeaderDatastoreFeatureGate runs the datastore reconcilers on
+// non-leader replicas so their datastore stays populated. Non-leaders still fail
+// their readiness/ext_proc health check (they are not advertised); this only lets
+// a request that reaches a standby be routed instead of returning 503. Enabled by
+// default; disable via the featureGates config with "haPopulateNonLeaderDatastore=false".
+const HAPopulateNonLeaderDatastoreFeatureGate = "haPopulateNonLeaderDatastore"
+
 var (
 	inferenceAPIGV           = schema.GroupVersion{Group: v1alpha2.GroupVersion.Group, Version: v1alpha2.GroupVersion.Version}
 	legacyInferenceAPIGV     = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: v1alpha2.GroupVersion.Version}
