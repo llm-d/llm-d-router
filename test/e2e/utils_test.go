@@ -269,10 +269,15 @@ func removePodSpecListItem(obj *unstructured.Unstructured, fieldName, itemName s
 }
 
 // eppExtraArgs are appended to the "epp" container's args in the Deployment
-// created by createEndPointPickerHelper. The disruption suite sets
-// --drain-timeout=0 so a killed EPP stops serving immediately rather than
-// entering the graceful-drain window.
-var eppExtraArgs []string
+// created by createEndPointPickerHelper.
+//
+// Graceful drain is disabled (--drain-timeout=0) for all e2e EPPs. The suites
+// create and delete the shared "e2e-epp" Deployment in sequence behind a single
+// Envoy; with a drain window a deleted EPP keeps serving ext_proc on its
+// existing connection, so Envoy lingers on the terminating pod (stale datastore)
+// and the next spec's requests fail. The graceful-drain behavior itself is
+// covered by unit tests.
+var eppExtraArgs = []string{"--drain-timeout=0"}
 
 // appendEppArgs returns the input YAML docs with args appended to the "epp"
 // container of any Deployment. It is a no-op when args is empty.

@@ -84,16 +84,6 @@ func eppPodReady(oldPodName string) func() bool {
 }
 
 var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disruptiveTestLabel), func() {
-	// The disruption suite deletes and force-kills the EPP and asserts it stops
-	// serving promptly. Disable the graceful-drain window so shutdown is
-	// immediate instead of keeping ext_proc alive for the default drain period.
-	ginkgo.BeforeAll(func() {
-		eppExtraArgs = []string{"--drain-timeout=0"}
-	})
-	ginkgo.AfterAll(func() {
-		eppExtraArgs = nil
-	})
-
 	ginkgo.When("A decode pod is killed mid-request", func() {
 		ginkgo.It("should recover and route to surviving pods", func() {
 			infPoolObjects = createInferencePool(1, true)
