@@ -30,6 +30,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/toolcalling"
 )
 
 const (
@@ -475,6 +476,11 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(LlmdDataLayerPollErrorsTotal)
 		metrics.Registry.MustRegister(DataLayerExtractErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
+		metrics.Registry.MustRegister(llmdToolCallingRequestsTotal)
+		metrics.Registry.MustRegister(llmdToolChoiceTotal)
+		metrics.Registry.MustRegister(llmdToolDefinitionsCount)
+		metrics.Registry.MustRegister(llmdParallelToolCallsTotal)
+		metrics.Registry.MustRegister(llmdToolCallingPreservedTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
 		}
@@ -541,6 +547,11 @@ func Reset() {
 	LlmdDataLayerPollErrorsTotal.Reset()
 	DataLayerExtractErrorsTotal.Reset()
 	LlmdDataLayerExtractErrorsTotal.Reset()
+	llmdToolCallingRequestsTotal.Reset()
+	llmdToolChoiceTotal.Reset()
+	llmdToolDefinitionsCount.Reset()
+	llmdParallelToolCallsTotal.Reset()
+	llmdToolCallingPreservedTotal.Reset()
 }
 
 // RecordRequestCounter records the number of requests.
@@ -847,4 +858,21 @@ func RecordDataLayerPollError(sourceType string) {
 func RecordDataLayerExtractError(sourceType, extractorType string) {
 	DataLayerExtractErrorsTotal.WithLabelValues(sourceType, extractorType).Inc()
 	LlmdDataLayerExtractErrorsTotal.WithLabelValues(sourceType, extractorType).Inc()
+}
+
+// RecordToolCallingRequest records tool-calling usage metrics from a snapshot.
+func RecordToolCallingRequest(parser string, snapshot *toolcalling.ToolCallingSnapshot) {
+	if snapshot == nil {
+		llmdToolCallingRequestsTotal.WithLabelValues(parser, "false").Inc()
+		return
+	}
+	llmdToolCallingRequestsTotal.WithLabelValues(parser, strconv.FormatBool(snapshot.Present)).Inc()
+	llmdToolChoiceTotal.WithLabelValues(parser, snapshot.ToolChoiceKind).Inc()
+	llmdToolDefinitionsCount.WithLabelValues(parser).Observe(float64(snapshot.ToolDefinitionsCount))
+	llmdParallelToolCallsTotal.WithLabelValues(parser, snapshot.ParallelToolCalls).Inc()
+}
+
+// RecordToolCallingPreservation records whether tool-calling parameters were preserved across the EPP boundary.
+func RecordToolCallingPreservation(parser, preserved string) {
+	llmdToolCallingPreservedTotal.WithLabelValues(parser, preserved).Inc()
 }

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,9 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/toolcalling"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // EvictChannelLookup is an optional interface for looking up eviction channels by request ID.
@@ -434,10 +438,39 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					break
 				}
 
+				var inboundToolSnapshot *toolcalling.ToolCallingSnapshot
+				if payloadMap, ok := parseResult.Body.Payload.(fwkrh.PayloadMap); ok {
+					inboundToolSnapshot = toolcalling.ExtractFromPayloadMap(payloadMap)
+				}
+
 				reqCtx, err = s.director.HandleRequest(ctx, reqCtx, parseResult.Body)
 				if err != nil {
 					logger.Error(err, "Error handling request")
 					break
+				}
+
+				var outboundToolSnapshot *toolcalling.ToolCallingSnapshot
+				if payloadMap, ok := parseResult.Body.Payload.(fwkrh.PayloadMap); ok {
+					outboundToolSnapshot = toolcalling.ExtractFromPayloadMap(payloadMap)
+				}
+
+				parserType := parser.TypedName().Type
+				metrics.RecordToolCallingRequest(parserType, inboundToolSnapshot)
+				preserved := toolcalling.PreservationStatus(inboundToolSnapshot, outboundToolSnapshot)
+				metrics.RecordToolCallingPreservation(parserType, preserved)
+
+				if inboundToolSnapshot != nil && span != nil {
+					span.AddEvent("tool_calling.parameters.observed",
+						trace.WithAttributes(toolcalling.SpanAttributes(inboundToolSnapshot, "epp_inbound")...))
+				}
+				if outboundToolSnapshot != nil && span != nil {
+					attrs := toolcalling.SpanAttributes(outboundToolSnapshot, "epp_outbound")
+					attrs = append(attrs, attribute.String("preserved_from_inbound", preserved))
+					span.AddEvent("tool_calling.parameters.forwarded", trace.WithAttributes(attrs...))
+				}
+
+				if outboundToolSnapshot != nil {
+					maps.Copy(reqCtx.Request.Headers, toolcalling.ToHeaders(outboundToolSnapshot))
 				}
 
 				// After scheduling, look up the eviction channel for eviction support.
