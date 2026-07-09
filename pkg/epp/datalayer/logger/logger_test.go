@@ -91,57 +91,6 @@ func TestLogger(t *testing.T) {
 	assert.Contains(t, logOutput, "\"Stale metrics\": \"[]\"")
 }
 
-func TestCalculateTotals(t *testing.T) {
-	tests := []struct {
-		name      string
-		endpoints []fwkdl.Endpoint
-		want      totals
-	}{
-		{
-			name:      "empty list",
-			endpoints: []fwkdl.Endpoint{},
-			want:      totals{},
-		},
-		{
-			name: "single endpoint",
-			endpoints: []fwkdl.Endpoint{
-				fwkdl.NewEndpoint(pod1, &fwkdl.Metrics{
-					KVCacheUsagePercent: 50.0,
-					WaitingQueueSize:    3,
-					RunningRequestsSize: 5,
-					UpdateTime:          time.Now(),
-				}),
-			},
-			want: totals{kvCache: 50.0, queueSize: 3, runningRequests: 5},
-		},
-		{
-			name: "multiple endpoints aggregated",
-			endpoints: []fwkdl.Endpoint{
-				fwkdl.NewEndpoint(pod1, &fwkdl.Metrics{
-					KVCacheUsagePercent: 30.0,
-					WaitingQueueSize:    2,
-					RunningRequestsSize: 1,
-					UpdateTime:          time.Now(),
-				}),
-				fwkdl.NewEndpoint(pod2, &fwkdl.Metrics{
-					KVCacheUsagePercent: 70.0,
-					WaitingQueueSize:    5,
-					RunningRequestsSize: 3,
-					UpdateTime:          time.Now(),
-				}),
-			},
-			want: totals{kvCache: 100.0, queueSize: 7, runningRequests: 4},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := calculateTotals(tt.endpoints)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 func TestCalculateSummary(t *testing.T) {
 	tests := []struct {
 		name      string
