@@ -1,0 +1,154 @@
+name: Rebase PR
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  rebase:
+    name: Rebase PR on main
+    if: >-
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/rebase')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check commenter has write access
+        id: check-access
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PERMISSION=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.event.comment.user.login }}/permission" --jq '.permission')
+          if [[ "$PERMISSION" != "admin" && "$PERMISSION" != "write" && "$PERMISSION" != "maintain" ]]; then
+            echo "User ${{ github.event.comment.user.login }} does not have write access (got: $PERMISSION). Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: React to comment
+        if: steps.check-access.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content='rocket' --silent
+
+      - name: Generate App token
+        if: steps.check-access.outputs.skip != 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.REBASE_APP_ID }}
+          private-key: ${{ secrets.REBASE_APP_PRIVATE_KEY }}
+
+      - name: Get App user info
+        if: steps.check-access.outputs.skip != 'true'
+        id: app-user
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          echo "user-id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
+          echo "app-slug=${APP_SLUG}" >> "$GITHUB_OUTPUT"
+
+      - name: Get PR details
+        if: steps.check-access.outputs.skip != 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_JSON=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}")
+          echo "head-repo=$(echo "$PR_JSON" | jq -r '.head.repo.full_name')" >> "$GITHUB_OUTPUT"
+          echo "head-ref=$(echo "$PR_JSON" | jq -r '.head.ref')" >> "$GITHUB_OUTPUT"
+          echo "base-ref=$(echo "$PR_JSON" | jq -r '.base.ref')" >> "$GITHUB_OUTPUT"
+          echo "maintainer-can-modify=$(echo "$PR_JSON" | jq -r '.maintainer_can_modify')" >> "$GITHUB_OUTPUT"
+
+      - name: Check fork allows maintainer push
+        if: >-
+          steps.check-access.outputs.skip != 'true' &&
+          steps.pr.outputs.head-repo != github.repository &&
+          steps.pr.outputs.maintainer-can-modify != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -f body='> /rebase
+
+          Cannot rebase: the PR author has not enabled **Allow edits from maintainers**. Please ask them to enable it in the PR sidebar.' --silent
+          exit 1
+
+      - name: Checkout PR head
+        if: steps.check-access.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.head-repo }}
+          ref: ${{ steps.pr.outputs.head-ref }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Configure git and rebase
+        if: steps.check-access.outputs.skip != 'true'
+        id: rebase
+        env:
+          APP_SLUG: ${{ steps.app-user.outputs.app-slug }}
+          APP_USER_ID: ${{ steps.app-user.outputs.user-id }}
+        run: |
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+
+          git remote add base "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/${{ github.repository }}.git"
+          git fetch base "${{ steps.pr.outputs.base-ref }}"
+
+          if git rebase "base/${{ steps.pr.outputs.base-ref }}"; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            git rebase --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push rebased branch
+        if: >-
+          steps.check-access.outputs.skip != 'true' &&
+          steps.rebase.outputs.result == 'success'
+        run: |
+          git push --force-with-lease origin "${{ steps.pr.outputs.head-ref }}"
+
+      - name: Comment on success
+        if: >-
+          steps.check-access.outputs.skip != 'true' &&
+          steps.rebase.outputs.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -f body='> /rebase
+
+          Done — rebased `${{ steps.pr.outputs.head-ref }}` on `${{ steps.pr.outputs.base-ref }}`.' --silent
+
+      - name: Comment on conflict
+        if: >-
+          steps.check-access.outputs.skip != 'true' &&
+          steps.rebase.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY=$(cat <<'COMMENT'
+          > /rebase
+
+          Rebase failed due to merge conflicts. Please rebase manually:
+          ```
+          gh pr checkout ${{ github.event.issue.number }}
+          git rebase origin/${{ steps.pr.outputs.base-ref }}
+          # resolve conflicts
+          git push --force-with-lease
+          ```
+          COMMENT
+          )
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -f body="$BODY" --silent
