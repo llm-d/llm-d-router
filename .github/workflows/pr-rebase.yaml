@@ -5,8 +5,9 @@ on:
     types: [created]
 
 permissions:
-  contents: read
-  pull-requests: read
+  contents: write
+  pull-requests: write
+  issues: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.issue.number }}
@@ -17,7 +18,7 @@ jobs:
     name: Rebase PR on main
     if: >-
       github.event.issue.pull_request &&
-      contains(github.event.comment.body, '/rebase')
+      github.event.comment.body == '/rebase'
     runs-on: ubuntu-latest
     steps:
       - name: Check commenter has write access
@@ -39,24 +40,6 @@ jobs:
           gh api "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
             -f content='rocket' --silent
 
-      - name: Generate App token
-        if: steps.check-access.outputs.skip != 'true'
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.RELEASE_NOTES_APP_ID }}
-          private-key: ${{ secrets.RELEASE_NOTES_APP_PRIVATE_KEY }}
-
-      - name: Get App user info
-        if: steps.check-access.outputs.skip != 'true'
-        id: app-user
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-        run: |
-          echo "user-id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
-          echo "app-slug=${APP_SLUG}" >> "$GITHUB_OUTPUT"
-
       - name: Get PR details
         if: steps.check-access.outputs.skip != 'true'
         id: pr
@@ -64,15 +47,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_JSON=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}")
-          echo "head-repo=$(echo "$PR_JSON" | jq -r '.head.repo.full_name')" >> "$GITHUB_OUTPUT"
+          HEAD_REPO=$(echo "$PR_JSON" | jq -r '.head.repo.full_name')
+          echo "head-repo=$HEAD_REPO" >> "$GITHUB_OUTPUT"
           echo "head-ref=$(echo "$PR_JSON" | jq -r '.head.ref')" >> "$GITHUB_OUTPUT"
           echo "base-ref=$(echo "$PR_JSON" | jq -r '.base.ref')" >> "$GITHUB_OUTPUT"
+          echo "is-fork=$( [ "$HEAD_REPO" != "${{ github.repository }}" ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
           echo "maintainer-can-modify=$(echo "$PR_JSON" | jq -r '.maintainer_can_modify')" >> "$GITHUB_OUTPUT"
 
       - name: Check fork allows maintainer push
         if: >-
           steps.check-access.outputs.skip != 'true' &&
-          steps.pr.outputs.head-repo != github.repository &&
+          steps.pr.outputs.is-fork == 'true' &&
           steps.pr.outputs.maintainer-can-modify != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -83,29 +68,26 @@ jobs:
           Cannot rebase: the PR author has not enabled **Allow edits from maintainers**. Please ask them to enable it in the PR sidebar.' --silent
           exit 1
 
-      - name: Checkout PR head
+      - name: Checkout base repo
         if: steps.check-access.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
-          repository: ${{ steps.pr.outputs.head-repo }}
-          ref: ${{ steps.pr.outputs.head-ref }}
-          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ steps.pr.outputs.base-ref }}
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure git and rebase
+      - name: Fetch PR head and rebase
         if: steps.check-access.outputs.skip != 'true'
         id: rebase
-        env:
-          APP_SLUG: ${{ steps.app-user.outputs.app-slug }}
-          APP_USER_ID: ${{ steps.app-user.outputs.user-id }}
         run: |
-          git config user.name "${APP_SLUG}[bot]"
-          git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git remote add base "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/${{ github.repository }}.git"
-          git fetch base "${{ steps.pr.outputs.base-ref }}"
+          # Fetch the PR head ref directly from GitHub
+          git fetch origin "pull/${{ github.event.issue.number }}/head:pr-head"
+          git checkout pr-head
 
-          if git rebase "base/${{ steps.pr.outputs.base-ref }}"; then
+          if git rebase "origin/${{ steps.pr.outputs.base-ref }}"; then
             echo "result=success" >> "$GITHUB_OUTPUT"
           else
             git rebase --abort
@@ -116,13 +98,20 @@ jobs:
         if: >-
           steps.check-access.outputs.skip != 'true' &&
           steps.rebase.outputs.result == 'success'
+        id: push
         run: |
-          git push --force-with-lease origin "${{ steps.pr.outputs.head-ref }}"
+          PUSH_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ steps.pr.outputs.head-repo }}.git"
+          if git push "$PUSH_URL" "HEAD:${{ steps.pr.outputs.head-ref }}" --force-with-lease 2>&1; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Comment on success
         if: >-
           steps.check-access.outputs.skip != 'true' &&
-          steps.rebase.outputs.result == 'success'
+          steps.rebase.outputs.result == 'success' &&
+          steps.push.outputs.result == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -138,8 +127,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BODY=$(cat <<'COMMENT'
-          > /rebase
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -f body='> /rebase
 
           Rebase failed due to merge conflicts. Please rebase manually:
           ```
@@ -147,8 +136,17 @@ jobs:
           git rebase origin/${{ steps.pr.outputs.base-ref }}
           # resolve conflicts
           git push --force-with-lease
-          ```
-          COMMENT
-          )
+          ```' --silent
+
+      - name: Comment on push failure
+        if: >-
+          steps.check-access.outputs.skip != 'true' &&
+          steps.rebase.outputs.result == 'success' &&
+          steps.push.outputs.result == 'failed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           gh api "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
-            -f body="$BODY" --silent
+            -f body='> /rebase
+
+          Rebase succeeded but push failed. This usually means the PR is from a fork and the author has not enabled **Allow edits from maintainers**, or the fork repo restricts pushes. Please rebase manually.' --silent
