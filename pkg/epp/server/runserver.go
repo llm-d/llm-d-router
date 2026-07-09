@@ -106,10 +106,14 @@ func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 // SetupWithManager sets up the runner with the given manager.
 func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 	// Create the controllers and register them with the manager
+	// When PopulateNonLeaderDatastore is set the reconcilers run on every
+	// replica (not just the leader) so non-leaders keep a populated datastore.
+	runOnNonLeaders := r.ControllerCfg.PopulateNonLeaderDatastore
 	if r.ControllerCfg.startCrdReconcilers {
 		if err := (&controller.InferencePoolReconciler{
-			Datastore: r.Datastore,
-			Reader:    mgr.GetClient(),
+			Datastore:       r.Datastore,
+			Reader:          mgr.GetClient(),
+			RunOnNonLeaders: runOnNonLeaders,
 		}).SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("failed setting up InferencePoolReconciler - %w", err)
 		}
@@ -120,15 +124,17 @@ func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 				Reader:                   mgr.GetClient(),
 				PoolGKNN:                 r.GKNN,
 				PriorityBandControlPlane: r.PriorityBandControlPlane,
+				RunOnNonLeaders:          runOnNonLeaders,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("failed setting up InferenceObjectiveReconciler - %w", err)
 			}
 		}
 		if r.ControllerCfg.hasInferenceModelRewrites {
 			if err := (&controller.InferenceModelRewriteReconciler{
-				Datastore: r.Datastore,
-				Reader:    mgr.GetClient(),
-				PoolGKNN:  r.GKNN,
+				Datastore:       r.Datastore,
+				Reader:          mgr.GetClient(),
+				PoolGKNN:        r.GKNN,
+				RunOnNonLeaders: runOnNonLeaders,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("failed setting up InferenceModelRewriteReconciler - %w", err)
 			}
@@ -136,8 +142,9 @@ func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	if err := (&controller.PodReconciler{
-		Datastore: r.Datastore,
-		Reader:    mgr.GetClient(),
+		Datastore:       r.Datastore,
+		Reader:          mgr.GetClient(),
+		RunOnNonLeaders: runOnNonLeaders,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("failed setting up PodReconciler - %w", err)
 	}

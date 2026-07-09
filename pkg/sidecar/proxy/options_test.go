@@ -595,6 +595,48 @@ func TestNewOptionsWithEnvVars(t *testing.T) {
 	}
 }
 
+func TestP2PConnectorPort(t *testing.T) {
+	t.Run("defaults to 7777", func(t *testing.T) {
+		opts := NewOptions()
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.Equal(t, defaultP2PConnectorPort, opts.P2PConnectorPort)
+	})
+
+	t.Run("env var overrides default", func(t *testing.T) {
+		t.Setenv(envP2PConnectorPort, "9500")
+		opts := NewOptions()
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.Equal(t, 9500, opts.P2PConnectorPort)
+	})
+
+	t.Run("rejects out-of-range port", func(t *testing.T) {
+		opts := NewOptions()
+		opts.P2PConnectorPort = 70000
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--p2p-connector-port must be between 1 and 65535")
+	})
+}
+
+func TestValidateOffloadingDP(t *testing.T) {
+	t.Run("rejects offloading with data-parallel-size > 1", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 2
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--kv-connector=offloading does not support --data-parallel-size > 1")
+	})
+
+	t.Run("allows offloading with data-parallel-size 1", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 1
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+	})
+}
+
 func TestValidateConnector(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -605,6 +647,7 @@ func TestValidateConnector(t *testing.T) {
 		{"valid shared-storage", KVConnectorSharedStorage, false},
 		{"valid sglang", KVConnectorSGLang, false},
 		{"valid mooncake", KVConnectorMooncake, false},
+		{"valid offloading", KVConnectorOffloading, false},
 		{"invalid connector", "invalid", true},
 	}
 
