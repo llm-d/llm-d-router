@@ -164,9 +164,9 @@ func TestCalculateSummary(t *testing.T) {
 				}),
 			},
 			want: summary{
-				kvCache:         stats{mean: 50.0, stdv: 0, vrce: 0},
-				queueSize:       stats{mean: 3.0, stdv: 0, vrce: 0},
-				runningRequests: stats{mean: 5.0, stdv: 0, vrce: 0},
+				kvCache:         stats{mean: 50.0, stdv: 0},
+				queueSize:       stats{mean: 3.0, stdv: 0},
+				runningRequests: stats{mean: 5.0, stdv: 0},
 			},
 		},
 		{
@@ -186,9 +186,9 @@ func TestCalculateSummary(t *testing.T) {
 				}),
 			},
 			want: summary{
-				kvCache:         stats{mean: 50.0, stdv: 28.28, vrce: 800.0},
-				queueSize:       stats{mean: 3.5, stdv: 2.12, vrce: 4.5},
-				runningRequests: stats{mean: 2.0, stdv: 1.41, vrce: 2.0},
+				kvCache:         stats{mean: 50.0, stdv: 28.28},
+				queueSize:       stats{mean: 3.5, stdv: 2.12},
+				runningRequests: stats{mean: 2.0, stdv: 1.41},
 			},
 		},
 	}

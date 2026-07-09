@@ -150,7 +150,6 @@ func calculateTotals(endpoints []fwkdl.Endpoint) totals {
 type stats struct {
 	mean float64 // average
 	stdv float64 // standard deviation
-	vrce float64 // variance
 }
 
 type summary struct {
@@ -174,32 +173,23 @@ func calculateSummary(endpoints []fwkdl.Endpoint) summary {
 
 	for _, pod := range endpoints {
 		metrics := pod.GetMetrics()
-		result.kvCache.vrce += (metrics.KVCacheUsagePercent - result.kvCache.mean) * (metrics.KVCacheUsagePercent - result.kvCache.mean)
-		result.queueSize.vrce += (float64(metrics.WaitingQueueSize) - result.queueSize.mean) * (float64(metrics.WaitingQueueSize) - result.queueSize.mean)
-		result.runningRequests.vrce += (float64(metrics.RunningRequestsSize) - result.runningRequests.mean) * (float64(metrics.RunningRequestsSize) - result.runningRequests.mean)
+		result.kvCache.stdv += (metrics.KVCacheUsagePercent - result.kvCache.mean) * (metrics.KVCacheUsagePercent - result.kvCache.mean)
+		result.queueSize.stdv += (float64(metrics.WaitingQueueSize) - result.queueSize.mean) * (float64(metrics.WaitingQueueSize) - result.queueSize.mean)
+		result.runningRequests.stdv += (float64(metrics.RunningRequestsSize) - result.runningRequests.mean) * (float64(metrics.RunningRequestsSize) - result.runningRequests.mean)
 	}
-
-	var num = 1.0
-	if size > 2 {
-		num = size - 1
-	}
-
-	result.kvCache.vrce /= num
-	result.queueSize.vrce /= num
-	result.runningRequests.vrce /= num
 
 	// Round stats to two decimal places
-	result.kvCache.mean = math.Round(result.kvCache.mean*100) / 100
-	result.queueSize.mean = math.Round(result.queueSize.mean*100) / 100
-	result.runningRequests.mean = math.Round(result.runningRequests.mean*100) / 100
+	result.kvCache.mean = round2(result.kvCache.mean)
+	result.queueSize.mean = round2(result.queueSize.mean)
+	result.runningRequests.mean = round2(result.runningRequests.mean)
 
-	result.kvCache.vrce = math.Round((result.kvCache.vrce)*100) / 100
-	result.queueSize.vrce = math.Round((result.queueSize.vrce)*100) / 100
-	result.runningRequests.vrce = math.Round((result.runningRequests.vrce)*100) / 100
+	sampleSize := math.Max(1, size-1)
 
-	result.kvCache.stdv = math.Round(math.Sqrt(result.kvCache.vrce)*100) / 100
-	result.queueSize.stdv = math.Round(math.Sqrt(result.queueSize.vrce)*100) / 100
-	result.runningRequests.stdv = math.Round(math.Sqrt(result.runningRequests.vrce)*100) / 100
+	result.kvCache.stdv = round2(math.Sqrt(result.kvCache.stdv / sampleSize))
+	result.queueSize.stdv = round2(math.Sqrt(result.queueSize.stdv / sampleSize))
+	result.runningRequests.stdv = round2(math.Sqrt(result.runningRequests.stdv / sampleSize))
 
 	return result
 }
+
+func round2(x float64) float64 { return math.Round(x*100) / 100 }
