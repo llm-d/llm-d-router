@@ -1,6 +1,6 @@
 module github.com/llm-d/llm-d-router
 
-go 1.25.11
+go 1.25.12
 
 require (
 	cloud.google.com/go/aiplatform v1.124.0
