@@ -200,7 +200,7 @@ func TestPodReconciler(t *testing.T) {
 					Build()
 
 				// Configure the initial state of the datastore.
-				store := datastore.NewDatastore(t.Context(), epf, 0)
+				store := datastore.NewDatastore(t.Context(), epf)
 				_ = store.PoolSet(t.Context(), fakeClient, pool.InferencePoolToEndpointPool(test.pool))
 				for _, pod := range test.existingPods {
 					store.PodUpdateOrAddIfNotExist(t.Context(), pod)
