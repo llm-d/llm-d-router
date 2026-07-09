@@ -30,46 +30,6 @@ const (
 	kubernetesDeploymentKind = "Deployment"
 )
 
-// getMetricValue scrapes the EPP /metrics endpoint and returns the sum of all
-// series for metricName whose label set matches every entry in filters.
-// Returns 0 on scrape error or no match.
-func getMetricValue(metricName string, filters map[string]string) float64 {
-	resp, err := http.Get(fmt.Sprintf("http://localhost:%s/metrics", metricsPort))
-	if err != nil {
-		return 0
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0
-	}
-	var total float64
-	for _, line := range strings.Split(string(body), "\n") {
-		if !strings.HasPrefix(line, metricName+"{") && !strings.HasPrefix(line, metricName+" ") {
-			continue
-		}
-		match := true
-		for k, v := range filters {
-			if !strings.Contains(line, fmt.Sprintf("%s=%q", k, v)) {
-				match = false
-				break
-			}
-		}
-		if !match {
-			continue
-		}
-		parts := strings.Fields(line)
-		if len(parts) < 2 {
-			continue
-		}
-		f, err := strconv.ParseFloat(parts[len(parts)-1], 64)
-		if err == nil {
-			total += f
-		}
-	}
-	return total
-}
-
 func scaleDeployment(objects []string, increment int) {
 	direction := "up"
 	absIncrement := increment
@@ -283,56 +243,6 @@ func filterDocument(doc string) string {
 		removePodSpecListItem(obj, "initContainers", "vllm-render")
 		removePodSpecListItem(obj, "volumes", "model-cache")
 	}
-	out, err := yaml.Marshal(obj.Object)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	return strings.TrimRight(string(out), "\n")
-}
-
-// swapToSimRenderSidecar rewrites the vllm-render sidecar to run the inference
-// sim, which emits mm_features that text-only vLLM does not.
-func swapToSimRenderSidecar(eppManifests []string, simImage, modelName string) []string {
-	outputs := make([]string, len(eppManifests))
-	for idx, manifest := range eppManifests {
-		yamlDocs := strings.Split(manifest, "\n---")
-		rendered := make([]string, 0, len(yamlDocs))
-		for _, yamlDoc := range yamlDocs {
-			if strings.TrimSpace(yamlDoc) == "" {
-				continue
-			}
-			rendered = append(rendered, swapRenderSidecarInDoc(yamlDoc, simImage, modelName))
-		}
-		outputs[idx] = strings.Join(rendered, "\n---\n")
-	}
-	return outputs
-}
-
-func swapRenderSidecarInDoc(doc, simImage, modelName string) string {
-	obj := &unstructured.Unstructured{}
-	err := yaml.Unmarshal([]byte(doc), &obj.Object)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	if len(obj.Object) == 0 || obj.GetKind() != kubernetesDeploymentKind {
-		return doc
-	}
-	path := []string{"spec", "template", "spec", "containers"}
-	containers, found, err := unstructured.NestedSlice(obj.Object, path...)
-	if err != nil || !found {
-		return doc
-	}
-	for i, raw := range containers {
-		c, ok := raw.(map[string]any)
-		if !ok || c["name"] != "vllm-render" {
-			continue
-		}
-		c["image"] = simImage
-		delete(c, "command")
-		// --log-http: surface inbound URL/method so CI failures are diagnosable.
-		c["args"] = []any{"--port=8000", "--model=" + modelName, "--log-http"}
-		delete(c, "volumeMounts")
-		containers[i] = c
-	}
-	err = unstructured.SetNestedSlice(obj.Object, containers, path...)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	removePodSpecListItem(obj, "volumes", "model-cache")
 	out, err := yaml.Marshal(obj.Object)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	return strings.TrimRight(string(out), "\n")
