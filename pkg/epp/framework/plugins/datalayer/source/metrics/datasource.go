@@ -58,10 +58,7 @@ func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[P
 // MetricsDataSourceFactory is a factory function used to instantiate data layer's
 // metrics data source plugins specified in a configuration.
 func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	cfg, err := defaultDataSourceConfigParams()
-	if err != nil {
-		return nil, err
-	}
+	cfg := defaultDataSourceConfigParams()
 
 	if parameters != nil { // overlay the defaults with configured values
 		if err := parameters.Decode(cfg); err != nil {
@@ -73,12 +70,12 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		MetricsDataSourceType, name, parseMetrics)
 }
 
-func defaultDataSourceConfigParams() (*metricsDatasourceParams, error) {
+func defaultDataSourceConfigParams() *metricsDatasourceParams {
 	return &metricsDatasourceParams{
 		Scheme:             defaultMetricsScheme,
 		Path:               defaultMetricsPath,
 		InsecureSkipVerify: defaultMetricsInsecureSkipVerify,
-	}, nil
+	}
 }
 
 func parseMetrics(data io.Reader) (PrometheusMetricMap, error) {

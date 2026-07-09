@@ -23,10 +23,7 @@ import (
 )
 
 func TestDataSourceConfigParams_UsesBuiltInDefaults(t *testing.T) {
-	cfg, err := defaultDataSourceConfigParams()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	cfg := defaultDataSourceConfigParams()
 
 	expected := &metricsDatasourceParams{
 		Scheme:             defaultMetricsScheme,
@@ -40,10 +37,7 @@ func TestDataSourceConfigParams_UsesBuiltInDefaults(t *testing.T) {
 }
 
 func TestDataSourceConfigParams_UsesConfig(t *testing.T) {
-	cfg, err := defaultDataSourceConfigParams()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	cfg := defaultDataSourceConfigParams()
 
 	// Config JSON overrides
 	parameters := metricsDatasourceParams{
