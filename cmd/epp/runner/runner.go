@@ -290,6 +290,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	startCrdReconcilers := opts.EndpointSelector == nil // If endpointSelector is nil, it means it's not in the standalone mode. Then we should start the inferencePool and other CRD Reconciler.
 	controllerCfg := runserver.NewControllerConfig(startCrdReconcilers)
+	controllerCfg.PopulateNonLeaderDatastore = r.featureGates[runserver.HAPopulateNonLeaderDatastoreFeatureGate]
 	if err := controllerCfg.PopulateControllerConfig(cfg); err != nil {
 		setupLog.Error(err, "Failed to populate controller config")
 		return nil, nil, err
@@ -599,6 +600,7 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 	}
 
 	loader.RegisterFeatureGate(flowcontrol.FeatureGate, false)
+	loader.RegisterFeatureGate(runserver.HAPopulateNonLeaderDatastoreFeatureGate, true)
 
 	r.registerInTreePlugins()
 
