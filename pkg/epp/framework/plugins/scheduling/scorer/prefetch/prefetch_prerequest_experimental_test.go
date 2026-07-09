@@ -482,4 +482,67 @@ func TestPrefetchWorkerPool_WorkerProcessing(t *testing.T) {
 	}
 }
 
+func TestSubmitForPrefetch(t *testing.T) {
+	ctx := context.Background()
+	paths := []string{"/a.bin", "/b.bin", "/c.bin", "/d.bin"}
+
+	// handler backed by a queue with no draining workers, so it fills and stays
+	// full; prefill puts `prefilled` paths on the queue before submission.
+	newHandler := func(queueSize, prefilled int) *PrefetchPrerequestHandler {
+		h := &PrefetchPrerequestHandler{
+			prefetchConfig: &PrefetchConfig{Enabled: true},
+			workerPool:     &PrefetchWorkerPool{workQueue: make(chan string, queueSize)},
+		}
+		for i := 0; i < prefilled; i++ {
+			h.workerPool.workQueue <- "/prefill.bin"
+		}
+		return h
+	}
+
+	t.Run("submits while room remains", func(t *testing.T) {
+		h := newHandler(len(paths), 0)
+		submitted, skipped := h.submitForPrefetch(ctx, "req", paths)
+		assert.Equal(t, len(paths), submitted)
+		assert.Equal(t, 0, skipped)
+	})
+
+	t.Run("drops on full queue without blocking", func(t *testing.T) {
+		// Queue holds 2; no workers drain it. Submitting 4 paths must fill the
+		// 2 free slots and drop the rest immediately rather than block.
+		h := newHandler(2, 0)
+		done := make(chan struct{})
+		var submitted, skipped int
+		go func() {
+			submitted, skipped = h.submitForPrefetch(ctx, "req", paths)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("submitForPrefetch blocked on a full queue")
+		}
+		assert.Equal(t, 2, submitted)
+		assert.Equal(t, len(paths)-2, skipped)
+	})
+
+	t.Run("drops every path when queue is full from the start", func(t *testing.T) {
+		// Queue full from the start (size 1, prefilled 1). Every path is dropped
+		// immediately without blocking.
+		h := newHandler(1, 1)
+		done := make(chan struct{})
+		var submitted, skipped int
+		go func() {
+			submitted, skipped = h.submitForPrefetch(ctx, "req", paths)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("submitForPrefetch blocked on a full queue")
+		}
+		assert.Equal(t, 0, submitted)
+		assert.Equal(t, len(paths), skipped)
+	})
+}
+
 // Made with Bob

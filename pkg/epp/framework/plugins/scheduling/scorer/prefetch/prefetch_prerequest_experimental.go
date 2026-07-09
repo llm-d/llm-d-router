@@ -295,7 +295,6 @@ type PrefetchConfig struct {
 	BlockCount         int   `json:"blockCount,omitempty"`
 	MaxConcurrentFiles int   `json:"maxConcurrentFiles,omitempty"`
 	WorkQueueSize      int   `json:"workQueueSize,omitempty"`
-	QueueTimeout       int   `json:"queueTimeout,omitempty"`
 }
 
 // SetDefaultsForFilePrefetching applies default values to unset prefetch configuration fields.
@@ -388,6 +387,26 @@ func (p *PrefetchPrerequestHandler) WithName(name string) *PrefetchPrerequestHan
 	return p
 }
 
+// submitForPrefetch enqueues each path onto the worker queue and returns the
+// number of paths submitted and skipped. It runs on the request's critical
+// path, so it never blocks waiting on the worker pool: a full queue drops the
+// path immediately. A skipped path is a benign warm-up miss (the backend reads
+// it cold later), never a request failure, so skipped is the queue-saturation
+// signal.
+func (p *PrefetchPrerequestHandler) submitForPrefetch(ctx context.Context, requestID string, paths []string) (submitted, skipped int) {
+	for _, path := range paths {
+		select {
+		case p.workerPool.workQueue <- path:
+			submitted++
+		default:
+			skipped++
+			log.FromContext(ctx).V(logging.DEBUG).Info("PreRequest: queue full, skipping file",
+				"requestId", requestID, "path", path)
+		}
+	}
+	return submitted, skipped
+}
+
 // PreRequest logs engine keys and submits matching KV cache files for best-effort prefetching.
 func (p *PrefetchPrerequestHandler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
 	_ = schedulingResult
@@ -406,12 +425,17 @@ func (p *PrefetchPrerequestHandler) PreRequest(ctx context.Context, request *sch
 				log.FromContext(ctx).Info("PreRequest: accessing engine-keys from provider",
 					"requestId", request.RequestID, "provider", p.engineKeysProviderPluginName)
 
+				hashStart := time.Now()
 				engineKeys, digests, err := keysProvider.GetEngineKeysAndDigestsForRequest(ctx, request)
+				hashDuration := time.Since(hashStart)
 				if err != nil {
 					log.FromContext(ctx).Error(err, "PreRequest: GetEngineKeysAndDigestsForRequest failed",
 						"requestId", request.RequestID, "provider", p.engineKeysProviderPluginName)
 					return
 				}
+
+				log.FromContext(ctx).V(logging.DEBUG).Info("PreRequest: engine-keys/digests computed",
+					"requestId", request.RequestID, "digestCount", len(digests), "hashDuration", hashDuration)
 
 				if len(digests) == 0 {
 					log.FromContext(ctx).Info("PreRequest: no block digests for request, skipping prefetch (prompt likely shorter than one KV block)",
@@ -446,27 +470,9 @@ func (p *PrefetchPrerequestHandler) PreRequest(ctx context.Context, request *sch
 
 					if p.workerPool != nil && p.workerPool.workQueue != nil && p.prefetchConfig != nil && p.prefetchConfig.Enabled {
 						log.FromContext(ctx).Info("PreRequest: submitting files for prefetch",
-							"requestId", request.RequestID, "fileCount", len(allFilePaths),
-							"queueTimeout", p.prefetchConfig.QueueTimeout)
+							"requestId", request.RequestID, "fileCount", len(allFilePaths))
 
-						submitted := 0
-						skipped := 0
-
-						for _, path := range allFilePaths {
-							if p.prefetchConfig.QueueTimeout > 0 {
-								select {
-								case p.workerPool.workQueue <- path:
-									submitted++
-								case <-time.After(time.Duration(p.prefetchConfig.QueueTimeout) * time.Millisecond):
-									skipped++
-									log.FromContext(ctx).V(1).Info("PreRequest: queue timeout, skipping file",
-										"requestId", request.RequestID, "path", path, "timeout", p.prefetchConfig.QueueTimeout)
-								}
-							} else {
-								p.workerPool.workQueue <- path
-								submitted++
-							}
-						}
+						submitted, skipped := p.submitForPrefetch(ctx, request.RequestID, allFilePaths)
 
 						log.FromContext(ctx).Info("PreRequest: prefetch submission complete",
 							"requestId", request.RequestID, "submitted", submitted, "skipped", skipped)
