@@ -66,6 +66,12 @@ func TestParseGrpcPayload(t *testing.T) {
 			want:    []byte("hello"),
 			wantErr: "",
 		},
+		{
+			name:    "length header overflows uint32",
+			data:    []byte{0, 0xFF, 0xFF, 0xFF, 0xFF, 0xAA, 0xBB, 0xCC, 0xDD},
+			want:    nil,
+			wantErr: "incomplete gRPC payload: header indicates 4294967295 bytes, but only 4 bytes are available",
+		},
 	}
 
 	for _, tt := range tests {
