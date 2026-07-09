@@ -136,7 +136,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		r.Header.Del(routing.KVCacheSourceHeader)
 		if kvCacheSource != "" {
 			switch {
-			case s.config.KVConnector != KVConnectorOffloading:
+			case !s.p2pPullAvailable():
 				s.logger.V(logging.DEBUG).Info("ignoring KV cache source header: connector does not support P2P pulls",
 					"connector", s.config.KVConnector)
 				kvCacheSource = ""

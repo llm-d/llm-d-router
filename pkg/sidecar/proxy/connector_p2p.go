@@ -72,13 +72,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 			requestFieldKVRequestID: kvRequestID,
 		},
 	}
-	// decode + p2p is the only legal multi-key combination: the prefill
-	// producer additionally pulls cached prefix blocks from the peer while
-	// keeping its computed blocks available for the decoder. Skip a source that
-	// resolves to the prefiller itself - there is nothing to pull.
-	if kvCacheSource != "" && extractHost(kvCacheSource) != extractHost(prefillPodHostPort) {
-		prefillKVParams[requestFieldP2PParams] = s.p2pSourceParams(kvCacheSource)
-	}
+	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
 	prefillData[requestFieldKVTransferParams] = prefillKVParams
 	prefillData[requestFieldStream] = false
 	delete(prefillData, requestFieldStreamOptions)
@@ -215,6 +209,27 @@ func (s *Server) handleP2PConcurrentRequests(w http.ResponseWriter, r *http.Requ
 			attribute.Float64("llm_d.pd_proxy.decode_duration_ms", float64(decodeDuration.Milliseconds())),
 			attribute.Bool("llm_d.pd_proxy.concurrent_pd", true),
 		)
+	}
+}
+
+// p2pPullAvailable reports whether this deployment can pull cached prefix over
+// the OffloadingConnector P2P tier. That tier is the PD connector itself when
+// KVConnector is offloading, or is composed alongside NIXL via MultiConnector
+// (declared with --enable-p2p-pull) when the PD connector is NIXL.
+func (s *Server) p2pPullAvailable() bool {
+	return s.config.KVConnector == KVConnectorOffloading || s.config.EnableP2PPull
+}
+
+// addP2PPullToPrefill adds the OffloadingConnector p2p pull block to a prefill
+// leg's kv_transfer_params so the prefiller pulls cached prefix from
+// kvCacheSource while keeping its own computed blocks available for the
+// decoder. It is a no-op when no source is set or the source resolves to the
+// prefiller itself, since there is nothing to pull from oneself. The p2p key
+// composes with NIXL params: vLLM's MultiConnector routes it to the
+// OffloadingConnector and the NIXL fields to the NixlConnector.
+func (s *Server) addP2PPullToPrefill(prefillKVParams map[string]any, kvCacheSource, prefillPodHostPort string) {
+	if kvCacheSource != "" && extractHost(kvCacheSource) != extractHost(prefillPodHostPort) {
+		prefillKVParams[requestFieldP2PParams] = s.p2pSourceParams(kvCacheSource)
 	}
 }
 
