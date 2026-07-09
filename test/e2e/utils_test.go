@@ -26,7 +26,8 @@ import (
 )
 
 const (
-	deploymentKind = "deployment"
+	deploymentKind       = "deployment"
+	deploymentObjectKind = "Deployment"
 )
 
 // getMetricValue scrapes the EPP /metrics endpoint and returns the sum of all
@@ -277,7 +278,7 @@ func filterDocument(doc string) string {
 	if len(obj.Object) == 0 {
 		return doc
 	}
-	if obj.GetKind() == "Deployment" {
+	if obj.GetKind() == deploymentObjectKind {
 		removePodSpecListItem(obj, "containers", "vllm-render")
 		removePodSpecListItem(obj, "initContainers", "vllm-render")
 		removePodSpecListItem(obj, "volumes", "model-cache")
@@ -309,7 +310,7 @@ func swapRenderSidecarInDoc(doc, simImage, modelName string) string {
 	obj := &unstructured.Unstructured{}
 	err := yaml.Unmarshal([]byte(doc), &obj.Object)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	if len(obj.Object) == 0 || obj.GetKind() != "Deployment" {
+	if len(obj.Object) == 0 || obj.GetKind() != deploymentObjectKind {
 		return doc
 	}
 	path := []string{"spec", "template", "spec", "containers"}
@@ -394,7 +395,7 @@ func appendArgsToEppContainer(doc string, args []string) string {
 	obj := &unstructured.Unstructured{}
 	err := yaml.Unmarshal([]byte(doc), &obj.Object)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	if len(obj.Object) == 0 || obj.GetKind() != "Deployment" {
+	if len(obj.Object) == 0 || obj.GetKind() != deploymentObjectKind {
 		return doc
 	}
 	path := []string{"spec", "template", "spec", "containers"}
