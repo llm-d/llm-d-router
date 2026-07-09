@@ -44,8 +44,8 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.REBASE_APP_ID }}
-          private-key: ${{ secrets.REBASE_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.RELEASE_NOTES_APP_ID }}
+          private-key: ${{ secrets.RELEASE_NOTES_APP_PRIVATE_KEY }}
 
       - name: Get App user info
         if: steps.check-access.outputs.skip != 'true'
