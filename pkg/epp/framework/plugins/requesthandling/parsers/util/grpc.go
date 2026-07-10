@@ -42,8 +42,11 @@ func ParseGrpcPayload(data []byte) ([]byte, error) {
 	}
 	msgLen := binary.BigEndian.Uint32(data[1:5])
 
-	if uint32(len(data)) < gRPCPayloadHeaderLen+msgLen {
-		return nil, fmt.Errorf("incomplete gRPC payload: header indicates %d bytes, but only %d bytes are available", msgLen, uint32(len(data))-gRPCPayloadHeaderLen)
+	// Compare in uint64 so gRPCPayloadHeaderLen+msgLen cannot overflow when
+	// msgLen is near math.MaxUint32, which would wrap the check and let the
+	// slice below panic with an out-of-range low>high index.
+	if uint64(len(data)) < uint64(gRPCPayloadHeaderLen)+uint64(msgLen) {
+		return nil, fmt.Errorf("incomplete gRPC payload: header indicates %d bytes, but only %d bytes are available", msgLen, len(data)-gRPCPayloadHeaderLen)
 	}
 	return data[gRPCPayloadHeaderLen : gRPCPayloadHeaderLen+msgLen], nil
 }

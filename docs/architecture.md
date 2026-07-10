@@ -170,9 +170,9 @@ schedulingProfiles:
     weight: 50
 ```
 
-If the configuration is in a file, the EPP command line argument `--configFile` should be used
+If the configuration is in a file, the EPP command line argument `--config-file` should be used
  to specify the full path of the file in question. If the configuration is passed as in-line
- text the EPP command line argument `--configText` should be used.
+ text the EPP command line argument `--config-text` should be used.
 
 ### Default plugins
 

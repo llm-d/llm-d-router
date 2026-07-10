@@ -19,6 +19,11 @@ const (
 	// DataParallelEndpointHeader is the header name used to indicate the worker <ip:port> for Data Parallel
 	DataParallelEndpointHeader = "x-data-parallel-host-port"
 
+	// KVCacheSourceHeader is the header name used to indicate the worker <ip:port> holding
+	// the most cached prefix KV blocks for the request, to pull from over the P2P connector
+	// instead of recomputing them
+	KVCacheSourceHeader = "x-kv-cache-source-host-port"
+
 	// InferencePoolAPIGroup is the default InferencePool API group
 	InferencePoolAPIGroup = "inference.networking.k8s.io"
 
