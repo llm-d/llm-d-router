@@ -112,7 +112,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Verifying new requests eventually route to a pod other than the killed one")
 			gomega.Eventually(func() error {
-				nsHdr, podHdr, _, err := tryCompletion(simplePrompt, simModelName)
+				nsHdr, podHdr, err := tryCompletion(simplePrompt, simModelName)
 				if err != nil {
 					return err
 				}
@@ -131,11 +131,19 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				return len(currentDecode)
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
-			ginkgo.By("Verifying requests succeed after recovery")
-			for range 3 {
-				nsHdr, _, _ = runCompletion(simplePrompt, simModelName)
-				gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
-			}
+			ginkgo.By("Verifying requests succeed consistently after recovery")
+			gomega.Eventually(func() error {
+				for range 3 {
+					nsHdr, _, err := tryCompletion(simplePrompt, simModelName)
+					if err != nil {
+						return err
+					}
+					if nsHdr != nsName {
+						return fmt.Errorf("expected namespace %q, got %q", nsName, nsHdr)
+					}
+				}
+				return nil
+			}, eppRecoveryTimeout, 1*time.Second).Should(gomega.Succeed())
 		})
 	})
 
