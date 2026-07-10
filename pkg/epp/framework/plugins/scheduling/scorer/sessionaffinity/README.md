@@ -42,6 +42,21 @@ To support session affinity with PD disaggregation, configure two separate insta
 
 The decode instance uses the default behavior (writing the decode pod to `x-session-token`). The prefill instance uses `profileName: prefill` to look up the prefill pod from the scheduling results and write it to `x-session-token-prefill`. This ensures that subsequent requests in the same session target both the same prefill pod and the same decode pod.
 
+### Agentic Workload Example
+
+For agentic workloads (long-running, multi-turn interactions), it is highly recommended to pair this scorer with the `prefix-cache-scorer` (with length awareness enabled) to ensure rapidly diverging chat history remains sticky to the original pod, while allowing shorter new sessions to migrate to less loaded pods:
+
+```yaml
+- type: prefix-cache-scorer
+  parameters:
+    matchLengthWeight: 0.8
+    matchLengthScaleTokens: 16000
+
+- type: session-affinity-scorer
+  parameters:
+    headerName: x-session-token
+```
+
 ## Relationship to the session affinity filter
 
 The [session affinity filter](../../filter/sessionaffinity/README.md) (`session-affinity-filter`) provides the same affinity behavior as a hard constraint and writes the same response header. Configuring both alongside the scorer is unnecessary and can be misleading; see [Relationship to the session affinity scorer](../../filter/sessionaffinity/README.md#relationship-to-the-session-affinity-scorer) for details. Use the scorer for a soft preference that can be outweighed by other scorers, or the filter for a hard pin.

@@ -31,6 +31,23 @@ The attribute is typically produced by the approximate prefix cache data produce
 
 This plugin does not define any plugin-specific parameters.
 
+### Agentic Workload Example
+
+For agentic workloads, sessions typically consist of long-running, multi-turn interactions where the system prompt is shared but session-specific context diverges rapidly.
+
+To optimize routing for these workloads, configure both the `prefix-cache-scorer` (with length awareness enabled) and the `session-affinity-scorer`. Length awareness allows shorter sessions to migrate freely when pods are overloaded, while session affinity keeps the rapidly diverging chat history sticky to the original pod:
+
+```yaml
+- type: prefix-cache-scorer
+  parameters:
+    matchLengthWeight: 0.8
+    matchLengthScaleTokens: 16000
+
+- type: session-affinity-scorer
+  parameters:
+    headerName: x-session-token
+```
+
 ## Operational notes
 
 - The scorer itself does not hash prompts or maintain cache state.
