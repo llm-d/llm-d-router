@@ -168,16 +168,6 @@ func (fcac *FlowControlAdmissionController) Admit(
 		modelName:         reqCtx.IncomingModelName,
 	}
 
-	if err := rejectIfSheddableAndSaturated(
-		ctx,
-		fcac.saturationDetector,
-		fcac.endpointCandidates,
-		reqCtx, priority,
-		logger,
-	); err != nil {
-		return err
-	}
-
 	outcome, err := fcac.flowController.EnqueueAndWait(ctx, fcReq)
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)
