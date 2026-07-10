@@ -32,7 +32,6 @@ Documentation for developing the llm-d Router.
     - [Filtered Tests](#filtered-tests)
     - [End-to-End Tests](#end-to-end-tests)
     - [Coverage](#coverage)
-  - [Tokenization Architecture](#tokenization-architecture)
   - [Kubernetes Development Environment](#kubernetes-development-environment)
     - [Infrastructure Setup](#infrastructure-setup)
     - [RBAC and Permissions](#rbac-and-permissions)

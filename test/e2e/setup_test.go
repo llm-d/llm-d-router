@@ -186,6 +186,7 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 	if !usesTokenProducer(eppConfig) {
 		eppYamls = removeRenderSidecar(eppYamls)
 	}
+	eppYamls = appendEppArgs(eppYamls, eppExtraArgs)
 
 	if waitForReady {
 		return append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls)...)

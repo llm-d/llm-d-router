@@ -40,6 +40,15 @@ const chatCompletionsRequestBody = `{
 				"max_tokens": 50
 			}`
 
+const chatCompletionsRequestBodyWithMaxCompletionTokens = `{
+				"model": "Qwen/Qwen2-0.5B",
+				"messages": [
+				  {"role": "user", "content": "Hello"}
+				],
+				"max_tokens": 50,
+				"max_completion_tokens": 100
+			}`
+
 type sidecarTestInfo struct {
 	ctx            context.Context
 	cancelFn       context.CancelFunc
@@ -96,15 +105,7 @@ var _ = Describe("Common Connector tests", func() {
 				proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
 
 				By("sending a /v1/chat/completions request with max_completion_tokens set")
-				//nolint:goconst
-				body := `{
-				"model": "Qwen/Qwen2-0.5B",
-				"messages": [
-				  {"role": "user", "content": "Hello"}
-				],
-				"max_tokens": 50,
-				"max_completion_tokens": 100
-			}`
+				body := chatCompletionsRequestBodyWithMaxCompletionTokens
 
 				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
 				Expect(err).ToNot(HaveOccurred())

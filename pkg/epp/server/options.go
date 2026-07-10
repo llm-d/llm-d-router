@@ -34,7 +34,8 @@ import (
 
 const (
 	DefaultGrpcPort      = 9002
-	DefaultPoolNamespace = "default" // default when pool namespace is empty (CLI flag default is empty)
+	DefaultPoolNamespace = "default"        // default when pool namespace is empty (CLI flag default is empty)
+	DefaultDrainTimeout  = 30 * time.Second // graceful shutdown drain window
 )
 
 // deprecatedMetricFlags lists metric flags that are superseded by engineConfigs
@@ -58,12 +59,13 @@ type Options struct {
 	//
 	// ext_proc configuration.
 	//
-	GRPCPort              int    // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
-	EnableLeaderElection  bool   // Enables leader election for high availability
-	GRPCMaxRecvMsgSize    int    // Maximum size of a gRPC message to receive (parsed bytes).
-	GRPCMaxSendMsgSize    int    // Maximum size of a gRPC message to send (parsed bytes).
-	GRPCMaxRecvMsgSizeStr string // Raw string value from CLI flag for receive limit.
-	GRPCMaxSendMsgSizeStr string // Raw string value from CLI flag for send limit.
+	GRPCPort              int           // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
+	EnableLeaderElection  bool          // Enables leader election for high availability
+	DrainTimeout          time.Duration // Graceful shutdown drain window; ext_proc keeps serving this long after SIGTERM.
+	GRPCMaxRecvMsgSize    int           // Maximum size of a gRPC message to receive (parsed bytes).
+	GRPCMaxSendMsgSize    int           // Maximum size of a gRPC message to send (parsed bytes).
+	GRPCMaxRecvMsgSizeStr string        // Raw string value from CLI flag for receive limit.
+	GRPCMaxSendMsgSizeStr string        // Raw string value from CLI flag for send limit.
 	//
 	// InferencePool.
 	//
@@ -120,6 +122,7 @@ type Options struct {
 func NewOptions() *Options {
 	return &Options{ // "zero" values are no explicitly set
 		GRPCPort:                         DefaultGrpcPort,
+		DrainTimeout:                     DefaultDrainTimeout,
 		PoolGroup:                        routing.InferencePoolAPIGroup,
 		EndpointTargetPorts:              []int{},
 		DisableEndpointSubsetFilter:      false,
@@ -153,6 +156,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.GRPCPort, "grpc-port", opts.GRPCPort, "gRPC port used for communicating with Envoy proxy.")
 	fs.BoolVar(&opts.EnableLeaderElection, "ha-enable-leader-election", opts.EnableLeaderElection,
 		"Enables leader election for high availability. When enabled, readiness probes will only pass on the leader.")
+	fs.DurationVar(&opts.DrainTimeout, "drain-timeout", opts.DrainTimeout,
+		"Graceful shutdown drain window. On SIGTERM the EPP goes NotServing and releases its leader lease "+
+			"immediately, then keeps serving ext_proc for this duration so in-flight and pre-DNS-refresh requests "+
+			"are not rejected.")
 	fs.StringVar(&opts.GRPCMaxRecvMsgSizeStr, "grpc-max-recv-msg-size", opts.GRPCMaxRecvMsgSizeStr, "Maximum size of a gRPC message to receive (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.GRPCMaxSendMsgSizeStr, "grpc-max-send-msg-size", opts.GRPCMaxSendMsgSizeStr, "Maximum size of a gRPC message to send (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.PoolGroup, "pool-group", opts.PoolGroup,

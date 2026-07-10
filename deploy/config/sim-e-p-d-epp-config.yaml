@@ -6,15 +6,15 @@ plugins:
 - type: encode-filter
 - type: prefill-filter
 - type: decode-filter
-- type: always-disagg-multimodal-decider
-- type: prefix-based-pd-decider
-  parameters:
-    nonCachedTokens: 16
 - type: disagg-profile-handler
   parameters:
     deciders:
       encode: always-disagg-multimodal-decider
       prefill: prefix-based-pd-decider
+- type: always-disagg-multimodal-decider
+- type: prefix-based-pd-decider
+  parameters:
+    nonCachedTokens: 16
 schedulingProfiles:
 - name: encode
   plugins:

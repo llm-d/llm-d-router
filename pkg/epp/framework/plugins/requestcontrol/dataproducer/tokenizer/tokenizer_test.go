@@ -624,3 +624,182 @@ func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {
 		})
 	}
 }
+
+func TestMessagesToRenderChatRequest_RawSystem(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		System:   fwkrh.AnthropicContent{Raw: "You are helpful."},
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}}},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 2)
+	assert.Equal(t, "system", result.Conversation[0].Role)
+	assert.Equal(t, tokenizerTypes.Content{Raw: "You are helpful."}, result.Conversation[0].Content)
+	assert.Equal(t, "user", result.Conversation[1].Role)
+	assert.Equal(t, tokenizerTypes.Content{Raw: "Hello"}, result.Conversation[1].Content)
+}
+
+func TestMessagesToRenderChatRequest_Tools(t *testing.T) {
+	tools := []any{map[string]any{"name": "get_weather"}}
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "What is the weather today?"}}},
+		Tools:    tools,
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	assert.Equal(t, tools, result.Tools)
+}
+
+func TestMessagesToRenderChatRequest_StructuredSystem(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		System: fwkrh.AnthropicContent{
+			Structured: []fwkrh.AnthropicContentBlock{
+				{Type: "text", Text: "System line 1."},
+				{Type: "text", Text: "System line 2."},
+			},
+		},
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 2)
+	assert.Equal(t, "system", result.Conversation[0].Role)
+	require.Len(t, result.Conversation[0].Content.Structured, 2)
+	assert.Equal(t, "text", result.Conversation[0].Content.Structured[0].Type)
+	assert.Equal(t, "System line 1.", result.Conversation[0].Content.Structured[0].Text)
+	assert.Equal(t, "System line 2.", result.Conversation[0].Content.Structured[1].Text)
+}
+
+func TestMessagesToRenderChatRequest_NoSystem(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 1)
+	assert.Equal(t, "user", result.Conversation[0].Role)
+}
+
+func TestMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []fwkrh.AnthropicMessage
+		wantConv []tokenizerTypes.Conversation
+	}{
+		{
+			name: "text-only structured content",
+			messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{
+					Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "text", Text: "Hello"},
+						{Type: "text", Text: "World"},
+					},
+				}},
+			},
+			wantConv: []tokenizerTypes.Conversation{
+				{Role: "user", Content: tokenizerTypes.Content{
+					Structured: []tokenizerTypes.ContentBlock{
+						{Type: "text", Text: "Hello"},
+						{Type: "text", Text: "World"},
+					},
+				}},
+			},
+		},
+		{
+			name: "image returns data URI",
+			messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{
+					Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "text", Text: "Describe this"},
+						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64", MediaType: "image/png", Data: "abc123"}},
+					},
+				}},
+			},
+			wantConv: []tokenizerTypes.Conversation{
+				{Role: "user", Content: tokenizerTypes.Content{
+					Structured: []tokenizerTypes.ContentBlock{
+						{Type: "text", Text: "Describe this"},
+						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "data:image/png;base64,abc123"}},
+					},
+				}},
+			},
+		},
+		{
+			name: "image returns https URL",
+			messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{
+					Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "text", Text: "Describe this"},
+						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "url", URL: "https://example.com/img.jpg"}},
+					},
+				}},
+			},
+			wantConv: []tokenizerTypes.Conversation{
+				{Role: "user", Content: tokenizerTypes.Content{
+					Structured: []tokenizerTypes.ContentBlock{
+						{Type: "text", Text: "Describe this"},
+						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "https://example.com/img.jpg"}},
+					},
+				}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &fwkrh.MessagesRequest{Messages: tt.messages}
+			result := MessagesToRenderChatRequest(msg)
+			require.Len(t, result.Conversation, len(tt.wantConv))
+			for i, want := range tt.wantConv {
+				got := result.Conversation[i]
+				assert.Equal(t, want.Role, got.Role)
+				assert.Equal(t, want.Content.Raw, got.Content.Raw)
+				assert.Equal(t, want.Content.Structured, got.Content.Structured,
+					"message %d: Structured content mismatch", i)
+			}
+		})
+	}
+}
+
+func TestProduce_MessagesRequest(t *testing.T) {
+	wantTokens := []uint32{100, 200, 300}
+	var gotPayload fwkrh.RequestPayload
+	tok := &mockTokenizer{
+		renderChatFunc: func(payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+			gotPayload = payload
+			return wantTokens, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+
+	// Payload holds the raw request body; RenderChat must receive the converted
+	// /render body, not that raw payload.
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Payload: fwkrh.PayloadMap{
+				"system":   "Be helpful.",
+				"messages": []any{map[string]any{"role": "user", "content": "Hi"}},
+			},
+			Messages: &fwkrh.MessagesRequest{
+				System:   fwkrh.AnthropicContent{Raw: "Be helpful."},
+				Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, [][]uint32{wantTokens}, req.Body.TokenizedPrompt.PerPromptTokens)
+
+	pm, ok := gotPayload.AsMap()
+	require.True(t, ok, "RenderChat payload must be a map")
+	assert.NotContains(t, pm, "system", "raw Anthropic top-level system must not reach /render")
+	msgs, ok := pm["messages"].([]any)
+	require.True(t, ok, "payload must carry the /render chat messages array")
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "system", msgs[0].(map[string]any)["role"])
+	assert.Equal(t, "user", msgs[1].(map[string]any)["role"])
+}
