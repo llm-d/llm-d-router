@@ -652,6 +652,43 @@ func TestMessagesToRenderChatRequest_Tools(t *testing.T) {
 	assert.Equal(t, tools, result.Tools)
 }
 
+func TestMessagesToRenderChatRequest_ConvertsAnthropicTools(t *testing.T) {
+	schema := map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}}
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "hi"}}},
+		Tools: []any{map[string]any{
+			"name":         "get_weather",
+			"description":  "Get the weather",
+			"input_schema": schema,
+		}},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	want := []any{map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "get_weather",
+			"description": "Get the weather",
+			"parameters":  schema,
+		},
+	}}
+	assert.Equal(t, want, result.Tools)
+}
+
+func TestMessagesToRenderChatRequest_ToolsPassThrough(t *testing.T) {
+	openAITool := map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}}
+	nonObject := "not-a-tool"
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "hi"}}},
+		Tools:    []any{openAITool, nonObject},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	assert.Equal(t, []any{openAITool, nonObject}, result.Tools)
+}
+
 func TestMessagesToRenderChatRequest_StructuredSystem(t *testing.T) {
 	msg := &fwkrh.MessagesRequest{
 		System: fwkrh.AnthropicContent{

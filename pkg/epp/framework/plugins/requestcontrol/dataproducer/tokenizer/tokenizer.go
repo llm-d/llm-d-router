@@ -322,8 +322,46 @@ func MessagesToRenderChatRequest(msg *fwkrh.MessagesRequest) *tokenizerTypes.Ren
 
 	return &tokenizerTypes.RenderChatRequest{
 		Conversation: conversation,
-		Tools:        msg.Tools,
+		Tools:        convertAnthropicTools(msg.Tools),
 	}
+}
+
+// convertAnthropicTools maps Anthropic tool definitions to the OpenAI function
+// schema vLLM /render expects. An Anthropic custom tool is
+// {name, description, input_schema}; the OpenAI form nests these under
+// {type: "function", function: {name, description, parameters}}. Tools that are
+// already OpenAI-shaped (have a "function" field) or are not object-shaped pass
+// through unchanged.
+func convertAnthropicTools(tools []any) []any {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(tools))
+	for _, t := range tools {
+		m, ok := t.(map[string]any)
+		if !ok {
+			out = append(out, t)
+			continue
+		}
+		if _, isOpenAI := m["function"]; isOpenAI {
+			out = append(out, t)
+			continue
+		}
+		schema, hasSchema := m["input_schema"]
+		if !hasSchema {
+			out = append(out, t)
+			continue
+		}
+		fn := map[string]any{
+			"name":       m["name"],
+			"parameters": schema,
+		}
+		if desc, ok := m["description"]; ok {
+			fn["description"] = desc
+		}
+		out = append(out, map[string]any{"type": "function", "function": fn})
+	}
+	return out
 }
 
 // convertAnthropicContent converts an AnthropicContent to the kv-cache tokenizer Content type
