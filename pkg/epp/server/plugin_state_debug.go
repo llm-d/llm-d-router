@@ -99,7 +99,7 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugRespons
 		dumper, ok := plugin.(fwkplugin.StateDumper)
 		if !ok {
 			response.Plugins[name] = pluginStateDebugEntry{
-				Plugin : name,
+				Name : name,
 				Type:    plugin.TypedName().Type,
 				Message: pluginStateUnsupportedText,
 			}
@@ -108,7 +108,7 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugRespons
 		state, err := dumper.DumpState()
 		if err != nil {
 			response.Plugins[name] = pluginStateDebugEntry{
-				Plugin : name,
+				Name : name,
 				Type:    plugin.TypedName().Type,
 				Message: fmt.Sprintf("failed to dump plugin state: %v", err),
 			}
@@ -126,7 +126,7 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugRespons
 			continue
 		}
 		response.Plugins[name] = pluginStateDebugEntry{
-			Plugin : name,
+			Name : name,
 			Type:  plugin.TypedName().Type,
 			State: state,
 		}
