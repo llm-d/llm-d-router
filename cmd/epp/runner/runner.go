@@ -833,7 +833,7 @@ func (r *Runner) initAdmissionControl(
 			UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
 		},
 	)
-	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName), registry
+	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, sd, endpointCandidates, opts.PoolName), registry
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.

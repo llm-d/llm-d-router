@@ -190,6 +190,42 @@ func TestFlowControlRequestAdapter(t *testing.T) {
 	}
 }
 
+func TestFlowControlAdmissionController_SheddableAndSaturated(t *testing.T) {
+	ctx := log.IntoContext(context.Background(), logr.Discard())
+	logger := logr.Discard()
+	_ = logger // ignore unused warning
+
+	mockFC := &mockFlowController{
+		enqueueAndWaitFunc: func(ctx context.Context, req flowcontrol.FlowControlRequest) (types.QueueOutcome, error) {
+			return types.QueueOutcomeDispatched, nil
+		},
+	}
+	mockSD := &mockSaturationDetector{saturation: 1.0}
+	mockEC := &mockEndpointCandidates{}
+
+	fcac := NewFlowControlAdmissionController(mockFC, mockSD, mockEC, "test-pool")
+
+	reqCtx := &handlers.RequestContext{
+		Request: &v1.InferenceRequest{},
+		SchedulingRequest: &inference.SchedulingRequest{
+			RequestID: "test-req",
+		},
+	}
+
+	// Test sheddable request (priority < 0)
+	err := fcac.Admit(ctx, reqCtx, -1)
+	assert.Error(t, err)
+	var cErr errcommon.Error
+	assert.True(t, errors.As(err, &cErr))
+	assert.Equal(t, errcommon.StatusTooManyRequests, cErr.StatusCode)
+	assert.Contains(t, cErr.Message, "system saturated")
+
+	// Test non-sheddable request (priority >= 0)
+	mockSD.saturation = 1.0
+	err = fcac.Admit(ctx, reqCtx, 0)
+	assert.NoError(t, err)
+}
+
 func TestFlowControlAdmissionController_Admit(t *testing.T) {
 	t.Parallel()
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
@@ -291,7 +327,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fc := &mockFlowController{outcome: tc.fcOutcome, err: tc.fcErr}
-			ac := NewFlowControlAdmissionController(fc, "pool")
+			ac := NewFlowControlAdmissionController(fc, nil, nil, "pool")
 
 			err := ac.Admit(ctx, reqCtx, tc.priority)
 
