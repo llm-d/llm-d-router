@@ -270,6 +270,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		FairnessID:       fairnessID,
 		Objectives:       requestObjectives,
 		RequestSizeBytes: reqCtx.RequestSize,
+		// Expose inbound Envoy dynamic metadata so request-scoped DataProducers can lift attributes an
+		// upstream ext_proc wrote.
+		Metadata: reqCtx.Request.Metadata,
 	}
 
 	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)

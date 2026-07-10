@@ -130,6 +130,10 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 // the token-producer before this producer runs and auto-creates one when none
 // is configured.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
+	if p.config.PrefixHashSource == prefixHashSourceMetadata {
+		// Hashes come from request dynamic metadata; no token-producer dependency.
+		return plugin.DataDependencies{}
+	}
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{}},
 	}
@@ -148,6 +152,11 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	}
 	if config.MaxPrefixTokensToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxPrefixTokensToMatch must be >= 0 (current value: %d)", config.MaxPrefixTokensToMatch)
+	}
+	switch config.PrefixHashSource {
+	case "", prefixHashSourceBody, prefixHashSourceMetadata:
+	default:
+		return nil, fmt.Errorf("invalid configuration: prefixHashSource must be %q or %q (current value: %q)", prefixHashSourceBody, prefixHashSourceMetadata, config.PrefixHashSource)
 	}
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
@@ -231,7 +240,12 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
 		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
 	}
-	perPromptHashes := prefixhash.GetBlockHashes(ctx, request, blockSize, maxBlocks)
+	var perPromptHashes [][]prefixhash.BlockHash
+	if p.config.PrefixHashSource == prefixHashSourceMetadata {
+		perPromptHashes = prefixhash.BlockHashesFromMetadata(request, maxBlocks)
+	} else {
+		perPromptHashes = prefixhash.GetBlockHashes(ctx, request, blockSize, maxBlocks)
+	}
 
 	prefixCacheServers := make(map[ServerID]int)
 	totalBlocks := 0

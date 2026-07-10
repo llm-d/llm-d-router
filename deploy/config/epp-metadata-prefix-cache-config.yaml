@@ -1,0 +1,26 @@
+# EPP config exercising prefix-cache affinity sourced from request metadata.
+#
+# The approx-prefix-cache-producer is configured with prefixHashSource: metadata, so it reads a precomputed
+# block-hash chain an upstream ext_proc (the IPP) placed in the llm-d.routing dynamic-metadata namespace
+# instead of tokenizing the body. It runs the same per-endpoint prefix match and the standard
+# prefix-cache-scorer scores it. For anything to arrive, the EPP ext_proc filter needs
+# forwarding_namespaces: [llm-d.routing] and an IPP that writes hashes with the same block-hash scheme.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: approx-prefix-cache-producer
+  parameters:
+    prefixHashSource: metadata
+    maxPrefixBlocksToMatch: 256
+    lruCapacityPerServer: 31250
+- type: prefix-cache-scorer
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 1

@@ -15,6 +15,7 @@ For each request, the plugin consumes `request.Body.TokenizedPrompt` (token IDs)
 - `maxPrefixBlocksToMatch` (int, optional, default: `2048`): Maximum number of prefix blocks hashed and matched per request. Not auto-tuned. `0` disables matching (zero blocks hashed).
 - `maxPrefixTokensToMatch` (int, optional, default: `131072`): Cap expressed in tokens instead of blocks (`maxBlocks = maxPrefixTokensToMatch / blockSizeTokens`). Not auto-tuned. Takes precedence over `maxPrefixBlocksToMatch` when set (> 0); set to `0` to fall back to the block-based cap. The `131072` default (128K, the context window of large production models such as gpt-oss 120b) is a reasonable upper bound that covers the long-prompt use cases seen in production.
 - `lruCapacityPerServer` (int, optional, default: `31250`): Per-pod LRU index capacity. Used when `autoTune` is false or endpoint metrics are unavailable; ignored when auto-tuned from metrics.
+- `prefixHashSource` (string, optional, default: `body`): Where block hashes come from. `body` tokenizes and hashes the request body via the `token-producer` (the default path above). `metadata` instead reads a precomputed block-hash chain that an upstream ext_proc (for example the IPP) placed in the request's `llm-d.routing` Envoy dynamic metadata, and skips the `token-producer` dependency; the body is never re-parsed. The upstream stage must hash with the same block-hash scheme, otherwise the hashes will not match any indexed prefix.
 - `blockSize` (int, optional): Deprecated — character-based block size. Use `blockSizeTokens` instead.
 
 **Configuration Examples:**
@@ -47,6 +48,15 @@ plugins:
     type: prefix-cache-scorer
     parameters:
       prefixMatchInfoProducerName: cpuPrefixProducer
+```
+
+Sourcing prefix hashes from request metadata (an upstream ext_proc supplies the chain, no tokenizer needed):
+```yaml
+plugins:
+  - type: approx-prefix-cache-producer
+    parameters:
+      prefixHashSource: metadata
+  - type: prefix-cache-scorer
 ```
 
 ---

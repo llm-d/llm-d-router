@@ -143,7 +143,15 @@ type config struct {
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
 	// Max capacity size of the LRU indexer in number of entries per server (pod).
 	LRUCapacityPerServer int `json:"lruCapacityPerServer"`
+	// PrefixHashSource selects the block-hash source: "body" (default) hashes the tokenized request body;
+	// "metadata" reads a precomputed chain from Envoy dynamic metadata, skipping the token-producer.
+	PrefixHashSource string `json:"prefixHashSource"`
 }
+
+const (
+	prefixHashSourceBody     = "body"
+	prefixHashSourceMetadata = "metadata"
+)
 
 // defaultConfig provides sensible defaults for the prefix cache plugins.
 var defaultConfig = config{
