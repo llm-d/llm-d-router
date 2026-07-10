@@ -139,6 +139,13 @@ func tryCompletion(prompt string, theModel openai.CompletionNewParamsModel) (str
 	if len(resp.Choices) != 1 {
 		return "", "", fmt.Errorf("expected 1 choice, got %d", len(resp.Choices))
 	}
+	if resp.Choices[0].FinishReason != openai.CompletionChoiceFinishReasonStop {
+		return "", "", fmt.Errorf("expected finish reason %q, got %q",
+			openai.CompletionChoiceFinishReasonStop, resp.Choices[0].FinishReason)
+	}
+	if resp.Choices[0].Text != prompt {
+		return "", "", fmt.Errorf("expected echoed prompt, got %q", resp.Choices[0].Text)
+	}
 	ns, pod, _ := extractInferenceHeaders(httpResp)
 	return ns, pod, nil
 }

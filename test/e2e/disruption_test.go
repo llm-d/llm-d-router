@@ -83,6 +83,19 @@ func eppPodReady(oldPodName string) func() bool {
 	}
 }
 
+// completionRoutedToNamespace sends one completion and reports an error on any
+// failure or namespace-header mismatch, for use inside Eventually blocks.
+func completionRoutedToNamespace() error {
+	nsHdr, _, err := tryCompletion(simplePrompt, simModelName)
+	if err != nil {
+		return err
+	}
+	if nsHdr != nsName {
+		return fmt.Errorf("expected namespace %q, got %q", nsName, nsHdr)
+	}
+	return nil
+}
+
 var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disruptiveTestLabel), func() {
 	ginkgo.When("A decode pod is killed mid-request", func() {
 		ginkgo.It("should recover and route to surviving pods", func() {
@@ -132,18 +145,8 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
 			ginkgo.By("Verifying requests succeed consistently after recovery")
-			gomega.Eventually(func() error {
-				for range 3 {
-					nsHdr, _, err := tryCompletion(simplePrompt, simModelName)
-					if err != nil {
-						return err
-					}
-					if nsHdr != nsName {
-						return fmt.Errorf("expected namespace %q, got %q", nsName, nsHdr)
-					}
-				}
-				return nil
-			}, eppRecoveryTimeout, 1*time.Second).Should(gomega.Succeed())
+			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).
+				MustPassRepeatedly(3).Should(gomega.Succeed())
 		})
 	})
 
@@ -191,11 +194,9 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				return len(currentDecode)
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
-			ginkgo.By("Verifying requests succeed after recovery")
-			for range 3 {
-				nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
-				gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
-			}
+			ginkgo.By("Verifying requests succeed consistently after recovery")
+			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).
+				MustPassRepeatedly(3).Should(gomega.Succeed())
 		})
 	})
 
