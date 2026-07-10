@@ -79,15 +79,20 @@ jobs:
       - name: Fetch PR head and rebase
         if: steps.check-access.outputs.skip != 'true'
         id: rebase
+        env:
+          HEAD_REPO: ${{ steps.pr.outputs.head-repo }}
+          HEAD_REF: ${{ steps.pr.outputs.head-ref }}
+          BASE_REF: ${{ steps.pr.outputs.base-ref }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Fetch the PR head ref directly from GitHub
-          git fetch origin "pull/${{ github.event.issue.number }}/head:pr-head"
-          git checkout pr-head
+          HEAD_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${HEAD_REPO}.git"
+          git remote add head-repo "$HEAD_URL"
+          git fetch head-repo "$HEAD_REF"
+          git checkout -b pr-head "head-repo/$HEAD_REF"
 
-          if git rebase "origin/${{ steps.pr.outputs.base-ref }}"; then
+          if git rebase "origin/$BASE_REF"; then
             echo "result=success" >> "$GITHUB_OUTPUT"
           else
             git rebase --abort
@@ -100,8 +105,7 @@ jobs:
           steps.rebase.outputs.result == 'success'
         id: push
         run: |
-          PUSH_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ steps.pr.outputs.head-repo }}.git"
-          if git push "$PUSH_URL" "HEAD:${{ steps.pr.outputs.head-ref }}" --force-with-lease 2>&1; then
+          if git push --force-with-lease head-repo "HEAD:${{ steps.pr.outputs.head-ref }}" 2>&1; then
             echo "result=success" >> "$GITHUB_OUTPUT"
           else
             echo "result=failed" >> "$GITHUB_OUTPUT"
