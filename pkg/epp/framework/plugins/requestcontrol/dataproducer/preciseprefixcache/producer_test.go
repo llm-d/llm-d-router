@@ -366,6 +366,79 @@ func TestProduce_MultiPromptSkipsEmptyPromptKeys(t *testing.T) {
 	assert.Equal(t, 1, info.TotalBlocks())
 }
 
+// Per-tier contiguous counts are attached per endpoint and summed across
+// prompts; endpoints without tier data get a non-nil empty map.
+func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+
+	promptA := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
+	promptB := []uint32{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35}
+	keysA := []kvblock.BlockHash{0xA1, 0xA2}
+	keysB := []kvblock.BlockHash{0xB1}
+
+	gpuA := kvblock.PodEntry{PodIdentifier: "10.0.0.1:8080", DeviceTier: "gpu"}
+	cpuA := kvblock.PodEntry{PodIdentifier: "10.0.0.1:8080", DeviceTier: "cpu"}
+
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, ts []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			if len(ts) == len(promptA) {
+				return keysA, nil
+			}
+			return keysB, nil
+		},
+		index: &fakeKVBlockIndex{
+			lookup: func(_ context.Context, keys []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+				if keys[0] == keysA[0] {
+					// Prompt A: block 0 on gpu+cpu, block 1 on gpu only.
+					return map[kvblock.BlockHash][]kvblock.PodEntry{
+						keysA[0]: {gpuA, cpuA},
+						keysA[1]: {gpuA},
+					}, nil
+				}
+				// Prompt B: single block on gpu+cpu.
+				return map[kvblock.BlockHash][]kvblock.PodEntry{
+					keysB[0]: {gpuA, cpuA},
+				}, nil
+			},
+		},
+	}
+	scorer := &fakeKVBlockScorer{
+		score: func(_ context.Context, _ []kvblock.BlockHash, _ map[kvblock.BlockHash][]kvblock.PodEntry) (map[string]float64, error) {
+			return map[string]float64{"10.0.0.1:8080": 1.0}, nil
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx, scorer)
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-by-tier",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				PerPromptTokens: [][]uint32{promptA, promptB},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	require.True(t, ok)
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+	assert.Equal(t, 3, info.CachedBlockCount())
+	// gpu: 2 (prompt A) + 1 (prompt B); cpu: 1 (prompt A) + 1 (prompt B).
+	assert.Equal(t, map[string]int{"gpu": 3, "cpu": 2}, info.CachedBlocksByTier())
+
+	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	require.True(t, ok)
+	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+	assert.Equal(t, 0, info.CachedBlockCount())
+	assert.NotNil(t, info.CachedBlocksByTier())
+	assert.Empty(t, info.CachedBlocksByTier())
+}
+
 // Multimodal features flow through to ComputeBlockKeysFromTokens.
 func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 	ctx := utils.NewTestContext(t)

@@ -54,3 +54,34 @@ func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash
 	}
 	return count
 }
+
+// matchedBlockCountByTier returns, per device tier, the number of contiguous
+// cached prefix blocks podID holds in that tier, counting from the first
+// block until the first block the pod does not hold in that tier. A block
+// held in several tiers counts once per tier, so each tier's count is at most
+// matchedBlockCount for the same pod. Tiers are recorded as found in the
+// index. Returns a non-nil (possibly empty) map.
+func matchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) map[string]int {
+	counts := map[string]int{}
+	var alive sets.Set[string]
+	for _, key := range keys {
+		tiersAtKey := sets.New[string]()
+		for _, e := range keyToPods[key] {
+			if e.PodIdentifier == podID {
+				tiersAtKey.Insert(e.DeviceTier)
+			}
+		}
+		if alive == nil {
+			alive = tiersAtKey
+		} else {
+			alive = alive.Intersection(tiersAtKey)
+		}
+		if alive.Len() == 0 {
+			break
+		}
+		for tier := range alive {
+			counts[tier]++
+		}
+	}
+	return counts
+}
