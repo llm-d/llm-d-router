@@ -309,6 +309,63 @@ func TestHandleResponseBodyWithoutSchedulingRequest(t *testing.T) {
 	require.Equal(t, uint64(1), histogram.GetSampleCount())
 }
 
+// TestHandleResponseBodyZeroTimestamps verifies that end-of-stream handling with zero
+// timestamps does not emit latency metrics or produce error log entries.
+func TestHandleResponseBodyZeroTimestamps(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+	}
+	server.director = &mockDirector{}
+	// RequestReceivedTimestamp, FirstTokenTimestamp, and ResponseCompleteTimestamp are all zero.
+	reqCtx := &RequestContext{
+		IncomingModelName: "incoming-model",
+		TargetModelName:   "target-model",
+		Response: &Response{
+			Headers: map[string]string{},
+		},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+	}
+
+	require.NotPanics(t, func() {
+		server.HandleResponseBody(ctx, reqCtx, []byte("data"), true)
+	})
+
+	// Latency metrics must not be recorded when timestamps are absent.
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	latencyMetrics := []string{
+		"llm_d_epp_request_ntpot_seconds",
+		"llm_d_epp_request_duration_seconds",
+		"llm_d_epp_request_ttft_seconds",
+		"llm_d_epp_request_streaming_tpot_seconds",
+	}
+	for _, family := range families {
+		for _, name := range latencyMetrics {
+			if family.GetName() == name {
+				for _, metric := range family.GetMetric() {
+					if metricHasLabels(metric, map[string]string{"model_name": "incoming-model"}) {
+						t.Errorf("latency metric %q must not be recorded with zero timestamps, got sample count %d",
+							name, metric.GetHistogram().GetSampleCount())
+					}
+				}
+			}
+		}
+	}
+
+	// ResponseSize should still be recorded.
+	sizeHistogram := findHistogramMetric(t, "llm_d_epp_response_size_bytes", map[string]string{
+		"model_name":        "incoming-model",
+		"target_model_name": "target-model",
+		"fairness_id":       metadata.DefaultFairnessID,
+	})
+	require.Equal(t, uint64(1), sizeHistogram.GetSampleCount())
+}
+
 func findHistogramMetric(t *testing.T, name string, labels map[string]string) *dto.Histogram {
 	t.Helper()
 
