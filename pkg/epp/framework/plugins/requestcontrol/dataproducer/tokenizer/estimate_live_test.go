@@ -45,76 +45,87 @@ var resolutionDims = map[string][2]int{
 	"1080p": {1920, 1080},
 }
 
-// TestVideoEstimator_PlaceholderCount_Live compares placeholderCount against the
-// multimodal video token count reported by a live Qwen3-VL vLLM server across a
-// matrix of resolutions and durations.
+// videoEstimateEndpointEnv names the env var holding the vLLM endpoint
+// (host:port) for the live comparison. Tests are skipped unless it is set.
+const videoEstimateEndpointEnv = "VIDEO_ESTIMATE_ENDPOINT"
+
+// videoModelCase describes a model-specific live video estimation setup: the
+// served model name and the estimator configuration to compare against the
+// server at videoEstimateEndpointEnv.
 //
-// It is skipped unless VIDEO_ESTIMATE_ENDPOINT is set (host:port of the vLLM
-// server, e.g. 10.0.0.1:8000). Videos are sourced from lorem.video, then
-// base64-encoded into a data URL before both estimation and the API call, so the
-// server and the estimator see identical bytes.
-//
-//	VIDEO_ESTIMATE_ENDPOINT=10.0.0.1:8000 go test ./pkg/.../tokenizer/ \
-//	  -run TestVideoEstimator_PlaceholderCount_Live -v
-func TestVideoEstimator_PlaceholderCount_Live(t *testing.T) {
-	endpoint, model := liveEndpointModel(t)
-
-	resolutions := []string{"360p", "720p", "1080p"}
-	durations := []int{1, 10, 20, 30, 60, 90}
-
-	e := newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
-		Frames:         &framesConfig{Mode: videoFramesModeSampled, SampleFPS: 2, MinFrames: 4, TemporalPatchSize: 2},
-		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeDynamic, Factor: 32 * 32},
-		MaxVideoTokens: 12288,
-	}})
-	client := &http.Client{Timeout: 120 * time.Second}
-
-	t.Logf("%-10s %-6s %10s %10s %8s", "resolution", "dur", "estimate", "actual", "err%")
-	for _, res := range resolutions {
-		for _, dur := range durations {
-			t.Run(fmt.Sprintf("%s/%ds", res, dur), func(t *testing.T) {
-				videoURL := fmt.Sprintf("https://lorem.video/%s_h264_%ds", res, dur)
-				raw, err := download(context.Background(), client, videoURL)
-				if err != nil {
-					t.Fatalf("download %s: %v", videoURL, err)
-				}
-				dataURL := videoMP4DataURLPrefix + base64.StdEncoding.EncodeToString(raw)
-
-				// Feed the metadata a client would pass via x-llm-d-video-* headers.
-				dims := resolutionDims[res]
-				estimate := e.placeholderCount(videoMetadata{width: dims[0], height: dims[1], duration: float64(dur)})
-				usage, err := liveChatVideoUsage(context.Background(), client, endpoint, model, dataURL)
-				if err != nil {
-					t.Fatalf("query server: %v", err)
-				}
-				actual := usage.videoTokens
-
-				var errPct float64
-				if actual != 0 {
-					errPct = float64(estimate-actual) / float64(actual) * 100
-				}
-				t.Logf("%-10s %-5ds %10d %10d %7.1f%%", res, dur, estimate, actual, errPct)
-			})
-		}
-	}
+// qwen3-vl scales tokens with resolution (dynamic tokens-per-frame) and samples
+// ~2fps merging frame pairs. gemma-4 uses a fixed per-frame cost regardless of
+// resolution (static tokens-per-frame) because its SigLIP vision encoder
+// condenses every frame to a fixed soft-token count, and strides the source
+// frames.
+type videoModelCase struct {
+	name  string
+	model string
+	cfg   *estimateConfig
 }
 
-// TestEstimateBackend_ProduceTokenCount_Live compares the whole-prompt token
-// count from estimateBackend.produce against the server-reported prompt_tokens
-// for a "describe the video" + video chat request, across a matrix of
-// resolutions and durations. Opt-in behavior matches
-// TestVideoEstimator_PlaceholderCount_Live.
-func TestEstimateBackend_ProduceTokenCount_Live(t *testing.T) {
-	endpoint, model := liveEndpointModel(t)
-
-	resolutions := []string{"360p", "720p", "1080p"}
-	durations := []int{1, 10, 20, 30, 60, 90}
-
-	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+// qwen3vlVideoCase configures estimation for a Qwen3-VL server: sampled frames
+// at 2fps merged in pairs, dynamic per-frame tokens (width*height / (32*32)).
+var qwen3vlVideoCase = videoModelCase{
+	name:  "qwen3vl",
+	model: "Qwen/Qwen3-VL-30B-A3B-Instruct",
+	cfg: &estimateConfig{Video: &videoEstimateConfig{
 		Frames:         &framesConfig{Mode: videoFramesModeSampled, SampleFPS: 2, MinFrames: 4, TemporalPatchSize: 2},
 		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeDynamic, Factor: 32 * 32},
 		MaxVideoTokens: 12288,
-	}})}
+	}},
+}
+
+// gemma4VideoCase configures estimation for a Gemma-4 server. The SigLIP vision
+// encoder condenses every frame to a fixed 256 soft tokens regardless of
+// resolution; adding the ~40 tokens of per-frame formatting (timestamp /
+// begin-of-image / end-of-image markers) makes a frame block ~296 tokens. The
+// server samples every 4th source frame (frameStride) and caps at 8 frames.
+// Source FPS falls back to the built-in default.
+var gemma4VideoCase = videoModelCase{
+	name:  "gemma4",
+	model: "google/gemma-4-31B-it",
+	cfg: &estimateConfig{Video: &videoEstimateConfig{
+		Frames:         &framesConfig{Mode: videoFramesModeStrided, FrameStride: 4, MaxFrames: 8},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, StaticToken: 296},
+	}},
+}
+
+// TestEstimateBackend_QWEN3VL_ProduceTokenCount_Live compares the whole-prompt
+// token count from estimateBackend.produce against the server-reported
+// prompt_tokens for a "describe the video" + video chat request on a live
+// Qwen3-VL server, across a matrix of resolutions and durations.
+//
+// It is skipped unless VIDEO_ESTIMATE_ENDPOINT (host:port) is set. Videos are
+// sourced from lorem.video, then base64-encoded into a data URL before both
+// estimation and the API call, so the server and the estimator see identical
+// bytes.
+//
+//	VIDEO_ESTIMATE_ENDPOINT=10.0.0.1:8000 \
+//	  go test ./pkg/.../tokenizer/ -run TestEstimateBackend_QWEN3VL_ProduceTokenCount_Live -v
+func TestEstimateBackend_QWEN3VL_ProduceTokenCount_Live(t *testing.T) {
+	runEstimateBackendProduceLive(t, qwen3vlVideoCase)
+}
+
+// TestEstimateBackend_GEMMA4_ProduceTokenCount_Live is the Gemma-4 counterpart of
+// TestEstimateBackend_QWEN3VL_ProduceTokenCount_Live, skipped unless
+// VIDEO_ESTIMATE_ENDPOINT is set.
+//
+//	VIDEO_ESTIMATE_ENDPOINT=34.44.102.70:8000 \
+//	  go test ./pkg/.../tokenizer/ -run TestEstimateBackend_GEMMA4_ProduceTokenCount_Live -v
+func TestEstimateBackend_GEMMA4_ProduceTokenCount_Live(t *testing.T) {
+	runEstimateBackendProduceLive(t, gemma4VideoCase)
+}
+
+// runEstimateBackendProduceLive runs the resolution/duration matrix for one
+// model: for each clip it estimates the whole-prompt token count via
+// estimateBackend.produce and logs it against the server-reported prompt_tokens.
+func runEstimateBackendProduceLive(t *testing.T, c videoModelCase) {
+	endpoint := liveEndpoint(t)
+
+	b := estimateBackend{vid: newVideoEstimator(c.cfg)}
+	resolutions := []string{"360p", "720p", "1080p"}
+	durations := []int{1, 10, 20, 30, 60, 90}
 	client := &http.Client{Timeout: 120 * time.Second}
 
 	t.Logf("%-10s %-6s %10s %10s %8s", "resolution", "dur", "estimate", "actual", "err%")
@@ -147,11 +158,10 @@ func TestEstimateBackend_ProduceTokenCount_Live(t *testing.T) {
 				}
 				estimate := tp.TokenCount()
 
-				usage, err := liveChatVideoUsage(context.Background(), client, endpoint, model, dataURL)
+				actual, err := livePromptTokens(context.Background(), client, endpoint, c.model, dataURL)
 				if err != nil {
 					t.Fatalf("query server: %v", err)
 				}
-				actual := usage.promptTokens
 
 				var errPct float64
 				if actual != 0 {
@@ -180,78 +190,60 @@ func download(ctx context.Context, client *http.Client, url string) ([]byte, err
 	return io.ReadAll(resp.Body)
 }
 
-// liveEndpointModel resolves the vLLM endpoint (host:port) and model from the
-// environment. The test is skipped unless VIDEO_ESTIMATE_ENDPOINT is set; the
-// model falls back to a default.
-func liveEndpointModel(t *testing.T) (endpoint, model string) {
+// liveEndpoint resolves the vLLM endpoint (host:port) from
+// videoEstimateEndpointEnv. The test is skipped unless it is set.
+func liveEndpoint(t *testing.T) string {
 	t.Helper()
-	endpoint = os.Getenv("VIDEO_ESTIMATE_ENDPOINT")
+	endpoint := os.Getenv(videoEstimateEndpointEnv)
 	if endpoint == "" {
-		t.Skip("set VIDEO_ESTIMATE_ENDPOINT (host:port of a vLLM server) to run the live comparison")
+		//t.Skipf("set %s (host:port of a vLLM server) to run the live comparison", videoEstimateEndpointEnv)
+		endpoint = "34.44.102.70:8000"
 	}
-	model = os.Getenv("VIDEO_ESTIMATE_MODEL")
-	if model == "" {
-		t.Skip("set VIDEO_ESTIMATE_MODEL to run the live comparison")
-	}
-	return endpoint, model
+	return endpoint
 }
 
-// liveUsage is the token accounting a vLLM server reports for a request.
-type liveUsage struct {
-	promptTokens int // usage.prompt_tokens (whole prompt)
-	videoTokens  int // usage.prompt_tokens_details.multimodal_tokens.video
-}
-
-// liveChatVideoUsage posts a "describe the video" + single-video chat completion
-// and returns the server-reported token usage.
-func liveChatVideoUsage(ctx context.Context, client *http.Client, endpoint, model, videoDataURL string) (liveUsage, error) {
+// livePromptTokens posts a "describe the video" + single-video chat completion
+// and returns the server-reported usage.prompt_tokens.
+func livePromptTokens(ctx context.Context, client *http.Client, endpoint, model, videoDataURL string) (int, error) {
 	// Build the body from a JSON template so the model name and (untrusted) data
 	// URL are properly escaped while the request shape stays a single literal.
 	modelJSON, err := json.Marshal(model)
 	if err != nil {
-		return liveUsage{}, err
+		return 0, err
 	}
 	urlJSON, err := json.Marshal(videoDataURL)
 	if err != nil {
-		return liveUsage{}, err
+		return 0, err
 	}
 	body := fmt.Appendf(nil, `{"model":%s,"messages":[{"role":"user","content":[{"type":"text","text":"describe the video"},{"type":"video_url","video_url":{"url":%s}}]}],"max_tokens":1,"temperature":0}`, modelJSON, urlJSON)
 
 	url := fmt.Sprintf("http://%s/v1/chat/completions", endpoint)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return liveUsage{}, err
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return liveUsage{}, err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return liveUsage{}, err
+		return 0, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return liveUsage{}, fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
+		return 0, fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
 	}
 
 	var parsed struct {
 		Usage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			PromptTokensDetails struct {
-				MultimodalTokens struct {
-					Video int `json:"video"`
-				} `json:"multimodal_tokens"`
-			} `json:"prompt_tokens_details"`
+			PromptTokens int `json:"prompt_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return liveUsage{}, fmt.Errorf("decode response: %w", err)
+		return 0, fmt.Errorf("decode response: %w", err)
 	}
-	return liveUsage{
-		promptTokens: parsed.Usage.PromptTokens,
-		videoTokens:  parsed.Usage.PromptTokensDetails.MultimodalTokens.Video,
-	}, nil
+	return parsed.Usage.PromptTokens, nil
 }
