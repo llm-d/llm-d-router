@@ -111,7 +111,7 @@ func TestEstimateBackend_QWEN3VL_ProduceTokenCount_Live(t *testing.T) {
 // TestEstimateBackend_QWEN3VL_ProduceTokenCount_Live, skipped unless
 // VIDEO_ESTIMATE_ENDPOINT is set.
 //
-//	VIDEO_ESTIMATE_ENDPOINT=34.44.102.70:8000 \
+//	VIDEO_ESTIMATE_ENDPOINT=10.0.0.1:8000 \
 //	  go test ./pkg/.../tokenizer/ -run TestEstimateBackend_GEMMA4_ProduceTokenCount_Live -v
 func TestEstimateBackend_GEMMA4_ProduceTokenCount_Live(t *testing.T) {
 	runEstimateBackendProduceLive(t, gemma4VideoCase)
@@ -196,8 +196,7 @@ func liveEndpoint(t *testing.T) string {
 	t.Helper()
 	endpoint := os.Getenv(videoEstimateEndpointEnv)
 	if endpoint == "" {
-		//t.Skipf("set %s (host:port of a vLLM server) to run the live comparison", videoEstimateEndpointEnv)
-		endpoint = "34.44.102.70:8000"
+		t.Skipf("set %s (host:port of a vLLM server) to run the live comparison", videoEstimateEndpointEnv)
 	}
 	return endpoint
 }
