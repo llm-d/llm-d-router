@@ -29,6 +29,10 @@ standalone validations
 {{- if and (not (kindIs "invalid" $failOpen)) (not (kindIs "bool" $failOpen)) -}}
   {{- fail (printf ".Values.router.proxy.failOpen must be a boolean, got %q" (toString $failOpen)) -}}
 {{- end -}}
+{{- $ipv6 := index $proxy "ipv6" -}}
+{{- if and (not (kindIs "invalid" $ipv6)) (not (kindIs "bool" $ipv6)) -}}
+  {{- fail (printf ".Values.router.proxy.ipv6 must be a boolean, got %q" (toString $ipv6)) -}}
+{{- end -}}
 {{- if eq $proxyMode "service" -}}
   {{- if not $proxy.enabled -}}
     {{- fail ".Values.router.proxy.enabled must be true when .Values.router.proxy.mode=service" -}}

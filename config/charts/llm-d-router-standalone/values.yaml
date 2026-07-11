@@ -26,6 +26,9 @@ router:
     # unreachable, for active/passive resiliency.
     failOpen: true
 
+    # (Envoy only) Whether the proxy listens on IPv6 wildcard (::) in addition to IPv4.
+    ipv6: false
+
     resources:
       requests:
         cpu: "4"
@@ -60,11 +63,13 @@ router:
                       socket_address:
                         address: 0.0.0.0
                         port_value: 19001
+                    {{- if .Values.router.proxy.ipv6 }}
                     additional_addresses:
                     - address:
                         socket_address:
                           address: "::"
                           port_value: 19001
+                    {{- end }}
                     filter_chains:
                       - filters:
                           - name: envoy.filters.network.http_connection_manager
@@ -98,11 +103,13 @@ router:
                       socket_address:
                         address: 0.0.0.0
                         port_value: 8081
+                    {{- if .Values.router.proxy.ipv6 }}
                     additional_addresses:
                     - address:
                         socket_address:
                           address: "::"
                           port_value: 8081
+                    {{- end }}
                     per_connection_buffer_limit_bytes: 32768
                     access_log:
                       - name: envoy.access_loggers.file
