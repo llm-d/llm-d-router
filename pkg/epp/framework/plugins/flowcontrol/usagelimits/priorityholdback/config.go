@@ -109,7 +109,7 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 // checkRequired verifies that mandatory fields are present before defaulting.
 func checkRequired(cfg *apiConfig) error {
 	if cfg.MinCeiling == nil {
-		return fmt.Errorf("minCeiling is required")
+		return errors.New("minCeiling is required")
 	}
 	return nil
 }
