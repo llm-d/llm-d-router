@@ -39,7 +39,6 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -80,12 +79,14 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/priorityholdback"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/probabilisticadmitter"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/burstprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	mmproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/multimodal"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource"
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
 	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid"
@@ -111,6 +112,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/activerequest"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/contextlengthaware"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/endpointattribute"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	latencyscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/latency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loadaware"
@@ -166,6 +168,12 @@ type Runner struct {
 	PluginHandle         fwkplugin.Handle
 	// rawConfig caches the result of parseConfigurationPhaseOne.
 	rawConfig *configapi.EndpointPickerConfig
+
+	// Populated by setup(); see runWithGracefulShutdown.
+	serverRunner     *runserver.ExtProcServerRunner
+	healthGRPCServer *grpc.Server
+	healthGRPCPort   int
+	draining         *atomic.Bool
 }
 
 // WithExecutableName sets the name of the executable containing the runner.
@@ -256,15 +264,66 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	// --- Start Manager ---
-	// This blocks until a signal is received.
+	return r.runWithGracefulShutdown(ctx, mgr, opts.DrainTimeout)
+}
+
+// runWithGracefulShutdown runs the ext_proc and health servers on a context that
+// outlives the manager. On SIGTERM (ctx cancelled) the manager stops and releases
+// its leader lease, the pod is marked NotServing (so Kubernetes drains it from the
+// Service endpoints), and the ext_proc server keeps accepting requests for
+// drainTimeout so in-flight and pre-DNS-refresh requests are served rather than
+// rejected. A drainTimeout of 0 stops the servers as soon as the manager
+// terminates. setup() has stashed the servers on r.
+func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, drainTimeout time.Duration) error {
+	// serveCtx is intentionally rooted at Background, not ctx, so SIGTERM does not
+	// immediately stop the ext_proc/health servers.
+	serveCtx, serveCancel := context.WithCancel(context.Background())
+	defer serveCancel()
+
+	serveErr := make(chan error, 1)
+	go func() {
+		g := newRunnableGroup()
+		g.Add("ext-proc", func(c context.Context) error {
+			return r.serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(c)
+		})
+		g.Add("health", func(c context.Context) error {
+			return runnable.NoLeaderElection(runnable.GRPCServer("health", r.healthGRPCServer, r.healthGRPCPort)).Start(c)
+		})
+		serveErr <- g.Run(serveCtx)
+	}()
+
+	// Flip readiness to NotServing as soon as SIGTERM arrives (concurrently with
+	// the manager's shutdown/lease release), so Kubernetes starts draining us from
+	// the Service endpoints while we keep serving in-flight traffic.
+	go func() {
+		<-ctx.Done()
+		r.draining.Store(true)
+		setupLog.Info("Shutdown signal received: draining (NotServing) while finishing in-flight requests", "drainTimeout", drainTimeout)
+	}()
+
+	// Blocks until SIGTERM cancels ctx; returns once the manager has stopped and
+	// released the leader lease (LeaderElectionReleaseOnCancel).
 	setupLog.Info("Controller manager starting")
-	if err := mgr.Start(ctx); err != nil {
-		setupLog.Error(err, "Error starting controller manager")
+	mgrErr := mgr.Start(ctx)
+	if mgrErr != nil {
+		setupLog.Error(mgrErr, "Error starting controller manager")
+		serveCancel()
+		<-serveErr
+		return mgrErr
+	}
+	setupLog.Info("Controller manager terminated; starting drain window")
+
+	// Keep serving ext_proc for the drain window, then stop. GracefulStop drains
+	// in-flight streams.
+	select {
+	case <-time.After(drainTimeout):
+		setupLog.Info("Drain window elapsed, stopping ext_proc server")
+	case err := <-serveErr:
+		// The servers exited on their own (e.g. listener error) during the drain.
 		return err
 	}
-	setupLog.Info("Controller manager terminated")
-	return nil
+	serveCancel()
+	return <-serveErr
 }
 
 // setup configures the internal state of the Runner, including the manager,
@@ -290,6 +349,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	startCrdReconcilers := opts.EndpointSelector == nil // If endpointSelector is nil, it means it's not in the standalone mode. Then we should start the inferencePool and other CRD Reconciler.
 	controllerCfg := runserver.NewControllerConfig(startCrdReconcilers)
+	controllerCfg.PopulateNonLeaderDatastore = r.featureGates[runserver.HAPopulateNonLeaderDatastoreFeatureGate]
 	if err := controllerCfg.PopulateControllerConfig(cfg); err != nil {
 		setupLog.Error(err, "Failed to populate controller config")
 		return nil, nil, err
@@ -418,14 +478,17 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	for i, p := range parsers {
 		supporters[i] = p
 	}
-	if err := registerHealthServer(mgr, ctrl.Log.WithName("health"), ds, opts.GRPCHealthPort, isLeader, opts.EnableLeaderElection, supporters); err != nil {
-		return nil, nil, err
-	}
 
-	// Register ext-proc server.
-	if err := registerExtProcServer(mgr, serverRunner, ctrl.Log.WithName("ext-proc")); err != nil {
-		return nil, nil, err
-	}
+	// Keep the ext_proc and health servers OUT of the manager so they outlive
+	// it. Run() runs them on a context that is only cancelled after the drain
+	// window, so on SIGTERM the manager stops (releasing the leader lease) while
+	// these keep serving. `draining` is flipped by Run() so readiness/ext_proc
+	// health go NOT_SERVING and the pod is drained from the Service endpoints. A
+	// DrainTimeout of 0 stops them as soon as the manager terminates.
+	r.draining = &atomic.Bool{}
+	r.serverRunner = serverRunner
+	r.healthGRPCPort = opts.GRPCHealthPort
+	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters)
 	return mgr, ds, nil
 }
 
@@ -508,6 +571,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, disagg.PrefixBasedPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.AlwaysDisaggMulimodalPluginType, disagg.AlwaysDisaggMulimodalDeciderPluginFactory)
 	fwkplugin.Register(kvcacheutilization.KvCacheUtilizationScorerType, kvcacheutilization.KvCacheUtilizationScorerFactory)
+	fwkplugin.Register(endpointattribute.EndpointAttributeScorerType, endpointattribute.EndpointAttributeScorerFactory)
 	fwkplugin.Register(queuedepth.QueueScorerType, queuedepth.QueueScorerFactory)
 	fwkplugin.Register(runningrequests.RunningRequestsSizeScorerType, runningrequests.RunningRequestsSizeScorerFactory)
 	fwkplugin.Register(loraaffinity.LoraAffinityScorerType, loraaffinity.LoraAffinityScorerFactory)
@@ -518,6 +582,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(burstprefix.PluginType, burstprefix.Factory)
 	fwkplugin.Register(mmcacheaffinity.Type, mmcacheaffinity.Factory)
 	fwkplugin.Register(preciseproducer.PluginType, preciseproducer.PluginFactory)
+	fwkplugin.Register(p2psource.PluginType, p2psource.PluginFactory)
 
 	// Flow Control plugins
 	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, globalstrict.GlobalStrictFairnessPolicyFactory)
@@ -527,6 +592,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(edf.EDFOrderingPolicyType, edf.EDFOrderingPolicyFactory)
 	fwkplugin.Register(slodeadline.SLODeadlineOrderingPolicyType, slodeadline.SLODeadlineOrderingPolicyFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, usagelimits.StaticPolicyFactory)
+	fwkplugin.Register(priorityholdback.PolicyType, priorityholdback.PolicyFactory)
 
 	// Register Request level data producer plugins as defaults for their respective data keys.
 	fwkplugin.RegisterAsDefaultProducer(reqdataprodprefix.ApproxPrefixCachePluginType, reqdataprodprefix.ApproxPrefixCacheFactory, attrprefix.PrefixCacheMatchInfoDataKey)
@@ -599,6 +665,7 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 	}
 
 	loader.RegisterFeatureGate(flowcontrol.FeatureGate, false)
+	loader.RegisterFeatureGate(runserver.HAPopulateNonLeaderDatastoreFeatureGate, true)
 
 	r.registerInTreePlugins()
 
@@ -702,18 +769,9 @@ func (r *Runner) setupMetricsCollection(opts *runserver.Options) datalayer.Endpo
 	return r.dlRuntime
 }
 
-// registerExtProcServer adds the ExtProcServerRunner as a Runnable to the manager.
-func registerExtProcServer(mgr manager.Manager, runner *runserver.ExtProcServerRunner, logger logr.Logger) error {
-	if err := mgr.Add(runner.AsRunnable(logger)); err != nil {
-		setupLog.Error(err, "Failed to register ext-proc gRPC server runnable")
-		return err
-	}
-	setupLog.Info("ExtProc server runner added to manager.")
-	return nil
-}
-
-// registerHealthServer adds the Health gRPC server as a Runnable to the given manager.
-func registerHealthServer(mgr manager.Manager, logger logr.Logger, ds datastore.Datastore, port int, isLeader *atomic.Bool, leaderElectionEnabled bool, supporters []appProtocolSupporter) error {
+// newHealthGRPCServer builds the gRPC health server. draining may be nil (graceful
+// drain disabled); when non-nil and set, non-liveness checks report NOT_SERVING.
+func newHealthGRPCServer(logger logr.Logger, ds datastore.Datastore, isLeader, draining *atomic.Bool, leaderElectionEnabled bool, supporters []appProtocolSupporter) *grpc.Server {
 	srv := grpc.NewServer()
 	healthPb.RegisterHealthServer(srv, &healthServer{
 		logger:                logger,
@@ -721,13 +779,9 @@ func registerHealthServer(mgr manager.Manager, logger logr.Logger, ds datastore.
 		isLeader:              isLeader,
 		leaderElectionEnabled: leaderElectionEnabled,
 		supporters:            supporters,
+		draining:              draining,
 	})
-	if err := mgr.Add(
-		runnable.NoLeaderElection(runnable.GRPCServer("health", srv, port))); err != nil {
-		setupLog.Error(err, "Failed to register health server")
-		return err
-	}
-	return nil
+	return srv
 }
 
 func extractDeploymentName(podName string) (string, error) {

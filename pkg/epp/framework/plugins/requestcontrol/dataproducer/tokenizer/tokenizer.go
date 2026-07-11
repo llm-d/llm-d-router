@@ -368,6 +368,72 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 	}
 }
 
+// MessagesToRenderChatRequest converts an Anthropic MessagesRequest to a
+// tokenization RenderChatRequest for vLLM /render endpoint with System, Message and Tools set in RenderChatRequest only.
+func MessagesToRenderChatRequest(msg *fwkrh.MessagesRequest) *tokenizerTypes.RenderChatRequest {
+	conversation := make([]tokenizerTypes.Conversation, 0, 1+len(msg.Messages))
+
+	if msg.System.Raw != "" || len(msg.System.Structured) > 0 {
+		conversation = append(conversation, tokenizerTypes.Conversation{
+			Role:    "system",
+			Content: convertAnthropicContent(msg.System),
+		})
+	}
+
+	for _, m := range msg.Messages {
+		conversation = append(conversation, tokenizerTypes.Conversation{
+			Role:    m.Role, // role: user, assistant, system
+			Content: convertAnthropicContent(m.Content),
+		})
+	}
+
+	return &tokenizerTypes.RenderChatRequest{
+		Conversation: conversation,
+		Tools:        msg.Tools,
+	}
+}
+
+// convertAnthropicContent converts an AnthropicContent to the kv-cache tokenizer Content type
+// mapping Anthropic image blocks to OpenAI-shaped image_url blocks.
+func convertAnthropicContent(ac fwkrh.AnthropicContent) tokenizerTypes.Content {
+	if ac.Raw != "" {
+		return tokenizerTypes.Content{Raw: ac.Raw}
+	}
+	blocks := make([]tokenizerTypes.ContentBlock, 0, len(ac.Structured))
+	for _, b := range ac.Structured {
+		switch b.Type {
+		case "text":
+			blocks = append(blocks, tokenizerTypes.ContentBlock{
+				Type: "text",
+				Text: b.Text,
+			})
+		case "image":
+			if url := anthropicImageToURL(b.Source); url != "" {
+				blocks = append(blocks, tokenizerTypes.ContentBlock{
+					Type:     "image_url",
+					ImageURL: tokenizerTypes.ImageBlock{URL: url},
+				})
+			}
+		}
+	}
+	return tokenizerTypes.Content{Structured: blocks}
+}
+
+// anthropicImageToURL converts an Anthropic image source to an OpenAI-shaped URL.
+// Base64 sources become data URIs; URL sources pass through.
+func anthropicImageToURL(src *fwkrh.AnthropicImageSource) string {
+	if src == nil {
+		return ""
+	}
+	if src.URL != "" {
+		return src.URL
+	}
+	if src.Data != "" {
+		return "data:" + src.MediaType + ";base64," + src.Data
+	}
+	return ""
+}
+
 // convertMMFeaturesToUpstream flattens the kv-cache map-shaped multimodal
 // metadata into the upstream flat list, sorted by placeholder offset so
 // consumers see items in prompt order. Returns nil when no content is present.
