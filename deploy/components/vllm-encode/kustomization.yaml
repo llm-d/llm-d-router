@@ -3,6 +3,7 @@
 #
 # Encoder deployment for multimodal disaggregation scenarios (E/PD, E/P/D).
 # Includes a PVC for shared encoder embeddings cache.
+# Also referenced by deploy/coordinator/environments/dev/epd-pools/kustomization.yaml.
 # ------------------------------------------------------------------------------
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

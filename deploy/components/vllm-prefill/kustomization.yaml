@@ -2,6 +2,7 @@
 # VLLM Prefill Component
 #
 # Prefill deployment for disaggregation scenarios (P/D, E/P/D).
+# Also referenced by deploy/coordinator/environments/dev/epd-pools/kustomization.yaml.
 # ------------------------------------------------------------------------------
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

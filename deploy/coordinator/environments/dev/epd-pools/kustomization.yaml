@@ -2,8 +2,11 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-- ../../../components/vllm-encode/
-- ../../../components/vllm-prefill/
+- ../../../../components/vllm-encode/
+- ../../../../components/vllm-prefill/
+# vllm-decode is coordinator-local, not the shared deploy/components/vllm-decode: the
+# router's decode carries a routing-sidecar proxying 8000->8200 for connector-based P/D
+# disaggregation, which the coordinator's own pipeline orchestration doesn't use.
 - ../../../components/vllm-decode/
 
 components:

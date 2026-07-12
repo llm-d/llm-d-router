@@ -56,23 +56,22 @@ const (
 	poolNameBase = "qwen3-vl-2b-instruct-inference-pool"
 	eppName      = "e2e-epp"
 
-	encodeEPPManifest   = "../../../deploy/coordinator/components/inference-gateway/epd-pools/encode/epp.yaml"
-	encodePoolManifest  = "../../../deploy/coordinator/components/inference-gateway/epd-pools/encode/inference-pool.yaml"
-	prefillEPPManifest  = "../../../deploy/coordinator/components/inference-gateway/epd-pools/prefill/epp.yaml"
-	prefillPoolManifest = "../../../deploy/coordinator/components/inference-gateway/epd-pools/prefill/inference-pool.yaml"
-	decodeEPPManifest   = "../../../deploy/coordinator/components/inference-gateway/epd-pools/decode/epp.yaml"
-	decodePoolManifest  = "../../../deploy/coordinator/components/inference-gateway/epd-pools/decode/inference-pool.yaml"
+	encodeEPPManifest   = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/encode/epp.yaml"
+	encodePoolManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/encode/inference-pool.yaml"
+	prefillEPPManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/prefill/epp.yaml"
+	prefillPoolManifest = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/prefill/inference-pool.yaml"
+	decodeEPPManifest   = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/decode/epp.yaml"
+	decodePoolManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/decode/inference-pool.yaml"
 
-	epdPoolsKustomizeDir    = "../../../deploy/coordinator/environments/dev/epd-pools"
-	coordinatorComponentDir = "../../../deploy/coordinator/components/coordinator"
-	rendererComponentDir    = "../../../deploy/coordinator/components/vllm-render"
+	epdPoolsKustomizeDir    = "../../../../deploy/coordinator/environments/dev/epd-pools"
+	coordinatorComponentDir = "../../../../deploy/coordinator/components/coordinator"
+	rendererComponentDir    = "../../../../deploy/coordinator/components/vllm-render"
 
 	envoyManifest = "testdata/envoy.yaml"
 
-	crdGatewayAPIPath = "../../../deploy/coordinator/components/crds-gateway-api"
-	crdGIEPath        = "../../../deploy/coordinator/components/crds-gie"
+	crdGIEPath = "../../../../deploy/components/crds-gie"
 
-	baseRbacManifest = "../../../deploy/coordinator/components/inference-gateway/base/rbac.yaml"
+	baseRbacManifest = "../../../../deploy/coordinator/components/inference-gateway/base/rbac.yaml"
 )
 
 var (
@@ -87,6 +86,8 @@ var (
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
 	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.0", ginkgo.GinkgoLogr)
+	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", vllmSimImage, ginkgo.GinkgoLogr)
+	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)
 	coordinatorImage = env.GetEnvString("COORDINATOR_IMAGE", "", ginkgo.GinkgoLogr)
 	modelName        = env.GetEnvString("MODEL_NAME", "Qwen/Qwen3-VL-2B-Instruct", ginkgo.GinkgoLogr)
 
@@ -191,7 +192,11 @@ func setupK8sCluster() {
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 
-	for _, img := range []string{vllmSimImage, eppImage, coordinatorImage} {
+	images := []string{vllmSimImage, eppImage, coordinatorImage}
+	if vllmRenderImage != vllmSimImage {
+		images = append(images, vllmRenderImage)
+	}
+	for _, img := range images {
 		kindLoadImage(img)
 	}
 }

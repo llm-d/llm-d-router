@@ -26,7 +26,6 @@ spec:
         - "--port=8000"
         - "--model=${MODEL_NAME}"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
-        - "--force-dummy-tokenizer"
         - "${VLLM_EXTRA_ARGS_D}"
         ports:
         - name: http

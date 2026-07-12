@@ -74,13 +74,8 @@ func setupInfra() {
 	})
 }
 
-// createCRDs installs the Gateway API and GIE CRDs used for testing.
+// createCRDs installs the GIE CRDs used for testing.
 func createCRDs() {
-	ginkgo.By("Installing Gateway API CRDs from " + crdGatewayAPIPath)
-	crds := e2eutil.RunKustomize(crdGatewayAPIPath)
-	crds = e2eutil.FilterKinds(crds, "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
-	_ = testutils.CreateObjsFromYaml(testConfig, crds)
-
 	ginkgo.By("Installing GIE CRDs from " + crdGIEPath)
 	gieCRDs := e2eutil.RunKustomize(crdGIEPath)
 	_ = testutils.CreateObjsFromYaml(testConfig, gieCRDs)
@@ -161,7 +156,10 @@ func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int) []s
 // config, deploys the coordinator component (Deployment + Service + SA), starts a
 // port-forward when running against an existing cluster, and waits for readiness.
 func createCoordinator(config string) []string {
-	coordinatorYAML := e2eutil.SubstituteMany([]string{config}, map[string]string{"${NAMESPACE}": nsName})[0]
+	coordinatorYAML := e2eutil.SubstituteMany([]string{config}, map[string]string{
+		"${NAMESPACE}":        nsName,
+		"${VLLM_RENDER_PORT}": vllmRenderPort,
+	})[0]
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "llm-d-coordinator-config",
@@ -290,8 +288,9 @@ func coordinatorSubstitutions() map[string]string {
 // component manifests.
 func rendererSubstitutions() map[string]string {
 	return map[string]string{
-		"${VLLM_IMAGE}": vllmSimImage,
-		"${MODEL_NAME}": modelName,
+		"${VLLM_RENDER_IMAGE}": vllmRenderImage,
+		"${VLLM_RENDER_PORT}":  vllmRenderPort,
+		"${MODEL_NAME}":        modelName,
 	}
 }
 
