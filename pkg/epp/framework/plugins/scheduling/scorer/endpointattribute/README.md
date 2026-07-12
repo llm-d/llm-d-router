@@ -23,6 +23,15 @@ In both strategies, an endpoint missing the attribute receives score `0.0` (and,
 
 The attribute is expected to be a numeric custom metric produced by the core metrics extractor (see the [metrics extractor](../../../datalayer/extractor/metrics/README.md)), stored as a `ScalarMetricValue` endpoint attribute.
 
+## Value source
+
+`source` selects where the per-endpoint value comes from:
+
+- **`endpoint`** (default): the scraped endpoint attribute named `attributeKey`.
+- **`metadata`**: a per-endpoint map an upstream ext_proc wrote to request dynamic metadata at `request.Metadata[metadataNamespace][metadataField]`, keyed by endpoint identity (`namespace/name`). It carries a signal the EPP cannot derive itself, such as an upstream stage's per-endpoint cost or entitlement (`attributeKey` is unused).
+
+The contract is the same for both sources: an endpoint absent from the source scores `0.0` and does not participate in `adaptiveRange`, so an empty or absent map is a neutral no-op. It is a soft preference, not admission; use a filter for a hard allow/deny.
+
 ## Scheduling intent
 
 The scorer returns category `Distribution`, helping spread requests according to the configured attribute.

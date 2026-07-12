@@ -33,6 +33,9 @@ const (
 
 	algorithmLinearLowerIsBetter  = "linear_lower_is_better"
 	algorithmLinearHigherIsBetter = "linear_higher_is_better"
+
+	sourceEndpoint = "endpoint"
+	sourceMetadata = "metadata"
 )
 
 // compile-time type assertion
@@ -62,8 +65,11 @@ type algorithmParameters struct {
 }
 
 type parameters struct {
-	AttributeKey string              `json:"attributeKey"`
-	Algorithm    algorithmParameters `json:"algorithm"`
+	AttributeKey      string              `json:"attributeKey"`
+	Algorithm         algorithmParameters `json:"algorithm"`
+	Source            string              `json:"source"`
+	MetadataNamespace string              `json:"metadataNamespace"`
+	MetadataField     string              `json:"metadataField"`
 }
 
 // EndpointAttributeScorerFactory defines the factory function for EndpointAttributeScorer.
@@ -84,9 +90,24 @@ func NewEndpointAttributeScorer(name string, params parameters) (*EndpointAttrib
 	if name == "" {
 		name = EndpointAttributeScorerType
 	}
-	if params.AttributeKey == "" {
-		return nil, errors.New("endpoint attribute scorer requires a non-empty attributeKey")
+
+	source := params.Source
+	if source == "" {
+		source = sourceEndpoint
 	}
+	switch source {
+	case sourceEndpoint:
+		if params.AttributeKey == "" {
+			return nil, errors.New("endpoint attribute scorer requires a non-empty attributeKey")
+		}
+	case sourceMetadata:
+		if params.MetadataNamespace == "" || params.MetadataField == "" {
+			return nil, errors.New("endpoint attribute scorer with source: metadata requires metadataNamespace and metadataField")
+		}
+	default:
+		return nil, fmt.Errorf("endpoint attribute scorer source must be %q or %q, got %q", sourceEndpoint, sourceMetadata, source)
+	}
+
 	switch params.Algorithm.Type {
 	case algorithmLinearLowerIsBetter, algorithmLinearHigherIsBetter:
 	default:
@@ -104,17 +125,19 @@ func NewEndpointAttributeScorer(name string, params parameters) (*EndpointAttrib
 	}
 
 	return &EndpointAttributeScorer{
-		typedName:     fwkplugin.TypedName{Type: EndpointAttributeScorerType, Name: name},
-		attributeKey:  params.AttributeKey,
-		lowerIsBetter: params.Algorithm.Type == algorithmLinearLowerIsBetter,
-		fixedRange:    normalization.FixedRange,
+		typedName:         fwkplugin.TypedName{Type: EndpointAttributeScorerType, Name: name},
+		attributeKey:      params.AttributeKey,
+		lowerIsBetter:     params.Algorithm.Type == algorithmLinearLowerIsBetter,
+		fixedRange:        normalization.FixedRange,
+		source:            source,
+		metadataNamespace: params.MetadataNamespace,
+		metadataField:     params.MetadataField,
 	}, nil
 }
 
-// EndpointAttributeScorer scores candidate endpoints by a single configured
-// numeric endpoint attribute (produced by the custom metrics extraction layer),
-// linearly normalized against either a fixed [min, max] range or an adaptive
-// range computed across the candidates.
+// EndpointAttributeScorer scores candidate endpoints by a single numeric value, linearly normalized against
+// a fixed [min, max] range or an adaptive range across the candidates. The value is a scraped endpoint
+// attribute (source: endpoint) or a per-endpoint map in request metadata (source: metadata).
 type EndpointAttributeScorer struct {
 	typedName     fwkplugin.TypedName
 	attributeKey  string
@@ -122,6 +145,10 @@ type EndpointAttributeScorer struct {
 	// fixedRange selects fixed-range normalization when set; adaptive-range
 	// normalization is used otherwise.
 	fixedRange *fixedRangeParameters
+
+	source            string
+	metadataNamespace string
+	metadataField     string
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -134,33 +161,74 @@ func (s *EndpointAttributeScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-// Consumes returns the list of data that is consumed by the plugin.
+// Consumes declares the endpoint attribute this scorer reads.
 func (s *EndpointAttributeScorer) Consumes() map[string]any {
+	if s.source == sourceMetadata {
+		// The value comes from request metadata, so there is no endpoint-attribute dependency.
+		return map[string]any{}
+	}
 	return map[string]any{
 		s.attributeKey: attrmetrics.ScalarMetricValue(0),
 	}
 }
 
-// Score returns the scoring result for the given list of endpoints based on the
-// configured endpoint attribute. Endpoints missing the attribute score 0.
-func (s *EndpointAttributeScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+// Score returns the scoring result for the given list of endpoints. Endpoints missing the value score 0.
+func (s *EndpointAttributeScorer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	valueOf := s.valueReader(request)
 	if s.fixedRange != nil {
-		return s.scoreFixedRange(endpoints)
+		return s.scoreFixedRange(endpoints, valueOf)
 	}
-	return s.scoreAdaptiveRange(endpoints)
+	return s.scoreAdaptiveRange(endpoints, valueOf)
 }
 
-// scoreFixedRange normalizes each endpoint's attribute value against the
-// configured [min, max] range, clamping values outside the range.
-func (s *EndpointAttributeScorer) scoreFixedRange(endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+// valueReader returns the per-endpoint value accessor for the configured source.
+func (s *EndpointAttributeScorer) valueReader(request *fwksched.InferenceRequest) func(fwksched.Endpoint) (float64, bool) {
+	if s.source == sourceMetadata {
+		scores := endpointScoresFromMetadata(request, s.metadataNamespace, s.metadataField)
+		return func(ep fwksched.Endpoint) (float64, bool) {
+			v, ok := scores[ep.GetMetadata().GetNamespacedName().String()]
+			return v, ok
+		}
+	}
+	return func(ep fwksched.Endpoint) (float64, bool) {
+		v, ok := attrmetrics.ReadScalarMetricValue(ep, s.attributeKey)
+		return float64(v), ok
+	}
+}
+
+// endpointScoresFromMetadata reads request.Metadata[namespace][field] as an endpoint-identity to score map.
+func endpointScoresFromMetadata(request *fwksched.InferenceRequest, namespace, field string) map[string]float64 {
+	scores := map[string]float64{}
+	if request == nil || request.Metadata == nil {
+		return scores
+	}
+	ns, ok := request.Metadata[namespace].(map[string]any)
+	if !ok {
+		return scores
+	}
+	raw, ok := ns[field].(map[string]any)
+	if !ok {
+		return scores
+	}
+	for k, v := range raw {
+		if f, ok := v.(float64); ok {
+			scores[k] = f
+		}
+	}
+	return scores
+}
+
+// scoreFixedRange normalizes each endpoint's value against the configured [min, max] range, clamping
+// values outside the range.
+func (s *EndpointAttributeScorer) scoreFixedRange(endpoints []fwksched.Endpoint, valueOf func(fwksched.Endpoint) (float64, bool)) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
-		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, s.attributeKey)
+		value, ok := valueOf(endpoint)
 		if !ok {
 			scores[endpoint] = 0.0
 			continue
 		}
-		normalized := (float64(value) - s.fixedRange.Min) / (s.fixedRange.Max - s.fixedRange.Min)
+		normalized := (value - s.fixedRange.Min) / (s.fixedRange.Max - s.fixedRange.Min)
 		normalized = math.Max(0.0, math.Min(1.0, normalized))
 		if s.lowerIsBetter {
 			normalized = 1.0 - normalized
@@ -170,27 +238,25 @@ func (s *EndpointAttributeScorer) scoreFixedRange(endpoints []fwksched.Endpoint)
 	return scores
 }
 
-// scoreAdaptiveRange normalizes each endpoint's attribute value against the
-// [min, max] range observed across the candidates. Endpoints missing the
-// attribute do not participate in the range. If all endpoints that have the
-// attribute share the same value, they all receive a neutral score of 1.0.
-func (s *EndpointAttributeScorer) scoreAdaptiveRange(endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+// scoreAdaptiveRange normalizes each endpoint's value against the [min, max] range observed across the
+// candidates. Endpoints missing the value do not participate in the range. If all endpoints that have the
+// value share the same value, they all receive a neutral score of 1.0.
+func (s *EndpointAttributeScorer) scoreAdaptiveRange(endpoints []fwksched.Endpoint, valueOf func(fwksched.Endpoint) (float64, bool)) map[fwksched.Endpoint]float64 {
 	values := make(map[fwksched.Endpoint]float64, len(endpoints))
 	minValue := math.Inf(1)
 	maxValue := math.Inf(-1)
 
 	for _, endpoint := range endpoints {
-		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, s.attributeKey)
+		value, ok := valueOf(endpoint)
 		if !ok {
 			continue
 		}
-		floatValue := float64(value)
-		values[endpoint] = floatValue
-		if floatValue < minValue {
-			minValue = floatValue
+		values[endpoint] = value
+		if value < minValue {
+			minValue = value
 		}
-		if floatValue > maxValue {
-			maxValue = floatValue
+		if value > maxValue {
+			maxValue = value
 		}
 	}
 
@@ -202,7 +268,7 @@ func (s *EndpointAttributeScorer) scoreAdaptiveRange(endpoints []fwksched.Endpoi
 			continue
 		}
 		if maxValue == minValue {
-			// All endpoints with the attribute have the same value, return a neutral score.
+			// All endpoints with the value share the same value, return a neutral score.
 			scores[endpoint] = 1.0
 			continue
 		}

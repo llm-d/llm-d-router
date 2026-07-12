@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -111,6 +112,79 @@ func newEndpointWithValue(value float64) fwksched.Endpoint {
 
 func newEndpointWithoutValue() fwksched.Endpoint {
 	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{}, nil)
+}
+
+func newEndpointNamed(name string) fwksched.Endpoint {
+	return fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			NamespacedName: types.NamespacedName{Namespace: "ns", Name: name},
+		},
+		&fwkdl.Metrics{},
+		nil,
+	)
+}
+
+func metadataReq(scores map[string]float64) *fwksched.InferenceRequest {
+	m := make(map[string]any, len(scores))
+	for k, v := range scores {
+		m[k] = v
+	}
+	return &fwksched.InferenceRequest{Metadata: map[string]any{
+		"llm-d.routing": map[string]any{"endpoint_scores": m},
+	}}
+}
+
+func TestEndpointAttributeScorerMetadataSourceContract(t *testing.T) {
+	epA, epB, epC := newEndpointNamed("ep-a"), newEndpointNamed("ep-b"), newEndpointNamed("ep-c")
+
+	tests := []struct {
+		name     string
+		request  *fwksched.InferenceRequest
+		expected map[fwksched.Endpoint]float64
+	}{
+		{
+			name:     "all endpoints scored",
+			request:  metadataReq(map[string]float64{"ns/ep-a": 0.9, "ns/ep-b": 0.5, "ns/ep-c": 0.1}),
+			expected: map[fwksched.Endpoint]float64{epA: 1.0, epB: 0.5, epC: 0.0},
+		},
+		{
+			name:     "only one listed: it wins, the rest score 0",
+			request:  metadataReq(map[string]float64{"ns/ep-a": 0.9}),
+			expected: map[fwksched.Endpoint]float64{epA: 1.0, epB: 0.0, epC: 0.0},
+		},
+		{
+			name:     "one missing from the map scores 0",
+			request:  metadataReq(map[string]float64{"ns/ep-a": 0.9, "ns/ep-c": 0.1}),
+			expected: map[fwksched.Endpoint]float64{epA: 1.0, epB: 0.0, epC: 0.0},
+		},
+		{
+			name:     "empty map is a neutral no-op",
+			request:  metadataReq(map[string]float64{}),
+			expected: map[fwksched.Endpoint]float64{epA: 0.0, epB: 0.0, epC: 0.0},
+		},
+		{
+			name:     "absent namespace is a neutral no-op",
+			request:  &fwksched.InferenceRequest{},
+			expected: map[fwksched.Endpoint]float64{epA: 0.0, epB: 0.0, epC: 0.0},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scorer, err := NewEndpointAttributeScorer("test", parameters{
+				Source:            sourceMetadata,
+				MetadataNamespace: "llm-d.routing",
+				MetadataField:     "endpoint_scores",
+				Algorithm:         algorithmParameters{Type: algorithmLinearHigherIsBetter},
+			})
+			require.NoError(t, err)
+
+			scores := scorer.Score(context.Background(), test.request, []fwksched.Endpoint{epA, epB, epC})
+			for ep, want := range test.expected {
+				assert.InDelta(t, want, scores[ep], 0.0001)
+			}
+		})
+	}
 }
 
 func TestEndpointAttributeScorerScoreAdaptiveRange(t *testing.T) {
