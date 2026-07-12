@@ -85,7 +85,7 @@ func eppPodReady(oldPodName string) func() bool {
 
 // completionRoutedToNamespace sends one completion and reports an error on any
 // failure or namespace-header mismatch, for use inside Eventually blocks.
-func completionRoutedToNamespace() error {
+func completionRoutedToNamespace(nsName string) error {
 	nsHdr, _, err := tryCompletion(simplePrompt, simModelName)
 	if err != nil {
 		return err
@@ -147,7 +147,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
 			ginkgo.By("Verifying requests succeed consistently after recovery")
-			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).
+			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).WithArguments(nsName).
 				MustPassRepeatedly(3).Should(gomega.Succeed())
 		})
 	})
@@ -199,7 +199,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
 			ginkgo.By("Verifying requests succeed consistently after recovery")
-			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).
+			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).WithArguments(nsName).
 				MustPassRepeatedly(3).Should(gomega.Succeed())
 		})
 	})
