@@ -17,13 +17,16 @@ limitations under the License.
 package coordinate2e
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apilabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,7 +44,7 @@ func getPodNames(labels map[string]string) []string {
 	podList := corev1.PodList{}
 	selector := apilabels.SelectorFromSet(labels)
 	err := testConfig.K8sClient.List(testConfig.Context, &podList,
-		&client.ListOptions{Namespace: nsName, LabelSelector: selector})
+		&client.ListOptions{Namespace: getNamespace(), LabelSelector: selector})
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
 	names := make([]string, 0, len(podList.Items))
@@ -59,7 +62,7 @@ func podsInDeploymentsReady(objects []string) {
 	isDeploymentReady := func(deploymentName string) bool {
 		var deployment appsv1.Deployment
 		err := testConfig.K8sClient.Get(testConfig.Context,
-			types.NamespacedName{Namespace: nsName, Name: deploymentName}, &deployment)
+			types.NamespacedName{Namespace: getNamespace(), Name: deploymentName}, &deployment)
 		if err != nil || deployment.Spec.Replicas == nil {
 			return false
 		}
@@ -79,4 +82,55 @@ func podsInDeploymentsReady(objects []string) {
 				Should(gomega.BeTrue())
 		}
 	}
+}
+
+// dumpPodsAndLogs prints pod statuses and container logs for the given namespace
+// to the Ginkgo writer. Call this before cleanup to ensure the information is
+// available when CI tests fail.
+func dumpPodsAndLogs(nsName string) {
+	if testConfig == nil || testConfig.KubeCli == nil {
+		ginkgo.GinkgoWriter.Println("Skipping pod dump: cluster not initialized")
+		return
+	}
+
+	ginkgo.GinkgoWriter.Printf("\n=== Dumping pod states and logs (namespace: %s) ===\n", nsName)
+
+	pods, err := testConfig.KubeCli.CoreV1().Pods(nsName).List(testConfig.Context, metav1.ListOptions{})
+	if err != nil {
+		ginkgo.GinkgoWriter.Printf("Failed to list pods: %v\n", err)
+		return
+	}
+
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		ginkgo.GinkgoWriter.Printf("--- Pod: %s | Phase: %s ---\n", pod.Name, pod.Status.Phase)
+
+		for _, c := range pod.Spec.InitContainers {
+			dumpContainerLogs(nsName, pod.Name, c.Name)
+		}
+		for _, c := range pod.Spec.Containers {
+			dumpContainerLogs(nsName, pod.Name, c.Name)
+		}
+	}
+}
+
+// dumpContainerLogs prints a single container's logs via the Kubernetes API,
+// prefixed so they're identifiable in the suite-failure dump.
+func dumpContainerLogs(nsName, podName, containerName string) {
+	ginkgo.GinkgoWriter.Printf("--- Logs: %s/%s ---\n", podName, containerName)
+
+	req := testConfig.KubeCli.CoreV1().Pods(nsName).GetLogs(podName, &corev1.PodLogOptions{Container: containerName})
+	stream, err := req.Stream(testConfig.Context)
+	if err != nil {
+		ginkgo.GinkgoWriter.Printf("(failed to fetch logs: %v)\n", err)
+		return
+	}
+	defer stream.Close()
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, stream); err != nil {
+		ginkgo.GinkgoWriter.Printf("(failed to read logs: %v)\n", err)
+		return
+	}
+	ginkgo.GinkgoWriter.Printf("%s\n", buf.String())
 }

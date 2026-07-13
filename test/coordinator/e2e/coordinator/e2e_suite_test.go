@@ -75,8 +75,8 @@ const (
 )
 
 var (
-	coordinatorPort = env.GetEnvString("COORDINATOR_PORT", strconv.Itoa(defaultCoordinatorPort), ginkgo.GinkgoLogr)
-	gatewayPort     = env.GetEnvString("E2E_GATEWAY_PORT", strconv.Itoa(defaultGatewayHostPort), ginkgo.GinkgoLogr)
+	baseCoordinatorPort = env.GetEnvInt("COORDINATOR_PORT", defaultCoordinatorPort, ginkgo.GinkgoLogr)
+	baseGatewayPort     = env.GetEnvInt("E2E_GATEWAY_PORT", defaultGatewayHostPort, ginkgo.GinkgoLogr)
 
 	testConfig *testutils.TestConfig
 
@@ -91,13 +91,13 @@ var (
 	coordinatorImage = env.GetEnvString("COORDINATOR_IMAGE", "", ginkgo.GinkgoLogr)
 	modelName        = env.GetEnvString("MODEL_NAME", "Qwen/Qwen3-VL-2B-Instruct", ginkgo.GinkgoLogr)
 
-	nsName     = env.GetEnvString("NAMESPACE", "default", ginkgo.GinkgoLogr)
+	numProcesses = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
+
+	// baseNsName is the base of the namespace in which the K8S objects will be created.
+	baseNsName = env.GetEnvString("NAMESPACE", testutils.DefaultNsName(numProcesses, "e2e-coordinator"), ginkgo.GinkgoLogr)
 	k8sContext = env.GetEnvString("K8S_CONTEXT", "", ginkgo.GinkgoLogr)
 
 	readyTimeout = env.GetEnvDuration("READY_TIMEOUT", defaultReadyTimeout, ginkgo.GinkgoLogr)
-
-	coordinatorBaseURL = "http://localhost:" + coordinatorPort
-	gatewayBaseURL     = "http://localhost:" + gatewayPort
 
 	portForwardSessions []*gexec.Session
 	rendererObjects     []string
@@ -111,6 +111,8 @@ func TestCoordinatorE2E(t *testing.T) {
 
 var _ = ginkgo.BeforeSuite(func() {
 	gomega.Expect(coordinatorImage).NotTo(gomega.BeEmpty(), "COORDINATOR_IMAGE must be set")
+
+	testutils.RequireParallelProcessesMatch(numProcesses)
 
 	if k8sContext == "" {
 		setupK8sCluster()
@@ -127,17 +129,24 @@ var _ = ginkgo.BeforeSuite(func() {
 	} else {
 		// Base infra (including Envoy) is pre-deployed; forward the gateway so
 		// the test can post to it. The kind nodePort mapping is unavailable here.
-		startPortForward("service/envoy", gatewayPort, "8081")
+		startPortForward("service/envoy", strconv.Itoa(getGatewayPort()), "8081")
 	}
 
 	rendererObjects = createRenderer()
 })
 
 var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
+	if !report.SuiteSucceeded {
+		for idx := range numProcesses {
+			dumpPodsAndLogs(testutils.NamespaceForProcess(baseNsName, numProcesses, idx+1))
+		}
+	}
+
 	if k8sContext == "" && keepClusterOnFailure && !report.SuiteSucceeded {
 		ginkgo.By("Keeping kind cluster " + kindClusterName + " due to suite failure (E2E_KEEP_CLUSTER_ON_FAILURE=true)")
 		return
 	}
+	nsName := getNamespace()
 	if len(rendererObjects) > 0 {
 		testutils.DeleteObjects(testConfig, rendererObjects, nsName)
 	}
@@ -168,13 +177,20 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 func startPortForward(target, localPort, remotePort string) {
 	command := exec.Command("kubectl", "port-forward", target,
 		localPort+":"+remotePort,
-		"--context="+k8sContext, "--namespace="+nsName)
+		"--context="+k8sContext, "--namespace="+getNamespace())
 	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	portForwardSessions = append(portForwardSessions, session)
 }
 
 func setupK8sCluster() {
+	// extraPortMappings is substituted into `extraPortMappings: ${EXTRA_PORT_MAPPINGS}` in the Kind
+	// cluster configuration below; keep its indentation in sync with testutils.BuildExtraPortMappings.
+	extraPortMappings := testutils.BuildExtraPortMappings(numProcesses,
+		[2]int{defaultCoordinatorPort, baseCoordinatorPort},
+		[2]int{defaultGatewayHostPort, baseGatewayPort},
+	)
+
 	command := exec.Command("kind", "create", "cluster", "--name", kindClusterName, "--config", "-")
 	stdin, err := command.StdinPipe()
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -183,8 +199,7 @@ func setupK8sCluster() {
 			err := stdin.Close()
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		}()
-		clusterConfig := strings.ReplaceAll(kindClusterConfig, "${COORDINATOR_PORT}", coordinatorPort)
-		clusterConfig = strings.ReplaceAll(clusterConfig, "${GATEWAY_PORT}", gatewayPort)
+		clusterConfig := strings.ReplaceAll(kindClusterConfig, "${EXTRA_PORT_MAPPINGS}", extraPortMappings)
 		_, err := io.WriteString(stdin, clusterConfig)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	}()
@@ -239,16 +254,37 @@ func setupK8sClient() {
 	k8slog.SetLogger(ginkgo.GinkgoLogr)
 }
 
+// getCoordinatorPort returns the coordinator's NodePort for this process. See testutils.ProcessPort.
+func getCoordinatorPort() int {
+	return testutils.ProcessPort(baseCoordinatorPort)
+}
+
+// getGatewayPort returns the envoy gateway's NodePort for this process. See testutils.ProcessPort.
+func getGatewayPort() int {
+	return testutils.ProcessPort(baseGatewayPort)
+}
+
+// getNamespace returns the namespace being used by the current process. Each
+// parallel process is assigned its own namespace to provide isolation between
+// the tests running in it. See testutils.Namespace.
+func getNamespace() string {
+	return testutils.Namespace(baseNsName, numProcesses)
+}
+
+// coordinatorBaseURL returns the coordinator's direct base URL for this process.
+func coordinatorBaseURL() string {
+	return testutils.LocalhostURL(getCoordinatorPort())
+}
+
+// gatewayBaseURL returns the gateway's base URL for this process.
+func gatewayBaseURL() string {
+	return testutils.LocalhostURL(getGatewayPort())
+}
+
 const kindClusterConfig = `
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - image: kindest/node:v1.31.12
-  extraPortMappings:
-  - containerPort: 30081
-    hostPort: ${COORDINATOR_PORT}
-    protocol: TCP
-  - containerPort: 30080
-    hostPort: ${GATEWAY_PORT}
-    protocol: TCP
+  extraPortMappings:${EXTRA_PORT_MAPPINGS}
 `

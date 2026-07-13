@@ -36,9 +36,7 @@ import (
 // setupNameSpace creates the test namespace if it does not already exist and
 // records whether it was created so AfterSuite can delete it on cleanup.
 func setupNameSpace() {
-	if nsName == "default" {
-		return
-	}
+	nsName := getNamespace()
 	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
 	if err == nil {
 		return
@@ -62,6 +60,7 @@ func setupNameSpace() {
 // The per-test workload (EPPs, InferencePools, vLLM workers, coordinator) is
 // created in the test body.
 func setupInfra() {
+	nsName := getNamespace()
 	createCRDs()
 
 	ginkgo.By("Applying shared Role/epp-reader from " + baseRbacManifest)
@@ -105,6 +104,7 @@ func createEndPointPicker(phase, config string) []string {
 // createInferencePool creates the InferencePool for the given phase. When
 // toDelete is set, the existing pool is removed first so the test starts clean.
 func createInferencePool(phase string, toDelete bool) []string {
+	nsName := getNamespace()
 	manifest := map[string]string{
 		"encode":  encodePoolManifest,
 		"prefill": prefillPoolManifest,
@@ -124,6 +124,7 @@ func createInferencePool(phase string, toDelete bool) []string {
 // against a persistent cluster starts clean. testutils.DeleteObjects asserts
 // the object exists, so a fresh cluster needs the existence check first.
 func deletePoolIfExists(name string) {
+	nsName := getNamespace()
 	pool := &inferenceapi.InferencePool{}
 	err := testConfig.K8sClient.Get(testConfig.Context,
 		types.NamespacedName{Namespace: nsName, Name: name}, pool)
@@ -147,7 +148,7 @@ func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int) []s
 	docs = e2eutil.SubstituteMany(docs, subs)
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	docs = e2eutil.RemoveEmptyLabels(docs)
-	objects := testutils.CreateObjsFromYaml(testConfig, docs, nsName)
+	objects := testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())
 	podsInDeploymentsReady(objects)
 	return objects
 }
@@ -156,6 +157,7 @@ func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int) []s
 // config, deploys the coordinator component (Deployment + Service + SA), starts a
 // port-forward when running against an existing cluster, and waits for readiness.
 func createCoordinator(config string) []string {
+	nsName := getNamespace()
 	coordinatorYAML := e2eutil.SubstituteMany([]string{config}, map[string]string{
 		"${NAMESPACE}":        nsName,
 		"${VLLM_RENDER_PORT}": vllmRenderPort,
@@ -182,7 +184,7 @@ func createCoordinator(config string) []string {
 
 	podsInDeploymentsReady(objects)
 	if k8sContext != "" {
-		startPortForward("deployment/llm-d-coordinator", coordinatorPort, "8080")
+		startPortForward("deployment/llm-d-coordinator", strconv.Itoa(getCoordinatorPort()), "8080")
 	}
 	waitForCoordinatorReady()
 	return objects
@@ -199,12 +201,12 @@ func createCoordinator(config string) []string {
 func waitForCoordinatorReady() {
 	ginkgo.By("Waiting for coordinator to be ready (direct)")
 	gomega.Eventually(func() bool {
-		return pollReady(coordinatorBaseURL + "/readyz")
+		return pollReady(coordinatorBaseURL() + "/readyz")
 	}, readyTimeout, defaultInterval).Should(gomega.BeTrue(), "coordinator should be ready within the ready timeout")
 
 	ginkgo.By("Waiting for coordinator to be reachable via gateway")
 	gomega.Eventually(func() bool {
-		return pollReady(gatewayBaseURL + "/readyz")
+		return pollReady(gatewayBaseURL() + "/readyz")
 	}, readyTimeout, defaultInterval).Should(gomega.BeTrue(), "coordinator should be reachable via gateway within the ready timeout")
 }
 
@@ -223,7 +225,7 @@ func createEPPConfigMap(name, content string) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: nsName,
+			Namespace: getNamespace(),
 		},
 		Data: map[string]string{"epp-config.yaml": content},
 	}
@@ -237,7 +239,7 @@ func applyManifest(path string, subs map[string]string) []string {
 	docs := testutils.ReadYaml(path)
 	docs = e2eutil.SubstituteMany(docs, subs)
 	docs = e2eutil.RemoveEmptyArgs(docs)
-	return testutils.CreateObjsFromYaml(testConfig, docs, nsName)
+	return testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())
 }
 
 func eppSubstitutions() map[string]string {
@@ -245,7 +247,7 @@ func eppSubstitutions() map[string]string {
 		"${EPP_NAME}":              eppName,
 		"${POOL_NAME}":             poolNameBase,
 		"${EPP_IMAGE}":             eppImage,
-		"${NAMESPACE}":             nsName,
+		"${NAMESPACE}":             getNamespace(),
 		"${METRICS_ENDPOINT_AUTH}": "false",
 	}
 }
@@ -271,7 +273,7 @@ func allSubstitutions() map[string]string {
 		"${KV_CACHE_ENABLED}":        "false",
 		"${HF_TOKEN}":                "",
 		"${EPP_NAME}":                eppName,
-		"${NAMESPACE}":               nsName,
+		"${NAMESPACE}":               getNamespace(),
 		"${DECODE_ROLE}":             "decode",
 	}
 }
@@ -300,7 +302,7 @@ func createRenderer() []string {
 	docs := e2eutil.RunKustomize(rendererComponentDir)
 	docs = e2eutil.SubstituteMany(docs, rendererSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
-	objects := testutils.CreateObjsFromYaml(testConfig, docs, nsName)
+	objects := testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())
 	podsInDeploymentsReady(objects)
 	return objects
 }
