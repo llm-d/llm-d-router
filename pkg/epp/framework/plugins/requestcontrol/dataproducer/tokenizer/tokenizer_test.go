@@ -792,8 +792,8 @@ func TestProduce_MessagesRequest(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, [][]uint32{wantTokens}, req.Body.TokenizedPrompt.PerPromptTokens)
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: wantTokens}}, req.Body.TokenizedRequest.Prompts)
 
 	pm, ok := gotPayload.AsMap()
 	require.True(t, ok, "RenderChat payload must be a map")
