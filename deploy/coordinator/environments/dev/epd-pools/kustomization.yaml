@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../../components/vllm-encode/
+- ../../../components/vllm-prefill/
+- ../../../components/vllm-decode/
+
+components:
+- ../../../components/overlays/simulator/

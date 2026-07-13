@@ -1,0 +1,156 @@
+name: Rebase PR
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  rebase:
+    name: Rebase PR on main
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/rebase'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check commenter has write access
+        id: check-access
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PERMISSION=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.event.comment.user.login }}/permission" --jq '.permission')
+          if [[ "$PERMISSION" != "admin" && "$PERMISSION" != "write" && "$PERMISSION" != "maintain" ]]; then
+            echo "User ${{ github.event.comment.user.login }} does not have write access (got: $PERMISSION). Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: React to comment
+        if: steps.check-access.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content='rocket' --silent
+
+      - name: Get PR details
+        if: steps.check-access.outputs.skip != 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_JSON=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}")
+          HEAD_REPO=$(echo "$PR_JSON" | jq -r '.head.repo.full_name')
+          echo "head-repo=$HEAD_REPO" >> "$GITHUB_OUTPUT"
+          echo "head-ref=$(echo "$PR_JSON" | jq -r '.head.ref')" >> "$GITHUB_OUTPUT"
+          echo "base-ref=$(echo "$PR_JSON" | jq -r '.base.ref')" >> "$GITHUB_OUTPUT"
+          echo "is-fork=$( [ "$HEAD_REPO" != "${{ github.repository }}" ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
+          echo "maintainer-can-modify=$(echo "$PR_JSON" | jq -r '.maintainer_can_modify')" >> "$GITHUB_OUTPUT"
+
+      - name: Check fork allows maintainer push
+        if: >-
+          steps.check-access.outputs.skip != 'true' &&
+          steps.pr.outputs.is-fork == 'true' &&
+          steps.pr.outputs.maintainer-can-modify != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -f body='> /rebase
+
+          Cannot rebase: the PR author has not enabled **Allow edits from maintainers**. Please ask them to enable it in the PR sidebar.' --silent
+          exit 1
+
+      - name: Checkout base repo
+        if: steps.check-access.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.base-ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch PR head and rebase
+        if: steps.check-access.outputs.skip != 'true'
+        id: rebase
+        env:
+          HEAD_REPO: ${{ steps.pr.outputs.head-repo }}
+          HEAD_REF: ${{ steps.pr.outputs.head-ref }}
+          BASE_REF: ${{ steps.pr.outputs.base-ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          HEAD_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${HEAD_REPO}.git"
+          git remote add head-repo "$HEAD_URL"
+          git fetch head-repo "$HEAD_REF"
+          git checkout -b pr-head "head-repo/$HEAD_REF"
+
+          if git rebase "origin/$BASE_REF"; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            git rebase --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push rebased branch
+        if: >-
+          steps.check-access.outputs.skip != 'true' &&
+          steps.rebase.outputs.result == 'success'
+        id: push
+        run: |
+          if git push --force-with-lease head-repo "HEAD:${{ steps.pr.outputs.head-ref }}" 2>&1; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment on success
+        if: >-
+          steps.check-access.outputs.skip != 'true' &&
+          steps.rebase.outputs.result == 'success' &&
+          steps.push.outputs.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -f body='> /rebase
+
+          Done — rebased `${{ steps.pr.outputs.head-ref }}` on `${{ steps.pr.outputs.base-ref }}`.' --silent
+
+      - name: Comment on conflict
+        if: >-
+          steps.check-access.outputs.skip != 'true' &&
+          steps.rebase.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -f body='> /rebase
+
+          Rebase failed due to merge conflicts. Please rebase manually:
+          ```
+          gh pr checkout ${{ github.event.issue.number }}
+          git rebase origin/${{ steps.pr.outputs.base-ref }}
+          # resolve conflicts
+          git push --force-with-lease
+          ```' --silent
+
+      - name: Comment on push failure
+        if: >-
+          steps.check-access.outputs.skip != 'true' &&
+          steps.rebase.outputs.result == 'success' &&
+          steps.push.outputs.result == 'failed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -f body='> /rebase
+
+          Rebase succeeded but push failed. This usually means the PR is from a fork and the author has not enabled **Allow edits from maintainers**, or the fork repo restricts pushes. Please rebase manually.' --silent
