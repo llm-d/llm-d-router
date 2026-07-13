@@ -15,7 +15,9 @@ router:
       tag: main
       pullPolicy: Always
     flags:
-      v: 2
+      v: 4
+      enable-pprof: "true"
+      tracing: "false"
     pluginsConfigFile: "optimized-baseline-plugins.yaml"
     pluginsCustomConfig:
       optimized-baseline-plugins.yaml: |
@@ -37,20 +39,12 @@ router:
             weight: 3
           - pluginRef: no-hit-lru-scorer
             weight: 2
-    resources:
-      requests:
-        cpu: "4"
-        memory: 8Gi
-      limits:
-        memory: 16Gi
 
   inferencePool:
     failureMode: "FailOpen"
 
   modelServers:
     protocol: http
-    matchLabels:
-      llm-d.ai/guide: "optimized-baseline"
 
   proxy:
     args:

@@ -1,7 +1,7 @@
 job:
   image:
     repository: quay.io/inference-perf/inference-perf
-    tag: main
+    tag: v0.6.0
   serviceAccountName: inference-perf-sa
 
   resources:
@@ -39,8 +39,8 @@ config:
     shared_prefix:
       num_groups: 150               # Number of distinct prefix, Note: the number of users is num_groups * num_prompts_per_group
       num_prompts_per_group: 5      # Number of unique questions per group (prefix)
-      system_prompt_len: 95000       # Length of the first prefix (in tokens), simulate initialization of a system prompt
-      question_len: 5000             # Length of the unique question part (in tokens)
+      system_prompt_len: 9500       # Length of the first prefix (in tokens), simulate initialization of a system prompt
+      question_len: 500             # Length of the unique question part (in tokens)
       output_len: 1000              # Target length for the model's generated output (in tokens)
       enable_multi_turn_chat: false # If enabled, the chat context will be appended for the each request.
   report:

@@ -461,7 +461,7 @@ def cleanup_namespace(ns):
     print(f"Cleaning up namespace: {ns}")
     run_cmd(f"kubectl delete namespace {ns} --wait=false")
 
-def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, config_name, perf_job, machine_family, sim_replicas, images, idle_metrics, peak_metrics, p50, p95, status):
+def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, router_config_path, perf_job, machine_family, sim_replicas, images, idle_metrics, peak_metrics, p50, p95, status):
     os.makedirs(results_dir, exist_ok=True)
     results_file = os.path.join(results_dir, f"{test_name}.md")
     file_exists = os.path.exists(results_file)
@@ -475,7 +475,14 @@ def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, confi
             
         epp_images = "<br>".join(images)
         mf_str = machine_family if machine_family else "-"
+        
+        config_name = os.path.splitext(os.path.basename(router_config_path))[0]
+        rel_router_config = os.path.relpath(router_config_path, results_dir)
+        rel_perf_job = os.path.relpath(perf_job, results_dir)
+        
+        config_link = f"[{config_name}]({rel_router_config})"
         job_basename = os.path.basename(perf_job)
+        job_link = f"[{job_basename}]({rel_perf_job})"
         
         # Write rows for each container
         for container in sorted(peak_metrics.keys()):
@@ -484,21 +491,21 @@ def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, confi
             peak_cpu = peak_metrics.get(container, {}).get('cpu', '-')
             peak_mem = peak_metrics.get(container, {}).get('mem', '-')
             
-            f.write(f"| {run_time} | {ns} | {config_name} | {job_basename} | {mf_str} | {sim_replicas} | {epp_images} | {container} | {idle_cpu} | {idle_mem} | {peak_cpu} | {peak_mem} | {p50:.2f} | {p95:.2f} | {status} |\n")
+            f.write(f"| {run_time} | {ns} | {config_link} | {job_link} | {mf_str} | {sim_replicas} | {epp_images} | {container} | {idle_cpu} | {idle_mem} | {peak_cpu} | {peak_mem} | {p50:.2f} | {p95:.2f} | {status} |\n")
 
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.abspath(os.path.join(script_dir, ".."))
+    repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
     
     # Resolve relative defaults
-    default_sim_deploy = os.path.join(script_dir, "perf-configs", "llm-d-sim-deployment.yaml")
-    default_sim_svc = os.path.join(script_dir, "perf-configs", "llm-d-sim-service.yaml")
+    default_sim_deploy = os.path.join(script_dir, "config", "llm-d-sim-deployment.yaml")
+    default_sim_svc = os.path.join(script_dir, "config", "llm-d-sim-service.yaml")
     default_router_chart = "oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev"
-    default_perf_chart = os.path.abspath(os.path.join(script_dir, "..", "..", "..", "inference-perf", "deploy", "inference-perf"))
-    default_perf_job = os.path.join(script_dir, "perf-configs", "shared_prefix_job1.yaml")
-    default_results_dir = os.path.abspath(os.path.join(script_dir, "..", "llm-d-router-resource-tests"))
-    default_router_config = os.path.abspath(os.path.join(script_dir, "perf-configs", "router-configs", "optimized-baseline.yaml"))
+    default_perf_chart = os.path.abspath(os.path.join(script_dir, "..", "..", "..", "..", "inference-perf", "deploy", "inference-perf"))
+    default_perf_job = os.path.join(script_dir, "config", "shared_prefix_job1.yaml")
+    default_results_dir = os.path.abspath(os.path.join(script_dir, "results"))
+    default_router_config = os.path.abspath(os.path.join(script_dir, "config", "router-configs", "optimized-baseline.yaml"))
  
     parser = argparse.ArgumentParser(description="Nightly EPP Performance Benchmarking")
     parser.add_argument("--namespace", default=None, help="Dedicated namespace name (auto-generated if omitted)")
@@ -651,7 +658,7 @@ def main():
                 args.test_name,
                 run_time, 
                 ns, 
-                release_name,
+                args.router_config,
                 args.perf_job,
                 args.router_machine_family,
                 args.sim_replicas,
