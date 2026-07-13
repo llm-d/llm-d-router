@@ -157,8 +157,12 @@ var _ = ginkgo.AfterSuite(func() {
 // ReportAfterEach only fires for individual specs and would miss setup/teardown failures.
 var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 	if !report.SuiteSucceeded {
-		for idx := range numProcesses {
-			dumpPodsAndLogs(fmt.Sprintf("%s-%d", baseNsName, idx+1))
+		if numProcesses > 1 {
+			for idx := range numProcesses {
+				dumpPodsAndLogs(fmt.Sprintf("%s-%d", baseNsName, idx+1))
+			}
+		} else {
+			dumpPodsAndLogs(baseNsName)
 		}
 	}
 
