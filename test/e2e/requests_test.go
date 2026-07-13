@@ -118,7 +118,7 @@ func runCompletion(prompt string, theModel openai.CompletionNewParamsModel) (str
 
 // tryCompletion is like runCompletion but returns an error instead of asserting,
 // intended for use inside Eventually blocks where transient failures are acceptable.
-func tryCompletion(prompt string, theModel openai.CompletionNewParamsModel) (string, string, string, error) {
+func tryCompletion(prompt string, theModel openai.CompletionNewParamsModel) (string, string, error) {
 	var httpResp *http.Response
 	completionParams := openai.CompletionNewParams{
 		Prompt: openai.CompletionNewParamsPromptUnion{OfString: openai.String(prompt)},
@@ -131,16 +131,23 @@ func tryCompletion(prompt string, theModel openai.CompletionNewParamsModel) (str
 		option.WithRequestTimeout(readyTimeout),
 	)
 	if err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
 	if httpResp == nil {
-		return "", "", "", errors.New("missing http response")
+		return "", "", errors.New("missing http response")
 	}
 	if len(resp.Choices) != 1 {
-		return "", "", "", fmt.Errorf("expected 1 choice, got %d", len(resp.Choices))
+		return "", "", fmt.Errorf("expected 1 choice, got %d", len(resp.Choices))
 	}
-	ns, pod, p := extractInferenceHeaders(httpResp)
-	return ns, pod, p, nil
+	if resp.Choices[0].FinishReason != openai.CompletionChoiceFinishReasonStop {
+		return "", "", fmt.Errorf("expected finish reason %q, got %q",
+			openai.CompletionChoiceFinishReasonStop, resp.Choices[0].FinishReason)
+	}
+	if resp.Choices[0].Text != prompt {
+		return "", "", fmt.Errorf("expected echoed prompt, got %q", resp.Choices[0].Text)
+	}
+	ns, pod, _ := extractInferenceHeaders(httpResp)
+	return ns, pod, nil
 }
 
 func runChatCompletion(prompt, modelName string) (string, string, string) {
