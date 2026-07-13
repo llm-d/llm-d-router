@@ -118,6 +118,26 @@ func getPodNames(labels map[string]string) []string {
 	return names
 }
 
+// waitForEPPToDiscoverPods blocks until the EPP's inference_pool_ready_pods
+// gauge for poolName reports at least one pod, indicating the InferencePool
+// controller has finished its initial pod discovery. The EPP reports gRPC
+// health as SERVING as soon as the pool is set, even if pod discovery found
+// zero endpoints, so readiness alone does not guarantee the datastore is
+// populated. Polling the gauge avoids routing a real request through the
+// EPP, which would otherwise be recorded as a routing decision and skew
+// tests that assert exact decision-type counts.
+func waitForEPPToDiscoverPods(poolName string) {
+	ginkgo.By("Waiting for EPP to discover pool members")
+	metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
+	if k8sContext != "" {
+		startEPPMetricsPortForward()
+	}
+	labelMatch := fmt.Sprintf(`name="%s"`, poolName)
+	gomega.Eventually(func() int {
+		return getCounterMetric(metricsURL, "inference_pool_ready_pods", labelMatch)
+	}, readyTimeout, time.Second).Should(gomega.BeNumerically(">", 0), "EPP should discover pool members within the ready timeout")
+}
+
 func podsInDeploymentsReady(nsName string, objects []string) {
 	isDeploymentReady := func(deploymentName string) bool {
 		var deployment appsv1.Deployment
