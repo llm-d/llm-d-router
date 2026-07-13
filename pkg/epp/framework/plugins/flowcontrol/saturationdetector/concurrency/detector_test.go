@@ -111,6 +111,11 @@ func TestConcurrencyDetectorFactory(t *testing.T) {
 			wantError:  true,
 		},
 		{
+			name:       "valid hybrid mode",
+			configJSON: []byte(`{"concurrencyMode": "hybrid", "maxConcurrency": 10, "maxTokenConcurrency": 100}`),
+			wantError:  false,
+		},
+		{
 			name:       "invalid mode",
 			configJSON: []byte(`{"concurrencyMode": "magic"}`),
 			wantError:  true,
@@ -488,6 +493,88 @@ func TestDetector_TokenDeleteEndpoint(t *testing.T) {
 
 	simulateDeleteEndpoint(reg, fullEndpointName(endpointName))
 	require.InDelta(t, 0.0, detector.Saturation(ctx, candidates), 1e-6, "expected clean state after DeleteEndpoint")
+}
+
+// TestDetector_HybridSaturation verifies hybrid mode reports the more saturated dimension.
+func TestDetector_HybridSaturation(t *testing.T) {
+	t.Parallel()
+
+	config := config{
+		mode:                modeHybrid,
+		maxConcurrency:      10,
+		maxTokenConcurrency: 100,
+	}
+
+	tests := []struct {
+		name           string
+		requests       int64
+		tokens         int64
+		wantSaturation float64
+	}{
+		{name: "empty", requests: 0, tokens: 0, wantSaturation: 0.0},
+		{name: "tokens_dominate", requests: 2, tokens: 80, wantSaturation: 0.8},  // max(0.2, 0.8)
+		{name: "requests_dominate", requests: 9, tokens: 10, wantSaturation: 0.9}, // max(0.9, 0.1)
+		{name: "request_dimension_saturates_first", requests: 10, tokens: 5, wantSaturation: 1.0},
+		{name: "token_dimension_saturates_first", requests: 1, tokens: 100, wantSaturation: 1.0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := newLocalRegistry()
+			ctx := context.Background()
+			detector := newDetector("test-detector", config, logr.Discard())
+			endpointName := "endpoint-a"
+			reg.update(fullEndpointName(endpointName), func(load *attrconcurrency.InFlightLoad) {
+				load.Requests = tc.requests
+				load.Tokens = tc.tokens
+			})
+
+			got := detector.Saturation(ctx, []datalayer.Endpoint{newFakeEndpoint(reg, endpointName)})
+			require.InDelta(t, tc.wantSaturation, got, 1e-6, "hybrid saturation mismatch")
+		})
+	}
+}
+
+// TestDetector_HybridFilter verifies hybrid mode drops an endpoint when either dimension hits its limit.
+func TestDetector_HybridFilter(t *testing.T) {
+	t.Parallel()
+
+	// headroom 0.0 -> limits are exactly maxConcurrency (10) and maxTokenConcurrency (100).
+	config := config{
+		mode:                modeHybrid,
+		maxConcurrency:      10,
+		maxTokenConcurrency: 100,
+	}
+	ctx := context.Background()
+
+	tests := []struct {
+		name     string
+		requests int64
+		tokens   int64
+		wantKept int
+	}{
+		{name: "below_both_limits", requests: 5, tokens: 50, wantKept: 1},
+		{name: "request_limit_reached", requests: 10, tokens: 50, wantKept: 0},
+		{name: "token_limit_reached", requests: 5, tokens: 100, wantKept: 0},
+		{name: "both_over", requests: 20, tokens: 200, wantKept: 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := newLocalRegistry()
+			detector := newDetector("test-detector", config, logr.Discard())
+			endpointName := "endpoint-a"
+			reg.update(fullEndpointName(endpointName), func(load *attrconcurrency.InFlightLoad) {
+				load.Requests = tc.requests
+				load.Tokens = tc.tokens
+			})
+
+			kept := detector.Filter(ctx, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
+			require.Len(t, kept, tc.wantKept, "hybrid filter mismatch")
+		})
+	}
 }
 
 // TestDetector_ConcurrencyStress performs race condition check.

@@ -62,6 +62,8 @@ type apiConfig struct {
 	// Valid values are:
 	// - "requests": use discrete request counts for capacity accounting.
 	// - "tokens": use estimated token counts for capacity accounting.
+	// - "hybrid": evaluate both request and token accounting and report whichever
+	//   reaches saturation first (the more constraining of the two).
 	//
 	// Defaults to "requests" if unset.
 	ConcurrencyMode *concurrencyMode `json:"concurrencyMode,omitempty"`
@@ -85,6 +87,8 @@ const (
 	modeRequests concurrencyMode = "requests"
 	// modeTokens uses token count for concurrency detection.
 	modeTokens concurrencyMode = "tokens"
+	// modeHybrid uses both request and token counts, reporting whichever saturates first.
+	modeHybrid concurrencyMode = "hybrid"
 )
 
 const (
@@ -164,7 +168,7 @@ func validateConfig(cfg *apiConfig) error {
 
 	if cfg.ConcurrencyMode != nil {
 		switch *cfg.ConcurrencyMode {
-		case modeRequests, modeTokens:
+		case modeRequests, modeTokens, modeHybrid:
 			// Valid
 		default:
 			errs = append(errs, fmt.Errorf("unsupported concurrencyMode: %q", *cfg.ConcurrencyMode))

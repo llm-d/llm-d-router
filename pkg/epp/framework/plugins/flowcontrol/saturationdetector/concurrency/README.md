@@ -34,7 +34,7 @@ The plugin internally tracks active concurrency by hooking into the request life
 
 The plugin accepts JSON parameters decoding to the following fields:
 
-- `concurrencyMode` (`string`): Evaluation mode. Valid values are `"requests"` or `"tokens"`. (Default: `"requests"`)
+- `concurrencyMode` (`string`): Evaluation mode. Valid values are `"requests"`, `"tokens"`, or `"hybrid"`. In `"hybrid"` mode both request and token accounting are evaluated and the more constraining dimension wins: pool saturation is the larger of the two ratios, and an endpoint is filtered out when either its request load or its token load reaches the limit. (Default: `"requests"`)
 - `maxConcurrency` (`int64`): Maximum requests in flight. Serves as the "ideal" request capacity for a single endpoint. Must be > 0. (Default: `100`)
 - `maxTokenConcurrency` (`int64`): Maximum tokens in flight. The "tokens" mode equivalent of `maxConcurrency`. Must be > 0. (Default: `1000000`)
 - `headroom` (`float64`): Allowed burst capacity above the ideal threshold, expressed as a fraction (e.g., `0.2` for 20%). Must be >= 0.0. (Default: `0.0`)
