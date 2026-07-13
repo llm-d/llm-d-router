@@ -394,14 +394,33 @@ func startEPPMetricsPortForward() {
 	time.Sleep(3 * time.Second)
 }
 
+// getPort is used by the E2E tests to get the port of the envoy service for their setup.
+// When the tests are running in parallel, there will be up to N processes running. Each process
+// will have it's own envoy instance with its own nodePort. The nodePorts will be of the form
+// 30080, 30180, 30280, etc. In a more general sense they are of the form:
+// (the base port) + 100 * (the process number minus one). The goal is that the port for process
+// one, is the base port specified by the user.
 func getPort() int {
 	return basePort + 100*(ginkgo.GinkgoParallelProcess()-1)
 }
 
+// getMetricsPort is used by the E2E tests to get the EPP's metrics port for their setup.
+// When the tests are running in parallel, there will be up to N processes running. Each process
+// will have it's own EPP instance with its own metrics nodePort. The nodePorts will be of the form
+// 32090, 32190, 32290, etc. In a more general sense they are of the form:
+// (the base metrics port) + 100 * (the process number minus one). The goal is that the metrics port
+// for process one, is the base metrics port specified by the user.
 func getMetricsPort() int {
 	return baseMetricsPort + 100*(ginkgo.GinkgoParallelProcess()-1)
 }
 
+// getNamespace returns the namespace being used by each and every test. When the tests run in
+// parallel, each test is assigned its own namespace to provide isolation between the tests.
+// If the tests are not being run in parallel, then the namespace used is simply the base namespace
+// setup by the NAMESPACE environment variable, defaulting to "default".
+// If the tests are running in parallel, the namespace names will be of the form baseName-N, where
+// baseName is the base namespace setup by the NAMESPACE environment variable, defaulting to "e2e"
+// and N is the process number.
 func getNamespace() string {
 	if numProcesses == 1 {
 		return baseNsName
@@ -409,6 +428,7 @@ func getNamespace() string {
 	return fmt.Sprintf("%s-%d", baseNsName, ginkgo.GinkgoParallelProcess())
 }
 
+// getDefaultNsName is used in setting the default base namespace.
 func getDefaultNsName() string {
 	if numProcesses == 1 {
 		return "default"
