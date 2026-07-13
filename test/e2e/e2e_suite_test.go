@@ -208,7 +208,8 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 func setupK8sCluster() {
 	// extraPortMappings is substituted into `extraPortMappings: ${EXTRA_PORT_MAPPINGS}` in the Kind
 	// cluster configuration. Each item must use 2-space indentation to match that field's level in the
-	// YAML. If the field is ever reindented in inference-pools.yaml, update the format string here too.
+	// YAML. If the field is ever reindented in Kind cluster configuration (kindClusterConfig), update
+	// the format string here too.
 	var extraPortMappingsBuilder strings.Builder
 	for idx := range numProcesses {
 		inc := idx * 100
