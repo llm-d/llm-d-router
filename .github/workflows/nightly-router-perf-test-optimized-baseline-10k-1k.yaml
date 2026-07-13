@@ -105,6 +105,7 @@ jobs:
           python3 scripts/run_nightly_perf.py \
             --router-config ${{ env.ROUTER_CONFIG }} \
             --test-name ${{ env.TEST_NAME }} \
+            --perf-chart ${{ github.workspace }}/inference-perf/deploy/inference-perf \
             --perf-job ${{ env.PERF_JOB }} \
             --sim-replicas ${{ env.SIM_REPLICAS }} \
             --results-dir llm-d-router-resource-tests \
