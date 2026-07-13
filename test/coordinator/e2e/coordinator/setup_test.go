@@ -65,7 +65,7 @@ func setupInfra() {
 	createCRDs()
 
 	ginkgo.By("Applying shared Role/epp-reader from " + baseRbacManifest)
-	_ = testutils.CreateObjsFromYaml(testConfig, testutils.ReadYaml(baseRbacManifest))
+	_ = testutils.CreateObjsFromYaml(testConfig, testutils.ReadYaml(baseRbacManifest), nsName)
 
 	ginkgo.By("Applying Envoy from " + envoyManifest)
 	applyManifest(envoyManifest, map[string]string{
@@ -79,11 +79,11 @@ func createCRDs() {
 	ginkgo.By("Installing Gateway API CRDs from " + crdGatewayAPIPath)
 	crds := e2eutil.RunKustomize(crdGatewayAPIPath)
 	crds = e2eutil.FilterKinds(crds, "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
-	_ = testutils.CreateObjsFromYaml(testConfig, crds)
+	_ = testutils.CreateObjsFromYaml(testConfig, crds, "")
 
 	ginkgo.By("Installing GIE CRDs from " + crdGIEPath)
 	gieCRDs := e2eutil.RunKustomize(crdGIEPath)
-	_ = testutils.CreateObjsFromYaml(testConfig, gieCRDs)
+	_ = testutils.CreateObjsFromYaml(testConfig, gieCRDs, "")
 }
 
 // createEndPointPicker creates the scheduling ConfigMap and EPP Deployment (plus
@@ -122,7 +122,7 @@ func createInferencePool(phase string, toDelete bool) []string {
 
 	docs := testutils.ReadYaml(manifest)
 	docs = e2eutil.SubstituteMany(docs, eppSubstitutions())
-	return testutils.CreateObjsFromYaml(testConfig, docs)
+	return testutils.CreateObjsFromYaml(testConfig, docs, nsName)
 }
 
 // deletePoolIfExists removes the named InferencePool when present so a rerun
@@ -131,12 +131,12 @@ func createInferencePool(phase string, toDelete bool) []string {
 func deletePoolIfExists(name string) {
 	pool := &inferenceapi.InferencePool{}
 	err := testConfig.K8sClient.Get(testConfig.Context,
-		types.NamespacedName{Namespace: testConfig.NsName, Name: name}, pool)
+		types.NamespacedName{Namespace: nsName, Name: name}, pool)
 	if apierrors.IsNotFound(err) {
 		return
 	}
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "checking InferencePool %s", name)
-	testutils.DeleteObjects(testConfig, []string{"InferencePool/" + name})
+	testutils.DeleteObjects(testConfig, []string{"InferencePool/" + name}, nsName)
 }
 
 // createModelServers deploys the vLLM encode/prefill/decode workers from the
@@ -152,7 +152,7 @@ func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int) []s
 	docs = e2eutil.SubstituteMany(docs, subs)
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	docs = e2eutil.RemoveEmptyLabels(docs)
-	objects := testutils.CreateObjsFromYaml(testConfig, docs)
+	objects := testutils.CreateObjsFromYaml(testConfig, docs, nsName)
 	podsInDeploymentsReady(objects)
 	return objects
 }
@@ -180,7 +180,7 @@ func createCoordinator(config string) []string {
 	docs = e2eutil.FilterKinds(docs, "ConfigMap")
 	docs = e2eutil.SubstituteMany(docs, coordinatorSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
-	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, docs)...)
+	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, docs, nsName)...)
 
 	podsInDeploymentsReady(objects)
 	if k8sContext != "" {
@@ -239,7 +239,7 @@ func applyManifest(path string, subs map[string]string) []string {
 	docs := testutils.ReadYaml(path)
 	docs = e2eutil.SubstituteMany(docs, subs)
 	docs = e2eutil.RemoveEmptyArgs(docs)
-	return testutils.CreateObjsFromYaml(testConfig, docs)
+	return testutils.CreateObjsFromYaml(testConfig, docs, nsName)
 }
 
 func eppSubstitutions() map[string]string {
@@ -301,7 +301,7 @@ func createRenderer() []string {
 	docs := e2eutil.RunKustomize(rendererComponentDir)
 	docs = e2eutil.SubstituteMany(docs, rendererSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
-	objects := testutils.CreateObjsFromYaml(testConfig, docs)
+	objects := testutils.CreateObjsFromYaml(testConfig, docs, nsName)
 	podsInDeploymentsReady(objects)
 	return objects
 }

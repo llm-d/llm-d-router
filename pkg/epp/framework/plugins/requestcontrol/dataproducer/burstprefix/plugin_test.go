@@ -62,6 +62,9 @@ func TestNew_RejectsInvalidConfig(t *testing.T) {
 
 	_, err = newDataProducer(context.Background(), "burst", config{WindowDurationMs: 100, MaxPerReplica: -1, BlockSizeTokens: 0})
 	assert.Error(t, err, "blockSizeTokens must be > 0")
+
+	_, err = newDataProducer(context.Background(), "burst", config{WindowDurationMs: 100, MaxPerReplica: -1, BlockSizeTokens: 64, BalanceBy: "bogus"})
+	assert.Error(t, err, "balanceBy must be requests or tokens")
 }
 
 func TestProduce_ColocatesIdenticalPromptBurst(t *testing.T) {

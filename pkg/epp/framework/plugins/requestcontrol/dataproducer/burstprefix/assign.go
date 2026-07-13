@@ -145,7 +145,7 @@ outer:
 // over the batch (longest-prefix first) so a shared prefix is prefilled once per
 // replica rather than scattered. Identical groups are placed before prefix-sharing
 // singletons so proven same-prompt co-location anchors the layout.
-func assign(entries []*entry, k, minColocateBlocks int) {
+func assign(entries []*entry, k, minColocateBlocks int, byTokens bool) {
 	groups := map[string][]*entry{}
 	order := []string{}
 	var replicas []fwksched.Endpoint
@@ -169,18 +169,16 @@ func assign(entries []*entry, k, minColocateBlocks int) {
 	shared := sharedPrefixKeys(groups, order, minColocateBlocks)
 	var groupUnits, singleUnits []string
 	counts := map[string]int{} // prefix-block count per placed unit, computed once
-	total := 0
 	for _, key := range order {
 		switch {
 		case len(groups[key]) >= 2:
 			groupUnits = append(groupUnits, key)
-			counts[key] = totalBlocks(groups[key][0].hashes)
-			total += len(groups[key])
 		case shared[key]:
 			singleUnits = append(singleUnits, key)
-			counts[key] = totalBlocks(groups[key][0].hashes)
-			total += len(groups[key])
+		default:
+			continue
 		}
+		counts[key] = totalBlocks(groups[key][0].hashes)
 	}
 	if len(groupUnits) == 0 && len(singleUnits) == 0 {
 		return
@@ -191,17 +189,28 @@ func assign(entries []*entry, k, minColocateBlocks int) {
 	sortByPrefixLen(groupUnits, counts)
 	sortByPrefixLen(singleUnits, counts)
 
-	maxShare := (total + len(replicas) - 1) / len(replicas) // ceil: equal samples per replica
+	// total and load carry one unit: request count, or prefix blocks under token
+	// balancing. Token totals sum full per-unit block counts (a loose fair-share
+	// target); the shared-prefix discount is applied to load at placement time.
+	total := 0
+	for key := range counts {
+		if byTokens {
+			total += counts[key]
+		} else {
+			total += len(groups[key])
+		}
+	}
+	maxShare := (total + len(replicas) - 1) / len(replicas) // ceil: fair share per replica
 
 	idx := newBatchIndex()
-	load := map[string]int{} // batch-wide samples assigned per replica
+	load := map[string]int{} // per-replica load in the balancing unit (requests or blocks)
 	// Groups first, then prefix-sharing singletons: same order as before, without
 	// allocating a combined slice.
 	for _, key := range groupUnits {
-		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, idx, load)
+		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, counts[key], idx, load, byTokens)
 	}
 	for _, key := range singleUnits {
-		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, idx, load)
+		placeGroup(groups[key], replicas, k, minColocateBlocks, maxShare, counts[key], idx, load, byTokens)
 	}
 }
 
@@ -217,7 +226,7 @@ func sortByPrefixLen(keys []string, counts map[string]int) {
 // preference bounded by the fair-share cap; remaining samples (when k caps the
 // group) spill to least-loaded replicas. The unit's blocks are then recorded so
 // later units can match against it.
-func placeGroup(members []*entry, replicas []fwksched.Endpoint, k, minColocateBlocks, maxShare int, idx *batchIndex, load map[string]int) {
+func placeGroup(members []*entry, replicas []fwksched.Endpoint, k, minColocateBlocks, maxShare, cost int, idx *batchIndex, load map[string]int, byTokens bool) {
 	if len(replicas) == 0 {
 		return
 	}
@@ -225,11 +234,14 @@ func placeGroup(members []*entry, replicas []fwksched.Endpoint, k, minColocateBl
 
 	var matches map[string]int
 	preferMatch := minColocateBlocks > 0
-	if preferMatch {
+	// Token balancing also needs the shared-prefix length per replica: a replica
+	// only prefills the blocks it does not already hold, so its load is charged the
+	// remaining cost rather than the full prefix.
+	if preferMatch || byTokens {
 		matches = idx.longestPrefix(hashes)
 	}
 
-	perReplica := map[string]int{} // samples of this group already on a replica
+	perReplica := map[string]int{} // requests of this unit already on a replica
 	i := 0
 	for i < len(members) {
 		target := pickReplica(replicas, perReplica, k, load, matches, minColocateBlocks, maxShare, preferMatch)
@@ -248,8 +260,20 @@ func placeGroup(members []*entry, replicas []fwksched.Endpoint, k, minColocateBl
 		for j := 0; j < run; j++ {
 			members[i+j].assigned = target
 		}
+		firstTouch := perReplica[name] == 0
 		perReplica[name] += run
-		load[name] += run
+		switch {
+		case !byTokens:
+			load[name] += run
+		case firstTouch:
+			// Charge the prefix once per replica this unit lands on, discounting the
+			// leading blocks already held there (prefilled by an earlier request).
+			inc := cost - matches[name]
+			if inc < 0 {
+				inc = 0
+			}
+			load[name] += inc
+		}
 		i += run
 		preferMatch = false // only the primary replica gets the prefix preference
 	}
@@ -322,12 +346,13 @@ func pickLeastLoaded(replicas []fwksched.Endpoint, perReplica map[string]int, k 
 	return best
 }
 
-// less reports whether replica a should be preferred over replica b: fewer
-// assigned samples first, then fewer running requests, then lower name. The
-// batch-local assigned-sample count (load) is the primary signal; running
-// requests only break ties within a batch and deliberately differ from the
-// load-aware-scorer's WaitingQueueSize signal, since placement balances work
-// already committed in this window rather than queue depth observed downstream.
+// less reports whether replica a should be preferred over replica b: lower
+// assigned load first, then fewer running requests, then lower name. The
+// batch-local load (assigned requests, or prefix blocks under token balancing) is
+// the primary signal; running requests only break ties within a batch and
+// deliberately differ from the load-aware-scorer's WaitingQueueSize signal, since
+// placement balances work already committed in this window rather than queue depth
+// observed downstream.
 func less(a fwksched.Endpoint, aName string, load map[string]int, b fwksched.Endpoint, bName string) bool {
 	if load[aName] != load[bName] {
 		return load[aName] < load[bName]

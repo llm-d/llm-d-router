@@ -74,7 +74,7 @@ func TestAssign_UnlimitedColocatesWholeGroup(t *testing.T) {
 	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2"), testEndpoint("pod3"), testEndpoint("pod4")}
 	entries := group(8, []prefixhash.BlockHash{1, 2, 3}, replicas)
 
-	assign(entries, unlimitedPerReplica, 0)
+	assign(entries, unlimitedPerReplica, 0, false)
 
 	for _, e := range entries {
 		assert.Equal(t, "pod1", assignedName(e), "all samples of one group must co-locate when k=-1")
@@ -85,7 +85,7 @@ func TestAssign_CapSpreadsEvenly(t *testing.T) {
 	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2"), testEndpoint("pod3"), testEndpoint("pod4")}
 	entries := group(8, []prefixhash.BlockHash{1, 2, 3}, replicas)
 
-	assign(entries, 2, 0)
+	assign(entries, 2, 0, false)
 
 	assert.Equal(t, map[string]int{"pod1": 2, "pod2": 2, "pod3": 2, "pod4": 2}, counts(entries),
 		"k=2 over 8 samples and 4 replicas must place 2 per replica")
@@ -95,7 +95,7 @@ func TestAssign_CapFillsBeforeSpilling(t *testing.T) {
 	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2"), testEndpoint("pod3"), testEndpoint("pod4")}
 	entries := group(8, []prefixhash.BlockHash{1, 2, 3}, replicas)
 
-	assign(entries, 4, 0)
+	assign(entries, 4, 0, false)
 
 	// k=4 fills one replica to 4 before using the next; only two replicas used.
 	assert.Equal(t, map[string]int{"pod1": 4, "pod2": 4}, counts(entries))
@@ -105,7 +105,7 @@ func TestAssign_SingletonGetsNoAffinity(t *testing.T) {
 	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
 	entries := group(1, []prefixhash.BlockHash{1, 2, 3}, replicas)
 
-	assign(entries, unlimitedPerReplica, 0)
+	assign(entries, unlimitedPerReplica, 0, false)
 
 	assert.Nil(t, entries[0].assigned, "a singleton group has no reuse and must not receive an affinity")
 }
@@ -117,7 +117,7 @@ func TestAssign_EmptyPrefixGetsNoAffinity(t *testing.T) {
 		{hashes: nil, pods: replicas},
 	}
 
-	assign(entries, unlimitedPerReplica, 0)
+	assign(entries, unlimitedPerReplica, 0, false)
 
 	for _, e := range entries {
 		assert.Nil(t, e.assigned, "requests with no prefix must not be grouped")
@@ -130,7 +130,7 @@ func TestAssign_DistinctGroupsSpreadAcrossReplicas(t *testing.T) {
 	groupB := group(8, []prefixhash.BlockHash{9, 9, 9}, replicas)
 	entries := append(append([]*entry{}, groupA...), groupB...)
 
-	assign(entries, unlimitedPerReplica, 0)
+	assign(entries, unlimitedPerReplica, 0, false)
 
 	// Each group co-locates, and the second group lands on a different, less
 	// loaded replica than the first.
@@ -154,7 +154,7 @@ func TestAssign_SharedPrefixFamiliesColocateWithinFairShare(t *testing.T) {
 	y2 := group(2, []prefixhash.BlockHash{7, 8, 6}, replicas)
 	entries := concat(x1, x2, y1, y2)
 
-	assign(entries, unlimitedPerReplica, 2)
+	assign(entries, unlimitedPerReplica, 2, false)
 
 	// Each family co-locates onto one replica, the two families land on
 	// different replicas, and the batch stays balanced (4 samples per replica).
@@ -174,7 +174,7 @@ func TestAssign_FairShareSpreadsPrefixSharingGroups(t *testing.T) {
 	g4 := group(2, []prefixhash.BlockHash{1, 2, 6}, replicas)
 	entries := concat(g1, g2, g3, g4)
 
-	assign(entries, unlimitedPerReplica, 2)
+	assign(entries, unlimitedPerReplica, 2, false)
 
 	assert.Equal(t, map[string]int{"pod1": 2, "pod2": 2, "pod3": 2, "pod4": 2}, counts(entries),
 		"the fair-share cap must spread prefix-sharing groups, not stampede them onto one replica")
@@ -190,7 +190,7 @@ func TestAssign_SingletonAttachesToOverlappingGroup(t *testing.T) {
 	sy := group(1, []prefixhash.BlockHash{7, 8, 9}, replicas)
 	entries := concat(gx, sx, gy, sy)
 
-	assign(entries, unlimitedPerReplica, 2)
+	assign(entries, unlimitedPerReplica, 2, false)
 
 	// The identical group stays whole, and the overlapping singleton attaches to
 	// the replica holding the group it shares a prefix with.
@@ -206,7 +206,7 @@ func TestAssign_LoneSingletonGetsNoAffinity(t *testing.T) {
 	lone := group(1, []prefixhash.BlockHash{5, 5, 5}, replicas) // overlaps nothing
 	entries := concat(g, lone)
 
-	assign(entries, unlimitedPerReplica, 2)
+	assign(entries, unlimitedPerReplica, 2, false)
 
 	assert.Nil(t, lone[0].assigned, "a request overlapping no other must keep no affinity")
 	assert.Equal(t, assignedName(g[0]), assignedName(g[1]), "the identical group still co-locates")
@@ -222,7 +222,7 @@ func TestAssign_OverlappingSingletonsColocateWithoutGroups(t *testing.T) {
 	s4 := group(1, []prefixhash.BlockHash{1, 2, 6}, replicas)
 	entries := concat(s1, s2, s3, s4)
 
-	assign(entries, unlimitedPerReplica, 2)
+	assign(entries, unlimitedPerReplica, 2, false)
 
 	for _, e := range entries {
 		assert.NotNil(t, e.assigned, "overlapping singletons receive an affinity even without identical groups")
@@ -240,7 +240,7 @@ func TestAssign_SharedPrefixBelowThresholdDoesNotColocate(t *testing.T) {
 	y2 := group(2, []prefixhash.BlockHash{7, 8, 6}, replicas)
 	entries := concat(x1, x2, y1, y2)
 
-	assign(entries, unlimitedPerReplica, 3)
+	assign(entries, unlimitedPerReplica, 3, false)
 
 	// The shared prefix falls short of the threshold, so groups are placed purely
 	// by load and a family is not kept together.
@@ -257,11 +257,56 @@ func TestAssign_SingleReplicaPlacesEverything(t *testing.T) {
 	groupB := group(4, []prefixhash.BlockHash{9, 9, 9}, replicas)
 	entries := concat(groupA, groupB)
 
-	assign(entries, unlimitedPerReplica, 2)
+	assign(entries, unlimitedPerReplica, 2, false)
 
 	for _, e := range entries {
 		assert.Equal(t, "pod1", assignedName(e), "with a single replica every request must land on it")
 	}
+}
+
+func TestAssign_BalanceByTokensSpreadsLargePrefix(t *testing.T) {
+	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
+	// One long-prefix unit and two short-prefix units with distinct prefixes.
+	// Balancing by request count puts a short unit on the same replica as the long
+	// one (block-imbalanced); balancing by tokens keeps the long unit alone and
+	// packs the short ones onto the other replica.
+	long := group(2, []prefixhash.BlockHash{1, 2, 3, 4}, replicas)
+	short1 := group(2, []prefixhash.BlockHash{5}, replicas)
+	short2 := group(2, []prefixhash.BlockHash{6}, replicas)
+
+	byReq := concat(long, short1, short2)
+	assign(byReq, unlimitedPerReplica, 0, false)
+	assert.Equal(t, assignedName(long[0]), assignedName(short2[0]),
+		"balancing by requests colocates a short unit with the long-prefix unit")
+
+	long = group(2, []prefixhash.BlockHash{1, 2, 3, 4}, replicas)
+	short1 = group(2, []prefixhash.BlockHash{5}, replicas)
+	short2 = group(2, []prefixhash.BlockHash{6}, replicas)
+	byTok := concat(long, short1, short2)
+	assign(byTok, unlimitedPerReplica, 0, true)
+	assert.NotEqual(t, assignedName(long[0]), assignedName(short1[0]),
+		"balancing by tokens keeps the long-prefix unit off the replica holding the short ones")
+	assert.Equal(t, assignedName(short1[0]), assignedName(short2[0]),
+		"the short units pack onto one replica under token balancing")
+}
+
+func TestAssign_BalanceByTokensDiscountsSharedPrefix(t *testing.T) {
+	replicas := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2")}
+	// Three units sharing a 9-block leading prefix. Charging each its full 10-block
+	// prefix would push the third off the shared replica once the fair-share cap is
+	// hit; discounting the already-prefilled 9 blocks keeps all three colocated so
+	// the shared prefix is prefilled once.
+	a1 := group(2, []prefixhash.BlockHash{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, replicas)
+	a2 := group(2, []prefixhash.BlockHash{1, 2, 3, 4, 5, 6, 7, 8, 9, 11}, replicas)
+	a3 := group(2, []prefixhash.BlockHash{1, 2, 3, 4, 5, 6, 7, 8, 9, 12}, replicas)
+	entries := concat(a1, a2, a3)
+
+	assign(entries, unlimitedPerReplica, 9, true)
+
+	assert.Equal(t, assignedName(a1[0]), assignedName(a2[0]),
+		"units sharing a prefix colocate when the shared prefill is not double-charged")
+	assert.Equal(t, assignedName(a2[0]), assignedName(a3[0]),
+		"the shared-prefix discount keeps the third unit on the shared replica")
 }
 
 func TestAssign_OverflowGuardBalancesBeyondCap(t *testing.T) {
@@ -271,7 +316,7 @@ func TestAssign_OverflowGuardBalancesBeyondCap(t *testing.T) {
 	// still place every member and keep the batch balanced.
 	entries := group(8, []prefixhash.BlockHash{1, 2, 3}, replicas)
 
-	assign(entries, 2, 0)
+	assign(entries, 2, 0, false)
 
 	for _, e := range entries {
 		assert.NotNil(t, e.assigned, "the overflow guard must still assign every member")
