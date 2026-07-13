@@ -70,7 +70,7 @@ jobs:
 
       - name: Checkout base repo
         if: steps.check-access.outputs.skip != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.pr.outputs.base-ref }}
           fetch-depth: 0
