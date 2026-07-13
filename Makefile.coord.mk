@@ -195,11 +195,15 @@ test-unit: image-build-builder
 	@printf "\033[33;1m==== Running Unit Tests ====\033[0m\n"
 	$(BUILDER_RUN) "go test -v -race $(TEST_PACKAGES)"
 
-.PHONY: test-e2e-coordinator
-test-e2e-coordinator: image-build-coordinator image-build-epp image-build-builder image-pull ## Run coordinator e2e tests against a new kind cluster
+.PHONY: test-e2e-coordinator-run
+test-e2e-coordinator-run: image-pull ## Ensure images are present, then run coordinator e2e tests
 	@printf "\033[33;1m==== Running Coordinator End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		$(BUILDER_IMAGE) test/coordinator/scripts/run_e2e_coordinator.sh
+
+.PHONY: test-e2e-coordinator
+test-e2e-coordinator: image-build-builder image-build-coordinator image-build-epp ## Build images and run coordinator e2e tests
+	$(MAKE) -f Makefile.coord.mk test-e2e-coordinator-run
 
 .PHONY: build
 build: image-build-builder ## Build the coordinator binary
