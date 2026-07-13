@@ -50,6 +50,7 @@ connector: %q
 ec-connector: %q
 enable-ssrf-protection: true
 enable-prefiller-sampling: true
+enable-p2p-pull: true
 enable-tls:
 - prefiller
 - decoder
@@ -98,6 +99,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		ec-connector: %s,
 		enable-ssrf-protection: true,
 		enable-prefiller-sampling: true,
+		enable-p2p-pull: true,
 		enable-tls: ['prefiller', 'decoder'],
 		prefiller-use-tls: false,
 		decoder-use-tls: true,
@@ -146,6 +148,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
+				o.EnableP2PPull = true
 
 				o.enableTLS = []string{prefillStage, decodeStage}
 				o.UseTLSForPrefiller = true
@@ -193,6 +196,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
+				o.EnableP2PPull = true
 
 				o.enableTLS = []string{prefillStage, decodeStage}
 				o.UseTLSForPrefiller = true
@@ -253,6 +257,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
+				o.EnableP2PPull = true
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
@@ -327,6 +332,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
+				o.EnableP2PPull = true
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
@@ -457,6 +463,7 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 
 	assertEqual(enableSSRFProtection, expected.EnableSSRFProtection, actual.EnableSSRFProtection)
 	assertEqual(enablePrefillerSampling, expected.EnablePrefillerSampling, actual.EnablePrefillerSampling)
+	assertEqual(enableP2PPull, expected.EnableP2PPull, actual.EnableP2PPull)
 
 	assertEqual(prefillerUseTLS, expected.UseTLSForPrefiller, actual.UseTLSForPrefiller)
 	assertEqual(decoderUseTLS, expected.UseTLSForDecoder, actual.UseTLSForDecoder)

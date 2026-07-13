@@ -115,6 +115,7 @@ type yamlConfiguration struct {
 	ECConnector                    string   `json:"ec-connector,omitempty"`
 	EnableSSRFProtection           *bool    `json:"enable-ssrf-protection,omitempty"`
 	EnablePrefillerSampling        *bool    `json:"enable-prefiller-sampling,omitempty"`
+	EnableP2PPull                  *bool    `json:"enable-p2p-pull,omitempty"`
 	SecureServing                  *bool    `json:"secure-proxy,omitempty"`
 	CertPath                       string   `json:"cert-path,omitempty"`
 	EnableTLS                      []string `json:"enable-tls,omitempty"`
@@ -691,6 +692,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.EnablePrefillerSampling != nil && !opts.isFlagSet(enablePrefillerSampling) {
 		opts.EnablePrefillerSampling = *cfg.EnablePrefillerSampling
+	}
+	if cfg.EnableP2PPull != nil && !opts.isFlagSet(enableP2PPull) {
+		opts.EnableP2PPull = *cfg.EnableP2PPull
 	}
 
 	if cfg.SecureServing != nil && !opts.isFlagSet(secureServing) {
