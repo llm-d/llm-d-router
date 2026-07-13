@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-d
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: routing-sidecar
+        $patch: delete
+      containers:
+      - name: vllm
+        args:
+        - "--port=8000"
+        - "--model=${MODEL_NAME}"
+        - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
+        - "${VLLM_EXTRA_ARGS_D}"
+        ports:
+        - $patch: replace
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        startupProbe:
+          httpGet:
+            port: 8000
+        readinessProbe:
+          httpGet:
+            port: 8000
+        livenessProbe:
+          httpGet:
+            port: 8000
+        env:
+        - name: PORT
+          value: "8000"

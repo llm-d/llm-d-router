@@ -51,7 +51,7 @@ LINT_NEW_ONLY ?= false
 # Optional: override the runtime base image used in container builds.
 BASE_IMAGE ?=
 
-TEST_PACKAGES = $$(go list ./... | grep -v /test/ | tr '\n' ' ')
+TEST_PACKAGES = $$(go list ./pkg/coordinator/... ./cmd/coordinator/... | tr '\n' ' ')
 
 # Common flags for running the builder container: mounts source, Go caches, and runs as current user.
 # Podman rootless requires --userns=keep-id to correctly map host UID; docker uses -u directly.

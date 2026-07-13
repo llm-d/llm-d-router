@@ -4,9 +4,10 @@ kind: Kustomization
 resources:
 - ../../../../components/vllm-encode/
 - ../../../../components/vllm-prefill/
-# vllm-decode is coordinator-local, not the shared deploy/components/vllm-decode: the
-# router's decode carries a routing-sidecar proxying 8000->8200 for connector-based P/D
-# disaggregation, which the coordinator's own pipeline orchestration doesn't use.
+# vllm-decode is a coordinator-local overlay of the shared deploy/components/vllm-decode/:
+# it patches out the routing-sidecar that proxies 8000->8200 for connector-based P/D
+# disaggregation, which the coordinator's own pipeline orchestration doesn't use. This
+# mirrors deploy/environments/dev/epd/, the router's own no-disaggregation scenario.
 - ../../../components/vllm-decode/
 
 components:
