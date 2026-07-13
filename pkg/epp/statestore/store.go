@@ -1,0 +1,172 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package statestore defines the unified abstraction over the three categories
+// of shared scheduling state that must remain consistent across EPP replicas:
+// inflight request/token counters, prefix cache index, and flow control.
+//
+// This is the P0 (Phase 1) abstraction described in the "Shared Scheduling State
+// for Horizontally Scalable EPP Deployments" RFC (#1593). Phase 1 introduces only
+// the Local provider, which wraps the existing in-process implementations so
+// that classic behavior remains exactly equivalent. Phase 2 will add a Remote
+// provider that accesses a stateful EPP via an internal gRPC State API.
+//
+// Design principles (from the RFC):
+//   - EPP stable operation first: all failures degrade rather than interrupt.
+//   - Zero-change deployment: default behavior is unchanged.
+//   - Minimal dependencies: no external storage; shared state lives in the same binary.
+//   - Local shadow always runs: immediate fallback when remote fails.
+//   - Scheduling modules remain unaware: scorer, filter, and picker require no changes.
+//
+// Phase 1 scope note: every write method on the three sub-interfaces below is a
+// no-op in the Local implementation, because the corresponding producer's own
+// PreRequest/ResponseBody hooks already perform that mutation today as a
+// byproduct of routing decisions. Only the read methods (GetInflightSnapshot,
+// GetPrefixMatch) and flow control's Admit are real pass-throughs. See each
+// method's doc comment for specifics.
+package statestore
+
+import (
+	"context"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+)
+
+// StateStore is the unified abstraction over the three categories of shared
+// scheduling state. It composes the per-category interfaces so that a single
+// implementation (Local or Remote) can serve all scheduling state access.
+//
+// Conformance: Implementations MUST be goroutine-safe.
+type StateStore interface {
+	InflightState
+	PrefixState
+	FlowControlState
+}
+
+// InflightState provides read/write access to inflight request and token
+// counters per endpoint. These counters back load-aware routing.
+//
+// In the Local provider this wraps the atomic counters in
+// inflightload/producer.go. In the Remote provider (Phase 2) it forwards to the
+// stateful EPP via gRPC.
+//
+// Degradation strategy: FailOpen. The local shadow is a natural byproduct of
+// routing decisions because the ResponseBodyProcessor hook must run locally.
+type InflightState interface {
+	// GetInflightSnapshot returns the inflight request and token counts for the
+	// given endpoint. It is pulled on demand per candidate endpoint during
+	// request data preparation; the stateful EPP does not actively push.
+	GetInflightSnapshot(ctx context.Context, endpointID string) InflightSnapshot
+
+	// ReserveInflight is a Phase-1 no-op. inflightload's own PreRequest hook
+	// already increments requestTracker/tokenTracker directly (with
+	// PluginState-backed, endpoint-flap-safe release bookkeeping) as a
+	// byproduct of the routing decision; duplicating that here would double
+	// count. This method exists so the interface is complete for Phase 2, where
+	// a Remote provider additionally does a best-effort push to the stateful
+	// EPP after the local mutation.
+	ReserveInflight(ctx context.Context, requestID, endpointID string, estimatedTokens int64) error
+
+	// ReleaseInflight is a Phase-1 no-op; see ReserveInflight.
+	ReleaseInflight(ctx context.Context, requestID, endpointID string, estimatedTokens int64) error
+
+	// DeleteEndpoint is a Phase-1 no-op; inflightload's own endpoint-delete
+	// handling already calls DeleteEndpoint on its trackers directly.
+	DeleteEndpoint(ctx context.Context, endpointID string)
+}
+
+// PrefixState provides read/write access to the prefix cache index used by
+// prefix-aware routing.
+//
+// In the Local provider this wraps the LRU index in approximateprefix. In the
+// Remote provider (Phase 2) it forwards prefix score/commit operations to
+// stateful EPP.
+//
+// Degradation strategy: FailOpen. The local shadow auto-updates after each
+// routing decision.
+type PrefixState interface {
+	// GetPrefixMatch returns the set of endpoint IDs that have the given prefix
+	// hash cached. Used during request data preparation to populate per-endpoint
+	// prefix cache match info.
+	GetPrefixMatch(ctx context.Context, hash uint64) []string
+
+	// CommitPrefix is a Phase-1 no-op. approximateprefix's own PreRequest hook
+	// already commits matched hashes to its indexer directly as a byproduct of
+	// the routing decision; duplicating that here would be redundant. This
+	// method exists so the interface is complete for Phase 2.
+	CommitPrefix(ctx context.Context, requestID, endpointID string, hashes []uint64) error
+
+	// RemoveEndpoint is a Phase-1 no-op; approximateprefix's own endpoint-delete
+	// handling already calls RemovePod on its indexer directly.
+	RemoveEndpoint(ctx context.Context, endpointID string)
+}
+
+// FlowControlState provides admit/release access to flow control quotas.
+//
+// In the Local provider this wraps flowcontrol/controller.FlowController. In the
+// Remote provider (Phase 2) it forwards admit/release operations to stateful
+// EPP via gRPC.
+//
+// Degradation strategy: LocalFallback. A dual-quota design is used:
+// globalMaxConcurrency (remote authority, precise) and localMaxConcurrency
+// (local shadow). Note: unlike Inflight/Prefix, Admit is not a no-op — it IS
+// the admission decision, not downstream bookkeeping.
+type FlowControlState interface {
+	// Admit submits a request to flow control and blocks until it reaches a
+	// terminal outcome.
+	Admit(ctx context.Context, req flowcontrol.FlowControlRequest) (FlowControlOutcome, error)
+
+	// Release is a Phase-1 no-op. FlowController's only exported method is
+	// EnqueueAndWait; finalization (dispatch, TTL/cancellation eviction,
+	// cleanup) happens entirely inside that blocking call, with no separate
+	// release call to invoke afterward. Note this also means the existing
+	// FlowRegistry counts queue occupancy, not concurrent-execution leases;
+	// true admit-reserve-execute-release concurrency limiting needs a separate
+	// ConcurrencyLeaseStore abstraction and is explicitly out of scope here.
+	Release(ctx context.Context, requestID string, flowKey FlowControlKey) error
+}
+
+// InflightSnapshot is a point-in-time view of inflight load for one endpoint.
+type InflightSnapshot struct {
+	// Requests is the number of inflight requests currently routed to the endpoint.
+	Requests int64
+	// Tokens is the estimated total inflight tokens for the endpoint.
+	Tokens int64
+}
+
+// FlowControlKey identifies a flow control instance, mirroring
+// flowcontrol.FlowKey but kept as a plain value type in this package so the
+// Release signature does not require callers to import the flowcontrol package.
+type FlowControlKey struct {
+	// ID is the logical grouping identifier for a flow (e.g. tenant or model).
+	ID string
+	// Priority is the numerical priority level for this flow instance.
+	Priority int
+}
+
+// FlowControlOutcome describes the result of a flow control admission attempt.
+type FlowControlOutcome int
+
+const (
+	// FlowControlOutcomeAdmitted indicates the request was admitted.
+	FlowControlOutcomeAdmitted FlowControlOutcome = iota
+	// FlowControlOutcomeRejected indicates the request was rejected due to
+	// capacity limits.
+	FlowControlOutcomeRejected
+	// FlowControlOutcomeDegraded indicates the remote authority was
+	// unavailable and the request was admitted using the local shadow quota.
+	FlowControlOutcomeDegraded
+)
