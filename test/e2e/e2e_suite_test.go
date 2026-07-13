@@ -110,6 +110,12 @@ func TestEndToEnd(t *testing.T) {
 }
 
 var _ = ginkgo.BeforeSuite(func() {
+	suiteConfig, _ := ginkgo.GinkgoConfiguration()
+	if numProcesses != suiteConfig.ParallelTotal {
+		ginkgo.Fail(fmt.Sprintf("The value of the environment variable `E2E_NUM_PROCS` (%d) is not equal to the number of ginkgo processes being run (%d)",
+			numProcesses, suiteConfig.ParallelTotal))
+	}
+
 	if k8sContext == "" {
 		setupK8sCluster()
 	}
