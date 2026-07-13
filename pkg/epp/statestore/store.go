@@ -35,8 +35,16 @@ limitations under the License.
 // no-op in the Local implementation, because the corresponding producer's own
 // PreRequest/ResponseBody hooks already perform that mutation today as a
 // byproduct of routing decisions. Only the read methods (GetInflightSnapshot,
-// GetPrefixMatch) and flow control's Admit are real pass-throughs. See each
-// method's doc comment for specifics.
+// GetPrefixMatch) and flow control's Admit are real pass-throughs in Local mode.
+// See each method's doc comment for specifics.
+//
+// Phase 2 (feasibility spike, RFC #1593): a Remote provider (remote_client.go)
+// and a FailOpen/LocalFallback decorator (failopen.go, concurrency_lease.go)
+// implement these same interfaces for real over an internal gRPC "State API"
+// (pkg/epp/statestore/stateapi). In that configuration, the write methods are
+// no longer no-ops end-to-end: the producer's existing local mutation is
+// unchanged, and a real best-effort push to the stateful EPP is added
+// alongside it. See failopen.go for the composition.
 package statestore
 
 import (
@@ -69,7 +77,20 @@ type InflightState interface {
 	// GetInflightSnapshot returns the inflight request and token counts for the
 	// given endpoint. It is pulled on demand per candidate endpoint during
 	// request data preparation; the stateful EPP does not actively push.
+	//
+	// Callers on the request hot path MUST use GetInflightSnapshotBatch instead
+	// of looping this per endpoint when the underlying implementation may be
+	// remote (a per-endpoint RPC loop turns one request into N round trips).
+	// This single-endpoint form exists for interface completeness and tests.
 	GetInflightSnapshot(ctx context.Context, endpointID string) InflightSnapshot
+
+	// GetInflightSnapshotBatch returns snapshots for multiple endpoints in a
+	// single call. The Local implementation loops in-process (cheap, no I/O);
+	// the Remote implementation issues one batched gRPC call. This is the
+	// method producers must call from Produce (which runs once per request and
+	// has a context) rather than from any per-endpoint, per-scorer lazy
+	// attribute accessor.
+	GetInflightSnapshotBatch(ctx context.Context, endpointIDs []string) map[string]InflightSnapshot
 
 	// ReserveInflight is a Phase-1 no-op. inflightload's own PreRequest hook
 	// already increments requestTracker/tokenTracker directly (with
@@ -101,7 +122,16 @@ type PrefixState interface {
 	// GetPrefixMatch returns the set of endpoint IDs that have the given prefix
 	// hash cached. Used during request data preparation to populate per-endpoint
 	// prefix cache match info.
+	//
+	// A single request's prompt can carry many block hashes; callers on the
+	// hot path MUST use GetPrefixMatchBatch instead of looping this per hash
+	// when the underlying implementation may be remote, for the same reason as
+	// InflightState.GetInflightSnapshot.
 	GetPrefixMatch(ctx context.Context, hash uint64) []string
+
+	// GetPrefixMatchBatch returns matches for multiple prefix hashes in a
+	// single call. See GetInflightSnapshotBatch for the same rationale.
+	GetPrefixMatchBatch(ctx context.Context, hashes []uint64) map[uint64][]string
 
 	// CommitPrefix is a Phase-1 no-op. approximateprefix's own PreRequest hook
 	// already commits matched hashes to its indexer directly as a byproduct of

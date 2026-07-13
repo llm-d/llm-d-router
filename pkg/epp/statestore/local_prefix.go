@@ -52,6 +52,14 @@ func (s *localPrefixState) GetPrefixMatch(_ context.Context, hash uint64) []stri
 	return s.backend.GetMatch(hash)
 }
 
+func (s *localPrefixState) GetPrefixMatchBatch(_ context.Context, hashes []uint64) map[uint64][]string {
+	result := make(map[uint64][]string, len(hashes))
+	for _, hash := range hashes {
+		result[hash] = s.backend.GetMatch(hash)
+	}
+	return result
+}
+
 func (s *localPrefixState) CommitPrefix(_ context.Context, _, _ string, _ []uint64) error {
 	return nil
 }

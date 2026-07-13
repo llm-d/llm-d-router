@@ -31,9 +31,10 @@ import (
 )
 
 // stubFlowControlRequest is a minimal flowcontrol.FlowControlRequest for tests
-// that only need FlowKey to be meaningful.
+// that only need FlowKey (and, optionally, a distinct ID) to be meaningful.
 type stubFlowControlRequest struct {
 	flowKey flowcontrol.FlowKey
+	id      string
 }
 
 func (r *stubFlowControlRequest) FlowKey() flowcontrol.FlowKey                 { return r.flowKey }
@@ -41,11 +42,16 @@ func (r *stubFlowControlRequest) ByteSize() uint64                             {
 func (r *stubFlowControlRequest) InferenceRequest() *fwksched.InferenceRequest { return nil }
 func (r *stubFlowControlRequest) ReceivedTimestamp() time.Time                 { return time.Time{} }
 func (r *stubFlowControlRequest) InitialEffectiveTTL() time.Duration           { return 0 }
-func (r *stubFlowControlRequest) ID() string                                   { return "req-1" }
-func (r *stubFlowControlRequest) GetMetadata() map[string]any                  { return nil }
-func (r *stubFlowControlRequest) InferencePoolName() string                    { return "" }
-func (r *stubFlowControlRequest) ModelName() string                            { return "" }
-func (r *stubFlowControlRequest) TargetModelName() string                      { return "" }
+func (r *stubFlowControlRequest) ID() string {
+	if r.id != "" {
+		return r.id
+	}
+	return "req-1"
+}
+func (r *stubFlowControlRequest) GetMetadata() map[string]any { return nil }
+func (r *stubFlowControlRequest) InferencePoolName() string   { return "" }
+func (r *stubFlowControlRequest) ModelName() string           { return "" }
+func (r *stubFlowControlRequest) TargetModelName() string     { return "" }
 
 var _ flowcontrol.FlowControlRequest = &stubFlowControlRequest{}
 

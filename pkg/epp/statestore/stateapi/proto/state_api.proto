@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package epp.stateapi.v1;
+
+option go_package = "github.com/llm-d/llm-d-router/pkg/epp/statestore/stateapi/proto/gen";
+
+// StateAPI is the internal, cluster-local gRPC service exposed by a stateful
+// EPP replica so stateless EPP replicas can read/write shared scheduling
+// state: inflight request/token counters, the approximate prefix cache index,
+// and flow control concurrency leases.
+//
+// This is a feasibility-spike implementation of RFC #1593 Phase 2. It is
+// intentionally not authenticated/encrypted (matches the existing internal
+// health-check gRPC server's bare grpc.NewServer() precedent in this repo).
+service StateAPI {
+  // GetInflightSnapshotBatch returns the inflight request/token counts for
+  // multiple endpoints in one round trip. Batched deliberately: callers must
+  // never fan this out per-endpoint on the request hot path.
+  rpc GetInflightSnapshotBatch(InflightSnapshotBatchRequest) returns (InflightSnapshotBatchResponse);
+  rpc ReserveInflight(ReserveInflightRequest) returns (ReserveInflightResponse);
+  rpc ReleaseInflight(ReleaseInflightRequest) returns (ReleaseInflightResponse);
+  rpc DeleteInflightEndpoint(DeleteEndpointRequest) returns (DeleteEndpointResponse);
+
+  // GetPrefixMatchBatch returns, for multiple prefix hashes in one round trip,
+  // the endpoints known to have each cached (approximate prefix cache index
+  // only). Batched deliberately: a single request can carry many block
+  // hashes, so callers must never fan this out per-hash on the request hot path.
+  rpc GetPrefixMatchBatch(PrefixMatchBatchRequest) returns (PrefixMatchBatchResponse);
+  rpc CommitPrefix(CommitPrefixRequest) returns (CommitPrefixResponse);
+  rpc RemovePrefixEndpoint(DeleteEndpointRequest) returns (DeleteEndpointResponse);
+
+  // AdmitConcurrency/ReleaseConcurrency implement a fleet-wide concurrency
+  // lease: a primitive that does not exist elsewhere in this codebase today
+  // (the local FlowRegistry counts queue depth, not concurrent execution).
+  rpc AdmitConcurrency(AdmitConcurrencyRequest) returns (AdmitConcurrencyResponse);
+  rpc ReleaseConcurrency(ReleaseConcurrencyRequest) returns (ReleaseConcurrencyResponse);
+}
+
+message InflightSnapshotBatchRequest {
+  repeated string endpoint_ids = 1;
+}
+
+message InflightSnapshot {
+  int64 requests = 1;
+  int64 tokens = 2;
+}
+
+message InflightSnapshotBatchResponse {
+  // Keyed by endpoint_id. Endpoints with no recorded state are omitted (zero
+  // value is implied).
+  map<string, InflightSnapshot> snapshots = 1;
+}
+
+message ReserveInflightRequest {
+  string request_id = 1;
+  string endpoint_id = 2;
+  int64 estimated_tokens = 3;
+}
+
+message ReserveInflightResponse {}
+
+message ReleaseInflightRequest {
+  string request_id = 1;
+  string endpoint_id = 2;
+  int64 estimated_tokens = 3;
+}
+
+message ReleaseInflightResponse {}
+
+message DeleteEndpointRequest {
+  string endpoint_id = 1;
+}
+
+message DeleteEndpointResponse {}
+
+message PrefixMatchBatchRequest {
+  repeated uint64 hashes = 1;
+}
+
+message PrefixMatchEndpoints {
+  repeated string endpoint_ids = 1;
+}
+
+message PrefixMatchBatchResponse {
+  // Keyed by hash. Hashes with no match are omitted.
+  map<uint64, PrefixMatchEndpoints> matches = 1;
+}
+
+message CommitPrefixRequest {
+  string request_id = 1;
+  string endpoint_id = 2;
+  repeated uint64 hashes = 3;
+}
+
+message CommitPrefixResponse {}
+
+message FlowKey {
+  string id = 1;
+  int32 priority = 2;
+}
+
+message AdmitConcurrencyRequest {
+  string request_id = 1;
+  FlowKey flow_key = 2;
+}
+
+enum ConcurrencyOutcome {
+  CONCURRENCY_OUTCOME_UNSPECIFIED = 0;
+  CONCURRENCY_OUTCOME_ADMITTED = 1;
+  CONCURRENCY_OUTCOME_REJECTED = 2;
+}
+
+message AdmitConcurrencyResponse {
+  ConcurrencyOutcome outcome = 1;
+}
+
+message ReleaseConcurrencyRequest {
+  string request_id = 1;
+  FlowKey flow_key = 2;
+}
+
+message ReleaseConcurrencyResponse {}

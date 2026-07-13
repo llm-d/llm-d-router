@@ -57,6 +57,14 @@ func (s *localInflightState) GetInflightSnapshot(_ context.Context, endpointID s
 	}
 }
 
+func (s *localInflightState) GetInflightSnapshotBatch(_ context.Context, endpointIDs []string) map[string]InflightSnapshot {
+	result := make(map[string]InflightSnapshot, len(endpointIDs))
+	for _, id := range endpointIDs {
+		result[id] = InflightSnapshot{Requests: s.backend.GetRequests(id), Tokens: s.backend.GetTokens(id)}
+	}
+	return result
+}
+
 func (s *localInflightState) ReserveInflight(_ context.Context, _, _ string, _ int64) error {
 	return nil
 }
