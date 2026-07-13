@@ -252,5 +252,5 @@ image-build-builder: check-container-tool ## Build builder image if missing loca
 .PHONY: image-pull
 image-pull: check-container-tool ## Pull all related images using $(CONTAINER_RUNTIME)
 	@printf "\033[33;1m==== Pulling Container images ====\033[0m\n"
-	./scripts/pull_images.sh
+	PULL_EPP_IMAGE=false PULL_SIDECAR_IMAGE=false ./scripts/pull_images.sh
 
