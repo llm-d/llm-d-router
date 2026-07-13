@@ -148,7 +148,7 @@ func createEndPointPicker(eppConfig string) []string {
 		return resp.StatusCode == http.StatusOK || len(body) > 0
 	}, readyTimeout, 2*time.Second).Should(gomega.BeTrue(), "gateway should be ready within the ready timeout")
 
-	waitForEPPToDiscoverPods(simModelName)
+	waitForEPPToDiscoverPods(poolName)
 
 	return objects
 }
