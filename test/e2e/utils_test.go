@@ -424,7 +424,7 @@ func extractFinishReasonFromStreaming(sseData string) string {
 }
 
 // getPodRequestCount gets the total vLLM request count from a pod's metrics endpoint.
-func getPodRequestCount(nsName string, podName string) int {
+func getPodRequestCount(nsName, podName string) int {
 	ginkgo.By("Getting request count from pod: " + podName)
 
 	// Use Kubernetes API proxy to access the metrics endpoint
