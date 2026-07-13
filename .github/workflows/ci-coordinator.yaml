@@ -1,7 +1,7 @@
 name: CI - Coordinator Test
 
-# Runs coordinator unit tests and e2e tests. Path filter excludes the
-# sidecar-only paths.
+# Runs coordinator unit tests and e2e tests. Path filter excludes paths not
+# exercised by the coordinator.
 on:
   push:
     branches:
@@ -40,13 +40,17 @@ jobs:
               - scripts/**
               - hack/**
               - test/**
-              - .github/actions/docker-build-and-push/action.yml
               - .github/actions/e2e-runner-setup/action.yml
               - .github/workflows/ci-coordinator.yaml
               - '!Dockerfile.sidecar'
               - '!cmd/pd-sidecar/**'
               - '!pkg/sidecar/**'
               - '!test/sidecar/**'
+              - '!pkg/generator/**'
+              - '!test/e2e/**'
+              - '!test/integration/**'
+              - '!test/profiling/**'
+              - '!Makefile'
 
   unit-tests:
     needs: check-changes
