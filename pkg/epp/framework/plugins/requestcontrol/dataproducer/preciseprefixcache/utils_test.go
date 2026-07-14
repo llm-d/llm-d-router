@@ -155,12 +155,12 @@ func TestMatchedBlockCountByTier(t *testing.T) {
 			want:  map[string]int{"gpu": 2},
 		},
 		{
-			name: "speculative entries count under the empty tier",
+			name: "speculative entries count under the speculative key",
 			keyToPods: map[kvblock.BlockHash][]kvblock.PodEntry{
 				1: {speculative(podA), gpu(podA)}, 2: {speculative(podA)},
 			},
 			podID: podA,
-			want:  map[string]int{"gpu": 1, "": 2},
+			want:  map[string]int{"gpu": 1, speculativeTierKey: 2},
 		},
 		{
 			name:      "empty index yields empty map",

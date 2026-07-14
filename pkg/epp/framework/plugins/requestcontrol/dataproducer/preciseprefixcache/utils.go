@@ -55,12 +55,18 @@ func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash
 	return count
 }
 
+// speculativeTierKey is the CachedBlocksByTier key for speculative index
+// entries: PreRequest inserts them before vLLM has reported placement, so
+// they carry no device tier.
+const speculativeTierKey = "speculative"
+
 // matchedBlockCountByTier returns, per device tier, the number of contiguous
 // cached prefix blocks podID holds in that tier, counting from the first
 // block until the first block the pod does not hold in that tier. A block
 // held in several tiers counts once per tier, so each tier's count is at most
 // matchedBlockCount for the same pod. Tiers are recorded as found in the
-// index. Returns a non-nil (possibly empty) map.
+// index, except speculative entries, which count under speculativeTierKey.
+// Returns a non-nil (possibly empty) map.
 func matchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) map[string]int {
 	counts := map[string]int{}
 	var alive sets.Set[string]
@@ -68,7 +74,11 @@ func matchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblock.Blo
 		tiersAtKey := sets.New[string]()
 		for _, e := range keyToPods[key] {
 			if e.PodIdentifier == podID {
-				tiersAtKey.Insert(e.DeviceTier)
+				if e.Speculative {
+					tiersAtKey.Insert(speculativeTierKey)
+				} else {
+					tiersAtKey.Insert(e.DeviceTier)
+				}
 			}
 		}
 		if alive == nil {

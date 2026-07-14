@@ -44,9 +44,8 @@ type PrefixCacheMatchInfo struct {
 	// per device tier, the unweighted count of contiguous cached prefix blocks
 	// the endpoint holds in that tier, from the first block until the first
 	// block missing from that tier. A block held in several tiers counts once
-	// per tier. Entries without a confirmed device tier (e.g. speculative
-	// index entries) count under the empty string. Nil when the producer
-	// supplies no tier data.
+	// per tier. Speculative index entries count under the synthetic
+	// "speculative" tier. Nil when the producer supplies no tier data.
 	cachedBlocksByTier map[string]int
 }
 
@@ -85,7 +84,8 @@ func (p *PrefixCacheMatchInfo) CachedBlockCount() int {
 }
 
 // WithCachedBlocksByTier sets the per-device-tier contiguous cached-block
-// counts and returns the receiver for chaining.
+// counts and returns the receiver for chaining. Takes ownership of the map;
+// the caller must not mutate it after the call.
 func (p *PrefixCacheMatchInfo) WithCachedBlocksByTier(cachedBlocksByTier map[string]int) *PrefixCacheMatchInfo {
 	p.cachedBlocksByTier = cachedBlocksByTier
 	return p
