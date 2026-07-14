@@ -44,12 +44,12 @@ type disaggProfilesParameters struct {
 }
 
 type disaggDecidersParameters struct {
-	Prefill string `json:"prefill,omitempty"`
-	Encode  string `json:"encode,omitempty"`
+	Prefill string `json:"prefill,omitempty" pluginRef:""`
+	Encode  string `json:"encode,omitempty" pluginRef:""`
 }
 
-// disaggProfileHandlerParameters is the current parameter format using nested maps.
-type disaggProfileHandlerParameters struct {
+// DisaggProfileHandlerParameters is the current parameter format using nested maps.
+type DisaggProfileHandlerParameters struct {
 	Profiles disaggProfilesParameters `json:"profiles"`
 	Deciders disaggDecidersParameters `json:"deciders"`
 }
@@ -69,8 +69,8 @@ type legacyDisaggProfileHandlerParameters struct {
 
 // toDisaggParams copies legacy flat fields into the nested format, logging a
 // deprecation warning for each field in use.
-func (l *legacyDisaggProfileHandlerParameters) toDisaggParams(logger logr.Logger) disaggProfileHandlerParameters {
-	p := disaggProfileHandlerParameters{}
+func (l *legacyDisaggProfileHandlerParameters) toDisaggParams(logger logr.Logger) DisaggProfileHandlerParameters {
+	p := DisaggProfileHandlerParameters{}
 	if l.DecodeProfile != "" {
 		logger.Info("Deprecated parameter 'decodeProfile', use 'profiles.decode' instead")
 		p.Profiles.Decode = l.DecodeProfile
@@ -112,7 +112,54 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 	}
 	logger := log.FromContext(handle.Context())
 
-	parameters := disaggProfileHandlerParameters{}
+	tmpParameters, err := DisaggProfileHandlerConfigParser(rawParameters, handle)
+	if err != nil {
+		return nil, err
+	}
+	parameters := tmpParameters.(DisaggProfileHandlerParameters)
+
+	// Resolve PD decider (optional).
+	var pdDecider deciderPlugin
+	if parameters.Deciders.Prefill != "" {
+		p := handle.Plugin(parameters.Deciders.Prefill)
+		if p == nil {
+			return nil, fmt.Errorf("deciders.prefill plugin not found: %s", parameters.Deciders.Prefill)
+		}
+		var ok bool
+		pdDecider, ok = p.(deciderPlugin)
+		if !ok {
+			return nil, fmt.Errorf("plugin %s does not implement prefillDeciderPlugin", parameters.Deciders.Prefill)
+		}
+	} else {
+		logger.Info("No deciders.prefill configured, P/D disaggregation disabled")
+	}
+	// Resolve encode decider (optional).
+	var encodeDecider deciderPlugin
+	if parameters.Deciders.Encode != "" {
+		ep := handle.Plugin(parameters.Deciders.Encode)
+		if ep == nil {
+			return nil, fmt.Errorf("deciders.encode plugin not found: %s", parameters.Deciders.Encode)
+		}
+		var ok bool
+		encodeDecider, ok = ep.(deciderPlugin)
+		if !ok {
+			return nil, fmt.Errorf("plugin %s does not implement encodeDeciderPlugin", parameters.Deciders.Encode)
+		}
+	} else {
+		logger.Info("No deciders.encode configured, E disaggregation disabled")
+	}
+	// Create handler
+	handler := NewDisaggProfileHandler(
+		parameters.Profiles.Decode, parameters.Profiles.Prefill, parameters.Profiles.Encode,
+		pdDecider, encodeDecider,
+	)
+	return handler.WithName(name), nil
+}
+
+func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, handle plugin.Handle) (any, error) {
+	logger := log.FromContext(handle.Context())
+
+	parameters := DisaggProfileHandlerParameters{}
 	if rawParameters != nil {
 		// Capture raw bytes once so we can try each schema independently with
 		// strict decoding. The decoder passed in is one-shot, so we re-read
@@ -155,42 +202,7 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 		parameters.Profiles.Encode = defaultEncodeProfile
 	}
 
-	// Resolve PD decider (optional).
-	var pdDecider deciderPlugin
-	if parameters.Deciders.Prefill != "" {
-		p := handle.Plugin(parameters.Deciders.Prefill)
-		if p == nil {
-			return nil, fmt.Errorf("deciders.prefill plugin not found: %s", parameters.Deciders.Prefill)
-		}
-		var ok bool
-		pdDecider, ok = p.(deciderPlugin)
-		if !ok {
-			return nil, fmt.Errorf("plugin %s does not implement prefillDeciderPlugin", parameters.Deciders.Prefill)
-		}
-	} else {
-		logger.Info("No deciders.prefill configured, P/D disaggregation disabled")
-	}
-	// Resolve encode decider (optional).
-	var encodeDecider deciderPlugin
-	if parameters.Deciders.Encode != "" {
-		ep := handle.Plugin(parameters.Deciders.Encode)
-		if ep == nil {
-			return nil, fmt.Errorf("deciders.encode plugin not found: %s", parameters.Deciders.Encode)
-		}
-		var ok bool
-		encodeDecider, ok = ep.(deciderPlugin)
-		if !ok {
-			return nil, fmt.Errorf("plugin %s does not implement encodeDeciderPlugin", parameters.Deciders.Encode)
-		}
-	} else {
-		logger.Info("No deciders.encode configured, E disaggregation disabled")
-	}
-	// Create handler
-	handler := NewDisaggProfileHandler(
-		parameters.Profiles.Decode, parameters.Profiles.Prefill, parameters.Profiles.Encode,
-		pdDecider, encodeDecider,
-	)
-	return handler.WithName(name), nil
+	return parameters, nil
 }
 
 // NewDisaggProfileHandler creates a Handler directly.

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -60,12 +61,14 @@ import (
 // Define constants for test plugins.
 // Constants must match those used in testdata_test.go.
 const (
-	testPluginType     = "test-plugin"
-	testPickerType     = "test-picker"
-	testScorerType     = "test-scorer"
-	testProfileHandler = "test-profile-handler"
-	testSourceType     = "test-source"
-	testExtractorType  = "test-extractor"
+	testPluginType             = "test-plugin"
+	testPickerType             = "test-picker"
+	testScorerType             = "test-scorer"
+	testProfileHandler         = "test-profile-handler"
+	testSourceType             = "test-source"
+	testExtractorType          = "test-extractor"
+	testWithDependencies       = "test-with-dependencies"
+	testWithNestedDependencies = "test-with-nested-dependencies"
 
 	testFeatureGate = "test-feature-gate"
 )
@@ -377,6 +380,64 @@ func TestLoadRawConfiguration(t *testing.T) {
 }
 
 // --- Test: Phase 2 (Instantiation, System Defaulting, Deep Validation) ---
+
+func TestPluginsWithDependencies(t *testing.T) {
+	// Not parallel because it modifies global plugin registry.
+	registerTestPlugins(t)
+
+	tests := []struct {
+		name       string
+		configText string
+		wantErr    bool
+	}{
+		{
+			name:       "pluginsInOrder",
+			configText: pluginsInOrderText,
+		},
+		{
+			name:       "pluginsOutOfOrder",
+			configText: pluginsOutOfOrderText,
+		},
+		{
+			name:       "pluginsRefedByPointer",
+			configText: pluginsRefedByPointerText,
+		},
+		{
+			name:       "pluginsRefedInNesteding",
+			configText: pluginsRefedInNestedingText,
+		},
+		{
+			name:       "errorPluginsRefedInLoop",
+			configText: errorPluginsRefedInLoopText,
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := logging.NewTestLogger()
+
+			// 1. Load Raw (Assuming valid yaml/structure for Phase 2 tests)
+			rawConfig, _, err := LoadRawConfig([]byte(tc.configText), logger)
+			if err != nil {
+				// If we expected failure (and it failed early in Phase 1), success.
+				if tc.wantErr {
+					return
+				}
+				require.NoError(t, err, "Setup: LoadRawConfig failed")
+			}
+
+			// 2. Instantiate
+			handle := testutils.NewTestHandle(context.Background())
+			err = instantiatePlugins(rawConfig.Plugins, handle)
+			if tc.wantErr {
+				require.Error(t, err, "Expected instantiatePlugins to fail")
+				return
+			}
+			require.NoError(t, err, "Expected instantiatePlugins to succeed")
+		})
+	}
+}
 
 func TestInstantiateAndConfigure(t *testing.T) {
 	// Not parallel because it modifies global plugin registry.
@@ -887,6 +948,61 @@ func (m *mockExtractor) Extract(_ context.Context, _ fwkdl.NotificationEvent) er
 	return nil
 }
 
+// mockWithDependencies is a ProfileHandler that "uses" other plugins
+type mockWithDependencies struct{ mockPlugin }
+type mockWithDependenciesConfig struct {
+	Dependency string  `json:"dependency" pluginRef:""`
+	PointedTo  *string `json:"pointedTo" pluginRef:""`
+}
+
+// compile-time type assertion
+var _ fwksched.ProfileHandler = &mockWithDependencies{}
+
+func (m *mockWithDependencies) Pick(context.Context, *fwksched.InferenceRequest, map[string]fwksched.SchedulerProfile,
+	map[string]*fwksched.ProfileRunResult) map[string]fwksched.SchedulerProfile {
+	return nil
+}
+func (m *mockWithDependencies) ProcessResults(context.Context, *fwksched.InferenceRequest,
+	map[string]*fwksched.ProfileRunResult) (*fwksched.SchedulingResult, error) {
+	return nil, errors.New("sentinel error for mock handler")
+}
+
+func mockWithDependenciesConfigParser(decoder *json.Decoder, _ fwkplugin.Handle) (any, error) {
+	cfg := &mockWithDependenciesConfig{}
+	err := decoder.Decode(cfg)
+	return cfg, err
+}
+
+// mockWithNestedDependencies is a ProfileHandler that "uses" other plugins
+type mockWithNestedDependencies struct{ mockPlugin }
+type mockWithNestedDependenciesConfig struct {
+	Nested    MockNestedDependenciesStruct  `json:"nested"`
+	NestedPtr *MockNestedDependenciesStruct `json:"nestedPtr"`
+	Extras    []string                      `json:"extras" pluginRef:""`
+	PointedTo *string                       `json:"pointedTo" pluginRef:""`
+}
+type MockNestedDependenciesStruct struct {
+	Dependency string `json:"dependency" pluginRef:""`
+}
+
+// compile-time type assertion
+var _ fwksched.ProfileHandler = &mockWithDependencies{}
+
+func (m *mockWithNestedDependencies) Pick(context.Context, *fwksched.InferenceRequest, map[string]fwksched.SchedulerProfile,
+	map[string]*fwksched.ProfileRunResult) map[string]fwksched.SchedulerProfile {
+	return nil
+}
+func (m *mockWithNestedDependencies) ProcessResults(context.Context, *fwksched.InferenceRequest,
+	map[string]*fwksched.ProfileRunResult) (*fwksched.SchedulingResult, error) {
+	return nil, errors.New("sentinel error for mock handler")
+}
+
+func mockWithNestedDependenciesConfigParser(decoder *json.Decoder, _ fwkplugin.Handle) (any, error) {
+	cfg := &mockWithNestedDependenciesConfig{}
+	err := decoder.Decode(cfg)
+	return cfg, err
+}
+
 func registerTestPlugins(t *testing.T) {
 	t.Helper()
 
@@ -928,6 +1044,54 @@ func registerTestPlugins(t *testing.T) {
 	fwkplugin.Register(testProfileHandler, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockHandler{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testProfileHandler}}}, nil
 	})
+
+	fwkplugin.RegisterWithPluginDependencies(testWithDependencies,
+		func(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+			rawCfg, err := mockWithDependenciesConfigParser(decoder, handle)
+			if err != nil {
+				return nil, err
+			}
+			cfg := rawCfg.(*mockWithDependenciesConfig)
+			if dependency := handle.Plugin(cfg.Dependency); dependency == nil {
+				return nil, fmt.Errorf("failed to find dependency %s", cfg.Dependency)
+			}
+			if cfg.PointedTo != nil {
+				if dependency := handle.Plugin(*cfg.PointedTo); dependency == nil {
+					return nil, fmt.Errorf("failed to find dependency %s", *cfg.PointedTo)
+				}
+			}
+			return &mockWithDependencies{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testWithDependencies}}}, nil
+		}, mockWithDependenciesConfigParser,
+	)
+
+	fwkplugin.RegisterWithPluginDependencies(testWithNestedDependencies,
+		func(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+			rawCfg, err := mockWithNestedDependenciesConfigParser(decoder, handle)
+			if err != nil {
+				return nil, err
+			}
+			cfg := rawCfg.(*mockWithNestedDependenciesConfig)
+			if dependency := handle.Plugin(cfg.Nested.Dependency); dependency == nil {
+				return nil, fmt.Errorf("failed to find dependency %s", cfg.Nested.Dependency)
+			}
+			for _, pluginName := range cfg.Extras {
+				if dependency := handle.Plugin(pluginName); dependency == nil {
+					return nil, fmt.Errorf("failed to find dependency %s", pluginName)
+				}
+			}
+			if cfg.NestedPtr != nil {
+				if dependency := handle.Plugin(cfg.NestedPtr.Dependency); dependency == nil {
+					return nil, fmt.Errorf("failed to find dependency %s", cfg.NestedPtr.Dependency)
+				}
+			}
+			if cfg.PointedTo != nil {
+				if dependency := handle.Plugin(*cfg.PointedTo); dependency == nil {
+					return nil, fmt.Errorf("failed to find dependency %s", *cfg.PointedTo)
+				}
+			}
+			return &mockWithNestedDependencies{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testWithNestedDependencies}}}, nil
+		}, mockWithNestedDependenciesConfigParser,
+	)
 
 	fwkplugin.Register(testSourceType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockSource{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testSourceType}}}, nil

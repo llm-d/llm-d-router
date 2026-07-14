@@ -41,6 +41,7 @@ const blockTypeText = "text"
 // so pairing this backend with the engine-correlated scorer yields misses, not bad routes.
 type estimateBackend struct {
 	img imageEstimator
+	vid videoEstimator
 }
 
 func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
@@ -159,7 +160,7 @@ func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiMod
 		case "image_url":
 			out, features = appendMMAsset(out, features, fwkrh.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
 		case "video_url":
-			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, assetPlaceholderCount(len(block.VideoURL.URL)))
+			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(block.VideoURL.URL))
 		case "input_audio", "audio_url":
 			data := block.InputAudio.Data + block.InputAudio.Format
 			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, assetPlaceholderCount(len(data)))
