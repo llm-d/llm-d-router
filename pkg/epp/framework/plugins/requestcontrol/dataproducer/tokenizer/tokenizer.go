@@ -80,9 +80,8 @@ type tokenizerPluginConfig struct {
 	ModelName string `json:"modelName"`
 }
 
-// estimateConfig configures the estimation backend. An empty config uses built-in defaults.
-// Video placeholder-token estimation is not configurable: its parameters are
-// Qwen3-VL/vLLM architecture constants, not per-deployment tuning knobs.
+// estimateConfig configures the estimation backend. Multimodal image estimation
+// is the only tunable; an empty config uses built-in defaults.
 type estimateConfig struct {
 	// Image tunes multimodal image placeholder-token estimation.
 	Image *imageEstimateConfig `json:"image,omitempty"`
@@ -195,7 +194,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		backend = renderBackend{tk: renderer}
 	default:
-		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator()}
+		backend = estimateBackend{img: newImageEstimator(config.Estimate)}
 	}
 
 	p := &Plugin{
