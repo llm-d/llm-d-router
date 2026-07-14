@@ -208,7 +208,7 @@ func runChatCompletionWithImages(imageURLs ...string) (string, string) {
 	ginkgo.By(fmt.Sprintf("Sending Multimodal Chat Completion Request with %d images", len(imageURLs)))
 	var sb strings.Builder
 	for i, url := range imageURLs {
-		sb.WriteString(fmt.Sprintf(`{"type":"image_url","image_url":{"url":%q},"uuid":"image-%d"},`, url, i))
+		fmt.Fprintf(&sb, `{"type":"image_url","image_url":{"url":%q},"uuid":"image-%d"},`, url, i)
 	}
 	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":[%s{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
 		simModelName, sb.String())

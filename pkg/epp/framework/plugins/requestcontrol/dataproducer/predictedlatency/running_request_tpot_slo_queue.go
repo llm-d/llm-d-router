@@ -242,7 +242,7 @@ func (pq *requestPriorityQueue) String() string {
 		}
 		builder.WriteString(item.id)
 		builder.WriteString("(")
-		builder.WriteString(fmt.Sprintf("%.2f", item.tpot))
+		fmt.Fprintf(&builder, "%.2f", item.tpot)
 		builder.WriteString(")")
 	}
 
