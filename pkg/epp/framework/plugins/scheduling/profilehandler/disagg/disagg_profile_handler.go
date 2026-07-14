@@ -21,6 +21,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -43,12 +44,12 @@ type disaggProfilesParameters struct {
 }
 
 type disaggDecidersParameters struct {
-	Prefill string `json:"prefill,omitempty"`
-	Encode  string `json:"encode,omitempty"`
+	Prefill string `json:"prefill,omitempty" pluginRef:""`
+	Encode  string `json:"encode,omitempty" pluginRef:""`
 }
 
-// disaggProfileHandlerParameters is the current parameter format using nested maps.
-type disaggProfileHandlerParameters struct {
+// DisaggProfileHandlerParameters is the current parameter format using nested maps.
+type DisaggProfileHandlerParameters struct {
 	Profiles disaggProfilesParameters `json:"profiles"`
 	Deciders disaggDecidersParameters `json:"deciders"`
 }
@@ -68,8 +69,8 @@ type legacyDisaggProfileHandlerParameters struct {
 
 // toDisaggParams copies legacy flat fields into the nested format, logging a
 // deprecation warning for each field in use.
-func (l *legacyDisaggProfileHandlerParameters) toDisaggParams(logger logr.Logger) disaggProfileHandlerParameters {
-	p := disaggProfileHandlerParameters{}
+func (l *legacyDisaggProfileHandlerParameters) toDisaggParams(logger logr.Logger) DisaggProfileHandlerParameters {
+	p := DisaggProfileHandlerParameters{}
 	if l.DecodeProfile != "" {
 		logger.Info("Deprecated parameter 'decodeProfile', use 'profiles.decode' instead")
 		p.Profiles.Decode = l.DecodeProfile
@@ -111,7 +112,54 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 	}
 	logger := log.FromContext(handle.Context())
 
-	parameters := disaggProfileHandlerParameters{}
+	tmpParameters, err := DisaggProfileHandlerConfigParser(rawParameters, handle)
+	if err != nil {
+		return nil, err
+	}
+	parameters := tmpParameters.(DisaggProfileHandlerParameters)
+
+	// Resolve PD decider (optional).
+	var pdDecider deciderPlugin
+	if parameters.Deciders.Prefill != "" {
+		p := handle.Plugin(parameters.Deciders.Prefill)
+		if p == nil {
+			return nil, fmt.Errorf("deciders.prefill plugin not found: %s", parameters.Deciders.Prefill)
+		}
+		var ok bool
+		pdDecider, ok = p.(deciderPlugin)
+		if !ok {
+			return nil, fmt.Errorf("plugin %s does not implement prefillDeciderPlugin", parameters.Deciders.Prefill)
+		}
+	} else {
+		logger.Info("No deciders.prefill configured, P/D disaggregation disabled")
+	}
+	// Resolve encode decider (optional).
+	var encodeDecider deciderPlugin
+	if parameters.Deciders.Encode != "" {
+		ep := handle.Plugin(parameters.Deciders.Encode)
+		if ep == nil {
+			return nil, fmt.Errorf("deciders.encode plugin not found: %s", parameters.Deciders.Encode)
+		}
+		var ok bool
+		encodeDecider, ok = ep.(deciderPlugin)
+		if !ok {
+			return nil, fmt.Errorf("plugin %s does not implement encodeDeciderPlugin", parameters.Deciders.Encode)
+		}
+	} else {
+		logger.Info("No deciders.encode configured, E disaggregation disabled")
+	}
+	// Create handler
+	handler := NewDisaggProfileHandler(
+		parameters.Profiles.Decode, parameters.Profiles.Prefill, parameters.Profiles.Encode,
+		pdDecider, encodeDecider,
+	)
+	return handler.WithName(name), nil
+}
+
+func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, handle plugin.Handle) (any, error) {
+	logger := log.FromContext(handle.Context())
+
+	parameters := DisaggProfileHandlerParameters{}
 	if rawParameters != nil {
 		// Capture raw bytes once so we can try each schema independently with
 		// strict decoding. The decoder passed in is one-shot, so we re-read
@@ -154,42 +202,7 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 		parameters.Profiles.Encode = defaultEncodeProfile
 	}
 
-	// Resolve PD decider (optional).
-	var pdDecider deciderPlugin
-	if parameters.Deciders.Prefill != "" {
-		p := handle.Plugin(parameters.Deciders.Prefill)
-		if p == nil {
-			return nil, fmt.Errorf("deciders.prefill plugin not found: %s", parameters.Deciders.Prefill)
-		}
-		var ok bool
-		pdDecider, ok = p.(deciderPlugin)
-		if !ok {
-			return nil, fmt.Errorf("plugin %s does not implement prefillDeciderPlugin", parameters.Deciders.Prefill)
-		}
-	} else {
-		logger.Info("No deciders.prefill configured, P/D disaggregation disabled")
-	}
-	// Resolve encode decider (optional).
-	var encodeDecider deciderPlugin
-	if parameters.Deciders.Encode != "" {
-		ep := handle.Plugin(parameters.Deciders.Encode)
-		if ep == nil {
-			return nil, fmt.Errorf("deciders.encode plugin not found: %s", parameters.Deciders.Encode)
-		}
-		var ok bool
-		encodeDecider, ok = ep.(deciderPlugin)
-		if !ok {
-			return nil, fmt.Errorf("plugin %s does not implement encodeDeciderPlugin", parameters.Deciders.Encode)
-		}
-	} else {
-		logger.Info("No deciders.encode configured, E disaggregation disabled")
-	}
-	// Create handler
-	handler := NewDisaggProfileHandler(
-		parameters.Profiles.Decode, parameters.Profiles.Prefill, parameters.Profiles.Encode,
-		pdDecider, encodeDecider,
-	)
-	return handler.WithName(name), nil
+	return parameters, nil
 }
 
 // NewDisaggProfileHandler creates a Handler directly.
@@ -263,14 +276,14 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 // Returns the next profile to execute, or an empty map when all stages are done.
 func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
-	tracer := tracing.Tracer()
-	ctx, span := tracer.Start(ctx, "llm_d.epp.disagg.profile_handler.pick",
+	tracer := tracing.Tracer(schedplugins.TracerScope)
+	ctx, span := tracer.Start(ctx, "pick_disagg_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
 
 	if request == nil {
-		span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "complete_nil_request"))
+		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "complete_nil_request"))
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
@@ -283,18 +296,18 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if _, executed := profileResults[h.decodeProfile]; !executed {
 		decodeProfile, ok := profiles[h.decodeProfile]
 		if !ok {
-			span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "error_missing_decode_profile"))
+			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "error_missing_decode_profile"))
 			return map[string]scheduling.SchedulerProfile{}
 		}
-		span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "run_decode"))
+		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_decode"))
 		return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
 	}
 
 	decodeRes := profileResults[h.decodeProfile]
 	if decodeRes == nil || len(decodeRes.TargetEndpoints) == 0 {
 		span.SetAttributes(
-			attribute.String("llm_d.profile_handler.decision", "complete"),
-			attribute.Bool("llm_d.profile_handler.decode_failed", true),
+			attribute.String("llm_d.epp.profile_handler.decision", "complete"),
+			attribute.Bool("llm_d.epp.profile_handler.decode_failed", true),
 		)
 		return map[string]scheduling.SchedulerProfile{}
 	}
@@ -303,12 +316,12 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if _, hasEncodeProfile := profiles[h.encodeProfile]; hasEncodeProfile {
 		if _, executed := profileResults[h.encodeProfile]; !executed {
 			if h.encodeDecider != nil && h.encodeDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
-				span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "run_encode"))
+				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_encode"))
 				return map[string]scheduling.SchedulerProfile{h.encodeProfile: profiles[h.encodeProfile]}
 			}
 			// Decider rejected encode - mark as evaluated so we don't re-run the decider.
 			profileResults[h.encodeProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "skip_encode"))
+			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_encode"))
 		}
 	}
 
@@ -316,12 +329,12 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
 			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
-				span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "run_prefill"))
+				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
 				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 			}
 			// Decider rejected prefill - mark as evaluated so we don't re-run the decider.
 			profileResults[h.prefillProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "skip_prefill"))
+			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_prefill"))
 		}
 	}
 
@@ -331,7 +344,7 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 
 	decision := DisaggDecisionType(encodeUsed, prefillUsed)
 	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
-	span.SetAttributes(attribute.String("llm_d.profile_handler.decision", "complete_"+decision))
+	span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "complete_"+decision))
 
 	return map[string]scheduling.SchedulerProfile{}
 }
@@ -375,8 +388,8 @@ func (h *Handler) ProcessResults(
 // PreRequest wires prefill and encode SchedulerProfile results into headers
 // so the sidecar knows which pods to contact for disaggregated work.
 func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	tracer := tracing.Tracer()
-	_, span := tracer.Start(ctx, "llm_d.epp.prerequest.disaggregation",
+	tracer := tracing.Tracer(schedplugins.TracerScope)
+	_, span := tracer.Start(ctx, "prepare_disaggregation",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

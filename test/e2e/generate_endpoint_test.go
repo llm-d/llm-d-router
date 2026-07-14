@@ -47,14 +47,15 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate encode against en
 	// Uses single-profile-handler (generateEncodeConfig) so the EPP routes
 	// directly to encode pods without requiring a decode stage first.
 	ginkgo.It("returns ec_transfer_params for encode bodies", func() {
+		nsName := getNamespace()
 		infPoolObjects = createInferencePool(1, true)
 
 		encodeReplicas := 1
 		modelServers := createModelServersEncodeOnly(encodeReplicas)
 		epp := createEndPointPicker(generateEncodeConfig)
 		ginkgo.DeferCleanup(func() {
-			testutils.DeleteObjects(testConfig, epp)
-			testutils.DeleteObjects(testConfig, modelServers)
+			testutils.DeleteObjects(testConfig, epp, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
 		})
 
 		encodePods := getPodNames(encodeSelector)
@@ -80,14 +81,15 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate prefill against p
 	// Uses single-profile-handler (generatePrefillConfig) so the EPP routes
 	// directly to prefill pods without requiring a decode stage first.
 	ginkgo.It("returns kv_transfer_params for prefill bodies", func() {
+		nsName := getNamespace()
 		infPoolObjects = createInferencePool(1, true)
 
 		prefillReplicas := 1
 		modelServers := createModelServersPrefillOnly(prefillReplicas)
 		epp := createEndPointPicker(generatePrefillConfig)
 		ginkgo.DeferCleanup(func() {
-			testutils.DeleteObjects(testConfig, epp)
-			testutils.DeleteObjects(testConfig, modelServers)
+			testutils.DeleteObjects(testConfig, epp, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
 		})
 
 		prefillPods := getPodNames(prefillSelector)
@@ -182,7 +184,7 @@ func prefillBody(tokenIDs []int, images []imageSpec) []byte {
 // fresh X-Request-ID. Returns the live *http.Response (its body is already
 // drained) and the raw response body.
 func doRequest(path string, body []byte) (*http.Response, []byte) {
-	req, err := http.NewRequest(http.MethodPost, "http://localhost:"+port+path, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d%s", getPort(), path), bytes.NewReader(body))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "build POST request")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Request-ID", uuid.NewString())
@@ -243,6 +245,7 @@ var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via si
 	// P/D setup is used, proving the sidecar routes it through
 	// disaggregatedPrefillHandler rather than the decoder catch-all.
 	ginkgo.It("routes token-in generate to the prefill pod", func() {
+		nsName := getNamespace()
 		infPoolObjects = createInferencePool(1, true)
 
 		prefillReplicas := 1
@@ -250,15 +253,15 @@ var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via si
 		modelServers := createModelServersPDSharedStorage(decodeReplicas)
 		epp := createEndPointPicker(pdConfig)
 		ginkgo.DeferCleanup(func() {
-			testutils.DeleteObjects(testConfig, epp)
-			testutils.DeleteObjects(testConfig, modelServers)
+			testutils.DeleteObjects(testConfig, epp, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
 		})
 
 		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 		gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 		gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
-		prefillCountBefore := getPodRequestCount(prefillPods[0])
+		prefillCountBefore := getPodRequestCount(nsName, prefillPods[0])
 		ginkgo.By(fmt.Sprintf("prefill request count before test: %d", prefillCountBefore))
 
 		ginkgo.By("sending /inference/v1/generate through P/D EPP")
@@ -266,7 +269,7 @@ var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via si
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"non-200 from gateway: status=%d body=%s", resp.StatusCode, string(raw))
 
-		prefillCountAfter := getPodRequestCount(prefillPods[0])
+		prefillCountAfter := getPodRequestCount(nsName, prefillPods[0])
 		ginkgo.By(fmt.Sprintf("prefill request count after test: %d", prefillCountAfter))
 
 		gomega.Expect(prefillCountAfter).To(gomega.BeNumerically(">", prefillCountBefore),

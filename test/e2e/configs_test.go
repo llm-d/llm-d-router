@@ -65,11 +65,11 @@ plugins:
 - type: encode-filter
 - type: decode-filter
 - type: max-score-picker
-- type: always-disagg-multimodal-decider
 - type: disagg-profile-handler
   parameters:
     deciders:
       encode: always-disagg-multimodal-decider
+- type: always-disagg-multimodal-decider
 schedulingProfiles:
 - name: encode
   plugins:
@@ -94,15 +94,15 @@ plugins:
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: max-score-picker
-- type: always-disagg-multimodal-decider
-- type: prefix-based-pd-decider
-  parameters:
-    nonCachedTokens: 16
 - type: disagg-profile-handler
   parameters:
     deciders:
       encode: always-disagg-multimodal-decider
       prefill: prefix-based-pd-decider
+- type: always-disagg-multimodal-decider
+- type: prefix-based-pd-decider
+  parameters:
+    nonCachedTokens: 16
 schedulingProfiles:
 - name: encode
   plugins:
@@ -152,7 +152,7 @@ plugins:
 - type: max-score-picker
 - type: single-profile-handler
 requestHandler:
-  parsers
+  parsers:
    - pluginRef: vllmhttp-parser
 schedulingProfiles:
 - name: default
@@ -187,7 +187,7 @@ plugins:
     deciders:
       prefill: prefix-based-pd-decider
 requestHandler:
-  parsers
+  parsers:
    - pluginRef: vllmhttp-parser
 schedulingProfiles:
 - name: prefill

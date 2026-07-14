@@ -213,6 +213,20 @@ func (m *mockRegistryClient) Stats() contracts.AggregateStats {
 	return contracts.AggregateStats{}
 }
 
+func (m *mockRegistryClient) SubmitDesiredPriorities(_ map[int]struct{}) {}
+
+func (m *mockRegistryClient) PriorityBandUpdateChannel() <-chan map[int]struct{} {
+	return nil
+}
+
+func (m *mockRegistryClient) FlowGCTimeout() time.Duration {
+	return time.Minute
+}
+
+func (m *mockRegistryClient) ApplyDesiredPriorities(_ map[int]struct{}) {}
+
+func (m *mockRegistryClient) ExecuteGCCycle() {}
+
 // mockProcessor is a mock for the internal `Processor` interface.
 type mockProcessor struct {
 	SubmitFunc        func(item *internal.FlowItem) error
@@ -265,6 +279,7 @@ type mockProcessorFactory struct {
 func (f *mockProcessorFactory) new(
 	_ context.Context, // The factory does not use the lifecycle context; it's passed to the processor's Run method later.
 	_ contracts.FlowRegistry,
+	_ contracts.FlowRegistryBackground,
 	_ flowcontrol.SaturationDetector,
 	_ contracts.EndpointCandidates,
 	_ flowcontrol.UsageLimitPolicy,
@@ -1054,4 +1069,45 @@ func TestFlowController_Concurrency_Backpressure(t *testing.T) {
 	}
 	require.Equal(t, numRequests, successCount,
 		"all concurrent requests should be dispatched successfully even under high contention and zero buffer capacity")
+}
+
+// TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority verifies that when the requested priority band is not
+// provisioned, the request is not only leased at the fallback priority (0) but also enqueued there: the FlowItem handed
+// to the processor must report the fallback flow key, not the original (unprovisioned) priority. Without this, the
+// processor looks up a managed queue at the missing band and rejects the request.
+func TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const originalPriority = 100
+
+	var capturedKey flowcontrol.FlowKey
+	processor := &mockProcessor{
+		SubmitFunc: func(item *internal.FlowItem) error {
+			capturedKey = item.OriginalRequest().FlowKey()
+			go item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+			return nil
+		},
+	}
+
+	registry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
+	registry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(conn contracts.ActiveFlowConnection) error) error {
+		// Only priority 0 is provisioned; any other band is rejected, forcing the fallback.
+		if key.Priority != 0 {
+			return fmt.Errorf("band %d: %w", key.Priority, contracts.ErrPriorityBandNotFound)
+		}
+		return fn(&mockActiveFlowConnection{RegistryV: registry, FlowKeyV: key})
+	}
+
+	h := newUnitHarness(ctx, t, &Config{DefaultRequestTTL: time.Minute}, registry, processor)
+
+	outcome, err := h.fc.EnqueueAndWait(ctx, newTestRequest(flowcontrol.FlowKey{ID: "batch", Priority: originalPriority}))
+
+	require.NoError(t, err, "fallback request should be dispatched, not rejected")
+	assert.Equal(t, types.QueueOutcomeDispatched, outcome)
+	assert.Equal(t, 0, capturedKey.Priority,
+		"fallback request must be enqueued at priority 0, not its original unprovisioned priority")
+	assert.Equal(t, "batch", capturedKey.ID, "fallback must preserve the flow ID")
 }

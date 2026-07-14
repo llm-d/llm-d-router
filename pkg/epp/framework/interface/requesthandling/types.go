@@ -34,34 +34,44 @@ const nilStr = "<nil>"
 // Modality identifies the type of multimodal content in a prompt.
 type Modality string
 
-// ModalityImage is the only currently supported modality.
-const ModalityImage Modality = "image"
+// Modality values match the model-server's multimodal hash keys so labels agree
+// across backends.
+const (
+	ModalityImage Modality = "image"
+	ModalityAudio Modality = "audio"
+	ModalityVideo Modality = "video"
+)
 
 // RequestPayload represents a strongly-typed unmarshaled request payload or raw bytes.
 type RequestPayload interface {
 	isRequestPayload()
 	IsParsed() bool
+	// AsMap returns the parsed JSON map
+	AsMap() (PayloadMap, bool)
 }
 
 // PayloadMap represents a JSON request body unmarshaled into a map.
 type PayloadMap map[string]any
 
-func (PayloadMap) isRequestPayload() {}
-func (PayloadMap) IsParsed() bool    { return true }
+func (p PayloadMap) isRequestPayload()         {}
+func (p PayloadMap) IsParsed() bool            { return true }
+func (p PayloadMap) AsMap() (PayloadMap, bool) { return p, p != nil }
 
 // PayloadProto represents a gRPC request body unmarshaled into a proto.Message.
 type PayloadProto struct {
 	proto.Message
 }
 
-func (PayloadProto) isRequestPayload() {}
-func (PayloadProto) IsParsed() bool    { return true }
+func (PayloadProto) isRequestPayload()         {}
+func (PayloadProto) IsParsed() bool            { return true }
+func (PayloadProto) AsMap() (PayloadMap, bool) { return nil, false }
 
 // RawPayload represents an unparsed request body kept as raw bytes.
 type RawPayload []byte
 
-func (RawPayload) isRequestPayload() {}
-func (RawPayload) IsParsed() bool    { return false }
+func (RawPayload) isRequestPayload()         {}
+func (RawPayload) IsParsed() bool            { return false }
+func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
@@ -92,19 +102,80 @@ type InferenceRequestBody struct {
 	// Stream indicates whether the request specifies a streaming response (e.g., via a stream field).
 	// This typically implies the model server's response will be streamed.
 	Stream bool `json:"-"`
+
+	// MaxOutputTokens is the client-requested cap on generated output tokens,
+	// normalized across APIs (OpenAI max_tokens / max_completion_tokens, Anthropic
+	// max_tokens, Responses max_output_tokens, vLLM SamplingParams.max_tokens).
+	// It is nil when the client did not specify a cap. Consumers such as output
+	// token estimators use it as an upper bound. Derived, not round-tripped.
+	MaxOutputTokens *int64 `json:"-"`
+}
+
+// MaxOutputTokensFromPayload returns the client-requested output-token cap read
+// from a decoded JSON request body. The keys are tried in order and the first one
+// holding a valid value wins, so callers express per-API precedence (e.g. chat
+// completions: max_completion_tokens then the legacy max_tokens). JSON numbers
+// decode as float64; json.Number is also accepted. A present key whose value is
+// the wrong type, negative, or non-integral is treated as absent and the next key
+// is tried. An explicit non-negative whole number (including 0) is returned; if no
+// key holds a valid value the result is nil ("no cap").
+func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
+	for _, k := range keys {
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		var f float64
+		switch n := v.(type) {
+		case float64:
+			f = n
+		case json.Number:
+			parsed, err := n.Float64()
+			if err != nil {
+				continue
+			}
+			f = parsed
+		default:
+			continue
+		}
+		// Skip negative or non-integral values as malformed and try the next key.
+		if f < 0 || f != math.Trunc(f) {
+			continue
+		}
+		out := int64(f)
+		return &out
+	}
+	return nil
 }
 
 // TokenizedPrompt contains the result of tokenizing the request prompt.
 // It is consumed by scheduling and request-control plugins that benefit from
 // actual token data such as prefix-cache awareness.
 type TokenizedPrompt struct {
-	// TokenIDs are the token IDs for the prompt, including multimodal placeholder tokens.
-	TokenIDs []uint32
+	// PerPromptTokens holds the token IDs for each prompt in the request.
+	// Single-prompt requests (chat, generate, single-string completions) use a
+	// length-1 outer slice. Multi-string completions use one inner slice per
+	// prompt string.
+	PerPromptTokens [][]uint32
 	// MultiModalFeatures holds one entry per multimodal item in prompt order.
-	// Nil if the prompt contains no multimodal content.
+	// Nil if the prompt contains no multimodal content. Offsets are relative
+	// to PerPromptTokens[0] (always single-prompt when multimodal content is
+	// present).
 	MultiModalFeatures []MultiModalFeature
 	// CacheSalt isolates prefix caches across requests. Populated by the token-producer.
 	CacheSalt string
+}
+
+// TokenCount returns the total number of tokens across all prompts.
+func (tp *TokenizedPrompt) TokenCount() int {
+	if tp == nil {
+		return 0
+	}
+	n := 0
+	for _, pp := range tp.PerPromptTokens {
+		n += len(pp)
+	}
+	return n
 }
 
 // MultiModalFeature holds all data needed for prefix-cache scoring of a single
@@ -574,7 +645,7 @@ func (r *MessagesRequest) String() string {
 	}
 	messagesLen := 0
 	for _, msg := range r.Messages {
-		messagesLen += len(msg.Content.PlainText())
+		messagesLen += msg.Content.textLen()
 	}
 	return fmt.Sprintf("{MessagesLength: %d}", messagesLen)
 }
@@ -617,18 +688,17 @@ func (ac AnthropicContent) MarshalJSON() ([]byte, error) {
 	return json.Marshal("")
 }
 
-func (ac AnthropicContent) PlainText() string {
+func (ac AnthropicContent) textLen() int {
 	if ac.Raw != "" {
-		return ac.Raw
+		return len(ac.Raw)
 	}
-	var sb strings.Builder
+	n := 0
 	for _, block := range ac.Structured {
 		if block.Type == "text" {
-			sb.WriteString(block.Text)
-			sb.WriteString(" ")
+			n += len(block.Text)
 		}
 	}
-	return sb.String()
+	return n
 }
 
 type AnthropicContentBlock struct {

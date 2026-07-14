@@ -51,3 +51,43 @@ jobs:
       tag: ${{ needs.set-params.outputs.tag }}
       prerelease: ${{ fromJSON(needs.set-params.outputs.prerelease) }}
       chart-suffix: ""
+
+  upload-artifacts:
+    needs: set-params
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Kubectl
+        uses: azure/setup-kubectl@v5
+        with:
+          version: 'latest'
+
+      - name: Build Artifacts
+        run: |
+          make artifacts BUNDLE_VERSION=${{ needs.set-params.outputs.tag }}
+
+      - name: Upload Release Assets
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          files=$(find artifacts -type f -size +0c | tr '\n' ' ')
+          if [ -z "$files" ]; then
+            echo "No artifacts to upload."
+            exit 0
+          fi
+          if gh release view "${{ needs.set-params.outputs.tag }}" >/dev/null 2>&1; then
+            gh release upload "${{ needs.set-params.outputs.tag }}" $files --clobber
+          else
+            echo "Release ${{ needs.set-params.outputs.tag }} does not exist. Creating a draft release..."
+            gh release create "${{ needs.set-params.outputs.tag }}" $files --draft --title "${{ needs.set-params.outputs.tag }}" --notes "Release ${{ needs.set-params.outputs.tag }}"
+          fi
+

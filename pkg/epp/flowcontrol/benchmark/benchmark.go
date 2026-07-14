@@ -78,7 +78,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 func init() {
@@ -187,7 +187,6 @@ func (r *benchRequest) ReceivedTimestamp() time.Time                   { return 
 
 // setupRegistry provisions the concrete FlowRegistry.
 func setupRegistry(
-	ctx context.Context,
 	b *testing.B,
 	defaults registry.PriorityBandPolicyDefaults,
 	p priorityLevels,
@@ -215,8 +214,7 @@ func setupRegistry(
 	}
 
 	reg := registry.NewFlowRegistry(regCfg, logr.Discard())
-
-	go reg.Run(ctx)
+	// Registry maintenance (GC, priority band sync) runs in the Processor loop started by FlowController.
 	return reg
 }
 
@@ -230,7 +228,7 @@ func setupBenchmarkHarness(
 	customCfg *controller.Config,
 ) (*controller.FlowController, testDetector) {
 	b.Helper()
-	handle := igwtestutils.NewTestHandle(ctx)
+	handle := testutils.NewTestHandle(ctx)
 
 	fPolicy, err := globalstrict.GlobalStrictFairnessPolicyFactory(registry.DefaultFairnessPolicyRef, nil, handle)
 	if err != nil {
@@ -249,7 +247,7 @@ func setupBenchmarkHarness(
 		FairnessPolicy: fPolicy.(flowcontrol.FairnessPolicy),
 	}
 
-	reg := setupRegistry(ctx, b, defaults, p)
+	reg := setupRegistry(b, defaults, p)
 
 	detector := customDetector
 	if detector == nil {

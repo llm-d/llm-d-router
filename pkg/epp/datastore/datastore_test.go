@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -45,6 +46,18 @@ import (
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
+
+var endpointPoolCmpOpts = []cmp.Option{
+	cmp.Comparer(func(a, b labels.Selector) bool {
+		if a == nil && b == nil {
+			return true
+		}
+		if a == nil || b == nil {
+			return false
+		}
+		return a.String() == b.String()
+	}),
+}
 
 // mockEndpointFactory is a minimal EndpointFactory for EndpointUpsert/Delete tests.
 // When returnNil is true, NewEndpoint returns nil (simulating a duplicate-start race).
@@ -78,7 +91,7 @@ func (f *mockEndpointFactory) updateEvents() []fwkdl.Endpoint {
 func TestPoolGet_NoDeadlockWithConcurrentWrite(t *testing.T) {
 	pool := &datalayer.EndpointPool{
 		Namespace:   "default",
-		Selector:    map[string]string{"app": "vllm"},
+		Selector:    labels.SelectorFromSet(labels.Set{"app": "vllm"}),
 		TargetPorts: []int{8000},
 	}
 	ds := &datastore{pool: pool}
@@ -155,13 +168,13 @@ func TestPool(t *testing.T) {
 					WithScheme(scheme).
 					Build()
 
-				ds := NewDatastore(context.Background(), epf, 0)
+				ds := NewDatastore(context.Background(), epf)
 				_ = ds.PoolSet(context.Background(), fakeClient, poolutil.InferencePoolToEndpointPool(tt.inferencePool))
 				gotPool, gotErr := ds.PoolGet()
 				if diff := cmp.Diff(tt.wantErr, gotErr, cmpopts.EquateErrors()); diff != "" {
 					t.Errorf("Unexpected error diff (+got/-want): %s", diff)
 				}
-				if diff := cmp.Diff(poolutil.InferencePoolToEndpointPool(tt.wantPool), gotPool); diff != "" {
+				if diff := cmp.Diff(poolutil.InferencePoolToEndpointPool(tt.wantPool), gotPool, endpointPoolCmpOpts...); diff != "" {
 					t.Errorf("Unexpected pool diff (+got/-want): %s", diff)
 				}
 				gotSynced := ds.PoolHasSynced()
@@ -267,7 +280,7 @@ func TestObjective(t *testing.T) {
 		}
 		for _, epf := range factories {
 			t.Run(test.name, func(t *testing.T) {
-				ds := NewDatastore(t.Context(), epf, 0)
+				ds := NewDatastore(t.Context(), epf)
 				for _, m := range test.existingModels {
 					ds.ObjectiveSet(m)
 				}
@@ -406,7 +419,7 @@ func TestMetrics(t *testing.T) {
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
 				Build()
-			ds := NewDatastore(ctx, epf, 0)
+			ds := NewDatastore(ctx, epf)
 			_ = ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(inferencePool))
 			for _, pod := range test.storePods {
 				ds.PodUpdateOrAddIfNotExist(ctx, pod)
@@ -478,7 +491,7 @@ func TestPods(t *testing.T) {
 		for _, epf := range factories {
 			t.Run(test.name, func(t *testing.T) {
 				ctx := context.Background()
-				ds := NewDatastore(t.Context(), epf, 0)
+				ds := NewDatastore(t.Context(), epf)
 				fakeClient := fake.NewFakeClient()
 				if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(inferencePool)); err != nil {
 					t.Error(err)
@@ -569,7 +582,7 @@ func TestTargetPortsChange(t *testing.T) {
 					WithObjects(readyPod1).
 					Build()
 
-				ds := NewDatastore(ctx, epf, 0)
+				ds := NewDatastore(ctx, epf)
 
 				// Set initial pool with multiple target ports
 				initialPool := testutil.MakeInferencePool("test-pool").
@@ -786,7 +799,7 @@ func TestEndpointMetadata(t *testing.T) {
 		for _, epf := range factories {
 			t.Run(test.name, func(t *testing.T) {
 				ctx := context.Background()
-				ds := NewDatastore(t.Context(), epf, 0)
+				ds := NewDatastore(t.Context(), epf)
 				fakeClient := fake.NewFakeClient()
 				if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(test.pool)); err != nil {
 					t.Error(err)
@@ -939,7 +952,7 @@ func TestActivePortFiltering(t *testing.T) {
 					WithScheme(scheme).
 					Build()
 
-				ds := NewDatastore(ctx, epf, 0)
+				ds := NewDatastore(ctx, epf)
 
 				// Use the first pool in the test
 				if len(test.pools) > 0 {
@@ -1091,7 +1104,7 @@ func TestActivePortEndpointRemoval(t *testing.T) {
 					WithScheme(scheme).
 					Build()
 
-				ds := NewDatastore(ctx, epf, 0)
+				ds := NewDatastore(ctx, epf)
 
 				// Set up the pool
 				if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(test.pool)); err != nil {
@@ -1145,7 +1158,7 @@ func TestPodUpdateOrAddIfNotExist_ConcurrentPoolSet(t *testing.T) {
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 			ctx := context.Background()
-			ds := NewDatastore(ctx, epf, 0)
+			ds := NewDatastore(ctx, epf)
 
 			pool := poolutil.InferencePoolToEndpointPool(
 				testutil.MakeInferencePool("pool1").
@@ -1354,7 +1367,7 @@ func TestExtractActivePorts(t *testing.T) {
 func TestEndpointUpsert_NewEndpoint(t *testing.T) {
 	const addr, port = "10.0.0.1", "8000"
 	ctx := context.Background()
-	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	ds := NewDatastore(ctx, &mockEndpointFactory{})
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
 	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Port: port})
@@ -1367,7 +1380,7 @@ func TestEndpointUpsert_NewEndpoint(t *testing.T) {
 func TestEndpointUpsert_UpdateExisting(t *testing.T) {
 	const addr1, addr2 = "10.0.0.1", "10.0.0.2"
 	ctx := context.Background()
-	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	ds := NewDatastore(ctx, &mockEndpointFactory{})
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
 	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr1})
@@ -1382,7 +1395,7 @@ func TestEndpointUpsert_UpdateExistingNotifiesEndpointFactory(t *testing.T) {
 	const addr1, addr2 = "10.0.0.1", "10.0.0.2"
 	ctx := context.Background()
 	factory := &mockEndpointFactory{}
-	ds := NewDatastore(ctx, factory, 0)
+	ds := NewDatastore(ctx, factory)
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
 	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr1})
@@ -1402,7 +1415,7 @@ func TestEndpointUpsert_SemanticallyEqualMetadataDoesNotNotify(t *testing.T) {
 	const addr = "10.0.0.1"
 	ctx := context.Background()
 	factory := &mockEndpointFactory{}
-	ds := NewDatastore(ctx, factory, 0)
+	ds := NewDatastore(ctx, factory)
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
 	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Labels: nil})
@@ -1413,7 +1426,7 @@ func TestEndpointUpsert_SemanticallyEqualMetadataDoesNotNotify(t *testing.T) {
 
 func TestEndpointUpsert_NewEndpointFactoryReturnsNil(t *testing.T) {
 	ctx := context.Background()
-	ds := NewDatastore(ctx, &mockEndpointFactory{returnNil: true}, 0)
+	ds := NewDatastore(ctx, &mockEndpointFactory{returnNil: true})
 	meta := &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Name: "ep1", Namespace: "default"}}
 
 	assert.NotPanics(t, func() { ds.EndpointUpsert(ctx, meta) })
@@ -1422,7 +1435,7 @@ func TestEndpointUpsert_NewEndpointFactoryReturnsNil(t *testing.T) {
 
 func TestEndpointDelete_Existing(t *testing.T) {
 	ctx := context.Background()
-	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	ds := NewDatastore(ctx, &mockEndpointFactory{})
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
 	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id})
@@ -1434,7 +1447,7 @@ func TestEndpointDelete_Existing(t *testing.T) {
 
 func TestEndpointDelete_Missing(t *testing.T) {
 	ctx := context.Background()
-	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	ds := NewDatastore(ctx, &mockEndpointFactory{})
 
 	assert.NotPanics(t, func() {
 		ds.EndpointDelete(types.NamespacedName{Name: "nonexistent", Namespace: "default"})
@@ -1443,7 +1456,7 @@ func TestEndpointDelete_Missing(t *testing.T) {
 
 func TestDiscoveryNotifier_WorksAlongsideDirectUpsert(t *testing.T) {
 	ctx := context.Background()
-	ds := NewDatastore(ctx, &mockEndpointFactory{}, 0)
+	ds := NewDatastore(ctx, &mockEndpointFactory{})
 
 	// Populate one endpoint directly (simulates the K8s reconciler path).
 	directID := types.NamespacedName{Name: "direct-ep", Namespace: "default"}

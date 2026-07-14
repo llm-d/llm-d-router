@@ -52,8 +52,9 @@ func (f *fakeKVCacheIndexer) ComputeBlockKeysFromTokens(ctx context.Context, tok
 func (f *fakeKVCacheIndexer) KVBlockIndex() kvblock.Index { return f.index }
 
 type fakeKVBlockIndex struct {
-	lookup func(ctx context.Context, keys []kvblock.BlockHash, podSet sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error)
-	addFn  func(ctx context.Context, prevKeys, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error
+	lookup  func(ctx context.Context, keys []kvblock.BlockHash, podSet sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error)
+	addFn   func(ctx context.Context, prevKeys, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error
+	clearFn func(ctx context.Context, podIdentifier string) error
 }
 
 func (f *fakeKVBlockIndex) Lookup(ctx context.Context, keys []kvblock.BlockHash, podSet sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
@@ -76,6 +77,13 @@ func (f *fakeKVBlockIndex) Evict(_ context.Context, _ kvblock.BlockHash, _ kvblo
 
 func (f *fakeKVBlockIndex) GetRequestKey(_ context.Context, _ kvblock.BlockHash) (kvblock.BlockHash, error) {
 	return kvblock.EmptyBlockHash, nil
+}
+
+func (f *fakeKVBlockIndex) Clear(ctx context.Context, podIdentifier string) error {
+	if f.clearFn != nil {
+		return f.clearFn(ctx, podIdentifier)
+	}
+	return nil
 }
 
 type fakeKVBlockScorer struct {
@@ -109,6 +117,23 @@ var testEndpoints = []scheduling.Endpoint{
 }
 
 const testBlockSize = 16
+
+func freshEndpoints() []scheduling.Endpoint {
+	return []scheduling.Endpoint{
+		scheduling.NewEndpoint(
+			&fwkdl.EndpointMetadata{
+				NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
+				Address:        "10.0.0.1",
+				Port:           "8080",
+			}, nil, nil),
+		scheduling.NewEndpoint(
+			&fwkdl.EndpointMetadata{
+				NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
+				Address:        "10.0.0.2",
+				Port:           "8080",
+			}, nil, nil),
+	}
+}
 
 func newProducerWithIndexer(ctx context.Context, idx kvCacheIndexer, scorer kvcache.KVBlockScorer) *Producer {
 	return &Producer{
@@ -156,7 +181,7 @@ func TestProduce_UsesTokenizedPrompt(t *testing.T) {
 		RequestID:   "req-1",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: tokens},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}},
 		},
 	}
 
@@ -217,10 +242,128 @@ func TestProduce_EmptyTokenizedPrompt_NoOp(t *testing.T) {
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
 			Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "p"}},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: []uint32{}},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{{}}},
 		},
 	}
 	require.NoError(t, p.Produce(ctx, req, testEndpoints))
+}
+
+func TestProduce_MultiPromptEmptyBlockKeys_NoOp(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+
+	promptA := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
+	promptB := []uint32{9, 10, 11, 12, 13, 14, 15, 16}
+
+	var computeCalls [][]uint32
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, ts []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			computeCalls = append(computeCalls, append([]uint32{}, ts...))
+			if len(ts) >= testBlockSize {
+				return []kvblock.BlockHash{0xABCD}, nil
+			}
+			return nil, nil
+		},
+		index: &fakeKVBlockIndex{
+			lookup: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+				t.Fatalf("Lookup must not be called when no prompt produces block keys")
+				return nil, assert.AnError
+			},
+		},
+	}
+	scorer := &fakeKVBlockScorer{
+		score: func(_ context.Context, _ []kvblock.BlockHash, _ map[kvblock.BlockHash][]kvblock.PodEntry) (map[string]float64, error) {
+			t.Fatalf("Score must not be called when no prompt produces block keys")
+			return nil, assert.AnError
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx, scorer)
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-multi-empty",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				PerPromptTokens: [][]uint32{promptA, promptB},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+	require.Equal(t, [][]uint32{promptA, promptB}, computeCalls)
+
+	_, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	assert.False(t, ok)
+}
+
+func TestProduce_MultiPromptSkipsEmptyPromptKeys(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+
+	shortPrompt := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
+	fullPrompt := []uint32{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35}
+	wantKey := kvblock.BlockHash(0xCAFE)
+
+	var computeCalls [][]uint32
+	var lookupCalls [][]kvblock.BlockHash
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, ts []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			computeCalls = append(computeCalls, append([]uint32{}, ts...))
+			switch {
+			case len(ts) == len(shortPrompt):
+				return nil, nil
+			case len(ts) == len(fullPrompt):
+				return []kvblock.BlockHash{wantKey}, nil
+			default:
+				t.Fatalf("unexpected flat token lookup with %d tokens", len(ts))
+				return nil, nil
+			}
+		},
+		index: &fakeKVBlockIndex{
+			lookup: func(_ context.Context, keys []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+				require.NotEmpty(t, keys)
+				lookupCalls = append(lookupCalls, append([]kvblock.BlockHash{}, keys...))
+				return map[kvblock.BlockHash][]kvblock.PodEntry{
+					wantKey: {{PodIdentifier: "10.0.0.1:8080"}},
+				}, nil
+			},
+		},
+	}
+	scorer := &fakeKVBlockScorer{
+		score: func(_ context.Context, keys []kvblock.BlockHash, _ map[kvblock.BlockHash][]kvblock.PodEntry) (map[string]float64, error) {
+			require.Equal(t, []kvblock.BlockHash{wantKey}, keys)
+			return map[string]float64{"10.0.0.1:8080": 1.0}, nil
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx, scorer)
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-multi-mixed",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				PerPromptTokens: [][]uint32{shortPrompt, fullPrompt},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+	require.Equal(t, [][]uint32{shortPrompt, fullPrompt}, computeCalls)
+	require.Equal(t, [][]kvblock.BlockHash{{wantKey}}, lookupCalls)
+
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	require.True(t, ok)
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+	assert.Equal(t, 1, info.MatchBlocks())
+	assert.Equal(t, 1, info.TotalBlocks())
+
+	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	require.True(t, ok)
+	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+	assert.Equal(t, 0, info.MatchBlocks())
+	assert.Equal(t, 1, info.TotalBlocks())
 }
 
 // Multimodal features flow through to ComputeBlockKeysFromTokens.
@@ -253,7 +396,7 @@ func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				TokenIDs: tokens,
+				PerPromptTokens: [][]uint32{tokens},
 				MultiModalFeatures: []fwkrh.MultiModalFeature{
 					{Modality: fwkrh.ModalityImage, Hash: "abc", Offset: 2, Length: 4},
 				},
@@ -263,6 +406,95 @@ func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 
 	require.NoError(t, p.Produce(ctx, req, testEndpoints))
 	require.NotNil(t, captured)
+}
+
+// Cache salt is folded into the first block's extra keys, isolating salted
+// prompts. Mirrors engine-side ingestion, which folds vLLM's block-0 cache_salt
+// into the same per-block hash list.
+func TestProduce_FoldsCacheSalt(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	tokens := make([]uint32, 16)
+	for i := range tokens {
+		tokens[i] = uint32(i)
+	}
+
+	tests := []struct {
+		name string
+		mm   []fwkrh.MultiModalFeature
+		want []kvblock.MMHash
+	}{
+		{
+			name: "salt only",
+			want: []kvblock.MMHash{{Hash: "s3cr3t"}},
+		},
+		{
+			name: "salt appended after mm hash",
+			mm:   []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "abc", Offset: 2, Length: 4}},
+			want: []kvblock.MMHash{{Hash: "abc"}, {Hash: "s3cr3t"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured []*kvblock.BlockExtraFeatures
+			idx := &fakeKVCacheIndexer{
+				computeFromTokens: func(_ context.Context, _ []uint32, _ string, extra []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+					captured = extra
+					return []kvblock.BlockHash{0xAA}, nil
+				},
+				index: &fakeKVBlockIndex{},
+			}
+			p := newProducerWithIndexer(ctx, idx, &fakeKVBlockScorer{})
+
+			req := &scheduling.InferenceRequest{
+				RequestID:   "req-salt",
+				TargetModel: "test-model",
+				Body: &fwkrh.InferenceRequestBody{
+					TokenizedPrompt: &fwkrh.TokenizedPrompt{
+						PerPromptTokens:    [][]uint32{tokens},
+						MultiModalFeatures: tc.mm,
+						CacheSalt:          "s3cr3t",
+					},
+				},
+			}
+
+			require.NoError(t, p.Produce(ctx, req, testEndpoints))
+			require.Len(t, captured, 1)
+			require.NotNil(t, captured[0])
+			require.Equal(t, tc.want, captured[0].MMHashes)
+		})
+	}
+}
+
+// No salt → extra features stay untouched (nil for a text-only prompt).
+func TestProduce_NoCacheSalt_NoExtraFeatures(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	tokens := make([]uint32, 16)
+	for i := range tokens {
+		tokens[i] = uint32(i)
+	}
+	captured := []*kvblock.BlockExtraFeatures{{}} // sentinel; expect overwrite to nil
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, extra []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			captured = extra
+			return []kvblock.BlockHash{0xAA}, nil
+		},
+		index: &fakeKVBlockIndex{},
+	}
+	p := newProducerWithIndexer(ctx, idx, &fakeKVBlockScorer{})
+
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-nosalt",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, testEndpoints))
+	require.Nil(t, captured)
 }
 
 // nil request / empty body → don't touch the indexer.
@@ -354,7 +586,7 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 				RequestID:   "r",
 				TargetModel: "m",
 				Body: &fwkrh.InferenceRequestBody{
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: tokens},
+					TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}},
 				},
 			}
 			require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{endpoint}))

@@ -172,7 +172,10 @@ func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "hello world"}},
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt:    fwkrh.Prompt{Raw: "hello world"},
+				CacheSalt: "leg-salt",
+			},
 		},
 	}
 	require.NoError(t, lp.Produce(ctx, req, nil))
@@ -180,7 +183,10 @@ func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
 	assert.Equal(t, 1, stub.calls)
 	assert.Equal(t, "hello world", stub.lastRaw)
 	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedPrompt.PerPromptTokens[0])
+	// Wrapper-owned tokenization must still carry the cache salt so precise
+	// keys stay isolated on this path.
+	assert.Equal(t, "leg-salt", req.Body.TokenizedPrompt.CacheSalt)
 }
 
 // End-to-end: tokens from the pool flow into the embedded producer, get
@@ -249,12 +255,12 @@ func TestLegacyProducer_KeepsExistingTokenizedPrompt(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: []uint32{5, 5, 5}},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{{5, 5, 5}}},
 			Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "should not tokenize"}},
 		},
 	}
 	require.NoError(t, lp.Produce(ctx, req, nil))
 
 	assert.Equal(t, 0, stub.calls, "pool must not be called when tokens already present")
-	assert.Equal(t, []uint32{5, 5, 5}, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Equal(t, []uint32{5, 5, 5}, req.Body.TokenizedPrompt.PerPromptTokens[0])
 }

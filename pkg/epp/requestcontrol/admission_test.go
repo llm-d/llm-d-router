@@ -232,6 +232,16 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
 		},
 		{
+			name:            "fc_reject_no_endpoints",
+			priority:        0,
+			fcOutcome:       fctypes.QueueOutcomeRejectedNoEndpoints,
+			fcErr:           fctypes.ErrNoEndpoints,
+			expectErr:       true,
+			expectErrCode:   errcommon.ServiceUnavailable,
+			expectErrSubstr: "no endpoints available",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+		},
+		{
 			name:            "fc_evict_ttl",
 			priority:        0,
 			fcOutcome:       fctypes.QueueOutcomeEvictedTTL,
@@ -297,6 +307,86 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 					assert.Contains(t, e.Msg, tc.expectErrSubstr, "incorrect error message substring for scenario: %s", tc.name)
 					assert.Equal(t, tc.expectHeaders, e.Headers, "incorrect headers for scenario: %s", tc.name)
 				}
+			}
+		})
+	}
+}
+
+func TestTranslateFlowControlOutcome(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		outcome    fctypes.QueueOutcome
+		err        error
+		wantCode   string
+		wantReason string
+		wantNil    bool
+	}{
+		{
+			name:    "dispatched returns nil",
+			outcome: fctypes.QueueOutcomeDispatched,
+			err:     nil,
+			wantNil: true,
+		},
+		{
+			name:       "capacity rejection returns 429",
+			outcome:    fctypes.QueueOutcomeRejectedCapacity,
+			err:        fctypes.ErrQueueAtCapacity,
+			wantCode:   errcommon.ResourceExhausted,
+			wantReason: string(errcommon.RequestDroppedReasonSaturated),
+		},
+		{
+			name:       "TTL expiry returns 503",
+			outcome:    fctypes.QueueOutcomeEvictedTTL,
+			err:        fctypes.ErrTTLExpired,
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonTTLExpired),
+		},
+		{
+			name:       "context cancellation returns 503",
+			outcome:    fctypes.QueueOutcomeEvictedContextCancelled,
+			err:        fctypes.ErrContextCancelled,
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonContextCancelled),
+		},
+		{
+			name:       "shutdown eviction returns 503",
+			outcome:    fctypes.QueueOutcomeEvictedOther,
+			err:        fctypes.ErrFlowControllerNotRunning,
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonShuttingDown),
+		},
+		{
+			name:       "shutdown rejection returns 503",
+			outcome:    fctypes.QueueOutcomeRejectedOther,
+			err:        fctypes.ErrFlowControllerNotRunning,
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonShuttingDown),
+		},
+		{
+			name:     "internal error returns 500",
+			outcome:  fctypes.QueueOutcomeRejectedOther,
+			err:      errors.New("unexpected failure"),
+			wantCode: errcommon.Internal,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := translateFlowControlOutcome(tt.outcome, tt.err)
+			if tt.wantNil {
+				require.NoError(t, result)
+				return
+			}
+			require.Error(t, result)
+			var e errcommon.Error
+			require.ErrorAs(t, result, &e)
+			assert.Equal(t, tt.wantCode, e.Code)
+			if tt.wantReason != "" {
+				assert.Equal(t, tt.wantReason, e.Headers[errcommon.RequestDroppedReasonHeaderKey],
+					"drop reason header should match")
 			}
 		})
 	}

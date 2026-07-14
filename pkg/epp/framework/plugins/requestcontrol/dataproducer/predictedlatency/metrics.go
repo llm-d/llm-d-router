@@ -68,7 +68,7 @@ var (
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "inference_request_metric",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_inference_request_metric] Consolidated gauge for various inference request metrics including TTFT, TPOT, SLOs, and prediction durations.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_inference_request_metric] Consolidated gauge for various inference request metrics including TTFT, TPOT, SLOs, and prediction durations.", compbasemetrics.ALPHA),
 		},
 		modelTypeLabels,
 	)
@@ -86,27 +86,17 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_ttft_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_ttft_seconds] Inference model TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_ttft_seconds] Inference model TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   generalLatencyBuckets,
 		},
 		modelLabels,
-	)
-
-	llmdRequestTTFT = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "request_ttft_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inference model TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
-		},
-		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name"},
 	)
 
 	requestPredictedTTFT = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_predicted_ttft_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_predicted_ttft_seconds] Inference model Predicted TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_predicted_ttft_seconds] Inference model Predicted TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   generalLatencyBuckets,
 		},
 		modelLabels,
@@ -126,7 +116,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_ttft_prediction_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_ttft_prediction_duration_seconds] Duration taken to generate TTFT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_ttft_prediction_duration_seconds] Duration taken to generate TTFT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   predictionLatencyBuckets,
 		},
 		modelLabels,
@@ -146,27 +136,17 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_tpot_seconds] Inference model TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_streaming_tpot_seconds] Inference model TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   tpotBuckets,
 		},
 		modelLabels,
-	)
-
-	llmdRequestTPOT = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "request_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inference model TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   tpotBuckets,
-		},
-		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name"},
 	)
 
 	requestPredictedTPOT = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_predicted_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_predicted_tpot_seconds] Inference model Predicted TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_predicted_tpot_seconds] Inference model Predicted TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   tpotBuckets,
 		},
 		modelLabels,
@@ -186,7 +166,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_tpot_prediction_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_tpot_prediction_duration_seconds] Duration taken to generate TPOT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_tpot_prediction_duration_seconds] Duration taken to generate TPOT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   predictionLatencyBuckets,
 		},
 		modelLabels,
@@ -206,7 +186,7 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_slo_violation_total",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_slo_violation_total] Counter of SLO violations for each model, target model, and violation type.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_slo_violation_total] Counter of SLO violations for each model, target model, and violation type.", compbasemetrics.ALPHA),
 		},
 		modelTypeLabels,
 	)
@@ -229,13 +209,11 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		inferenceGauges,
 		llmdInferenceGauges,
 		requestTTFT,
-		llmdRequestTTFT,
 		requestPredictedTTFT,
 		llmdRequestPredictedTTFT,
 		requestTTFTPredictionDuration,
 		llmdRequestTTFTPredictionDuration,
 		requestTPOT,
-		llmdRequestTPOT,
 		requestPredictedTPOT,
 		llmdRequestPredictedTPOT,
 		requestTPOTPredictionDuration,
@@ -261,7 +239,6 @@ func recordRequestTPOT(ctx context.Context, pluginName, pluginType, modelName, t
 		return false
 	}
 	requestTPOT.WithLabelValues(modelName, targetModelName).Observe(tpot)
-	llmdRequestTPOT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(tpot)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTPOT).Set(tpot)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOT).Set(tpot)
 	return true
@@ -322,7 +299,6 @@ func recordRequestTTFT(ctx context.Context, pluginName, pluginType, modelName, t
 		return false
 	}
 	requestTTFT.WithLabelValues(modelName, targetModelName).Observe(ttft)
-	llmdRequestTTFT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(ttft)
 	inferenceGauges.WithLabelValues(modelName, targetModelName, typeTTFT).Set(ttft)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFT).Set(ttft)
 	return true

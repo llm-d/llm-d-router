@@ -1,0 +1,14 @@
+# ------------------------------------------------------------------------------
+# Custom Resource Definitions (CRDs) for Gateway API
+#
+# **Warning**: CRDs are cluster-level, so in a shared development environment
+# this needs to be done in a controlled and communicated manner.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Vendored from https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.5.1
+# (standard-install.yaml). Refresh by re-downloading into gateway-api.yaml when
+# upgrading Gateway API.
+resources:
+- gateway-api.yaml

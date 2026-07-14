@@ -40,8 +40,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/controller"
 	datalayerlogger "github.com/llm-d/llm-d-router/pkg/epp/datalayer/logger"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 )
 
@@ -60,8 +62,10 @@ type ExtProcServerRunner struct {
 	Director                         *requestcontrol.Director
 	ParserRegistry                   *handlers.ParserRegistry
 	SaturationDetector               fwkfc.SaturationDetector
+	PriorityBandControlPlane         contracts.PriorityBandControlPlane
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
+	EnableGRPCStreamMetrics          bool
 }
 
 // NewDefaultExtProcServerRunner creates a runner with default values.
@@ -102,28 +106,35 @@ func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 // SetupWithManager sets up the runner with the given manager.
 func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 	// Create the controllers and register them with the manager
+	// When PopulateNonLeaderDatastore is set the reconcilers run on every
+	// replica (not just the leader) so non-leaders keep a populated datastore.
+	runOnNonLeaders := r.ControllerCfg.PopulateNonLeaderDatastore
 	if r.ControllerCfg.startCrdReconcilers {
 		if err := (&controller.InferencePoolReconciler{
-			Datastore: r.Datastore,
-			Reader:    mgr.GetClient(),
+			Datastore:       r.Datastore,
+			Reader:          mgr.GetClient(),
+			RunOnNonLeaders: runOnNonLeaders,
 		}).SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("failed setting up InferencePoolReconciler - %w", err)
 		}
 
 		if r.ControllerCfg.hasInferenceObjective {
 			if err := (&controller.InferenceObjectiveReconciler{
-				Datastore: r.Datastore,
-				Reader:    mgr.GetClient(),
-				PoolGKNN:  r.GKNN,
+				Datastore:                r.Datastore,
+				Reader:                   mgr.GetClient(),
+				PoolGKNN:                 r.GKNN,
+				PriorityBandControlPlane: r.PriorityBandControlPlane,
+				RunOnNonLeaders:          runOnNonLeaders,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("failed setting up InferenceObjectiveReconciler - %w", err)
 			}
 		}
 		if r.ControllerCfg.hasInferenceModelRewrites {
 			if err := (&controller.InferenceModelRewriteReconciler{
-				Datastore: r.Datastore,
-				Reader:    mgr.GetClient(),
-				PoolGKNN:  r.GKNN,
+				Datastore:       r.Datastore,
+				Reader:          mgr.GetClient(),
+				PoolGKNN:        r.GKNN,
+				RunOnNonLeaders: runOnNonLeaders,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("failed setting up InferenceModelRewriteReconciler - %w", err)
 			}
@@ -131,8 +142,9 @@ func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	if err := (&controller.PodReconciler{
-		Datastore: r.Datastore,
-		Reader:    mgr.GetClient(),
+		Datastore:       r.Datastore,
+		Reader:          mgr.GetClient(),
+		RunOnNonLeaders: runOnNonLeaders,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("failed setting up PodReconciler - %w", err)
 	}
@@ -188,6 +200,10 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 		if r.GRPCMaxSendMsgSize > 0 {
 			grpcOpts = append(grpcOpts, grpc.MaxSendMsgSize(r.GRPCMaxSendMsgSize))
+		}
+		if r.EnableGRPCStreamMetrics {
+			metrics.RegisterGRPCStreamMetrics()
+			grpcOpts = append(grpcOpts, grpc.ChainStreamInterceptor(streamMetricsInterceptor))
 		}
 		// Note: gzip compressor is registered via blank import above.
 

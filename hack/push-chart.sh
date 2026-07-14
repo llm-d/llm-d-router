@@ -26,7 +26,8 @@ IMAGE_REGISTRY=${IMAGE_REGISTRY:-ghcr.io/llm-d}
 AGENTGATEWAY_TAG=${AGENTGATEWAY_TAG:-${EXTRA_TAG}}
 CHART_SUFFIX=${CHART_SUFFIX:-""}
 EPP_RELEASE_IMAGE_REPOSITORY=${EPP_RELEASE_IMAGE_REPOSITORY:-llm-d-router-endpoint-picker}
-export EXTRA_TAG AGENTGATEWAY_TAG IMAGE_REGISTRY EPP_RELEASE_IMAGE_REPOSITORY CHART_SUFFIX
+LATENCY_PREDICTOR_TAG=${LATENCY_PREDICTOR_TAG:-latest}
+export EXTRA_TAG AGENTGATEWAY_TAG IMAGE_REGISTRY EPP_RELEASE_IMAGE_REPOSITORY LATENCY_PREDICTOR_TAG CHART_SUFFIX
 
 HELM_CHART_REPO=${HELM_CHART_REPO:-${IMAGE_REGISTRY}/charts}
 CHART=${CHART:-llm-d-router-gateway}
@@ -43,6 +44,20 @@ then
      .router.epp.image.repository=strenv(EPP_RELEASE_IMAGE_REPOSITORY) |
      .router.epp.image.tag=strenv(EXTRA_TAG) |
      .router.epp.image.pullPolicy="IfNotPresent"' \
+    config/charts/${CHART}/values.yaml
+  if [[ ! ${LATENCY_PREDICTOR_TAG} =~ ${semver_regex} ]]; then
+    echo "ERROR: LATENCY_PREDICTOR_TAG must be a semver value on a release branch, got '${LATENCY_PREDICTOR_TAG}'"
+    exit 1
+  fi
+  ${YQ} -i \
+    '.router.latencyPredictor.trainingServer.image.registry=strenv(IMAGE_REGISTRY) |
+     .router.latencyPredictor.trainingServer.image.repository="llm-d-latency-predictor-training-server" |
+     .router.latencyPredictor.trainingServer.image.tag=strenv(LATENCY_PREDICTOR_TAG) |
+     .router.latencyPredictor.trainingServer.image.pullPolicy="IfNotPresent" |
+     .router.latencyPredictor.predictionServers.image.registry=strenv(IMAGE_REGISTRY) |
+     .router.latencyPredictor.predictionServers.image.repository="llm-d-latency-predictor-prediction-server" |
+     .router.latencyPredictor.predictionServers.image.tag=strenv(LATENCY_PREDICTOR_TAG) |
+     .router.latencyPredictor.predictionServers.image.pullPolicy="IfNotPresent"' \
     config/charts/${CHART}/values.yaml
   if [[ ${CHART} == "llm-d-router-standalone" ]]; then
     ${YQ} -i \

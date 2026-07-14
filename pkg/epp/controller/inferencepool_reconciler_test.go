@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,6 +40,18 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
+
+var endpointPoolCmpOpts = []cmp.Option{
+	cmp.Comparer(func(a, b labels.Selector) bool {
+		if a == nil && b == nil {
+			return true
+		}
+		if a == nil || b == nil {
+			return false
+		}
+		return a.String() == b.String()
+	}),
+}
 
 var (
 	selectorV1 = map[string]string{"app": "vllm_v1"}
@@ -111,7 +124,7 @@ func TestInferencePoolReconciler(t *testing.T) {
 		req := ctrl.Request{NamespacedName: namespacedName}
 		ctx := context.Background()
 
-		ds := datastore.NewDatastore(ctx, epf, 0)
+		ds := datastore.NewDatastore(ctx, epf)
 		inferencePoolReconciler := &InferencePoolReconciler{Reader: fakeClient, Datastore: ds}
 
 		// Step 1: Inception, only ready pods matching pool1 are added to the store.
@@ -181,7 +194,7 @@ type diffStoreParams struct {
 
 func diffStore(store datastore.Datastore, params diffStoreParams) string {
 	gotPool, _ := store.PoolGet()
-	if diff := cmp.Diff(params.wantPool, gotPool); diff != "" {
+	if diff := cmp.Diff(params.wantPool, gotPool, endpointPoolCmpOpts...); diff != "" {
 		return "inferencePool:" + diff
 	}
 

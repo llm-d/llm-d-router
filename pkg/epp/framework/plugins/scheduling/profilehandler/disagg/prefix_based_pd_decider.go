@@ -127,8 +127,11 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 		return false
 	}
 
-	// number of cached tokens
-	hitPrefixTokens := prefixCacheMatchInfo.MatchBlocks() * prefixCacheMatchInfo.BlockSizeTokens()
+	// number of cached tokens. Use the unweighted cached-block count, not the
+	// tier-weighted match score: a RAM-cached prefix must contribute its full
+	// token count here, otherwise the non-cached suffix is overestimated and
+	// requests with large local-RAM hits are misrouted to remote prefill.
+	hitPrefixTokens := prefixCacheMatchInfo.CachedBlockCount() * prefixCacheMatchInfo.BlockSizeTokens()
 	// length of non-cached suffix in tokens
 	nonCachedTokens := inputTokens - hitPrefixTokens
 
@@ -151,7 +154,7 @@ func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) 
 	}
 
 	if tp := request.Body.TokenizedPrompt; tp != nil {
-		return len(tp.TokenIDs), nil
+		return tp.TokenCount(), nil
 	}
 	return 0, nil
 }

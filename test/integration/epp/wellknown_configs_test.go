@@ -108,10 +108,11 @@ apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: disagg-headers-handler
-- type: always-disagg-pd-decider
 - type: disagg-profile-handler
   parameters:
-    deciderPluginName: always-disagg-pd-decider
+    deciders:
+      prefill: always-disagg-pd-decider
+- type: always-disagg-pd-decider
 - type: prefill-filter
 - type: decode-filter
 - type: prefix-cache-scorer
@@ -162,10 +163,11 @@ apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: disagg-headers-handler
-- type: always-disagg-pd-decider
 - type: disagg-profile-handler
   parameters:
-    deciderPluginName: always-disagg-pd-decider
+    deciders:
+      prefill: always-disagg-pd-decider
+- type: always-disagg-pd-decider
 - type: prefill-filter
 - type: decode-filter
 - type: prefix-cache-scorer
@@ -369,6 +371,31 @@ schedulingProfiles:
 			{Name: "weighted-random-picker", Type: "weighted-random-picker"},
 			{Name: "slo-headroom-tier-filter", Type: "slo-headroom-tier-filter"},
 			{Name: "latency-slo-admitter", Type: "latency-slo-admitter"},
+		},
+	},
+	"payload-agnostic": {
+		yaml: `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: passthrough-parser
+- type: active-request-scorer
+- type: session-affinity-scorer
+requestHandler:
+  parsers:
+  - pluginRef: passthrough-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: active-request-scorer
+    weight: 1
+  - pluginRef: session-affinity-scorer
+    weight: 1
+`,
+		expectedPlugins: []configapi.PluginSpec{
+			{Name: "passthrough-parser", Type: "passthrough-parser"},
+			{Name: "active-request-scorer", Type: "active-request-scorer"},
+			{Name: "session-affinity-scorer", Type: "session-affinity-scorer"},
 		},
 	},
 }

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -52,6 +54,7 @@ var minBlockSizeTokens = 64
 var (
 	_ requestcontrol.DataProducer = &dataProducer{}
 	_ requestcontrol.PreRequest   = &dataProducer{}
+	_ plugin.StateDumper          = &dataProducer{}
 )
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
@@ -67,6 +70,55 @@ type dataProducer struct {
 // TypedName returns the type and name of the plugin.
 func (p *dataProducer) TypedName() plugin.TypedName {
 	return p.typedName
+}
+
+const maxDebugDumpPods = 100
+
+// prefixIndexState is the sanitized snapshot returned by DumpState. It carries
+// per-pod block counts only; the prompt-derived block hashes are never exposed.
+// The dump is partial when TotalPods exceeds MaxPods.
+type prefixIndexState struct {
+	Pods      []podBlockCount `json:"pods"`
+	TotalPods int             `json:"totalPods"`
+	MaxPods   int             `json:"maxPods"`
+}
+
+type podBlockCount struct {
+	Pod    string `json:"pod"`
+	Blocks int    `json:"blocks"`
+}
+
+// DumpState reports how many prefix-cache blocks the indexer currently tracks
+// per pod, ordered by block count and capped to maxDebugDumpPods so the debug
+// payload stays bounded when a pool has many pods.
+func (p *dataProducer) DumpState() (json.RawMessage, error) {
+	return json.Marshal(p.snapshotState())
+}
+
+func (p *dataProducer) snapshotState() prefixIndexState {
+	state := prefixIndexState{MaxPods: maxDebugDumpPods}
+	if p.indexerInst == nil {
+		return state
+	}
+
+	counts := p.indexerInst.PodBlockCounts()
+	state.TotalPods = len(counts)
+	state.Pods = make([]podBlockCount, 0, len(counts))
+	for pod, blocks := range counts {
+		state.Pods = append(state.Pods, podBlockCount{Pod: pod.String(), Blocks: blocks})
+	}
+
+	sort.SliceStable(state.Pods, func(a, b int) bool {
+		if state.Pods[a].Blocks != state.Pods[b].Blocks {
+			return state.Pods[a].Blocks > state.Pods[b].Blocks
+		}
+		return state.Pods[a].Pod < state.Pods[b].Pod
+	})
+
+	if len(state.Pods) > maxDebugDumpPods {
+		state.Pods = state.Pods[:maxDebugDumpPods]
+	}
+	return state
 }
 
 // Produces returns the data produced by the plugin.
@@ -179,22 +231,27 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
 		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
 	}
-	hashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
-	total := len(hashes)
-	prefixCacheServers := p.matchLongestPrefix(ctx, hashes)
+	perPromptHashes := prefixhash.GetBlockHashes(ctx, request, blockSize, maxBlocks)
+
+	prefixCacheServers := make(map[ServerID]int)
+	totalBlocks := 0
+	for _, hashes := range perPromptHashes {
+		for server, matchLen := range p.matchLongestPrefix(ctx, hashes) {
+			prefixCacheServers[server] += matchLen
+		}
+		totalBlocks += len(hashes)
+	}
 
 	for _, pod := range pods {
 		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().NamespacedName)]
-		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, total, blockSize))
+		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
 	}
 
 	state := &SchedulingContextState{
-		PrefixHashes:       hashes,
+		PerPromptHashes:    perPromptHashes,
 		PrefixCacheServers: prefixCacheServers,
 	}
 
-	// Store the state in shared plugin state for later use in PreRequest.
-	// NOTE: We use the prefix plugin's name as part of the key so that multiple instances avoid collisions.
 	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
 
 	return nil
@@ -228,12 +285,17 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	// Update indexer asynchronously to avoid blocking the request path.
 	p.wg.Go(func() {
 		for _, s := range servers {
-			p.indexerInst.Add(state.PrefixHashes, s)
+			for _, hashes := range state.PerPromptHashes {
+				p.indexerInst.Add(hashes, s)
+			}
 		}
 	})
 
 	// Record metrics. Lengths are reported as a byte estimate (~averageCharactersPerToken bytes/token).
-	total := len(state.PrefixHashes)
+	total := 0
+	for _, hashes := range state.PerPromptHashes {
+		total += len(hashes)
+	}
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4

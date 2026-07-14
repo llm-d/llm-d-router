@@ -2,6 +2,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/llm-d/llm-d-router.svg)](https://pkg.go.dev/github.com/llm-d/llm-d-router)
 [![License](https://img.shields.io/github/license/llm-d/llm-d-router)](/LICENSE)
 [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://llm-d.slack.com/archives/C08SBNRRSBD)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router?ref=badge_shield)
 
 # llm-d Router
 
@@ -39,7 +40,7 @@ A lightweight deployment where a self-managed Envoy proxy runs alongside the EPP
 ### 2. Gateway Mode (Inference Gateway)
 The recommended mode for production environments, leveraging the official [Gateway API]. In this mode, the EPP acts as a backend for an `InferencePool`, which is referenced by an `HTTPRoute` on a shared `Gateway`. This enables advanced traffic management, multi-cluster load balancing, and shared infrastructure for both inference and traditional workloads.
 
-For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation].
+For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide].
 
 ---
 
@@ -61,6 +62,7 @@ To ensure clarity across the project, we use the following standard terminology:
 [Kubernetes Gateway API]:https://gateway-api.sigs.k8s.io/
 [Architecture Documentation]:docs/architecture.md
 [Disaggregation Documentation]:docs/disaggregation.md
+[EPP Container Sizing Guide]:docs/operations.md
 [InferencePool]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
 [Gateway API Inference Extension (GIE)]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
 [Kubernetes Gateway API Inference Extensions]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
@@ -86,6 +88,10 @@ Contributions are welcome!
 [create an issue]:https://github.com/llm-d/llm-d-router/issues/new
 [discussion]:https://github.com/llm-d/llm-d-router/discussions/new?category=q-a
 [Slack]:https://llm-d.slack.com/
-[Google Meet]:https://meet.google.com/zij-zekm-jvt
+[Google Meet]:https://meet.google.com/ozx-goao-cxh
 [Meeting Notes]:https://docs.google.com/document/d/1Pf3x7ZM8nNpU56nt6CzePAOmFZ24NXDeXyaYb565Wq4
 [#sig-router]:https://llm-d.slack.com/?redir=%2Fmessages%2Fsig-router
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router?ref=badge_large)

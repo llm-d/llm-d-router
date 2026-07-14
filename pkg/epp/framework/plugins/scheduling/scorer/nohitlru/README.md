@@ -10,7 +10,7 @@ Integrates with a prefix cache plugin to determine whether a request has cache h
 
 LRU tracking is specific to cold requests only — a pod is added to the LRU when it serves a cold request, not when it serves a cached one.
 
-> **Note:** Designed to work alongside a prefix cache scorer (such as `precise-prefix-cache-scorer`). If no prefix cache state is available, all requests are treated as cold. The prefix-cache scorer should be defined first in the scheduling profile.
+> **Note:** Designed to work alongside a prefix cache scorer (such as `prefix-cache-scorer`). If no prefix cache state is available, all requests are treated as cold. The prefix-cache scorer should be defined first in the scheduling profile.
 
 **Parameters:**
 - `prefixPluginType` (string, optional, default: `"prefix-cache-scorer"`): Type of the prefix-cache scorer to read for cache-hit detection.
@@ -20,16 +20,20 @@ LRU tracking is specific to cold requests only — a pod is added to the LRU whe
 **Configuration Example:**
 ```yaml
 plugins:
-  - type: precise-prefix-cache-scorer
+  - type: precise-prefix-cache-producer
+
+  - type: prefix-cache-scorer
     name: cache-scorer
-    weight: 10
+    parameters:
+      prefixMatchInfoProducerName: precise-prefix-cache-producer
 
   - type: no-hit-lru-scorer
     name: lru-scorer
     parameters:
-      prefixPluginType: "precise-prefix-cache-scorer"
+      prefixPluginType: "prefix-cache-scorer"
       prefixPluginName: "cache-scorer"
       lruSize: 1024
+
 schedulingProfiles:
   - name: default
     plugins:

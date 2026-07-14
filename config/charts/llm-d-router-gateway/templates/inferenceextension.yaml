@@ -1,8 +1,0 @@
-{{ include "llm-d-router.validations.epp" $ }}
-{{ include "inference-extension.config" . }}
-{{ include "inference-extension.deployment" . }}
-{{ include "inference-extension.lead-election-rbac" . }}
-{{ include "inference-extension.sa-token-secret" . }}
-{{ include "inference-extension.service" . }}
-{{ include "inference-extension.service-monitor" . }}
-{{ include "inference-extension.inferencepool-resource" . }}

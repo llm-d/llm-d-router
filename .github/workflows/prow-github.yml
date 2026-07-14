@@ -9,7 +9,7 @@ on:
 permissions:
   # Allow labeling issues
   issues: write
-  # Allow adding a review to a pull request
+  # Allow assigning, labeling, and updating pull requests
   pull-requests: write
 
 jobs:
@@ -21,13 +21,11 @@ jobs:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
           prow-commands: "/assign
             /unassign
-            /approve
             /retitle
             /area
             /kind
             /priority
             /remove
-            /lgtm
             /close
             /reopen
             /lock

@@ -19,6 +19,7 @@ package tokenizer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -35,16 +36,16 @@ import (
 )
 
 type mockTokenizer struct {
-	renderFunc     func(prompt string) ([]uint32, []tokenizerTypes.Offset, error)
-	renderChatFunc func(req *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error)
+	renderFunc     func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error)
+	renderChatFunc func(payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
-func (m *mockTokenizer) Render(_ context.Context, prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
-	return m.renderFunc(prompt)
+func (m *mockTokenizer) Render(_ context.Context, payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
+	return m.renderFunc(payload)
 }
 
-func (m *mockTokenizer) RenderChat(_ context.Context, req *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
-	return m.renderChatFunc(req)
+func (m *mockTokenizer) RenderChat(_ context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	return m.renderChatFunc(payload)
 }
 
 func newTestPlugin(tok tokenizer) *Plugin {
@@ -149,7 +150,7 @@ func TestProduce_PopulatesTokenizedPrompt(t *testing.T) {
 		},
 	}
 	tok := &mockTokenizer{
-		renderChatFunc: func(_ *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+		renderChatFunc: func(_ fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
 			return []uint32{1, 2, 3, 4}, mm, nil
 		},
 	}
@@ -160,11 +161,12 @@ func TestProduce_PopulatesTokenizedPrompt(t *testing.T) {
 			ChatCompletions: &fwkrh.ChatCompletionsRequest{
 				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
 			},
+			Payload: fwkrh.PayloadMap{},
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
 	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, []uint32{1, 2, 3, 4}, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Equal(t, []uint32{1, 2, 3, 4}, req.Body.TokenizedPrompt.PerPromptTokens[0])
 	require.Len(t, req.Body.TokenizedPrompt.MultiModalFeatures, 2)
 
 	assert.Equal(t, 3, req.Body.TokenizedPrompt.MultiModalFeatures[0].Offset)
@@ -175,7 +177,7 @@ func TestProduce_PopulatesTokenizedPrompt(t *testing.T) {
 }
 
 func TestProduce_SkipsWhenAlreadyPopulated(t *testing.T) {
-	existing := &fwkrh.TokenizedPrompt{TokenIDs: []uint32{42}}
+	existing := &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{{42}}}
 	p := newTestPlugin(&mockTokenizer{})
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{TokenizedPrompt: existing},
@@ -186,12 +188,12 @@ func TestProduce_SkipsWhenAlreadyPopulated(t *testing.T) {
 
 func TestProduce_SetsCacheSaltOnSkipPath(t *testing.T) {
 	tok := &mockTokenizer{
-		renderChatFunc: func(*tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+		renderChatFunc: func(fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
 			t.Fatal("backend must not run on the skip path")
 			return nil, nil, nil
 		},
 	}
-	existing := &fwkrh.TokenizedPrompt{TokenIDs: []uint32{1, 2, 3}}
+	existing := &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{{1, 2, 3}}}
 	p := newTestPlugin(tok)
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
@@ -202,12 +204,12 @@ func TestProduce_SetsCacheSaltOnSkipPath(t *testing.T) {
 	require.NoError(t, p.Produce(context.Background(), req, nil))
 	assert.Same(t, existing, req.Body.TokenizedPrompt)
 	assert.Equal(t, "tenant-x", req.Body.TokenizedPrompt.CacheSalt)
-	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedPrompt.PerPromptTokens[0])
 }
 
 func TestRenderBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 	tok := &mockTokenizer{
-		renderFunc: func(string) ([]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			t.Fatal("render must not run when token IDs are provided")
 			return nil, nil, nil
 		},
@@ -216,22 +218,43 @@ func TestRenderBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: []uint32{5, 6, 7}}},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []uint32{5, 6, 7}, tp.TokenIDs)
+	assert.Equal(t, []uint32{5, 6, 7}, tp.PerPromptTokens[0])
 }
 
-func TestRenderBackend_CompletionsArrayUsesPlainText(t *testing.T) {
-	var got string
+func TestRenderBackend_CompletionsArrayPassesArrayPayload(t *testing.T) {
 	tok := &mockTokenizer{
-		renderFunc: func(prompt string) ([]uint32, []tokenizerTypes.Offset, error) {
-			got = prompt
-			return []uint32{1}, nil, nil
+		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
+			pm, ok := payload.AsMap()
+			require.True(t, ok)
+			arr, ok := pm["prompt"].([]string)
+			require.True(t, ok, "multi-string prompt must be passed as []string")
+			assert.Equal(t, []string{"alpha", "beta"}, arr)
+			return [][]uint32{{1, 2}, {3}}, nil, nil
 		},
 	}
-	_, err := renderBackend{tk: tok}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+	tp, err := renderBackend{tk: tok}.produce(context.Background(), &fwkrh.InferenceRequestBody{
 		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Strings: []string{"alpha", "beta"}}},
 	})
 	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{1, 2}, {3}}, tp.PerPromptTokens)
+}
+
+func TestRenderBackend_CompletionsSingleArrayUsesPlainText(t *testing.T) {
+	var got string
+	tok := &mockTokenizer{
+		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
+			pm, ok := payload.AsMap()
+			require.True(t, ok)
+			got, _ = pm["prompt"].(string)
+			return [][]uint32{{1}}, nil, nil
+		},
+	}
+	tp, err := renderBackend{tk: tok}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Strings: []string{"alpha beta"}}},
+	})
+	require.NoError(t, err)
 	assert.Equal(t, "alpha beta", got)
+	assert.Equal(t, [][]uint32{{1}}, tp.PerPromptTokens)
 }
 
 func TestProduce_NilBody(t *testing.T) {
@@ -244,7 +267,7 @@ func TestProduce_NilBody(t *testing.T) {
 
 func TestProduce_TokenizerError(t *testing.T) {
 	tok := &mockTokenizer{
-		renderChatFunc: func(_ *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+		renderChatFunc: func(_ fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
 			return nil, nil, assert.AnError
 		},
 	}
@@ -254,6 +277,7 @@ func TestProduce_TokenizerError(t *testing.T) {
 			ChatCompletions: &fwkrh.ChatCompletionsRequest{
 				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
 			},
+			Payload: fwkrh.PayloadMap{},
 		},
 	}
 	err := p.Produce(context.Background(), req, nil)
@@ -265,7 +289,9 @@ func TestProduce_TokenizerError(t *testing.T) {
 func TestProduce_UnsupportedBodyType(t *testing.T) {
 	p := newTestPlugin(&mockTokenizer{})
 	req := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{}, // no Completions or ChatCompletions
+		Body: &fwkrh.InferenceRequestBody{
+			Payload: fwkrh.PayloadMap{},
+		},
 	}
 	err := p.Produce(context.Background(), req, nil)
 	require.Error(t, err)
@@ -276,11 +302,11 @@ func TestProduce_UnsupportedBodyType(t *testing.T) {
 func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
 	// Generate requests carry pre-tokenized IDs — the tokenizer must NOT be called.
 	tok := &mockTokenizer{
-		renderFunc: func(_ string) ([]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			t.Error("tokenizer.Render must not be called for generate requests")
 			return nil, nil, nil
 		},
-		renderChatFunc: func(_ *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+		renderChatFunc: func(_ fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
 			t.Error("tokenizer.RenderChat must not be called for generate requests")
 			return nil, nil, nil
 		},
@@ -298,7 +324,7 @@ func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
 
 	require.NoError(t, p.Produce(context.Background(), req, nil))
 	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, tokenIDs, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Equal(t, tokenIDs, req.Body.TokenizedPrompt.PerPromptTokens[0])
 	assert.Nil(t, req.Body.TokenizedPrompt.MultiModalFeatures)
 }
 
@@ -306,11 +332,11 @@ func TestProduce_GenerateFlattensFeatures(t *testing.T) {
 	// Generate requests with multimodal features must populate TokenizedPrompt.MultiModalFeatures
 	// in offset-sorted prompt order, so downstream prefix-cache scoring picks up image hashes.
 	tok := &mockTokenizer{
-		renderFunc: func(_ string) ([]uint32, []tokenizerTypes.Offset, error) {
+		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			t.Error("tokenizer.Render must not be called for generate requests")
 			return nil, nil, nil
 		},
-		renderChatFunc: func(_ *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+		renderChatFunc: func(_ fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
 			t.Error("tokenizer.RenderChat must not be called for generate requests")
 			return nil, nil, nil
 		},
@@ -339,7 +365,7 @@ func TestProduce_GenerateFlattensFeatures(t *testing.T) {
 
 	require.NoError(t, p.Produce(context.Background(), req, nil))
 	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, tokenIDs, req.Body.TokenizedPrompt.TokenIDs)
+	assert.Equal(t, tokenIDs, req.Body.TokenizedPrompt.PerPromptTokens[0])
 	assert.Equal(t,
 		[]fwkrh.MultiModalFeature{
 			{Modality: fwkrh.ModalityImage, Hash: "abc123hash", Offset: 1, Length: 3},
@@ -414,6 +440,91 @@ func TestChatCompletionsToRenderChatRequest(t *testing.T) {
 	assert.True(t, result.ReturnAssistantTokensMask)
 
 	assert.Equal(t, toolCalls, result.Conversation[1].ToolCalls)
+}
+
+func TestProduce_StringArrayPrompt(t *testing.T) {
+	tok := &mockTokenizer{
+		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
+			pm, _ := payload.AsMap()
+			_, ok := pm["prompt"].([]string)
+			require.True(t, ok, "multi-string prompt must be passed as []string")
+			return [][]uint32{{10, 20, 30}, {40, 50}}, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Strings: []string{"hello", "world"}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	require.Len(t, req.Body.TokenizedPrompt.PerPromptTokens, 2)
+	assert.Equal(t, []uint32{10, 20, 30}, req.Body.TokenizedPrompt.PerPromptTokens[0])
+	assert.Equal(t, []uint32{40, 50}, req.Body.TokenizedPrompt.PerPromptTokens[1])
+}
+
+func TestProduce_StringArrayPromptRenderError(t *testing.T) {
+	tok := &mockTokenizer{
+		renderFunc: func(fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
+			return nil, nil, errors.New("render failed")
+		},
+	}
+	p := newTestPlugin(tok)
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Strings: []string{"hello", "world"}},
+			},
+		},
+	}
+	err := p.Produce(context.Background(), req, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tokenization failed")
+	assert.Nil(t, req.Body.TokenizedPrompt)
+}
+
+func TestProduce_StringArrayPromptDoesNotPublishEmptyTokenResult(t *testing.T) {
+	tok := &mockTokenizer{
+		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
+			return nil, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Strings: []string{"", ""}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.Nil(t, req.Body.TokenizedPrompt)
+}
+
+func TestProduce_SinglePromptSetsPerPromptTokens(t *testing.T) {
+	tok := &mockTokenizer{
+		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
+			return [][]uint32{{10, 20, 30}}, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{
+				Prompt: fwkrh.Prompt{Raw: "hello"},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, [][]uint32{{10, 20, 30}}, req.Body.TokenizedPrompt.PerPromptTokens)
 }
 
 func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {
@@ -512,4 +623,183 @@ func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMessagesToRenderChatRequest_RawSystem(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		System:   fwkrh.AnthropicContent{Raw: "You are helpful."},
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}}},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 2)
+	assert.Equal(t, "system", result.Conversation[0].Role)
+	assert.Equal(t, tokenizerTypes.Content{Raw: "You are helpful."}, result.Conversation[0].Content)
+	assert.Equal(t, "user", result.Conversation[1].Role)
+	assert.Equal(t, tokenizerTypes.Content{Raw: "Hello"}, result.Conversation[1].Content)
+}
+
+func TestMessagesToRenderChatRequest_Tools(t *testing.T) {
+	tools := []any{map[string]any{"name": "get_weather"}}
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "What is the weather today?"}}},
+		Tools:    tools,
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	assert.Equal(t, tools, result.Tools)
+}
+
+func TestMessagesToRenderChatRequest_StructuredSystem(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		System: fwkrh.AnthropicContent{
+			Structured: []fwkrh.AnthropicContentBlock{
+				{Type: "text", Text: "System line 1."},
+				{Type: "text", Text: "System line 2."},
+			},
+		},
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 2)
+	assert.Equal(t, "system", result.Conversation[0].Role)
+	require.Len(t, result.Conversation[0].Content.Structured, 2)
+	assert.Equal(t, "text", result.Conversation[0].Content.Structured[0].Type)
+	assert.Equal(t, "System line 1.", result.Conversation[0].Content.Structured[0].Text)
+	assert.Equal(t, "System line 2.", result.Conversation[0].Content.Structured[1].Text)
+}
+
+func TestMessagesToRenderChatRequest_NoSystem(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 1)
+	assert.Equal(t, "user", result.Conversation[0].Role)
+}
+
+func TestMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []fwkrh.AnthropicMessage
+		wantConv []tokenizerTypes.Conversation
+	}{
+		{
+			name: "text-only structured content",
+			messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{
+					Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "text", Text: "Hello"},
+						{Type: "text", Text: "World"},
+					},
+				}},
+			},
+			wantConv: []tokenizerTypes.Conversation{
+				{Role: "user", Content: tokenizerTypes.Content{
+					Structured: []tokenizerTypes.ContentBlock{
+						{Type: "text", Text: "Hello"},
+						{Type: "text", Text: "World"},
+					},
+				}},
+			},
+		},
+		{
+			name: "image returns data URI",
+			messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{
+					Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "text", Text: "Describe this"},
+						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64", MediaType: "image/png", Data: "abc123"}},
+					},
+				}},
+			},
+			wantConv: []tokenizerTypes.Conversation{
+				{Role: "user", Content: tokenizerTypes.Content{
+					Structured: []tokenizerTypes.ContentBlock{
+						{Type: "text", Text: "Describe this"},
+						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "data:image/png;base64,abc123"}},
+					},
+				}},
+			},
+		},
+		{
+			name: "image returns https URL",
+			messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{
+					Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "text", Text: "Describe this"},
+						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "url", URL: "https://example.com/img.jpg"}},
+					},
+				}},
+			},
+			wantConv: []tokenizerTypes.Conversation{
+				{Role: "user", Content: tokenizerTypes.Content{
+					Structured: []tokenizerTypes.ContentBlock{
+						{Type: "text", Text: "Describe this"},
+						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "https://example.com/img.jpg"}},
+					},
+				}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &fwkrh.MessagesRequest{Messages: tt.messages}
+			result := MessagesToRenderChatRequest(msg)
+			require.Len(t, result.Conversation, len(tt.wantConv))
+			for i, want := range tt.wantConv {
+				got := result.Conversation[i]
+				assert.Equal(t, want.Role, got.Role)
+				assert.Equal(t, want.Content.Raw, got.Content.Raw)
+				assert.Equal(t, want.Content.Structured, got.Content.Structured,
+					"message %d: Structured content mismatch", i)
+			}
+		})
+	}
+}
+
+func TestProduce_MessagesRequest(t *testing.T) {
+	wantTokens := []uint32{100, 200, 300}
+	var gotPayload fwkrh.RequestPayload
+	tok := &mockTokenizer{
+		renderChatFunc: func(payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+			gotPayload = payload
+			return wantTokens, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+
+	// Payload holds the raw request body; RenderChat must receive the converted
+	// /render body, not that raw payload.
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Payload: fwkrh.PayloadMap{
+				"system":   "Be helpful.",
+				"messages": []any{map[string]any{"role": "user", "content": "Hi"}},
+			},
+			Messages: &fwkrh.MessagesRequest{
+				System:   fwkrh.AnthropicContent{Raw: "Be helpful."},
+				Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, [][]uint32{wantTokens}, req.Body.TokenizedPrompt.PerPromptTokens)
+
+	pm, ok := gotPayload.AsMap()
+	require.True(t, ok, "RenderChat payload must be a map")
+	assert.NotContains(t, pm, "system", "raw Anthropic top-level system must not reach /render")
+	msgs, ok := pm["messages"].([]any)
+	require.True(t, ok, "payload must carry the /render chat messages array")
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "system", msgs[0].(map[string]any)["role"])
+	assert.Equal(t, "user", msgs[1].(map[string]any)["role"])
 }

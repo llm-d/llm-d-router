@@ -223,7 +223,7 @@ func createRequest(prompt string) *scheduling.InferenceRequest {
 			Completions: &fwkrh.CompletionsRequest{
 				Prompt: fwkrh.Prompt{Raw: prompt},
 			},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, len(prompt)/averageCharactersPerToken)}},
 		},
 	}
 }
@@ -323,7 +323,7 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			handler, err := NewPdProfileHandler(
 				"test-handler",
-				pdProfileHandlerParameters{
+				PdProfileHandlerParameters{
 					PrefillProfile: defaultPrefillProfile,
 					DecodeProfile:  defaultDecodeProfile,
 				},
@@ -423,7 +423,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 
 			handler, err := NewPdProfileHandler(
 				"test-handler",
-				pdProfileHandlerParameters{
+				PdProfileHandlerParameters{
 					PrefillProfile: defaultPrefillProfile,
 					DecodeProfile:  defaultDecodeProfile,
 				},
@@ -521,7 +521,7 @@ func TestPdProfileHandler_ProcessResults(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			handler, err := NewPdProfileHandler(
 				"test-handler",
-				pdProfileHandlerParameters{
+				PdProfileHandlerParameters{
 					PrefillProfile: defaultPrefillProfile,
 					DecodeProfile:  defaultDecodeProfile,
 					PrimaryPort:    tt.primaryPort,

@@ -19,6 +19,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
 const (
@@ -29,15 +30,15 @@ const (
 
 // pdDeciderPlugin interface for pd decider plugins
 
-type pdProfileHandlerParameters struct {
+type PdProfileHandlerParameters struct {
 	DecodeProfile  string `json:"decodeProfile"`
 	PrefillProfile string `json:"prefillProfile"`
 	// Deprecated: This field was never used.
 	PrefixPluginType string `json:"prefixPluginType"`
 	// Deprecated: This field was never used.
-	PrefixPluginName            string `json:"prefixPluginName"`
+	PrefixPluginName            string `json:"prefixPluginName"  pluginRef:""`
 	PrimaryPort                 int    `json:"primaryPort"`
-	DeciderPluginName           string `json:"deciderPluginName"`
+	DeciderPluginName           string `json:"deciderPluginName" pluginRef:""`
 	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName"`
 }
 
@@ -55,21 +56,12 @@ func PdProfileHandlerFactory(name string, rawParameters *json.Decoder, handle pl
 		return nil, err
 	}
 	log.FromContext(handle.Context()).Info("Deprecated: pd-profile-handler is deprecated, use disagg-profile-handler instead")
-	parameters := pdProfileHandlerParameters{
-		DecodeProfile:     defaultDecodeProfile,
-		PrefillProfile:    defaultPrefillProfile,
-		PrimaryPort:       0,
-		DeciderPluginName: defaultDeciderPluginName,
-	}
-	if rawParameters != nil {
-		if err := rawParameters.Decode(&parameters); err != nil {
-			return nil, fmt.Errorf("failed to parse the parameters of the '%s' profile handler - %w", PdProfileHandlerType, err)
-		}
-	}
 
-	if parameters.PrefixPluginName == "" {
-		parameters.PrefixPluginName = parameters.PrefixPluginType
+	tmpParameters, err := PdProfileHandlerConfigParser(rawParameters, handle)
+	if err != nil {
+		return nil, err
 	}
+	parameters := tmpParameters.(PdProfileHandlerParameters)
 
 	if parameters.PrimaryPort != 0 {
 		log.FromContext(handle.Context()).Info("Deprecated: primaryPort not needed with Istio >= 1.28.1")
@@ -102,10 +94,30 @@ func PdProfileHandlerFactory(name string, rawParameters *json.Decoder, handle pl
 
 }
 
+func PdProfileHandlerConfigParser(rawParameters *json.Decoder, handle plugin.Handle) (any, error) {
+	parameters := PdProfileHandlerParameters{
+		DecodeProfile:     defaultDecodeProfile,
+		PrefillProfile:    defaultPrefillProfile,
+		PrimaryPort:       0,
+		DeciderPluginName: defaultDeciderPluginName,
+	}
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
+			return nil, fmt.Errorf("failed to parse the parameters of the '%s' profile handler - %w", PdProfileHandlerType, err)
+		}
+	}
+
+	if parameters.PrefixPluginName == "" {
+		parameters.PrefixPluginName = parameters.PrefixPluginType
+	}
+
+	return parameters, nil
+}
+
 // NewPdProfileHandler initializes a new PdProfileHandler and returns its pointer.
 //
 // Deprecated: Use NewDisaggProfileHandler instead.
-func NewPdProfileHandler(name string, parameters pdProfileHandlerParameters, deciderPlugin deciderPlugin) (*PdProfileHandler, error) {
+func NewPdProfileHandler(name string, parameters PdProfileHandlerParameters, deciderPlugin deciderPlugin) (*PdProfileHandler, error) {
 	result := &PdProfileHandler{
 		typedName:      plugin.TypedName{Name: name, Type: PdProfileHandlerType},
 		decodeProfile:  parameters.DecodeProfile,
@@ -158,16 +170,16 @@ func (h *PdProfileHandler) WithName(name string) *PdProfileHandler {
 func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
 	// Start tracing span for profile picking operation
-	tracer := tracing.Tracer()
-	ctx, span := tracer.Start(ctx, "llm_d.epp.pd.profile_handler.pick",
+	tracer := tracing.Tracer(schedplugins.TracerScope)
+	ctx, span := tracer.Start(ctx, "pick_pd_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
 
 	// Set initial attributes
 	span.SetAttributes(
-		attribute.Int("llm_d.profile_handler.total_profiles", len(profiles)),
-		attribute.Int("llm_d.profile_handler.executed_profiles", len(profileResults)),
+		attribute.Int("llm_d.epp.profile_handler.total_profiles", len(profiles)),
+		attribute.Int("llm_d.epp.profile_handler.executed_profiles", len(profileResults)),
 	)
 
 	// Set optional request attributes if request is not nil
@@ -183,8 +195,8 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 	if _, executed := profileResults[h.decodeProfile]; !executed {
 		// if decode profile was not executed yet, first let the scheduler run the decode profile
 		span.SetAttributes(
-			attribute.String("llm_d.profile_handler.decision", "run_decode"),
-			attribute.String("llm_d.profile_handler.selected_profile", h.decodeProfile),
+			attribute.String("llm_d.epp.profile_handler.decision", "run_decode"),
+			attribute.String("llm_d.epp.profile_handler.selected_profile", h.decodeProfile),
 		)
 		return map[string]scheduling.SchedulerProfile{
 			h.decodeProfile: profiles[h.decodeProfile],
@@ -196,8 +208,8 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 	// check if all configured profiles have been executed, or if decode failed, no need to run more profiles.
 	if len(profiles) == len(profileResults) || profileResults[h.decodeProfile] == nil {
 		span.SetAttributes(
-			attribute.String("llm_d.profile_handler.decision", "complete"),
-			attribute.Bool("llm_d.profile_handler.decode_failed", profileResults[h.decodeProfile] == nil),
+			attribute.String("llm_d.epp.profile_handler.decision", "complete"),
+			attribute.Bool("llm_d.epp.profile_handler.decode_failed", profileResults[h.decodeProfile] == nil),
 		)
 		return map[string]scheduling.SchedulerProfile{}
 	}
@@ -206,8 +218,8 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 		RecordPDDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, DecisionTypePrefillDecode) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
 		// run the prefill profile
 		span.SetAttributes(
-			attribute.String("llm_d.profile_handler.decision", "prefill_decode"),
-			attribute.String("llm_d.profile_handler.selected_profile", h.prefillProfile),
+			attribute.String("llm_d.epp.profile_handler.decision", "prefill_decode"),
+			attribute.String("llm_d.epp.profile_handler.selected_profile", h.prefillProfile),
 		)
 		return map[string]scheduling.SchedulerProfile{
 			h.prefillProfile: profiles[h.prefillProfile],
@@ -216,7 +228,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 
 	RecordPDDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, DecisionTypeDecodeOnly) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
 	span.SetAttributes(
-		attribute.String("llm_d.profile_handler.decision", "decode_only"),
+		attribute.String("llm_d.epp.profile_handler.decision", "decode_only"),
 	)
 	return map[string]scheduling.SchedulerProfile{} // do not run prefill
 }

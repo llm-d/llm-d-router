@@ -273,7 +273,7 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 		RequestID:   "test-request",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{TokenIDs: tokenIDs},
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokenIDs}},
 		},
 	}
 

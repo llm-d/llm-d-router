@@ -1,4 +1,4 @@
-{{- define "inference-extension.config" -}}
+{{- define "llm-d-epp.config" -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,15 +8,15 @@ data:
   default-plugins.yaml: |
     {{- $modelServerProtocol := .Values.router.modelServers.protocol | default "http" }}
     {{- $modelServerType := .Values.router.modelServers.type | default "vllm" }}
-    {{- $parserType := "" }}
+    {{- $parsers := list }}
     {{- if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
-      {{- $parserType = "vllmgrpc-parser" }}
-    {{- else if .Values.router.epp.parser }}
-      {{- $parserType = .Values.router.epp.parser }}
+      {{- $parsers = append $parsers "vllmgrpc-parser" }}
+    {{- else if .Values.router.epp.parsers }}
+      {{- $parsers = .Values.router.epp.parsers }}
     {{- else if eq (lower $modelServerType) "triton" }}
-      {{- $parserType = "passthrough-parser" }}
+      {{- $parsers = append $parsers "passthrough-parser" }}
     {{- end }}
-    apiVersion: inference.networking.x-k8s.io/v1alpha1
+    apiVersion: llm-d.ai/v1alpha1
     kind: EndpointPickerConfig
     plugins:
     - type: queue-scorer
@@ -33,8 +33,8 @@ data:
       parameters:
         defaultEngine: {{ $modelServerType | quote }}
       {{- end }}
-    {{- if $parserType }}
-    - type: {{ $parserType }}
+    {{- range $p := $parsers }}
+    - type: {{ $p }}
     {{- end }}
     {{- if .Values.router.latencyPredictor.enabled }}
     - type: predicted-latency-producer
@@ -46,10 +46,14 @@ data:
       type: prefix-cache-affinity-filter
       parameters:
         affinityThreshold: 0.99
+        ttftSource: latencyPredictor
+        maxTTFTPenaltyMs: 5000
     - name: loose-affinity-filter
       type: prefix-cache-affinity-filter
       parameters:
         affinityThreshold: 0.80
+        ttftSource: latencyPredictor
+        maxTTFTPenaltyMs: 5000
     - type: latency-scorer
     - type: weighted-random-picker
     - type: slo-headroom-tier-filter
@@ -75,11 +79,37 @@ data:
       - pluginRef: prefix-cache-scorer
         weight: 3
     {{- end }}
-    {{- if $parserType }}
+    {{- if $parsers }}
     requestHandler:
-      parser:
-        pluginRef: {{ $parserType }}
+      parsers:
+      {{- range $p := $parsers }}
+      - pluginRef: {{ $p }}
+      {{- end }}
     {{- end }}
+  payload-agnostic.yaml: |
+    # Request-format agnostic routing. Use this when the request format is
+    # unknown or unsupported, so the EPP cannot rely on scorers that read the
+    # request body (e.g. the prefix-cache scorer). The passthrough parser does
+    # not parse the body, and routing falls back to backend-state scorers:
+    #   - active-request-scorer  : prefers the least busy endpoint
+    #   - session-affinity-scorer: keeps a session pinned to the same endpoint
+    # Select it by setting router.epp.pluginsConfigFile: payload-agnostic.yaml
+    apiVersion: llm-d.ai/v1alpha1
+    kind: EndpointPickerConfig
+    plugins:
+    - type: passthrough-parser
+    - type: active-request-scorer
+    - type: session-affinity-scorer
+    requestHandler:
+      parsers:
+      - pluginRef: passthrough-parser
+    schedulingProfiles:
+    - name: default
+      plugins:
+      - pluginRef: active-request-scorer
+        weight: 1
+      - pluginRef: session-affinity-scorer
+        weight: 1
   {{- if .Values.router.epp.pluginsCustomConfig }}
   {{- .Values.router.epp.pluginsCustomConfig | toYaml | nindent 2 }}
   {{- end }}

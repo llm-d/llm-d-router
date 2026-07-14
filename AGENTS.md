@@ -30,6 +30,12 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 - The PR addresses that issue and nothing else: no renames, reformatting, refactors, new abstractions, or pattern changes beyond what the issue requires.
 - Unrelated improvements belong in their own issue and PR, not folded into this PR. If you spot dead code or unrelated bugs in passing, mention them; don't fix them.
 - Self-check on the way out: if the change grew larger than expected or the fix feels hacky, rewrite the clean version before opening the PR.
+- Verify the code passs `make presubmit` locally before submitting a PR.
+- Always use the project's `.github/PULL_REQUEST_TEMPLATE.md`.
+  - Document user (not developer) facing changes in the ```release-note``` block. The  `release-notes.d/unreleased/*`
+    file is automatically generated from the block's content - do not create the file directly. 
+  - If you include a test plan section, mark passing tests with [x] so it is clear which ran and passed.
+    List only new tests - indicate functionality verified, not the test names.
 
 ## Code style
 
@@ -38,6 +44,35 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 - Docs and comments describe the current state on its own terms. No "previously", "now", "recently", "renamed from", "added to fix", or other temporal or conversational framing. A reader with no context for the change must still understand the text.
 - State each fact once, in its canonical location. Do not duplicate across struct docs, prose, tables, inline comments, and examples.
 - Do not use Unicode symbols or special characters in general, unless explicitly requested.
+
+### Logging
+
+The codebase uses `go-logr` via controller-runtime. Verbosity constants are defined in `pkg/common/observability/logging` (`DEFAULT=2`, `VERBOSE=3`, `DEBUG=4`, `TRACE=5`).
+
+**Level conventions:**
+
+- `logger.Info(...)` for once-per-request operational signals.
+- `logger.V(logging.DEBUG).Info(...)` for per-item or per-loop signals that fire multiple times per request.
+- `logger.V(logging.TRACE).Info(...)` for detailed state transitions (cache operations, index updates).
+- `logger.Error(err, "msg", ...)` for recoverable errors that carry an underlying `error` value.
+
+**Use named constants, not bare integers:**
+
+```go
+// wrong
+logger.V(4).Info("running protocol", ...)
+
+// correct
+logger.V(logging.DEBUG).Info("running protocol", ...)
+```
+
+**Guard expensive log construction:**
+
+```go
+if v := logger.V(logging.DEBUG); v.Enabled() {
+    v.Info("payload details", "data", expensiveSerialization())
+}
+```
 
 ## Git workflow
 

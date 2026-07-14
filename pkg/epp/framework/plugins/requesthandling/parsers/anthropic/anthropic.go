@@ -25,9 +25,9 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 )
 
 const (
@@ -79,7 +79,7 @@ func (p *AnthropicParser) WithName(name string) *AnthropicParser {
 }
 
 func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	path := getRequestPath(headers)
+	path := request.GetRequestPath(headers)
 
 	// The count_tokens endpoint returns only a token count and gains nothing from
 	// structured parsing or response interception; forward the body unchanged.
@@ -108,8 +108,9 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	}
 
 	result := &fwkrh.InferenceRequestBody{
-		Messages: &messagesReq,
-		Payload:  fwkrh.PayloadMap(bodyMap),
+		Messages:        &messagesReq,
+		Payload:         fwkrh.PayloadMap(bodyMap),
+		MaxOutputTokens: fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
 	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		result.Stream = true
@@ -139,19 +140,6 @@ func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers 
 		return nil, err
 	}
 	return &fwkrh.ParsedResponse{Usage: usage}, nil
-}
-
-func getRequestPath(headers map[string]string) string {
-	if path := headers[parsers.MethodPathKey]; path != "" {
-		return path
-	}
-	if path := headers["x-original-path"]; path != "" {
-		return path
-	}
-	if path := headers["x-forwarded-path"]; path != "" {
-		return path
-	}
-	return ""
 }
 
 func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
