@@ -108,10 +108,11 @@ apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: disagg-headers-handler
-- type: always-disagg-pd-decider
 - type: disagg-profile-handler
   parameters:
-    deciderPluginName: always-disagg-pd-decider
+    deciders:
+      prefill: always-disagg-pd-decider
+- type: always-disagg-pd-decider
 - type: prefill-filter
 - type: decode-filter
 - type: prefix-cache-scorer
@@ -162,10 +163,11 @@ apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: disagg-headers-handler
-- type: always-disagg-pd-decider
 - type: disagg-profile-handler
   parameters:
-    deciderPluginName: always-disagg-pd-decider
+    deciders:
+      prefill: always-disagg-pd-decider
+- type: always-disagg-pd-decider
 - type: prefill-filter
 - type: decode-filter
 - type: prefix-cache-scorer

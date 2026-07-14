@@ -31,15 +31,15 @@ const (
 
 // pdDeciderPlugin interface for pd decider plugins
 
-type pdProfileHandlerParameters struct {
+type PdProfileHandlerParameters struct {
 	DecodeProfile  string `json:"decodeProfile"`
 	PrefillProfile string `json:"prefillProfile"`
 	// Deprecated: This field was never used.
 	PrefixPluginType string `json:"prefixPluginType"`
 	// Deprecated: This field was never used.
-	PrefixPluginName            string `json:"prefixPluginName"`
+	PrefixPluginName            string `json:"prefixPluginName"  pluginRef:""`
 	PrimaryPort                 int    `json:"primaryPort"`
-	DeciderPluginName           string `json:"deciderPluginName"`
+	DeciderPluginName           string `json:"deciderPluginName" pluginRef:""`
 	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName"`
 }
 
@@ -57,21 +57,12 @@ func PdProfileHandlerFactory(name string, rawParameters *json.Decoder, handle pl
 		return nil, err
 	}
 	log.FromContext(handle.Context()).Info("Deprecated: pd-profile-handler is deprecated, use disagg-profile-handler instead")
-	parameters := pdProfileHandlerParameters{
-		DecodeProfile:     defaultDecodeProfile,
-		PrefillProfile:    defaultPrefillProfile,
-		PrimaryPort:       0,
-		DeciderPluginName: defaultDeciderPluginName,
-	}
-	if rawParameters != nil {
-		if err := rawParameters.Decode(&parameters); err != nil {
-			return nil, fmt.Errorf("failed to parse the parameters of the '%s' profile handler - %w", PdProfileHandlerType, err)
-		}
-	}
 
-	if parameters.PrefixPluginName == "" {
-		parameters.PrefixPluginName = parameters.PrefixPluginType
+	tmpParameters, err := PdProfileHandlerConfigParser(rawParameters, handle)
+	if err != nil {
+		return nil, err
 	}
+	parameters := tmpParameters.(PdProfileHandlerParameters)
 
 	if parameters.PrimaryPort != 0 {
 		log.FromContext(handle.Context()).Info("Deprecated: primaryPort not needed with Istio >= 1.28.1")
@@ -104,10 +95,30 @@ func PdProfileHandlerFactory(name string, rawParameters *json.Decoder, handle pl
 
 }
 
+func PdProfileHandlerConfigParser(rawParameters *json.Decoder, handle plugin.Handle) (any, error) {
+	parameters := PdProfileHandlerParameters{
+		DecodeProfile:     defaultDecodeProfile,
+		PrefillProfile:    defaultPrefillProfile,
+		PrimaryPort:       0,
+		DeciderPluginName: defaultDeciderPluginName,
+	}
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
+			return nil, fmt.Errorf("failed to parse the parameters of the '%s' profile handler - %w", PdProfileHandlerType, err)
+		}
+	}
+
+	if parameters.PrefixPluginName == "" {
+		parameters.PrefixPluginName = parameters.PrefixPluginType
+	}
+
+	return parameters, nil
+}
+
 // NewPdProfileHandler initializes a new PdProfileHandler and returns its pointer.
 //
 // Deprecated: Use NewDisaggProfileHandler instead.
-func NewPdProfileHandler(name string, parameters pdProfileHandlerParameters, deciderPlugin deciderPlugin) (*PdProfileHandler, error) {
+func NewPdProfileHandler(name string, parameters PdProfileHandlerParameters, deciderPlugin deciderPlugin) (*PdProfileHandler, error) {
 	result := &PdProfileHandler{
 		typedName:      plugin.TypedName{Name: name, Type: PdProfileHandlerType},
 		decodeProfile:  parameters.DecodeProfile,

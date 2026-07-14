@@ -24,3 +24,4 @@ spec:
         - --config-file
         - "/etc/epp/epp-config.yaml"
         - --metrics-endpoint-auth=false
+        - --ha-enable-leader-election=${ENABLE_LEADER_ELECTION}

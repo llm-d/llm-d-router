@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
+	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -352,6 +353,68 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 
 			if diff := cmp.Diff(tt.want, got.Body, protocmp.Transform()); diff != "" {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestVllmGRPCParser_ParseRequest_MaxOutputTokens(t *testing.T) {
+	parser := NewVllmGRPCParser()
+	ctx := context.Background()
+	headers := map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"}
+
+	tests := []struct {
+		name   string
+		reqMsg *pb.GenerateRequest
+		want   *int64
+	}{
+		{
+			name: "text input with max_tokens",
+			reqMsg: &pb.GenerateRequest{
+				Input:          &pb.GenerateRequest_Text{Text: "hello"},
+				SamplingParams: &pb.SamplingParams{MaxTokens: ptr.To(uint32(256))},
+			},
+			want: ptr.To(int64(256)),
+		},
+		{
+			name: "tokenized input with max_tokens",
+			reqMsg: &pb.GenerateRequest{
+				Input:          &pb.GenerateRequest_Tokenized{Tokenized: &pb.TokenizedInput{InputIds: []uint32{1, 2, 3}}},
+				SamplingParams: &pb.SamplingParams{MaxTokens: ptr.To(uint32(128))},
+			},
+			want: ptr.To(int64(128)),
+		},
+		{
+			name:   "no sampling params",
+			reqMsg: &pb.GenerateRequest{Input: &pb.GenerateRequest_Text{Text: "hello"}},
+			want:   nil,
+		},
+		{
+			name: "sampling params without max_tokens",
+			reqMsg: &pb.GenerateRequest{
+				Input:          &pb.GenerateRequest_Text{Text: "hello"},
+				SamplingParams: &pb.SamplingParams{},
+			},
+			want: nil,
+		},
+		{
+			name: "explicit zero max_tokens binds",
+			reqMsg: &pb.GenerateRequest{
+				Input:          &pb.GenerateRequest_Text{Text: "hello"},
+				SamplingParams: &pb.SamplingParams{MaxTokens: ptr.To(uint32(0))},
+			},
+			want: ptr.To(int64(0)),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseRequest(ctx, createGrpcPayload(t, tt.reqMsg), headers)
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got.Body.MaxOutputTokens); diff != "" {
+				t.Errorf("MaxOutputTokens mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

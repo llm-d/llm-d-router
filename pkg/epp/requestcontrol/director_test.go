@@ -804,7 +804,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 	}
 	for _, epf := range factories {
 		// Datastore setup
-		ds := datastore.NewDatastore(t.Context(), epf, 0)
+		ds := datastore.NewDatastore(t.Context(), epf)
 		ds.ObjectiveSet(ioFoodReview)
 		ds.ObjectiveSet(ioFoodReviewResolve)
 		ds.ObjectiveSet(ioFoodReviewSheddable)
@@ -989,7 +989,7 @@ func TestGetRandomEndpoint(t *testing.T) {
 		for _, epf := range factories {
 			t.Run(test.name, func(t *testing.T) {
 				endpointPool := poolutil.InferencePoolToEndpointPool(pool)
-				ds := datastore.NewDatastore(t.Context(), epf, 0)
+				ds := datastore.NewDatastore(t.Context(), epf)
 				err := ds.PoolSet(t.Context(), fakeClient, endpointPool)
 				if err != nil {
 					t.Errorf("unexpected error setting pool: %s", err)
@@ -1290,7 +1290,7 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 	pr1 := newTestResponseReceived("pr1")
 
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
-	ds := datastore.NewDatastore(t.Context(), nil, 0)
+	ds := datastore.NewDatastore(t.Context(), nil)
 	mockSched := &mockScheduler{}
 	endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 	director := NewDirectorWithConfig(
@@ -1364,7 +1364,7 @@ func TestDirector_HandleResponseHeader_SessionAffinity(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := logutil.NewTestLoggerIntoContext(context.Background())
-			ds := datastore.NewDatastore(t.Context(), nil, 0)
+			ds := datastore.NewDatastore(t.Context(), nil)
 			endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 			director := NewDirectorWithConfig(
 				ds,
@@ -1394,7 +1394,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	ps1 := newTestResponseStreaming("ps1")
 
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
-	ds := datastore.NewDatastore(t.Context(), nil, 0)
+	ds := datastore.NewDatastore(t.Context(), nil)
 	mockSched := &mockScheduler{}
 	endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 	director := NewDirectorWithConfig(ds, mockSched, nil, endpointCandidates, NewConfig().WithResponseStreamingPlugins(ps1))
@@ -1455,7 +1455,7 @@ func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 	}
 
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
-	ds := datastore.NewDatastore(t.Context(), nil, 0)
+	ds := datastore.NewDatastore(t.Context(), nil)
 	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
 
 	const numChunks = 50
@@ -1811,7 +1811,7 @@ func newConditionalDecodeDirector(t *testing.T, scheduleResult *fwksched.Schedul
 
 	period := time.Second
 	epf := datalayer.NewTestRuntime(t, period)
-	ds := datastore.NewDatastore(t.Context(), epf, 0)
+	ds := datastore.NewDatastore(t.Context(), epf)
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()

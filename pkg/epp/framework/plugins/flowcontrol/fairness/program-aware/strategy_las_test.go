@@ -20,7 +20,7 @@ func makeQueue(id string, length int, headEnqueue time.Time) *fwkfcmocks.MockFlo
 		FlowKeyV: flowcontrol.FlowKey{ID: id},
 	}
 	if length > 0 {
-		q.PeekHeadV = &fwkfcmocks.MockQueueItemAccessor{EnqueueTimeV: headEnqueue}
+		q.PeekV = &fwkfcmocks.MockQueueItemAccessor{EnqueueTimeV: headEnqueue}
 	}
 	return q
 }

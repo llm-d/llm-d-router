@@ -65,11 +65,11 @@ plugins:
 - type: encode-filter
 - type: decode-filter
 - type: max-score-picker
-- type: always-disagg-multimodal-decider
 - type: disagg-profile-handler
   parameters:
     deciders:
       encode: always-disagg-multimodal-decider
+- type: always-disagg-multimodal-decider
 schedulingProfiles:
 - name: encode
   plugins:
@@ -94,15 +94,15 @@ plugins:
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: max-score-picker
-- type: always-disagg-multimodal-decider
-- type: prefix-based-pd-decider
-  parameters:
-    nonCachedTokens: 16
 - type: disagg-profile-handler
   parameters:
     deciders:
       encode: always-disagg-multimodal-decider
       prefill: prefix-based-pd-decider
+- type: always-disagg-multimodal-decider
+- type: prefix-based-pd-decider
+  parameters:
+    nonCachedTokens: 16
 schedulingProfiles:
 - name: encode
   plugins:
@@ -121,10 +121,55 @@ schedulingProfiles:
     weight: 2
 `
 
+// generateEncodeConfig is the encode-only EPP config for /inference/v1/generate.
+// Uses single-profile-handler so the EPP routes directly to encode pods without
+// requiring a decode stage.
+const generateEncodeConfig = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: vllmhttp-parser
+- type: encode-filter
+- type: max-score-picker
+- type: single-profile-handler
+requestHandler:
+  parsers:
+   - pluginRef: vllmhttp-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: encode-filter
+  - pluginRef: max-score-picker
+`
+
+// generatePrefillConfig is the prefill-only EPP config for /inference/v1/generate.
+// Uses single-profile-handler so the EPP routes directly to prefill pods without
+// requiring a decode stage.
+const generatePrefillConfig = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: vllmhttp-parser
+- type: prefill-filter
+- type: max-score-picker
+- type: single-profile-handler
+requestHandler:
+  parsers:
+   - pluginRef: vllmhttp-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: prefill-filter
+  - pluginRef: max-score-picker
+`
+
 // EPP configuration for running with P/D using the unified disagg-profile-handler
+// pdConfig uses vllmhttp-parser as the request handler so the EPP can parse
+// both OpenAI-style and /inference/v1/generate (token-in) traffic. The parser
+// delegates non-generate paths to the embedded OpenAI parser, so existing
+// chat/completions tests are unaffected.
 const pdConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: vllmhttp-parser
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16

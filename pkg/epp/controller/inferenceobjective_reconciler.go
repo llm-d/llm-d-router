@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -40,6 +41,7 @@ type InferenceObjectiveReconciler struct {
 	Datastore                datastore.Datastore
 	PoolGKNN                 common.GKNN
 	PriorityBandControlPlane contracts.PriorityBandControlPlane
+	RunOnNonLeaders          bool
 }
 
 func (c *InferenceObjectiveReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -93,6 +95,7 @@ func (c *InferenceObjectiveReconciler) syncPriorityBands() {
 }
 
 func (c *InferenceObjectiveReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	needLeaderElection := !c.RunOnNonLeaders
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha2.InferenceObjective{}).
 		WithEventFilter(predicate.Funcs{
@@ -103,6 +106,7 @@ func (c *InferenceObjectiveReconciler) SetupWithManager(mgr ctrl.Manager) error 
 			DeleteFunc:  func(e event.DeleteEvent) bool { return c.eventPredicate(e.Object.(*v1alpha2.InferenceObjective)) },
 			GenericFunc: func(e event.GenericEvent) bool { return c.eventPredicate(e.Object.(*v1alpha2.InferenceObjective)) },
 		}).
+		WithOptions(controller.Options{NeedLeaderElection: &needLeaderElection}).
 		Complete(c)
 }
 

@@ -468,7 +468,7 @@ func (p *PriorityBandConfig) applyDefaults(defaults PriorityBandPolicyDefaults) 
 		// If the policy requires priority configurability (like EDF), we must use a heap.
 		// Otherwise, we prefer the ListQueue for performance (O(1) vs O(log n)).
 		if slices.Contains(p.OrderingPolicy.RequiredQueueCapabilities(), flowcontrol.CapabilityPriorityConfigurable) {
-			p.Queue = queue.MaxMinHeapName
+			p.Queue = queue.PriorityQueueName
 		}
 	}
 	if p.MaxBytes == 0 {

@@ -122,6 +122,18 @@ func (d *switchableDetector) Release() {
 	d.inFlight.Add(-1)
 }
 
+// nonEmptyCandidates returns a pool containing a single placeholder endpoint.
+//
+// Capacity tests block dispatch via a saturated detector (which ignores the pool), but the processor
+// classifies a queue-capacity rejection as RejectedNoEndpoints when the pool is empty and as
+// RejectedCapacity when it is not. These tests assert RejectedCapacity, so they need a non-empty pool
+// even though the endpoint is never dispatched to.
+func nonEmptyCandidates() *contractmocks.MockEndpointCandidates {
+	return &contractmocks.MockEndpointCandidates{
+		Candidates: []datalayer.Endpoint{datalayer.NewEndpoint(nil, nil)},
+	}
+}
+
 // --- dispatchResult ---
 
 type dispatchResult struct {

@@ -1,4 +1,4 @@
-FROM golang:1.25.11
+FROM golang:1.25.12
 
 RUN mkdir /app
 WORKDIR /app
@@ -62,6 +62,11 @@ ENV ENVTEST_K8S_VERSION=${ENVTEST_K8S_VERSION}
 # --userns=keep-id / -u <uid> can use the binary without writing to root-owned
 # /usr/local/bin.
 RUN GOBIN=/usr/local/bin go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+
+# Install the ginkgo CLI. Build-time install ensures runtime invocations under
+# --userns=keep-id / -u <uid> can use the binary without writing to root-owned
+# /usr/local/bin.
+RUN GOBIN=/usr/local/bin go install github.com/onsi/ginkgo/v2/ginkgo@v2.28.3
 
 # Go caches are mounted as volumes at runtime for persistence across image rebuilds.
 # Directories are created with open permissions so non-root users (docker -u) can write.
