@@ -20,11 +20,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jellydator/ttlcache/v3"
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -468,4 +472,134 @@ func TestSloContextStoreEviction(t *testing.T) {
 	item = pl.sloContextStore.Get(requestID)
 	assert.Nil(t, item, "Item should have been evicted from cache")
 	assert.False(t, queue.Contains(requestID), "Request should be removed from queue via OnEviction")
+}
+
+func dumpSeedQueue(ids map[string]float64) *requestPriorityQueue {
+	q := newRequestPriorityQueue()
+	for id, tpot := range ids {
+		q.Add(id, tpot)
+	}
+	return q
+}
+
+func dumpNN(name string) types.NamespacedName {
+	return types.NamespacedName{Name: name, Namespace: "default"}
+}
+
+func TestPredictedLatency_DumpState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("populated sorted by busyness", func(t *testing.T) {
+		pl := &PredictedLatency{}
+		pl.runningRequestLists.Store(dumpNN("pod-a"), dumpSeedQueue(map[string]float64{"r1": 5, "r2": 5}))
+		pl.runningRequestLists.Store(dumpNN("pod-b"), dumpSeedQueue(map[string]float64{"r3": 9}))
+		c := new(atomic.Int64)
+		c.Store(30)
+		pl.prefillTokensInFlight.Store(dumpNN("pod-b").String(), c)
+
+		payload, err := pl.DumpState()
+		require.NoError(t, err)
+		require.True(t, json.Valid(payload))
+
+		var state predictedLatencyState
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.Equal(t, predictedLatencyState{
+			Endpoints: []endpointPredictedLatencyState{
+				{Endpoint: dumpNN("pod-b").String(), RunningRequests: 1, MinTPOTSLO: 9, PrefillTokensInFlight: 30},
+				{Endpoint: dumpNN("pod-a").String(), RunningRequests: 2, MinTPOTSLO: 5, PrefillTokensInFlight: 0},
+			},
+			TotalEndpoints: 2,
+			MaxEndpoints:   maxDebugDumpEndpoints,
+		}, state)
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		pl := &PredictedLatency{}
+		payload, err := pl.DumpState()
+		require.NoError(t, err)
+		var state predictedLatencyState
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.Empty(t, state.Endpoints)
+		require.Equal(t, 0, state.TotalEndpoints)
+		require.Equal(t, maxDebugDumpEndpoints, state.MaxEndpoints)
+		require.False(t, state.Truncated)
+		require.Equal(t, 0, state.TrackedRequests)
+	})
+
+	t.Run("merge across maps", func(t *testing.T) {
+		pl := &PredictedLatency{}
+		pl.runningRequestLists.Store(dumpNN("pod-a"), dumpSeedQueue(map[string]float64{"r1": 3}))
+		c := new(atomic.Int64)
+		c.Store(40)
+		pl.prefillTokensInFlight.Store(dumpNN("pod-b").String(), c)
+
+		var state predictedLatencyState
+		payload, err := pl.DumpState()
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.Equal(t, 2, state.TotalEndpoints)
+		// pod-b busier (40) sorts first; pod-a has prefill 0, pod-b has running 0.
+		require.Equal(t, dumpNN("pod-b").String(), state.Endpoints[0].Endpoint)
+		require.Equal(t, int64(40), state.Endpoints[0].PrefillTokensInFlight)
+		require.Equal(t, 0, state.Endpoints[0].RunningRequests)
+		require.Equal(t, dumpNN("pod-a").String(), state.Endpoints[1].Endpoint)
+		require.Equal(t, 1, state.Endpoints[1].RunningRequests)
+		require.Equal(t, int64(0), state.Endpoints[1].PrefillTokensInFlight)
+	})
+
+	t.Run("caps endpoints", func(t *testing.T) {
+		pl := &PredictedLatency{}
+		for i := range maxDebugDumpEndpoints + 5 {
+			c := new(atomic.Int64)
+			c.Store(int64(i))
+			pl.prefillTokensInFlight.Store(dumpNN(fmt.Sprintf("pod-%03d", i)).String(), c)
+		}
+		var state predictedLatencyState
+		payload, err := pl.DumpState()
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.True(t, state.Truncated)
+		require.Equal(t, maxDebugDumpEndpoints+5, state.TotalEndpoints)
+		require.Len(t, state.Endpoints, maxDebugDumpEndpoints)
+		require.Equal(t, int64(maxDebugDumpEndpoints+4), state.Endpoints[0].PrefillTokensInFlight)
+	})
+
+	t.Run("tracked requests count", func(t *testing.T) {
+		pl := &PredictedLatency{}
+		pl.sloContextStore = ttlcache.New(ttlcache.WithTTL[string, *predictedLatencyCtx](time.Minute))
+		pl.sloContextStore.Set("req-1", &predictedLatencyCtx{}, ttlcache.DefaultTTL)
+		pl.sloContextStore.Set("req-2", &predictedLatencyCtx{}, ttlcache.DefaultTTL)
+
+		var state predictedLatencyState
+		payload, err := pl.DumpState()
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.Equal(t, 2, state.TrackedRequests)
+		require.Empty(t, state.Endpoints)
+	})
+
+	// Non-finite head TPOT (NaN / +Inf) must not break json.Marshal; it is coerced to 0.
+	t.Run("non-finite min tpot sanitized", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			tpot float64
+		}{
+			{"nan", math.NaN()},
+			{"posinf", math.Inf(1)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				pl := &PredictedLatency{}
+				pl.runningRequestLists.Store(dumpNN("pod-a"), dumpSeedQueue(map[string]float64{"r1": tc.tpot}))
+
+				payload, err := pl.DumpState()
+				require.NoError(t, err)
+				require.True(t, json.Valid(payload))
+				var state predictedLatencyState
+				require.NoError(t, json.Unmarshal(payload, &state))
+				require.Len(t, state.Endpoints, 1)
+				require.Equal(t, float64(0), state.Endpoints[0].MinTPOTSLO)
+				require.Equal(t, 1, state.Endpoints[0].RunningRequests)
+			})
+		}
+	})
 }

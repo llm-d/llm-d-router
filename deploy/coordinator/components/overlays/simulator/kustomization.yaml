@@ -1,0 +1,59 @@
+# Simulator Overlay
+#
+# Adds simulator-specific configuration to vLLM deployments:
+#   - --mode=${VLLM_SIM_MODE} arg on Decode (vllm-d) only
+#   - --zmq-endpoint on Decode only
+#   - --force-dummy-tokenizer on all deployments (Decode, Prefill, Encode)
+#   - KV cache args on Decode for cache-aware scheduling tests
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+# --- Decode deployment (vllm-d) ---
+- target:
+    kind: Deployment
+    name: vllm-d
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/0
+      value: "--mode=${VLLM_SIM_MODE}"
+    - op: add
+      path: /spec/template/spec/containers/0/args/1
+      value: "--enable-kvcache=${KV_CACHE_ENABLED}"
+    - op: add
+      path: /spec/template/spec/containers/0/args/2
+      value: "--kv-cache-size=1024"
+    - op: add
+      path: /spec/template/spec/containers/0/args/3
+      value: "--block-size=16"
+    - op: add
+      path: /spec/template/spec/containers/0/args/4
+      value: "--zmq-endpoint=tcp://${EPP_NAME}.${NAMESPACE}.svc.cluster.local:5557"
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: "--force-dummy-tokenizer"
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: "--max-model-len=131072"
+# --- Encode deployment (vllm-e) ---
+- target:
+    kind: Deployment
+    name: vllm-e
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: "--force-dummy-tokenizer"
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: "--max-model-len=131072"
+# --- Prefill deployment (vllm-p) ---
+- target:
+    kind: Deployment
+    name: vllm-p
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: "--force-dummy-tokenizer"
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: "--max-model-len=131072"

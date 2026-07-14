@@ -25,7 +25,28 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
+
+// validatePlugins validates the plugins section of the configuration file.
+func validatePlugins(configuredPlugins []configapi.PluginSpec) error {
+	pluginNames := sets.New[string]()
+	for _, spec := range configuredPlugins {
+		if spec.Type == "" {
+			return fmt.Errorf("plugin '%s' is missing a type", spec.Name)
+		}
+		if pluginNames.Has(spec.Name) {
+			return fmt.Errorf("duplicate plugin name '%s'", spec.Name)
+		}
+		pluginNames.Insert(spec.Name)
+
+		_, ok := fwkplugin.Registry[spec.Type]
+		if !ok {
+			return fmt.Errorf("plugin type '%s' is not registered", spec.Type)
+		}
+	}
+	return nil
+}
 
 // validateConfig performs a deep validation of the configuration integrity.
 // It checks relationships between profiles, plugins, and feature gates.

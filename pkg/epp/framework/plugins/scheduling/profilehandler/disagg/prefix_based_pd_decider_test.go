@@ -477,7 +477,7 @@ func TestConsumes(t *testing.T) {
 
 	handler, err := NewPdProfileHandler(
 		"test-handler",
-		pdProfileHandlerParameters{
+		PdProfileHandlerParameters{
 			PrefillProfile:              "prefill",
 			DecodeProfile:               "decode",
 			PrefixMatchInfoProducerName: "test",
