@@ -127,7 +127,8 @@ func (s *DiffusionCost) Score(ctx context.Context, _ *scheduling.InferenceReques
 		}
 	}
 
-	log.FromContext(ctx).V(logutil.TRACE).Info("Diffusion cost units", "endpointCosts", logCosts, "maxCost", maxCost)
+	// TODO: change the log level before submission
+	log.FromContext(ctx).V(logutil.DEFAULT).Info("Diffusion cost units", "endpointCosts", logCosts, "maxCost", maxCost)
 
 	scoredEndpointsMap := make(map[scheduling.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
