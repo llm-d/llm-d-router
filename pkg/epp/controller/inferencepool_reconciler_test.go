@@ -124,7 +124,7 @@ func TestInferencePoolReconciler(t *testing.T) {
 		req := ctrl.Request{NamespacedName: namespacedName}
 		ctx := context.Background()
 
-		ds := datastore.NewDatastore(ctx, epf, 0)
+		ds := datastore.NewDatastore(ctx, epf)
 		inferencePoolReconciler := &InferencePoolReconciler{Reader: fakeClient, Datastore: ds}
 
 		// Step 1: Inception, only ready pods matching pool1 are added to the store.

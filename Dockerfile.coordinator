@@ -1,0 +1,47 @@
+# BASE_IMAGE can be overridden at build time, e.g.:
+#   --build-arg BASE_IMAGE=registry.access.redhat.com/ubi9/ubi-micro:9.7
+# Default is distroless/static which includes CA certs and has minimal CVE surface.
+# NOTE: if using scratch, CA certificates must be copied from the builder stage:
+#   COPY --from=builder /etc/ssl/certs/ca-bundle.crt /etc/ssl/certs/ca-bundle.crt
+ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
+
+# Go build stage
+FROM --platform=${BUILDPLATFORM} quay.io/projectquay/golang:1.25 AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG COMMIT_SHA=unknown
+ARG BUILD_REF
+ARG LDFLAGS="-s -w"
+
+WORKDIR /workspace
+
+# Copy the Go Modules manifests
+COPY go.mod go.sum ./
+
+# Download dependencies - this layer is cached as long as go.mod/go.sum are unchanged
+RUN go mod download
+
+# Copy the go source
+COPY cmd/ cmd/
+COPY pkg/ pkg/
+COPY config/coordinator/ config/coordinator/
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -ldflags="${LDFLAGS}" \
+    -o bin/coordinator ./cmd/coordinator/...
+
+# Runtime stage
+FROM ${BASE_IMAGE}
+
+WORKDIR /
+COPY --from=builder /workspace/bin/coordinator /coordinator
+COPY --from=builder /workspace/config/coordinator/ /config/coordinator/
+
+USER 65532:65532
+
+EXPOSE 8080
+
+ENTRYPOINT ["/coordinator", "--config", "/config/coordinator/coordinator.yaml"]
+
+# Made with Bob

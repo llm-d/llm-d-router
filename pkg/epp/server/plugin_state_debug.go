@@ -40,6 +40,7 @@ type pluginStateDebugResponse struct {
 }
 
 type pluginStateDebugEntry struct {
+	Name    string          `json:"name"`
 	Type    string          `json:"type"`
 	State   json.RawMessage `json:"state,omitempty"`
 	Message string          `json:"message,omitempty"`
@@ -98,6 +99,8 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugRespons
 		dumper, ok := plugin.(fwkplugin.StateDumper)
 		if !ok {
 			response.Plugins[name] = pluginStateDebugEntry{
+
+				Name:    name,
 				Type:    plugin.TypedName().Type,
 				Message: pluginStateUnsupportedText,
 			}
@@ -106,6 +109,7 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugRespons
 		state, err := dumper.DumpState()
 		if err != nil {
 			response.Plugins[name] = pluginStateDebugEntry{
+				Name:    name,
 				Type:    plugin.TypedName().Type,
 				Message: fmt.Sprintf("failed to dump plugin state: %v", err),
 			}
@@ -116,12 +120,14 @@ func collectPluginState(plugins fwkplugin.HandlePlugins) pluginStateDebugRespons
 		}
 		if !json.Valid(state) {
 			response.Plugins[name] = pluginStateDebugEntry{
+				Name:    name,
 				Type:    plugin.TypedName().Type,
 				Message: "plugin returned invalid JSON state",
 			}
 			continue
 		}
 		response.Plugins[name] = pluginStateDebugEntry{
+			Name:  name,
 			Type:  plugin.TypedName().Type,
 			State: state,
 		}
