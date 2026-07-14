@@ -165,10 +165,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
-			if k8sContext != "" {
-				// Use port-forward to access the EPP pod's metrics endpoint.
-				startEPPMetricsPortForward()
-			}
+			startEPPMetricsPortForward()
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
@@ -476,10 +473,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
-			if k8sContext != "" {
-				// Use port-forward to access the EPP pod's metrics endpoint.
-				startEPPMetricsPortForward()
-			}
+			startEPPMetricsPortForward()
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))

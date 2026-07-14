@@ -147,6 +147,7 @@ var _ = ginkgo.AfterSuite(func() {
 		}
 		if eppPortForwardSession != nil {
 			eppPortForwardSession.Terminate()
+			eppPortForwardSession = nil
 		}
 	}
 })
@@ -378,7 +379,14 @@ func createInferencePool(numTargetPorts int, toDelete bool) []string {
 	return testutils.CreateObjsFromYaml(testConfig, infPoolYaml, nsName)
 }
 
+// startEPPMetricsPortForward is a no-op outside an existing-cluster run (k8sContext
+// unset) and safe to call repeatedly; it starts at most one port-forward session,
+// reused until AfterSuite terminates it.
 func startEPPMetricsPortForward() {
+	if k8sContext == "" || eppPortForwardSession != nil {
+		return
+	}
+
 	pods, err := testConfig.KubeCli.CoreV1().Pods(getNamespace()).List(testConfig.Context, metav1.ListOptions{
 		LabelSelector: "app=e2e-epp",
 	})

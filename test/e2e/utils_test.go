@@ -129,9 +129,7 @@ func getPodNames(labels map[string]string) []string {
 func waitForEPPToDiscoverPods(poolName string) {
 	ginkgo.By("Waiting for EPP to discover pool members")
 	metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
-	if k8sContext != "" {
-		startEPPMetricsPortForward()
-	}
+	startEPPMetricsPortForward()
 	labelMatch := fmt.Sprintf(`name="%s"`, poolName)
 	gomega.Eventually(func() int {
 		return getCounterMetric(metricsURL, "inference_pool_ready_pods", labelMatch)
