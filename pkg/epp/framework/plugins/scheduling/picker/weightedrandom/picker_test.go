@@ -113,6 +113,16 @@ func TestPickWeightedRandomPicker(t *testing.T) {
 				selectionCounts[endpointName] = 0
 			}
 
+			result := picker.Pick(context.Background(), test.input)
+			if len(result.ScoredEndpoints) != len(result.TargetEndpoints) {
+				t.Fatalf("Expected ScoredEndpoints length %d, got %d", len(result.TargetEndpoints), len(result.ScoredEndpoints))
+			}
+			for i, scoredEndpoint := range result.ScoredEndpoints {
+				if result.TargetEndpoints[i] != fwksched.Endpoint(scoredEndpoint) {
+					t.Errorf("ScoredEndpoints[%d] is not parallel to TargetEndpoints[%d]", i, i)
+				}
+			}
+
 			// Run multiple iterations to gather statistical data
 			for range testIterations {
 				result := picker.Pick(context.Background(), test.input)

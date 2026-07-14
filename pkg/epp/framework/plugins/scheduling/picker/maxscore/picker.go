@@ -111,5 +111,5 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 		targetEndpoints[i] = scoredEndpoint
 	}
 
-	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}
+	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints, ScoredEndpoints: scoredEndpoints}
 }

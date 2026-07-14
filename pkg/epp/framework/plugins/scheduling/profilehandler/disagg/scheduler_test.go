@@ -81,12 +81,18 @@ func TestPDSchedule(t *testing.T) {
 						Endpoint: endpoint2,
 					},
 				},
+				ScoredEndpoints: []*fwksched.ScoredEndpoint{
+					{Endpoint: endpoint2},
+				},
 			},
 			prefill: {
 				TargetEndpoints: []fwksched.Endpoint{
 					&fwksched.ScoredEndpoint{
 						Endpoint: endpoint1,
 					},
+				},
+				ScoredEndpoints: []*fwksched.ScoredEndpoint{
+					{Endpoint: endpoint1},
 				},
 			},
 		},
@@ -101,6 +107,9 @@ func TestPDSchedule(t *testing.T) {
 					&fwksched.ScoredEndpoint{
 						Endpoint: endpoint2,
 					},
+				},
+				ScoredEndpoints: []*fwksched.ScoredEndpoint{
+					{Endpoint: endpoint2},
 				},
 			},
 		},
@@ -188,12 +197,18 @@ func TestPDSchedule(t *testing.T) {
 								Endpoint: noRoleEndpoint1,
 							},
 						},
+						ScoredEndpoints: []*fwksched.ScoredEndpoint{
+							{Endpoint: noRoleEndpoint1},
+						},
 					},
 					prefill: {
 						TargetEndpoints: []fwksched.Endpoint{
 							&fwksched.ScoredEndpoint{
 								Endpoint: endpoint1,
 							},
+						},
+						ScoredEndpoints: []*fwksched.ScoredEndpoint{
+							{Endpoint: endpoint1},
 						},
 					},
 				},

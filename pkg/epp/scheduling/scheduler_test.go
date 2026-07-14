@@ -134,6 +134,22 @@ func TestSchedule(t *testing.T) {
 								Score: 2.8,
 							},
 						},
+						ScoredEndpoints: []*fwksched.ScoredEndpoint{
+							{
+								Endpoint: fwksched.NewEndpoint(
+									&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}},
+									&fwkdl.Metrics{
+										WaitingQueueSize:    0,
+										KVCacheUsagePercent: 0.2,
+										MaxActiveModels:     2,
+										ActiveModels: map[string]int{
+											"foo":      1,
+											"critical": 1,
+										},
+									}, nil),
+								Score: 2.8,
+							},
+						},
 					},
 				},
 				PrimaryProfileName: "default",

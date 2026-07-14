@@ -100,5 +100,5 @@ func (p *RandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.Sco
 		targetEndpoints[i] = scoredEndpoint
 	}
 
-	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}
+	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints, ScoredEndpoints: scoredEndpoints}
 }
