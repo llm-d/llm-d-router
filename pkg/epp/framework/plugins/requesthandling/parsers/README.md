@@ -86,3 +86,17 @@ requestHandler:
   - pluginRef: openaiParser
   - pluginRef: anthropicParser
 ```
+
+### Custom path claims for `openai-parser`
+
+`openai-parser` accepts an `additionalPathClaims` parameter listing extra path suffixes to route to it, for OpenAI-compatible providers that expose sub-paths or prefixed variants of the canonical endpoints. Each claim must sit under a canonical OpenAI endpoint (`chat/completions`, `completions`, `embeddings`, `responses`, `conversations`) as a complete run of path segments; the request body is then parsed as that endpoint's API type. Matching is segment-aware, so `chat/completions/pipeline` is parsed as `chat/completions` rather than bare `completions`. A claim that sits under no canonical endpoint fails configuration loading.
+
+```yaml
+plugins:
+- name: openaiParser
+  type: openai-parser
+  parameters:
+    additionalPathClaims:
+    - chat/completions/pipeline
+    - myservice/embeddings
+```

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -65,6 +66,61 @@ var _ fwkrh.Parser = &OpenAIParser{}
 // https://developers.openai.com/api/reference/overview
 type OpenAIParser struct {
 	typedName fwkplugin.TypedName
+	// customClaims holds operator-configured path claims, sorted deepest-first
+	// so the most specific claim wins at dispatch time.
+	customClaims []customClaim
+}
+
+// Parameters is the user-facing plugin configuration block.
+type Parameters struct {
+	// AdditionalPathClaims lists extra path suffixes routed to this parser.
+	// Each claim must sit under a canonical OpenAI endpoint (segment-aware, so
+	// "chat/completions/pipeline" dispatches as chat/completions rather than
+	// bare completions) and is parsed as that endpoint's API type.
+	AdditionalPathClaims []string `json:"additionalPathClaims,omitempty"`
+}
+
+// customClaim maps a configured path claim to the API type of the canonical
+// endpoint it sits under.
+type customClaim struct {
+	path    string
+	apiType string
+}
+
+// canonicalAPIEndpoints is ordered deepest-first so "chat/completions/x"
+// resolves to chat/completions rather than bare completions.
+var canonicalAPIEndpoints = []string{
+	chatCompletionsAPI,
+	conversationsAPI,
+	responsesAPI,
+	completionsAPI,
+	embeddingsAPI,
+}
+
+// resolveClaimAPIType returns the API type of the deepest canonical endpoint
+// the claim sits under, or an error when it sits under none.
+func resolveClaimAPIType(claim string) (string, error) {
+	normalized := strings.Trim(strings.TrimSpace(claim), "/")
+	if normalized == "" {
+		return "", fmt.Errorf("%s: additionalPathClaims entry %q is empty", OpenAIParserType, claim)
+	}
+	for _, endpoint := range canonicalAPIEndpoints {
+		if sitsUnder(normalized, endpoint) {
+			return endpoint, nil
+		}
+	}
+	return "", fmt.Errorf("%s: additionalPathClaims entry %q does not sit under any canonical OpenAI endpoint (%s)",
+		OpenAIParserType, claim, strings.Join(canonicalAPIEndpoints, ", "))
+}
+
+// sitsUnder reports whether path contains endpoint as a complete run of path
+// segments, so "chat/completions" is found in "v2/chat/completions/stream" but
+// not in "fancycompletions".
+func sitsUnder(path, endpoint string) bool {
+	return path == endpoint ||
+		strings.HasPrefix(path, endpoint+"/") ||
+		strings.HasSuffix(path, "/"+endpoint) ||
+		strings.Contains(path, "/"+endpoint+"/")
 }
 
 // NewOpenAIParser creates a new OpenAIParser.
@@ -83,22 +139,53 @@ func (p *OpenAIParser) TypedName() fwkplugin.TypedName {
 }
 
 func (p *OpenAIParser) Claims() fwkrh.Claims {
+	paths := append(make([]string, 0, 7+len(p.customClaims)),
+		chatCompletionsAPI,
+		completionsAPI,
+		embeddingsAPI,
+		responsesAPI,
+		conversationsAPI,
+		chatCompletionsAPI+"/render",
+		completionsAPI+"/render",
+	)
+	for _, claim := range p.customClaims {
+		paths = append(paths, claim.path)
+	}
 	return fwkrh.Claims{
-		Paths: []string{
-			chatCompletionsAPI,
-			completionsAPI,
-			embeddingsAPI,
-			responsesAPI,
-			conversationsAPI,
-			chatCompletionsAPI + "/render",
-			completionsAPI + "/render",
-		},
+		Paths:     paths,
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
 }
 
-func OpenAIParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	return NewOpenAIParser().WithName(name), nil
+func OpenAIParserPluginFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	var params Parameters
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&params); err != nil {
+			return nil, fmt.Errorf("%s: failed to decode parameters: %w", OpenAIParserType, err)
+		}
+	}
+
+	parser := NewOpenAIParser().WithName(name)
+	for _, claim := range params.AdditionalPathClaims {
+		apiType, err := resolveClaimAPIType(claim)
+		if err != nil {
+			return nil, err
+		}
+		parser.customClaims = append(parser.customClaims, customClaim{
+			path:    strings.Trim(strings.TrimSpace(claim), "/"),
+			apiType: apiType,
+		})
+	}
+	// Deepest claim wins when a path matches several; ties broken
+	// lexicographically for determinism.
+	sort.SliceStable(parser.customClaims, func(i, j int) bool {
+		di, dj := strings.Count(parser.customClaims[i].path, "/"), strings.Count(parser.customClaims[j].path, "/")
+		if di != dj {
+			return di > dj
+		}
+		return parser.customClaims[i].path < parser.customClaims[j].path
+	})
+	return parser, nil
 }
 
 func (p *OpenAIParser) WithName(name string) *OpenAIParser {
@@ -112,7 +199,7 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if err := json.Unmarshal(body, &bodyMap); err != nil {
 		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
 	}
-	apiType := determineAPITypeFromPath(request.GetRequestPath(headers))
+	apiType := p.apiTypeFromPath(request.GetRequestPath(headers))
 	extractedBody, err := extractRequestBody(apiType, body)
 	if err != nil {
 		return nil, err
@@ -173,6 +260,17 @@ func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse,
 	return &fwkrh.ParsedResponse{
 		Usage: usage,
 	}, nil
+}
+
+// apiTypeFromPath resolves the API type for a request path, consulting the
+// operator-configured claims (deepest first) before the canonical suffix chain.
+func (p *OpenAIParser) apiTypeFromPath(path string) string {
+	for _, claim := range p.customClaims {
+		if request.MatchPathSuffix(path, claim.path) {
+			return claim.apiType
+		}
+	}
+	return determineAPITypeFromPath(path)
 }
 
 // determineAPITypeFromPath determines the API type based on the request path.

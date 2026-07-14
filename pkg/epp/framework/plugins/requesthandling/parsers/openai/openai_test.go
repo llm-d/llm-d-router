@@ -1454,3 +1454,141 @@ func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAIParserPluginFactory_AdditionalPathClaims(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		wantErr    bool
+		wantExtras []string
+	}{
+		{
+			name:       "extras merged into claims",
+			raw:        `{"additionalPathClaims":["chat/completions/pipeline","myservice/embeddings"]}`,
+			wantExtras: []string{"chat/completions/pipeline", "myservice/embeddings"},
+		},
+		{
+			name: "no parameters keeps default claims",
+		},
+		{
+			name:    "claim under no canonical endpoint rejected",
+			raw:     `{"additionalPathClaims":["foo/bar"]}`,
+			wantErr: true,
+		},
+		{
+			name:    "bare-suffix overlap without segment boundary rejected",
+			raw:     `{"additionalPathClaims":["fancycompletions"]}`,
+			wantErr: true,
+		},
+		{
+			name:    "empty claim rejected",
+			raw:     `{"additionalPathClaims":["/"]}`,
+			wantErr: true,
+		},
+		{
+			name:    "unknown field rejected",
+			raw:     `{"additionalPathClaim":["completions/x"]}`,
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var decoder *json.Decoder
+			if tc.raw != "" {
+				decoder = fwkplugin.StrictDecoder(json.RawMessage(tc.raw))
+			}
+			plg, err := OpenAIParserPluginFactory("test-parser", decoder, nil)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("OpenAIParserPluginFactory() expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("OpenAIParserPluginFactory() unexpected error: %v", err)
+			}
+			want := append([]string{
+				chatCompletionsAPI,
+				completionsAPI,
+				embeddingsAPI,
+				responsesAPI,
+				conversationsAPI,
+				chatCompletionsAPI + "/render",
+				completionsAPI + "/render",
+			}, tc.wantExtras...)
+			got := plg.(*OpenAIParser).Claims().Paths
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("Claims().Paths mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestResolveClaimAPIType(t *testing.T) {
+	tests := []struct {
+		claim   string
+		want    string
+		wantErr bool
+	}{
+		{claim: "chat/completions/pipeline", want: chatCompletionsAPI},
+		{claim: "v2/chat/completions/stream", want: chatCompletionsAPI},
+		{claim: "myservice/completions", want: completionsAPI},
+		{claim: "conversations/archive", want: conversationsAPI},
+		{claim: "embeddings", want: embeddingsAPI},
+		{claim: "/responses/", want: responsesAPI},
+		{claim: "completionsfoo", wantErr: true},
+		{claim: "foo/bar", wantErr: true},
+		{claim: "", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.claim, func(t *testing.T) {
+			got, err := resolveClaimAPIType(tc.claim)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolveClaimAPIType(%q) expected error, got %q", tc.claim, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveClaimAPIType(%q) unexpected error: %v", tc.claim, err)
+			}
+			if got != tc.want {
+				t.Errorf("resolveClaimAPIType(%q) = %q, want %q", tc.claim, got, tc.want)
+			}
+		})
+	}
+}
+
+// A request on a configured custom sub-path must parse as the canonical
+// endpoint the claim sits under; without the claim mapping, the same path
+// falls through to the completions default and misparses a chat body.
+func TestOpenAIParser_ParseRequest_CustomClaimDispatch(t *testing.T) {
+	raw := json.RawMessage(`{"additionalPathClaims":["chat/completions/pipeline"]}`)
+	plg, err := OpenAIParserPluginFactory("test-parser", fwkplugin.StrictDecoder(raw), nil)
+	if err != nil {
+		t.Fatalf("OpenAIParserPluginFactory() unexpected error: %v", err)
+	}
+	parser := plg.(*OpenAIParser)
+
+	body := map[string]any{
+		"model": "test",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello"},
+		},
+	}
+	jsonBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, err := parser.ParseRequest(context.Background(), jsonBytes, map[string]string{":path": "/v1/chat/completions/pipeline"})
+	if err != nil {
+		t.Fatalf("ParseRequest() unexpected error: %v", err)
+	}
+	if got.Body.ChatCompletions == nil {
+		t.Fatalf("ParseRequest() dispatched custom claim path as %+v, want chat/completions extraction", got.Body)
+	}
+	wantMessages := []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hello"}}}
+	if diff := cmp.Diff(wantMessages, got.Body.ChatCompletions.Messages); diff != "" {
+		t.Errorf("ChatCompletions.Messages mismatch (-want +got):\n%s", diff)
+	}
+}
