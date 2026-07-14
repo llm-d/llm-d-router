@@ -147,9 +147,11 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 	selectedCount := min(p.maxNumOfEndpoints, len(weightedEndpoints))
 
 	targetEndpoints := make([]fwksched.Endpoint, selectedCount)
+	selectedScoredEndpoints := make([]*fwksched.ScoredEndpoint, selectedCount)
 	for i := range selectedCount {
 		targetEndpoints[i] = weightedEndpoints[i].ScoredEndpoint
+		selectedScoredEndpoints[i] = weightedEndpoints[i].ScoredEndpoint
 	}
 
-	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}
+	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints, ScoredEndpoints: selectedScoredEndpoints}
 }

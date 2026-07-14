@@ -93,6 +93,15 @@ func TestPickRandomPicker(t *testing.T) {
 				t.Errorf("Expected %d endpoints, got %d", test.numPods, len(got))
 			}
 
+			if len(result.ScoredEndpoints) != len(got) {
+				t.Fatalf("Expected ScoredEndpoints length %d, got %d", len(got), len(result.ScoredEndpoints))
+			}
+			for i, scoredEndpoint := range result.ScoredEndpoints {
+				if got[i] != fwksched.Endpoint(scoredEndpoint) {
+					t.Errorf("ScoredEndpoints[%d] is not parallel to TargetEndpoints[%d]", i, i)
+				}
+			}
+
 			// Verify uniform distribution: each endpoint's selection probability
 			// should be min(numPods/numCandidates, 1.0), regardless of scores.
 			selectionCounts := make(map[string]int)
