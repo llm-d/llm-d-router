@@ -396,8 +396,9 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 		OriginalPath: gateway.PathChatCompletions,
 		Model:        "test-model",
 		Body: map[string]any{
-			"model":  "test-model",
-			"stream": true,
+			"model":          "test-model",
+			"stream":         true,
+			"stream_options": map[string]any{"include_usage": true},
 			"messages": []any{
 				map[string]any{"role": "user", "content": "hello"},
 			},
@@ -411,6 +412,9 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 
 	if prefillBody["stream"] != false {
 		t.Fatalf("expected prefill request to force stream=false, got %v", prefillBody["stream"])
+	}
+	if _, ok := prefillBody["stream_options"]; ok {
+		t.Fatalf("expected stream_options to be stripped from prefill request, got %v", prefillBody["stream_options"])
 	}
 }
 

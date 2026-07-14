@@ -138,6 +138,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	case gateway.FormatChatCompletions:
 		body := maps.Clone(reqCtx.Body)
 		body["stream"] = false
+		delete(body, "stream_options")
 		tokens := map[string]any{
 			"token_ids": reqCtx.TokenIDs,
 		}
