@@ -489,9 +489,10 @@ func TestGlobalAndBandCapacityInteraction(t *testing.T) {
 	detector := newBlockedDetector()
 
 	h := newHarness(t, harnessOpts{
-		detector:        detector,
-		maxRequests:     3,
-		bandMaxRequests: 10,
+		detector:           detector,
+		maxRequests:        3,
+		bandMaxRequests:    10,
+		endpointCandidates: nonEmptyCandidates(),
 	})
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
@@ -537,8 +538,9 @@ func TestByteCapacityEnforcement(t *testing.T) {
 	detector := newBlockedDetector()
 
 	h := newHarness(t, harnessOpts{
-		detector:     detector,
-		bandMaxBytes: 1000,
+		detector:           detector,
+		bandMaxBytes:       1000,
+		endpointCandidates: nonEmptyCandidates(),
 	})
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
@@ -571,6 +573,59 @@ func TestByteCapacityEnforcement(t *testing.T) {
 
 	require.GreaterOrEqual(t, rejected, 1,
 		"at least 1 request should be rejected when 4x300 bytes exceeds band budget of 1000")
+}
+
+// TestEmptyPoolRejectsAsNoEndpoints verifies the scale-from-zero path: when the candidate pool has no
+// endpoints, requests buffer until capacity is exhausted, and the overflow rejection is surfaced as
+// RejectedNoEndpoints (mapped to 503) rather than RejectedCapacity (429).
+func TestEmptyPoolRejectsAsNoEndpoints(t *testing.T) {
+	t.Parallel()
+
+	// Blocked detector prevents dispatch; the pool is intentionally empty (no endpointCandidates set).
+	detector := newBlockedDetector()
+
+	h := newHarness(t, harnessOpts{
+		detector:     detector,
+		bandMaxBytes: 1000,
+	})
+
+	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
+
+	const numRequests = 4
+	results := make(chan dispatchResult, numRequests)
+	for i := 0; i < numRequests; i++ {
+		id := fmt.Sprintf("noep-req-%d", i)
+		go func() {
+			reqCtx, reqCancel := context.WithTimeout(h.ctx, 500*time.Millisecond)
+			defer reqCancel()
+			req := &testRequest{id: id, key: key, byteSize: 300, ttl: 500 * time.Millisecond}
+			outcome, err := h.fc.EnqueueAndWait(reqCtx, req)
+			results <- dispatchResult{id: id, outcome: outcome, err: err}
+		}()
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	var noEndpoints, capacity int
+	for i := 0; i < numRequests; i++ {
+		select {
+		case r := <-results:
+			switch r.outcome {
+			case fcTypes.QueueOutcomeRejectedNoEndpoints:
+				noEndpoints++
+				require.ErrorIs(t, r.err, fcTypes.ErrNoEndpoints,
+					"no-endpoints rejection should wrap ErrNoEndpoints")
+			case fcTypes.QueueOutcomeRejectedCapacity:
+				capacity++
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for result %d", i)
+		}
+	}
+
+	require.GreaterOrEqual(t, noEndpoints, 1,
+		"with an empty pool, a full-queue rejection should be RejectedNoEndpoints")
+	require.Zero(t, capacity,
+		"with an empty pool, no rejection should be classified as RejectedCapacity")
 }
 
 // ============================================================================
@@ -855,8 +910,9 @@ func TestZombieCapacityStarvation(t *testing.T) {
 	detector := newBlockedDetector()
 
 	h := newHarness(t, harnessOpts{
-		detector:        detector,
-		bandMaxRequests: 3,
+		detector:           detector,
+		bandMaxRequests:    3,
+		endpointCandidates: nonEmptyCandidates(),
 		controllerCfg: &controller.Config{
 			DefaultRequestTTL:        50 * time.Millisecond,
 			ExpiryCleanupInterval:    10 * time.Second,
@@ -1122,7 +1178,7 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 	var queueSizeWhileQueued float64
 	var foundQueueSize bool
 	for _, f := range families {
-		if f.GetName() == "llm_d_router_epp_flow_control_queue_size" {
+		if f.GetName() == "llm_d_epp_flow_control_queue_size" {
 			foundQueueSize = true
 			for _, m := range f.GetMetric() {
 				queueSizeWhileQueued += m.GetGauge().GetValue()
@@ -1130,7 +1186,7 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 		}
 	}
 	require.True(t, foundQueueSize,
-		"llm_d_router_epp_flow_control_queue_size metric should exist")
+		"llm_d_epp_flow_control_queue_size metric should exist")
 	require.Greater(t, queueSizeWhileQueued, 0.0,
 		"queue_size should be > 0 while a request is actively queued")
 

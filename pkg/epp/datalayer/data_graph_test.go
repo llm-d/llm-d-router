@@ -32,6 +32,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/util"
 )
 
 const mockProducedDataKey = "mockProducedData"
@@ -275,7 +276,7 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 				}
 				assert.NoError(t, err)
 			}
-			orderedPlugins, err := topologicalSort(dag)
+			orderedPlugins, err := util.TopologicalSort(dag)
 
 			if tc.expectedErr != "" {
 				assert.Error(t, err)

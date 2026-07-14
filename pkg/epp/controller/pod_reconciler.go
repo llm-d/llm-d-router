@@ -24,6 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -35,7 +36,8 @@ import (
 
 type PodReconciler struct {
 	client.Reader
-	Datastore datastore.Datastore
+	Datastore       datastore.Datastore
+	RunOnNonLeaders bool
 }
 
 func (c *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -81,9 +83,11 @@ func (c *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return c.Datastore.PoolLabelsMatch(pod.GetLabels())
 		},
 	}
+	needLeaderElection := !c.RunOnNonLeaders
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Pod{}).
 		WithEventFilter(filter).
+		WithOptions(controller.Options{NeedLeaderElection: &needLeaderElection}).
 		Complete(c)
 }
 

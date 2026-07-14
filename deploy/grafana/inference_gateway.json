@@ -137,7 +137,7 @@
             {
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "sum by(name) (llm_d_router_epp_average_kv_cache_utilization)",
+              "expr": "sum by(name) (llm_d_epp_average_kv_cache_utilization)",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "legendFormat": "__auto",
@@ -233,7 +233,7 @@
             {
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "sum by(name) (llm_d_router_epp_average_queue_size)",
+              "expr": "sum by(name) (llm_d_epp_average_queue_size)",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "legendFormat": "__auto",
@@ -331,7 +331,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "sum by(name, model_server_endpoint, pod) (llm_d_router_epp_per_endpoint_queue_size)",
+              "expr": "sum by(name, model_server_endpoint, pod) (llm_d_epp_per_endpoint_queue_size)",
               "fullMetaSearch": false,
               "includeNullMetadata": false,
               "instant": false,
@@ -443,7 +443,7 @@
             {
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.95, sum by(le) (rate(llm_d_router_epp_request_duration_seconds_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.95, sum by(le) (rate(llm_d_epp_request_duration_seconds_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "includeNullMetadata": false,
               "legendFormat": "95%",
@@ -458,7 +458,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.9, sum by(le) (rate(llm_d_router_epp_request_duration_seconds_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.9, sum by(le) (rate(llm_d_epp_request_duration_seconds_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -474,7 +474,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.5, sum by(le) (rate(llm_d_router_epp_request_duration_seconds_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.5, sum by(le) (rate(llm_d_epp_request_duration_seconds_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -576,7 +576,7 @@
               "disableTextWrap": false,
               "editorMode": "builder",
               "exemplar": false,
-              "expr": "sum by(model_name, target_model_name) (rate(llm_d_router_epp_request_total{}[$__rate_interval]))",
+              "expr": "sum by(model_name, target_model_name) (rate(llm_d_epp_request_total{}[$__rate_interval]))",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "interval": "",
@@ -678,7 +678,7 @@
               "disableTextWrap": false,
               "editorMode": "builder",
               "exemplar": false,
-              "expr": "sum by(error_code, model_name, target_model_name) (rate(llm_d_router_epp_request_error_total[$__rate_interval]))",
+              "expr": "sum by(error_code, model_name, target_model_name) (rate(llm_d_epp_request_error_total[$__rate_interval]))",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "interval": "",
@@ -775,7 +775,7 @@
             {
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.95, sum by(le) (rate(llm_d_router_epp_request_size_bytes_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.95, sum by(le) (rate(llm_d_epp_request_size_bytes_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "includeNullMetadata": false,
               "legendFormat": "95%",
@@ -790,7 +790,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.9, sum by(le) (rate(llm_d_router_epp_request_size_bytes_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.9, sum by(le) (rate(llm_d_epp_request_size_bytes_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -806,7 +806,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.5, sum by(le) (rate(llm_d_router_epp_request_size_bytes_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.5, sum by(le) (rate(llm_d_epp_request_size_bytes_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -903,7 +903,7 @@
             {
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.95, sum by(le) (rate(llm_d_router_epp_response_size_bytes_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.95, sum by(le) (rate(llm_d_epp_response_size_bytes_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "includeNullMetadata": false,
               "legendFormat": "95%",
@@ -918,7 +918,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.9, sum by(le) (rate(llm_d_router_epp_response_size_bytes_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.9, sum by(le) (rate(llm_d_epp_response_size_bytes_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -934,7 +934,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.5, sum by(le) (rate(llm_d_router_epp_response_size_bytes_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.5, sum by(le) (rate(llm_d_epp_response_size_bytes_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -1031,7 +1031,7 @@
             {
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.95, sum by(le) (rate(llm_d_router_epp_request_input_tokens_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.95, sum by(le) (rate(llm_d_epp_request_input_tokens_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "includeNullMetadata": false,
               "legendFormat": "95%",
@@ -1046,7 +1046,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.9, sum by(le) (rate(llm_d_router_epp_request_input_tokens_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.9, sum by(le) (rate(llm_d_epp_request_input_tokens_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -1062,7 +1062,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.5, sum by(le) (rate(llm_d_router_epp_request_input_tokens_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.5, sum by(le) (rate(llm_d_epp_request_input_tokens_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -1159,7 +1159,7 @@
             {
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.95, sum by(le) (rate(llm_d_router_epp_request_output_tokens_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.95, sum by(le) (rate(llm_d_epp_request_output_tokens_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "includeNullMetadata": false,
               "legendFormat": "95%",
@@ -1174,7 +1174,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.9, sum by(le) (rate(llm_d_router_epp_request_output_tokens_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.9, sum by(le) (rate(llm_d_epp_request_output_tokens_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -1190,7 +1190,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "histogram_quantile(0.5, sum by(le) (rate(llm_d_router_epp_request_output_tokens_bucket{}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.5, sum by(le) (rate(llm_d_epp_request_output_tokens_bucket{}[$__rate_interval])))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -1236,7 +1236,7 @@
           },
           "targets": [
             {
-              "expr": "max by(inference_pool) (llm_d_router_epp_flow_control_pool_saturation)",
+              "expr": "max by(inference_pool) (llm_d_epp_flow_control_pool_saturation)",
               "legendFormat": "{{inference_pool}}",
               "refId": "A"
             }
@@ -1301,7 +1301,7 @@
           },
           "targets": [
             {
-              "expr": "sum(deriv(llm_d_router_epp_flow_control_queue_size[$__rate_interval]))",
+              "expr": "sum(deriv(llm_d_epp_flow_control_queue_size[$__rate_interval]))",
               "legendFormat": "Net Flow (Req/sec change)",
               "refId": "A"
             }
@@ -1360,12 +1360,12 @@
           },
           "targets": [
             {
-              "expr": "sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_enqueue_duration_seconds_count[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_enqueue_duration_seconds_count[$__range])))",
+              "expr": "sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_enqueue_duration_seconds_count[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_enqueue_duration_seconds_count[$__range])))",
               "legendFormat": "P{{priority}} - {{fairness_id}}",
               "refId": "A"
             },
             {
-              "expr": "sum(rate(llm_d_router_epp_flow_control_request_enqueue_duration_seconds_count[$__rate_interval])) - sum(sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_enqueue_duration_seconds_count[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_enqueue_duration_seconds_count[$__range]))))",
+              "expr": "sum(rate(llm_d_epp_flow_control_request_enqueue_duration_seconds_count[$__rate_interval])) - sum(sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_enqueue_duration_seconds_count[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_enqueue_duration_seconds_count[$__range]))))",
               "legendFormat": "Other",
               "refId": "B"
             }
@@ -1435,12 +1435,12 @@
           },
           "targets": [
             {
-              "expr": "sum by (priority, fairness_id) (llm_d_router_epp_flow_control_queue_size) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (max_over_time(llm_d_router_epp_flow_control_queue_size[$__range])))",
+              "expr": "sum by (priority, fairness_id) (llm_d_epp_flow_control_queue_size) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (max_over_time(llm_d_epp_flow_control_queue_size[$__range])))",
               "legendFormat": "P{{priority}} - {{fairness_id}}",
               "refId": "A"
             },
             {
-              "expr": "sum(llm_d_router_epp_flow_control_queue_size) - sum(sum by (priority, fairness_id) (llm_d_router_epp_flow_control_queue_size) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (max_over_time(llm_d_router_epp_flow_control_queue_size[$__range]))))",
+              "expr": "sum(llm_d_epp_flow_control_queue_size) - sum(sum by (priority, fairness_id) (llm_d_epp_flow_control_queue_size) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (max_over_time(llm_d_epp_flow_control_queue_size[$__range]))))",
               "legendFormat": "Other",
               "refId": "B"
             }
@@ -1511,12 +1511,12 @@
           },
           "targets": [
             {
-              "expr": "sum by (priority, fairness_id) (llm_d_router_epp_flow_control_queue_bytes) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (max_over_time(llm_d_router_epp_flow_control_queue_bytes[$__range])))",
+              "expr": "sum by (priority, fairness_id) (llm_d_epp_flow_control_queue_bytes) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (max_over_time(llm_d_epp_flow_control_queue_bytes[$__range])))",
               "legendFormat": "P{{priority}} - {{fairness_id}}",
               "refId": "A"
             },
             {
-              "expr": "sum(llm_d_router_epp_flow_control_queue_bytes) - sum(sum by (priority, fairness_id) (llm_d_router_epp_flow_control_queue_bytes) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (max_over_time(llm_d_router_epp_flow_control_queue_bytes[$__range]))))",
+              "expr": "sum(llm_d_epp_flow_control_queue_bytes) - sum(sum by (priority, fairness_id) (llm_d_epp_flow_control_queue_bytes) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (max_over_time(llm_d_epp_flow_control_queue_bytes[$__range]))))",
               "legendFormat": "Other",
               "refId": "B"
             }
@@ -1587,12 +1587,12 @@
           },
           "targets": [
             {
-              "expr": "sum by (priority, fairness_id, outcome) (rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_count[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_count[$__range])))",
+              "expr": "sum by (priority, fairness_id, outcome) (rate(llm_d_epp_flow_control_request_queue_duration_seconds_count[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_queue_duration_seconds_count[$__range])))",
               "legendFormat": "P{{priority}} - {{fairness_id}} - {{outcome}}",
               "refId": "A"
             },
             {
-              "expr": "sum by (outcome) (rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_count[$__rate_interval])) - sum by (outcome) (sum by (priority, fairness_id, outcome) (rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_count[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_count[$__range]))))",
+              "expr": "sum by (outcome) (rate(llm_d_epp_flow_control_request_queue_duration_seconds_count[$__rate_interval])) - sum by (outcome) (sum by (priority, fairness_id, outcome) (rate(llm_d_epp_flow_control_request_queue_duration_seconds_count[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_queue_duration_seconds_count[$__range]))))",
               "legendFormat": "Other - {{outcome}}",
               "refId": "B"
             }
@@ -1700,7 +1700,7 @@
           },
           "targets": [
             {
-              "expr": "histogram_quantile(0.99, sum by (priority, fairness_id, le) (rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_bucket[$__rate_interval]))) > 0 and on(priority, fairness_id) sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_enqueue_duration_seconds_count[$__rate_interval])) > 0.05",
+              "expr": "histogram_quantile(0.99, sum by (priority, fairness_id, le) (rate(llm_d_epp_flow_control_request_queue_duration_seconds_bucket[$__rate_interval]))) > 0 and on(priority, fairness_id) sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_enqueue_duration_seconds_count[$__rate_interval])) > 0.05",
               "legendFormat": "P{{priority}} - {{fairness_id}}",
               "refId": "A"
             }
@@ -1754,12 +1754,12 @@
           },
           "targets": [
             {
-              "expr": "histogram_quantile(0.99, sum by (le) (rate(llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds_bucket[$__rate_interval]))) > 0",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(llm_d_epp_flow_control_dispatch_cycle_duration_seconds_bucket[$__rate_interval]))) > 0",
               "legendFormat": "Dispatch Cycle P99",
               "refId": "A"
             },
             {
-              "expr": "histogram_quantile(0.99, sum by (le) (rate(llm_d_router_epp_flow_control_request_enqueue_duration_seconds_bucket[$__rate_interval]))) > 0",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(llm_d_epp_flow_control_request_enqueue_duration_seconds_bucket[$__rate_interval]))) > 0",
               "legendFormat": "Enqueue P99",
               "refId": "B"
             }
@@ -1810,12 +1810,12 @@
           },
           "targets": [
             {
-              "expr": "sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_count{outcome=\"Dispatched\"}[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_count{outcome=\"Dispatched\"}[$__range])))",
+              "expr": "sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_queue_duration_seconds_count{outcome=\"Dispatched\"}[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_queue_duration_seconds_count{outcome=\"Dispatched\"}[$__range])))",
               "legendFormat": "P{{priority}} - {{fairness_id}}",
               "refId": "A"
             },
             {
-              "expr": "sum(rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_count{outcome=\"Dispatched\"}[$__rate_interval])) - sum(sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_count{outcome=\"Dispatched\"}[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_router_epp_flow_control_request_queue_duration_seconds_count{outcome=\"Dispatched\"}[$__range]))))",
+              "expr": "sum(rate(llm_d_epp_flow_control_request_queue_duration_seconds_count{outcome=\"Dispatched\"}[$__rate_interval])) - sum(sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_queue_duration_seconds_count{outcome=\"Dispatched\"}[$__rate_interval])) and on(priority, fairness_id) topk(10, sum by (priority, fairness_id) (rate(llm_d_epp_flow_control_request_queue_duration_seconds_count{outcome=\"Dispatched\"}[$__range]))))",
               "legendFormat": "Other",
               "refId": "B"
             }

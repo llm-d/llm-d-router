@@ -171,7 +171,7 @@ func (p *Plugin) Score(ctx context.Context,
 	)
 	defer span.End()
 
-	span.SetAttributes(attribute.Int("llm_d.scorer.candidate_endpoints", len(endpoints)))
+	span.SetAttributes(attribute.Int("llm_d.epp.scorer.candidate_endpoints", len(endpoints)))
 	if req != nil {
 		if req.TargetModel != "" {
 			span.SetAttributes(attribute.String("gen_ai.request.model", req.TargetModel))
@@ -192,9 +192,9 @@ func (p *Plugin) Score(ctx context.Context,
 			totalScore += s
 		}
 		span.SetAttributes(
-			attribute.Float64("llm_d.scorer.score.max", maxScore),
-			attribute.Float64("llm_d.scorer.score.avg", totalScore/float64(len(scores))),
-			attribute.Int("llm_d.scorer.endpoints_scored", len(scores)),
+			attribute.Float64("llm_d.epp.scorer.score.max", maxScore),
+			attribute.Float64("llm_d.epp.scorer.score.avg", totalScore/float64(len(scores))),
+			attribute.Int("llm_d.epp.scorer.endpoints_scored", len(scores)),
 		)
 	}
 

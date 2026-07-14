@@ -1,4 +1,4 @@
-# HELP inference_extension_prefix_indexer_hit_ratio [ALPHA] [Deprecated: Use llm_d_router_epp_prefix_indexer_hit_ratio] Ratio of prefix length matched to total prefix length in the cache lookup.
+# HELP inference_extension_prefix_indexer_hit_ratio [ALPHA] [Deprecated: Use llm_d_epp_prefix_indexer_hit_ratio] Ratio of prefix length matched to total prefix length in the cache lookup.
 # TYPE inference_extension_prefix_indexer_hit_ratio histogram
 inference_extension_prefix_indexer_hit_ratio_bucket{le="0"} 2
 inference_extension_prefix_indexer_hit_ratio_bucket{le="0.1"} 2

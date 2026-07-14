@@ -58,7 +58,7 @@ var reverseEnqueueTimePolicy = &mocks.MockOrderingPolicy{
 	},
 }
 
-// testLifecycleAndOrdering is a helper function to execute a standard sequence of Add, PeekHead, and Remove operations
+// testLifecycleAndOrdering is a helper function to execute a standard sequence of Add, Peek, and Remove operations
 // on a queue. It verifies the queue's state (length, byte size) and item ordering based on the provided `itemsInOrder`
 // slice, which should be pre-sorted according to the `comparatorName` (which is just a string for
 // logging/identification).
@@ -71,11 +71,9 @@ func testLifecycleAndOrdering(
 ) {
 	t.Helper()
 
-	// PeekHead/PeekTail on empty queue
-	peeked := q.PeekHead()
-	assert.Nil(t, peeked, "[%s] PeekHead on empty queue should return a nil item", comparatorName)
-	peeked = q.PeekTail()
-	assert.Nil(t, peeked, "[%s] PeekTail on empty queue should return a nil item", comparatorName)
+	// Peek on empty queue
+	peeked := q.Peek()
+	assert.Nil(t, peeked, "[%s] Peek on empty queue should return a nil item", comparatorName)
 
 	// Add items
 	currentExpectedLen := 0
@@ -112,28 +110,20 @@ func testLifecycleAndOrdering(
 	expectedLen := initialLen
 	expectedByteSize := expectedTotalByteSize
 	for i, expectedItem := range itemsInOrder {
-		// Verify PeekHead
-		peeked = q.PeekHead()
-		require.NotNil(t, peeked, "[%s] PeekHead should return a non-nil item (iteration %d)", comparatorName, i)
+		// Verify Peek
+		peeked = q.Peek()
+		require.NotNil(t, peeked, "[%s] Peek should return a non-nil item (iteration %d)", comparatorName, i)
 		assert.Equal(t, expectedItem.OriginalRequest().ID(), peeked.OriginalRequest().ID(),
-			"[%s] PeekHead must return the item (ID: %s) at the head of the queue (iteration %d)",
+			"[%s] Peek must return the item (ID: %s) at the head of the queue (iteration %d)",
 			comparatorName, expectedItem.OriginalRequest().ID(), i)
 		peekedHandle := peeked.Handle()
 		require.NotNil(t, peekedHandle, "[%s] Handle from a peeked item must not be nil (iteration %d)", comparatorName, i)
 		require.False(t, peekedHandle.IsInvalidated(),
 			"[%s] Handle from a peeked item must not be invalidated (iteration %d)", comparatorName, i)
-		assert.Equal(t, expectedLen, q.Len(), "[%s] Len() must be unchanged after PeekHead (iteration %d)",
+		assert.Equal(t, expectedLen, q.Len(), "[%s] Len() must be unchanged after Peek (iteration %d)",
 			comparatorName, i)
 		assert.Equal(t, expectedByteSize, q.ByteSize(),
-			"[%s] ByteSize() must be unchanged after PeekHead (iteration %d)", comparatorName, i)
-
-		// Verify PeekTail
-		peekedTail := q.PeekTail()
-		require.NotNil(t, peekedTail, "[%s] PeekTail should return a non-nil item (iteration %d)", comparatorName, i)
-		// The tail is the last item in the *remaining* ordered slice.
-		expectedTailItem := itemsInOrder[len(itemsInOrder)-1]
-		assert.Equal(t, expectedTailItem.OriginalRequest().ID(), peekedTail.OriginalRequest().ID(),
-			"[%s] PeekTail must return the item with the lowest priority (iteration %d)", comparatorName, i)
+			"[%s] ByteSize() must be unchanged after Peek (iteration %d)", comparatorName, i)
 
 		// Remove the head item
 		removed, removeErr := q.Remove(peekedHandle)
@@ -156,8 +146,8 @@ func testLifecycleAndOrdering(
 	assert.Zero(t, q.Len(), "[%s] Queue length should be 0 after all items are removed", comparatorName)
 	assert.Zero(t, q.ByteSize(), "[%s] Queue byte size should be 0 after all items are removed", comparatorName)
 
-	peeked = q.PeekHead()
-	assert.Nil(t, peeked, "[%s] PeekHead on an empty queue should return a nil item again", comparatorName)
+	peeked = q.Peek()
+	assert.Nil(t, peeked, "[%s] Peek on an empty queue should return a nil item again", comparatorName)
 }
 
 // TestQueueConformance is the main conformance test suite for SafeQueue implementations.
@@ -404,7 +394,7 @@ func TestQueueConformance(t *testing.T) {
 				// Verify remaining items are correct
 				var remainingIDs []string
 				for q.Len() > 0 {
-					peeked := q.PeekHead()
+					peeked := q.Peek()
 					item, _ := q.Remove(peeked.Handle())
 					remainingIDs = append(remainingIDs, item.OriginalRequest().ID())
 				}
@@ -517,13 +507,9 @@ func TestQueueConformance(t *testing.T) {
 							case 2: // Inspect
 								_ = q.Len()
 								_ = q.ByteSize()
-								peeked := q.PeekHead()
+								peeked := q.Peek()
 								if q.Len() == 0 {
-									assert.Nil(t, peeked, "PeekHead on empty queue expected nil")
-								}
-								peeked = q.PeekTail()
-								if q.Len() == 0 {
-									assert.Nil(t, peeked, "PeekTail on empty queue expected nil")
+									assert.Nil(t, peeked, "Peek on empty queue expected nil")
 								}
 							case 3: // Cleanup
 								q.Cleanup(func(item flowcontrol.QueueItemAccessor) bool { return false })

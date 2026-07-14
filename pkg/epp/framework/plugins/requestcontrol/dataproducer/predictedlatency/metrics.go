@@ -68,7 +68,7 @@ var (
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "inference_request_metric",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_inference_request_metric] Consolidated gauge for various inference request metrics including TTFT, TPOT, SLOs, and prediction durations.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_inference_request_metric] Consolidated gauge for various inference request metrics including TTFT, TPOT, SLOs, and prediction durations.", compbasemetrics.ALPHA),
 		},
 		modelTypeLabels,
 	)
@@ -86,7 +86,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_ttft_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_ttft_seconds] Inference model TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_ttft_seconds] Inference model TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   generalLatencyBuckets,
 		},
 		modelLabels,
@@ -96,7 +96,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_predicted_ttft_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_predicted_ttft_seconds] Inference model Predicted TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_predicted_ttft_seconds] Inference model Predicted TTFT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   generalLatencyBuckets,
 		},
 		modelLabels,
@@ -116,7 +116,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_ttft_prediction_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_ttft_prediction_duration_seconds] Duration taken to generate TTFT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_ttft_prediction_duration_seconds] Duration taken to generate TTFT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   predictionLatencyBuckets,
 		},
 		modelLabels,
@@ -136,7 +136,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_tpot_seconds] Inference model TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_streaming_tpot_seconds] Inference model TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   tpotBuckets,
 		},
 		modelLabels,
@@ -146,7 +146,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_predicted_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_predicted_tpot_seconds] Inference model Predicted TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_predicted_tpot_seconds] Inference model Predicted TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   tpotBuckets,
 		},
 		modelLabels,
@@ -166,7 +166,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_tpot_prediction_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_tpot_prediction_duration_seconds] Duration taken to generate TPOT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_tpot_prediction_duration_seconds] Duration taken to generate TPOT predictions in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   predictionLatencyBuckets,
 		},
 		modelLabels,
@@ -186,7 +186,7 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_slo_violation_total",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_request_slo_violation_total] Counter of SLO violations for each model, target model, and violation type.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_slo_violation_total] Counter of SLO violations for each model, target model, and violation type.", compbasemetrics.ALPHA),
 		},
 		modelTypeLabels,
 	)

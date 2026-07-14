@@ -31,6 +31,7 @@ import (
 
 	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -89,10 +90,17 @@ const (
 	// Mooncake transfer fields
 	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 
+	// OffloadingConnector kv_transfer_params fields. The role is encoded by the
+	// nesting key: "decode" on the prefiller leg, "prefill" on the decoder leg.
+	requestFieldP2PDecodeParams  = "decode"
+	requestFieldP2PPrefillParams = "prefill"
+	requestFieldKVRequestID      = "kv_request_id"
+
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
 	KVConnectorSGLang        = constants.KVConnectorSGLang
 	KVConnectorMooncake      = constants.KVConnectorMooncake
+	KVConnectorOffloading    = constants.KVConnectorOffloading
 	ECExampleConnector       = constants.ECExampleConnector
 	ECConnectorNIXL          = constants.ECConnectorNIXL
 )
@@ -195,6 +203,11 @@ type Config struct {
 
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
 	MooncakeBootstrapPort int
+
+	// P2PConnectorPort is the prefiller's OffloadingConnector P2P tier listening port,
+	// injected as remote_port on the decode leg so the decoder can pull KV from it.
+	// Only meaningful with --kv-connector=offloading.
+	P2PConnectorPort int
 
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
@@ -400,10 +413,12 @@ func (s *Server) Clone() *Server {
 	}
 }
 
-// newProxyTransport returns an http.Transport cloned from the default with
-// connection-pool settings applied. If scheme is schemeHTTPS the transport's
-// TLSClientConfig is set accordingly.
-func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) *http.Transport {
+// newProxyTransport returns an http.RoundTripper backed by an http.Transport
+// cloned from the default with connection-pool settings applied. If scheme is
+// schemeHTTPS the transport's TLSClientConfig is set accordingly. The transport
+// is wrapped with otelhttp so outbound requests carry W3C trace context,
+// keeping EPP, routing-proxy, and vLLM spans in a single trace.
+func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.RoundTripper {
 	maxIdle := s.config.MaxIdleConnsPerHost
 	if maxIdle <= 0 {
 		maxIdle = defaultMaxIdleConnsPerHost
@@ -427,7 +442,7 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) *http
 			},
 		}
 	}
-	return t
+	return otelhttp.NewTransport(t)
 }
 
 func (s *Server) setKVConnector() {
@@ -444,6 +459,10 @@ func (s *Server) setKVConnector() {
 	case KVConnectorMooncake:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
 			s.handleMooncake(w, r, host)
+		}
+	case KVConnectorOffloading:
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+			s.handleP2P(w, r, host)
 		}
 	case KVConnectorNIXLV2:
 		fallthrough

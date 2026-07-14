@@ -130,7 +130,7 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) flowcontrol.FlowQ
 
 		service := st.Service()
 		var headWaitMs float64
-		if head := qi.Queue.PeekHead(); head != nil {
+		if head := qi.Queue.Peek(); head != nil {
 			headWaitMs = float64(time.Since(head.EnqueueTime()).Milliseconds())
 		}
 

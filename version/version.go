@@ -22,13 +22,14 @@ var (
 
 	// The build ref from the _PULL_BASE_REF from cloud build trigger.
 	BuildRef string
+
+	// BundleVersion is the value used for labeling the CRD bundle version.
+	// Defaults to "main-dev" for development builds. Set via -ldflags at release time via Github workflow.
+	BundleVersion = "main-dev"
 )
 
 const (
 	// BundleVersionAnnotation is the annotation key used in llm-d CRDs to specify
 	// the installed bundle version.
 	BundleVersionAnnotation = "llm-d.ai/bundle-version"
-
-	// BundleVersion is the value used for labeling the CRD bundle version.
-	BundleVersion = "main-dev"
 )

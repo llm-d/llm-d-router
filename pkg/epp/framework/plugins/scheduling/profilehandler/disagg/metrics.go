@@ -47,7 +47,7 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.SchedulerSubsystem,
 			Name:      "pd_decision_total",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_pd_decision_total] Total number of P/D disaggregation decisions made", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_pd_decision_total] Total number of P/D disaggregation decisions made", compbasemetrics.ALPHA),
 		},
 		[]string{"model_name", "decision_type"}, // "decode-only" or "prefill-decode"
 	)
@@ -65,13 +65,13 @@ var (
 	// SchedulerDisaggDecisionCount records disaggregation routing decisions,
 	// covering all stages: decode-only, prefill-decode, encode-decode, encode-prefill-decode.
 	//
-	// Deprecated: Use llm_d_router_epp_disagg_decision_total instead.
+	// Deprecated: Use llm_d_epp_disagg_decision_total instead.
 	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	SchedulerDisaggDecisionCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.SchedulerSubsystem,
 			Name:      "disagg_decision_total",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_router_epp_disagg_decision_total] Total number of disaggregation routing decisions made", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_disagg_decision_total] Total number of disaggregation routing decisions made", compbasemetrics.ALPHA),
 		},
 		[]string{"model_name", "decision_type"},
 	)

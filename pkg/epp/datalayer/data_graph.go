@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"slices"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -29,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/util"
 )
 
 // ValidateAndOrderDataDependencies validates that the data dependencies among the given plugins are acyclic
@@ -54,7 +54,7 @@ func ValidateAndOrderDataDependencies(plugins []plugin.Plugin) ([]string, error)
 		return nil, err
 	}
 	// Topologically sort the DAG to determine the order of plugin execution.
-	pluginNames, err := topologicalSort(dag)
+	pluginNames, err := util.TopologicalSort(dag)
 	if err != nil {
 		return nil, err
 	}
@@ -253,60 +253,4 @@ func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]p
 		}
 	}
 	return dag, nil
-}
-
-// TopologicalSort performs Kahn's Algorithm on a DAG.
-// It returns the sorted order or an error if a cycle is detected.
-func topologicalSort(graph map[string][]string) ([]string, error) {
-	// 1. Initialize in-degree map
-	inDegree := make(map[string]int)
-
-	// Ensure all nodes are present in the inDegree map, even those with no dependencies
-	for u, neighbors := range graph {
-		if _, ok := inDegree[u]; !ok {
-			inDegree[u] = 0
-		}
-		for _, v := range neighbors {
-			inDegree[v]++ // Increment in-degree for the destination node
-		}
-	}
-
-	// 2. Initialize the queue with nodes having 0 in-degree
-	var queue []string
-	for node, degree := range inDegree {
-		if degree == 0 {
-			queue = append(queue, node)
-		}
-	}
-
-	var result []string
-
-	// 3. Process the queue
-	for len(queue) > 0 {
-		// Dequeue
-		u := queue[0]
-		queue = queue[1:]
-
-		result = append(result, u)
-
-		// Decrease in-degree of neighbors
-		if neighbors, ok := graph[u]; ok {
-			for _, v := range neighbors {
-				inDegree[v]--
-				if inDegree[v] == 0 {
-					queue = append(queue, v)
-				}
-			}
-		}
-	}
-
-	// 4. Check for cycles
-	// If the result size != total nodes, there is a cycle
-	if len(result) != len(inDegree) {
-		return nil, errors.New("cycle detected: graph is not a DAG")
-	}
-
-	// Reverse to get the correct order since edges point from consumer to producer
-	slices.Reverse(result)
-	return result, nil
 }

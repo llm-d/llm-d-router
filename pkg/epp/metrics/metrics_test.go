@@ -124,13 +124,13 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metrics
+			// Verify llm_d_epp metrics
 			wantRequestTotalNew, err := os.Open("testdata/llm_d_request_total_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantRequestTotalNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestTotalNew, "llm_d_router_epp_request_total"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestTotalNew, "llm_d_epp_request_total"); err != nil {
 				t.Error(err)
 			}
 
@@ -139,7 +139,7 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantRequestSizesNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestSizesNew, "llm_d_router_epp_request_size_bytes"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestSizesNew, "llm_d_epp_request_size_bytes"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -200,13 +200,13 @@ func TestRecordRequestErrorCounter(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metric
+			// Verify llm_d_epp metric
 			wantRequestErrorCounterNew, err := os.Open("testdata/llm_d_request_error_total_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantRequestErrorCounterNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestErrorCounterNew, "llm_d_router_epp_request_error_total"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestErrorCounterNew, "llm_d_epp_request_error_total"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -289,13 +289,13 @@ func TestRecordRequestLatencies(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metric
+			// Verify llm_d_epp metric
 			wantRequestLatenciesNew, err := os.Open("testdata/llm_d_request_duration_seconds_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantRequestLatenciesNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestLatenciesNew, "llm_d_router_epp_request_duration_seconds"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRequestLatenciesNew, "llm_d_epp_request_duration_seconds"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -397,17 +397,17 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metric
+			// Verify llm_d_epp metric
 			wantLatencyPerTokenNew, err := os.Open("testdata/llm_d_normalized_time_per_output_token_seconds_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantLatencyPerTokenNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantLatencyPerTokenNew, "llm_d_router_epp_request_ntpot_seconds"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantLatencyPerTokenNew, "llm_d_epp_request_ntpot_seconds"); err != nil {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metric labels directly.
+			// Verify llm_d_epp metric labels directly.
 			if !scenario.invalid {
 				observed, err := getHistogramVecLabelValues(t, llmdNormalizedTimePerOutputToken, "m10", "t10", "tenant-a", "3")
 				require.NoError(t, err)
@@ -505,13 +505,13 @@ func TestRecordResponseMetrics(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metrics
+			// Verify llm_d_epp metrics
 			wantResponseSizeNew, err := os.Open("testdata/llm_d_response_size_bytes_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantResponseSizeNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantResponseSizeNew, "llm_d_router_epp_response_size_bytes"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantResponseSizeNew, "llm_d_epp_response_size_bytes"); err != nil {
 				t.Error(err)
 			}
 
@@ -520,7 +520,7 @@ func TestRecordResponseMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantInputTokenNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantInputTokenNew, "llm_d_router_epp_request_input_tokens"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantInputTokenNew, "llm_d_epp_request_input_tokens"); err != nil {
 				t.Error(err)
 			}
 
@@ -529,7 +529,7 @@ func TestRecordResponseMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantOutputTokenNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantOutputTokenNew, "llm_d_router_epp_request_output_tokens"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantOutputTokenNew, "llm_d_epp_request_output_tokens"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -605,13 +605,13 @@ func TestRunningRequestsMetrics(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metric
+			// Verify llm_d_epp metric
 			wantRunningRequestsNew, err := os.Open("testdata/llm_d_running_requests_metrics")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantRunningRequestsNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsNew, "llm_d_router_epp_request_running"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsNew, "llm_d_epp_request_running"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -621,18 +621,24 @@ func TestRunningRequestsMetrics(t *testing.T) {
 func TestInferencePoolMetrics(t *testing.T) {
 	Reset()
 	scenarios := []struct {
-		name               string
-		poolName           string
-		kvCacheAvg         float64
-		queueSizeAvg       float64
-		runningRequestsAvg float64
+		name                  string
+		poolName              string
+		kvCacheAvg            float64
+		queueSizeAvg          float64
+		runningRequestsAvg    float64
+		kvCacheStdDev         float64
+		queueSizeStdDev       float64
+		runningRequestsStdDev float64
 	}{
 		{
-			name:               "basic test",
-			poolName:           "p1",
-			kvCacheAvg:         0.3,
-			queueSizeAvg:       0.4,
-			runningRequestsAvg: 0.5,
+			name:                  "basic test",
+			poolName:              "p1",
+			kvCacheAvg:            0.3,
+			queueSizeAvg:          0.4,
+			runningRequestsAvg:    0.5,
+			kvCacheStdDev:         0.1,
+			queueSizeStdDev:       0.2,
+			runningRequestsStdDev: 0.3,
 		},
 	}
 	for _, scenario := range scenarios {
@@ -640,6 +646,9 @@ func TestInferencePoolMetrics(t *testing.T) {
 			RecordInferencePoolAvgKVCache(scenario.poolName, scenario.kvCacheAvg)
 			RecordInferencePoolAvgQueueSize(scenario.poolName, scenario.queueSizeAvg)
 			RecordInferencePoolAvgRunningRequests(scenario.poolName, scenario.runningRequestsAvg)
+			RecordInferencePoolStdDevKVCache(scenario.poolName, scenario.kvCacheStdDev)
+			RecordInferencePoolStdDevQueueSize(scenario.poolName, scenario.queueSizeStdDev)
+			RecordInferencePoolStdDevRunningRequests(scenario.poolName, scenario.runningRequestsStdDev)
 
 			// Verify deprecated metrics
 			wantKVCache, err := os.Open("testdata/kv_cache_avg_metrics")
@@ -669,13 +678,13 @@ func TestInferencePoolMetrics(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metrics
+			// Verify llm_d_epp metrics
 			wantKVCacheNew, err := os.Open("testdata/llm_d_kv_cache_avg_metrics")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantKVCacheNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantKVCacheNew, "llm_d_router_epp_average_kv_cache_utilization"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantKVCacheNew, "llm_d_epp_average_kv_cache_utilization"); err != nil {
 				t.Error(err)
 			}
 
@@ -684,7 +693,7 @@ func TestInferencePoolMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantQueueSizeNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantQueueSizeNew, "llm_d_router_epp_average_queue_size"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantQueueSizeNew, "llm_d_epp_average_queue_size"); err != nil {
 				t.Error(err)
 			}
 
@@ -693,7 +702,34 @@ func TestInferencePoolMetrics(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer wantRunningRequestsNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsNew, "llm_d_router_epp_average_running_requests"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsNew, "llm_d_epp_average_running_requests"); err != nil {
+				t.Error(err)
+			}
+
+			wantKVCacheStdDev, err := os.Open("testdata/llm_d_kv_cache_std_dev_metrics")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer wantKVCacheStdDev.Close()
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantKVCacheStdDev, "llm_d_epp_std_dev_kv_cache_utilization"); err != nil {
+				t.Error(err)
+			}
+
+			wantQueueSizeStdDev, err := os.Open("testdata/llm_d_queue_std_dev_size_metrics")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer wantQueueSizeStdDev.Close()
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantQueueSizeStdDev, "llm_d_epp_std_dev_queue_size"); err != nil {
+				t.Error(err)
+			}
+
+			wantRunningRequestsStdDev, err := os.Open("testdata/llm_d_running_requests_std_dev_metrics")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer wantRunningRequestsStdDev.Close()
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsStdDev, "llm_d_epp_std_dev_running_requests"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -782,13 +818,13 @@ func TestPluginProcessingLatencies(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metric
+			// Verify llm_d_epp metric
 			wantPluginLatenciesNew, err := os.Open("testdata/llm_d_plugin_processing_latencies_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantPluginLatenciesNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantPluginLatenciesNew, "llm_d_router_epp_plugin_duration_seconds"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantPluginLatenciesNew, "llm_d_epp_plugin_duration_seconds"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -832,13 +868,13 @@ func TestSchedulerE2ELatency(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metric
+			// Verify llm_d_epp metric
 			wantE2ELatencyNew, err := os.Open("testdata/llm_d_scheduler_e2e_duration_seconds_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantE2ELatencyNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantE2ELatencyNew, "llm_d_router_epp_scheduler_e2e_duration_seconds"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantE2ELatencyNew, "llm_d_epp_scheduler_e2e_duration_seconds"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -884,13 +920,13 @@ func TestFlowControlDispatchCycleLengthMetric(t *testing.T) {
 				t.Error(err)
 			}
 
-			// Verify llm_d_router_epp metric
+			// Verify llm_d_epp metric
 			wantDispatchCycleLatencyNew, err := os.Open("testdata/llm_d_flow_control_dispatch_cycle_duration_seconds_metric")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer wantDispatchCycleLatencyNew.Close()
-			if err := promtestutil.GatherAndCompare(metrics.Registry, wantDispatchCycleLatencyNew, "llm_d_router_epp_flow_control_dispatch_cycle_duration_seconds"); err != nil {
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantDispatchCycleLatencyNew, "llm_d_epp_flow_control_dispatch_cycle_duration_seconds"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -958,14 +994,14 @@ func TestFlowControlEnqueueDurationMetric(t *testing.T) {
 				}
 			}()
 
-			// Verify llm_d_router_epp metric
+			// Verify llm_d_epp metric
 			func() {
 				wantEnqueueLatencyNew, err := os.Open("testdata/llm_d_flow_control_enqueue_duration_seconds_metric")
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer wantEnqueueLatencyNew.Close()
-				if err := promtestutil.GatherAndCompare(metrics.Registry, wantEnqueueLatencyNew, "llm_d_router_epp_flow_control_request_enqueue_duration_seconds"); err != nil {
+				if err := promtestutil.GatherAndCompare(metrics.Registry, wantEnqueueLatencyNew, "llm_d_epp_flow_control_request_enqueue_duration_seconds"); err != nil {
 					t.Error(err)
 				}
 			}()
@@ -993,7 +1029,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer wantMetrics.Close()
-		if err := promtestutil.GatherAndCompare(metrics.Registry, wantMetrics, "llm_d_router_epp_scheduler_attempts_total"); err != nil {
+		if err := promtestutil.GatherAndCompare(metrics.Registry, wantMetrics, "llm_d_epp_scheduler_attempts_total"); err != nil {
 			t.Errorf("metric comparison failed: %v", err)
 		}
 	}
@@ -1214,11 +1250,11 @@ func TestFlowControlQueueDurationMetric(t *testing.T) {
 			require.Equal(t, tc.expectCount, hist.GetSampleCount(), "Sample count mismatch for labels %v", tc.labels)
 			require.InDelta(t, tc.expectSum, hist.GetSampleSum(), 0.00001, "Sample sum mismatch for labels %v", tc.labels)
 
-			// llm_d_router_epp metric
+			// llm_d_epp metric
 			histNew, err := getHistogramVecLabelValues(t, llmdFlowControlRequestQueueDuration, labels...)
-			require.NoError(t, err, "Failed to get llm_d_router_epp histogram for labels %v", tc.labels)
-			require.Equal(t, tc.expectCount, histNew.GetSampleCount(), "llm_d_router_epp sample count mismatch for labels %v", tc.labels)
-			require.InDelta(t, tc.expectSum, histNew.GetSampleSum(), 0.00001, "llm_d_router_epp sample sum mismatch for labels %v", tc.labels)
+			require.NoError(t, err, "Failed to get llm_d_epp histogram for labels %v", tc.labels)
+			require.Equal(t, tc.expectCount, histNew.GetSampleCount(), "llm_d_epp sample count mismatch for labels %v", tc.labels)
+			require.InDelta(t, tc.expectSum, histNew.GetSampleSum(), 0.00001, "llm_d_epp sample sum mismatch for labels %v", tc.labels)
 		})
 	}
 }

@@ -1,4 +1,4 @@
-# HELP inference_objective_normalized_time_per_output_token_seconds [ALPHA] [Deprecated: Use llm_d_router_epp_normalized_time_per_output_token_seconds] Inference objective latency divided by number of output tokens in seconds for each model and target model.
+# HELP inference_objective_normalized_time_per_output_token_seconds [ALPHA] [Deprecated: Use llm_d_epp_request_ntpot_seconds] Inference objective latency divided by number of output tokens in seconds for each model and target model.
 # TYPE inference_objective_normalized_time_per_output_token_seconds histogram
 inference_objective_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.001"} 0
 inference_objective_normalized_time_per_output_token_seconds_bucket{model_name="m10", target_model_name="t10", le="0.002"} 0

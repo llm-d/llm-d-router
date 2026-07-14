@@ -7,6 +7,8 @@ on:
 
 jobs:
   assemble:
+    # RC tags are pre-release; only assemble notes for final releases.
+    if: ${{ !contains(github.ref_name, '-rc') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,7 +33,7 @@ jobs:
         # Check out the tagged commit (not main HEAD) so a fragment merged
         # into main between the tag push and this workflow's run is not
         # accidentally rolled into the wrong release.
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           token: ${{ steps.app-token.outputs.token }}
@@ -45,6 +47,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          # ── Phase 1: read fragments from the tagged commit ──────────
+          # The checkout step landed us on the tagged commit so that
+          # fragments merged into main *after* the tag are excluded.
           shopt -s nullglob
           fragments=( release-notes.d/unreleased/*.md )
           if [[ ${#fragments[@]} -eq 0 ]]; then
@@ -54,15 +59,9 @@ jobs:
 
           tmp=$(mktemp)
           for f in "${fragments[@]}"; do
-            # Extract frontmatter values: strip "key: " prefix, take first match.
-            # Plain field-split breaks on URLs because they contain colons.
             pr=$(sed -n 's/^pr: *//p' "$f" | head -1)
             url=$(sed -n 's/^url: *//p' "$f" | head -1)
             date=$(sed -n 's/^date: *//p' "$f" | head -1)
-            # Print everything after the second `---` line verbatim — once
-            # we're past the closing frontmatter marker, a body line that
-            # happens to be `---` (Markdown horizontal rule) must be kept,
-            # not counted as a third delimiter.
             note=$(awk 'p {print; next} /^---$/ {if (++c == 2) p = 1}' "$f" | sed '/^[[:space:]]*$/d' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
             if [[ -z "$pr" || -z "$url" || -z "$date" || -z "$note" ]]; then
               echo "Malformed fragment: $f" >&2
@@ -81,17 +80,30 @@ jobs:
           done < "$tmp"
           printf '\n' >> "$new_section"
 
-          touch RELEASE-NOTES.md
-          cat "$new_section" RELEASE-NOTES.md > RELEASE-NOTES.md.new
-          mv RELEASE-NOTES.md.new RELEASE-NOTES.md
-
-          git rm -- release-notes.d/unreleased/*.md
-
+          # ── Phase 2: branch from main so the PR contains only
+          #    release-notes changes, not unrelated diffs between
+          #    the tagged commit and main HEAD ─────────────────────
+          git fetch origin main
           BRANCH="release-notes/assemble-${TAG}"
           git config user.name "${APP_SLUG}[bot]"
           git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
+          git checkout -b "$BRANCH" origin/main
+
+          # ── Phase 3: apply release-notes changes on top of main ─
+          touch RELEASE-NOTES.md
+          cat "$new_section" RELEASE-NOTES.md > RELEASE-NOTES.md.new
+          mv RELEASE-NOTES.md.new RELEASE-NOTES.md
           git add RELEASE-NOTES.md
+
+          # Remove only the fragments captured from the tagged commit,
+          # not the current main glob which may include post-tag fragments.
+          # The -f guard skips fragments already absent from main.
+          for f in "${fragments[@]}"; do
+            if [[ -f "$f" ]]; then
+              git rm -- "$f"
+            fi
+          done
+
           git commit -s -m "docs: assemble release notes for ${TAG}"
           # Force-push so a re-run (re-tag, manual workflow re-run) overwrites
           # the prior branch rather than failing non-fast-forward.

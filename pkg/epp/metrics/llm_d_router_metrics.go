@@ -25,7 +25,7 @@ import (
 
 const (
 	// LLMDRouterEndpointPickerSubsystem is the subsystem for llm-d router endpoint picker metrics.
-	LLMDRouterEndpointPickerSubsystem = "llm_d_router_epp"
+	LLMDRouterEndpointPickerSubsystem = "llm_d_epp"
 )
 
 var (
@@ -208,6 +208,33 @@ var (
 		poolLabels,
 	)
 
+	llmdInferencePoolStdDevKVCache = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "std_dev_kv_cache_utilization",
+			Help:      metricsutil.HelpMsgWithStability("The standard deviation kv cache utilization for an inference server pool.", compbasemetrics.ALPHA),
+		},
+		poolLabels,
+	)
+
+	llmdInferencePoolStdDevQueueSize = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "std_dev_queue_size",
+			Help:      metricsutil.HelpMsgWithStability("The standard deviation number of requests pending in the model server queue.", compbasemetrics.ALPHA),
+		},
+		poolLabels,
+	)
+
+	llmdInferencePoolStdDevRunningRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "std_dev_running_requests",
+			Help:      metricsutil.HelpMsgWithStability("The standard deviation number of running requests across model servers in the pool.", compbasemetrics.ALPHA),
+		},
+		poolLabels,
+	)
+
 	llmdInferencePoolReadyEndpoints = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
@@ -366,7 +393,7 @@ var (
 var (
 	// DescInferencePoolPerEndpointQueueSize is the standardized exported prometheus descriptor.
 	DescInferencePoolPerEndpointQueueSize = prometheus.NewDesc(
-		"llm_d_router_epp_per_endpoint_queue_size",
+		"llm_d_epp_per_endpoint_queue_size",
 		metricsutil.HelpMsgWithStability("The total number of requests pending in the model server queue for each underlying endpoint.", compbasemetrics.ALPHA),
 		[]string{
 			"name",

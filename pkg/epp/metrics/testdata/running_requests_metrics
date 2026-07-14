@@ -1,4 +1,4 @@
-# HELP inference_objective_running_requests [ALPHA] [Deprecated: Use llm_d_router_epp_running_requests] Inference objective number of running requests in each model.
+# HELP inference_objective_running_requests [ALPHA] [Deprecated: Use llm_d_epp_request_running] Inference objective number of running requests in each model.
 # TYPE inference_objective_running_requests gauge
 inference_objective_running_requests{model_name="m1"} 1
 inference_objective_running_requests{model_name="m2"} 1

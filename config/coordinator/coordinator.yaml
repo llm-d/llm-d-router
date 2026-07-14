@@ -1,0 +1,224 @@
+# Coordinator configuration.
+#
+# Every parameter that the coordinator and its pipeline steps recognise is
+# listed below. Required values are uncommented; optional values are shown
+# commented with their defaults so an operator can copy-and-edit instead of
+# reading source. Lines tagged "env: ..." can also be set via environment
+# variable; the env var overrides the YAML value.
+
+# log_level controls global log verbosity. Higher = more output.
+#   1 = warning, 2 = info, 3 = verbose, 4 = debug, 5 = trace.
+# The CLI flag -v overrides this when set.
+#
+# Do not enable level 5 (trace) in production. Trace logs request and response
+# bodies (with redaction) through the gateway client (encode and prefill steps),
+# including kv_transfer_params and ec_transfer_params coordination fields such as
+# bootstrap_host, bootstrap_room, and remote_host.
+# A compromised log store would expose them.
+log_level: 2
+
+# ---------------------------------------------------------------------------
+# server: HTTP listener for incoming OpenAI-compatible requests.
+# ---------------------------------------------------------------------------
+server:
+  # listen_addr is the address:port the coordinator binds to.
+  listen_addr: ":8080"
+
+  # read_timeout caps how long the server waits for the full request body.
+  # Long enough for HD images inlined as data URLs (~hundreds of KB).
+  read_timeout: 30s
+
+  # write_timeout caps the entire response. For streaming completions this
+  # bounds the total in-flight time of a single chat — set generously.
+  write_timeout: 120s
+  
+  # Kubernetes terminationGracePeriodSeconds must exceed shutdown_timeout; SSE
+  # streams held open for up to write_timeout are force-closed once the grace period expires.
+  shutdown_timeout: 25s
+
+  # max_request_body_size caps the request body in megabytes. The default is
+  # sized for multimodal requests that inline images as data: URIs, which land
+  # in the body verbatim and are not subject to replace-media-urls.max_download_size.
+  # A text-only deployment can set a much smaller value. Megabytes; default 64.
+  # env: COORDINATOR_SERVER_MAX_REQUEST_BODY_SIZE
+  # max_request_body_size: 64
+
+# ---------------------------------------------------------------------------
+# gateway: outbound HTTP client used by encode/prefill/decode to reach the
+# Inference Gateway.
+# ---------------------------------------------------------------------------
+gateway:
+  # address is the base URL of the Inference Gateway (no trailing slash).
+  # Every path-bearing call (e.g. /v1/chat/completions) is appended to this.
+  address: "http://inference-gateway:80"
+
+  # max_idle_conns_per_host caps the size of the keep-alive pool. Encode
+  # fan-out can open many concurrent connections; raise if you see
+  # connection churn under multi-image load.
+  max_idle_conns_per_host: 200
+
+  # idle_conn_timeout is how long an idle keep-alive connection survives
+  # before the transport closes it.
+  idle_conn_timeout: 90s
+
+  # timeout is the response-header timeout per outbound request. Body
+  # streaming is not bounded by this.
+  timeout: 60s
+
+# ---------------------------------------------------------------------------
+# pipeline: ordered list of steps that process every request.
+# ---------------------------------------------------------------------------
+pipeline:
+  # kv_connector picks the protocol used to coordinate KV-cache transfer
+  # between prefill and decode pods.
+  #   kv-nixl           - NIXL P2P RDMA
+  #   kv-shared-storage - shared filesystem / object store (default)
+  #   kv-sglang         - SGLang-style KV bootstrap
+  kv_connector: kv-shared-storage
+
+  # ec_connector picks the protocol used to ship encoded multimodal embedding
+  # tensors from encoder pods to prefill pods.
+  #   ec-nixl           - NIXL P2P RDMA
+  #   ec-shared-storage - shared filesystem (default for non-RDMA clusters)
+  ec_connector: ec-shared-storage
+
+  # use_openai_format selects the wire format for the encode and prefill steps.
+  #   true (default) - forward on the client's original OpenAI path
+  #                    (/v1/chat/completions, /v1/completions).
+  #   false          - rewrite to the internal /inference/v1/generate
+  #                    token-array (tokens-in) format.
+  # false requires a render step in the pipeline (render produces the token
+  # IDs the tokens-in format sends); the coordinator fails to start otherwise.
+  # A step may override this in its own params.
+  # env: COORDINATOR_PIPELINE_USE_OPENAI_FORMAT
+  use_openai_format: true
+
+  steps:
+    # -------------------------------------------------------------------
+    # replace-media-urls: first step. Downloads any http(s) image_url
+    # references, base64-inlines them as data: URIs, and seeds
+    # MultimodalEntries on the request context.
+    # -------------------------------------------------------------------
+    - type: replace-media-urls
+      params:
+        # download_timeout caps each individual image download.
+        download_timeout: 10s
+
+        # max_concurrent_downloads bounds the errgroup that fans out
+        # downloads. Useful when a single request references many images.
+        max_concurrent_downloads: 10
+
+        # max_multimodal_entries rejects requests with more than N image_url
+        # parts BEFORE any download happens. Cheapest admission gate.
+        # 0 (or omitted) = unlimited.
+        # max_multimodal_entries: 8
+
+        # max_download_size caps the megabytes read per image download. A response
+        # whose Content-Length or body exceeds the cap is rejected as a client
+        # error (4xx). Bounds peak memory together with the two limits above:
+        # roughly max_concurrent_downloads x max_download_size x ~2.3 MB.
+        # data: URIs do not hit the network and are unaffected. Default 10 MB.
+        # max_download_size: 10
+
+        # allow_private_networks permits downloads whose resolved IP falls in
+        # an RFC1918 private range (10/8, 172.16/12, 192.168/16). Loopback,
+        # link-local (including the 169.254.169.254 cloud metadata endpoint),
+        # CGNAT, and unique-local addresses stay blocked regardless. Enable
+        # only when image origins are inside the cluster network.
+        # Default false.
+        # allow_private_networks: false
+
+        # allowed_domains restricts downloads to an explicit set of hostnames.
+        # When omitted or empty, any host that passes the IP checks above is
+        # allowed. This is an ADDITIONAL filter, not a replacement: a host in
+        # this list is still subject to the IP blocks, so listing "localhost"
+        # or an internal hostname does NOT make it reachable unless the
+        # resolved IP is also permitted (see allow_private_networks).
+        # allowed_domains:
+        #   - images.example.com
+
+    # -------------------------------------------------------------------
+    # render: tokenizes the request via the rendering service and (for
+    # chat-completions multimodal) populates each MultimodalEntry's Hash,
+    # KwargsData, and Placeholder offset/length.
+    # -------------------------------------------------------------------
+    - type: render
+      params:
+        # address is the base URL of the rendering service. Required.
+        address: "http://rendering-service:8080"
+
+        # timeout caps a single render HTTP call.
+        timeout: 30s
+
+        # max_idle_conns_per_host caps the size of the keep-alive pool to the
+        # rendering service.
+        max_idle_conns_per_host: 100
+
+        # idle_conn_timeout is how long an idle keep-alive connection survives
+        # before the transport closes it.
+        idle_conn_timeout: 90s
+
+        # max_total_tokens rejects requests whose tokenized prompt exceeds
+        # the limit. Counts both text and image-placeholder tokens. Enforced
+        # in chat-completions, completions string, and completions
+        # token-array paths. 0 (or omitted) = unlimited.
+        # max_total_tokens: 32768
+
+        # max_total_placeholder_tokens rejects requests whose summed image
+        # placeholder length exceeds the limit. Only meaningful for
+        # multimodal chat-completions. 0 (or omitted) = unlimited.
+        # max_total_placeholder_tokens: 4096
+
+    # -------------------------------------------------------------------
+    # conditional-decode: optional shortcut. When the request has no
+    # multimodal entries, runs decode directly and skips encode/prefill
+    # (saves a round-trip for text-only chats). Uncomment to enable.
+    # -------------------------------------------------------------------
+    # - type: conditional-decode
+    #   params:
+    #     # use_openai_format mirrors gateway.use_openai_format but lets the
+    #     # step override per-pipeline if you want a different wire format
+    #     # for the text-only fast path.
+    #     use_openai_format: true
+
+    # -------------------------------------------------------------------
+    # encode: fans out one POST per multimodal entry to the encoder pods,
+    # collects the EC handoff descriptors, and merges them into
+    # RequestContext.ECTransferParams.
+    # -------------------------------------------------------------------
+    - type: encode
+      params:
+        # max_parallel bounds the per-request errgroup. Each goroutine
+        # holds an in-flight encoder request (~1 MB per HD image on the
+        # /inference/v1/generate path) - keep modest if your encoder pods
+        # are GPU-bound or memory-tight.
+        max_parallel: 8
+
+        # use_openai_format=true sends the original chat-completions body
+        # to the encoder (encoder re-preprocesses from image_url, ~16 KB
+        # per HD image). false sends features.kwargs_data with the
+        # pre-preprocessed tensor (~1 MB per HD image, no encoder CPU
+        # cost). Inherits from gateway.use_openai_format if omitted.
+        # use_openai_format: true
+
+        # ec_connector overrides pipeline.ec_connector for this step only.
+        # Rarely needed.
+        # ec_connector: ec-nixl
+
+    # -------------------------------------------------------------------
+    # prefill: forwards the request (now annotated with EC and KV hints)
+    # to a prefill pod selected by the EPP.
+    # -------------------------------------------------------------------
+    - type: prefill
+      # params:
+      #   use_openai_format: true   # see notes above
+      #   ec_connector: ec-nixl     # overrides pipeline.ec_connector
+      #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
+
+    # -------------------------------------------------------------------
+    # decode: streams the completion back to the client. Last step.
+    # -------------------------------------------------------------------
+    - type: decode
+      # params:
+      #   use_openai_format: true   # see notes above
+      #   kv_connector: kv-nixl     # overrides pipeline.kv_connector

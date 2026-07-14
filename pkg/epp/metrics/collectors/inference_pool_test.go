@@ -58,7 +58,7 @@ func TestNoMetricsCollected(t *testing.T) {
 		datalayer.NewTestRuntime(t, period),
 	}
 	for _, epf := range factories {
-		ds := datastore.NewDatastore(context.Background(), epf, 0)
+		ds := datastore.NewDatastore(context.Background(), epf)
 
 		collector := &inferencePoolMetricsCollector{
 			ds: ds,
@@ -93,7 +93,7 @@ func TestMetricsCollected(t *testing.T) {
 				TargetPorts: []v1.Port{{Number: v1.PortNumber(int32(8000))}},
 			},
 		}
-		ds := datastore.NewDatastore(context.Background(), epf, 0)
+		ds := datastore.NewDatastore(context.Background(), epf)
 
 		scheme := runtime.NewScheme()
 		fakeClient := fake.NewClientBuilder().
@@ -118,10 +118,10 @@ func TestMetricsCollected(t *testing.T) {
 		}
 
 		errNew := promtestutil.CollectAndCompare(collector, strings.NewReader(`
-		# HELP llm_d_router_epp_per_endpoint_queue_size [ALPHA] The total number of requests pending in the model server queue for each underlying endpoint.
-		# TYPE llm_d_router_epp_per_endpoint_queue_size gauge
-		llm_d_router_epp_per_endpoint_queue_size{model_server_endpoint="pod1-rank-0",name="test-pool"} 100
-`), "llm_d_router_epp_per_endpoint_queue_size")
+		# HELP llm_d_epp_per_endpoint_queue_size [ALPHA] The total number of requests pending in the model server queue for each underlying endpoint.
+		# TYPE llm_d_epp_per_endpoint_queue_size gauge
+		llm_d_epp_per_endpoint_queue_size{model_server_endpoint="pod1-rank-0",name="test-pool"} 100
+`), "llm_d_epp_per_endpoint_queue_size")
 		if errNew != nil {
 			t.Fatal(errNew)
 		}
