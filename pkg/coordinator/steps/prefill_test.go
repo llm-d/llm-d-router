@@ -371,6 +371,12 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != gateway.PathChatCompletions {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
 		_ = json.NewEncoder(w).Encode(map[string]any{
