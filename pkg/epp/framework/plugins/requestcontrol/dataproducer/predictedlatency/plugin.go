@@ -91,20 +91,28 @@ func (pl *PredictedLatency) endpointInFlightLoad(endpoint fwksched.Endpoint) (*a
 	return nil, false
 }
 
-// snapshotInFlightLoad records the endpoint's in-flight token and request load
-// at dispatch into the provided fields. When the InFlightLoad attribute is
-// absent, tokens is zeroed (no in-flight token signal available) and the request
-// count falls back to the endpoint's vLLM metrics. Both fields are always
-// written so the snapshot is deterministic regardless of the caller's prior
-// values.
-func (pl *PredictedLatency) snapshotInFlightLoad(endpoint fwksched.Endpoint, tokens *int64, requests *int) {
+// inFlightLoadSnapshot is an endpoint's in-flight load captured at a single
+// point in time.
+type inFlightLoadSnapshot struct {
+	tokens   int64
+	requests int
+}
+
+// readInFlightLoad reads the endpoint's in-flight token and request load. When
+// the InFlightLoad attribute is absent, tokens is zero (no in-flight token
+// signal available) and the request count falls back to the endpoint's vLLM
+// metrics. Both fields are always set, so the result is deterministic.
+//
+// The InFlightLoad attribute is a live view of the producer's tracker, not a
+// stored value: the producer adds a request's own tokens in its PreRequest hook,
+// and PreRequest hooks are not ordered relative to one another. This is
+// therefore called only from Produce, which the data-layer DAG does order, and
+// the captured value is reused for the rest of the request.
+func (pl *PredictedLatency) readInFlightLoad(endpoint fwksched.Endpoint) inFlightLoadSnapshot {
 	if load, ok := pl.endpointInFlightLoad(endpoint); ok {
-		*tokens = load.Tokens
-		*requests = int(load.Requests)
-		return
+		return inFlightLoadSnapshot{tokens: load.Tokens, requests: int(load.Requests)}
 	}
-	*tokens = 0
-	*requests = endpoint.GetMetrics().RunningRequestsSize
+	return inFlightLoadSnapshot{tokens: 0, requests: endpoint.GetMetrics().RunningRequestsSize}
 }
 
 type Config struct {
@@ -261,6 +269,13 @@ type predictedLatencyCtx struct {
 
 	prefixCacheScoresForEndpoints map[string]float64
 
+	// inFlightLoadForEndpoints holds the in-flight load captured for every
+	// candidate endpoint during Produce, keyed by NamespacedName.String().
+	// Produce is DAG-ordered, so capturing here (rather than re-reading the live
+	// attribute in PreRequest, whose hook order is undefined) keeps the dispatch
+	// training features deterministic and identical to the prediction features.
+	inFlightLoadForEndpoints map[string]inFlightLoadSnapshot
+
 	ttftSLO    float64
 	avgTPOTSLO float64
 
@@ -286,6 +301,7 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 		inputTokenCount:               inputTokenCount,
 		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints: make(map[string]float64),
+		inFlightLoadForEndpoints:      make(map[string]inFlightLoadSnapshot),
 		predictionsForScheduling:      make(map[string]endpointPredictionResult),
 	}
 }

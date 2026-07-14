@@ -99,14 +99,21 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.In
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now()
 	refreshLastSeenMetrics(ctx, predictedLatencyCtx)
 
-	// Snapshot the in-flight load (cache-discounted prefill tokens and active
-	// request count) the request saw at dispatch, sourced from the
-	// InFlightLoadProducer. These become the prefill-tokens-in-flight and
-	// num-request-running training features. The request count falls back to
-	// vLLM metrics when the attribute is absent.
-	pl.snapshotInFlightLoad(decodeEndpoint, &predictedLatencyCtx.prefillTokensAtDispatch, &predictedLatencyCtx.requestsAtDispatch)
+	// Reuse the in-flight load captured for the winning endpoints during Produce.
+	// The InFlightLoad attribute is a live view of the producer's tracker, and the
+	// producer adds this request's own tokens in its own PreRequest hook; since
+	// PreRequest hooks have no defined order, re-reading it here would make the
+	// training features depend on hook ordering. Produce is DAG-ordered, so the
+	// value captured there is well defined and matches the prediction features.
+	if snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[decodeEndpoint.GetMetadata().NamespacedName.String()]; ok {
+		predictedLatencyCtx.prefillTokensAtDispatch = snapshot.tokens
+		predictedLatencyCtx.requestsAtDispatch = snapshot.requests
+	}
 	if prefillEndpoint != nil {
-		pl.snapshotInFlightLoad(prefillEndpoint, &predictedLatencyCtx.prefillTokensAtDispatchOnPrefill, &predictedLatencyCtx.requestsAtDispatchOnPrefill)
+		if snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[prefillEndpoint.GetMetadata().NamespacedName.String()]; ok {
+			predictedLatencyCtx.prefillTokensAtDispatchOnPrefill = snapshot.tokens
+			predictedLatencyCtx.requestsAtDispatchOnPrefill = snapshot.requests
+		}
 	}
 	predictedLatencyCtx.decodeTokensAtDispatch = 0
 

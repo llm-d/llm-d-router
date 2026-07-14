@@ -69,14 +69,15 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 		generatedTokenCounts[i] = 1
 		prefixCacheScores[i] = prefixCacheScore
 
-		// In-flight load (cache-discounted prefill tokens and active request
-		// count) comes from the InFlightLoadProducer. Fall back to vLLM metrics
-		// for the request count when the attribute is not yet present.
-		numRequestRunnings[i] = endpoint.GetMetrics().RunningRequestsSize
-		if load, ok := pl.endpointInFlightLoad(endpoint); ok {
-			prefillTokensInFlights[i] = load.Tokens
-			numRequestRunnings[i] = int(load.Requests)
+		// Reuse the in-flight load captured for this endpoint earlier in Produce,
+		// so the prediction features are identical to the dispatch-time training
+		// features and neither depends on PreRequest hook ordering.
+		snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[endpoint.GetMetadata().NamespacedName.String()]
+		if !ok {
+			snapshot = pl.readInFlightLoad(endpoint)
 		}
+		prefillTokensInFlights[i] = snapshot.tokens
+		numRequestRunnings[i] = snapshot.requests
 	}
 
 	// Bulk predict

@@ -58,6 +58,12 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 			prefixCacheScore = 0.0
 		}
 		predictedLatencyCtx.prefixCacheScoresForEndpoints[endpoint.GetMetadata().NamespacedName.Name] = prefixCacheScore
+
+		// Capture the in-flight load here, in the DAG-ordered Produce hook, and
+		// reuse it for both the prediction features and the dispatch-time training
+		// features. Re-reading the live attribute in PreRequest would make the
+		// value depend on undefined PreRequest hook ordering.
+		predictedLatencyCtx.inFlightLoadForEndpoints[endpoint.GetMetadata().NamespacedName.String()] = pl.readInFlightLoad(endpoint)
 	}
 	if !pl.config.PredictInProduce {
 		logger.V(logutil.DEBUG).Info("PredictInProduce disabled, skipping predictions")

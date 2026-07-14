@@ -106,26 +106,22 @@ func (m *mockPredictor) GetServerStatus(ctx context.Context) (*latencypredictor.
 	return &latencypredictor.ServerStatusResponse{}, nil
 }
 
-func TestSnapshotInFlightLoad(t *testing.T) {
+func TestReadInFlightLoad(t *testing.T) {
 	pl := &PredictedLatency{inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey}
 
-	// Fallback path (no InFlightLoad attribute): tokens must be zeroed even when
-	// the caller passes a stale non-zero value, and requests fall back to metrics.
+	// Fallback path (no InFlightLoad attribute): tokens are zero and requests
+	// fall back to vLLM metrics. Both fields are always set.
 	ep := createTestEndpoint("pod1", 0.5, 5, 0)
-	tokens := int64(999)
-	requests := -1
-	pl.snapshotInFlightLoad(ep, &tokens, &requests)
-	assert.Equal(t, int64(0), tokens, "tokens must be zeroed on the fallback path")
-	assert.Equal(t, 5, requests, "requests falls back to metrics RunningRequestsSize")
+	got := pl.readInFlightLoad(ep)
+	assert.Equal(t, int64(0), got.tokens, "tokens must be zero on the fallback path")
+	assert.Equal(t, 5, got.requests, "requests falls back to metrics RunningRequestsSize")
 
 	// Attribute present: both fields come from InFlightLoad.
 	epWithLoad := createTestEndpoint("pod2", 0.5, 5, 0)
 	epWithLoad.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 42, Requests: 3})
-	tokens = 999
-	requests = -1
-	pl.snapshotInFlightLoad(epWithLoad, &tokens, &requests)
-	assert.Equal(t, int64(42), tokens)
-	assert.Equal(t, 3, requests)
+	got = pl.readInFlightLoad(epWithLoad)
+	assert.Equal(t, int64(42), got.tokens)
+	assert.Equal(t, 3, got.requests)
 }
 
 func createTestEndpoint(name string, kvCacheUsage float64, runningRequestsSize, waitingQueueSize int) fwksched.Endpoint {
