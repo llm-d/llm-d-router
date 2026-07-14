@@ -26,10 +26,11 @@ import (
 )
 
 const (
-	deploymentKind = "deployment"
+	deploymentKind           = "deployment"
+	kubernetesDeploymentKind = "Deployment"
 )
 
-func scaleDeployment(objects []string, increment int) {
+func scaleDeployment(nsName string, objects []string, increment int) {
 	direction := "up"
 	absIncrement := increment
 	if increment < 0 {
@@ -49,7 +50,7 @@ func scaleDeployment(objects []string, increment int) {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 	}
-	podsInDeploymentsReady(objects)
+	podsInDeploymentsReady(nsName, objects)
 }
 
 // getModelServerPods Returns the list of Prefill and Decode vLLM pods separately
@@ -117,7 +118,7 @@ func getPodNames(labels map[string]string) []string {
 	return names
 }
 
-func podsInDeploymentsReady(objects []string) {
+func podsInDeploymentsReady(nsName string, objects []string) {
 	isDeploymentReady := func(deploymentName string) bool {
 		var deployment appsv1.Deployment
 		err := testConfig.K8sClient.Get(testConfig.Context, types.NamespacedName{Namespace: nsName, Name: deploymentName}, &deployment)
@@ -237,7 +238,7 @@ func filterDocument(doc string) string {
 	if len(obj.Object) == 0 {
 		return doc
 	}
-	if obj.GetKind() == "Deployment" {
+	if obj.GetKind() == kubernetesDeploymentKind {
 		removePodSpecListItem(obj, "containers", "vllm-render")
 		removePodSpecListItem(obj, "initContainers", "vllm-render")
 		removePodSpecListItem(obj, "volumes", "model-cache")
@@ -266,6 +267,75 @@ func removePodSpecListItem(obj *unstructured.Unstructured, fieldName, itemName s
 	}
 	err = unstructured.SetNestedSlice(obj.Object, filtered, path...)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+}
+
+// eppExtraArgs are appended to the "epp" container's args in the Deployment
+// created by createEndPointPickerHelper.
+//
+// Graceful drain is disabled (--drain-timeout=0) for all e2e EPPs. The suites
+// create and delete the shared "e2e-epp" Deployment in sequence behind a single
+// Envoy; with a drain window a deleted EPP keeps serving ext_proc on its
+// existing connection, so Envoy lingers on the terminating pod (stale datastore)
+// and the next spec's requests fail. The graceful-drain behavior itself is
+// covered by unit tests.
+var eppExtraArgs = []string{"--drain-timeout=0"}
+
+// appendEppArgs returns the input YAML docs with args appended to the "epp"
+// container of any Deployment. It is a no-op when args is empty.
+func appendEppArgs(inputs []string, args []string) []string {
+	if len(args) == 0 {
+		return inputs
+	}
+	outputs := make([]string, len(inputs))
+	for idx, input := range inputs {
+		docs := strings.Split(input, "\n---")
+		rendered := make([]string, 0, len(docs))
+		for _, doc := range docs {
+			if strings.TrimSpace(doc) == "" {
+				continue
+			}
+			rendered = append(rendered, appendArgsToEppContainer(doc, args))
+		}
+		outputs[idx] = strings.Join(rendered, "\n---\n")
+	}
+	return outputs
+}
+
+func appendArgsToEppContainer(doc string, args []string) string {
+	obj := &unstructured.Unstructured{}
+	err := yaml.Unmarshal([]byte(doc), &obj.Object)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	if len(obj.Object) == 0 || obj.GetKind() != kubernetesDeploymentKind {
+		return doc
+	}
+	path := []string{"spec", "template", "spec", "containers"}
+	containers, found, err := unstructured.NestedSlice(obj.Object, path...)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	if !found {
+		return doc
+	}
+	for i, c := range containers {
+		m, ok := c.(map[string]any)
+		if !ok || m["name"] != "epp" {
+			continue
+		}
+		existing, _, err := unstructured.NestedStringSlice(m, "args")
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		merged := make([]any, 0, len(existing)+len(args))
+		for _, a := range existing {
+			merged = append(merged, a)
+		}
+		for _, a := range args {
+			merged = append(merged, a)
+		}
+		m["args"] = merged
+		containers[i] = m
+	}
+	err = unstructured.SetNestedSlice(obj.Object, containers, path...)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	out, err := yaml.Marshal(obj.Object)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	return strings.TrimRight(string(out), "\n")
 }
 
 func substituteMany(inputs []string, substitutions map[string]string) []string {
@@ -354,7 +424,7 @@ func extractFinishReasonFromStreaming(sseData string) string {
 }
 
 // getPodRequestCount gets the total vLLM request count from a pod's metrics endpoint.
-func getPodRequestCount(podName string) int {
+func getPodRequestCount(nsName, podName string) int {
 	ginkgo.By("Getting request count from pod: " + podName)
 
 	// Use Kubernetes API proxy to access the metrics endpoint
@@ -396,7 +466,7 @@ func parseRequestCountFromMetrics(metricsOutput string) int {
 
 // dumpPodsAndLogs dumps all pod statuses and their logs to the Ginkgo writer.
 // Call this before cleanup to insure the information is available when CI tests fail.
-func dumpPodsAndLogs() {
+func dumpPodsAndLogs(nsName string) {
 	if testConfig == nil || testConfig.KubeCli == nil {
 		ginkgo.GinkgoWriter.Println("Skipping pod dump: cluster not initialized")
 		return
@@ -470,15 +540,15 @@ func dumpPodsAndLogs() {
 
 		for _, c := range pod.Spec.InitContainers {
 			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Name, c.Name, true)
+				dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, true)
 			}
-			dumpContainerLogs(ctx, pod.Name, c.Name, false)
+			dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, false)
 		}
 		for _, c := range pod.Spec.Containers {
 			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Name, c.Name, true)
+				dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, true)
 			}
-			dumpContainerLogs(ctx, pod.Name, c.Name, false)
+			dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, false)
 		}
 	}
 	ginkgo.GinkgoWriter.Println("=== End of pod dump ===")
@@ -495,7 +565,7 @@ func printContainerStatus(kind string, cs corev1.ContainerStatus) {
 	ginkgo.GinkgoWriter.Println(status)
 }
 
-func dumpContainerLogs(ctx context.Context, podName, containerName string, previous bool) {
+func dumpContainerLogs(ctx context.Context, nsName, podName, containerName string, previous bool) {
 	tailLines := int64(100)
 	req := testConfig.KubeCli.CoreV1().Pods(nsName).GetLogs(podName, &corev1.PodLogOptions{
 		Container: containerName,

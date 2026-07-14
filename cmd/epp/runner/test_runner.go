@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-router/internal/runnable"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -54,5 +55,22 @@ func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.O
 	}
 
 	manager, ds, err := runner.setup(ctx, cfg, opts, managerOverrides)
-	return runner, manager, ds, err
+	if err != nil {
+		return runner, manager, ds, err
+	}
+
+	// Production runs the ext_proc and health servers on a context that outlives
+	// the manager (see Runner.runWithGracefulShutdown). Integration tests drive
+	// only mgr.Start, so register them as manager runnables here: they come up
+	// with the manager and stop immediately when the test cancels its context,
+	// with no drain window.
+	if err := manager.Add(runner.serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc"))); err != nil {
+		return runner, manager, ds, err
+	}
+	health := runnable.NoLeaderElection(runnable.GRPCServer("health", runner.healthGRPCServer, runner.healthGRPCPort))
+	if err := manager.Add(health); err != nil {
+		return runner, manager, ds, err
+	}
+
+	return runner, manager, ds, nil
 }

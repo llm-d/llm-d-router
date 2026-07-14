@@ -58,7 +58,7 @@ func TestNoMetricsCollected(t *testing.T) {
 		datalayer.NewTestRuntime(t, period),
 	}
 	for _, epf := range factories {
-		ds := datastore.NewDatastore(context.Background(), epf, 0)
+		ds := datastore.NewDatastore(context.Background(), epf)
 
 		collector := &inferencePoolMetricsCollector{
 			ds: ds,
@@ -93,7 +93,7 @@ func TestMetricsCollected(t *testing.T) {
 				TargetPorts: []v1.Port{{Number: v1.PortNumber(int32(8000))}},
 			},
 		}
-		ds := datastore.NewDatastore(context.Background(), epf, 0)
+		ds := datastore.NewDatastore(context.Background(), epf)
 
 		scheme := runtime.NewScheme()
 		fakeClient := fake.NewClientBuilder().
