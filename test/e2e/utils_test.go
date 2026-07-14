@@ -26,10 +26,11 @@ import (
 )
 
 const (
-	deploymentKind = "deployment"
+	deploymentKind           = "deployment"
+	kubernetesDeploymentKind = "Deployment"
 )
 
-func scaleDeployment(objects []string, increment int) {
+func scaleDeployment(nsName string, objects []string, increment int) {
 	direction := "up"
 	absIncrement := increment
 	if increment < 0 {
@@ -49,7 +50,7 @@ func scaleDeployment(objects []string, increment int) {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 	}
-	podsInDeploymentsReady(objects)
+	podsInDeploymentsReady(nsName, objects)
 }
 
 // getModelServerPods Returns the list of Prefill and Decode vLLM pods separately
@@ -117,7 +118,7 @@ func getPodNames(labels map[string]string) []string {
 	return names
 }
 
-func podsInDeploymentsReady(objects []string) {
+func podsInDeploymentsReady(nsName string, objects []string) {
 	isDeploymentReady := func(deploymentName string) bool {
 		var deployment appsv1.Deployment
 		err := testConfig.K8sClient.Get(testConfig.Context, types.NamespacedName{Namespace: nsName, Name: deploymentName}, &deployment)
@@ -237,7 +238,7 @@ func filterDocument(doc string) string {
 	if len(obj.Object) == 0 {
 		return doc
 	}
-	if obj.GetKind() == "Deployment" {
+	if obj.GetKind() == kubernetesDeploymentKind {
 		removePodSpecListItem(obj, "containers", "vllm-render")
 		removePodSpecListItem(obj, "initContainers", "vllm-render")
 		removePodSpecListItem(obj, "volumes", "model-cache")
@@ -304,7 +305,7 @@ func appendArgsToEppContainer(doc string, args []string) string {
 	obj := &unstructured.Unstructured{}
 	err := yaml.Unmarshal([]byte(doc), &obj.Object)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	if len(obj.Object) == 0 || obj.GetKind() != "Deployment" {
+	if len(obj.Object) == 0 || obj.GetKind() != kubernetesDeploymentKind {
 		return doc
 	}
 	path := []string{"spec", "template", "spec", "containers"}
@@ -423,7 +424,7 @@ func extractFinishReasonFromStreaming(sseData string) string {
 }
 
 // getPodRequestCount gets the total vLLM request count from a pod's metrics endpoint.
-func getPodRequestCount(podName string) int {
+func getPodRequestCount(nsName, podName string) int {
 	ginkgo.By("Getting request count from pod: " + podName)
 
 	// Use Kubernetes API proxy to access the metrics endpoint
@@ -465,7 +466,7 @@ func parseRequestCountFromMetrics(metricsOutput string) int {
 
 // dumpPodsAndLogs dumps all pod statuses and their logs to the Ginkgo writer.
 // Call this before cleanup to insure the information is available when CI tests fail.
-func dumpPodsAndLogs() {
+func dumpPodsAndLogs(nsName string) {
 	if testConfig == nil || testConfig.KubeCli == nil {
 		ginkgo.GinkgoWriter.Println("Skipping pod dump: cluster not initialized")
 		return
@@ -539,15 +540,15 @@ func dumpPodsAndLogs() {
 
 		for _, c := range pod.Spec.InitContainers {
 			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Name, c.Name, true)
+				dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, true)
 			}
-			dumpContainerLogs(ctx, pod.Name, c.Name, false)
+			dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, false)
 		}
 		for _, c := range pod.Spec.Containers {
 			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Name, c.Name, true)
+				dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, true)
 			}
-			dumpContainerLogs(ctx, pod.Name, c.Name, false)
+			dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, false)
 		}
 	}
 	ginkgo.GinkgoWriter.Println("=== End of pod dump ===")
@@ -564,7 +565,7 @@ func printContainerStatus(kind string, cs corev1.ContainerStatus) {
 	ginkgo.GinkgoWriter.Println(status)
 }
 
-func dumpContainerLogs(ctx context.Context, podName, containerName string, previous bool) {
+func dumpContainerLogs(ctx context.Context, nsName, podName, containerName string, previous bool) {
 	tailLines := int64(100)
 	req := testConfig.KubeCli.CoreV1().Pods(nsName).GetLogs(podName, &corev1.PodLogOptions{
 		Container: containerName,

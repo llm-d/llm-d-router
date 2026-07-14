@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -265,5 +266,22 @@ func TestDrainTimeoutFlag(t *testing.T) {
 	}
 	if opts.DrainTimeout != 30*time.Second {
 		t.Errorf("DrainTimeout = %v, want 30s", opts.DrainTimeout)
+	}
+}
+
+func TestValidateConfigFlagsMutuallyExclusive(t *testing.T) {
+	opts := NewOptions()
+	opts.PoolName = "config-flags-pool" // bypass the pool/selector validation
+	opts.ConfigFile = "fake-config.yaml"
+	opts.ConfigText = "fake: config"
+
+	err := opts.Validate()
+	if err == nil {
+		t.Fatalf("Expected Validate() to fail when both config flags are set, but it succeeded")
+	}
+	for _, want := range []string{"config-file", "config-text"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate() error must reference the %q flag, got: %v", want, err)
+		}
 	}
 }
