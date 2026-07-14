@@ -12,7 +12,7 @@
   - [`SchedulingProfiles` Configuration](#schedulingprofiles-configuration)
   - [Available plugins](#available-plugins)
 - [Metric Scraping](#metric-scraping)
-- [Disaggregated Encode/Prefill/Decode (E/P/D)](#disaggregated-encodeprefilldecodesepd-epd)
+- [Disaggregated Encode/Prefill/Decode (E/P/D)](#disaggregated-encodeprefilldecode-epd)
 - [InferencePool & InferenceModel Design](#inferencepool--inferencemodel-design)
   - [Current Assumptions](#current-assumptions)
 - [References](#references)
@@ -304,6 +304,6 @@ Enable chunked decode via the pd-sidecar flag:
 
 ## References
 
-- [GIE Spec](../README.md#relation-to-gie-igw)
+- [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension)
 - [Envoy External Processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)
 - [EPP Container Sizing Guide](./operations.md)

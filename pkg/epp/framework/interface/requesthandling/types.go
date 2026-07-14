@@ -24,8 +24,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
-	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	"google.golang.org/protobuf/proto"
 )
 

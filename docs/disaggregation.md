@@ -285,6 +285,7 @@ plugins:
   - type: prefix-based-pd-decider
     parameters:
       nonCachedTokens: 8
+      promptTokens: 0
   - type: disagg-profile-handler
     parameters:
       profiles:
@@ -348,6 +349,7 @@ plugins:
   - type: prefix-based-pd-decider
     parameters:
       nonCachedTokens: 8
+      promptTokens: 0
   - type: disagg-profile-handler
     parameters:
       profiles:
@@ -397,21 +399,27 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 **How It Works**
 - Once a decode pod is selected, the decider checks how many tokens from the incoming prompt have already been sent to this pod
 
-- If the remaining non-cached suffix length is longer than the configured threshold (nonCachedTokens), disaggregation is triggered – the prefill will run remotely on a prefill pod, and decode locally on the decode pod
+- If the prompt length is shorter than the configured prompt length threshold (promptTokens), the full request runs locally on the decode worker without remote prefill
 
-- If the non-cached suffix is shorter or equal to the threshold, the full request runs locally on the decode worker without remote prefill
+- If the remaining non-cached suffix length is at least the configured threshold (nonCachedTokens), disaggregation is triggered: the prefill will run remotely on a prefill pod, and decode locally on the decode pod
+
+- If the non-cached suffix is shorter than the threshold, the full request runs locally on the decode worker without remote prefill
 
 **Configuration**
 ```yaml
 - type: prefix-based-pd-decider
   parameters:
     nonCachedTokens: 8
+    promptTokens: 0
 ```
 
 **Parameter:**
 
 - `nonCachedTokens`: Number of non-cached tokens that trigger disaggregation
   - If set to 0, disaggregation never occurs for any request
+- `promptTokens`: Minimum prompt length in tokens before prefix-cache-based disaggregation logic is applied
+  - If set to 0, the prompt-length gate is disabled
+  - If set to a positive value, requests with fewer prompt tokens run locally on the decode worker without remote prefill
 
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.

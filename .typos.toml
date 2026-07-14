@@ -7,6 +7,8 @@ IST = "IST"
 unmarshaling = "unmarshaling"
 # image_grid_thw is a vLLM/CUDA tensor shape parameter
 thw = "thw"
+# trak is the ISO/MP4 container's track atom name
+trak = "trak"
 
 [files]
 extend-exclude = [
