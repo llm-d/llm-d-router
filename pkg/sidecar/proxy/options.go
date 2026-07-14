@@ -576,6 +576,13 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--kv-connector=offloading does not support --data-parallel-size > 1 (got %d)", opts.DataParallelSize)
 	}
 
+	// --enable-p2p-pull composes the OffloadingConnector P2P tier alongside NIXL
+	// via MultiConnector; it is only meaningful with the NIXLv2 PD connector.
+	// offloading already provides the tier natively and needs no flag.
+	if opts.EnableP2PPull && opts.KVConnector != KVConnectorNIXLV2 {
+		return fmt.Errorf("--enable-p2p-pull requires --kv-connector=%s (got %q)", KVConnectorNIXLV2, opts.KVConnector)
+	}
+
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
 		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {

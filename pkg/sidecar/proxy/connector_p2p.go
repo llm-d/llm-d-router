@@ -215,9 +215,12 @@ func (s *Server) handleP2PConcurrentRequests(w http.ResponseWriter, r *http.Requ
 // p2pPullAvailable reports whether this deployment can pull cached prefix over
 // the OffloadingConnector P2P tier. That tier is the PD connector itself when
 // KVConnector is offloading, or is composed alongside NIXL via MultiConnector
-// (declared with --enable-p2p-pull) when the PD connector is NIXL.
+// (declared with --enable-p2p-pull) when the PD connector is NIXLv2. On any
+// other connector --enable-p2p-pull has no effect, since no MultiConnector
+// routes the p2p params to an OffloadingConnector.
 func (s *Server) p2pPullAvailable() bool {
-	return s.config.KVConnector == KVConnectorOffloading || s.config.EnableP2PPull
+	return s.config.KVConnector == KVConnectorOffloading ||
+		(s.config.EnableP2PPull && s.config.KVConnector == KVConnectorNIXLV2)
 }
 
 // addP2PPullToPrefill adds the OffloadingConnector p2p pull block to a prefill
