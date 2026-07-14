@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
