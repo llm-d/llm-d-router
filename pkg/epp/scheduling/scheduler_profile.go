@@ -34,6 +34,14 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
+// tracerScope is the OTel instrumentation scope for scheduler-level scoring
+// spans emitted from this package.
+const tracerScope = "llm-d-router/pkg/epp/scheduling"
+
+// internalSpanKind is hoisted to avoid allocating a span-start option on every
+// scoring call.
+var internalSpanKind = trace.WithSpanKind(trace.SpanKindInternal)
+
 // NewSchedulerProfile creates a new SchedulerProfile object and returns its pointer.
 func NewSchedulerProfile() *SchedulerProfile {
 	return &SchedulerProfile{
@@ -170,6 +178,26 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	logger := log.FromContext(ctx)
 	logger.V(logutil.DEBUG).Info("Before running scorer plugins", "endpoints", endpoints)
 
+	// Parent span over the whole scorer chain. Per-scorer child spans (and any
+	// plugin-internal spans) nest under it. Attributes are request- and
+	// chain-level only; no per-endpoint keys, to keep span cardinality bounded.
+	// The tracer is resolved once and threaded into runScorer so the per-scorer
+	// spans reuse it rather than rebuilding instrumentation options per scorer.
+	tracer := tracing.Tracer(tracerScope)
+	ctx, span := tracer.Start(ctx, "llm_d.epp.scoring", internalSpanKind)
+	defer span.End()
+	// On the default (tracing-disabled) path Start returns a non-recording span;
+	// skip all attribute and child-span construction so the scoring hot path
+	// stays allocation-free, matching the rest of this package.
+	tracingActive := span.IsRecording()
+	if tracingActive {
+		span.SetAttributes(
+			attribute.Int("llm_d.epp.scorer.count", len(p.scorers)),
+			attribute.Int("llm_d.epp.scoring.candidate_endpoints", len(endpoints)),
+		)
+		setRequestSpanAttributes(span, request)
+	}
+
 	weightedScorePerEndpoint := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
 		weightedScorePerEndpoint[endpoint] = float64(0) // initialize weighted score per endpoint with 0 value
@@ -186,9 +214,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	// Iterate through each scorer in the chain and accumulate the weighted scores.
 	for _, scorer := range p.scorers {
 		logger.V(logutil.VERBOSE).Info("Running scorer plugin", "plugin", scorer.TypedName())
-		before := time.Now()
-		scores := scorer.Score(ctx, request, endpoints)
-		metrics.RecordPluginProcessingLatency(scorerExtensionPoint, scorer.TypedName().Type, scorer.TypedName().Name, time.Since(before))
+		scores := runScorer(ctx, tracer, tracingActive, scorer, request, endpoints)
 		for endpoint, score := range scores { // weight is relative to the sum of weights
 			if debugEnabled {
 				debug.Info("Calculated score", "plugin", scorer.TypedName(), "endpoint", endpoint.GetMetadata().NamespacedName, "score", score)
@@ -200,6 +226,69 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	logger.V(logutil.VERBOSE).Info("Completed running scorer plugins successfully")
 
 	return weightedScorePerEndpoint
+}
+
+// runScorer invokes a single weighted scorer and records its latency metric.
+// When tracing is active it wraps the call in an llm_d.epp.scorer.<type> span
+// annotated with the scorer's identity, weight, candidate count, and aggregate
+// score signals; aggregates are derived from the returned score map only, with
+// no per-endpoint attribute keys, to keep span cardinality bounded. When
+// tracing is inactive no span or attribute work is performed.
+func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, scorer *WeightedScorer, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	typedName := scorer.TypedName()
+
+	if !tracingActive {
+		before := time.Now()
+		scores := scorer.Score(ctx, request, endpoints)
+		metrics.RecordPluginProcessingLatency(scorerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
+		return scores
+	}
+
+	ctx, span := tracer.Start(ctx, "llm_d.epp.scorer."+typedName.Type, internalSpanKind)
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("llm_d.epp.scorer.type", typedName.Type),
+		attribute.String("llm_d.epp.scorer.name", typedName.Name),
+		attribute.Float64("llm_d.epp.scorer.weight", scorer.Weight()),
+		attribute.Int("llm_d.epp.scorer.candidate_endpoints", len(endpoints)),
+	)
+
+	before := time.Now()
+	scores := scorer.Score(ctx, request, endpoints)
+	metrics.RecordPluginProcessingLatency(scorerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
+
+	if len(scores) > 0 {
+		var maxScore, totalScore float64
+		first := true
+		for _, s := range scores {
+			if first || s > maxScore {
+				maxScore = s
+			}
+			first = false
+			totalScore += s
+		}
+		span.SetAttributes(
+			attribute.Float64("llm_d.epp.scorer.score.max", maxScore),
+			attribute.Float64("llm_d.epp.scorer.score.avg", totalScore/float64(len(scores))),
+			attribute.Int("llm_d.epp.scorer.endpoints_scored", len(scores)),
+		)
+	}
+
+	return scores
+}
+
+// setRequestSpanAttributes mirrors the request-identity attribute schema used
+// by the scorer plugins so scheduler-level spans correlate with the same trace.
+func setRequestSpanAttributes(span trace.Span, request *fwksched.InferenceRequest) {
+	if request == nil {
+		return
+	}
+	if request.TargetModel != "" {
+		span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+	}
+	if request.RequestID != "" {
+		span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+	}
 }
 
 func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, weightedScorePerEndpoint map[fwksched.Endpoint]float64) *fwksched.ProfileRunResult {
