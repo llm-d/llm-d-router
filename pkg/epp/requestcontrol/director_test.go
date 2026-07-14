@@ -27,7 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
@@ -56,6 +55,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -1735,77 +1735,10 @@ func newResponseBodyTestRequestContext(requestID string, completionTokens int) *
 
 // ── Conditional-decode gate (Prefer: if-available) ─────────────────────────
 
-// wrongTypeAttr is a Cloneable that is NOT *attrprefix.PrefixCacheMatchInfo,
-// used to exercise the type-assertion failure branch.
-type wrongTypeAttr struct{}
-
-func (w wrongTypeAttr) Clone() fwkdl.Cloneable { return w }
-
-func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
-	endpointWith := func(matched, total int) fwksched.Endpoint {
-		attrs := fwkdl.NewAttributes()
-		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
-		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
-			nil, attrs,
-		)
-	}
-	endpointBare := func() fwksched.Endpoint {
-		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
-			nil, fwkdl.NewAttributes(),
-		)
-	}
-	endpointWithWrongType := func() fwksched.Endpoint {
-		attrs := fwkdl.NewAttributes()
-		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), wrongTypeAttr{})
-		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
-			nil, attrs,
-		)
-	}
-	resultWith := func(eps ...fwksched.Endpoint) *fwksched.SchedulingResult {
-		return &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults: map[string]*fwksched.ProfileRunResult{
-				"decode": {TargetEndpoints: eps},
-			},
-		}
-	}
-
-	tests := []struct {
-		name string
-		in   *fwksched.SchedulingResult
-		want bool
-	}{
-		{"nil result", nil, false},
-		{"empty profile results", &fwksched.SchedulingResult{PrimaryProfileName: "decode"}, false},
-		{"primary profile missing", &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults:     map[string]*fwksched.ProfileRunResult{"other": {TargetEndpoints: []fwksched.Endpoint{endpointWith(2, 4)}}},
-		}, false},
-		{"primary profile nil", &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults:     map[string]*fwksched.ProfileRunResult{"decode": nil},
-		}, false},
-		{"primary has no endpoints", resultWith(), false},
-		{"endpoint has no match info", resultWith(endpointBare()), false},
-		{"wrong type in attribute", resultWith(endpointWithWrongType()), false},
-		{"zero match blocks", resultWith(endpointWith(0, 4)), false},
-		{"some match blocks", resultWith(endpointWith(2, 4)), true},
-		{"full match", resultWith(endpointWith(4, 4)), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, primaryEndpointHasCachedPrefix(logr.Discard(), tt.in))
-		})
-	}
-}
-
 // newConditionalDecodeDirector builds a minimal Director suitable for
-// exercising the conditional-decode gate end-to-end.
-func newConditionalDecodeDirector(t *testing.T, scheduleResult *fwksched.SchedulingResult) (*Director, context.Context) {
+// exercising the conditional-decode gate end-to-end. When decider is non-nil
+// it is wired into the request-control config; otherwise the gate is disabled.
+func newConditionalDecodeDirector(t *testing.T, scheduleResult *fwksched.SchedulingResult, decider fwkrc.ConditionalDecodeDecider) (*Director, context.Context) {
 	t.Helper()
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 
@@ -1837,18 +1770,30 @@ func newConditionalDecodeDirector(t *testing.T, scheduleResult *fwksched.Schedul
 	})
 
 	mockSched := &mockScheduler{scheduleResults: scheduleResult}
-	cfg := NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil))
+	cfg := NewConfig().
+		WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil)).
+		WithConditionalDecodeDecider(decider)
 	candidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 	dir := NewDirectorWithConfig(ds, mockSched, &mockAdmissionController{}, candidates, cfg)
 	return dir, ctx
 }
 
 func TestDirector_HandleRequest_ConditionalDecode(t *testing.T) {
-	scheduleResultWith := func(matched, total int) *fwksched.SchedulingResult {
+	const (
+		blockSize       = 1
+		nonCachedTokens = 5
+		inputTokens     = 10
+	)
+
+	// scheduleResultWith builds a result where the chosen decode endpoint
+	// reports `cached` cached blocks (each `blockSize` tokens). cached == -1
+	// means the endpoint carries no PrefixCacheMatchInfo attribute.
+	scheduleResultWith := func(cached int) *fwksched.SchedulingResult {
 		attrs := fwkdl.NewAttributes()
-		if matched >= 0 {
+		if cached >= 0 {
 			attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
-				attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
+				attrprefix.NewPrefixCacheMatchInfo(cached, inputTokens, blockSize).
+					WithCachedBlockCount(cached))
 		}
 		return &fwksched.SchedulingResult{
 			PrimaryProfileName: "decode",
@@ -1865,23 +1810,33 @@ func TestDirector_HandleRequest_ConditionalDecode(t *testing.T) {
 		}
 	}
 
+	newDecider := func(t *testing.T) fwkrc.ConditionalDecodeDecider {
+		t.Helper()
+		d, err := disagg.NewPrefixBasedPDDecider(disagg.PrefixBasedPDDeciderConfig{NonCachedTokens: nonCachedTokens})
+		require.NoError(t, err)
+		return d
+	}
+
 	tests := []struct {
 		name        string
 		preferValue string // empty == no Prefer header
-		matched     int    // -1 == no PrefixCacheMatchInfo at all
-		total       int
+		cached      int    // -1 == no PrefixCacheMatchInfo at all
+		decider     func(t *testing.T) fwkrc.ConditionalDecodeDecider
 		wantErrCode string
 	}{
-		{"prefer if-available + cache hit forwards", "if-available", 2, 4, ""},
-		{"prefer if-available + zero match returns 412", "if-available", 0, 4, errcommon.PreconditionFailed},
-		{"prefer if-available + no match info returns 412", "if-available", -1, 0, errcommon.PreconditionFailed},
-		{"absent Prefer header proceeds even with no cache", "", -1, 0, ""},
-		{"unrelated Prefer token proceeds even with no cache", "return=minimal", -1, 0, ""},
+		// inputTokens=10, threshold=5: cached>=6 → nonCached<=4 → forward; cached<=5 → nonCached>=5 → reject.
+		{"prefer if-available + suffix below threshold forwards", "if-available", 8, newDecider, ""},
+		{"prefer if-available + suffix at threshold returns 412", "if-available", 5, newDecider, errcommon.PreconditionFailed},
+		{"prefer if-available + zero cache returns 412", "if-available", 0, newDecider, errcommon.PreconditionFailed},
+		{"prefer if-available + no match info returns 412", "if-available", -1, newDecider, errcommon.PreconditionFailed},
+		{"absent Prefer header proceeds regardless of cache", "", -1, newDecider, ""},
+		{"unrelated Prefer token proceeds regardless of cache", "return=minimal", -1, newDecider, ""},
+		{"no decider configured forwards even on cache miss", "if-available", -1, func(*testing.T) fwkrc.ConditionalDecodeDecider { return nil }, ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dir, ctx := newConditionalDecodeDirector(t, scheduleResultWith(tt.matched, tt.total))
+			dir, ctx := newConditionalDecodeDirector(t, scheduleResultWith(tt.cached), tt.decider(t))
 
 			reqCtx := &handlers.RequestContext{
 				Request: &handlers.Request{
@@ -1900,6 +1855,12 @@ func TestDirector_HandleRequest_ConditionalDecode(t *testing.T) {
 
 			parseResult, err := openai.NewOpenAIParser().ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 			require.NoError(t, err)
+			// Inject a tokenized prompt so the decider's token-count branch
+			// sees inputTokens=10 instead of 0 (no tokenizer plugin runs in
+			// this minimal director fixture).
+			parseResult.Body.TokenizedPrompt = &fwkrh.TokenizedPrompt{
+				PerPromptTokens: [][]uint32{make([]uint32, inputTokens)},
+			}
 
 			_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
 			if tt.wantErrCode == "" {

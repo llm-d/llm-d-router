@@ -48,7 +48,6 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -61,49 +60,27 @@ const (
 	responseBodyQueueCapacity = 100
 )
 
-// primaryEndpointHasCachedPrefix reports whether the primary profile's chosen
-// endpoint has at least one matching prefix block in its KV cache, as observed
-// by a precise/approximate-prefix scorer during the decode profile run. It
-// returns false when the result is missing, the primary profile produced no
-// endpoint, the endpoint carries no PrefixCacheMatchInfo attribute, or the
-// recorded match has zero blocks. False-return reasons are logged at
-// V(logutil.DEBUG) to disambiguate misconfiguration (no scorer attached) from
-// a real cache miss.
-func primaryEndpointHasCachedPrefix(logger logr.Logger, result *fwksched.SchedulingResult) bool {
+// primaryDecodeEndpoint returns the first endpoint chosen by the primary
+// profile, or nil when the result is nil, the primary profile is missing, or
+// it produced no endpoints. Each nil-return reason is logged at
+// V(logutil.DEBUG) so an unexpected nil here can be distinguished from a
+// healthy schedule with no endpoint.
+func primaryDecodeEndpoint(logger logr.Logger, result *fwksched.SchedulingResult) fwksched.Endpoint {
 	debug := logger.V(logutil.DEBUG)
 	if result == nil {
 		debug.Info("conditional-decode: scheduling result is nil")
-		return false
+		return nil
 	}
 	primary, ok := result.ProfileResults[result.PrimaryProfileName]
 	if !ok || primary == nil {
 		debug.Info("conditional-decode: primary profile result missing", "primary", result.PrimaryProfileName)
-		return false
+		return nil
 	}
 	if len(primary.TargetEndpoints) == 0 {
 		debug.Info("conditional-decode: primary profile produced no endpoints", "primary", result.PrimaryProfileName)
-		return false
+		return nil
 	}
-	endpoint := primary.TargetEndpoints[0]
-	if endpoint == nil {
-		debug.Info("conditional-decode: primary endpoint is nil")
-		return false
-	}
-	raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String())
-	if !ok || raw == nil {
-		debug.Info("conditional-decode: endpoint has no prefix-cache match attribute (no scorer attached?)")
-		return false
-	}
-	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
-	if !ok {
-		debug.Info("conditional-decode: prefix-cache attribute has unexpected type", "type", fmt.Sprintf("%T", raw))
-		return false
-	}
-	if info.MatchBlocks() == 0 {
-		debug.Info("conditional-decode: prefix-cache match has zero blocks")
-		return false
-	}
-	return true
+	return primary.TargetEndpoints[0]
 }
 
 // Datastore defines the interface required by the Director.
@@ -330,14 +307,20 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// at encode/prefill/decode. Lives in the director (not in a profile handler)
 	// so it fires regardless of which profile handler is configured.
 	if routing.IsConditionalDecode(reqCtx.Request.Headers) {
-		if !primaryEndpointHasCachedPrefix(logger, result) {
-			logger.V(logutil.DEBUG).Info("conditional-decode: chosen decode worker has no cached prefix, returning 412")
-			return reqCtx, errcommon.Error{
-				Code: errcommon.PreconditionFailed,
-				Msg:  "no decode worker has the requested KV cache",
+		decider := d.requestControlPlugins.ConditionalDecodeDecider()
+		if decider == nil {
+			logger.V(logutil.DEBUG).Info("conditional-decode: no decider configured, forwarding")
+		} else {
+			endpoint := primaryDecodeEndpoint(logger, result)
+			if endpoint == nil || decider.ShouldRejectConditionalDecode(ctx, reqCtx.SchedulingRequest, endpoint) {
+				logger.V(logutil.DEBUG).Info("conditional-decode: chosen decode worker has no cached prefix, returning 412")
+				return reqCtx, errcommon.Error{
+					Code: errcommon.PreconditionFailed,
+					Msg:  "no decode worker has the requested KV cache",
+				}
 			}
+			logger.V(logutil.DEBUG).Info("conditional-decode: chosen decode worker has cached prefix, forwarding")
 		}
-		logger.V(logutil.DEBUG).Info("conditional-decode: chosen decode worker has cached prefix, forwarding")
 	}
 
 	reqCtx.SchedulingRequest.SchedulingResult = result

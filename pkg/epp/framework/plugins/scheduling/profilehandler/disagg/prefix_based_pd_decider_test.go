@@ -415,6 +415,76 @@ func TestDisaggregate_UsesUnweightedCachedBlockCount(t *testing.T) {
 		"sanity: the tier-weighted score alone undercounts cached blocks and misroutes")
 }
 
+func TestShouldRejectConditionalDecode(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	tests := []struct {
+		name            string
+		nonCachedTokens int
+		request         *scheduling.InferenceRequest
+		endpoint        scheduling.Endpoint
+		expectReject    bool
+	}{
+		{
+			name:            "threshold zero disables gate",
+			nonCachedTokens: 0,
+			request:         makeRequestWithTokens(10),
+			endpoint:        makeTestEndpoint(0),
+			expectReject:    false,
+		},
+		{
+			name:            "non-cached suffix below threshold forwards",
+			nonCachedTokens: 5,
+			request:         makeRequestWithTokens(10),
+			endpoint:        makeTestEndpoint(8),
+			expectReject:    false,
+		},
+		{
+			name:            "non-cached suffix at threshold rejects",
+			nonCachedTokens: 5,
+			request:         makeRequestWithTokens(10),
+			endpoint:        makeTestEndpoint(5),
+			expectReject:    true,
+		},
+		{
+			name:            "no cache hit at all rejects",
+			nonCachedTokens: 5,
+			request:         makeRequestWithTokens(10),
+			endpoint:        makeTestEndpoint(0),
+			expectReject:    true,
+		},
+		{
+			name:            "fully cached prompt forwards",
+			nonCachedTokens: 1,
+			request:         makeRequestWithTokens(10),
+			endpoint:        makeTestEndpoint(10),
+			expectReject:    false,
+		},
+		{
+			name:            "missing prefix info rejects (fail closed)",
+			nonCachedTokens: 5,
+			request:         makeRequestWithTokens(10),
+			endpoint:        makeTestEndpointBase(),
+			expectReject:    true,
+		},
+		{
+			name:            "nil endpoint rejects",
+			nonCachedTokens: 5,
+			request:         makeRequestWithTokens(10),
+			endpoint:        nil,
+			expectReject:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: tt.nonCachedTokens})
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectReject, decider.ShouldRejectConditionalDecode(ctx, tt.request, tt.endpoint))
+		})
+	}
+}
+
 func TestDisaggregateNoPrefixInfo(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
