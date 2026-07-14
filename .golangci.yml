@@ -45,6 +45,14 @@ linters:
         text: "avoid meaningless package names"
       - linters: [revive]
         text: "avoid package names that conflict with Go standard library package names"
+      # Packages transferred verbatim from llm-d-kv-cache (#1862); style cleanup tracked separately
+      - path: pkg/(kvcache|kvevents|telemetry|utils)/
+        linters:
+          - revive
+          - perfsprint
+          - goconst
+          - dupword
+          - prealloc
   settings:
     importas:
       no-unaliased: false # unaliased imports are allowed; only enforce when an alias is used
