@@ -32,6 +32,13 @@ func TestFactory_LASConfig(t *testing.T) {
 	require.NotNil(t, p)
 }
 
+func TestFactory_TurnPriorityConfig(t *testing.T) {
+	cfg := `{"strategy":"turn-priority","turnPriorityTimeWeight":0.5}`
+	p, err := ProgramAwarePluginFactory("test", decoder(cfg), nil)
+	require.NoError(t, err)
+	require.NotNil(t, p)
+}
+
 func TestFactory_UnknownStrategy(t *testing.T) {
 	_, err := ProgramAwarePluginFactory("test", decoder(`{"strategy":"wfq"}`), nil)
 	require.Error(t, err)
@@ -39,12 +46,13 @@ func TestFactory_UnknownStrategy(t *testing.T) {
 
 func TestFactory_InvalidConfig(t *testing.T) {
 	cases := map[string]string{
-		"negative ttl":       `{"evictionTtlSeconds":-1}`,
-		"zero sweep":         `{"evictionSweepSeconds":0}`,
-		"negative weight":    `{"lasWeightService":-0.1}`,
-		"decay factor > 1":   `{"lasDecayFactor":1.5}`,
-		"decay factor 0":     `{"lasDecayFactor":0}`,
-		"negative half life": `{"lasHalfLifeSeconds":-1}`,
+		"negative ttl":         `{"evictionTtlSeconds":-1}`,
+		"zero sweep":           `{"evictionSweepSeconds":0}`,
+		"negative weight":      `{"lasWeightService":-0.1}`,
+		"decay factor > 1":     `{"lasDecayFactor":1.5}`,
+		"decay factor 0":       `{"lasDecayFactor":0}`,
+		"negative half life":   `{"lasHalfLifeSeconds":-1}`,
+		"negative turn weight": `{"turnPriorityTimeWeight":-0.1}`,
 	}
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
