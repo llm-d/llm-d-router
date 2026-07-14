@@ -58,6 +58,8 @@ const (
 	kvConnector               = "kv-connector"
 	ecConnector               = "ec-connector"
 	mooncakeBootstrapPortFlag = "mooncake-bootstrap-port"
+	p2pConnectorPortFlag      = "p2p-connector-port"
+	enableP2PPull             = "enable-p2p-pull"
 	enableSSRFProtection      = "enable-ssrf-protection"
 	enablePrefillerSampling   = "enable-prefiller-sampling"
 	enableTLS                 = "enable-tls"
@@ -86,12 +88,14 @@ const (
 	envInferencePool           = "INFERENCE_POOL"
 	envEnablePrefillerSampling = "ENABLE_PREFILLER_SAMPLING"
 	envMooncakeBootstrapPort   = "MOONCAKE_BOOTSTRAP_PORT"
+	envP2PConnectorPort        = "P2P_CONNECTOR_PORT"
 
 	// Defaults
 	defaultPort                  = "8000"
 	defaultVLLMPort              = "8200"
 	defaultDataParallelSize      = 1
 	defaultMooncakeBootstrapPort = 8998
+	defaultP2PConnectorPort      = 7777
 
 	// TLS stages
 	prefillStage = "prefiller"
@@ -104,12 +108,14 @@ type yamlConfiguration struct {
 	Port                           int      `json:"port,omitempty"`
 	VLLMPort                       int      `json:"vllm-port,omitempty"`
 	MooncakeBootstrapPort          int      `json:"mooncake-bootstrap-port,omitempty"`
+	P2PConnectorPort               int      `json:"p2p-connector-port,omitempty"`
 	DataParallelSize               int      `json:"data-parallel-size,omitempty"`
 	KVConnector                    string   `json:"kv-connector,omitempty"`
 	Connector                      string   `json:"connector,omitempty"`
 	ECConnector                    string   `json:"ec-connector,omitempty"`
 	EnableSSRFProtection           *bool    `json:"enable-ssrf-protection,omitempty"`
 	EnablePrefillerSampling        *bool    `json:"enable-prefiller-sampling,omitempty"`
+	EnableP2PPull                  *bool    `json:"enable-p2p-pull,omitempty"`
 	SecureServing                  *bool    `json:"secure-proxy,omitempty"`
 	CertPath                       string   `json:"cert-path,omitempty"`
 	EnableTLS                      []string `json:"enable-tls,omitempty"`
@@ -165,6 +171,7 @@ var (
 		KVConnectorSharedStorage: {},
 		KVConnectorSGLang:        {},
 		KVConnectorMooncake:      {},
+		KVConnectorOffloading:    {},
 	}
 
 	// supportedECConnectors defines all valid E/P EC connector types
@@ -180,7 +187,7 @@ var (
 		encodeStage:  {},
 	}
 
-	supportedKVConnectorNamesStr = strings.Join([]string{KVConnectorNIXLV2, KVConnectorSharedStorage, KVConnectorSGLang, KVConnectorMooncake}, ", ")
+	supportedKVConnectorNamesStr = strings.Join([]string{KVConnectorNIXLV2, KVConnectorSharedStorage, KVConnectorSGLang, KVConnectorMooncake, KVConnectorOffloading}, ", ")
 	supportedECConnectorNamesStr = strings.Join([]string{ECExampleConnector, ECConnectorNIXL}, ", ")
 
 	supportedTLSStageNamesStr = strings.Join([]string{prefillStage, decodeStage, encodeStage}, ", ")
@@ -200,6 +207,13 @@ func NewOptions() *Options {
 		}
 	}
 
+	p2pConnectorPort := defaultP2PConnectorPort
+	if portStr := os.Getenv(envP2PConnectorPort); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			p2pConnectorPort = port
+		}
+	}
+
 	return &Options{
 		Config: Config{
 			Port:                    defaultPort,
@@ -210,6 +224,7 @@ func NewOptions() *Options {
 			PrefillMaxRetries:       0,
 			PrefillRetryBackoff:     200 * time.Millisecond,
 			MooncakeBootstrapPort:   mooncakeBootstrapPort,
+			P2PConnectorPort:        p2pConnectorPort,
 			PoolGroup:               routing.InferencePoolAPIGroup,
 			DecodeChunkSize:         0,
 			Tracing:                 false,
@@ -255,6 +270,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"the EC protocol between encoder and prefiller (for EPD mode). Supported: "+supportedECConnectorNamesStr+". Leave empty to skip encoder stage.")
 	fs.IntVar(&opts.MooncakeBootstrapPort, mooncakeBootstrapPortFlag, opts.MooncakeBootstrapPort,
 		"the port used to query the Mooncake bootstrap endpoint on prefill pods (only used with --kv-connector=mooncake)")
+	fs.IntVar(&opts.P2PConnectorPort, p2pConnectorPortFlag, opts.P2PConnectorPort,
+		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode leg (used with --kv-connector=offloading or --enable-p2p-pull)")
+	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
+		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). No effect with --kv-connector=offloading.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Enables secure proxy. Defaults to true.")
 	fs.StringVar(&opts.CertPath, certPath, opts.CertPath, "The path to the certificate for secure proxy. The certificate and private key files are assumed to be named tls.crt and tls.key, respectively. If not set, and secureProxy is enabled, then a self-signed certificate is used (for testing).")
 	fs.BoolVar(&opts.EnableSSRFProtection, enableSSRFProtection, opts.EnableSSRFProtection, "enable SSRF protection using InferencePool allowlisting")
@@ -546,6 +565,24 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--mooncake-bootstrap-port must be between 1 and 65535, got %d", opts.MooncakeBootstrapPort)
 	}
 
+	// Validate P2P connector port
+	if opts.P2PConnectorPort < 1 || opts.P2PConnectorPort > 65535 {
+		return fmt.Errorf("--p2p-connector-port must be between 1 and 65535, got %d", opts.P2PConnectorPort)
+	}
+
+	// offloading does not support wide-EP: every DP rank would bind the same
+	// POD_IP:<p2p-connector-port>. DP-aware support is not yet implemented.
+	if opts.KVConnector == KVConnectorOffloading && opts.DataParallelSize > 1 {
+		return fmt.Errorf("--kv-connector=offloading does not support --data-parallel-size > 1 (got %d)", opts.DataParallelSize)
+	}
+
+	// --enable-p2p-pull composes the OffloadingConnector P2P tier alongside NIXL
+	// via MultiConnector; it is only meaningful with the NIXLv2 PD connector.
+	// offloading already provides the tier natively and needs no flag.
+	if opts.EnableP2PPull && opts.KVConnector != KVConnectorNIXLV2 {
+		return fmt.Errorf("--enable-p2p-pull requires --kv-connector=%s (got %q)", KVConnectorNIXLV2, opts.KVConnector)
+	}
+
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
 		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {
@@ -637,6 +674,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	if cfg.MooncakeBootstrapPort != 0 && !opts.isFlagSet(mooncakeBootstrapPortFlag) {
 		opts.MooncakeBootstrapPort = cfg.MooncakeBootstrapPort
 	}
+	if cfg.P2PConnectorPort != 0 && !opts.isFlagSet(p2pConnectorPortFlag) {
+		opts.P2PConnectorPort = cfg.P2PConnectorPort
+	}
 	if cfg.DataParallelSize != 0 && !opts.isFlagSet(dataParallelSize) {
 		opts.DataParallelSize = cfg.DataParallelSize
 	}
@@ -659,6 +699,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.EnablePrefillerSampling != nil && !opts.isFlagSet(enablePrefillerSampling) {
 		opts.EnablePrefillerSampling = *cfg.EnablePrefillerSampling
+	}
+	if cfg.EnableP2PPull != nil && !opts.isFlagSet(enableP2PPull) {
+		opts.EnableP2PPull = *cfg.EnableP2PPull
 	}
 
 	if cfg.SecureServing != nil && !opts.isFlagSet(secureServing) {

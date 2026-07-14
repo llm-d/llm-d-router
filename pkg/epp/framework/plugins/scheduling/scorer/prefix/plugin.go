@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -33,12 +34,19 @@ import (
 type Config struct {
 	// The name of the data producer that produces PrefixCacheMatchInfo.
 	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
+	// The weight assigned to match length, between 0.0 and 1.0.
+	MatchLengthWeight float64 `json:"matchLengthWeight,omitempty"`
+	// Normalization factor for match length in terms of tokens.
+	// Used only when MatchLengthWeight > 0.
+	MatchLengthScaleTokens int `json:"matchLengthScaleTokens,omitempty"`
 }
 
 // Plugin implements the prefix cache aware scoring logic.
 type Plugin struct {
-	typedName          plugin.TypedName
-	prefixMatchDataKey plugin.DataKey
+	typedName              plugin.TypedName
+	prefixMatchDataKey     plugin.DataKey
+	matchLengthWeight      float64
+	matchLengthScaleTokens int
 }
 
 // compile-time type assertions
@@ -49,11 +57,19 @@ var (
 const (
 	// Type is the unique identifier for the prefix cache scorer plugin.
 	PrefixCacheScorerPluginType = "prefix-cache-scorer"
+	// The default weight of the absolute match length in the score.
+	// Set to 0 so by default only the match ratio is considered.
+	defaultMatchLengthWeight = 0.0
+	// Default number of tokens used as a scaling factor.
+	defaultMatchLengthScaleTokens = 8192
 )
 
 // PrefixCachePluginFactory defines the factory function for the Prefix plugin.
 func PrefixCachePluginFactory(name string, decoder *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
-	var cfg Config
+	cfg := Config{
+		MatchLengthWeight:      defaultMatchLengthWeight,
+		MatchLengthScaleTokens: defaultMatchLengthScaleTokens,
+	}
 	if decoder != nil {
 		if err := decoder.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to decode prefix cache scorer parameters: %w", err)
@@ -64,6 +80,17 @@ func PrefixCachePluginFactory(name string, decoder *json.Decoder, handle plugin.
 	if err != nil {
 		return nil, err
 	}
+
+	if cfg.MatchLengthWeight < 0.0 || cfg.MatchLengthWeight > 1.0 {
+		return nil, fmt.Errorf("matchLengthWeight must be between 0.0 and 1.0, got %f", cfg.MatchLengthWeight)
+	}
+	p.matchLengthWeight = cfg.MatchLengthWeight
+
+	if p.matchLengthWeight > 0.0 && cfg.MatchLengthScaleTokens <= 0 {
+		return nil, fmt.Errorf("matchLengthScaleTokens must be greater than 0 when matchLengthWeight is greater than 0, got %d", cfg.MatchLengthScaleTokens)
+	}
+	p.matchLengthScaleTokens = cfg.MatchLengthScaleTokens
+
 	return p, nil
 }
 
@@ -114,13 +141,29 @@ func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 			continue
 		}
 
-		if prefixMatchInfo, ok := info.(*attrprefix.PrefixCacheMatchInfo); ok {
-			if prefixMatchInfo.TotalBlocks() != 0 {
-				scores[endpoint] = float64(prefixMatchInfo.MatchBlocks()) / float64(prefixMatchInfo.TotalBlocks())
-			}
-		} else {
+		prefixMatchInfo, ok := info.(*attrprefix.PrefixCacheMatchInfo)
+		if !ok {
 			logger.V(logutil.DEFAULT).Error(nil, "PrefixCacheMatchInfo has unexpected type, assigning score 0", "endpoint", endpoint)
+			continue
 		}
+
+		matchBlocks := prefixMatchInfo.MatchBlocks()
+		totalBlocks := prefixMatchInfo.TotalBlocks()
+		if totalBlocks == 0 {
+			logger.V(logutil.DEFAULT).Error(nil, "totalBlocks is set to 0, assigning score 0", "endpoint", endpoint)
+			continue
+		}
+
+		matchRatioScore := float64(matchBlocks) / float64(totalBlocks)
+		blockSize := prefixMatchInfo.BlockSizeTokens()
+		matchLengthScore := 0.0
+		// Calculate matchLengthScore when match length is considered
+		if p.matchLengthWeight > 0.0 && blockSize > 0 {
+			// (matchBlocks * blockSize / matchLengthScaleTokens) ^ 2
+			normalizedMatchLength := math.Min(1.0, float64(matchBlocks)*float64(blockSize)/float64(p.matchLengthScaleTokens))
+			matchLengthScore = normalizedMatchLength * normalizedMatchLength
+		}
+		scores[endpoint] += p.matchLengthWeight*matchLengthScore + (1.0-p.matchLengthWeight)*matchRatioScore
 	}
 	return scores
 }

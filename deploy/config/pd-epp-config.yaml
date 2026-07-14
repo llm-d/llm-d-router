@@ -1,4 +1,4 @@
-# Sample EPP configuration for tunning with P/D
+# Sample EPP configuration for running with P/D
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
@@ -11,13 +11,13 @@ plugins:
 - type: prefill-filter
 - type: decode-filter
 - type: max-score-picker
-- type: prefix-based-pd-decider
-  parameters:
-    nonCachedTokens: 16
 - type: disagg-profile-handler
   parameters:
     deciders:
       prefill: prefix-based-pd-decider
+- type: prefix-based-pd-decider
+  parameters:
+    nonCachedTokens: 16
 schedulingProfiles:
 - name: prefill
   plugins:

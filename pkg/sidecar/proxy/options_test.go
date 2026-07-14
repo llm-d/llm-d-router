@@ -50,6 +50,7 @@ connector: %q
 ec-connector: %q
 enable-ssrf-protection: true
 enable-prefiller-sampling: true
+enable-p2p-pull: true
 enable-tls:
 - prefiller
 - decoder
@@ -67,7 +68,7 @@ prefill-retry-backoff: "500ms"
 decode-chunk-size: 128
 mooncake-bootstrap-port: 9000
 tracing: true
-`, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector))
+`, KVConnectorNIXLV2, KVConnectorSGLang, ECExampleConnector))
 }
 
 func createConfigWithUnknownKeys(t *testing.T) string {
@@ -98,6 +99,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		ec-connector: %s,
 		enable-ssrf-protection: true,
 		enable-prefiller-sampling: true,
+		enable-p2p-pull: true,
 		enable-tls: ['prefiller', 'decoder'],
 		prefiller-use-tls: false,
 		decoder-use-tls: true,
@@ -113,7 +115,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		decode-chunk-size: 256,
 		mooncake-bootstrap-port: 9001,
 		tracing: true
-	}`, KVConnectorSGLang, KVConnectorNIXLV2, ECExampleConnector)
+	}`, KVConnectorNIXLV2, KVConnectorSGLang, ECExampleConnector)
 	invalidInlineYAML := "{port: 8200, invalid-yaml}"
 
 	// -- file YAML for testing ---
@@ -140,12 +142,13 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 200
 				o.MooncakeBootstrapPort = 9001
 
-				o.KVConnector = KVConnectorSGLang
-				o.connector = KVConnectorNIXLV2
+				o.KVConnector = KVConnectorNIXLV2
+				o.connector = KVConnectorSGLang
 				o.ECConnector = ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
+				o.EnableP2PPull = true
 
 				o.enableTLS = []string{prefillStage, decodeStage}
 				o.UseTLSForPrefiller = true
@@ -188,11 +191,12 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 300
 				o.MooncakeBootstrapPort = 9000
 
-				o.KVConnector = KVConnectorSGLang
+				o.KVConnector = KVConnectorNIXLV2
 				o.ECConnector = ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
+				o.EnableP2PPull = true
 
 				o.enableTLS = []string{prefillStage, decodeStage}
 				o.UseTLSForPrefiller = true
@@ -229,7 +233,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				port:                    "8111",
 				vllmPort:                "8222",
 				dataParallelSize:        2,
-				kvConnector:             KVConnectorSGLang,
+				kvConnector:             KVConnectorNIXLV2,
 				ecConnector:             ECExampleConnector,
 				enableSSRFProtection:    true,
 				enablePrefillerSampling: true,
@@ -239,6 +243,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				certPath:                "/etc/certificates",
 				inferencePool:           "ns/inference-pool",
 				poolGroup:               "pool-group",
+				enableP2PPull:           false, // overrides enable-p2p-pull: true in the inline YAML
 				inlineConfiguration:     &inlineYAML,
 			},
 			expected: func(o *Options) {
@@ -248,11 +253,12 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 200
 				o.MooncakeBootstrapPort = 9001
 
-				o.KVConnector = KVConnectorSGLang
+				o.KVConnector = KVConnectorNIXLV2
 				o.ECConnector = ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
+				o.EnableP2PPull = false
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
@@ -301,7 +307,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				port:                      "8111",
 				vllmPort:                  "8222",
 				dataParallelSize:          2,
-				kvConnector:               KVConnectorSGLang,
+				kvConnector:               KVConnectorNIXLV2,
 				ecConnector:               ECExampleConnector,
 				enableSSRFProtection:      true,
 				enablePrefillerSampling:   true,
@@ -322,11 +328,12 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 400
 				o.MooncakeBootstrapPort = 9002
 
-				o.KVConnector = KVConnectorSGLang
+				o.KVConnector = KVConnectorNIXLV2
 				o.ECConnector = ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
+				o.EnableP2PPull = true
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
@@ -457,6 +464,7 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 
 	assertEqual(enableSSRFProtection, expected.EnableSSRFProtection, actual.EnableSSRFProtection)
 	assertEqual(enablePrefillerSampling, expected.EnablePrefillerSampling, actual.EnablePrefillerSampling)
+	assertEqual(enableP2PPull, expected.EnableP2PPull, actual.EnableP2PPull)
 
 	assertEqual(prefillerUseTLS, expected.UseTLSForPrefiller, actual.UseTLSForPrefiller)
 	assertEqual(decoderUseTLS, expected.UseTLSForDecoder, actual.UseTLSForDecoder)
@@ -595,6 +603,74 @@ func TestNewOptionsWithEnvVars(t *testing.T) {
 	}
 }
 
+func TestP2PConnectorPort(t *testing.T) {
+	t.Run("defaults to 7777", func(t *testing.T) {
+		opts := NewOptions()
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.Equal(t, defaultP2PConnectorPort, opts.P2PConnectorPort)
+	})
+
+	t.Run("env var overrides default", func(t *testing.T) {
+		t.Setenv(envP2PConnectorPort, "9500")
+		opts := NewOptions()
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.Equal(t, 9500, opts.P2PConnectorPort)
+	})
+
+	t.Run("rejects out-of-range port", func(t *testing.T) {
+		opts := NewOptions()
+		opts.P2PConnectorPort = 70000
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--p2p-connector-port must be between 1 and 65535")
+	})
+}
+
+func TestValidateOffloadingDP(t *testing.T) {
+	t.Run("rejects offloading with data-parallel-size > 1", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 2
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--kv-connector=offloading does not support --data-parallel-size > 1")
+	})
+
+	t.Run("allows offloading with data-parallel-size 1", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 1
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+	})
+}
+
+func TestValidateEnableP2PPull(t *testing.T) {
+	t.Run("rejects enable-p2p-pull with non-NIXLv2 connector", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorSharedStorage
+		opts.EnableP2PPull = true
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--enable-p2p-pull requires --kv-connector=nixlv2")
+	})
+
+	t.Run("rejects enable-p2p-pull with offloading connector", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.EnableP2PPull = true
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--enable-p2p-pull requires --kv-connector=nixlv2")
+	})
+
+	t.Run("allows enable-p2p-pull with NIXLv2 connector", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorNIXLV2
+		opts.EnableP2PPull = true
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+	})
+}
+
 func TestValidateConnector(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -605,6 +681,7 @@ func TestValidateConnector(t *testing.T) {
 		{"valid shared-storage", KVConnectorSharedStorage, false},
 		{"valid sglang", KVConnectorSGLang, false},
 		{"valid mooncake", KVConnectorMooncake, false},
+		{"valid offloading", KVConnectorOffloading, false},
 		{"invalid connector", "invalid", true},
 	}
 

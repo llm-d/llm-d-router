@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-render
+  labels:
+    app: vllm-render
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-render
+  template:
+    metadata:
+      labels:
+        app: vllm-render
+    spec:
+      containers:
+      - name: vllm-render
+        image: ${VLLM_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - "--model=${MODEL_NAME}"
+        - "--port=8082"
+        - "--force-dummy-tokenizer"
+        ports:
+        - name: http
+          containerPort: 8082
+          protocol: TCP
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          failureThreshold: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        env:
+        - name: PORT
+          value: "8082"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      volumes: []
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-render
+  labels:
+    app: vllm-render
+spec:
+  selector:
+    app: vllm-render
+  ports:
+  - name: http
+    protocol: TCP
+    port: 8082
+    targetPort: 8082

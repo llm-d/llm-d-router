@@ -1,0 +1,7 @@
+# EPP Router Performance Benchmarking Results: optimized-baseline-job1
+
+| Timestamp | Namespace | Router Config | Perf Job | Machine Family | Sim Replicas | EPP Images | Container | Idle CPU (m) | Idle Mem (MiB) | Peak CPU (m) | Peak Mem (MiB) | P50 Latency (ms) | P95 Latency (ms) | Status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-07-13 18:17:03 | llm-d-perf-1783966623 | [optimized-baseline](../../config/router-configs/optimized-baseline.yaml) | [shared_prefix_job1.yaml](../../config/shared_prefix_job1.yaml) | e2 | 10 | docker.io/envoyproxy/envoy:distroless-v1.33.2<br>ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main | TOTAL | 126 | 35 | 4295 | 136 | 2.42 | 7.81 | SUCCESS |
+| 2026-07-13 18:17:03 | llm-d-perf-1783966623 | [optimized-baseline](../../config/router-configs/optimized-baseline.yaml) | [shared_prefix_job1.yaml](../../config/shared_prefix_job1.yaml) | e2 | 10 | docker.io/envoyproxy/envoy:distroless-v1.33.2<br>ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main | envoy-proxy | 11 | 13 | 2119 | 30 | 2.42 | 7.81 | SUCCESS |
+| 2026-07-13 18:17:03 | llm-d-perf-1783966623 | [optimized-baseline](../../config/router-configs/optimized-baseline.yaml) | [shared_prefix_job1.yaml](../../config/shared_prefix_job1.yaml) | e2 | 10 | docker.io/envoyproxy/envoy:distroless-v1.33.2<br>ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main | epp | 114 | 21 | 2190 | 109 | 2.42 | 7.81 | SUCCESS |
