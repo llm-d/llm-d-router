@@ -82,6 +82,12 @@ func (s *StreamingServer) SetEvictChannelLookup(lookup EvictChannelLookup) {
 	s.evictionLookup = lookup
 }
 
+// SetEmitEndpointScores controls whether the per-endpoint scheduler scores are emitted in the
+// request-path dynamic metadata under metadata.DestinationEndpointScoresKey. Off by default.
+func (s *StreamingServer) SetEmitEndpointScores(enabled bool) {
+	s.emitEndpointScores = enabled
+}
+
 type Director interface {
 	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
@@ -102,6 +108,9 @@ type StreamingServer struct {
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
+	// emitEndpointScores enables emitting per-endpoint scheduler scores in the request-path
+	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
+	emitEndpointScores bool
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -110,8 +119,11 @@ type StreamingServer struct {
 // Refactor this monolithic struct. Fields related to the Envoy ext-proc protocol should be decoupled from the internal
 // request lifecycle state.
 type RequestContext struct {
-	TargetPod                  *fwkdl.EndpointMetadata
-	TargetEndpoint             string
+	TargetPod      *fwkdl.EndpointMetadata
+	TargetEndpoint string
+	// TargetEndpointScores maps each endpoint address in TargetEndpoint to the scheduler's score for it.
+	// Nil when the picker did not surface scores.
+	TargetEndpointScores       map[string]float64
 	IncomingModelName          string
 	TargetModelName            string
 	ObjectiveKey               string
