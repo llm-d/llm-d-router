@@ -23,9 +23,8 @@ import (
 )
 
 // DiffusionLoadDataKey carries the per-endpoint in-flight diffusion cost
-// snapshot used by cost-aware scorers. Populated dynamically by
-// DiffusionLoadProducer on endpoint registration and never overwritten
-// during a scheduling cycle.
+// snapshot used by cost-aware scorers. Published per request by
+// DiffusionLoadProducer.Produce onto each candidate endpoint.
 var DiffusionLoadDataKey = plugin.NewDataKey("DiffusionLoadDataKey", diffusionloadconstants.DiffusionLoadProducerType)
 
 // DiffusionLoad captures the outstanding declared diffusion work an endpoint

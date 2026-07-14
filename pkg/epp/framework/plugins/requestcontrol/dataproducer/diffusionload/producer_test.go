@@ -247,24 +247,42 @@ func TestDiffusionLoadProducer_Extract(t *testing.T) {
 	endpoint := newStubSchedulingEndpoint("pod-a")
 	eid := endpoint.GetMetadata().NamespacedName.String()
 
-	// Registration injects the dynamic attribute.
+	// Registration does not publish an attribute; Produce does that per request.
 	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventAddOrUpdate, Endpoint: endpoint}))
-	val, ok := endpoint.Get(producer.dk.String())
-	require.True(t, ok)
-	load, ok := val.(*attrdiffusion.DiffusionLoad)
-	require.True(t, ok)
-	require.Equal(t, int64(0), load.CostUnits)
+	_, ok := endpoint.Get(producer.dk.String())
+	require.False(t, ok)
 
-	// The attribute reflects live counters.
+	// Commit some cost, then deletion cleans up the tracker.
 	request := makeImagesRequest("req-1", &fwkrh.ImagesGenerationsRequest{Prompt: "p", NumInferenceSteps: ptr.To[int64](30)})
 	producer.PreRequest(ctx, request, makeSchedulingResult(endpoint))
+	require.Equal(t, int64(30), producer.GetCostUnits(eid))
+
+	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: endpoint}))
+	require.Equal(t, int64(0), producer.GetCostUnits(eid))
+}
+
+func TestDiffusionLoadProducer_Produce(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t, Config{})
+	ctx := context.Background()
+
+	endpoint := newStubSchedulingEndpoint("pod-a")
+
+	// Before any cost is committed, Produce publishes a zero snapshot.
+	require.NoError(t, producer.Produce(ctx, nil, []fwksched.Endpoint{endpoint}))
+	val, ok := endpoint.Get(producer.dk.String())
+	require.True(t, ok)
+	require.Equal(t, int64(0), val.(*attrdiffusion.DiffusionLoad).CostUnits)
+
+	// After committing cost, Produce publishes the live snapshot.
+	request := makeImagesRequest("req-1", &fwkrh.ImagesGenerationsRequest{Prompt: "p", NumInferenceSteps: ptr.To[int64](30)})
+	producer.PreRequest(ctx, request, makeSchedulingResult(endpoint))
+
+	require.NoError(t, producer.Produce(ctx, nil, []fwksched.Endpoint{endpoint}))
 	val, ok = endpoint.Get(producer.dk.String())
 	require.True(t, ok)
 	require.Equal(t, int64(30), val.(*attrdiffusion.DiffusionLoad).CostUnits)
-
-	// Deletion cleans up the tracker.
-	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: endpoint}))
-	require.Equal(t, int64(0), producer.GetCostUnits(eid))
 }
 
 func TestDiffusionLoadProducer_Produces(t *testing.T) {

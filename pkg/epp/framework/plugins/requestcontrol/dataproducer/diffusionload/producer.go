@@ -174,7 +174,7 @@ func (p *DiffusionLoadProducer) RegisterDependencies(r datalayer.Registrar) erro
 	})
 }
 
-// Extract handles endpoint lifecycle events to manage the dynamic attribute.
+// Extract releases per-endpoint cost state when an endpoint is removed.
 func (p *DiffusionLoadProducer) Extract(ctx context.Context, event datalayer.EndpointEvent) error {
 	if event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
 		return nil
@@ -185,7 +185,9 @@ func (p *DiffusionLoadProducer) Extract(ctx context.Context, event datalayer.End
 	switch event.Type {
 	case datalayer.EventDelete:
 		// Assumes the datalayer delivers the same Endpoint pointer for delete as
-		// for the preceding add; see InFlightLoadProducer.Extract for details.
+		// for the preceding add. When the endpoint was replaced under the same
+		// NamespacedName, the pointers differ and the stale delete is ignored so
+		// it does not drop the live endpoint's counter.
 		if registered, ok := p.registeredEndpoints.Load(id); ok && registered != event.Endpoint {
 			log.FromContext(ctx).V(logutil.DEFAULT).Info("Ignoring stale delete for replaced endpoint", "endpoint", id)
 			break
@@ -194,22 +196,24 @@ func (p *DiffusionLoadProducer) Extract(ctx context.Context, event datalayer.End
 		p.costTracker.delete(id)
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up diffusion load for deleted endpoint", "endpoint", id)
 	case datalayer.EventAddOrUpdate:
+		// Track the endpoint pointer so a later EventDelete can be recognized as
+		// stale (and ignored) when the endpoint was replaced under the same name.
 		p.registeredEndpoints.Store(id, event.Endpoint)
-		event.Endpoint.GetAttributes().Put(p.dk.String(), &datalayer.DynamicAttribute{
-			Get: func() datalayer.Cloneable {
-				return &attrdiffusion.DiffusionLoad{
-					CostUnits: p.costTracker.get(id),
-				}
-			},
-		})
-		log.FromContext(ctx).V(logutil.DEFAULT).Info("Injected dynamic attribute into endpoint", "key", p.dk.String(), "endpoint", id)
 	}
 	return nil
 }
 
-// Produce is a no-op: the DiffusionLoad attribute is published dynamically on
-// endpoint registration and reflects live counters at read time.
-func (p *DiffusionLoadProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
+// Produce publishes each candidate endpoint's current outstanding declared
+// diffusion cost as the DiffusionLoad attribute, read by the diffusion-cost
+// scorer. The value is a snapshot of the live counter at scheduling time.
+func (p *DiffusionLoadProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	for _, endpoint := range endpoints {
+		if endpoint == nil || endpoint.GetMetadata() == nil {
+			continue
+		}
+		id := endpoint.GetMetadata().NamespacedName.String()
+		endpoint.Put(p.dk.String(), &attrdiffusion.DiffusionLoad{CostUnits: p.costTracker.get(id)})
+	}
 	return nil
 }
 
@@ -237,7 +241,7 @@ func (p *DiffusionLoadProducer) PreRequest(ctx context.Context, request *fwksche
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
 			continue
 		}
-		// Only track the primary target, consistent with InFlightLoadProducer.
+		// Only track the primary target endpoint of each profile.
 		endpoint := profileResult.TargetEndpoints[0]
 		if endpoint == nil || endpoint.GetMetadata() == nil {
 			continue
@@ -334,8 +338,7 @@ func (p *DiffusionLoadProducer) GetCostUnits(eid string) int64 {
 	return p.costTracker.get(eid)
 }
 
-// costTracker manages thread-safe per-endpoint cost counters, following the
-// captured-instance pattern of inflightload.concurrencyTracker.
+// costTracker manages thread-safe per-endpoint cost counters.
 type costTracker struct {
 	mu     sync.RWMutex
 	counts map[string]*atomic.Int64
@@ -389,8 +392,9 @@ func (t *costTracker) delete(endpointID string) {
 	delete(t.counts, endpointID)
 }
 
-// decrementClamped subtracts delta from counter with a hard floor at zero;
-// see inflightload.decrementClamped for the rationale of the CAS floor.
+// decrementClamped subtracts delta from counter with a hard floor at zero. The
+// CAS loop keeps the floor race-safe against a concurrent increment on the same
+// instance, which a plain Add followed by Store(0) could clobber.
 func decrementClamped(counter *atomic.Int64, delta int64) {
 	for {
 		current := counter.Load()
