@@ -168,9 +168,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		}
 	}
 
-	// Compose the OffloadingConnector p2p pull onto the prefill leg when a source
-	// is set; MultiConnector routes it to the OffloadingConnector while the NIXL
-	// fields above drive the NixlConnector.
+	// Compose the OffloadingConnector p2p pull onto the NIXL prefill leg.
 	s.addP2PPullToPrefill(completionRequest[requestFieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
 
 	completionRequest[requestFieldStream] = false
@@ -497,9 +495,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			pkv["remote_dp_size_local"] = s.config.MoRIIODPSizeLocal
 		}
 	}
-	// Compose the OffloadingConnector p2p pull onto the prefill leg when a source
-	// is set; MultiConnector routes it to the OffloadingConnector while the NIXL
-	// fields above drive the NixlConnector.
+	// Compose the OffloadingConnector p2p pull onto the NIXL prefill leg.
 	s.addP2PPullToPrefill(completionRequest[requestFieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
 
 	completionRequest[requestFieldStream] = false

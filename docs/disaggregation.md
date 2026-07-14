@@ -569,6 +569,7 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
 | `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port, injected as `remote_port` on the decode leg so the decoder can pull KV. |
+| `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
 
 ---
 

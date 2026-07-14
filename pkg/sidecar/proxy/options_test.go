@@ -243,6 +243,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				certPath:                "/etc/certificates",
 				inferencePool:           "ns/inference-pool",
 				poolGroup:               "pool-group",
+				enableP2PPull:           false, // overrides enable-p2p-pull: true in the inline YAML
 				inlineConfiguration:     &inlineYAML,
 			},
 			expected: func(o *Options) {
@@ -257,7 +258,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
-				o.EnableP2PPull = true
+				o.EnableP2PPull = false
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
