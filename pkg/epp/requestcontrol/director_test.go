@@ -349,6 +349,34 @@ func TestDirector_HandleRequest(t *testing.T) {
 		PrimaryProfileName: "testProfile",
 	}
 
+	scoredEndpoint1 := &fwksched.ScoredEndpoint{
+		Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			Address:        "192.168.1.100",
+			Port:           "8000",
+			MetricsHost:    "192.168.1.100:8000",
+			NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
+		}, nil, nil),
+		Score: 0.91,
+	}
+	scoredEndpoint2 := &fwksched.ScoredEndpoint{
+		Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			Address:        "192.168.2.100",
+			Port:           "8000",
+			MetricsHost:    "192.168.2.100:8000",
+			NamespacedName: types.NamespacedName{Name: "pod2", Namespace: "default"},
+		}, nil, nil),
+		Score: 0.74,
+	}
+	scoredScheduleResults := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"testProfile": {
+				TargetEndpoints: []fwksched.Endpoint{scoredEndpoint1, scoredEndpoint2},
+				ScoredEndpoints: []*fwksched.ScoredEndpoint{scoredEndpoint1, scoredEndpoint2},
+			},
+		},
+		PrimaryProfileName: "testProfile",
+	}
+
 	tests := []struct {
 		name                    string
 		reqBodyMap              map[string]any
@@ -393,6 +421,34 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantMutatedBody: map[string]any{
 				"model":  model,
 				"prompt": "critical prompt",
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "successful request with scored endpoints",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = scoredScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:        "192.168.1.100",
+					Port:           "8000",
+					MetricsHost:    "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000",
+				TargetEndpointScores: map[string]float64{
+					"192.168.1.100:8000": 0.91,
+					"192.168.2.100:8000": 0.74,
+				},
 			},
 			inferenceObjectiveName: objectiveName,
 		},
@@ -914,6 +970,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 						t.Errorf("reqCtx.TargetPod mismatch (-want +got):\n%s", diff)
 					}
 					assert.Equal(t, test.wantReqCtx.TargetEndpoint, returnedReqCtx.TargetEndpoint, "reqCtx.TargetEndpoint mismatch")
+					assert.Equal(t, test.wantReqCtx.TargetEndpointScores, returnedReqCtx.TargetEndpointScores, "reqCtx.TargetEndpointScores mismatch")
 				}
 
 				if test.wantFairnessID != "" {

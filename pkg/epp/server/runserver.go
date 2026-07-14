@@ -66,6 +66,7 @@ type ExtProcServerRunner struct {
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
 	EnableGRPCStreamMetrics          bool
+	EmitEndpointScores               bool
 }
 
 // NewDefaultExtProcServerRunner creates a runner with default values.
@@ -214,6 +215,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			poolCap = 4 * 1024 * 1024 // gRPC default 4MB
 		}
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
+		extProcServer.SetEmitEndpointScores(r.EmitEndpointScores)
 		extProcPb.RegisterExternalProcessorServer(srv, extProcServer)
 
 		if r.HealthChecking {

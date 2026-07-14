@@ -76,7 +76,11 @@ func (s *StreamingServer) generateRequestHeaderResponse(ctx context.Context, req
 	// The Endpoint Picker supports two approaches to communicating the target endpoint, as a request header
 	// and as an unstructure ext-proc response metadata key/value pair. This enables different integration
 	// options for gateway providers.
-	dynamicMetadata := s.generateMetadata(reqCtx.TargetEndpoint)
+	var endpointScores map[string]float64
+	if s.emitEndpointScores {
+		endpointScores = reqCtx.TargetEndpointScores
+	}
+	dynamicMetadata := s.generateMetadata(reqCtx.TargetEndpoint, endpointScores)
 	if reqCtx.Response.DynamicMetadata != nil {
 		if dynamicMetadata.Fields == nil {
 			dynamicMetadata.Fields = make(map[string]*structpb.Value)
@@ -148,19 +152,28 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 	return headers
 }
 
-func (s *StreamingServer) generateMetadata(endpoint string) *structpb.Struct {
+func (s *StreamingServer) generateMetadata(endpoint string, endpointScores map[string]float64) *structpb.Struct {
+	endpointFields := map[string]*structpb.Value{
+		metadata.DestinationEndpointKey: {
+			Kind: &structpb.Value_StringValue{
+				StringValue: endpoint,
+			},
+		},
+	}
+	if len(endpointScores) > 0 {
+		scoreFields := make(map[string]*structpb.Value, len(endpointScores))
+		for endpointAddress, score := range endpointScores {
+			scoreFields[endpointAddress] = structpb.NewNumberValue(score)
+		}
+		endpointFields[metadata.DestinationEndpointScoresKey] = structpb.NewStructValue(&structpb.Struct{Fields: scoreFields})
+	}
+
 	return &structpb.Struct{
 		Fields: map[string]*structpb.Value{
 			metadata.DestinationEndpointNamespace: {
 				Kind: &structpb.Value_StructValue{
 					StructValue: &structpb.Struct{
-						Fields: map[string]*structpb.Value{
-							metadata.DestinationEndpointKey: {
-								Kind: &structpb.Value_StringValue{
-									StringValue: endpoint,
-								},
-							},
-						},
+						Fields: endpointFields,
 					},
 				},
 			},

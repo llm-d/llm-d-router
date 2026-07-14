@@ -78,6 +78,7 @@ type Options struct {
 	EndpointSelector            labels.Selector // Parsed selector to filter model server pods on. Set via --endpoint-selector flag and parsed in Complete().
 	EndpointTargetPorts         []int           // Target ports of model server pods.
 	DisableEndpointSubsetFilter bool            // Disables respecting destination endpoint subset metadata in EPP.
+	EmitEndpointScores          bool            // Enables emitting per-endpoint scheduler scores in the request-path dynamic metadata.
 	//
 	// MSP metrics scraping.
 	//
@@ -122,6 +123,7 @@ func NewOptions() *Options {
 		PoolGroup:                        routing.InferencePoolAPIGroup,
 		EndpointTargetPorts:              []int{},
 		DisableEndpointSubsetFilter:      false,
+		EmitEndpointScores:               false,
 		RefreshMetricsInterval:           50 * time.Millisecond,
 		RefreshPrometheusMetricsInterval: 5 * time.Second,
 		MetricsStalenessThreshold:        2 * time.Second,
@@ -168,6 +170,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Format: a comma-separated list of numbers without whitespace (e.g., '3000,3001,3002').")
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
 		"Disables respecting the destination endpoint subset metadata for dispatching requests in EPP.")
+	fs.BoolVar(&opts.EmitEndpointScores, "emit-endpoint-scores", opts.EmitEndpointScores,
+		"Enables emitting the scheduler's per-endpoint scores in the request-path dynamic metadata under the "+
+			"'x-gateway-destination-endpoint-scores' key of the 'envoy.lb' namespace.")
 	fs.DurationVar(&opts.RefreshMetricsInterval, "refresh-metrics-interval", opts.RefreshMetricsInterval, "Interval to refresh metrics.")
 	fs.DurationVar(&opts.RefreshPrometheusMetricsInterval, "refresh-prometheus-metrics-interval", opts.RefreshPrometheusMetricsInterval,
 		"Interval to flush Prometheus metrics.")

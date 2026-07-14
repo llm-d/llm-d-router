@@ -455,10 +455,11 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: "results must be greater than zero"}
 	}
 	// primary profile is used to set destination
+	primaryResult := result.ProfileResults[result.PrimaryProfileName]
 	targetMetadatas := []*fwkdl.EndpointMetadata{}
 	targetEndpoints := []string{}
 
-	for _, pod := range result.ProfileResults[result.PrimaryProfileName].TargetEndpoints {
+	for _, pod := range primaryResult.TargetEndpoints {
 		curMetadata := pod.GetMetadata()
 		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
 		targetMetadatas = append(targetMetadatas, curMetadata)
@@ -470,6 +471,15 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 
 	reqCtx.TargetPod = targetMetadatas[0]
 	reqCtx.TargetEndpoint = multiEndpointString
+
+	if len(primaryResult.ScoredEndpoints) > 0 {
+		scores := make(map[string]float64, len(primaryResult.ScoredEndpoints))
+		for _, scoredEndpoint := range primaryResult.ScoredEndpoints {
+			curMetadata := scoredEndpoint.GetMetadata()
+			scores[net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())] = scoredEndpoint.Score
+		}
+		reqCtx.TargetEndpointScores = scores
+	}
 
 	d.runPreRequestPlugins(ctx, reqCtx.SchedulingRequest, result)
 
