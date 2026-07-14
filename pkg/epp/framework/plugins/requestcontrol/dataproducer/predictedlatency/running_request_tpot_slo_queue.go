@@ -240,10 +240,7 @@ func (pq *requestPriorityQueue) String() string {
 		if i > 0 {
 			builder.WriteString(", ")
 		}
-		builder.WriteString(item.id)
-		builder.WriteString("(")
-		builder.WriteString(fmt.Sprintf("%.2f", item.tpot))
-		builder.WriteString(")")
+		fmt.Fprintf(&builder, "%s(%.2f)", item.id, item.tpot)
 	}
 
 	builder.WriteString("]")
