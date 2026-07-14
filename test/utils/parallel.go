@@ -80,10 +80,10 @@ func RequireParallelProcessesMatch(numProcesses int) {
 
 // BuildExtraPortMappings builds a Kind `extraPortMappings` YAML fragment for
 // numProcesses processes, mapping each (containerPortBase, hostPortBase) pair
-// in portPairs to per-process ports offset by 100 * (process index). Each
-// item uses 2-space indentation to match the `extraPortMappings:` field level
-// in a Kind cluster config; callers substituting this into their own YAML
-// must keep that indentation in sync.
+// in portPairs to per-process ports offset by processPortOffset * (process
+// index). Each item uses 2-space indentation to match the
+// `extraPortMappings:` field level in a Kind cluster config; callers
+// substituting this into their own YAML must keep that indentation in sync.
 func BuildExtraPortMappings(numProcesses int, portPairs ...[2]int) string {
 	var b strings.Builder
 	for idx := range numProcesses {

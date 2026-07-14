@@ -279,7 +279,7 @@ make -f Makefile.coord.mk clean   # Remove build artifacts
 #### Unit Tests
 
 ```bash
-make -f Makefile.coord.mk test   # run all tests
+make -f Makefile.coord.mk test   # run coordinator unit tests
 ```
 
 #### End-to-End Tests
