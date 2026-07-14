@@ -34,7 +34,8 @@ import (
 
 const (
 	DefaultGrpcPort      = 9002
-	DefaultPoolNamespace = "default" // default when pool namespace is empty (CLI flag default is empty)
+	DefaultPoolNamespace = "default"        // default when pool namespace is empty (CLI flag default is empty)
+	DefaultDrainTimeout  = 30 * time.Second // graceful shutdown drain window
 )
 
 // deprecatedMetricFlags lists metric flags that are superseded by engineConfigs
@@ -58,12 +59,13 @@ type Options struct {
 	//
 	// ext_proc configuration.
 	//
-	GRPCPort              int    // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
-	EnableLeaderElection  bool   // Enables leader election for high availability
-	GRPCMaxRecvMsgSize    int    // Maximum size of a gRPC message to receive (parsed bytes).
-	GRPCMaxSendMsgSize    int    // Maximum size of a gRPC message to send (parsed bytes).
-	GRPCMaxRecvMsgSizeStr string // Raw string value from CLI flag for receive limit.
-	GRPCMaxSendMsgSizeStr string // Raw string value from CLI flag for send limit.
+	GRPCPort              int           // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
+	EnableLeaderElection  bool          // Enables leader election for high availability
+	DrainTimeout          time.Duration // Graceful shutdown drain window; ext_proc keeps serving this long after SIGTERM.
+	GRPCMaxRecvMsgSize    int           // Maximum size of a gRPC message to receive (parsed bytes).
+	GRPCMaxSendMsgSize    int           // Maximum size of a gRPC message to send (parsed bytes).
+	GRPCMaxRecvMsgSizeStr string        // Raw string value from CLI flag for receive limit.
+	GRPCMaxSendMsgSizeStr string        // Raw string value from CLI flag for send limit.
 	//
 	// InferencePool.
 	//
@@ -79,10 +81,6 @@ type Options struct {
 	//
 	// MSP metrics scraping.
 	//
-	ModelServerMetricsScheme         string        // Protocol scheme used in scraping metrics from endpoints.
-	ModelServerMetricsPath           string        // URL path used in scraping metrics from endpoints.
-	ModelServerMetricsPort           int           // Port to scrape metrics from endpoints. (TODO: Deprecated, uint16)
-	ModelServerMetricsHTTPSInsecure  bool          // Disable certificate verification when using 'https' scheme for 'model-server-metrics-scheme'.
 	RefreshMetricsInterval           time.Duration // Interval to refresh metrics.
 	RefreshPrometheusMetricsInterval time.Duration // Interval to flush Prometheus metrics.
 	MetricsStalenessThreshold        time.Duration // Duration after which metrics are considered stale.
@@ -120,12 +118,10 @@ type Options struct {
 func NewOptions() *Options {
 	return &Options{ // "zero" values are no explicitly set
 		GRPCPort:                         DefaultGrpcPort,
+		DrainTimeout:                     DefaultDrainTimeout,
 		PoolGroup:                        routing.InferencePoolAPIGroup,
 		EndpointTargetPorts:              []int{},
 		DisableEndpointSubsetFilter:      false,
-		ModelServerMetricsScheme:         "http",
-		ModelServerMetricsPath:           "/metrics",
-		ModelServerMetricsHTTPSInsecure:  true,
 		RefreshMetricsInterval:           50 * time.Millisecond,
 		RefreshPrometheusMetricsInterval: 5 * time.Second,
 		MetricsStalenessThreshold:        2 * time.Second,
@@ -153,6 +149,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.GRPCPort, "grpc-port", opts.GRPCPort, "gRPC port used for communicating with Envoy proxy.")
 	fs.BoolVar(&opts.EnableLeaderElection, "ha-enable-leader-election", opts.EnableLeaderElection,
 		"Enables leader election for high availability. When enabled, readiness probes will only pass on the leader.")
+	fs.DurationVar(&opts.DrainTimeout, "drain-timeout", opts.DrainTimeout,
+		"Graceful shutdown drain window. On SIGTERM the EPP goes NotServing and releases its leader lease "+
+			"immediately, then keeps serving ext_proc for this duration so in-flight and pre-DNS-refresh requests "+
+			"are not rejected.")
 	fs.StringVar(&opts.GRPCMaxRecvMsgSizeStr, "grpc-max-recv-msg-size", opts.GRPCMaxRecvMsgSizeStr, "Maximum size of a gRPC message to receive (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.GRPCMaxSendMsgSizeStr, "grpc-max-send-msg-size", opts.GRPCMaxSendMsgSizeStr, "Maximum size of a gRPC message to send (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.PoolGroup, "pool-group", opts.PoolGroup,
@@ -168,18 +168,6 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Format: a comma-separated list of numbers without whitespace (e.g., '3000,3001,3002').")
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
 		"Disables respecting the destination endpoint subset metadata for dispatching requests in EPP.")
-	fs.StringVar(&opts.ModelServerMetricsScheme, "model-server-metrics-scheme", opts.ModelServerMetricsScheme,
-		"Protocol scheme used in scraping metrics from endpoints.")
-	_ = fs.MarkDeprecated("model-server-metrics-scheme", "This flag is deprecated. Configure via EndpointPickerConfig data layer plugin parameters instead.")
-	fs.StringVar(&opts.ModelServerMetricsPath, "model-server-metrics-path", opts.ModelServerMetricsPath,
-		"URL path used in scraping metrics from endpoints.")
-	_ = fs.MarkDeprecated("model-server-metrics-path", "This flag is deprecated. Configure via EndpointPickerConfig data layer plugin parameters instead.")
-	fs.IntVar(&opts.ModelServerMetricsPort, "model-server-metrics-port", opts.ModelServerMetricsPort,
-		"Port to scrape metrics from endpoints. Set to the InferencePool.Spec.TargetPorts[0].Number if not defined.")
-	_ = fs.MarkDeprecated("model-server-metrics-port", "This flag is deprecated and will be removed in a future release.")
-	fs.BoolVar(&opts.ModelServerMetricsHTTPSInsecure, "model-server-metrics-https-insecure-skip-verify", opts.ModelServerMetricsHTTPSInsecure,
-		"Disable certificate verification when using 'https' scheme for 'model-server-metrics-scheme'.")
-	_ = fs.MarkDeprecated("model-server-metrics-https-insecure-skip-verify", "This flag is deprecated. Configure via EndpointPickerConfig data layer plugin parameters instead.")
 	fs.DurationVar(&opts.RefreshMetricsInterval, "refresh-metrics-interval", opts.RefreshMetricsInterval, "Interval to refresh metrics.")
 	fs.DurationVar(&opts.RefreshPrometheusMetricsInterval, "refresh-prometheus-metrics-interval", opts.RefreshPrometheusMetricsInterval,
 		"Interval to flush Prometheus metrics.")
@@ -292,11 +280,7 @@ func (opts *Options) Validate() error {
 	}
 
 	if opts.ConfigText != "" && opts.ConfigFile != "" {
-		return fmt.Errorf("both the %q and %q flags can not be set at the same time", "configText", "configFile")
-	}
-	if opts.ModelServerMetricsScheme != "http" && opts.ModelServerMetricsScheme != "https" {
-		return fmt.Errorf("unexpected %q value for %q flag, it can only be set to 'http' or 'https'",
-			opts.ModelServerMetricsScheme, "model-server-metrics-scheme")
+		return fmt.Errorf("both the %q and %q flags cannot be set at the same time", "config-file", "config-text")
 	}
 
 	if opts.GRPCMaxRecvMsgSize < 0 {

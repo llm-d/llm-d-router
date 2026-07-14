@@ -63,6 +63,7 @@ func TestHealthServer_Check(t *testing.T) {
 		name                  string
 		leaderElectionEnabled bool
 		isLeader              bool
+		draining              bool
 		hasSynced             bool
 		pool                  *datalayer.EndpointPool
 		poolErr               error
@@ -169,6 +170,61 @@ func TestHealthServer_Check(t *testing.T) {
 			wantStatus:            healthPb.HealthCheckResponse_SERVICE_UNKNOWN,
 		},
 		{
+			// Graceful drain: an otherwise-Ready leader reports NotServing on
+			// readiness so Kubernetes drains it from the Service endpoints.
+			name:                  "LeaderElectionEnabled_Draining_Readiness_NotServing",
+			leaderElectionEnabled: true,
+			isLeader:              true,
+			draining:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			service:               ReadinessCheckService,
+			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
+			// Liveness must stay Serving while draining so we are not restarted
+			// mid-drain.
+			name:                  "LeaderElectionEnabled_Draining_Liveness_StillServing",
+			leaderElectionEnabled: true,
+			isLeader:              true,
+			draining:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			service:               LivenessCheckService,
+			wantStatus:            healthPb.HealthCheckResponse_SERVING,
+		},
+		{
+			// Drain also applies in all-active (no leader election).
+			name:                  "LeaderElectionDisabled_Draining_NotServing",
+			leaderElectionEnabled: false,
+			draining:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
+			// The ext_proc service check is what Envoy's cluster health check hits.
+			name:                  "LeaderElectionEnabled_Draining_ExtProc_NotServing",
+			leaderElectionEnabled: true,
+			isLeader:              true,
+			draining:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			service:               extProcPb.ExternalProcessor_ServiceDesc.ServiceName,
+			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
+			// The empty service name is used by load balancers for overall health.
+			name:                  "LeaderElectionEnabled_Draining_EmptyService_NotServing",
+			leaderElectionEnabled: true,
+			isLeader:              true,
+			draining:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			service:               "",
+			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
 			name:                  "MultipleSupporters_AllMatch",
 			leaderElectionEnabled: false,
 			hasSynced:             true,
@@ -202,6 +258,8 @@ func TestHealthServer_Check(t *testing.T) {
 			}
 			var isLeader atomic.Bool
 			isLeader.Store(tt.isLeader)
+			var draining atomic.Bool
+			draining.Store(tt.draining)
 
 			s := &healthServer{
 				logger:                logger,
@@ -209,6 +267,7 @@ func TestHealthServer_Check(t *testing.T) {
 				isLeader:              &isLeader,
 				leaderElectionEnabled: tt.leaderElectionEnabled,
 				supporters:            tt.supporters,
+				draining:              &draining,
 			}
 
 			resp, err := s.Check(context.Background(), &healthPb.HealthCheckRequest{Service: tt.service})

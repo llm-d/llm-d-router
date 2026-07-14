@@ -29,9 +29,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
-	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
-	tokenizerTypes "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )

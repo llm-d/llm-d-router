@@ -21,6 +21,7 @@ import (
 )
 
 func createModelServersFromKustomize(kustomizeDir string, extra map[string]string) []string {
+	nsName := getNamespace()
 	subs := map[string]string{
 		"${MODEL_NAME}":              simModelName,
 		"${POOL_NAME}":               poolName,
@@ -51,8 +52,8 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 	if !isModelReal(subs["${MODEL_NAME}"]) {
 		manifests = removeRenderSidecar(manifests)
 	}
-	objects := testutils.CreateObjsFromYaml(testConfig, manifests)
-	podsInDeploymentsReady(objects)
+	objects := testutils.CreateObjsFromYaml(testConfig, manifests, nsName)
+	podsInDeploymentsReady(nsName, objects)
 	return objects
 }
 
@@ -131,14 +132,14 @@ func createModelServersEPDUnified(replicas int) []string {
 
 func createEndPointPicker(eppConfig string) []string {
 	objects := createEndPointPickerHelper(eppConfig, 1, false, true)
-	podsInDeploymentsReady(objects)
+	podsInDeploymentsReady(getNamespace(), objects)
 
 	// Envoy registers the EPP as a healthy ext_proc upstream asynchronously.
 	// "no healthy upstream" returns HTTP 500 with empty body; any non-empty
 	// response (200 or 500-with-body) means EPP is reachable from Envoy.
 	ginkgo.By("Waiting for gateway to be ready")
 	gomega.Eventually(func() bool {
-		resp, err := http.Get(fmt.Sprintf("http://localhost:%s/v1/models", port))
+		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/v1/models", getPort()))
 		if err != nil {
 			return false
 		}
@@ -151,6 +152,7 @@ func createEndPointPicker(eppConfig string) []string {
 }
 
 func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElectionEnabled bool, waitForReady bool) []string {
+	nsName := getNamespace()
 	configMap := &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
@@ -158,7 +160,7 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "epp-config",
-			Namespace: nsName,
+			Namespace: getNamespace(),
 		},
 		Data: map[string]string{"epp-config.yaml": eppConfig},
 	}
@@ -186,12 +188,13 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 	if !usesTokenProducer(eppConfig) {
 		eppYamls = removeRenderSidecar(eppYamls)
 	}
+	eppYamls = appendEppArgs(eppYamls, eppExtraArgs)
 
 	if waitForReady {
-		return append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls)...)
+		return append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls, nsName)...)
 	}
 	objs := testutils.CreateUnstructuredObjs(testConfig, eppYamls)
-	return append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, func(kind string, clientObj client.Object) {})...)
+	return append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {})...)
 }
 
 func usesTokenProducer(eppConfig string) bool {
