@@ -16,11 +16,11 @@ limitations under the License.
 
 package plugin
 
-// StateStore is a pluggable key-value store for cross-plugin state sharing.
-// Plugins write endpoint-scoped state here; a sync plugin can swap the
-// implementation to aggregate state across replicas (e.g. via Redis).
-type StateStore interface {
+// SharedStateStore is a cross-plugin state store on the Handle.
+// Plugins namespace their data via StateKey.
+type SharedStateStore interface {
 	Get(key StateKey, id string) (any, bool)
 	Set(key StateKey, id string, value any)
+	Publish(key StateKey, id string, supplier func() any)
 	Delete(key StateKey, id string)
 }

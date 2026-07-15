@@ -37,8 +37,8 @@ type Handle interface {
 	// nil when no recorder is configured.
 	Metrics() MetricsRecorder
 
-	// State returns the shared StateStore for cross-plugin state.
-	State() StateStore
+	// SharedState returns the cross-replica state store shared by all plugins.
+	SharedState() SharedStateStore
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -63,9 +63,9 @@ type PodListFunc func() []types.NamespacedName
 type eppHandle struct {
 	ctx context.Context
 	HandlePlugins
-	podList         PodListFunc
-	metricsRecorder MetricsRecorder
-	state           StateStore
+	podList          PodListFunc
+	metricsRecorder  MetricsRecorder
+	sharedStateStore SharedStateStore
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -115,9 +115,9 @@ func (h *eppHandle) Metrics() MetricsRecorder {
 	return h.metricsRecorder
 }
 
-// State returns the shared StateStore.
-func (h *eppHandle) State() StateStore {
-	return h.state
+// SharedState returns the cross-replica state store.
+func (h *eppHandle) SharedState() SharedStateStore {
+	return h.sharedStateStore
 }
 
 // HandleOption configures an eppHandle constructed via NewEppHandle.
@@ -133,11 +133,11 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 	}
 }
 
-// WithStateStore sets the StateStore used by the handle. A nil store is ignored.
-func WithStateStore(store StateStore) HandleOption {
+// WithSharedStateStore sets the SharedStateStore used by the handle.
+func WithSharedStateStore(store SharedStateStore) HandleOption {
 	return func(h *eppHandle) {
 		if store != nil {
-			h.state = store
+			h.sharedStateStore = store
 		}
 	}
 }
@@ -148,7 +148,8 @@ func NewEppHandle(ctx context.Context, podList PodListFunc, opts ...HandleOption
 		HandlePlugins: &eppHandlePlugins{
 			plugins: map[string]Plugin{},
 		},
-		podList: podList,
+		podList:          podList,
+		sharedStateStore: NewLocalStateStore(),
 	}
 	for _, opt := range opts {
 		opt(h)

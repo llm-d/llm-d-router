@@ -25,10 +25,11 @@ var _ plugin.Handle = &fakeHandle{}
 type fakeHandle struct {
 	ctx     context.Context
 	plugins map[string]plugin.Plugin
+	state   plugin.SharedStateStore
 }
 
 func newFakeHandle(ctx context.Context) *fakeHandle {
-	return &fakeHandle{ctx: ctx, plugins: map[string]plugin.Plugin{}}
+	return &fakeHandle{ctx: ctx, plugins: map[string]plugin.Plugin{}, state: plugin.NewLocalStateStore()}
 }
 
 func (h *fakeHandle) Context() context.Context {
@@ -63,8 +64,8 @@ func (h *fakeHandle) Metrics() plugin.MetricsRecorder {
 	return nil
 }
 
-func (h *fakeHandle) State() plugin.StateStore {
-	return nil
+func (h *fakeHandle) SharedState() plugin.SharedStateStore {
+	return h.state
 }
 
 type stubPlugin struct {

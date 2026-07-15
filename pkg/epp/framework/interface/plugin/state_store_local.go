@@ -18,7 +18,9 @@ package plugin
 
 import "sync"
 
-// LocalStateStore is an in-memory StateStore backed by a sync.Map.
+var _ SharedStateStore = (*LocalStateStore)(nil)
+
+// LocalStateStore is an in-memory SharedStateStore backed by a sync.Map.
 type LocalStateStore struct {
 	data sync.Map
 }
@@ -27,12 +29,20 @@ func NewLocalStateStore() *LocalStateStore {
 	return &LocalStateStore{}
 }
 
-func (s *LocalStateStore) Get(key StateKey, id string) (any, bool) {
-	return s.data.Load(string(key) + ":" + id)
+func (s *LocalStateStore) Set(key StateKey, id string, value any) {
+	s.data.Store(string(key)+":"+id, func() any { return value })
 }
 
-func (s *LocalStateStore) Set(key StateKey, id string, value any) {
-	s.data.Store(string(key)+":"+id, value)
+func (s *LocalStateStore) Publish(key StateKey, id string, supplier func() any) {
+	s.data.Store(string(key)+":"+id, supplier)
+}
+
+func (s *LocalStateStore) Get(key StateKey, id string) (any, bool) {
+	v, ok := s.data.Load(string(key) + ":" + id)
+	if !ok {
+		return nil, false
+	}
+	return v.(func() any)(), true
 }
 
 func (s *LocalStateStore) Delete(key StateKey, id string) {

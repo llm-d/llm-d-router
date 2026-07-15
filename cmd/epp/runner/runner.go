@@ -704,7 +704,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 		ctx,
 		makePodListFunc(ds),
 		fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry),
-		fwkplugin.WithStateStore(fwkplugin.NewLocalStateStore()),
+		fwkplugin.WithSharedStateStore(fwkplugin.NewLocalStateStore()),
 	)
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
