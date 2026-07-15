@@ -63,6 +63,10 @@ func (h *fakeHandle) Metrics() plugin.MetricsRecorder {
 	return nil
 }
 
+func (h *fakeHandle) State() plugin.StateStore {
+	return nil
+}
+
 type stubPlugin struct {
 	name plugin.TypedName
 }

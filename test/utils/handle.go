@@ -45,6 +45,10 @@ func (h *testHandle) Metrics() plugin.MetricsRecorder {
 	return h.metricsRecorder
 }
 
+func (h *testHandle) State() plugin.StateStore {
+	return plugin.NewLocalStateStore()
+}
+
 type testHandlePlugins struct {
 	plugins map[string]plugin.Plugin
 }

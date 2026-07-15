@@ -36,6 +36,9 @@ type Handle interface {
 	// Metrics returns a recorder plugins can use to register metrics. It may return
 	// nil when no recorder is configured.
 	Metrics() MetricsRecorder
+
+	// State returns the shared StateStore for cross-plugin state.
+	State() StateStore
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -62,6 +65,7 @@ type eppHandle struct {
 	HandlePlugins
 	podList         PodListFunc
 	metricsRecorder MetricsRecorder
+	state           StateStore
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -111,6 +115,11 @@ func (h *eppHandle) Metrics() MetricsRecorder {
 	return h.metricsRecorder
 }
 
+// State returns the shared StateStore.
+func (h *eppHandle) State() StateStore {
+	return h.state
+}
+
 // HandleOption configures an eppHandle constructed via NewEppHandle.
 type HandleOption func(*eppHandle)
 
@@ -120,6 +129,15 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 	return func(h *eppHandle) {
 		if recorder != nil {
 			h.metricsRecorder = recorder
+		}
+	}
+}
+
+// WithStateStore sets the StateStore used by the handle. A nil store is ignored.
+func WithStateStore(store StateStore) HandleOption {
+	return func(h *eppHandle) {
+		if store != nil {
+			h.state = store
 		}
 	}
 }
@@ -137,6 +155,7 @@ func NewEppHandle(ctx context.Context, podList PodListFunc, opts ...HandleOption
 	}
 	return h
 }
+
 
 // PluginByType retrieves the specified plugin by name and verifies its type
 func PluginByType[P Plugin](handlePlugins HandlePlugins, name string) (P, error) {

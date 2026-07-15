@@ -43,6 +43,9 @@ const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
 	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
+
+	// InFlightStateKey is the StateStore key for per-endpoint in-flight load.
+	InFlightStateKey fwkplugin.StateKey = "inflight"
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
@@ -103,6 +106,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		tokenTracker:             newConcurrencyTracker(),
 		tokenEstimator:           NewSimpleTokenEstimatorWithConfig(outputRatio, cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
+		state:                    handle.State(),
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		uncachedRequestTokensDk:  attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name),
@@ -127,6 +131,7 @@ type InFlightLoadProducer struct {
 	tokenEstimator           TokenEstimator
 	addEstimatedOutputTokens bool
 	PluginState              *fwkplugin.PluginState
+	state                    fwkplugin.StateStore
 	dk                       fwkplugin.DataKey
 	prefixMatchInfoDK        fwkplugin.DataKey
 	uncachedRequestTokensDk  fwkplugin.DataKey
@@ -303,10 +308,13 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		p.registeredEndpoints.Store(id, event.Endpoint)
 		event.Endpoint.GetAttributes().Put(p.dk.String(), &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
-				return &attrconcurrency.InFlightLoad{
-					Tokens:   p.GetTokens(id),
-					Requests: p.GetRequests(id),
+				if p.state != nil {
+					val, ok := p.state.Get(InFlightStateKey, id)
+					if ok {
+						return val.(*attrconcurrency.InFlightLoad)
+					}
 				}
+				return &attrconcurrency.InFlightLoad{}
 			},
 		})
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Injected dynamic attribute into endpoint", "key", p.dk.String(), "endpoint", id)
@@ -387,6 +395,8 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			fwkplugin.StateKey(addedTokensKey(eid, profileName)),
 			entry,
 		)
+
+		p.syncStore(eid)
 	}
 }
 
@@ -499,6 +509,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 		if t := entry.tokens.Swap(0); t != 0 {
 			decrementClamped(entry.tokenCounter, t)
 		}
+		p.syncStore(eid)
 	}
 }
 
@@ -586,6 +597,18 @@ func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 func (p *InFlightLoadProducer) DeleteEndpoint(endpointID string) {
 	p.requestTracker.delete(endpointID)
 	p.tokenTracker.delete(endpointID)
+	if p.state != nil {
+		p.state.Delete(InFlightStateKey, endpointID)
+	}
+}
+
+func (p *InFlightLoadProducer) syncStore(endpointID string) {
+	if p.state != nil {
+		p.state.Set(InFlightStateKey, endpointID, &attrconcurrency.InFlightLoad{
+			Requests: p.requestTracker.get(endpointID),
+			Tokens:   p.tokenTracker.get(endpointID),
+		})
+	}
 }
 
 func (p *InFlightLoadProducer) GetTokens(eid string) int64 {
