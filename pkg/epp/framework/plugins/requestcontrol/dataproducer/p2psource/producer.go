@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -142,20 +143,54 @@ func (p *Producer) attrKey() string {
 	return p.attrKeyValue
 }
 
-// Produce reads each candidate's PrefixCacheMatchInfo and stashes the
-// endpoint holding the most cached prompt tokens on the request. No-op when
-// no candidate holds any cached block.
+// Produce reads each candidate's PrefixCacheMatchInfo and stashes the chosen
+// source on the request: among the endpoints holding the most cached prompt
+// tokens, one is sampled with probability proportional to 1/(1+waiting
+// queue), using a request-ID hash as the sampling coordinate. Load-blind
+// argmax alone would send every consumer of a widely-replicated prefix to
+// the same peer (equal counts lose to iteration order), concentrating pull
+// traffic on one source. A hard minimum-queue rule would too: metrics
+// refresh once per scrape interval, so a stale one-request difference would
+// herd a whole window of requests onto the single "idle" peer. Proportional
+// weights spread exact ties uniformly, mildly prefer a one-request-shorter
+// queue, and starve deeply-queued sources. No-op when no candidate holds any
+// cached block.
 func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
-	best := bestMatchPeer{}
+	maxCached := 0
 	for _, ep := range endpoints {
-		md := ep.GetMetadata()
-		if md == nil {
-			continue
+		if cached := p.cachedTokenCount(ep); cached > maxCached {
+			maxCached = cached
 		}
-		if cached := p.cachedTokenCount(ep); cached > best.cachedTokens {
+	}
+
+	best := bestMatchPeer{}
+	if maxCached > 0 {
+		var candidates []scheduling.Endpoint
+		var weights []float64
+		total := 0.0
+		for _, ep := range endpoints {
+			if ep.GetMetadata() == nil || p.cachedTokenCount(ep) != maxCached {
+				continue
+			}
+			w := 1.0 / (1.0 + float64(waitingQueueSize(ep)))
+			candidates = append(candidates, ep)
+			weights = append(weights, w)
+			total += w
+		}
+		if len(candidates) > 0 {
+			target := requestSpreadFraction(request.RequestID) * total
+			chosen := len(candidates) - 1
+			for i, w := range weights {
+				if target < w {
+					chosen = i
+					break
+				}
+				target -= w
+			}
+			md := candidates[chosen].GetMetadata()
 			best = bestMatchPeer{
 				hostPort:     net.JoinHostPort(md.Address, md.Port),
-				cachedTokens: cached,
+				cachedTokens: maxCached,
 			}
 		}
 	}
@@ -166,6 +201,29 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		"requestID", request.RequestID, "endpoints", len(endpoints),
 		"bestHostPort", best.hostPort, "bestCachedTokens", best.cachedTokens)
 	return nil
+}
+
+// waitingQueueSize returns the endpoint's waiting-queue depth, or 0 when
+// metrics are absent so metric-less endpoints keep the delta-only behavior.
+// The waiting queue reflects inference admission, not pull-serve fanout; it
+// is a proxy for engine-step responsiveness (a busy engine serves its P2P
+// session slower), which is why equally-queued sources share traffic by
+// request hash rather than by any per-pod pull accounting.
+func waitingQueueSize(ep scheduling.Endpoint) int {
+	m := ep.GetMetrics()
+	if m == nil {
+		return 0
+	}
+	return m.WaitingQueueSize
+}
+
+// requestSpreadFraction maps a request ID onto [0, 1) so weighted source
+// sampling is uniform across requests while staying deterministic per
+// request.
+func requestSpreadFraction(requestID string) float64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(requestID))
+	return float64(h.Sum32()) / float64(1<<32)
 }
 
 // PreRequest sets routing.KVCacheSourceHeader to the best-match peer stashed

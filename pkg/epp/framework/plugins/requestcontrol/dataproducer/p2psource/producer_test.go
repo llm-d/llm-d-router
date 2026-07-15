@@ -18,6 +18,7 @@ package p2psource
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -308,4 +309,136 @@ func TestPluginFactory_PrefillProfileName(t *testing.T) {
 	custom, err := PluginFactory("c", dec, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "P", custom.(*Producer).prefillProfile)
+}
+
+// endpointWithLoad builds a candidate carrying both PrefixCacheMatchInfo and
+// a waiting-queue depth.
+func endpointWithLoad(p *Producer, name, address string, cachedBlocks, waiting int) scheduling.Endpoint {
+	e := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		NamespacedName: k8stypes.NamespacedName{Name: name},
+		Address:        address,
+		Port:           "8080",
+	}, &fwkdl.Metrics{WaitingQueueSize: waiting}, nil)
+	e.Put(p.prefixMatchDataKey.String(),
+		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).WithCachedBlockCount(cachedBlocks))
+	return e
+}
+
+// Equally-cached peers share pull traffic proportionally to 1/(1+queue):
+// the shortest queue receives the most requests, deeper queues fewer, and a
+// small queue difference shifts share without starving anyone.
+func TestProduce_SharesByInverseQueueWeight(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	// Weights: pod-a 1/13, pod-b 1/3, pod-c 1/8.
+	eps := []scheduling.Endpoint{
+		endpointWithLoad(p, "pod-a", "10.0.0.1", 3, 12),
+		endpointWithLoad(p, "pod-b", "10.0.0.2", 3, 2),
+		endpointWithLoad(p, "pod-c", "10.0.0.3", 3, 7),
+	}
+	picks := map[string]int{}
+	for i := 0; i < 400; i++ {
+		req := &scheduling.InferenceRequest{RequestID: fmt.Sprintf("req-%d", i)}
+		require.NoError(t, p.Produce(ctx, req, eps))
+		best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+		require.True(t, ok)
+		picks[best.hostPort]++
+	}
+	assert.Greater(t, picks["10.0.0.2:8080"], picks["10.0.0.3:8080"], "shortest queue must lead: %v", picks)
+	assert.Greater(t, picks["10.0.0.3:8080"], picks["10.0.0.1:8080"], "middle queue must beat deepest: %v", picks)
+	assert.Greater(t, picks["10.0.0.1:8080"], 0, "deepest queue must still receive some share: %v", picks)
+}
+
+// A one-request queue difference (noise at scrape granularity) shifts share
+// roughly 2:1 instead of starving the deeper peer.
+func TestProduce_NearTie_NoHerding(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	eps := []scheduling.Endpoint{
+		endpointWithLoad(p, "pod-idle", "10.0.0.1", 3, 0),
+		endpointWithLoad(p, "pod-busy", "10.0.0.2", 3, 1),
+	}
+	picks := map[string]int{}
+	for i := 0; i < 600; i++ {
+		req := &scheduling.InferenceRequest{RequestID: fmt.Sprintf("near-%d", i)}
+		require.NoError(t, p.Produce(ctx, req, eps))
+		best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+		require.True(t, ok)
+		picks[best.hostPort]++
+	}
+	idle, busy := picks["10.0.0.1:8080"], picks["10.0.0.2:8080"]
+	assert.Greater(t, idle, busy, "idle peer must lead: %v", picks)
+	// Expected ratio 2:1 (weights 1 and 0.5); allow generous slack around it.
+	assert.Greater(t, busy, 600/6, "busy peer must not be starved: %v", picks)
+}
+
+// A strictly-better-cached peer wins regardless of load: the tie-break
+// applies to equal counts only.
+func TestProduce_HigherCachedWinsOverIdle(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-strict"}
+	eps := []scheduling.Endpoint{
+		endpointWithLoad(p, "pod-a", "10.0.0.1", 4, 20),
+		endpointWithLoad(p, "pod-b", "10.0.0.2", 3, 0),
+	}
+	require.NoError(t, p.Produce(ctx, req, eps))
+	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	require.True(t, ok)
+	assert.Equal(t, "10.0.0.1:8080", best.hostPort)
+	assert.Equal(t, 4*testBlockSize, best.cachedTokens)
+}
+
+// Peers tied on cached count and queue depth: requests spread across them by
+// request-ID hash instead of converging on iteration order, and the same
+// request always maps to the same peer.
+func TestProduce_EqualQueues_SpreadByRequestID(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	eps := []scheduling.Endpoint{
+		endpointWithLoad(p, "pod-a", "10.0.0.1", 3, 0),
+		endpointWithLoad(p, "pod-b", "10.0.0.2", 3, 0),
+		endpointWithLoad(p, "pod-c", "10.0.0.3", 3, 0),
+	}
+
+	picks := map[string]int{}
+	for i := 0; i < 64; i++ {
+		req := &scheduling.InferenceRequest{RequestID: fmt.Sprintf("req-%d", i)}
+		require.NoError(t, p.Produce(ctx, req, eps))
+		best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+		require.True(t, ok)
+		picks[best.hostPort]++
+	}
+	assert.Len(t, picks, 3, "ties must spread across all tied peers, got %v", picks)
+
+	// Determinism: the same request ID picks the same peer.
+	reqA := &scheduling.InferenceRequest{RequestID: "req-7"}
+	reqB := &scheduling.InferenceRequest{RequestID: "req-7"}
+	require.NoError(t, p.Produce(ctx, reqA, eps))
+	require.NoError(t, p.Produce(ctx, reqB, eps))
+	bestA, _ := scheduling.ReadRequestAttribute[*bestMatchPeer](reqA, p.attrKey())
+	bestB, _ := scheduling.ReadRequestAttribute[*bestMatchPeer](reqB, p.attrKey())
+	assert.Equal(t, bestA.hostPort, bestB.hostPort)
+}
+
+// Endpoints without metrics are treated as load 0: selection stays purely
+// delta-driven, matching the previous behavior.
+func TestProduce_NilMetrics_NeutralLoad(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-nilmetrics"}
+	eps := []scheduling.Endpoint{
+		endpoint(p, "pod-a", "10.0.0.1", 2),
+		endpoint(p, "pod-b", "10.0.0.2", 3),
+	}
+	require.NoError(t, p.Produce(ctx, req, eps))
+
+	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	require.True(t, ok)
+	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
 }
