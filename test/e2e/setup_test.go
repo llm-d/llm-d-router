@@ -10,10 +10,12 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"github.com/onsi/gomega/gexec"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -213,4 +215,88 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 	}
 	objs := testutils.CreateUnstructuredObjs(testConfig, eppYamls)
 	return append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {})...)
+}
+
+func usesTokenProducer(eppConfig string) bool {
+	cfg, _, err := configloader.LoadRawConfig([]byte(eppConfig), ginkgo.GinkgoLogr)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	for _, plugin := range cfg.Plugins {
+		if plugin.Type == tokenizer.PluginType {
+			return true
+		}
+	}
+	return false
+}
+
+// testWrapper wraps tests with the setup and teardown code needed.
+// It is used as a wrapper of the function passed to ginkgo.When calls that
+// setup the tests. It is important that the gink.Ordered decorator is used
+// to enable the use of the ginkgo.BeforeAll and ginkgo.AfterAll functions
+// to inject the setup and teardown code.
+func testWrapper(test func()) func() {
+	var (
+		nsName           = getNamespace()
+		createdNameSpace bool
+
+		rbacObjects           []string
+		serviceAccountObjects []string
+		serviceObjects        []string
+		envoyObjects          []string
+		portForwardSession    *gexec.Session
+	)
+	return func() {
+		ginkgo.BeforeAll(func() {
+			createdNameSpace = setupNameSpace()
+
+			envoyObjects, portForwardSession = createEnvoy(nsName)
+
+			infraSubs := map[string]string{
+				"${EPP_NAME}":          "e2e-epp",
+				"${METRICS_NODE_PORT}": strconv.Itoa(32090 + 100*(ginkgo.GinkgoParallelProcess()-1)),
+			}
+			rbacYamls := substituteMany(testutils.ReadYaml(rbacManifest), infraSubs)
+			rbacObjects = testutils.CreateObjsFromYaml(testConfig, rbacYamls, nsName)
+			saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
+			serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls, nsName)
+			svcYamls := substituteMany(testutils.ReadYaml(servicesManifest), infraSubs)
+			serviceObjects = testutils.CreateObjsFromYaml(testConfig, svcYamls, nsName)
+		})
+
+		ginkgo.AfterEach(func() {
+			// The starting of the EPP can launch a port-forwarder to access the metrics port.
+			if eppPortForwardSession != nil {
+				eppPortForwardSession.Terminate()
+				eppPortForwardSession = nil
+			}
+		})
+
+		ginkgo.AfterAll(func() {
+			// Only cleanup if the test succeeded
+			if !ginkgo.CurrentSpecReport().Failed() {
+				testutils.DeleteObjects(testConfig, rbacObjects, nsName)
+				testutils.DeleteObjects(testConfig, serviceObjects, nsName)
+				testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
+				if portForwardSession != nil {
+					portForwardSession.Terminate()
+					portForwardSession = nil
+				}
+				testutils.DeleteObjects(testConfig, envoyObjects, nsName)
+
+				if createdNameSpace {
+					ginkgo.By("Deleting namespace " + getNamespace())
+					err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, getNamespace(), metav1.DeleteOptions{})
+					gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+					gomega.Eventually(func() bool {
+						_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, getNamespace(), metav1.GetOptions{})
+						return apierrors.IsNotFound(err)
+					}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.BeTrue())
+				}
+			} else {
+				// The test failed
+				dumpPodsAndLogs(getNamespace())
+			}
+		})
+
+		test()
+	}
 }
