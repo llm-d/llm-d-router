@@ -20,7 +20,8 @@ limitations under the License.
 //
 // Behavior is configured via two independent parameters:
 //   - shape: the interpolation curve (currently "linear"; future: sigmoid, exponential, etc.).
-//   - domain: how priorities map to positions ("rank" for ordinal, "value" for proportional).
+//   - domain: how priorities map to positions ("rank" for ordinal, "value" for proportional,
+//     "explicit" for a direct operator-supplied map).
 package priorityholdback
 
 import (
@@ -56,25 +57,40 @@ type priorityHoldbackPolicy struct {
 	name      string
 	cMax      float64
 	cMin      float64
-	computeFn func(cMin, cMax float64, priorities []int) (ceilings []float64)
+	computeFn func(priorities []int) (ceilings []float64)
+	// enableSinglePriorityBypass controls whether a single active priority skips holdback
+	// and receives cMax directly. This optimization applies to algorithmic domains (rank, value)
+	// where the interpolation math degenerates with one input. The explicit domain does not use it
+	// because the operator already supplied the ceiling for that priority.
+	enableSinglePriorityBypass bool
 }
 
 var _ flowcontrol.UsageLimitPolicy = &priorityHoldbackPolicy{}
 
 func newPriorityHoldbackPolicy(cfg config) *priorityHoldbackPolicy {
-	var fn func(cMin, cMax float64, priorities []int) (ceilings []float64)
+	p := &priorityHoldbackPolicy{
+		name: PolicyType,
+		cMax: cfg.maxCeiling,
+		cMin: cfg.minCeiling,
+	}
 	switch cfg.domain {
 	case domainRank:
-		fn = computeLimitStepwiseSpread
+		p.enableSinglePriorityBypass = true
+		p.computeFn = func(priorities []int) []float64 {
+			return computeLimitStepwiseSpread(cfg.minCeiling, cfg.maxCeiling, priorities)
+		}
 	case domainValue:
-		fn = computeLimitLinearProportional
+		p.enableSinglePriorityBypass = true
+		p.computeFn = func(priorities []int) []float64 {
+			return computeLimitLinearProportional(cfg.minCeiling, cfg.maxCeiling, priorities)
+		}
+	case domainExplicit:
+		p.enableSinglePriorityBypass = false
+		p.computeFn = func(priorities []int) []float64 {
+			return computeLimitExplicit(cfg.ceilings, priorities)
+		}
 	}
-	return &priorityHoldbackPolicy{
-		name:      PolicyType,
-		cMax:      cfg.maxCeiling,
-		cMin:      cfg.minCeiling,
-		computeFn: fn,
-	}
+	return p
 }
 
 func (p *priorityHoldbackPolicy) withName(name string) *priorityHoldbackPolicy {
@@ -96,17 +112,18 @@ func (p *priorityHoldbackPolicy) TypedName() plugin.TypedName {
 }
 
 // ComputeLimit returns an admission ceiling for each priority. With a single active priority,
-// holdback is bypassed (ceiling = cMax) to preserve work-conserving behavior.
+// algorithmic domains bypass holdback (ceiling = cMax) to preserve work-conserving behavior.
+// The explicit domain always uses the configured map value regardless of input length.
 func (p *priorityHoldbackPolicy) ComputeLimit(_ context.Context, _ float64, priorities []int) (ceilings []float64) {
 	if len(priorities) == 0 {
 		return []float64{}
 	}
-	if len(priorities) == 1 {
+	if len(priorities) == 1 && p.enableSinglePriorityBypass {
 		return []float64{p.cMax}
 	}
 	// Ceilings are monotonically decreasing as priorities are ordered from highest to lowest per UsageLimitPolicy contract.
 	// New strategies (e.g. sigmoid/static definition) could require explicit monotizing sweep.
-	return p.computeFn(p.cMin, p.cMax, priorities)
+	return p.computeFn(priorities)
 }
 
 // computeLimitStepwiseSpread divides [cMin, cMax] into equal steps by rank.
@@ -143,4 +160,16 @@ func computeLimitLinearProportional(cMin, cMax float64, priorities []int) (ceili
 		ceilings[i] = cMin + r*spread
 	}
 	return ceilings
+}
+
+// computeLimitExplicit looks up each priority in the configured map and returns the ceiling slice
+// in the same order as the input. Missing entries return 0.0, consistent with the UsageLimitPolicy
+// contract where 0.0 represents a fully gated priority. This provides a safe default without
+// introducing additional fallback semantics.
+func computeLimitExplicit(ceilings map[int]float64, priorities []int) []float64 {
+	result := make([]float64, len(priorities))
+	for i, p := range priorities {
+		result[i] = ceilings[p]
+	}
+	return result
 }
