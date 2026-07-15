@@ -20,11 +20,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
+	"github.com/jellydator/ttlcache/v3"
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -491,4 +494,113 @@ func TestSloContextStoreEviction(t *testing.T) {
 	item = pl.sloContextStore.Get(requestID)
 	assert.Nil(t, item, "Item should have been evicted from cache")
 	assert.False(t, queue.Contains(requestID), "Request should be removed from queue via OnEviction")
+}
+
+func dumpSeedQueue(ids map[string]float64) *requestPriorityQueue {
+	q := newRequestPriorityQueue()
+	for id, tpot := range ids {
+		q.Add(id, tpot)
+	}
+	return q
+}
+
+func dumpNN(name string) types.NamespacedName {
+	return types.NamespacedName{Name: name, Namespace: "default"}
+}
+
+func TestPredictedLatency_DumpState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("populated sorted by running requests", func(t *testing.T) {
+		pl := &PredictedLatency{}
+		pl.runningRequestLists.Store(dumpNN("pod-a"), dumpSeedQueue(map[string]float64{"r1": 5, "r2": 5}))
+		pl.runningRequestLists.Store(dumpNN("pod-b"), dumpSeedQueue(map[string]float64{"r3": 9}))
+
+		payload, err := pl.DumpState()
+		require.NoError(t, err)
+		require.True(t, json.Valid(payload))
+
+		var state predictedLatencyState
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.Equal(t, predictedLatencyState{
+			Endpoints: []endpointPredictedLatencyState{
+				{Endpoint: dumpNN("pod-a").String(), RunningRequests: 2, MinTPOTSLO: 5},
+				{Endpoint: dumpNN("pod-b").String(), RunningRequests: 1, MinTPOTSLO: 9},
+			},
+			TotalEndpoints: 2,
+			MaxEndpoints:   maxDebugDumpEndpoints,
+		}, state)
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		pl := &PredictedLatency{}
+		payload, err := pl.DumpState()
+		require.NoError(t, err)
+		var state predictedLatencyState
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.Empty(t, state.Endpoints)
+		require.Equal(t, 0, state.TotalEndpoints)
+		require.Equal(t, maxDebugDumpEndpoints, state.MaxEndpoints)
+		require.False(t, state.Truncated)
+		require.Equal(t, 0, state.TrackedRequests)
+	})
+
+	t.Run("caps endpoints", func(t *testing.T) {
+		pl := &PredictedLatency{}
+		for i := range maxDebugDumpEndpoints + 5 {
+			// pod-i gets i+1 running requests so the busiest sort deterministically.
+			seed := map[string]float64{}
+			for r := 0; r <= i; r++ {
+				seed[fmt.Sprintf("r%03d", r)] = 1
+			}
+			pl.runningRequestLists.Store(dumpNN(fmt.Sprintf("pod-%03d", i)), dumpSeedQueue(seed))
+		}
+		var state predictedLatencyState
+		payload, err := pl.DumpState()
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.True(t, state.Truncated)
+		require.Equal(t, maxDebugDumpEndpoints+5, state.TotalEndpoints)
+		require.Len(t, state.Endpoints, maxDebugDumpEndpoints)
+		require.Equal(t, maxDebugDumpEndpoints+5, state.Endpoints[0].RunningRequests)
+	})
+
+	t.Run("tracked requests count", func(t *testing.T) {
+		pl := &PredictedLatency{}
+		pl.sloContextStore = ttlcache.New(ttlcache.WithTTL[string, *predictedLatencyCtx](time.Minute))
+		pl.sloContextStore.Set("req-1", &predictedLatencyCtx{}, ttlcache.DefaultTTL)
+		pl.sloContextStore.Set("req-2", &predictedLatencyCtx{}, ttlcache.DefaultTTL)
+
+		var state predictedLatencyState
+		payload, err := pl.DumpState()
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(payload, &state))
+		require.Equal(t, 2, state.TrackedRequests)
+		require.Empty(t, state.Endpoints)
+	})
+
+	// Non-finite head TPOT (NaN / +Inf) must not break json.Marshal; it is coerced to 0.
+	t.Run("non-finite min tpot sanitized", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			tpot float64
+		}{
+			{"nan", math.NaN()},
+			{"posinf", math.Inf(1)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				pl := &PredictedLatency{}
+				pl.runningRequestLists.Store(dumpNN("pod-a"), dumpSeedQueue(map[string]float64{"r1": tc.tpot}))
+
+				payload, err := pl.DumpState()
+				require.NoError(t, err)
+				require.True(t, json.Valid(payload))
+				var state predictedLatencyState
+				require.NoError(t, json.Unmarshal(payload, &state))
+				require.Len(t, state.Endpoints, 1)
+				require.Equal(t, float64(0), state.Endpoints[0].MinTPOTSLO)
+				require.Equal(t, 1, state.Endpoints[0].RunningRequests)
+			})
+		}
+	})
 }

@@ -166,7 +166,7 @@ func TestInferenceObjectiveReconciler(t *testing.T) {
 					WithScheme(scheme).
 					WithObjects(initObjs...).
 					Build()
-				ds := datastore.NewDatastore(t.Context(), epf, 0)
+				ds := datastore.NewDatastore(t.Context(), epf)
 				for _, m := range test.objectivessInStore {
 					ds.ObjectiveSet(m)
 				}

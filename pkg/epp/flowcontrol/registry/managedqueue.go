@@ -223,10 +223,7 @@ type flowQueueAccessor struct {
 var _ flowcontrol.FlowQueueAccessor = &flowQueueAccessor{}
 
 // --- Read-only pass-through methods to the underlying SafeQueue ---
-func (a *flowQueueAccessor) Name() string { return a.mq.queue.Name() }
-func (a *flowQueueAccessor) Capabilities() []flowcontrol.QueueCapability {
-	return a.mq.queue.Capabilities()
-}
+func (a *flowQueueAccessor) Name() string                        { return a.mq.queue.Name() }
 func (a *flowQueueAccessor) Peek() flowcontrol.QueueItemAccessor { return a.mq.queue.Peek() }
 
 // --- Read-only methods from the managedQueue wrapper ---

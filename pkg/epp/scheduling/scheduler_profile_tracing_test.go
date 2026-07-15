@@ -71,6 +71,142 @@ func newTestEndpoints(names ...string) []fwksched.Endpoint {
 	return endpoints
 }
 
+type allProfilesTraceHandler struct{}
+
+func (*allProfilesTraceHandler) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "all-profiles-trace-handler"}
+}
+
+func (*allProfilesTraceHandler) Pick(_ context.Context, _ *fwksched.InferenceRequest,
+	profiles map[string]fwksched.SchedulerProfile,
+	profileResults map[string]*fwksched.ProfileRunResult,
+) map[string]fwksched.SchedulerProfile {
+	if len(profileResults) == 0 {
+		return profiles
+	}
+	return nil
+}
+
+func (*allProfilesTraceHandler) ProcessResults(_ context.Context, _ *fwksched.InferenceRequest,
+	profileResults map[string]*fwksched.ProfileRunResult,
+) (*fwksched.SchedulingResult, error) {
+	return &fwksched.SchedulingResult{
+		ProfileResults:     profileResults,
+		PrimaryProfileName: "decode",
+	}, nil
+}
+
+type panicTraceFilter struct{}
+
+func (*panicTraceFilter) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "panic-trace-filter"}
+}
+
+func (*panicTraceFilter) Filter(_ context.Context, _ *fwksched.InferenceRequest,
+	_ []fwksched.Endpoint,
+) []fwksched.Endpoint {
+	panic("filter panic")
+}
+
+func TestScheduleNestsFilterSpansUnderNamedProfiles(t *testing.T) {
+	recorder := setupSpanRecorder(t)
+	endpoints := newTestEndpoints("pod1")
+
+	newProfile := func(name string) *SchedulerProfile {
+		plugin := &testPlugin{
+			typedName: fwkplugin.TypedName{Type: "test-plugin", Name: name},
+			FilterRes: []k8stypes.NamespacedName{{Name: "pod1"}},
+			PickRes:   k8stypes.NamespacedName{Name: "pod1"},
+		}
+		return NewSchedulerProfile().WithFilters(plugin).WithPicker(plugin)
+	}
+
+	scheduler := NewSchedulerWithConfig(NewSchedulerConfig(
+		&allProfilesTraceHandler{},
+		map[string]fwksched.SchedulerProfile{
+			"decode":  newProfile("decode"),
+			"prefill": newProfile("prefill"),
+		},
+	))
+
+	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
+	_, err := scheduler.Schedule(ctx, &fwksched.InferenceRequest{TargetModel: "m1", RequestID: "r1"}, endpoints)
+	root.End()
+	if err != nil {
+		t.Fatalf("Schedule returned error: %v", err)
+	}
+
+	profileSpans := findSpans(recorder.Ended(), "run_scheduler_profile")
+	if len(profileSpans) != 2 {
+		t.Fatalf("got %d run_scheduler_profile spans, want 2", len(profileSpans))
+	}
+	profileNameBySpanID := make(map[trace.SpanID]string, len(profileSpans))
+	for _, profileSpan := range profileSpans {
+		profileName := spanAttributes(profileSpan)["llm_d.epp.scheduling.profile.name"].AsString()
+		profileNameBySpanID[profileSpan.SpanContext().SpanID()] = profileName
+	}
+
+	filterSpans := findSpans(recorder.Ended(), "filter_endpoints")
+	if len(filterSpans) != 2 {
+		t.Fatalf("got %d filter_endpoints spans, want 2", len(filterSpans))
+	}
+	seenProfiles := make(map[string]bool, len(filterSpans))
+	for _, filterSpan := range filterSpans {
+		profileName, ok := profileNameBySpanID[filterSpan.Parent().SpanID()]
+		if !ok {
+			t.Errorf("filter_endpoints parent %v is not a run_scheduler_profile span", filterSpan.Parent().SpanID())
+			continue
+		}
+		seenProfiles[profileName] = true
+	}
+	for _, profileName := range []string{"decode", "prefill"} {
+		if !seenProfiles[profileName] {
+			t.Errorf("no filter_endpoints span attributed to profile %q", profileName)
+		}
+	}
+}
+
+func TestScheduleEndsProfileSpanWhenFilterPanics(t *testing.T) {
+	recorder := setupSpanRecorder(t)
+	endpoints := newTestEndpoints("pod1")
+	picker := &testPlugin{
+		typedName: fwkplugin.TypedName{Type: "test-picker"},
+		PickRes:   k8stypes.NamespacedName{Name: "pod1"},
+	}
+	profile := NewSchedulerProfile().WithFilters(&panicTraceFilter{}).WithPicker(picker)
+	scheduler := NewSchedulerWithConfig(NewSchedulerConfig(
+		&allProfilesTraceHandler{},
+		map[string]fwksched.SchedulerProfile{"decode": profile},
+	))
+
+	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
+	recovered := func() (value any) {
+		defer func() { value = recover() }()
+		_, _ = scheduler.Schedule(ctx, &fwksched.InferenceRequest{TargetModel: "m1", RequestID: "r1"}, endpoints)
+		return nil
+	}()
+	root.End()
+	if recovered != "filter panic" {
+		t.Fatalf("recovered panic = %v, want filter panic", recovered)
+	}
+
+	profileSpans := findSpans(recorder.Ended(), "run_scheduler_profile")
+	if len(profileSpans) != 1 {
+		t.Fatalf("got %d run_scheduler_profile spans after panic, want 1", len(profileSpans))
+	}
+	filterSpans := findSpans(recorder.Ended(), "filter_endpoints")
+	if len(filterSpans) != 1 {
+		t.Fatalf("got %d filter_endpoints spans after panic, want 1", len(filterSpans))
+	}
+	if filterSpans[0].Parent().SpanID() != profileSpans[0].SpanContext().SpanID() {
+		t.Errorf("filter_endpoints parent = %v, want profile span %v",
+			filterSpans[0].Parent().SpanID(), profileSpans[0].SpanContext().SpanID())
+	}
+	if got := spanAttributes(profileSpans[0])["llm_d.epp.scheduling.profile.name"].AsString(); got != "decode" {
+		t.Errorf("profile name = %q, want decode", got)
+	}
+}
+
 func TestRunFilterPluginsSingleSpan(t *testing.T) {
 	recorder := setupSpanRecorder(t)
 

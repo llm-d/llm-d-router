@@ -39,12 +39,12 @@ func expectedPools() []string {
 func expectAllPoolsExist() {
 	for _, name := range expectedPools() {
 		pool := &inferenceapi.InferencePool{}
-		key := types.NamespacedName{Namespace: testConfig.NsName, Name: name}
+		key := types.NamespacedName{Namespace: nsName, Name: name}
 		gomega.Eventually(func() error {
 			return testConfig.K8sClient.Get(testConfig.Context, key, pool)
 		}, readyTimeout, defaultInterval).Should(
 			gomega.Succeed(),
-			"InferencePool %q not found in namespace %q", name, testConfig.NsName,
+			"InferencePool %q not found in namespace %q", name, nsName,
 		)
 	}
 }

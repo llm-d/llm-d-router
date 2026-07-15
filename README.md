@@ -2,6 +2,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/llm-d/llm-d-router.svg)](https://pkg.go.dev/github.com/llm-d/llm-d-router)
 [![License](https://img.shields.io/github/license/llm-d/llm-d-router)](/LICENSE)
 [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://llm-d.slack.com/archives/C08SBNRRSBD)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router?ref=badge_shield)
 
 # llm-d Router
 
@@ -90,3 +91,7 @@ Contributions are welcome!
 [Google Meet]:https://meet.google.com/ozx-goao-cxh
 [Meeting Notes]:https://docs.google.com/document/d/1Pf3x7ZM8nNpU56nt6CzePAOmFZ24NXDeXyaYb565Wq4
 [#sig-router]:https://llm-d.slack.com/?redir=%2Fmessages%2Fsig-router
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router?ref=badge_large)

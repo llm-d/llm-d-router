@@ -107,3 +107,15 @@ var _ = Describe("P2P Connector", func() {
 		<-testInfo.stoppedCh
 	})
 })
+
+var _ = DescribeTable("p2pPullAvailable",
+	func(connector string, enableP2PPull, want bool) {
+		s := &Server{config: Config{KVConnector: connector, EnableP2PPull: enableP2PPull}}
+		Expect(s.p2pPullAvailable()).To(Equal(want))
+	},
+	Entry("offloading is always available", KVConnectorOffloading, false, true),
+	Entry("nixlv2 with the flag is available", KVConnectorNIXLV2, true, true),
+	Entry("nixlv2 without the flag is unavailable", KVConnectorNIXLV2, false, false),
+	Entry("the flag has no effect on sglang", KVConnectorSGLang, true, false),
+	Entry("the flag has no effect on shared-storage", KVConnectorSharedStorage, true, false),
+)

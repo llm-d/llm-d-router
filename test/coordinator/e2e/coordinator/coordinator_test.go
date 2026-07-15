@@ -110,14 +110,14 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 		if keepClusterOnFailure && ginkgo.CurrentSpecReport().Failed() {
 			return
 		}
-		testutils.DeleteObjects(testConfig, coordinator)
-		testutils.DeleteObjects(testConfig, modelServers)
-		testutils.DeleteObjects(testConfig, decodeEPP)
-		testutils.DeleteObjects(testConfig, prefillEPP)
-		testutils.DeleteObjects(testConfig, encodeEPP)
-		testutils.DeleteObjects(testConfig, decodePool)
-		testutils.DeleteObjects(testConfig, prefillPool)
-		testutils.DeleteObjects(testConfig, encodePool)
+		testutils.DeleteObjects(testConfig, coordinator, nsName)
+		testutils.DeleteObjects(testConfig, modelServers, nsName)
+		testutils.DeleteObjects(testConfig, decodeEPP, nsName)
+		testutils.DeleteObjects(testConfig, prefillEPP, nsName)
+		testutils.DeleteObjects(testConfig, encodeEPP, nsName)
+		testutils.DeleteObjects(testConfig, decodePool, nsName)
+		testutils.DeleteObjects(testConfig, prefillPool, nsName)
+		testutils.DeleteObjects(testConfig, encodePool, nsName)
 	})
 
 	// Dump coordinator logs on failure, or always when E2E_PRINT_COORDINATOR_LOGS is

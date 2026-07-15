@@ -24,10 +24,10 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache"
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents/engineadapter"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvevents"
+	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -297,11 +297,17 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 			maxMatch = matchLen
 		}
 		cachedBlocks := 0
+		cachedBlocksByTier := map[string]int{}
 		for _, lu := range lookups {
 			cachedBlocks += matchedBlockCount(lu.keys, lu.keyToPods, addr)
+			for tier, count := range matchedBlockCountByTier(lu.keys, lu.keyToPods, addr) {
+				cachedBlocksByTier[tier] += count
+			}
 		}
 		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).WithCachedBlockCount(cachedBlocks))
+			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
+				WithCachedBlockCount(cachedBlocks).
+				WithCachedBlocksByTier(cachedBlocksByTier))
 	}
 
 	if p.speculativeEnabled {

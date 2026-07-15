@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -89,6 +91,113 @@ func (pl *PredictedLatency) endpointInFlightLoad(endpoint fwksched.Endpoint) (*a
 		}
 	}
 	return nil, false
+}
+
+const maxDebugDumpEndpoints = 100
+
+var _ plugin.StateDumper = &PredictedLatency{}
+
+type predictedLatencyState struct {
+	Endpoints       []endpointPredictedLatencyState `json:"endpoints"`
+	TotalEndpoints  int                             `json:"totalEndpoints"`
+	MaxEndpoints    int                             `json:"maxEndpoints"`
+	Truncated       bool                            `json:"truncated"`
+	TrackedRequests int                             `json:"trackedRequests"`
+}
+
+type endpointPredictedLatencyState struct {
+	Endpoint        string  `json:"endpoint"`
+	RunningRequests int     `json:"runningRequests"`
+	MinTPOTSLO      float64 `json:"minTpotSlo"`
+}
+
+// DumpState implements [plugin.StateDumper] and exposes per-endpoint running-request
+// counts and the tightest TPOT SLO among them for the /debug/plugins/state endpoint.
+//
+// The prefill-tokens-in-flight signal is no longer maintained internally (it is read
+// from the InFlightLoadProducer's per-endpoint attribute at scheduling time), so it is
+// not reported here.
+//
+// The running-request queues and the context store are read under their own separate
+// synchronization, so per-endpoint values are not guaranteed to be from a single
+// instant. This is acceptable for a debug endpoint, where best-effort visibility is
+// preferred over a global lock contending the hot path.
+//
+// Per-request contexts hold request payloads and are high-cardinality, so only their
+// count is reported. The endpoint list is capped to the busiest endpoints.
+func (pl *PredictedLatency) DumpState() (json.RawMessage, error) {
+	return json.Marshal(pl.snapshotState())
+}
+
+func (pl *PredictedLatency) snapshotState() predictedLatencyState {
+	type agg struct {
+		running int
+		minTPOT float64
+	}
+	endpoints := map[string]*agg{}
+	get := func(id string) *agg {
+		a, ok := endpoints[id]
+		if !ok {
+			a = &agg{}
+			endpoints[id] = a
+		}
+		return a
+	}
+
+	pl.runningRequestLists.Range(func(key, value any) bool {
+		name, ok := key.(types.NamespacedName)
+		if !ok {
+			return true
+		}
+		q, ok := value.(*requestPriorityQueue)
+		if !ok || q == nil {
+			return true
+		}
+		a := get(name.String())
+		a.running = q.GetSize()
+		if minReq := q.Peek(); minReq != nil {
+			// Client headers can yield NaN/+Inf TPOT (strconv.ParseFloat accepts
+			// them and Add only rejects negatives). json.Marshal errors on
+			// non-finite floats, which would fail the whole debug response, so
+			// coerce them to 0.
+			if tpot := minReq.tpot; !math.IsNaN(tpot) && !math.IsInf(tpot, 0) {
+				a.minTPOT = tpot
+			}
+		}
+		return true
+	})
+
+	trackedRequests := 0
+	if pl.sloContextStore != nil {
+		trackedRequests = pl.sloContextStore.Len()
+	}
+
+	state := predictedLatencyState{
+		Endpoints:       make([]endpointPredictedLatencyState, 0, len(endpoints)),
+		TotalEndpoints:  len(endpoints),
+		MaxEndpoints:    maxDebugDumpEndpoints,
+		TrackedRequests: trackedRequests,
+	}
+	for id, a := range endpoints {
+		state.Endpoints = append(state.Endpoints, endpointPredictedLatencyState{
+			Endpoint:        id,
+			RunningRequests: a.running,
+			MinTPOTSLO:      a.minTPOT,
+		})
+	}
+
+	sort.SliceStable(state.Endpoints, func(i, j int) bool {
+		if state.Endpoints[i].RunningRequests != state.Endpoints[j].RunningRequests {
+			return state.Endpoints[i].RunningRequests > state.Endpoints[j].RunningRequests
+		}
+		return state.Endpoints[i].Endpoint < state.Endpoints[j].Endpoint
+	})
+	if len(state.Endpoints) > maxDebugDumpEndpoints {
+		state.Endpoints = state.Endpoints[:maxDebugDumpEndpoints]
+		state.Truncated = true
+	}
+
+	return state
 }
 
 // inFlightLoadSnapshot is an endpoint's in-flight load captured at a single

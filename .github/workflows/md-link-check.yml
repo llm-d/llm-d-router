@@ -49,7 +49,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Run lychee link checker
-        uses: lycheeverse/lychee-action@v2.8.0
+        uses: lycheeverse/lychee-action@v2.9.0
         with:
           # Exclude release-notes.d/ — fragments are sourced verbatim from
           # PR bodies; let the original PR's link check be authoritative.

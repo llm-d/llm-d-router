@@ -79,6 +79,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/priorityholdback"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/probabilisticadmitter"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
@@ -111,6 +112,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/activerequest"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/contextlengthaware"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/endpointattribute"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	latencyscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/latency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loadaware"
@@ -353,7 +355,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		return nil, nil, err
 	}
 
-	ds, err := setupDatastore(ctx, epf, int32(opts.ModelServerMetricsPort), startCrdReconcilers,
+	ds, err := setupDatastore(ctx, epf, startCrdReconcilers,
 		gknn.Namespace, gknn.Name, opts.EndpointSelector, opts.EndpointTargetPorts)
 	if err != nil {
 		setupLog.Error(err, "Failed to setup datastore")
@@ -518,18 +520,18 @@ func NewEndpointPoolFromOptions(
 	return pool, nil
 }
 
-func setupDatastore(ctx context.Context, epFactory datalayer.EndpointFactory, modelServerMetricsPort int32,
+func setupDatastore(ctx context.Context, epFactory datalayer.EndpointFactory,
 	startCrdReconcilers bool, namespace, name string, endpointSelector labels.Selector, endpointTargetPorts []int) (datastore.Datastore, error) {
 
 	if startCrdReconcilers {
-		return datastore.NewDatastore(ctx, epFactory, modelServerMetricsPort), nil
+		return datastore.NewDatastore(ctx, epFactory), nil
 	}
 	endpointPool, err := NewEndpointPoolFromOptions(namespace, name, endpointSelector, endpointTargetPorts)
 	if err != nil {
 		setupLog.Error(err, "Failed to construct endpoint pool from options")
 		return nil, err
 	}
-	return datastore.NewDatastore(ctx, epFactory, modelServerMetricsPort).WithEndpointPool(endpointPool), nil
+	return datastore.NewDatastore(ctx, epFactory).WithEndpointPool(endpointPool), nil
 }
 
 // registerInTreePlugins registers the factory functions of all known plugins
@@ -569,6 +571,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, disagg.PrefixBasedPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.AlwaysDisaggMulimodalPluginType, disagg.AlwaysDisaggMulimodalDeciderPluginFactory)
 	fwkplugin.Register(kvcacheutilization.KvCacheUtilizationScorerType, kvcacheutilization.KvCacheUtilizationScorerFactory)
+	fwkplugin.Register(endpointattribute.EndpointAttributeScorerType, endpointattribute.EndpointAttributeScorerFactory)
 	fwkplugin.Register(queuedepth.QueueScorerType, queuedepth.QueueScorerFactory)
 	fwkplugin.Register(runningrequests.RunningRequestsSizeScorerType, runningrequests.RunningRequestsSizeScorerFactory)
 	fwkplugin.Register(loraaffinity.LoraAffinityScorerType, loraaffinity.LoraAffinityScorerFactory)
@@ -589,6 +592,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(edf.EDFOrderingPolicyType, edf.EDFOrderingPolicyFactory)
 	fwkplugin.Register(slodeadline.SLODeadlineOrderingPolicyType, slodeadline.SLODeadlineOrderingPolicyFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, usagelimits.StaticPolicyFactory)
+	fwkplugin.Register(priorityholdback.PolicyType, priorityholdback.PolicyFactory)
 
 	// Register Request level data producer plugins as defaults for their respective data keys.
 	fwkplugin.RegisterAsDefaultProducer(reqdataprodprefix.ApproxPrefixCachePluginType, reqdataprodprefix.ApproxPrefixCacheFactory, attrprefix.PrefixCacheMatchInfoDataKey)
@@ -900,7 +904,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		poolName = "epp"
 	}
 	pool := datalayer.NewEndpointPool(namespace, poolName)
-	ds := datastore.NewDatastore(ctx, epf, int32(opts.ModelServerMetricsPort)).WithEndpointPool(pool)
+	ds := datastore.NewDatastore(ctx, epf).WithEndpointPool(pool)
 
 	// On bare metal / Slurm / Ray (or any deployment without the K8s Downward
 	// API), neither --pool-namespace nor the NAMESPACE env var is set, so the

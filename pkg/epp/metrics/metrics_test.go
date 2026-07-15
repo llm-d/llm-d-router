@@ -621,18 +621,24 @@ func TestRunningRequestsMetrics(t *testing.T) {
 func TestInferencePoolMetrics(t *testing.T) {
 	Reset()
 	scenarios := []struct {
-		name               string
-		poolName           string
-		kvCacheAvg         float64
-		queueSizeAvg       float64
-		runningRequestsAvg float64
+		name                  string
+		poolName              string
+		kvCacheAvg            float64
+		queueSizeAvg          float64
+		runningRequestsAvg    float64
+		kvCacheStdDev         float64
+		queueSizeStdDev       float64
+		runningRequestsStdDev float64
 	}{
 		{
-			name:               "basic test",
-			poolName:           "p1",
-			kvCacheAvg:         0.3,
-			queueSizeAvg:       0.4,
-			runningRequestsAvg: 0.5,
+			name:                  "basic test",
+			poolName:              "p1",
+			kvCacheAvg:            0.3,
+			queueSizeAvg:          0.4,
+			runningRequestsAvg:    0.5,
+			kvCacheStdDev:         0.1,
+			queueSizeStdDev:       0.2,
+			runningRequestsStdDev: 0.3,
 		},
 	}
 	for _, scenario := range scenarios {
@@ -640,6 +646,9 @@ func TestInferencePoolMetrics(t *testing.T) {
 			RecordInferencePoolAvgKVCache(scenario.poolName, scenario.kvCacheAvg)
 			RecordInferencePoolAvgQueueSize(scenario.poolName, scenario.queueSizeAvg)
 			RecordInferencePoolAvgRunningRequests(scenario.poolName, scenario.runningRequestsAvg)
+			RecordInferencePoolStdDevKVCache(scenario.poolName, scenario.kvCacheStdDev)
+			RecordInferencePoolStdDevQueueSize(scenario.poolName, scenario.queueSizeStdDev)
+			RecordInferencePoolStdDevRunningRequests(scenario.poolName, scenario.runningRequestsStdDev)
 
 			// Verify deprecated metrics
 			wantKVCache, err := os.Open("testdata/kv_cache_avg_metrics")
@@ -694,6 +703,33 @@ func TestInferencePoolMetrics(t *testing.T) {
 			}
 			defer wantRunningRequestsNew.Close()
 			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsNew, "llm_d_epp_average_running_requests"); err != nil {
+				t.Error(err)
+			}
+
+			wantKVCacheStdDev, err := os.Open("testdata/llm_d_kv_cache_std_dev_metrics")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer wantKVCacheStdDev.Close()
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantKVCacheStdDev, "llm_d_epp_std_dev_kv_cache_utilization"); err != nil {
+				t.Error(err)
+			}
+
+			wantQueueSizeStdDev, err := os.Open("testdata/llm_d_queue_std_dev_size_metrics")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer wantQueueSizeStdDev.Close()
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantQueueSizeStdDev, "llm_d_epp_std_dev_queue_size"); err != nil {
+				t.Error(err)
+			}
+
+			wantRunningRequestsStdDev, err := os.Open("testdata/llm_d_running_requests_std_dev_metrics")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer wantRunningRequestsStdDev.Close()
+			if err := promtestutil.GatherAndCompare(metrics.Registry, wantRunningRequestsStdDev, "llm_d_epp_std_dev_running_requests"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -1293,6 +1329,24 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool))
 	require.NoError(t, err)
 	require.Equal(t, 0.5, valNew)
+}
+
+func TestFlowControlRequestsTotalMetric(t *testing.T) {
+	Reset()
+
+	const pool = "test-pool"
+
+	IncFlowControlRequestsTotal("Dispatched", "0", pool)
+	IncFlowControlRequestsTotal("Dispatched", "0", pool)
+	IncFlowControlRequestsTotal("RejectedCapacity", "10", pool)
+
+	val, err := testutil.GetCounterMetricValue(llmdFlowControlRequestsTotal.WithLabelValues("Dispatched", "0", pool))
+	require.NoError(t, err)
+	require.Equal(t, float64(2), val)
+
+	val, err = testutil.GetCounterMetricValue(llmdFlowControlRequestsTotal.WithLabelValues("RejectedCapacity", "10", pool))
+	require.NoError(t, err)
+	require.Equal(t, float64(1), val)
 }
 
 func TestRecordRequestTTFT(t *testing.T) {
