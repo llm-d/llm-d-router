@@ -63,6 +63,7 @@ func DefaultNsName(numProcesses int, parallelName string) string {
 	return parallelName
 }
 
+// LocalhostURL returns an http://localhost:<port> base URL for the given port.
 func LocalhostURL(port int) string {
 	return "http://localhost:" + strconv.Itoa(port)
 }

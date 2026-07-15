@@ -15,6 +15,8 @@ spec:
         - "--model=${MODEL_NAME}"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
         - "${VLLM_EXTRA_ARGS_D}"
+        # $patch: replace overwrites the entire ports list; adding a port to the
+        # vllm-decode base will not appear here unless this patch is updated.
         ports:
         - $patch: replace
         - name: http
