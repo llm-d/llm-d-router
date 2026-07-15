@@ -64,9 +64,6 @@ const (
 	metricsTestLabel       = "Metrics"
 	deprecatedPDTestLabel  = "DeprecatedPD"
 	disaggTestLabel        = "Disagg"
-
-	// images
-	simulatorImg = "ghcr.io/llm-d/llm-d-inference-sim:v0.9.2"
 )
 
 var (
