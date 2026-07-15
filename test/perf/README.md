@@ -8,8 +8,8 @@ This directory contains the performance testing pipeline for the Endpoint Picker
   - **`router-configs/`**: Router Helm configuration values recipes (e.g. `optimized-baseline.yaml`).
   - `llm-d-sim-deployment.yaml` / `llm-d-sim-service.yaml`: Kubernetes manifests for deploying the vLLM simulator.
   - `shared_prefix_job1.yaml`: Performance test workload specification defining load stages, API target, and request distributions.
-- **`results/`**: Execution results logged as Markdown tables, grouped by test recipe name (e.g., `results/optimized-baseline/`).
-- **`run_nightly_perf.py`**: The Python orchestrator script responsible for test namespace setup, application deployment (EPP & simulator), metrics scraping, and markdown generation. It assumes that `kubectl` is already configured to target an active Kubernetes cluster.
+- **`results/`**: Execution results logged as Markdown tables, grouped by test recipe name (e.g., `results/optimized-baseline/`). If profiling is enabled, the `.pprof` and `.svg` files are saved here as well.
+- **`run_nightly_perf.py`**: The Python orchestrator script responsible for test namespace setup, EPP and simulator deployments, pprof profiling collection, metrics scraping, and markdown generation. It assumes that `kubectl` is already configured to target an active Kubernetes cluster.
 
 ---
 
@@ -21,6 +21,8 @@ To execute the performance suite locally, you must target an active GKE cluster.
 - Python 3.10+
 - `pyyaml`
 - `helm`
+- `go` (required to compile/parse pprof profiles)
+- `graphviz` (required to generate SVG diagrams from profiles)
 - A GKE cluster with Gateway API and Inference Extension CRDs installed.
 
 ### Execution Command
@@ -46,6 +48,8 @@ python3 test/perf/run_nightly_perf.py \
 - `--gcp-project`: GCP Project ID hosting your GKE cluster.
 - `--results-dir`: Output path for appending markdown result metrics.
 - `--router-machine-family`: Optional node affinity mapping (e.g. `e2`, `c3`).
+- `--collect-pprof-profiles`: (Optional) Collect EPP CPU & memory pprof profiles and render them as PNG and SVG visual artifacts.
+- `--gcs-bucket`: (Optional) Target GCS bucket name or URI (e.g. `gs://llm-d-perf-results`) to sync and preserve test results and profiling artifacts without committing them to the Git repository.
 - `--no-cleanup`: (Optional) Skip namespace deletion on test completion (useful for debugging).
 
 ---
@@ -57,6 +61,6 @@ The benchmarking pipeline runs daily via GHA:
 - **Schedule**: Daily at 09:00 UTC.
 - **Actions**:
   1. Authenticates to GCP and configures `kubectl` to point to the GKE development cluster.
-  2. Runs `run_nightly_perf.py` (specifying `--router-machine-family e2` for node affinity).
-  3. Appends the metrics results to `test/perf/results/optimized-baseline/optimized-baseline-job1.md`.
-  4. Automatically commits and pushes the updated results file back to the repository.
+  2. Runs `run_nightly_perf.py` (specifying `--router-machine-family e2` and `--gcs-bucket`).
+  3. Appends the metrics results and uploads profiling artifacts directly to the specified Google Cloud Storage bucket.
+

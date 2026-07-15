@@ -26,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
@@ -131,6 +132,27 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 			s.logger.V(4).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
 		}
 
+		kvCacheSource := strings.TrimSpace(r.Header.Get(routing.KVCacheSourceHeader))
+		r.Header.Del(routing.KVCacheSourceHeader)
+		if kvCacheSource != "" {
+			switch {
+			case !s.p2pPullAvailable():
+				s.logger.V(logging.DEBUG).Info("ignoring KV cache source header: connector does not support P2P pulls",
+					"connector", s.config.KVConnector)
+				kvCacheSource = ""
+			case !isHostPort(kvCacheSource):
+				s.logger.Info("ignoring malformed KV cache source header", "value", kvCacheSource)
+				kvCacheSource = ""
+			case !s.allowlistValidator.IsAllowed(kvCacheSource):
+				s.logger.Info("SSRF protection: KV cache source not in allowlist, ignoring",
+					"target", kvCacheSource, "clientIP", r.RemoteAddr)
+				kvCacheSource = ""
+			}
+		}
+		if kvCacheSource != "" {
+			span.SetAttributes(attribute.String("llm_d.pd_proxy.kv_cache_source", kvCacheSource))
+		}
+
 		encoderHostPorts := r.Header.Values(routing.EncoderEndpointsHeader)
 		r.Header.Del(routing.EncoderEndpointsHeader)
 		if len(encoderHostPorts) == 1 {
@@ -180,12 +202,16 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 
 		if len(prefillHostPort) > 0 {
 			s.logger.V(4).Info("using P/D protocol")
-			s.handlePDConnector(w, r, prefillHostPort, apiType)
+			s.handlePDConnector(w, r, prefillHostPort, kvCacheSource, apiType)
 			return
 		}
 
 		s.logger.V(4).Info("no prefiller or encoder, using decoder only")
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
+			if kvCacheSource != "" {
+				s.decodeWithP2PSource(w, r, kvCacheSource)
+				return
+			}
 			if s.config.DecodeChunkSize > 0 && r.URL.Path == ChatCompletionsPath {
 				s.runChunkedDecode(w, r)
 				return

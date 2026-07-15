@@ -94,6 +94,7 @@ const (
 	// nesting key: "decode" on the prefiller leg, "prefill" on the decoder leg.
 	requestFieldP2PDecodeParams  = "decode"
 	requestFieldP2PPrefillParams = "prefill"
+	requestFieldP2PParams        = "p2p"
 	requestFieldKVRequestID      = "kv_request_id"
 
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
@@ -206,8 +207,14 @@ type Config struct {
 
 	// P2PConnectorPort is the prefiller's OffloadingConnector P2P tier listening port,
 	// injected as remote_port on the decode leg so the decoder can pull KV from it.
-	// Only meaningful with --kv-connector=offloading.
+	// Meaningful with --kv-connector=offloading or --enable-p2p-pull.
 	P2PConnectorPort int
+
+	// EnableP2PPull declares that the OffloadingConnector P2P tier is available
+	// for cached-prefix pulls even when the PD connector is not offloading, i.e.
+	// the engines run MultiConnector(NixlConnector + OffloadingConnector). It has
+	// no effect with --kv-connector=offloading, where the tier is always present.
+	EnableP2PPull bool
 
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
@@ -293,9 +300,11 @@ func (c Config) String() string {
 	return string(b)
 }
 
-// pdConnectorHandler handles a P/D KV connector request. The APIType lets each
-// connector decide internally which JSON fields (if any) need special handling.
-type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, APIType)
+// pdConnectorHandler handles a P/D KV connector request. kvCacheSource is the
+// validated x-kv-cache-source-host-port peer to pull cached prefix from ("" when
+// absent); the APIType lets each connector decide internally which JSON fields
+// (if any) need special handling.
+type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, APIType)
 
 type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)
 
@@ -449,25 +458,27 @@ func (s *Server) setKVConnector() {
 
 	switch s.config.KVConnector {
 	case KVConnectorSharedStorage:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
 			s.handleSharedStorage(w, r, host)
 		}
 	case KVConnectorSGLang:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
 			s.handleSGLang(w, r, host)
 		}
 	case KVConnectorMooncake:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
 			s.handleMooncake(w, r, host)
 		}
 	case KVConnectorOffloading:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
-			s.handleP2P(w, r, host)
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, _ APIType) {
+			s.handleP2P(w, r, host, kvCacheSource)
 		}
 	case KVConnectorNIXLV2:
 		fallthrough
 	default:
-		s.handlePDConnector = s.handleNIXLV2
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType APIType) {
+			s.handleNIXLV2(w, r, host, kvCacheSource, apiType)
+		}
 	}
 }
 
