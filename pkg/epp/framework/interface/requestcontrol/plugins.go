@@ -99,11 +99,3 @@ type RequestHeaderProcessor interface {
 	plugin.Plugin
 	RequestHeader(ctx context.Context, request *fwksched.InferenceRequest) error
 }
-
-const (
-	// AgentIdentityKey is the request-attribute key under which a
-	// RequestHeaderProcessor publishes the resolved agent identity.
-	// Downstream consumers such as the Director read it
-	// via scheduling.ReadRequestAttribute to derive the FairnessID.
-	AgentIdentityKey = "agent-identity"
-)

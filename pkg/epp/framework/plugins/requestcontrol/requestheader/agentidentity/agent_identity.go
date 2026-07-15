@@ -31,8 +31,12 @@ import (
 )
 
 const (
-	PluginType = "agent-identity"
-
+	// AgentIdentityKey is the request-attribute key under which
+	// this plugin publishes the resolved agent identity.
+	// Downstream consumers such as the Director read it
+	// via scheduling.ReadRequestAttribute to derive the FairnessID.
+	AgentIdentityKey        = "agent-identity"
+	PluginType              = "agent-identity"
 	ClaudeCodeSessionHeader = "x-claude-code-session-id"
 	OpenCodeSessionHeader   = "x-session-affinity"
 	// CodexSessionHeader is the current (Codex >= 0.131.0) hyphenated form.
@@ -109,7 +113,7 @@ func (p *Plugin) TypedName() plugin.TypedName {
 func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceRequest) error {
 	for _, header := range p.priorityHeaders {
 		if id := request.Headers[header]; id != "" {
-			request.PutAttribute(requestcontrol.AgentIdentityKey, id)
+			request.PutAttribute(AgentIdentityKey, id)
 			return nil
 		}
 	}

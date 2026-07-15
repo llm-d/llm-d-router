@@ -54,6 +54,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
@@ -455,7 +456,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName: objectiveName,
 			requestHeaderPlugin: &mockRequestHeaderPlugin{
 				name:           "agent-identity",
-				attributeKey:   fwkrc.AgentIdentityKey,
+				attributeKey:   agentidentity.AgentIdentityKey,
 				attributeValue: "session-abc",
 			},
 			wantFairnessID: "session-abc",
@@ -475,7 +476,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			fairnessIDHeader:       "explicit-id",
 			requestHeaderPlugin: &mockRequestHeaderPlugin{
 				name:           "agent-identity",
-				attributeKey:   fwkrc.AgentIdentityKey,
+				attributeKey:   agentidentity.AgentIdentityKey,
 				attributeValue: "session-abc",
 			},
 			wantFairnessID: "explicit-id",

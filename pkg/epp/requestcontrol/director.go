@@ -49,6 +49,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -281,12 +282,11 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 	// Derive FairnessID from agent-identity attribute if not already set by explicit header.
 	if reqCtx.SchedulingRequest.FairnessID == "" {
-		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, fwkrc.AgentIdentityKey); ok && agentID != "" {
+		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey); ok && agentID != "" {
 			reqCtx.SchedulingRequest.FairnessID = agentID
+		} else {
+			reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
 		}
-	}
-	if reqCtx.SchedulingRequest.FairnessID == "" {
-		reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
 	}
 
 	// Admit may block until flow control admits the request.
