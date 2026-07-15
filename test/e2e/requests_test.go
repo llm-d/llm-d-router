@@ -304,10 +304,7 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 
 	metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
-	if k8sContext != "" {
-		// Use port-forward to access the EPP pod's metrics endpoint.
-		startEPPMetricsPortForward()
-	}
+	startEPPMetricsPortForward()
 
 	theMetrics := getMetrics(metricsURL)
 	gomega.Expect(theMetrics).ShouldNot(gomega.BeEmpty())

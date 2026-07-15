@@ -40,9 +40,14 @@ on:
         default: 'test/perf/config/shared_prefix_job1.yaml'
         required: true
         type: string
+      gcs_bucket:
+        description: 'GCS bucket name for storing performance test results'
+        default: 'llm-d-router-perf-results'
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 jobs:
@@ -58,6 +63,7 @@ jobs:
       ROUTER_CONFIG: ${{ inputs.router_config || 'test/perf/config/router-configs/optimized-baseline.yaml' }}
       TEST_NAME: ${{ inputs.test_name || 'optimized-baseline-job1' }}
       PERF_JOB: ${{ inputs.perf_job || 'test/perf/config/shared_prefix_job1.yaml' }}
+      GCS_BUCKET: ${{ inputs.gcs_bucket || 'llm-d-router-perf-results' }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - name: Checkout llm-d/llm-d-router
@@ -95,6 +101,10 @@ jobs:
         with:
           python-version: "3.10"
 
+      - name: Install Graphviz
+        run: |
+          sudo apt-get update && sudo apt-get install -y graphviz
+
       - name: Install Python dependencies
         run: |
           python3 -m pip install --upgrade pip
@@ -110,21 +120,13 @@ jobs:
             --sim-replicas ${{ env.SIM_REPLICAS }} \
             --results-dir test/perf/results/optimized-baseline \
             --router-machine-family e2 \
-            --gcp-project ${{ env.GCP_PROJECT_ID }}
+            --gcp-project ${{ env.GCP_PROJECT_ID }} \
+            --collect-pprof-profiles \
+            --gcs-bucket ${{ env.GCS_BUCKET }}
 
-      - name: Upload Performance Results
+      - name: Upload Performance Results Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: epp-perf-results
           path: test/perf/results/optimized-baseline/
-
-      - name: Commit and push updated results
-        if: success() && github.ref == 'refs/heads/main'
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add test/perf/results/optimized-baseline/
-          git commit -m "Auto-update EPP nightly performance results [skip ci]" || exit 0
-          git pull --rebase origin main
-          git push

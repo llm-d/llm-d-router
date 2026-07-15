@@ -3,7 +3,6 @@ package e2e
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -27,10 +26,6 @@ const (
 	// ePDDisaggDir references the Kustomize directory for the deployment
 	// running vLLM with E/P/D (Encode/Prefill/Decode)
 	ePDDisaggDir = "../../deploy/environments/dev/e-p-d"
-	// encodeOnlyDir is the single-component kustomize path for encode-only pods.
-	encodeOnlyDir = "../../deploy/components/vllm-encode"
-	// prefillOnlyDir is the single-component kustomize path for prefill-only pods.
-	prefillOnlyDir = "../../deploy/components/vllm-prefill"
 
 	simplePrompt = "Hello my name is Andrew, I have a doctorate in Rocket Science, and I like interplanetary space exploration"
 	extraPrompt  = "Why is the sky sometimes blue and sometimes red close to sunset?"
@@ -170,10 +165,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
-			if k8sContext != "" {
-				// Use port-forward to access the EPP pod's metrics endpoint.
-				startEPPMetricsPortForward()
-			}
+			startEPPMetricsPortForward()
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
@@ -481,10 +473,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
-			if k8sContext != "" {
-				// Use port-forward to access the EPP pod's metrics endpoint.
-				startEPPMetricsPortForward()
-			}
+			startEPPMetricsPortForward()
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
@@ -794,11 +783,9 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects = createInferencePool(1, true)
 
+			modelServers := createModelServersDecodeKV(1)
 			epp := createEndPointPicker(kvConfig)
 			nsName := getNamespace()
-
-			modelServers := createModelServersDecodeKV(1)
-			time.Sleep(5 * time.Second) // wait for model server(s) to become ready
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
@@ -819,11 +806,9 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects = createInferencePool(1, true)
 
+			modelServers := createModelServersDecodeKV(1)
 			epp := createEndPointPicker(kvExternalTokenizerConfig)
 			nsName := getNamespace()
-
-			modelServers := createModelServersDecodeKV(1)
-			time.Sleep(5 * time.Second) // wait for model server(s) to become ready
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
