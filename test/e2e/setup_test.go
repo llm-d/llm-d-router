@@ -133,7 +133,7 @@ func createRender(nsName string) []string {
 			"${VLLM_RENDER_PORT}":  vllmRenderPort,
 		})
 	objects := testutils.CreateObjsFromYaml(testConfig, renderYamls, nsName)
-	podsInDeploymentsReady(objects)
+	podsInDeploymentsReady(nsName, objects)
 	return objects
 }
 
@@ -190,6 +190,7 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 			"${EPP_REPLICA_COUNT}":      strconv.Itoa(replicas),
 			"${ENABLE_LEADER_ELECTION}": strconv.FormatBool(isLeaderElectionEnabled),
 		})
+	eppYamls = appendEppArgs(eppYamls, eppExtraArgs)
 
 	if waitForReady {
 		return append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls, nsName)...)

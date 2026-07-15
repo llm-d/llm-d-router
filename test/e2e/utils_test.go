@@ -14,9 +14,12 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
+	"sigs.k8s.io/yaml"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	apilabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -207,6 +210,76 @@ func removeEmptyLabels(inputs []string) []string {
 		outputs[idx] = strings.Join(filtered, "\n")
 	}
 	return outputs
+}
+
+// eppExtraArgs are appended to the "epp" container's args in the Deployment
+// created by createEndPointPickerHelper.
+//
+// Graceful drain is disabled (--drain-timeout=0) for all e2e EPPs. The suites
+// create and delete the shared "e2e-epp" Deployment in sequence behind a single
+// Envoy; with a drain window a deleted EPP keeps serving ext_proc on its
+// existing connection, so Envoy lingers on the terminating pod (stale datastore)
+// and the next spec's requests fail. The graceful-drain behavior itself is
+// covered by unit tests.
+var eppExtraArgs = []string{"--drain-timeout=0"}
+
+// appendEppArgs returns the input YAML docs with args appended to the "epp"
+// container of any Deployment. It is a no-op when args is empty.
+func appendEppArgs(inputs []string, args []string) []string {
+	if len(args) == 0 {
+		return inputs
+	}
+	outputs := make([]string, len(inputs))
+	for idx, input := range inputs {
+		docs := strings.Split(input, "\n---")
+		rendered := make([]string, 0, len(docs))
+		for _, doc := range docs {
+			if strings.TrimSpace(doc) == "" {
+				continue
+			}
+			rendered = append(rendered, appendArgsToEppContainer(doc, args))
+		}
+		outputs[idx] = strings.Join(rendered, "\n---\n")
+	}
+	return outputs
+}
+
+func appendArgsToEppContainer(doc string, args []string) string {
+	obj := &unstructured.Unstructured{}
+	err := yaml.Unmarshal([]byte(doc), &obj.Object)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	if len(obj.Object) == 0 || obj.GetKind() != kubernetesDeploymentKind {
+		return doc
+	}
+	path := []string{"spec", "template", "spec", "containers"}
+	containers, found, err := unstructured.NestedSlice(obj.Object, path...)
+
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	if !found {
+		return doc
+	}
+	for i, c := range containers {
+		m, ok := c.(map[string]any)
+		if !ok || m["name"] != "epp" {
+			continue
+		}
+		existing, _, err := unstructured.NestedStringSlice(m, "args")
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		merged := make([]any, 0, len(existing)+len(args))
+		for _, a := range existing {
+			merged = append(merged, a)
+		}
+		for _, a := range args {
+			merged = append(merged, a)
+		}
+		m["args"] = merged
+		containers[i] = m
+	}
+	err = unstructured.SetNestedSlice(obj.Object, containers, path...)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	out, err := yaml.Marshal(obj.Object)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	return strings.TrimRight(string(out), "\n")
 }
 
 func substituteMany(inputs []string, substitutions map[string]string) []string {
