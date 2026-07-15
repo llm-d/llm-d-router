@@ -24,8 +24,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+
 	"testing"
 	"time"
+
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -231,5 +234,16 @@ func TestHandleInference_OverlongRequestIDIsRejected(t *testing.T) {
 	rec := postInferenceWithRequestID(t, newTestServer(stepErr), overlong)
 	if strings.Contains(rec.Body.String(), overlong) {
 		t.Fatalf("overlong request_id must not leak to the client: %q", rec.Body.String())
+	}
+}
+
+func TestHandleInference_GenerateRouteRegistered(t *testing.T) {
+	srv := newTestServer(nil)
+	req := httptest.NewRequest(http.MethodPost, gateway.DefaultGeneratePath,
+		strings.NewReader(`{"model":"m","token_ids":[1,2,3]}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
+		t.Fatalf("route %s not registered: got HTTP %d", gateway.DefaultGeneratePath, rec.Code)
 	}
 }
