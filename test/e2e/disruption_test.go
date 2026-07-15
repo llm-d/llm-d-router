@@ -96,8 +96,8 @@ func completionRoutedToNamespace(nsName string) error {
 	return nil
 }
 
-var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disruptiveTestLabel), func() {
-	ginkgo.When("A decode pod is killed mid-request", func() {
+var _ = ginkgo.Describe("Disruption tests", ginkgo.Label(disruptiveTestLabel), func() {
+	ginkgo.When("A decode pod is killed mid-request", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should recover and route to surviving pods", func() {
 			nsName := getNamespace()
 
@@ -151,9 +151,9 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
 			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("A decode pod is killed while a streaming request is in-flight", func() {
+	ginkgo.When("A decode pod is killed while a streaming request is in-flight", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should not hang and should recover routing", func() {
 			nsName := getNamespace()
 
@@ -205,9 +205,9 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
 			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("All pods are gone", func() {
+	ginkgo.When("All pods are gone", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should return 503 to the client", func() {
 			nsName := getNamespace()
 
@@ -255,9 +255,9 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
 			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("The EPP is killed while requests are in flight", func() {
+	ginkgo.When("The EPP is killed while requests are in flight", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should recover and resume routing after restart", func() {
 			nsName := getNamespace()
 
@@ -308,9 +308,9 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
 			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Traffic is flowing during scale-to-zero and back", func() {
+	ginkgo.When("Traffic is flowing during scale-to-zero and back", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should return 503s when empty and recover when scaled back", func() {
 			nsName := getNamespace()
 
@@ -363,7 +363,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
 			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
-	})
+	}))
 
 })
 
