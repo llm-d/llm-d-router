@@ -278,11 +278,16 @@ func createCRDs() {
 	crdObjects = testutils.CreateObjsFromYaml(testConfig, crds, "")
 }
 
-func createEnvoy(nsName string) {
+func createEnvoy(nsName string) ([]string, *gexec.Session) {
+	infraSubs := map[string]string{
+		"${NAMESPACE}":       nsName,
+		"${ENVOY_NODE_PORT}": strconv.Itoa(30080 + 100*(ginkgo.GinkgoParallelProcess()-1)),
+	}
 	manifests := testutils.ReadYaml(envoyManifest)
-	manifests = substituteMany(manifests, map[string]string{"${NAMESPACE}": nsName})
+	manifests = substituteMany(manifests, infraSubs)
 	ginkgo.By("Creating envoy proxy resources from manifest: " + envoyManifest)
-	envoyObjects = testutils.CreateObjsFromYaml(testConfig, manifests, nsName)
+	envoyObjects := testutils.CreateObjsFromYaml(testConfig, manifests, nsName)
+	var portForwardSession *gexec.Session
 
 	if k8sContext != "" {
 		envoyName := ""
@@ -300,6 +305,7 @@ func createEnvoy(nsName string) {
 		portForwardSession, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	}
+	return envoyObjects, portForwardSession
 }
 
 func createInferencePool(numTargetPorts int, toDelete bool) []string {
