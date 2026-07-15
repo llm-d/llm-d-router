@@ -87,7 +87,12 @@ var (
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
 	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
-	numProcesses     = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
+
+	// numProcesses is the number of parallel processes that will be used by the tests.
+	// Theorectically this value could be gotten from the Ginkgo Suite Configuration.
+	// However, that needs to be done while the tests are running and has shown to not
+	// always allow the baseNsName field to be set correctly.
+	numProcesses = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
 	// baseNsName is the base of the namespace in which the K8S objects will be created
 	baseNsName = env.GetEnvString("NAMESPACE", testutils.DefaultNsName(numProcesses, "e2e"), ginkgo.GinkgoLogr)
 
@@ -97,16 +102,9 @@ var (
 	readyTimeout = env.GetEnvDuration("READY_TIMEOUT", defaultReadyTimeout, ginkgo.GinkgoLogr)
 	interval     = defaultInterval
 
-	crdObjects            []string
-	envoyObjects          []string
-	rbacObjects           []string
-	serviceAccountObjects []string
-	serviceObjects        []string
-	renderObjects         []string
-	infPoolObjects        []string
-	createdNameSpace      bool
+	crdObjects    []string
+	renderObjects []string
 
-	portForwardSession    *gexec.Session
 	eppPortForwardSession *gexec.Session
 )
 
@@ -125,36 +123,8 @@ var _ = ginkgo.BeforeSuite(func() {
 	}
 	testConfig = testutils.NewTestConfig(k8sContext)
 	setupK8sClient()
-	setupNameSpace()
 	createCRDs()
-	nsName := getNamespace()
-	createEnvoy(nsName)
-	infraSubs := map[string]string{
-		"${EPP_NAME}": "e2e-epp",
-	}
-	rbacYamls := substituteMany(testutils.ReadYaml(rbacManifest), infraSubs)
-	rbacObjects = testutils.CreateObjsFromYaml(testConfig, rbacYamls, nsName)
-	saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
-	serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls, nsName)
-	serviceObjects = testutils.ApplyYAMLFile(testConfig, servicesManifest, nsName)
-	renderObjects = createRender(nsName)
-
-	// Prevent failure in tests due to InferencePool not existing before the test
-	infPoolObjects = createInferencePool(1, false)
-})
-
-var _ = ginkgo.AfterSuite(func() {
-	// Stop port-forwards when using an existing cluster context; they must be
-	// terminated before the process exits regardless of pass/fail status.
-	if k8sContext != "" {
-		if portForwardSession != nil {
-			portForwardSession.Terminate()
-		}
-		if eppPortForwardSession != nil {
-			eppPortForwardSession.Terminate()
-			eppPortForwardSession = nil
-		}
-	}
+	renderObjects = createRender(getNamespace())
 })
 
 // ReportAfterSuite receives the full suite report and uses report.SuiteSucceeded
@@ -188,21 +158,9 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 		if shouldKeep {
 			ginkgo.By("Keeping created Kubernetes objects due to suite failure (E2E_KEEP_CLUSTER_ON_FAILURE=true)")
 		} else {
-			nsName := getNamespace()
 			ginkgo.By("Deleting created Kubernetes objects")
-			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
-			testutils.DeleteObjects(testConfig, renderObjects, nsName)
-			testutils.DeleteObjects(testConfig, serviceObjects, nsName)
-			testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
-			testutils.DeleteObjects(testConfig, rbacObjects, nsName)
-			testutils.DeleteObjects(testConfig, envoyObjects, nsName)
+			testutils.DeleteObjects(testConfig, renderObjects, getNamespace())
 			testutils.DeleteObjects(testConfig, crdObjects, "")
-
-			if createdNameSpace {
-				ginkgo.By("Deleting namespace " + getNamespace())
-				err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, getNamespace(), metav1.DeleteOptions{})
-				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-			}
 		}
 	}
 })
