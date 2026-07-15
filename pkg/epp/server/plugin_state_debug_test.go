@@ -79,9 +79,9 @@ func TestPluginStateDebugHandlerIncludesPlugins(t *testing.T) {
 	require.JSONEq(t, `{
 		"timestamp": "2025-01-02T03:04:05Z",
 		"plugins": {
-			"a-dumper": {"type":"test-type","state":{"value":"first"}},
-			"skip": {"type":"skip-type","message":"plugin does not support state collection"},
-			"z-dumper": {"type":"test-type","state":{"count":2}}
+			"a-dumper": {"name":"a-dumper","type":"test-type","state":{"value":"first"}},
+			"skip": {"name":"skip","type":"skip-type","message":"plugin does not support state collection"},
+			"z-dumper": {"name":"z-dumper","type":"test-type","state":{"count":2}}
 		}
 	}`, recorder.Body.String())
 
@@ -125,8 +125,8 @@ func TestPluginStateDebugHandlerReportsPluginStateErrors(t *testing.T) {
 	require.JSONEq(t, `{
 		"timestamp": "2025-01-02T03:04:05Z",
 		"plugins": {
-			"bad-dumper": {"type":"test-type","message":"plugin returned invalid JSON state"},
-			"good-dumper": {"type":"test-type","state":{"ok":true}}
+			"bad-dumper": {"name":"bad-dumper","type":"test-type","message":"plugin returned invalid JSON state"},
+			"good-dumper": {"name":"good-dumper","type":"test-type","state":{"ok":true}}
 		}
 	}`, recorder.Body.String())
 }

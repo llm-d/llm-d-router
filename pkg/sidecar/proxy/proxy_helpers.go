@@ -206,6 +206,13 @@ func extractHost(hostWithPort string) string {
 	return host
 }
 
+// isHostPort reports whether s parses as host:port with a non-empty host.
+// net.SplitHostPort accepts ":8000" (empty host), which is not a usable target.
+func isHostPort(s string) bool {
+	host, _, err := net.SplitHostPort(s)
+	return err == nil && host != ""
+}
+
 func newUUID() string {
 	return uuid.New().String()
 }

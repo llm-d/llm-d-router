@@ -61,6 +61,7 @@ This producer emits `PrefixCacheMatchInfo`; it does not score. Reuse the
 | `maxPrefixTokensToMatch` | 0 | cap on matched prefix tokens; 0 uses the default block cap. A positive value must be >= `blockSizeTokens`, otherwise it yields zero prefix blocks. |
 | `minColocateBlocks` | 0 | min shared leading blocks for inter-unit co-location and for a single request to gain an affinity; 0 disables both (only identical groups are placed, purely load-balanced) |
 | `maxBatchSize` | 1000 | max requests one window may accumulate; Produce returns an error once reached. -1 = unlimited. |
+| `balanceBy` | `requests` | quantity balanced across replicas within a window: `requests` (by request count) or `tokens` (by prefix-block load, charging each unit's prefix once per replica and discounting the leading blocks already held there). Token balancing spreads long-prompt units so no replica saturates on stacked prefixes while request counts stay even. |
 
 ## Operational notes
 

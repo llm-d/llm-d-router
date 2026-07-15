@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
-	tokenizerTypes "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
+	kvctok "github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
+
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -52,7 +54,7 @@ type legacyProducer struct {
 // to preciseproducer.New (so the embedded indexer doesn't build a second
 // pool), then constructs the wrapper-owned pool when requested.
 func newLegacyProducer(ctx context.Context, name string, cfg preciseproducer.PluginConfig) (*legacyProducer, error) {
-	var poolCfg *tokenization.Config
+	var poolCfg *kvctok.Config
 	if cfg.IndexerConfig != nil {
 		//nolint:staticcheck // SA1019: legacy config still flows through here.
 		if cfg.IndexerConfig.TokenizersPoolConfig != nil {
@@ -69,7 +71,7 @@ func newLegacyProducer(ctx context.Context, name string, cfg preciseproducer.Plu
 
 	lp := &legacyProducer{Producer: inner}
 	if poolCfg != nil {
-		pool, err := tokenization.NewTokenizationPool(ctx, poolCfg)
+		pool, err := tokenizer.NewLegacyPool(ctx, poolCfg)
 		if err != nil {
 			return nil, fmt.Errorf("legacy tokenization pool: %w", err)
 		}

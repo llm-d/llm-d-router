@@ -30,7 +30,7 @@ const (
 	kubernetesDeploymentKind = "Deployment"
 )
 
-func scaleDeployment(objects []string, increment int) {
+func scaleDeployment(nsName string, objects []string, increment int) {
 	direction := "up"
 	absIncrement := increment
 	if increment < 0 {
@@ -50,7 +50,7 @@ func scaleDeployment(objects []string, increment int) {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 	}
-	podsInDeploymentsReady(objects)
+	podsInDeploymentsReady(nsName, objects)
 }
 
 // getModelServerPods Returns the list of Prefill and Decode vLLM pods separately
@@ -118,7 +118,25 @@ func getPodNames(labels map[string]string) []string {
 	return names
 }
 
-func podsInDeploymentsReady(objects []string) {
+// waitForEPPToDiscoverPods blocks until the EPP's inference_pool_ready_pods
+// gauge for poolName reports at least one pod, indicating the InferencePool
+// controller has finished its initial pod discovery. The EPP reports gRPC
+// health as SERVING as soon as the pool is set, even if pod discovery found
+// zero endpoints, so readiness alone does not guarantee the datastore is
+// populated. Polling the gauge avoids routing a real request through the
+// EPP, which would otherwise be recorded as a routing decision and skew
+// tests that assert exact decision-type counts.
+func waitForEPPToDiscoverPods(poolName string) {
+	ginkgo.By("Waiting for EPP to discover pool members")
+	metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
+	startEPPMetricsPortForward()
+	labelMatch := fmt.Sprintf(`name="%s"`, poolName)
+	gomega.Eventually(func() int {
+		return getCounterMetric(metricsURL, "inference_pool_ready_pods", labelMatch)
+	}, readyTimeout, time.Second).Should(gomega.BeNumerically(">", 0), "EPP should discover pool members within the ready timeout")
+}
+
+func podsInDeploymentsReady(nsName string, objects []string) {
 	isDeploymentReady := func(deploymentName string) bool {
 		var deployment appsv1.Deployment
 		err := testConfig.K8sClient.Get(testConfig.Context, types.NamespacedName{Namespace: nsName, Name: deploymentName}, &deployment)
@@ -424,7 +442,7 @@ func extractFinishReasonFromStreaming(sseData string) string {
 }
 
 // getPodRequestCount gets the total vLLM request count from a pod's metrics endpoint.
-func getPodRequestCount(podName string) int {
+func getPodRequestCount(nsName, podName string) int {
 	ginkgo.By("Getting request count from pod: " + podName)
 
 	// Use Kubernetes API proxy to access the metrics endpoint
@@ -466,7 +484,7 @@ func parseRequestCountFromMetrics(metricsOutput string) int {
 
 // dumpPodsAndLogs dumps all pod statuses and their logs to the Ginkgo writer.
 // Call this before cleanup to insure the information is available when CI tests fail.
-func dumpPodsAndLogs() {
+func dumpPodsAndLogs(nsName string) {
 	if testConfig == nil || testConfig.KubeCli == nil {
 		ginkgo.GinkgoWriter.Println("Skipping pod dump: cluster not initialized")
 		return
@@ -540,15 +558,15 @@ func dumpPodsAndLogs() {
 
 		for _, c := range pod.Spec.InitContainers {
 			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Name, c.Name, true)
+				dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, true)
 			}
-			dumpContainerLogs(ctx, pod.Name, c.Name, false)
+			dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, false)
 		}
 		for _, c := range pod.Spec.Containers {
 			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Name, c.Name, true)
+				dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, true)
 			}
-			dumpContainerLogs(ctx, pod.Name, c.Name, false)
+			dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, false)
 		}
 	}
 	ginkgo.GinkgoWriter.Println("=== End of pod dump ===")
@@ -565,7 +583,7 @@ func printContainerStatus(kind string, cs corev1.ContainerStatus) {
 	ginkgo.GinkgoWriter.Println(status)
 }
 
-func dumpContainerLogs(ctx context.Context, podName, containerName string, previous bool) {
+func dumpContainerLogs(ctx context.Context, nsName, podName, containerName string, previous bool) {
 	tailLines := int64(100)
 	req := testConfig.KubeCli.CoreV1().Pods(nsName).GetLogs(podName, &corev1.PodLogOptions{
 		Container: containerName,

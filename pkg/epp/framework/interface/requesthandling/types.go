@@ -24,8 +24,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
-	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -75,7 +75,8 @@ func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
-// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest, or MessagesRequest.
+// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest,
+// ImagesGenerationsRequest, or MessagesRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
@@ -91,6 +92,8 @@ type InferenceRequestBody struct {
 	Embeddings *EmbeddingsRequest `json:"embeddings,omitempty"`
 	// GenerateRequest is the representation of the vLLM /inference/v1/generate request body.
 	Generate *GenerateRequest `json:"generate,omitempty"`
+	// ImagesGenerationsRequest is the representation of the OpenAI /v1/images/generations request body.
+	Images *ImagesGenerationsRequest `json:"images,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
@@ -439,6 +442,27 @@ func (e *EmbeddingsRequest) String() string {
 		return nilStr
 	}
 	return fmt.Sprintf("{InputType: %T}", e.Input)
+}
+
+// ImagesGenerationsRequest represents the OpenAI /v1/images/generations request body
+// structure.
+type ImagesGenerationsRequest struct {
+	// Prompt is the text description of the desired image(s).
+	Prompt string `json:"prompt"`
+	// N is the number of images to generate. Nil means the server default (1).
+	N *int64 `json:"n,omitempty"`
+	// Size is the requested image size as "WIDTHxHEIGHT" (e.g. "1024x1024").
+	Size string `json:"size,omitempty"`
+	// NumInferenceSteps is the number of denoising steps. Nil means the server default.
+	NumInferenceSteps *int64 `json:"num_inference_steps,omitempty"`
+}
+
+func (i *ImagesGenerationsRequest) String() string {
+	if i == nil {
+		return nilStr
+	}
+	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v}",
+		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps)
 }
 
 // GenerateRequest is a structured representation of the fields we parse out of the vLLM

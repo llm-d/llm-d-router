@@ -18,13 +18,10 @@ package metrics
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
-	"strconv"
 
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
-	"github.com/spf13/pflag"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
@@ -61,10 +58,7 @@ func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[P
 // MetricsDataSourceFactory is a factory function used to instantiate data layer's
 // metrics data source plugins specified in a configuration.
 func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	cfg, err := defaultDataSourceConfigParams()
-	if err != nil {
-		return nil, err
-	}
+	cfg := defaultDataSourceConfigParams()
 
 	if parameters != nil { // overlay the defaults with configured values
 		if err := parameters.Decode(cfg); err != nil {
@@ -76,75 +70,12 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		MetricsDataSourceType, name, parseMetrics)
 }
 
-// These flags are registered in options.go (server package) and marked as deprecated there.
-// They are kept for one release cycle to give users time to migrate their configuration
-// to the EndpointPickerConfig `parameters` field (metricsDatasourceParams).
-// They will be removed in a future release.
-//
-// TODO: Remove these constants and defaultDataSourceConfigParams() once the deprecated flags
-// are removed from options.go.
-// Note: these flag names are duplicated here (rather than imported from the server package)
-// to avoid an import cycle between the datalayer plugin and the server/runserver packages.
-const (
-	modelServerMetricsPathFlag               = "model-server-metrics-path"
-	modelServerMetricsSchemeFlag             = "model-server-metrics-scheme"
-	modelServerMetricsInsecureSkipVerifyFlag = "model-server-metrics-https-insecure-skip-verify"
-)
-
-// DataSource parameters values - Priority (lowest → highest):
-//  1. Built-in defaults (defaultMetricsScheme / defaultMetricsPath / defaultMetricsInsecureSkipVerify)
-//  2. Deprecated CLI flag value (when the flag is registered and has been set by the operator)
-//  3. Explicit plugin `parameters` in EndpointPickerConfig
-func defaultDataSourceConfigParams() (*metricsDatasourceParams, error) {
-	cfg := &metricsDatasourceParams{
+func defaultDataSourceConfigParams() *metricsDatasourceParams {
+	return &metricsDatasourceParams{
 		Scheme:             defaultMetricsScheme,
 		Path:               defaultMetricsPath,
 		InsecureSkipVerify: defaultMetricsInsecureSkipVerify,
 	}
-
-	if scheme, ok := fromStringFlag(modelServerMetricsSchemeFlag); ok {
-		cfg.Scheme = scheme
-	}
-
-	if path, ok := fromStringFlag(modelServerMetricsPathFlag); ok {
-		cfg.Path = path
-	}
-
-	if insecure, ok, err := fromBoolFlag(modelServerMetricsInsecureSkipVerifyFlag); err != nil {
-		return nil, err
-	} else if ok {
-		cfg.InsecureSkipVerify = insecure
-	}
-
-	return cfg, nil
-}
-
-// fromStringFlag returns the value of a registered pflag string flag.
-// The second return value is false when the flag is not registered; no error is returned in that case.
-func fromStringFlag(name string) (string, bool) {
-	f := pflag.Lookup(name)
-	if f == nil || !f.Changed {
-		return "", false
-	}
-	return f.Value.String(), true
-}
-
-// fromBoolFlag returns the value of a registered pflag bool flag.
-// The second return value is false when the flag is not registered; no error is returned in that case.
-// An error is returned only when the flag exists but its value cannot be parsed as a bool.
-func fromBoolFlag(name string) (bool, bool, error) {
-	f := pflag.Lookup(name)
-	if f == nil {
-		return false, false, nil
-	}
-	if !f.Changed {
-		return false, false, nil // user did NOT provide it
-	}
-	b, err := strconv.ParseBool(f.Value.String())
-	if err != nil {
-		return false, false, fmt.Errorf("invalid bool flag %q: %w", name, err)
-	}
-	return b, true, nil
 }
 
 func parseMetrics(data io.Reader) (PrometheusMetricMap, error) {

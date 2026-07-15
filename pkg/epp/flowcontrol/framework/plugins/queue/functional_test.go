@@ -18,7 +18,6 @@ package queue
 
 import (
 	"fmt"
-	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -170,8 +169,6 @@ func TestQueueConformance(t *testing.T) {
 				assert.Zero(t, q.Len(), "A new queue should have a length of 0")
 				assert.Zero(t, q.ByteSize(), "A new queue should have a byte size of 0")
 				assert.Equal(t, string(queueName), q.Name(), "Name() should return the registered name of the queue")
-				assert.NotNil(t, q.Capabilities(), "Capabilities() should not return a nil slice")
-				assert.NotEmpty(t, q.Capabilities(), "Capabilities() should return at least one capability")
 			})
 
 			t.Run("LifecycleAndOrdering_DefaultFIFO", func(t *testing.T) {
@@ -192,38 +189,35 @@ func TestQueueConformance(t *testing.T) {
 				testLifecycleAndOrdering(t, q, itemsInFIFOOrder, "DefaultFIFO")
 			})
 
-			qForCapCheck, err := constructor(enqueueTimePolicy)
-			if err == nil && slices.Contains(qForCapCheck.Capabilities(), flowcontrol.CapabilityPriorityConfigurable) {
-				t.Run("LifecycleAndOrdering_PriorityConfigurable_ByteSize", func(t *testing.T) {
-					t.Parallel()
-					q, err := constructor(byteSizePolicy)
-					require.NoError(t, err, "Setup: creating queue with byteSizePolicy should not fail")
+			t.Run("LifecycleAndOrdering_PriorityConfigurable_ByteSize", func(t *testing.T) {
+				t.Parallel()
+				q, err := constructor(byteSizePolicy)
+				require.NoError(t, err, "Setup: creating queue with byteSizePolicy should not fail")
 
-					itemLarge := mocks.NewMockQueueItemAccessor(100, "itemLarge_prio", flowKey)
-					itemSmall := mocks.NewMockQueueItemAccessor(20, "itemSmall_prio", flowKey)
-					itemMedium := mocks.NewMockQueueItemAccessor(50, "itemMedium_prio", flowKey)
+				itemLarge := mocks.NewMockQueueItemAccessor(100, "itemLarge_prio", flowKey)
+				itemSmall := mocks.NewMockQueueItemAccessor(20, "itemSmall_prio", flowKey)
+				itemMedium := mocks.NewMockQueueItemAccessor(50, "itemMedium_prio", flowKey)
 
-					itemsInByteSizeOrder := []*mocks.MockQueueItemAccessor{itemSmall, itemMedium, itemLarge}
-					testLifecycleAndOrdering(t, q, itemsInByteSizeOrder, "PriorityByteSize")
-				})
+				itemsInByteSizeOrder := []*mocks.MockQueueItemAccessor{itemSmall, itemMedium, itemLarge}
+				testLifecycleAndOrdering(t, q, itemsInByteSizeOrder, "PriorityByteSize")
+			})
 
-				t.Run("LifecycleAndOrdering_PriorityConfigurable_LIFO", func(t *testing.T) {
-					t.Parallel()
-					q, err := constructor(reverseEnqueueTimePolicy)
-					require.NoError(t, err, "Setup: creating queue with reverseEnqueueTimePolicy should not fail")
+			t.Run("LifecycleAndOrdering_PriorityConfigurable_LIFO", func(t *testing.T) {
+				t.Parallel()
+				q, err := constructor(reverseEnqueueTimePolicy)
+				require.NoError(t, err, "Setup: creating queue with reverseEnqueueTimePolicy should not fail")
 
-					now := time.Now()
-					item1 := mocks.NewMockQueueItemAccessor(100, "item1_lifo", flowKey)
-					item1.EnqueueTimeV = now.Add(-2 * time.Second) // Earliest
-					item2 := mocks.NewMockQueueItemAccessor(50, "item2_lifo", flowKey)
-					item2.EnqueueTimeV = now.Add(-1 * time.Second) // Middle
-					item3 := mocks.NewMockQueueItemAccessor(20, "item3_lifo", flowKey)
-					item3.EnqueueTimeV = now // Latest
+				now := time.Now()
+				item1 := mocks.NewMockQueueItemAccessor(100, "item1_lifo", flowKey)
+				item1.EnqueueTimeV = now.Add(-2 * time.Second) // Earliest
+				item2 := mocks.NewMockQueueItemAccessor(50, "item2_lifo", flowKey)
+				item2.EnqueueTimeV = now.Add(-1 * time.Second) // Middle
+				item3 := mocks.NewMockQueueItemAccessor(20, "item3_lifo", flowKey)
+				item3.EnqueueTimeV = now // Latest
 
-					itemsInLIFOOrder := []*mocks.MockQueueItemAccessor{item3, item2, item1}
-					testLifecycleAndOrdering(t, q, itemsInLIFOOrder, "PriorityLIFO")
-				})
-			}
+				itemsInLIFOOrder := []*mocks.MockQueueItemAccessor{item3, item2, item1}
+				testLifecycleAndOrdering(t, q, itemsInLIFOOrder, "PriorityLIFO")
+			})
 
 			t.Run("Remove_InvalidHandle", func(t *testing.T) {
 				t.Parallel()
