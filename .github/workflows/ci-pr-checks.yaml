@@ -1,3 +1,6 @@
+# Matrix jobs (e2e-image-common, e2e-image-router, e2e-router) are each
+# followed by a *-status job that aggregates their result, since GitHub
+# required status checks cannot reference individual matrix legs.
 name: CI - Test
 
 on:
@@ -256,6 +259,19 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  e2e-image-common-status:
+    needs: e2e-image-common
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check e2e-image-common result
+        run: |
+          result="${{ needs.e2e-image-common.result }}"
+          if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+            echo "::error::e2e-image-common failed for at least one matrix image"
+            exit 1
+          fi
+
   e2e-image-router:
     needs: check-changes
     if: ${{ needs.check-changes.outputs.src == 'true' }}
@@ -305,6 +321,19 @@ jobs:
           path: ${{ runner.temp }}/${{ matrix.image.archive }}.tar
           retention-days: 1
           compression-level: 0
+
+  e2e-image-router-status:
+    needs: e2e-image-router
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check e2e-image-router result
+        run: |
+          result="${{ needs.e2e-image-router.result }}"
+          if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+            echo "::error::e2e-image-router failed for at least one matrix image"
+            exit 1
+          fi
 
   e2e-router:
     needs:
@@ -393,3 +422,16 @@ jobs:
           PULL_VLLM_RENDER_IMAGE: "false"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: make test-e2e-run
+
+  e2e-router-status:
+    needs: e2e-router
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check e2e-router result
+        run: |
+          result="${{ needs.e2e-router.result }}"
+          if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+            echo "::error::e2e-router failed for at least one matrix suite"
+            exit 1
+          fi
