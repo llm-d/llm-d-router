@@ -26,6 +26,10 @@ import (
 
 var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
 
+// SpeculativeTierKey is the CachedBlocksByTier key for speculative index
+// entries, which carry no engine-reported device tier.
+const SpeculativeTierKey = "speculative"
+
 type PrefixCacheMatchInfo struct {
 	// matched prefix length in blocks. For the precise prefix cache this is the
 	// device-tier-weighted longest-prefix score (e.g. RAM-tier blocks count as
@@ -44,8 +48,8 @@ type PrefixCacheMatchInfo struct {
 	// per device tier, the unweighted count of contiguous cached prefix blocks
 	// the endpoint holds in that tier, from the first block until the first
 	// block missing from that tier. A block held in several tiers counts once
-	// per tier. Speculative index entries count under the synthetic
-	// "speculative" tier. Nil when the producer supplies no tier data.
+	// per tier. Speculative index entries count under SpeculativeTierKey.
+	// Nil when the producer supplies no tier data.
 	cachedBlocksByTier map[string]int
 }
 

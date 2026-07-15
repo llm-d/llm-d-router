@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 // extractEndpointSet builds the "address:port" identifier set used to filter
@@ -55,17 +56,14 @@ func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash
 	return count
 }
 
-// speculativeTierKey is the CachedBlocksByTier key for speculative index
-// entries: PreRequest inserts them before vLLM has reported placement, so
-// they carry no device tier.
-const speculativeTierKey = "speculative"
-
 // matchedBlockCountByTier returns, per device tier, the number of contiguous
 // cached prefix blocks podID holds in that tier, counting from the first
 // block until the first block the pod does not hold in that tier. A block
 // held in several tiers counts once per tier, so each tier's count is at most
 // matchedBlockCount for the same pod. Tiers are recorded as found in the
-// index, except speculative entries, which count under speculativeTierKey.
+// index, except speculative entries, which count under
+// attrprefix.SpeculativeTierKey: PreRequest inserts them before vLLM has
+// reported placement, so they carry no device tier.
 // Returns a non-nil (possibly empty) map.
 func matchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) map[string]int {
 	counts := map[string]int{}
@@ -75,7 +73,7 @@ func matchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblock.Blo
 		for _, e := range keyToPods[key] {
 			if e.PodIdentifier == podID {
 				if e.Speculative {
-					tiersAtKey.Insert(speculativeTierKey)
+					tiersAtKey.Insert(attrprefix.SpeculativeTierKey)
 				} else {
 					tiersAtKey.Insert(e.DeviceTier)
 				}

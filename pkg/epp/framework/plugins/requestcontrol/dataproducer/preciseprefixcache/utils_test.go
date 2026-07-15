@@ -21,6 +21,8 @@ import (
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/stretchr/testify/assert"
+
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 func TestMatchedBlockCount(t *testing.T) {
@@ -160,7 +162,7 @@ func TestMatchedBlockCountByTier(t *testing.T) {
 				1: {speculative(podA), gpu(podA)}, 2: {speculative(podA)},
 			},
 			podID: podA,
-			want:  map[string]int{"gpu": 1, speculativeTierKey: 2},
+			want:  map[string]int{"gpu": 1, attrprefix.SpeculativeTierKey: 2},
 		},
 		{
 			name:      "empty index yields empty map",
