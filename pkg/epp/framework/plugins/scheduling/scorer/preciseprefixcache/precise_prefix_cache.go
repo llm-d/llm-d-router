@@ -36,6 +36,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 	prefixscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
@@ -61,9 +63,10 @@ type PluginConfig struct {
 // Deprecated: configure precise-prefix-cache-producer and prefix-cache-scorer
 // directly.
 type Plugin struct {
-	typedName plugin.TypedName
-	producer  *legacyProducer
-	scorer    *prefixscorer.Plugin
+	typedName    plugin.TypedName
+	producer     *legacyProducer
+	scorer       *prefixscorer.Plugin
+	matchInfoKey string
 }
 
 var (
@@ -130,9 +133,10 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	}
 
 	return &Plugin{
-		typedName: plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: name},
-		producer:  producer,
-		scorer:    scorer,
+		typedName:    plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: name},
+		producer:     producer,
+		scorer:       scorer,
+		matchInfoKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name).String(),
 	}, nil
 }
 
@@ -180,6 +184,7 @@ func (p *Plugin) Score(ctx context.Context,
 			span.SetAttributes(attribute.String("gen_ai.request.id", req.RequestID))
 		}
 	}
+	span.SetAttributes(mmobs.SpanAttributes(req)...)
 
 	scores := p.scorer.Score(ctx, req, endpoints)
 
@@ -198,7 +203,35 @@ func (p *Plugin) Score(ctx context.Context,
 		)
 	}
 
+	if hit, tracked := anyMMHit(endpoints, p.matchInfoKey); tracked {
+		span.SetAttributes(attribute.Bool("mm.hit", hit))
+	}
 	return scores
+}
+
+// anyMMHit returns (hit, tracked). When no endpoint had MM tracked, the
+// caller should omit mm.hit (OTel: don't emit attributes whose value is unknown).
+func anyMMHit(endpoints []scheduling.Endpoint, key string) (hit, tracked bool) {
+	for _, ep := range endpoints {
+		v, ok := ep.Get(key)
+		if !ok {
+			continue
+		}
+		info, ok := v.(*attrprefix.PrefixCacheMatchInfo)
+		if !ok {
+			continue
+		}
+		mm := info.MM()
+		if mm == nil {
+			continue
+		}
+		tracked = true
+		if mm.MatchBlocks > 0 {
+			hit = true
+			return
+		}
+	}
+	return
 }
 
 func (p *Plugin) Produces() map[plugin.DataKey]any { return p.producer.Produces() }

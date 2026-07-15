@@ -55,3 +55,49 @@ func TestPrefixCacheMatchInfo_CloneCopiesCachedBlockCount(t *testing.T) {
 	assert.Equal(t, 240, orig.CachedBlockCount())
 	assert.Equal(t, 1, clone.CachedBlockCount())
 }
+
+func TestPrefixCacheMatchInfo_MM(t *testing.T) {
+	tests := []struct {
+		name      string
+		info      *PrefixCacheMatchInfo
+		wantMatch int
+		wantTotal int
+		wantBlock int
+		wantMM    *MMMatchInfo
+	}{
+		{
+			name:      "constructor leaves mm nil",
+			info:      NewPrefixCacheMatchInfo(5, 10, 16),
+			wantMatch: 5, wantTotal: 10, wantBlock: 16, wantMM: nil,
+		},
+		{
+			name:      "WithMM attaches non-zero",
+			info:      NewPrefixCacheMatchInfo(5, 10, 16).WithMM(MMMatchInfo{MatchBlocks: 2}),
+			wantMatch: 5, wantTotal: 10, wantBlock: 16, wantMM: &MMMatchInfo{MatchBlocks: 2},
+		},
+		{
+			name:      "WithMM(zero) attaches present-but-zero",
+			info:      NewPrefixCacheMatchInfo(5, 10, 16).WithMM(MMMatchInfo{MatchBlocks: 0}),
+			wantMatch: 5, wantTotal: 10, wantBlock: 16, wantMM: &MMMatchInfo{MatchBlocks: 0},
+		},
+		{
+			name:      "clone preserves nil mm",
+			info:      NewPrefixCacheMatchInfo(5, 10, 16).Clone().(*PrefixCacheMatchInfo),
+			wantMatch: 5, wantTotal: 10, wantBlock: 16, wantMM: nil,
+		},
+		{
+			name:      "clone preserves mm",
+			info:      NewPrefixCacheMatchInfo(7, 12, 64).WithMM(MMMatchInfo{MatchBlocks: 3}).Clone().(*PrefixCacheMatchInfo),
+			wantMatch: 7, wantTotal: 12, wantBlock: 64, wantMM: &MMMatchInfo{MatchBlocks: 3},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantMatch, tt.info.MatchBlocks())
+			assert.Equal(t, tt.wantTotal, tt.info.TotalBlocks())
+			assert.Equal(t, tt.wantBlock, tt.info.BlockSizeTokens())
+			assert.Equal(t, tt.wantMM, tt.info.MM())
+		})
+	}
+}
