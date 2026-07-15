@@ -99,12 +99,11 @@ func completionRoutedToNamespace(nsName string) error {
 var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disruptiveTestLabel), func() {
 	ginkgo.When("A decode pod is killed mid-request", func() {
 		ginkgo.It("should recover and route to surviving pods", func() {
-			infPoolObjects = createInferencePool(1, true)
-
 			nsName := getNamespace()
 
 			modelServers := createModelServersDecode(2)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
+			infPoolObjects := createInferencePool(1)
 
 			epp := createEndPointPicker(simpleConfig)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
@@ -149,14 +148,16 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			ginkgo.By("Verifying requests succeed consistently after recovery")
 			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).WithArguments(nsName).
 				MustPassRepeatedly(3).Should(gomega.Succeed())
+
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
 	})
 
 	ginkgo.When("A decode pod is killed while a streaming request is in-flight", func() {
 		ginkgo.It("should not hang and should recover routing", func() {
-			infPoolObjects = createInferencePool(1, true)
-
 			nsName := getNamespace()
+
+			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(2)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
@@ -201,14 +202,15 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			ginkgo.By("Verifying requests succeed consistently after recovery")
 			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).WithArguments(nsName).
 				MustPassRepeatedly(3).Should(gomega.Succeed())
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
 	})
 
 	ginkgo.When("All pods are gone", func() {
 		ginkgo.It("should return 503 to the client", func() {
-			infPoolObjects = createInferencePool(1, true)
-
 			nsName := getNamespace()
+
+			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(1)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
@@ -249,14 +251,15 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
 				return nsHdr
 			}, eppRecoveryTimeout, 2*time.Second).Should(gomega.Equal(nsName))
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
 	})
 
 	ginkgo.When("The EPP is killed while requests are in flight", func() {
 		ginkgo.It("should recover and resume routing after restart", func() {
-			infPoolObjects = createInferencePool(1, true)
-
 			nsName := getNamespace()
+
+			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(1)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
@@ -300,13 +303,15 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				}
 				return nil
 			}, eppRecoveryTimeout, 2*time.Second).Should(gomega.Succeed())
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
 	})
 
 	ginkgo.When("Traffic is flowing during scale-to-zero and back", func() {
 		ginkgo.It("should return 503s when empty and recover when scaled back", func() {
-			infPoolObjects = createInferencePool(1, true)
 			nsName := getNamespace()
+
+			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(1)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
@@ -352,6 +357,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			<-done
 
 			ginkgo.By(fmt.Sprintf("Traffic results: %d successes, %d failures", tc.successes(), tc.failures()))
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
 	})
 
