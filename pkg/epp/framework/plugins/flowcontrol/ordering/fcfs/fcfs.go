@@ -60,12 +60,6 @@ func (p *fcfs) withName(name string) *fcfs {
 	return p
 }
 
-// RequiredQueueCapabilities returns an empty slice, indicating that this policy can operate with any queue.
-// See the `FCFSPolicyName` constant's documentation for details on the behavioral trade-offs.
-func (p *fcfs) RequiredQueueCapabilities() []flowcontrol.QueueCapability {
-	return []flowcontrol.QueueCapability{}
-}
-
 // TypedName returns the type and name tuple of this plugin instance.
 func (p *fcfs) TypedName() plugin.TypedName {
 	return plugin.TypedName{

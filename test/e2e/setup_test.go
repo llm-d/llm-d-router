@@ -122,22 +122,6 @@ func createModelServersEPDDisagg(encodeReplicas, prefillReplicas, decodeReplicas
 	})
 }
 
-// createModelServersEncodeOnly creates encode-only pods (no prefill, no decode).
-func createModelServersEncodeOnly(replicas int) []string {
-	return createModelServersFromKustomize(encodeOnlyDir, map[string]string{
-		"${EC_CONNECTOR_TYPE}":    "",
-		"${VLLM_REPLICA_COUNT_E}": strconv.Itoa(replicas),
-	})
-}
-
-// createModelServersPrefillOnly creates prefill-only pods (no encode, no decode).
-func createModelServersPrefillOnly(replicas int) []string {
-	return createModelServersFromKustomize(prefillOnlyDir, map[string]string{
-		"${KV_CONNECTOR_TYPE}":    "",
-		"${VLLM_REPLICA_COUNT_P}": strconv.Itoa(replicas),
-	})
-}
-
 // createModelServersEPDUnified creates model server resources for EPD (one deployment for encode/prefill/decode) testing.
 func createModelServersEPDUnified(replicas int) []string {
 	return createModelServersFromKustomize(epdDeploymentDir, map[string]string{
@@ -163,6 +147,8 @@ func createEndPointPicker(eppConfig string) []string {
 		_ = resp.Body.Close()
 		return resp.StatusCode == http.StatusOK || len(body) > 0
 	}, readyTimeout, 2*time.Second).Should(gomega.BeTrue(), "gateway should be ready within the ready timeout")
+
+	waitForEPPToDiscoverPods(poolName)
 
 	return objects
 }

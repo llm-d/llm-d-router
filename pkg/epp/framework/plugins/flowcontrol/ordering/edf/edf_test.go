@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
@@ -33,14 +32,6 @@ func TestEDFPolicy_Name(t *testing.T) {
 	t.Parallel()
 	policy := newEDFPolicy()
 	assert.Equal(t, EDFOrderingPolicyType, policy.Name())
-}
-
-func TestEDFPolicy_RequiredQueueCapabilities(t *testing.T) {
-	t.Parallel()
-	policy := newEDFPolicy()
-	caps := policy.RequiredQueueCapabilities()
-	require.Len(t, caps, 1)
-	assert.Equal(t, flowcontrol.CapabilityPriorityConfigurable, caps[0])
 }
 
 func TestEDF_Less(t *testing.T) {

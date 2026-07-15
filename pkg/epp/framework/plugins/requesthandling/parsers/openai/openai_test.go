@@ -950,6 +950,90 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:    "images generations request body",
+			headers: map[string]string{":path": "/v1/images/generations"},
+			body: map[string]any{
+				"model":               "test-image-model",
+				"prompt":              "a cat wearing a spacesuit",
+				"negative_prompt":     "blurry",
+				"n":                   2,
+				"size":                "1024x1024",
+				"response_format":     "b64_json",
+				"num_inference_steps": 30,
+				"guidance_scale":      7.5,
+				"seed":                42,
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Images: &fwkrh.ImagesGenerationsRequest{
+					Prompt:            "a cat wearing a spacesuit",
+					N:                 ptr.To[int64](2),
+					Size:              "1024x1024",
+					NumInferenceSteps: ptr.To[int64](30),
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":               "test-image-model",
+					"prompt":              "a cat wearing a spacesuit",
+					"negative_prompt":     "blurry",
+					"n":                   float64(2),
+					"size":                "1024x1024",
+					"response_format":     "b64_json",
+					"num_inference_steps": float64(30),
+					"guidance_scale":      7.5,
+					"seed":                float64(42),
+				},
+			},
+		},
+		{
+			name:    "images generations request without model",
+			headers: map[string]string{":path": "/v1/images/generations"},
+			body: map[string]any{
+				"prompt": "a dog",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Images: &fwkrh.ImagesGenerationsRequest{
+					Prompt: "a dog",
+				},
+				Payload: fwkrh.PayloadMap{
+					"prompt": "a dog",
+				},
+			},
+		},
+		{
+			name:    "images generations request via prefix-mounted path",
+			headers: map[string]string{":path": "/openai/v1/images/generations"},
+			body: map[string]any{
+				"model":  "test-image-model",
+				"prompt": "a dragon",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Images: &fwkrh.ImagesGenerationsRequest{
+					Prompt: "a dragon",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":  "test-image-model",
+					"prompt": "a dragon",
+				},
+			},
+		},
+		{
+			name:    "images generations request missing prompt",
+			headers: map[string]string{":path": "/v1/images/generations"},
+			body: map[string]any{
+				"model": "test-image-model",
+				"size":  "512x512",
+			},
+			wantErr: true,
+		},
+		{
+			name:    "images generations request with empty prompt",
+			headers: map[string]string{":path": "/v1/images/generations"},
+			body: map[string]any{
+				"model":  "test-image-model",
+				"prompt": "",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1227,6 +1311,7 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			conversationsAPI,
 			chatCompletionsAPI + "/render",
 			completionsAPI + "/render",
+			imagesGenerationsAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}

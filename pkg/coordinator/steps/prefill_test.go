@@ -367,6 +367,57 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	}
 }
 
+func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != gateway.PathChatCompletions {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-3"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-chat-stream",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        "test-model",
+		Body: map[string]any{
+			"model":          "test-model",
+			"stream":         true,
+			"stream_options": map[string]any{"include_usage": true},
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hello"},
+			},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["stream"] != false {
+		t.Fatalf("expected prefill request to force stream=false, got %v", prefillBody["stream"])
+	}
+	if _, ok := prefillBody["stream_options"]; ok {
+		t.Fatalf("expected stream_options to be stripped from prefill request, got %v", prefillBody["stream_options"])
+	}
+}
+
 // TestSharedStorage_OmitsECTransferParams_InPrefillBody verifies that the
 // ec-shared-storage EC connector never emits an ec_transfer_params field on
 // the prefill body, in every prefill wire format (chat-completions,
