@@ -41,7 +41,7 @@ func TestRecordPrefixCacheMatch_FullHit(t *testing.T) {
 	resetMetrics()
 	t.Cleanup(resetMetrics)
 
-	recordPrefixCacheHitRatio("p", "t", 0.5, 0.4, 0.2)
+	recordPrefixCacheHitRatioStats("p", "t", 0.5, 0.4, 0.2)
 
 	maxH, err := getHistogram(llmdPrefixCacheMaxHitRatio, "p", "t")
 	require.NoError(t, err)

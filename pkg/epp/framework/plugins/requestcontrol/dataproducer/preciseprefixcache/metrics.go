@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package preciseprefixcache
 
 import (
@@ -56,6 +57,16 @@ var (
 		},
 		[]string{"plugin_name", "plugin_type"},
 	)
+
+	llmdPrefixCacheHitRatio = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "prefix_indexer_hit_ratio",
+			Help:      metricsutil.HelpMsgWithStability("Ratio of prefix length matched to total prefix length in the cache lookup.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
+		},
+		[]string{"plugin_name", "plugin_type"},
+	)
 )
 
 func registerMetrics(registerer prometheus.Registerer) error {
@@ -66,6 +77,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		llmdPrefixCacheMaxHitRatio,
 		llmdPrefixCacheAvgHitRatio,
 		llmdPrefixCacheStdDevHitRatio,
+		llmdPrefixCacheHitRatio,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -78,7 +90,14 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	return nil
 }
 
-func recordPrefixCacheHitRatio(pluginName, pluginType string, maxHitRatio float64, avgHitRatio float64, stdDevHitRatio float64) {
+func recordPrefixCacheMatch(pluginName, pluginType string, matchedLength, totalLength float64) {
+	if totalLength > 0 {
+		hitRatio := matchedLength / totalLength
+		llmdPrefixCacheHitRatio.WithLabelValues(pluginName, pluginType).Observe(hitRatio)
+	}
+}
+
+func recordPrefixCacheHitRatioStats(pluginName, pluginType string, maxHitRatio float64, avgHitRatio float64, stdDevHitRatio float64) {
 	llmdPrefixCacheMaxHitRatio.WithLabelValues(pluginName, pluginType).Observe(maxHitRatio)
 	llmdPrefixCacheAvgHitRatio.WithLabelValues(pluginName, pluginType).Observe(avgHitRatio)
 	llmdPrefixCacheStdDevHitRatio.WithLabelValues(pluginName, pluginType).Observe(stdDevHitRatio)
