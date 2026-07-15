@@ -19,3 +19,8 @@ package scheduling
 // TracerScope is the OTel instrumentation scope for spans emitted by the
 // scheduling engine.
 const TracerScope = "llm-d-router/pkg/epp/scheduling"
+
+// maxTracedEndpointScores bounds how many of the highest-scoring endpoints are
+// recorded on the picker span. Candidate sets can reach production fleet sizes
+// (~100 pods); the strongest few carry the signal for why an endpoint was picked.
+const maxTracedEndpointScores = 5

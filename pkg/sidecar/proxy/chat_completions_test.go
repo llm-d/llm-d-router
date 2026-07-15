@@ -126,7 +126,7 @@ func testPrefillHeaderRouting(t *testing.T, apiType APIType) {
 				s.prefillSamplerFn = func(n int) int { return i % n }
 				var hostPort string
 				var capturedReq *http.Request
-				s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, selectedHostPort string, _ APIType) {
+				s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, selectedHostPort string, _ string, _ APIType) {
 					hostPort = selectedHostPort
 					capturedReq = r
 				}
@@ -322,7 +322,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 
 			var pdCalled bool
 			var pdHost string
-			s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, host string, _ APIType) {
+			s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
 				pdCalled = true
 				pdHost = host
 				capturedReq = r
