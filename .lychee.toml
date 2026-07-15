@@ -1,7 +1,9 @@
 # Ignore transient failures on gnu.org (it sometimes refuses connections)
 exclude = [
   "^https://www.gnu.org/software/make/?$",
-  "^https://www.envoyproxy.io/"
+  "^https://www.envoyproxy.io/",
+  "^https://gateway-api-inference-extension.sigs.k8s.io/guides/serving-multiple-inference-pools-latest/",
+  "^https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/metrics-and-observability.md"
 ]
 
 # Per-request timeout in seconds. Sized for slow upstream docs sites

@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   set-params:
+    if: github.event.repository.fork != true
     runs-on: ubuntu-latest
     outputs:
       epp_name: ${{ steps.version.outputs.epp_name }}
@@ -33,6 +34,7 @@ jobs:
           echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
   build-and-push:
+    if: github.event.repository.fork != true
     needs: set-params
     uses: ./.github/workflows/ci-build-images.yaml
     with:

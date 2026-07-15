@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -36,8 +37,9 @@ import (
 
 type InferenceModelRewriteReconciler struct {
 	client.Reader
-	Datastore datastore.Datastore
-	PoolGKNN  common.GKNN
+	Datastore       datastore.Datastore
+	PoolGKNN        common.GKNN
+	RunOnNonLeaders bool
 }
 
 func (c *InferenceModelRewriteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -81,6 +83,7 @@ func (c *InferenceModelRewriteReconciler) Reconcile(ctx context.Context, req ctr
 }
 
 func (c *InferenceModelRewriteReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	needLeaderElection := !c.RunOnNonLeaders
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha2.InferenceModelRewrite{}).
 		WithEventFilter(predicate.Funcs{
@@ -91,6 +94,7 @@ func (c *InferenceModelRewriteReconciler) SetupWithManager(mgr ctrl.Manager) err
 			DeleteFunc:  func(e event.DeleteEvent) bool { return c.eventPredicate(e.Object.(*v1alpha2.InferenceModelRewrite)) },
 			GenericFunc: func(e event.GenericEvent) bool { return c.eventPredicate(e.Object.(*v1alpha2.InferenceModelRewrite)) },
 		}).
+		WithOptions(controller.Options{NeedLeaderElection: &needLeaderElection}).
 		Complete(c)
 }
 
