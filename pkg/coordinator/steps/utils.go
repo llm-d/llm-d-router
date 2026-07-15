@@ -17,8 +17,10 @@ limitations under the License.
 package steps
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/go-logr/logr"
 
@@ -115,4 +117,141 @@ func coerceParamsMap(logger logr.Logger, v any, label string) map[string]any {
 			"type", fmt.Sprintf("%T", v))
 		return nil
 	}
+}
+
+// toIntSlice converts a JSON-unmarshalled []any of numeric elements to []int.
+// Each element must be a non-negative integer represented as float64 or json.Number.
+func toIntSlice(values []any) ([]int, error) {
+	out := make([]int, 0, len(values))
+	for _, v := range values {
+		switch n := v.(type) {
+		case float64:
+			if n < 0 || n != math.Trunc(n) {
+				return nil, fmt.Errorf("render: invalid token in prompt array: %v (must be a non-negative integer): %w", v, pipeline.ErrBadRequest)
+			}
+			out = append(out, int(n))
+		case json.Number:
+			i, err := n.Int64()
+			if err != nil {
+				return nil, fmt.Errorf("render: invalid token in prompt array: %v: %w", v, pipeline.ErrBadRequest)
+			}
+			if i < 0 {
+				return nil, fmt.Errorf("render: invalid token in prompt array: %v (must be a non-negative integer): %w", v, pipeline.ErrBadRequest)
+			}
+			out = append(out, int(i))
+		default:
+			return nil, fmt.Errorf("render: invalid token in prompt array: %T: %w", v, pipeline.ErrBadRequest)
+		}
+	}
+	return out, nil
+}
+
+// anyToNonNegativeInt converts a single JSON-unmarshalled numeric value to a non-negative int.
+func anyToNonNegativeInt(v any) (int, error) {
+	switch n := v.(type) {
+	case float64:
+		if n < 0 || n != math.Trunc(n) {
+			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
+		}
+		return int(n), nil
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return 0, err
+		}
+		if i < 0 {
+			return 0, fmt.Errorf("expected non-negative integer, got %d", i)
+		}
+		return int(i), nil
+	default:
+		return 0, fmt.Errorf("expected number, got %T", v)
+	}
+}
+
+// extractTokenIDs converts body["token_ids"] from a JSON-unmarshalled value to []int.
+// Returns ErrBadRequest when the field is absent, not an array, empty, or contains
+// non-integer or negative values.
+func extractTokenIDs(raw any) ([]int, error) {
+	if raw == nil {
+		return nil, fmt.Errorf("token_ids is required: %w", pipeline.ErrBadRequest)
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("token_ids must be an array, got %T: %w", raw, pipeline.ErrBadRequest)
+	}
+	if len(arr) == 0 {
+		return nil, fmt.Errorf("token_ids must not be empty: %w", pipeline.ErrBadRequest)
+	}
+	return toIntSlice(arr)
+}
+
+// extractMultimodalEntries builds []pipeline.MultimodalEntry from the three parallel
+// slices in a generate-format features map. Returns nil when features is nil or
+// mm_hashes.image is absent or empty (text-only request). Returns ErrBadRequest when
+// the three slices have different lengths or contain unexpected types.
+func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEntry, error) {
+	if features == nil {
+		return nil, nil
+	}
+	mmHashes, _ := features["mm_hashes"].(map[string]any)
+	if mmHashes == nil {
+		return nil, nil
+	}
+	rawHashes, _ := mmHashes[ModalityImage].([]any)
+	if len(rawHashes) == 0 {
+		return nil, nil
+	}
+
+	mmPlaceholders, _ := features["mm_placeholders"].(map[string]any)
+	rawPlaceholders, _ := mmPlaceholders[ModalityImage].([]any)
+
+	kwargsData, _ := features["kwargs_data"].(map[string]any)
+	rawKwargs, _ := kwargsData[ModalityImage].([]any)
+
+	n := len(rawHashes)
+	if len(rawPlaceholders) != n {
+		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, mm_placeholders has %d: %w",
+			n, len(rawPlaceholders), pipeline.ErrBadRequest)
+	}
+	if len(rawKwargs) != n {
+		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, kwargs_data has %d: %w",
+			n, len(rawKwargs), pipeline.ErrBadRequest)
+	}
+
+	entries := make([]pipeline.MultimodalEntry, n)
+	for i := range n {
+		hash, ok := rawHashes[i].(string)
+		if !ok {
+			return nil, fmt.Errorf("mm_hashes[%d] must be a string: %w", i, pipeline.ErrBadRequest)
+		}
+
+		pMap, ok := rawPlaceholders[i].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("mm_placeholders[%d] must be an object: %w", i, pipeline.ErrBadRequest)
+		}
+		offset, err := anyToNonNegativeInt(pMap["offset"])
+		if err != nil {
+			return nil, fmt.Errorf("mm_placeholders[%d].offset: %v: %w", i, err, pipeline.ErrBadRequest)
+		}
+		length, err := anyToNonNegativeInt(pMap["length"])
+		if err != nil {
+			return nil, fmt.Errorf("mm_placeholders[%d].length: %v: %w", i, err, pipeline.ErrBadRequest)
+		}
+
+		kwarg, ok := rawKwargs[i].(string)
+		if !ok {
+			return nil, fmt.Errorf("kwargs_data[%d] must be a string: %w", i, pipeline.ErrBadRequest)
+		}
+
+		entries[i] = pipeline.MultimodalEntry{
+			Index:      i,
+			Hash:       hash,
+			KwargsData: kwarg,
+			Placeholder: pipeline.PlaceholderRange{
+				Offset: offset,
+				Length: length,
+			},
+		}
+	}
+	return entries, nil
 }
