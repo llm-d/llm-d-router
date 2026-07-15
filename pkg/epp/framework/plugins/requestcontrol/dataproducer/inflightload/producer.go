@@ -37,6 +37,7 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/statestore"
 )
 
 const (
@@ -97,7 +98,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
 	}
 
-	return &InFlightLoadProducer{
+	p := &InFlightLoadProducer{
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:           newConcurrencyTracker(),
 		tokenTracker:             newConcurrencyTracker(),
@@ -107,7 +108,22 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		uncachedRequestTokensDk:  attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name),
 		PluginState:              fwkplugin.NewPluginState(ctx),
-	}, nil
+	}
+
+	// RFC #1593 feasibility spike: only set when running stateless with a
+	// configured stateful-epp-address AND --state-access-mode-inflight=FailOpen
+	// (the default). nil in classic/stateful mode, or when the access mode is
+	// forced to Local (isolating the pure multi-replica benefit from remote
+	// RPC cost, see bin/record/stateful-rfc/perf-test/ha-benchmark.sh), which
+	// keeps Produce/PreRequest/ResponseBody byte-for-byte identical to
+	// today's behavior (see the p.state nil checks at each call site).
+	if client, timeout, ok := handle.RemoteStateClient(); ok &&
+		handle.StateAccessMode().Inflight == fwkplugin.StateAccessModeFailOpen {
+		local := statestore.NewLocalInflightState(p)
+		p.state = statestore.NewFailOpenInflightState(statestore.NewRemoteInflightState(client), local, timeout)
+	}
+
+	return p, nil
 }
 
 var (
@@ -130,7 +146,15 @@ type InFlightLoadProducer struct {
 	dk                       fwkplugin.DataKey
 	prefixMatchInfoDK        fwkplugin.DataKey
 	uncachedRequestTokensDk  fwkplugin.DataKey
-	registeredEndpoints      sync.Map // key: string (NamespacedName), value: datalayer.Endpoint
+	registeredEndpoints      sync.Map       // key: string (NamespacedName), value: datalayer.Endpoint
+	wg                       sync.WaitGroup // Used for waiting on async remote Reserve calls in tests.
+
+	// state is nil in classic/stateful mode (see InFlightLoadProducerFactory).
+	// When set, Produce does one batched remote read per request instead of
+	// relying solely on the lazy Extract dynamic attribute, and PreRequest/
+	// OnEvicted additionally push best-effort Reserve/Release calls to the
+	// stateful EPP (RFC #1593 feasibility spike).
+	state statestore.InflightState
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -149,6 +173,19 @@ type addedTokensEntry struct {
 	tokenCounter   *atomic.Int64
 	requestCounter *atomic.Int64
 	requests       atomic.Int32
+
+	// endpointID and reservedTokens are immutable snapshots captured at
+	// PreRequest time, used only to mirror this reservation's release to the
+	// remote State API exactly once via remoteRelease (RFC #1593 feasibility
+	// spike). They deliberately do not participate in the local
+	// swap-to-zero/idempotency dance above: the remote store has its own
+	// idempotent Release keyed by requestID+endpointID (see
+	// stateapi.memoryInflightStore), independent of whether the local release
+	// happened in one phase or two (see releaseTokensEarly).
+	endpointID     string
+	reservedTokens int64
+	// remoteRelease is nil in classic/stateful mode.
+	remoteRelease func(requestID, endpointID string, tokens int64)
 }
 
 var _ fwkplugin.EvictableStateData = (*addedTokensEntry)(nil)
@@ -164,18 +201,29 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 	clone := &addedTokensEntry{
 		tokenCounter:   e.tokenCounter,
 		requestCounter: e.requestCounter,
+		endpointID:     e.endpointID,
+		reservedTokens: e.reservedTokens,
+		remoteRelease:  e.remoteRelease,
 	}
 	clone.tokens.Store(e.tokens.Load())
 	clone.requests.Store(e.requests.Load())
 	return clone
 }
 
-func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
+func (e *addedTokensEntry) OnEvicted(requestID string, _ fwkplugin.StateKey) {
 	if t := e.tokens.Swap(0); t != 0 {
 		decrementClamped(e.tokenCounter, t)
 	}
 	if e.requests.Swap(0) != 0 {
 		decrementClamped(e.requestCounter, 1)
+	}
+	// Fires at most once per entry (PluginState's contract), regardless of
+	// whether the local release above happened in one phase (release()) or
+	// two (releaseTokensEarly() then the EndOfStream bulk Delete) — the
+	// remote store's Reserve/Release model treats a reservation as one atomic
+	// unit, so this is the single correct point to mirror it.
+	if e.remoteRelease != nil {
+		e.remoteRelease(requestID, e.endpointID, e.reservedTokens)
 	}
 }
 
@@ -314,10 +362,27 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 	return nil
 }
 
-func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+func (p *InFlightLoadProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	var inputTokens int64
 	if request != nil {
 		inputTokens = p.tokenEstimator.EstimateInput(request)
+	}
+
+	// RFC #1593 feasibility spike: one batched remote read for all candidate
+	// endpoints, done here (once per request, has a context) rather than in
+	// Extract's lazy per-endpoint dynamic attribute closure, which would
+	// otherwise turn one request into N remote calls. nil in classic/stateful
+	// mode, in which case behavior is unchanged: Extract's dynamic attribute
+	// remains the sole source for InFlightLoad.
+	var snapshots map[string]statestore.InflightSnapshot
+	if p.state != nil {
+		ids := make([]string, 0, len(endpoints))
+		for _, e := range endpoints {
+			if e != nil && e.GetMetadata() != nil {
+				ids = append(ids, e.GetMetadata().NamespacedName.String())
+			}
+		}
+		snapshots = p.state.GetInflightSnapshotBatch(ctx, ids)
 	}
 
 	for _, e := range endpoints {
@@ -329,6 +394,10 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 			e.Put(p.uncachedRequestTokensDk.String(), &attrconcurrency.UncachedRequestTokens{
 				Tokens: tokens,
 			})
+		}
+		if snapshots != nil {
+			snap := snapshots[e.GetMetadata().NamespacedName.String()]
+			e.Put(p.dk.String(), &attrconcurrency.InFlightLoad{Requests: snap.Requests, Tokens: snap.Tokens})
 		}
 	}
 	return nil
@@ -379,15 +448,37 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		entry := &addedTokensEntry{
 			tokenCounter:   tokenCounter,
 			requestCounter: requestCounter,
+			endpointID:     eid,
+			reservedTokens: tokens,
 		}
 		entry.tokens.Store(tokens)
 		entry.requests.Store(1)
+		if p.state != nil {
+			entry.remoteRelease = p.remoteRelease
+			// Best-effort push to the stateful EPP (RFC #1593 feasibility
+			// spike), asynchronously so it never adds an RTT to the request's
+			// critical path: the local increments above are the source of
+			// truth and are never rolled back if this fails. Uses
+			// context.Background(), matching remoteRelease, since this must
+			// outlive PreRequest's own ctx.
+			requestID := request.RequestID
+			p.wg.Go(func() {
+				_ = p.state.ReserveInflight(context.Background(), requestID, eid, tokens)
+			})
+		}
 		p.PluginState.Write(
 			request.RequestID,
 			fwkplugin.StateKey(addedTokensKey(eid, profileName)),
 			entry,
 		)
 	}
+}
+
+// remoteRelease pushes a best-effort release for a single profile's
+// reservation to the stateful EPP. Bound to addedTokensEntry.remoteRelease at
+// PreRequest time; called from OnEvicted exactly once per entry.
+func (p *InFlightLoadProducer) remoteRelease(requestID, endpointID string, tokens int64) {
+	_ = p.state.ReleaseInflight(context.Background(), requestID, endpointID, tokens)
 }
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {

@@ -79,15 +79,14 @@ type admitRecord struct {
 }
 
 // localFallbackConcurrencyState implements FlowControlState by composing the
-// existing local queue admission (unchanged) with the new fleet-wide
-// concurrency lease, per the RFC's LocalFallback degradation strategy.
+// existing local queue admission (unchanged) with the fleet-wide concurrency
+// lease: the LocalFallback degradation strategy.
 //
 // Composition is sequential and local-first, deliberately:
 //   - The local FlowController is a queue (priority, TTL, backpressure); the
 //     remote counter is concurrency. Checking remote before local dispatch
 //     would hold a fleet concurrency slot for a request that isn't executing
-//     yet, reintroducing the same queue-vs-concurrency confusion the RFC
-//     is trying to escape.
+//     yet, conflating queue occupancy with concurrent execution.
 //   - Local-first also avoids a compensating-decrement RTT: remote-first with
 //     a subsequent local rejection would require rolling back the remote
 //     increment, which can itself fail and leak.
@@ -130,6 +129,7 @@ func (s *localFallbackConcurrencyState) Admit(ctx context.Context, req flowcontr
 	}
 
 	key := FlowControlKey{ID: req.FlowKey().ID, Priority: req.FlowKey().Priority}
+	recordRemoteCall("concurrency_admit")
 	rctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	remoteOutcome, rerr := s.remote.Admit(rctx, key, req.ID())
@@ -166,11 +166,14 @@ func (s *localFallbackConcurrencyState) Release(ctx context.Context, requestID s
 		return nil
 	}
 	if rec.usedRemote {
-		rctx, cancel := context.WithTimeout(ctx, s.timeout)
-		defer cancel()
-		if err := s.remote.Release(rctx, flowKey, requestID); err != nil {
-			recordRemoteFallback("concurrency_release")
-		}
+		// Called from response completion (Director.HandleResponseBody at
+		// EndOfStream): nothing downstream waits on this outcome, so — like
+		// failOpenInflightState/failOpenPrefixState's writes — it runs
+		// asynchronously rather than holding up response teardown.
+		recordRemoteCall("concurrency_release")
+		asyncRemoteWrite(s.timeout, "concurrency_release", func(rctx context.Context) error {
+			return s.remote.Release(rctx, flowKey, requestID)
+		})
 	}
 	return nil
 }

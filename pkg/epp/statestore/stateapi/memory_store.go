@@ -18,10 +18,18 @@ package stateapi
 
 import (
 	"context"
+	"hash/fnv"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// shardCount is the number of independent lock domains used by the prefix
+// index and the concurrency-lease store. Every stateless replica's remote
+// calls land on this one stateful EPP process, so a single global mutex per
+// store serializes all of them regardless of which hash/endpoint/requestID is
+// involved. 32 is a reasonable default, not tuned against real traffic shape.
+const shardCount = 32
 
 // Config controls the in-memory Store's behavior.
 type Config struct {
@@ -70,7 +78,22 @@ func NewMemoryStore(ctx context.Context, cfg Config) Store {
 	}
 }
 
+// stringShardIndex hashes s (fnv-1a, cheap and non-cryptographic — this is a
+// shard-assignment function, not a security boundary) into [0, shardCount).
+func stringShardIndex(s string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s)) // fnv.Write never errors
+	return int(h.Sum32() % shardCount)
+}
+
 // --- Inflight ---
+//
+// Not sharded: getOrCreateCounter already only takes the map mutex on the
+// cold path (first touch of a given endpoint); the hot path (Reserve/Release
+// on an already-known endpoint) is lock-free atomics. Endpoint cardinality is
+// also naturally low (one entry per backend pod, not per request), unlike the
+// prefix and concurrency-lease stores below, whose keys are per-request-hash
+// and per-request-lease respectively.
 
 type inflightCounter struct {
 	requests atomic.Int64
@@ -185,20 +208,39 @@ func decrementClamped(counter *atomic.Int64, delta int64) {
 }
 
 // --- Prefix ---
+//
+// Sharded by block hash: every request's PreRequest commits its matched
+// hashes here, so this is on the hot path for every one of N stateless
+// replicas. A single global mutex serialized all of them against each other
+// regardless of which hash/endpoint was involved; sharding lets writes to
+// unrelated hashes proceed concurrently.
 
-type memoryPrefixStore struct {
+type prefixShard struct {
 	mu    sync.RWMutex
 	index map[uint64]map[string]struct{} // hash -> set of endpoint IDs
 }
 
+type memoryPrefixStore struct {
+	shards [shardCount]*prefixShard
+}
+
 func newMemoryPrefixStore() *memoryPrefixStore {
-	return &memoryPrefixStore{index: make(map[uint64]map[string]struct{})}
+	s := &memoryPrefixStore{}
+	for i := range s.shards {
+		s.shards[i] = &prefixShard{index: make(map[uint64]map[string]struct{})}
+	}
+	return s
+}
+
+func (s *memoryPrefixStore) shardFor(hash uint64) *prefixShard {
+	return s.shards[hash%uint64(shardCount)]
 }
 
 func (s *memoryPrefixStore) Match(hash uint64) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	pods, ok := s.index[hash]
+	shard := s.shardFor(hash)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	pods, ok := shard.index[hash]
 	if !ok {
 		return nil
 	}
@@ -210,40 +252,68 @@ func (s *memoryPrefixStore) Match(hash uint64) []string {
 }
 
 func (s *memoryPrefixStore) Commit(_, endpointID string, hashes []uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Group by shard first so a single Commit call (typically many hashes for
+	// one prompt) takes each shard's mutex at most once instead of once per
+	// hash.
+	byShard := make(map[int][]uint64, len(hashes))
 	for _, h := range hashes {
-		pods, ok := s.index[h]
-		if !ok {
-			pods = make(map[string]struct{})
-			s.index[h] = pods
+		idx := int(h % uint64(shardCount))
+		byShard[idx] = append(byShard[idx], h)
+	}
+	for idx, hs := range byShard {
+		shard := s.shards[idx]
+		shard.mu.Lock()
+		for _, h := range hs {
+			pods, ok := shard.index[h]
+			if !ok {
+				pods = make(map[string]struct{})
+				shard.index[h] = pods
+			}
+			pods[endpointID] = struct{}{}
 		}
-		pods[endpointID] = struct{}{}
+		shard.mu.Unlock()
 	}
 }
 
 func (s *memoryPrefixStore) RemoveEndpoint(endpointID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for hash, pods := range s.index {
-		delete(pods, endpointID)
-		if len(pods) == 0 {
-			delete(s.index, hash)
+	// Rare (pod-delete events only, not per-request), so sequential per-shard
+	// locking is fine — no need to avoid locking every shard here.
+	for _, shard := range s.shards {
+		shard.mu.Lock()
+		for hash, pods := range shard.index {
+			delete(pods, endpointID)
+			if len(pods) == 0 {
+				delete(shard.index, hash)
+			}
 		}
+		shard.mu.Unlock()
 	}
 }
 
 // --- Concurrency lease ---
+//
+// Leases are sharded by requestID (one entry per in-flight request — high
+// cardinality, hot path); counters are kept in one small map (one entry per
+// distinct FlowKey — low cardinality by nature, and mutated via atomics once
+// resolved, matching memoryInflightStore's counter pattern) rather than
+// sharded themselves, since sharding a handful of keys buys nothing.
 
 type lease struct {
 	key       FlowKey
 	timestamp time.Time
 }
 
+type leaseShard struct {
+	mu     sync.Mutex
+	leases map[string]lease // requestID -> lease
+}
+
 type memoryConcurrencyStore struct {
-	mu        sync.Mutex
+	counterMu sync.RWMutex
 	counters  map[FlowKey]*atomic.Int64
-	leases    map[string]lease // requestID -> lease
+
+	leaseShards [shardCount]*leaseShard
+
 	globalMax int64
 	leaseTTL  time.Duration
 	now       func() time.Time
@@ -253,55 +323,88 @@ func newMemoryConcurrencyStore(ctx context.Context, cfg Config) *memoryConcurren
 	cfg = cfg.withDefaults()
 	s := &memoryConcurrencyStore{
 		counters:  make(map[FlowKey]*atomic.Int64),
-		leases:    make(map[string]lease),
 		globalMax: cfg.GlobalMaxConcurrency,
 		leaseTTL:  cfg.LeaseTTL,
 		now:       time.Now,
+	}
+	for i := range s.leaseShards {
+		s.leaseShards[i] = &leaseShard{leases: make(map[string]lease)}
 	}
 	go s.runSweep(ctx, cfg.SweepInterval)
 	return s
 }
 
+func (s *memoryConcurrencyStore) leaseShardFor(requestID string) *leaseShard {
+	return s.leaseShards[stringShardIndex(requestID)]
+}
+
 func (s *memoryConcurrencyStore) counterFor(key FlowKey) *atomic.Int64 {
+	s.counterMu.RLock()
 	c, ok := s.counters[key]
-	if !ok {
-		c = &atomic.Int64{}
-		s.counters[key] = c
+	s.counterMu.RUnlock()
+	if ok {
+		return c
 	}
+
+	s.counterMu.Lock()
+	defer s.counterMu.Unlock()
+	if c, ok = s.counters[key]; ok {
+		return c
+	}
+	c = &atomic.Int64{}
+	s.counters[key] = c
 	return c
 }
 
-func (s *memoryConcurrencyStore) Admit(requestID string, key FlowKey) ConcurrencyOutcome {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// tryAdmit atomically increments counter unless doing so would exceed max (max
+// <= 0 means unlimited), returning whether the increment happened.
+//
+// This must be a CAS loop, not "Load, branch, Add": Admit's shard lock is
+// keyed by requestID, but counter is the FlowKey-wide total shared by every
+// requestID for that key, so two concurrent Admits for the same key landing
+// on different shards would otherwise both pass a Load-based check before
+// either Add lands, overshooting max.
+func tryAdmit(counter *atomic.Int64, max int64) bool {
+	for {
+		current := counter.Load()
+		if max > 0 && current >= max {
+			return false
+		}
+		if counter.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
 
-	if existing, ok := s.leases[requestID]; ok {
+func (s *memoryConcurrencyStore) Admit(requestID string, key FlowKey) ConcurrencyOutcome {
+	shard := s.leaseShardFor(requestID)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	if _, ok := shard.leases[requestID]; ok {
 		// Idempotent retry of an already-admitted request.
-		_ = existing
 		return ConcurrencyOutcomeAdmitted
 	}
 
-	counter := s.counterFor(key)
-	if s.globalMax > 0 && counter.Load() >= s.globalMax {
+	if !tryAdmit(s.counterFor(key), s.globalMax) {
 		return ConcurrencyOutcomeRejected
 	}
-	counter.Add(1)
-	s.leases[requestID] = lease{key: key, timestamp: s.now()}
+	shard.leases[requestID] = lease{key: key, timestamp: s.now()}
 	return ConcurrencyOutcomeAdmitted
 }
 
 func (s *memoryConcurrencyStore) ReleaseConcurrency(requestID string, _ FlowKey) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	l, ok := s.leases[requestID]
+	shard := s.leaseShardFor(requestID)
+	shard.mu.Lock()
+	l, ok := shard.leases[requestID]
+	if ok {
+		delete(shard.leases, requestID)
+	}
+	shard.mu.Unlock()
 	if !ok {
 		return
 	}
-	delete(s.leases, requestID)
-	if counter, ok := s.counters[l.key]; ok {
-		decrementClamped(counter, 1)
-	}
+	decrementClamped(s.counterFor(l.key), 1)
 }
 
 // runSweep periodically reclaims leases that were never released (a crashed
@@ -321,17 +424,16 @@ func (s *memoryConcurrencyStore) runSweep(ctx context.Context, interval time.Dur
 }
 
 func (s *memoryConcurrencyStore) reclaimExpiredLeases() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	cutoff := s.now().Add(-s.leaseTTL)
-	for requestID, l := range s.leases {
-		if l.timestamp.After(cutoff) {
-			continue
+	for _, shard := range s.leaseShards {
+		shard.mu.Lock()
+		for requestID, l := range shard.leases {
+			if l.timestamp.After(cutoff) {
+				continue
+			}
+			delete(shard.leases, requestID)
+			decrementClamped(s.counterFor(l.key), 1)
 		}
-		delete(s.leases, requestID)
-		if counter, ok := s.counters[l.key]; ok {
-			decrementClamped(counter, 1)
-		}
+		shard.mu.Unlock()
 	}
 }

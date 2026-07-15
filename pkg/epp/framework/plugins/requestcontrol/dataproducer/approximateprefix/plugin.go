@@ -35,6 +35,7 @@ import (
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/statestore"
 )
 
 const (
@@ -65,6 +66,13 @@ type dataProducer struct {
 	pluginState *plugin.PluginState
 	wg          sync.WaitGroup // Used for waiting on async cache updates in tests.
 	dk          plugin.DataKey
+
+	// state is nil in classic/stateful mode (see newDataProducer). When set,
+	// Produce does one batched remote match read per request across all
+	// prompts instead of calling the local indexer per block hash, and
+	// PreRequest additionally pushes a best-effort Commit to the stateful EPP
+	// (RFC #1593 feasibility spike).
+	state statestore.PrefixState
 }
 
 // TypedName returns the type and name of the plugin.
@@ -181,6 +189,19 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
+	// RFC #1593 feasibility spike: only set when running stateless with a
+	// configured stateful-epp-address AND --state-access-mode-prefix=FailOpen
+	// (the default). nil in classic/stateful mode, or when the access mode is
+	// forced to Local (isolating the pure multi-replica benefit from remote
+	// RPC cost, see bin/record/stateful-rfc/perf-test/ha-benchmark.sh), which
+	// keeps Produce/PreRequest byte-for-byte identical to today's behavior
+	// (see the p.state nil checks at each call site).
+	if client, timeout, ok := handle.RemoteStateClient(); ok &&
+		handle.StateAccessMode().Prefix == plugin.StateAccessModeFailOpen {
+		local := statestore.NewLocalPrefixState(p)
+		p.state = statestore.NewFailOpenPrefixState(statestore.NewRemotePrefixState(client), local, timeout)
+	}
+
 	if handle != nil {
 		go p.CleanUpInactivePods(ctx, handle)
 	}
@@ -233,10 +254,31 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	}
 	perPromptHashes := prefixhash.GetBlockHashes(ctx, request, blockSize, maxBlocks)
 
+	// RFC #1593 feasibility spike: one batched remote read covering every hash
+	// across every prompt in this request, done here rather than inside
+	// matchLongestPrefix's per-hash loop, which would otherwise turn one
+	// request into as many remote calls as it has block hashes. nil in
+	// classic/stateful mode, in which case matchLongestPrefix falls back to
+	// its existing per-hash local indexer lookups, unchanged.
+	var remoteMatches map[uint64][]string
+	if p.state != nil {
+		hashSet := make(map[uint64]struct{})
+		for _, hashes := range perPromptHashes {
+			for _, h := range hashes {
+				hashSet[uint64(h)] = struct{}{}
+			}
+		}
+		allHashes := make([]uint64, 0, len(hashSet))
+		for h := range hashSet {
+			allHashes = append(allHashes, h)
+		}
+		remoteMatches = p.state.GetPrefixMatchBatch(ctx, allHashes)
+	}
+
 	prefixCacheServers := make(map[ServerID]int)
 	totalBlocks := 0
 	for _, hashes := range perPromptHashes {
-		for server, matchLen := range p.matchLongestPrefix(ctx, hashes) {
+		for server, matchLen := range p.matchLongestPrefix(ctx, hashes, remoteMatches) {
 			prefixCacheServers[server] += matchLen
 		}
 		totalBlocks += len(hashes)
@@ -284,9 +326,23 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 
 	// Update indexer asynchronously to avoid blocking the request path.
 	p.wg.Go(func() {
+		// Best-effort push to the stateful EPP (RFC #1593 feasibility spike);
+		// the local Add below is the source of truth and is never rolled back
+		// if this fails. nil p.state means classic/stateful mode: unchanged.
+		var flatHashes []uint64
+		if p.state != nil {
+			for _, hashes := range state.PerPromptHashes {
+				for _, h := range hashes {
+					flatHashes = append(flatHashes, uint64(h))
+				}
+			}
+		}
 		for _, s := range servers {
 			for _, hashes := range state.PerPromptHashes {
 				p.indexerInst.Add(hashes, s)
+			}
+			if p.state != nil {
+				_ = p.state.CommitPrefix(context.Background(), request.RequestID, s.String(), flatHashes)
 			}
 		}
 	})
@@ -316,15 +372,32 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 }
 
 // matchLongestPrefix returns a map of servers and length of prefix that each server caches, prefix length is defined in blocks.
-func (p *dataProducer) matchLongestPrefix(ctx context.Context, hashes []blockHash) map[ServerID]int {
+//
+// remoteMatches, when non-nil (RFC #1593 feasibility spike, stateless mode),
+// is a pre-fetched batch of hash -> endpoint-ID matches from Produce's single
+// remote round trip; lookups are served from it instead of the local indexer.
+// nil in classic/stateful mode, in which case behavior is unchanged.
+func (p *dataProducer) matchLongestPrefix(ctx context.Context, hashes []blockHash, remoteMatches map[uint64][]string) map[ServerID]int {
 	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
 	res := make(map[ServerID]int)
 
 	// Use a greedy strategy to search from the longest prefix.
 	for _, hash := range hashes {
-		cachedServers := p.indexerInst.Get(hash)
-		if len(cachedServers) == 0 {
-			break
+		var cachedServers podSet
+		if remoteMatches != nil {
+			ids := remoteMatches[uint64(hash)]
+			if len(ids) == 0 {
+				break
+			}
+			cachedServers = make(podSet, len(ids))
+			for _, id := range ids {
+				cachedServers[ServerID(parseNamespacedName(id))] = struct{}{}
+			}
+		} else {
+			cachedServers = p.indexerInst.Get(hash)
+			if len(cachedServers) == 0 {
+				break
+			}
 		}
 		loggerTrace.Info("Found cached servers", "cachedServers", cachedServers, "total # blocks", len(hashes))
 		for server := range cachedServers {

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,6 +32,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+	statepb "github.com/llm-d/llm-d-router/pkg/epp/statestore/stateapi/proto/gen"
 )
 
 func TestLRUCapacityFromCacheSizeMB(t *testing.T) {
@@ -232,6 +234,14 @@ func (h *testHandle) GetAllPluginsWithNames() map[string]plugin.Plugin {
 
 func (h *testHandle) Metrics() plugin.MetricsRecorder {
 	return nil
+}
+
+func (h *testHandle) RemoteStateClient() (statepb.StateAPIClient, time.Duration, bool) {
+	return nil, 0, false
+}
+
+func (h *testHandle) StateAccessMode() plugin.StateAccessModeConfig {
+	return plugin.StateAccessModeConfig{}
 }
 
 func (h *testHandle) PodList() []k8stypes.NamespacedName {

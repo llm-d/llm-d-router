@@ -17,12 +17,11 @@ limitations under the License.
 package statestore
 
 // AccessMode controls how a shared state capability is accessed. Each of the
-// three capabilities (inflight, prefix, flow control) can be configured with an
-// independent access mode, enabling phased rollout.
-//
-// In Phase 1 (P0) only the Local provider exists, so all capabilities behave
-// equivalently to classic regardless of the configured mode. The modes become
-// meaningful in Phase 2 when the Remote provider is introduced.
+// three capabilities (inflight, prefix, flow control) can be configured with
+// an independent access mode, enabling per-capability rollout: AccessModeLocal
+// forces classic-equivalent behavior for that capability even when a remote
+// client is configured, so a deployment can enable the State API for one
+// capability at a time.
 type AccessMode string
 
 const (
@@ -39,8 +38,9 @@ const (
 	AccessModeLocalFallback AccessMode = "LocalFallback"
 )
 
-// AccessModeConfig holds the per-capability access mode configuration. This
-// maps to the `stateless.stateAccessMode` block in the RFC configuration.
+// AccessModeConfig holds the per-capability access mode configuration, set via
+// the --state-access-mode-inflight, --state-access-mode-prefix, and
+// --state-access-mode-flowcontrol flags.
 type AccessModeConfig struct {
 	// Inflight controls how inflight counters are accessed.
 	Inflight AccessMode

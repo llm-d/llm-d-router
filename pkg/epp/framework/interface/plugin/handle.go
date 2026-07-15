@@ -19,9 +19,37 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+
+	statepb "github.com/llm-d/llm-d-router/pkg/epp/statestore/stateapi/proto/gen"
 )
+
+// StateAccessMode mirrors pkg/epp/statestore.AccessMode as a plain string:
+// pkg/epp/statestore transitively imports this package (via
+// pkg/epp/framework/interface/flowcontrol), so it cannot be imported here
+// without a cycle. The empty string is treated as "Local" by convention,
+// matching statestore.AccessMode's own zero-value semantics.
+type StateAccessMode string
+
+const (
+	// StateAccessModeLocal disables remote access for a capability; it
+	// behaves like classic even when a State API client is configured.
+	StateAccessModeLocal StateAccessMode = "Local"
+	// StateAccessModeFailOpen prefers a remote read/write and falls back to
+	// the local shadow on failure or timeout. Valid for inflight and prefix.
+	StateAccessModeFailOpen StateAccessMode = "FailOpen"
+	// StateAccessModeLocalFallback is flow-control only.
+	StateAccessModeLocalFallback StateAccessMode = "LocalFallback"
+)
+
+// StateAccessModeConfig mirrors pkg/epp/statestore.AccessModeConfig.
+type StateAccessModeConfig struct {
+	Inflight    StateAccessMode
+	Prefix      StateAccessMode
+	FlowControl StateAccessMode
+}
 
 // Handle provides plugins a set of standard data and tools to work with
 type Handle interface {
@@ -36,6 +64,24 @@ type Handle interface {
 	// Metrics returns a recorder plugins can use to register metrics. It may return
 	// nil when no recorder is configured.
 	Metrics() MetricsRecorder
+
+	// RemoteStateClient returns the shared gRPC client for the internal State
+	// API (RFC #1593 feasibility spike) and its configured per-call timeout.
+	// ok is false when not running in stateless mode with a configured
+	// stateful-epp-address, in which case client is nil and must not be used.
+	// Producers use this to build their own Remote/FailOpen-wrapped
+	// pkg/epp/statestore state, using themselves as the Local backend.
+	RemoteStateClient() (client statepb.StateAPIClient, timeout time.Duration, ok bool)
+
+	// StateAccessMode returns the configured per-capability access mode
+	// (RFC #1593 feasibility spike). The zero value of each field is treated
+	// as statestore.AccessModeLocal. Producers and the admission controller
+	// consult this alongside RemoteStateClient to decide whether to build a
+	// Remote/FailOpen-wrapped state or stay purely local even when a State
+	// API client is configured -- this is what isolates "more replicas
+	// sharing CPU work" from "cost of the remote read/write path" in the
+	// ha-benchmark.sh perf-test harness (bin/, gitignored).
+	StateAccessMode() StateAccessModeConfig
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -60,8 +106,11 @@ type PodListFunc func() []types.NamespacedName
 type eppHandle struct {
 	ctx context.Context
 	HandlePlugins
-	podList         PodListFunc
-	metricsRecorder MetricsRecorder
+	podList            PodListFunc
+	metricsRecorder    MetricsRecorder
+	remoteStateClient  statepb.StateAPIClient
+	remoteStateTimeout time.Duration
+	stateAccessMode    StateAccessModeConfig
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -111,6 +160,19 @@ func (h *eppHandle) Metrics() MetricsRecorder {
 	return h.metricsRecorder
 }
 
+// RemoteStateClient returns the shared State API client, if configured.
+func (h *eppHandle) RemoteStateClient() (statepb.StateAPIClient, time.Duration, bool) {
+	if h.remoteStateClient == nil {
+		return nil, 0, false
+	}
+	return h.remoteStateClient, h.remoteStateTimeout, true
+}
+
+// StateAccessMode returns the configured per-capability access mode.
+func (h *eppHandle) StateAccessMode() StateAccessModeConfig {
+	return h.stateAccessMode
+}
+
 // HandleOption configures an eppHandle constructed via NewEppHandle.
 type HandleOption func(*eppHandle)
 
@@ -121,6 +183,24 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 		if recorder != nil {
 			h.metricsRecorder = recorder
 		}
+	}
+}
+
+// WithRemoteStateClient sets the shared State API client and its per-call
+// timeout used by the handle. A nil client is ignored.
+func WithRemoteStateClient(client statepb.StateAPIClient, timeout time.Duration) HandleOption {
+	return func(h *eppHandle) {
+		if client != nil {
+			h.remoteStateClient = client
+			h.remoteStateTimeout = timeout
+		}
+	}
+}
+
+// WithStateAccessMode sets the per-capability access mode used by the handle.
+func WithStateAccessMode(cfg StateAccessModeConfig) HandleOption {
+	return func(h *eppHandle) {
+		h.stateAccessMode = cfg
 	}
 }
 

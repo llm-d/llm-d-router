@@ -19,7 +19,9 @@ package requestcontrol
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,6 +34,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/statestore"
 )
 
 // --- Mocks ---
@@ -310,6 +313,76 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeConcurrencyState is a hand-rolled statestore.ConcurrencyState for
+// exercising WithConcurrencyLease's composition without a real gRPC server.
+// releaseCalls is atomic because statestore.localFallbackConcurrencyState
+// pushes Release to remote asynchronously — tests exercising that path must
+// poll (require.Eventually) rather than assert immediately after the call
+// returns.
+type fakeConcurrencyState struct {
+	admitOutcome statestore.FlowControlOutcome
+	admitErr     error
+	admitCalls   int
+	releaseCalls atomic.Int32
+}
+
+func (f *fakeConcurrencyState) Admit(_ context.Context, _ statestore.FlowControlKey, _ string) (statestore.FlowControlOutcome, error) {
+	f.admitCalls++
+	return f.admitOutcome, f.admitErr
+}
+
+func (f *fakeConcurrencyState) Release(_ context.Context, _ statestore.FlowControlKey, _ string) error {
+	f.releaseCalls.Add(1)
+	return nil
+}
+
+func TestFlowControlAdmissionController_WithConcurrencyLease(t *testing.T) {
+	t.Parallel()
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	reqCtx := &handlers.RequestContext{
+		SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
+		Request:           &handlers.Request{Metadata: map[string]any{}},
+	}
+
+	t.Run("local admits then remote admits: Admit succeeds, Release reaches remote", func(t *testing.T) {
+		t.Parallel()
+		fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched}
+		remote := &fakeConcurrencyState{admitOutcome: statestore.FlowControlOutcomeAdmitted}
+		ac := NewFlowControlAdmissionController(fc, "pool", WithConcurrencyLease(fc, remote, time.Second, 0))
+
+		require.NoError(t, ac.Admit(ctx, reqCtx, 0))
+		require.Equal(t, 1, remote.admitCalls)
+
+		ac.ReleaseConcurrency(ctx, "test-req", "", 0)
+		// Release pushes to remote asynchronously; the call landing is not
+		// guaranteed the instant ReleaseConcurrency returns.
+		require.Eventually(t, func() bool { return remote.releaseCalls.Load() == 1 },
+			time.Second, time.Millisecond, "async remote release never landed")
+	})
+
+	t.Run("local queue rejects: remote concurrency check never runs, Release is a no-op", func(t *testing.T) {
+		t.Parallel()
+		fc := &mockFlowController{outcome: fctypes.QueueOutcomeRejectedCapacity}
+		remote := &fakeConcurrencyState{admitOutcome: statestore.FlowControlOutcomeAdmitted}
+		ac := NewFlowControlAdmissionController(fc, "pool", WithConcurrencyLease(fc, remote, time.Second, 0))
+
+		require.Error(t, ac.Admit(ctx, reqCtx, 0))
+		require.Zero(t, remote.admitCalls, "remote must not be consulted once the local queue already rejected")
+
+		ac.ReleaseConcurrency(ctx, "test-req", "", 0)
+		require.Zero(t, remote.releaseCalls.Load(), "no lease was ever held for this request")
+	})
+
+	t.Run("classic mode (no WithConcurrencyLease): ReleaseConcurrency is a harmless no-op", func(t *testing.T) {
+		t.Parallel()
+		fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched}
+		ac := NewFlowControlAdmissionController(fc, "pool")
+
+		require.NoError(t, ac.Admit(ctx, reqCtx, 0))
+		ac.ReleaseConcurrency(ctx, "test-req", "", 0) // must not panic
+	})
 }
 
 func TestTranslateFlowControlOutcome(t *testing.T) {

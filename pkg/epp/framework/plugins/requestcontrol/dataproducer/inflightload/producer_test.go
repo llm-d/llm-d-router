@@ -37,6 +37,7 @@ import (
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/statestore"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -537,6 +538,119 @@ func TestInFlightLoadProducer_ConcurrencyStress(t *testing.T) {
 
 	require.Equal(t, int64(0), producer.requestTracker.get(endpointID), "request count drift detected")
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID), "token count drift detected")
+}
+
+// --- RFC #1593 feasibility spike: remote state wiring ---
+
+type reserveCall struct {
+	requestID, endpointID string
+	tokens                int64
+}
+
+type releaseCall struct {
+	requestID, endpointID string
+	tokens                int64
+}
+
+// fakeInflightState is a hand-rolled statestore.InflightState for exercising
+// the producer's remote-state wiring without a real gRPC server.
+type fakeInflightState struct {
+	snapshotBatch map[string]statestore.InflightSnapshot
+	reserveCalls  []reserveCall
+	releaseCalls  []releaseCall
+}
+
+func (f *fakeInflightState) GetInflightSnapshot(ctx context.Context, endpointID string) statestore.InflightSnapshot {
+	return f.GetInflightSnapshotBatch(ctx, []string{endpointID})[endpointID]
+}
+func (f *fakeInflightState) GetInflightSnapshotBatch(_ context.Context, _ []string) map[string]statestore.InflightSnapshot {
+	return f.snapshotBatch
+}
+func (f *fakeInflightState) ReserveInflight(_ context.Context, requestID, endpointID string, tokens int64) error {
+	f.reserveCalls = append(f.reserveCalls, reserveCall{requestID, endpointID, tokens})
+	return nil
+}
+func (f *fakeInflightState) ReleaseInflight(_ context.Context, requestID, endpointID string, tokens int64) error {
+	f.releaseCalls = append(f.releaseCalls, releaseCall{requestID, endpointID, tokens})
+	return nil
+}
+func (f *fakeInflightState) DeleteEndpoint(_ context.Context, _ string) {}
+
+var _ statestore.InflightState = (*fakeInflightState)(nil)
+
+func TestInFlightLoadProducer_Produce_UsesRemoteStateBatchReadWhenConfigured(t *testing.T) {
+	t.Parallel()
+	producer := newTestProducer(t)
+	fake := &fakeInflightState{snapshotBatch: map[string]statestore.InflightSnapshot{
+		fullEndpointName("ep-1"): {Requests: 7, Tokens: 700},
+	}}
+	producer.state = fake
+
+	endpoint := newStubSchedulingEndpoint("ep-1")
+	req := makeTokenRequest("req-1", 10)
+
+	require.NoError(t, producer.Produce(context.Background(), req, []fwksched.Endpoint{endpoint}))
+
+	val, ok := endpoint.Get(producer.dk.String())
+	require.True(t, ok)
+	load := val.(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(7), load.Requests)
+	require.Equal(t, int64(700), load.Tokens)
+}
+
+func TestInFlightLoadProducer_Produce_NilStateLeavesDynamicAttributeUntouched(t *testing.T) {
+	t.Parallel()
+	producer := newTestProducer(t) // p.state is nil: classic/stateful mode
+	endpoint := newStubSchedulingEndpoint("ep-1")
+	req := makeTokenRequest("req-1", 10)
+
+	require.NoError(t, producer.Produce(context.Background(), req, []fwksched.Endpoint{endpoint}))
+
+	_, ok := endpoint.Get(producer.dk.String())
+	require.False(t, ok, "Produce must not write the InFlightLoad attribute when no remote state is configured")
+}
+
+func TestInFlightLoadProducer_PreRequest_ReservesRemoteStateWhenConfigured(t *testing.T) {
+	t.Parallel()
+	producer := newTestProducer(t)
+	fake := &fakeInflightState{}
+	producer.state = fake
+
+	req := makeTokenRequest("req-1", 40)
+	result := makeSchedulingResult("ep-1")
+
+	producer.PreRequest(context.Background(), req, result)
+	producer.wg.Wait()
+
+	require.Len(t, fake.reserveCalls, 1)
+	require.Equal(t, "req-1", fake.reserveCalls[0].requestID)
+	require.Equal(t, fullEndpointName("ep-1"), fake.reserveCalls[0].endpointID)
+}
+
+func TestInFlightLoadProducer_ResponseBody_ReleasesRemoteStateExactlyOnceAtEndOfStream(t *testing.T) {
+	t.Parallel()
+	producer := newTestProducer(t)
+	producer.addEstimatedOutputTokens = false
+	fake := &fakeInflightState{}
+	producer.state = fake
+
+	req := makeTokenRequest("req-1", 40)
+	result := makeSchedulingResult("ep-1")
+	req.SchedulingResult = result
+
+	producer.PreRequest(context.Background(), req, result)
+	producer.wg.Wait()
+	require.Len(t, fake.reserveCalls, 1)
+
+	// StartOfStream releases only the local token counter early; remote
+	// release must not fire until the entry is actually evicted at EndOfStream.
+	producer.ResponseBody(context.Background(), req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Empty(t, fake.releaseCalls)
+
+	producer.ResponseBody(context.Background(), req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Len(t, fake.releaseCalls, 1)
+	require.Equal(t, "req-1", fake.releaseCalls[0].requestID)
+	require.Equal(t, fullEndpointName("ep-1"), fake.releaseCalls[0].endpointID)
 }
 
 // --- Helpers ---

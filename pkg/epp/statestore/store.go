@@ -14,37 +14,35 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package statestore defines the unified abstraction over the three categories
-// of shared scheduling state that must remain consistent across EPP replicas:
-// inflight request/token counters, prefix cache index, and flow control.
+// Package statestore is the abstraction over the three categories of shared
+// scheduling state that must remain consistent across EPP replicas: inflight
+// request/token counters, prefix cache index, and flow control admission. See
+// RFC #1593 ("Shared Scheduling State for Horizontally Scalable EPP
+// Deployments") for the design rationale.
 //
-// This is the P0 (Phase 1) abstraction described in the "Shared Scheduling State
-// for Horizontally Scalable EPP Deployments" RFC (#1593). Phase 1 introduces only
-// the Local provider, which wraps the existing in-process implementations so
-// that classic behavior remains exactly equivalent. Phase 2 will add a Remote
-// provider that accesses a stateful EPP via an internal gRPC State API.
-//
-// Design principles (from the RFC):
+// Design principles:
 //   - EPP stable operation first: all failures degrade rather than interrupt.
 //   - Zero-change deployment: default behavior is unchanged.
 //   - Minimal dependencies: no external storage; shared state lives in the same binary.
 //   - Local shadow always runs: immediate fallback when remote fails.
 //   - Scheduling modules remain unaware: scorer, filter, and picker require no changes.
 //
-// Phase 1 scope note: every write method on the three sub-interfaces below is a
-// no-op in the Local implementation, because the corresponding producer's own
-// PreRequest/ResponseBody hooks already perform that mutation today as a
-// byproduct of routing decisions. Only the read methods (GetInflightSnapshot,
-// GetPrefixMatch) and flow control's Admit are real pass-throughs in Local mode.
-// See each method's doc comment for specifics.
+// Three implementations exist: Local (in-process, wraps the existing
+// per-replica trackers so it's behaviorally equivalent to classic mode),
+// Remote (remote_client.go, forwards to a stateful EPP over the internal gRPC
+// State API in pkg/epp/statestore/stateapi), and FailOpen/LocalFallback
+// (failopen.go, concurrency_lease.go), which decorate Remote to prefer its
+// reads/admission decisions within a timeout and fall back to Local on
+// failure or timeout.
 //
-// Phase 2 (feasibility spike, RFC #1593): a Remote provider (remote_client.go)
-// and a FailOpen/LocalFallback decorator (failopen.go, concurrency_lease.go)
-// implement these same interfaces for real over an internal gRPC "State API"
-// (pkg/epp/statestore/stateapi). In that configuration, the write methods are
-// no longer no-ops end-to-end: the producer's existing local mutation is
-// unchanged, and a real best-effort push to the stateful EPP is added
-// alongside it. See failopen.go for the composition.
+// Every write method on the three sub-interfaces below is a no-op in the
+// Local implementation: the corresponding producer's own PreRequest/
+// ResponseBody hooks already perform that mutation as a byproduct of routing
+// decisions. Only the read methods (GetInflightSnapshot, GetPrefixMatch) and
+// flow control's Admit are real pass-throughs in Local mode. In the Remote/
+// FailOpen configuration, write methods additionally push a best-effort
+// update to the stateful EPP alongside the unchanged local mutation; see
+// failopen.go for the composition.
 package statestore
 
 import (
@@ -68,7 +66,7 @@ type StateStore interface {
 // counters per endpoint. These counters back load-aware routing.
 //
 // In the Local provider this wraps the atomic counters in
-// inflightload/producer.go. In the Remote provider (Phase 2) it forwards to the
+// inflightload/producer.go. In the Remote provider it forwards to the
 // stateful EPP via gRPC.
 //
 // Degradation strategy: FailOpen. The local shadow is a natural byproduct of
@@ -92,19 +90,18 @@ type InflightState interface {
 	// attribute accessor.
 	GetInflightSnapshotBatch(ctx context.Context, endpointIDs []string) map[string]InflightSnapshot
 
-	// ReserveInflight is a Phase-1 no-op. inflightload's own PreRequest hook
+	// ReserveInflight is a Local no-op: inflightload's own PreRequest hook
 	// already increments requestTracker/tokenTracker directly (with
 	// PluginState-backed, endpoint-flap-safe release bookkeeping) as a
-	// byproduct of the routing decision; duplicating that here would double
-	// count. This method exists so the interface is complete for Phase 2, where
-	// a Remote provider additionally does a best-effort push to the stateful
-	// EPP after the local mutation.
+	// byproduct of the routing decision, so duplicating that here would double
+	// count. Remote/FailOpen additionally push a best-effort update to the
+	// stateful EPP after the local mutation.
 	ReserveInflight(ctx context.Context, requestID, endpointID string, estimatedTokens int64) error
 
-	// ReleaseInflight is a Phase-1 no-op; see ReserveInflight.
+	// ReleaseInflight is a Local no-op; see ReserveInflight.
 	ReleaseInflight(ctx context.Context, requestID, endpointID string, estimatedTokens int64) error
 
-	// DeleteEndpoint is a Phase-1 no-op; inflightload's own endpoint-delete
+	// DeleteEndpoint is a Local no-op; inflightload's own endpoint-delete
 	// handling already calls DeleteEndpoint on its trackers directly.
 	DeleteEndpoint(ctx context.Context, endpointID string)
 }
@@ -113,8 +110,7 @@ type InflightState interface {
 // prefix-aware routing.
 //
 // In the Local provider this wraps the LRU index in approximateprefix. In the
-// Remote provider (Phase 2) it forwards prefix score/commit operations to
-// stateful EPP.
+// Remote provider it forwards prefix score/commit operations to stateful EPP.
 //
 // Degradation strategy: FailOpen. The local shadow auto-updates after each
 // routing decision.
@@ -133,22 +129,21 @@ type PrefixState interface {
 	// single call. See GetInflightSnapshotBatch for the same rationale.
 	GetPrefixMatchBatch(ctx context.Context, hashes []uint64) map[uint64][]string
 
-	// CommitPrefix is a Phase-1 no-op. approximateprefix's own PreRequest hook
+	// CommitPrefix is a Local no-op: approximateprefix's own PreRequest hook
 	// already commits matched hashes to its indexer directly as a byproduct of
-	// the routing decision; duplicating that here would be redundant. This
-	// method exists so the interface is complete for Phase 2.
+	// the routing decision, so duplicating that here would be redundant.
 	CommitPrefix(ctx context.Context, requestID, endpointID string, hashes []uint64) error
 
-	// RemoveEndpoint is a Phase-1 no-op; approximateprefix's own endpoint-delete
+	// RemoveEndpoint is a Local no-op; approximateprefix's own endpoint-delete
 	// handling already calls RemovePod on its indexer directly.
 	RemoveEndpoint(ctx context.Context, endpointID string)
 }
 
 // FlowControlState provides admit/release access to flow control quotas.
 //
-// In the Local provider this wraps flowcontrol/controller.FlowController. In the
-// Remote provider (Phase 2) it forwards admit/release operations to stateful
-// EPP via gRPC.
+// In the Local provider this wraps flowcontrol/controller.FlowController. In
+// the Remote provider it forwards admit/release operations to stateful EPP
+// via gRPC.
 //
 // Degradation strategy: LocalFallback. A dual-quota design is used:
 // globalMaxConcurrency (remote authority, precise) and localMaxConcurrency
@@ -159,13 +154,13 @@ type FlowControlState interface {
 	// terminal outcome.
 	Admit(ctx context.Context, req flowcontrol.FlowControlRequest) (FlowControlOutcome, error)
 
-	// Release is a Phase-1 no-op. FlowController's only exported method is
+	// Release is a Local no-op. FlowController's only exported method is
 	// EnqueueAndWait; finalization (dispatch, TTL/cancellation eviction,
 	// cleanup) happens entirely inside that blocking call, with no separate
 	// release call to invoke afterward. Note this also means the existing
 	// FlowRegistry counts queue occupancy, not concurrent-execution leases;
-	// true admit-reserve-execute-release concurrency limiting needs a separate
-	// ConcurrencyLeaseStore abstraction and is explicitly out of scope here.
+	// true admit-reserve-execute-release concurrency limiting needs the
+	// separate ConcurrencyState abstraction (concurrency_lease.go).
 	Release(ctx context.Context, requestID string, flowKey FlowControlKey) error
 }
 

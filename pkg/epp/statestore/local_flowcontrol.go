@@ -35,9 +35,8 @@ type FlowControlBackend interface {
 }
 
 // localFlowControlState wraps a FlowControlBackend to satisfy FlowControlState.
-//
-// In Phase 1 this is the only implementation. Release is a no-op: the backend
-// has no separate release call (see FlowControlState.Release doc comment).
+// Release is a no-op: the backend has no separate release call (see
+// FlowControlState.Release doc comment).
 type localFlowControlState struct {
 	backend FlowControlBackend
 }

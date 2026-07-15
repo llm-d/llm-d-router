@@ -18,16 +18,15 @@ limitations under the License.
 // "stateful" EPP replica exposes so "stateless" EPP replicas can read/write
 // shared scheduling state over gRPC.
 //
-// This is a feasibility-spike implementation of RFC #1593 Phase 2. The
-// stateful EPP process never runs a real Director/Scheduler for actual
+// The stateful EPP process never runs a real Director/Scheduler for actual
 // requests, so its storage is a freestanding structure — not a wrapper around
 // an in-process producer instance, unlike pkg/epp/statestore's Local provider
 // (which wraps a specific producer, appropriate for a stateless replica's own
 // classic-equivalent local shadow).
 //
-// Storage is deliberately behind the Store interface so a future Redis/PVC
-// backend is a drop-in replacement; only memoryStore (in-memory, unbounded for
-// the run's duration) is implemented for this spike.
+// Storage is behind the Store interface so a Redis/PVC-backed implementation
+// can replace memoryStore (in-memory, no eviction, grows unbounded for the
+// life of the process) without changing the gRPC server or client code.
 package stateapi
 
 // InflightSnapshot is a point-in-time view of inflight load for one endpoint.

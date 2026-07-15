@@ -36,6 +36,51 @@ const (
 	DefaultGrpcPort      = 9002
 	DefaultPoolNamespace = "default"        // default when pool namespace is empty (CLI flag default is empty)
 	DefaultDrainTimeout  = 30 * time.Second // graceful shutdown drain window
+
+	// DefaultStateAPIPort is the gRPC port a stateful EPP exposes its internal
+	// State API on (RFC #1593 feasibility spike).
+	DefaultStateAPIPort = 9004
+	// DefaultStateAPIRemoteTimeout bounds a single State API call made by a
+	// stateless replica, per the RFC's FailOpen/LocalFallback degradation
+	// strategy: a slow or unreachable stateful EPP must not stall requests.
+	DefaultStateAPIRemoteTimeout = 50 * time.Millisecond
+)
+
+// EPP operating modes (RFC #1593 feasibility spike). classic is the default
+// and preserves today's active-passive behavior unchanged; stateful and
+// stateless implement the RFC's active-active split.
+const (
+	// EppModeClassic is today's behavior: a single active-passive leader
+	// serves ext-proc traffic, no State API involved.
+	EppModeClassic = "classic"
+	// EppModeStateful holds shared scheduling state and exposes the internal
+	// gRPC State API; it does not serve ext-proc traffic.
+	EppModeStateful = "stateful"
+	// EppModeStateless serves ext-proc traffic from multiple concurrently
+	// Ready replicas, reading/writing shared state via a stateful EPP.
+	EppModeStateless = "stateless"
+)
+
+// Per-capability access modes for stateless mode (RFC #1593 feasibility
+// spike), mirroring pkg/epp/statestore.AccessMode as plain strings so this
+// package doesn't need to import statestore just for flag validation.
+// StateAccessModeLocal isolates "more replicas sharing CPU work" from
+// "remote RPC cost" by disabling remote access for a capability even when
+// a State API client is configured -- see
+// bin/record/stateful-rfc/perf-test/ha-benchmark.sh's Profile-D-style
+// comparison, which needs exactly this to decompose a measured throughput
+// delta into its two contributing factors.
+const (
+	// StateAccessModeLocal disables remote access; the capability behaves
+	// like classic regardless of --stateful-epp-address.
+	StateAccessModeLocal = "Local"
+	// StateAccessModeFailOpen prefers a remote read/write and falls back to
+	// the local shadow on failure or timeout. Valid for inflight and prefix.
+	StateAccessModeFailOpen = "FailOpen"
+	// StateAccessModeLocalFallback is flow-control only: the local queue
+	// always admits first, then a fleet-wide concurrency lease; falls back
+	// to a local concurrency cap when the lease is unreachable.
+	StateAccessModeLocalFallback = "LocalFallback"
 )
 
 // deprecatedMetricFlags lists metric flags that are superseded by engineConfigs
@@ -112,6 +157,20 @@ type Options struct {
 	//
 	ConfigFile string // The path to the configuration file.
 	ConfigText string // The configuration specified as text, in lieu of a file.
+	//
+	// Stateful/stateless mode (RFC #1593 feasibility spike).
+	//
+	EppMode                 string        // classic (default), stateful, or stateless.
+	StateAPIPort            int           // gRPC port the stateful EPP exposes its internal State API on. Stateful mode only.
+	StatefulEPPAddress      string        // Address (host:port) of the stateful EPP's State API. Required in stateless mode.
+	StateAPIRemoteTimeout   time.Duration // Per-call timeout for State API reads/writes from a stateless replica.
+	GlobalMaxConcurrency    int64         // Fleet-wide concurrency cap enforced by the stateful EPP. Zero means unlimited.
+	LocalMaxConcurrency     int64         // Local fallback concurrency cap used when the State API is unreachable. Stateless mode only.
+	StateAPIArtificialDelay time.Duration // Artificial delay before the stateful EPP responds. For e2e perf-spike RTT modeling only.
+
+	StateAccessModeInflight    string // Local or FailOpen (default). Stateless mode only.
+	StateAccessModePrefix      string // Local or FailOpen (default). Stateless mode only.
+	StateAccessModeFlowControl string // Local or LocalFallback (default). Stateless mode only.
 
 	// internal
 	fs                  *pflag.FlagSet // FlagSet used in AddFlags() and consulted in Validate()
@@ -144,6 +203,12 @@ func NewOptions() *Options {
 		EnablePprof:                      true,
 		SecureServing:                    true,
 		MetricsEndpointAuth:              true,
+		EppMode:                          EppModeClassic,
+		StateAPIPort:                     DefaultStateAPIPort,
+		StateAPIRemoteTimeout:            DefaultStateAPIRemoteTimeout,
+		StateAccessModeInflight:          StateAccessModeFailOpen,
+		StateAccessModePrefix:            StateAccessModeFailOpen,
+		StateAccessModeFlowControl:       StateAccessModeLocalFallback,
 	}
 }
 
@@ -229,6 +294,37 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Enables authentication and authorization of the metrics endpoint.")
 	fs.StringVar(&opts.ConfigFile, "config-file", opts.ConfigFile, "The path to the configuration file.")
 	fs.StringVar(&opts.ConfigText, "config-text", opts.ConfigText, "The configuration specified as text, in lieu of a file.")
+
+	fs.StringVar(&opts.EppMode, "epp-mode", opts.EppMode,
+		"EPP operating mode: classic (default, single active-passive leader serves ext-proc traffic), "+
+			"stateful (holds shared scheduling state, exposes the internal State API, does not serve ext-proc "+
+			"traffic), or stateless (serves ext-proc traffic from multiple concurrently-ready replicas, backed "+
+			"by a stateful EPP via --stateful-epp-address). Feasibility spike for RFC #1593.")
+	fs.IntVar(&opts.StateAPIPort, "state-api-port", opts.StateAPIPort,
+		"gRPC port the stateful EPP exposes its internal State API on. Only used in stateful mode.")
+	fs.StringVar(&opts.StatefulEPPAddress, "stateful-epp-address", opts.StatefulEPPAddress,
+		"Address (host:port) of the stateful EPP's State API. Required in stateless mode.")
+	fs.DurationVar(&opts.StateAPIRemoteTimeout, "state-api-remote-timeout", opts.StateAPIRemoteTimeout,
+		"Per-call timeout for State API reads/writes made by a stateless replica.")
+	fs.Int64Var(&opts.GlobalMaxConcurrency, "flow-control-global-max-concurrency", opts.GlobalMaxConcurrency,
+		"Fleet-wide concurrency cap enforced by the stateful EPP's concurrency lease. Zero means unlimited. Only used in stateful mode.")
+	fs.Int64Var(&opts.LocalMaxConcurrency, "flow-control-local-max-concurrency", opts.LocalMaxConcurrency,
+		"Local fallback concurrency cap used by a stateless replica when the State API is unreachable. "+
+			"Recommended: flow-control-global-max-concurrency divided by the expected stateless replica count.")
+	fs.DurationVar(&opts.StateAPIArtificialDelay, "state-api-artificial-delay", opts.StateAPIArtificialDelay,
+		"Artificial delay added before the stateful EPP responds to any State API call. For e2e performance-spike "+
+			"RTT modeling only: on a single-node kind cluster, stateless<->stateful traffic is loopback and would "+
+			"otherwise understate a real cross-pod network hop.")
+	fs.StringVar(&opts.StateAccessModeInflight, "state-access-mode-inflight", opts.StateAccessModeInflight,
+		"Access mode for the inflight-load capability in stateless mode: FailOpen (default, prefer a remote read, "+
+			"fall back to local) or Local (never call remote, isolating the pure multi-replica benefit from remote "+
+			"RPC cost). Only used in stateless mode.")
+	fs.StringVar(&opts.StateAccessModePrefix, "state-access-mode-prefix", opts.StateAccessModePrefix,
+		"Access mode for the approximate-prefix-cache capability in stateless mode: FailOpen (default) or Local. "+
+			"Only used in stateless mode.")
+	fs.StringVar(&opts.StateAccessModeFlowControl, "state-access-mode-flowcontrol", opts.StateAccessModeFlowControl,
+		"Access mode for the concurrency-lease capability in stateless mode: LocalFallback (default, local queue "+
+			"admits first, then a fleet-wide lease) or Local (never build a remote lease). Only used in stateless mode.")
 }
 
 func (opts *Options) Complete() error {
@@ -304,6 +400,35 @@ func (opts *Options) Validate() error {
 	if opts.ModelServerMetricsScheme != "http" && opts.ModelServerMetricsScheme != "https" {
 		return fmt.Errorf("unexpected %q value for %q flag, it can only be set to 'http' or 'https'",
 			opts.ModelServerMetricsScheme, "model-server-metrics-scheme")
+	}
+
+	switch opts.EppMode {
+	case EppModeClassic, EppModeStateful, EppModeStateless:
+	default:
+		return fmt.Errorf("unexpected %q value for %q flag, it can only be set to %q, %q, or %q",
+			opts.EppMode, "epp-mode", EppModeClassic, EppModeStateful, EppModeStateless)
+	}
+	if opts.EppMode == EppModeStateless && opts.StatefulEPPAddress == "" {
+		return fmt.Errorf("%q is required when %q is %q", "stateful-epp-address", "epp-mode", EppModeStateless)
+	}
+
+	switch opts.StateAccessModeInflight {
+	case StateAccessModeLocal, StateAccessModeFailOpen:
+	default:
+		return fmt.Errorf("unexpected %q value for %q flag, it can only be set to %q or %q",
+			opts.StateAccessModeInflight, "state-access-mode-inflight", StateAccessModeLocal, StateAccessModeFailOpen)
+	}
+	switch opts.StateAccessModePrefix {
+	case StateAccessModeLocal, StateAccessModeFailOpen:
+	default:
+		return fmt.Errorf("unexpected %q value for %q flag, it can only be set to %q or %q",
+			opts.StateAccessModePrefix, "state-access-mode-prefix", StateAccessModeLocal, StateAccessModeFailOpen)
+	}
+	switch opts.StateAccessModeFlowControl {
+	case StateAccessModeLocal, StateAccessModeLocalFallback:
+	default:
+		return fmt.Errorf("unexpected %q value for %q flag, it can only be set to %q or %q",
+			opts.StateAccessModeFlowControl, "state-access-mode-flowcontrol", StateAccessModeLocal, StateAccessModeLocalFallback)
 	}
 
 	if opts.GRPCMaxRecvMsgSize < 0 {

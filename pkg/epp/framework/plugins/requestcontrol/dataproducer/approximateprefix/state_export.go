@@ -20,13 +20,19 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/statestore"
 )
 
-// GetPrefixMatch returns the endpoint IDs (NamespacedName strings) that have
-// the given prefix hash cached. This exposes the internal indexer to the
+// Compile-time assertion that *dataProducer satisfies statestore.PrefixBackend
+// via the three methods below, structurally, with no adapter shim.
+var _ statestore.PrefixBackend = (*dataProducer)(nil)
+
+// GetMatch returns the endpoint IDs (NamespacedName strings) that have the
+// given prefix hash cached. This exposes the internal indexer to the
 // statestore Local prefix provider without exporting the unexported
 // podSet/ServerID types.
-func (p *dataProducer) GetPrefixMatch(hash uint64) []string {
+func (p *dataProducer) GetMatch(hash uint64) []string {
 	pods := p.indexerInst.Get(blockHash(hash))
 	if pods == nil {
 		return nil
@@ -38,11 +44,11 @@ func (p *dataProducer) GetPrefixMatch(hash uint64) []string {
 	return result
 }
 
-// CommitPrefix records that the given prefix hashes are now cached on the
+// Commit records that the given prefix hashes are now cached on the
 // endpoint identified by endpointID, as a byproduct of a routing decision. The
 // endpoint's GPU block count is not known here, so the indexer falls back to
 // its default LRU size (NumOfGPUBlocks <= 0 path in indexer.Add).
-func (p *dataProducer) CommitPrefix(endpointID string, hashes []uint64) {
+func (p *dataProducer) Commit(endpointID string, hashes []uint64) {
 	blockHashes := make([]blockHash, 0, len(hashes))
 	for _, h := range hashes {
 		blockHashes = append(blockHashes, blockHash(h))
@@ -50,9 +56,9 @@ func (p *dataProducer) CommitPrefix(endpointID string, hashes []uint64) {
 	p.indexerInst.Add(blockHashes, server{ServerID: ServerID(parseNamespacedName(endpointID))})
 }
 
-// RemovePrefixEndpoint removes all prefix state for the given endpoint. This
+// RemoveEndpoint removes all prefix state for the given endpoint. This
 // delegates to the indexer's RemovePod.
-func (p *dataProducer) RemovePrefixEndpoint(endpointID string) {
+func (p *dataProducer) RemoveEndpoint(endpointID string) {
 	p.indexerInst.RemovePod(ServerID(parseNamespacedName(endpointID)))
 }
 

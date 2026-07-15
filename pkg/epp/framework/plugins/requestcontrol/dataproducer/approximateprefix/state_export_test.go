@@ -32,11 +32,11 @@ func TestDataProducer_CommitAndGetPrefixMatch(t *testing.T) {
 	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 	require.NoError(t, err)
 
-	p.CommitPrefix("default/pod-a", []uint64{1, 2, 3})
+	p.Commit("default/pod-a", []uint64{1, 2, 3})
 
-	require.ElementsMatch(t, []string{"default/pod-a"}, p.GetPrefixMatch(1))
-	require.ElementsMatch(t, []string{"default/pod-a"}, p.GetPrefixMatch(2))
-	require.Empty(t, p.GetPrefixMatch(999))
+	require.ElementsMatch(t, []string{"default/pod-a"}, p.GetMatch(1))
+	require.ElementsMatch(t, []string{"default/pod-a"}, p.GetMatch(2))
+	require.Empty(t, p.GetMatch(999))
 }
 
 func TestDataProducer_RemovePrefixEndpoint(t *testing.T) {
@@ -48,10 +48,10 @@ func TestDataProducer_RemovePrefixEndpoint(t *testing.T) {
 	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 	require.NoError(t, err)
 
-	p.CommitPrefix("default/pod-a", []uint64{1})
-	require.NotEmpty(t, p.GetPrefixMatch(1))
+	p.Commit("default/pod-a", []uint64{1})
+	require.NotEmpty(t, p.GetMatch(1))
 
-	p.RemovePrefixEndpoint("default/pod-a")
+	p.RemoveEndpoint("default/pod-a")
 
-	require.Empty(t, p.GetPrefixMatch(1))
+	require.Empty(t, p.GetMatch(1))
 }

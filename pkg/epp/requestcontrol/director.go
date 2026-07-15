@@ -512,6 +512,14 @@ func (d *Director) HandleResponseHeader(ctx context.Context, reqCtx *handlers.Re
 func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.RequestContext, endOfStream bool) *handlers.RequestContext {
 	logger := log.FromContext(ctx).WithValues("stage", "bodyChunk")
 	logger.V(logutil.TRACE).Info("Entering HandleResponseBodyChunk")
+
+	if endOfStream {
+		// Runs regardless of whether any ResponseStreaming plugin is registered
+		// (unlike the early return below), since a concurrency lease may have
+		// been acquired independently of the data-producer plugin pipeline.
+		d.releaseConcurrencyLease(ctx, reqCtx)
+	}
+
 	if len(d.requestControlPlugins.responseStreamingPlugins) == 0 {
 		logger.V(logutil.TRACE).Info("Exiting HandleResponseBodyChunk")
 		return reqCtx
@@ -553,6 +561,20 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	}
 	logger.V(logutil.TRACE).Info("Exiting HandleResponseBodyChunk")
 	return reqCtx
+}
+
+// releaseConcurrencyLease releases a fleet-wide concurrency lease previously
+// acquired by AdmissionController.Admit, if the configured AdmissionController
+// implements ConcurrencyReleaser (RFC #1593 feasibility spike, stateless mode
+// only). A no-op in classic/stateful mode, since neither's AdmissionController
+// implements that interface.
+func (d *Director) releaseConcurrencyLease(ctx context.Context, reqCtx *handlers.RequestContext) {
+	releaser, ok := d.admissionController.(ConcurrencyReleaser)
+	if !ok || reqCtx.SchedulingRequest == nil {
+		return
+	}
+	requestID := reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey]
+	releaser.ReleaseConcurrency(ctx, requestID, reqCtx.SchedulingRequest.FairnessID, reqCtx.Priority)
 }
 
 func (d *Director) loadOrCreateResponseBodyQueue(reqCtx *handlers.RequestContext) *responseBodyQueue {

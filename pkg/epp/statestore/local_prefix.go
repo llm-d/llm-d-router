@@ -33,12 +33,11 @@ type PrefixBackend interface {
 	RemoveEndpoint(endpointID string)
 }
 
-// localPrefixState wraps a PrefixBackend to satisfy PrefixState.
-//
-// In Phase 1 this is the only implementation. Its write method (CommitPrefix)
-// is a no-op for the same reason as localInflightState's Reserve/Release: the
-// backend's own PreRequest hook already commits to its indexer directly as a
-// byproduct of routing decisions.
+// localPrefixState wraps a PrefixBackend to satisfy PrefixState. Its write
+// method (CommitPrefix) is a no-op for the same reason as
+// localInflightState's Reserve/Release: the backend's own PreRequest hook
+// already commits to its indexer directly as a byproduct of routing
+// decisions.
 type localPrefixState struct {
 	backend PrefixBackend
 }

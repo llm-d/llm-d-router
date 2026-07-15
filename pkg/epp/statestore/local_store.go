@@ -17,8 +17,8 @@ limitations under the License.
 package statestore
 
 // localStateStore composes the three Local sub-providers into a single
-// StateStore. This is the Phase 1 (P0) implementation: classic behavior is
-// exactly equivalent because every write method is a no-op (see store.go).
+// StateStore. Classic behavior is exactly equivalent because every write
+// method is a no-op (see store.go).
 type localStateStore struct {
 	InflightState
 	PrefixState

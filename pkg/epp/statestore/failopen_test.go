@@ -19,6 +19,7 @@ package statestore
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,14 +27,17 @@ import (
 )
 
 // fakeInflightState is a hand-rolled InflightState for exercising
-// failOpenInflightState's composition without a real gRPC server.
+// failOpenInflightState's composition without a real gRPC server. Write-path
+// call counts are atomic because ReserveInflight/ReleaseInflight/DeleteEndpoint
+// now push to remote asynchronously (see asyncRemoteWrite) — tests must poll
+// (via require.Eventually) rather than assert immediately after the call
+// returns.
 type fakeInflightState struct {
-	snapshotBatch      map[string]InflightSnapshot // nil means "simulate failure"
-	reserveErr         error
-	releaseErr         error
-	reserveCalls       int
-	releaseCalls       int
-	deleteEndpointArgs []string
+	snapshotBatch map[string]InflightSnapshot // nil means "simulate failure"
+	reserveErr    error
+	releaseErr    error
+	reserveCalls  atomic.Int32
+	releaseCalls  atomic.Int32
 }
 
 func (f *fakeInflightState) GetInflightSnapshot(ctx context.Context, endpointID string) InflightSnapshot {
@@ -43,16 +47,14 @@ func (f *fakeInflightState) GetInflightSnapshotBatch(_ context.Context, _ []stri
 	return f.snapshotBatch
 }
 func (f *fakeInflightState) ReserveInflight(_ context.Context, _, _ string, _ int64) error {
-	f.reserveCalls++
+	f.reserveCalls.Add(1)
 	return f.reserveErr
 }
 func (f *fakeInflightState) ReleaseInflight(_ context.Context, _, _ string, _ int64) error {
-	f.releaseCalls++
+	f.releaseCalls.Add(1)
 	return f.releaseErr
 }
-func (f *fakeInflightState) DeleteEndpoint(_ context.Context, endpointID string) {
-	f.deleteEndpointArgs = append(f.deleteEndpointArgs, endpointID)
-}
+func (f *fakeInflightState) DeleteEndpoint(_ context.Context, _ string) {}
 
 var _ InflightState = (*fakeInflightState)(nil)
 
@@ -87,8 +89,13 @@ func TestFailOpenInflightState_ReserveCallsBothLocalAndRemote(t *testing.T) {
 	err := s.ReserveInflight(context.Background(), "req-1", "ep-1", 100)
 
 	require.NoError(t, err)
-	require.Equal(t, 1, local.reserveCalls)
-	require.Equal(t, 1, remote.reserveCalls)
+	// Local is synchronous (it's a documented no-op, not I/O), so it's
+	// already applied by the time ReserveInflight returns.
+	require.Equal(t, int32(1), local.reserveCalls.Load())
+	// Remote is pushed asynchronously (asyncRemoteWrite): the call landing
+	// is not guaranteed the instant ReserveInflight returns.
+	require.Eventually(t, func() bool { return remote.reserveCalls.Load() == 1 },
+		time.Second, time.Millisecond, "async remote push never landed")
 }
 
 func TestFailOpenInflightState_ReserveRemoteFailureIsBestEffort(t *testing.T) {
@@ -100,14 +107,16 @@ func TestFailOpenInflightState_ReserveRemoteFailureIsBestEffort(t *testing.T) {
 	err := s.ReserveInflight(context.Background(), "req-1", "ep-1", 100)
 
 	require.NoError(t, err, "a failed remote push must degrade silently, not fail the request")
-	require.Equal(t, 1, local.reserveCalls)
+	require.Equal(t, int32(1), local.reserveCalls.Load())
+	require.Eventually(t, func() bool { return remote.reserveCalls.Load() == 1 },
+		time.Second, time.Millisecond, "async remote push never landed")
 }
 
 // fakePrefixState mirrors fakeInflightState for PrefixState.
 type fakePrefixState struct {
 	matchBatch  map[uint64][]string // nil means "simulate failure"
 	commitErr   error
-	commitCalls int
+	commitCalls atomic.Int32
 }
 
 func (f *fakePrefixState) GetPrefixMatch(ctx context.Context, hash uint64) []string {
@@ -117,7 +126,7 @@ func (f *fakePrefixState) GetPrefixMatchBatch(_ context.Context, _ []uint64) map
 	return f.matchBatch
 }
 func (f *fakePrefixState) CommitPrefix(_ context.Context, _, _ string, _ []uint64) error {
-	f.commitCalls++
+	f.commitCalls.Add(1)
 	return f.commitErr
 }
 func (f *fakePrefixState) RemoveEndpoint(_ context.Context, _ string) {}
@@ -131,4 +140,18 @@ func TestFailOpenPrefixState_FallsBackToLocalOnRemoteFailure(t *testing.T) {
 	s := NewFailOpenPrefixState(remote, local, time.Second)
 
 	require.Equal(t, []string{"ep-1"}, s.GetPrefixMatch(context.Background(), 42))
+}
+
+func TestFailOpenPrefixState_CommitCallsBothLocalAndRemote(t *testing.T) {
+	t.Parallel()
+	remote := &fakePrefixState{}
+	local := &fakePrefixState{}
+	s := NewFailOpenPrefixState(remote, local, time.Second)
+
+	err := s.CommitPrefix(context.Background(), "req-1", "ep-1", []uint64{1, 2})
+
+	require.NoError(t, err)
+	require.Equal(t, int32(1), local.commitCalls.Load())
+	require.Eventually(t, func() bool { return remote.commitCalls.Load() == 1 },
+		time.Second, time.Millisecond, "async remote push never landed")
 }

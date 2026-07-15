@@ -33,13 +33,11 @@ type InflightBackend interface {
 	DeleteEndpoint(endpointID string)
 }
 
-// localInflightState wraps an InflightBackend to satisfy InflightState.
-//
-// In Phase 1 this is the only implementation. Its write methods
-// (ReserveInflight/ReleaseInflight) are no-ops: the backend's own PreRequest/
-// ResponseBody hooks already mutate its counters directly as a byproduct of
-// routing decisions, so calling through here as well would double count. See
-// the InflightState doc comments for the full rationale.
+// localInflightState wraps an InflightBackend to satisfy InflightState. Its
+// write methods (ReserveInflight/ReleaseInflight) are no-ops: the backend's
+// own PreRequest/ResponseBody hooks already mutate its counters directly as a
+// byproduct of routing decisions, so calling through here as well would
+// double count. See the InflightState doc comments for the full rationale.
 type localInflightState struct {
 	backend InflightBackend
 }

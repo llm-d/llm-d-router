@@ -19,6 +19,7 @@ package statestore
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,13 +48,16 @@ func (f *fakeLocalFlowControlState) Release(_ context.Context, _ string, _ FlowC
 var _ FlowControlState = (*fakeLocalFlowControlState)(nil)
 
 // fakeConcurrencyState is a hand-rolled ConcurrencyState standing in for the
-// gRPC-backed remoteConcurrencyState.
+// gRPC-backed remoteConcurrencyState. releaseCalls is atomic because Release
+// (unlike Admit) is pushed to remote asynchronously (see asyncRemoteWrite) —
+// tests exercising that path must poll (require.Eventually) rather than
+// assert immediately after the call returns.
 type fakeConcurrencyState struct {
 	admitOutcome FlowControlOutcome
 	admitErr     error
 	releaseErr   error
 	admitCalls   int
-	releaseCalls int
+	releaseCalls atomic.Int32
 }
 
 func (f *fakeConcurrencyState) Admit(_ context.Context, _ FlowControlKey, _ string) (FlowControlOutcome, error) {
@@ -61,7 +65,7 @@ func (f *fakeConcurrencyState) Admit(_ context.Context, _ FlowControlKey, _ stri
 	return f.admitOutcome, f.admitErr
 }
 func (f *fakeConcurrencyState) Release(_ context.Context, _ FlowControlKey, _ string) error {
-	f.releaseCalls++
+	f.releaseCalls.Add(1)
 	return f.releaseErr
 }
 
@@ -81,7 +85,7 @@ func TestLocalFallbackConcurrencyState_LocalRejectionShortCircuits(t *testing.T)
 
 	// A request that was never admitted must not be released.
 	require.NoError(t, s.Release(context.Background(), "req-1", FlowControlKey{}))
-	require.Zero(t, remote.releaseCalls)
+	require.Zero(t, remote.releaseCalls.Load())
 }
 
 func TestLocalFallbackConcurrencyState_RemoteAdmitThenRelease(t *testing.T) {
@@ -95,7 +99,10 @@ func TestLocalFallbackConcurrencyState_RemoteAdmitThenRelease(t *testing.T) {
 	require.Equal(t, FlowControlOutcomeAdmitted, outcome)
 
 	require.NoError(t, s.Release(context.Background(), "req-1", FlowControlKey{ID: "tenant-a"}))
-	require.Equal(t, 1, remote.releaseCalls)
+	// Release pushes to remote asynchronously; the call landing is not
+	// guaranteed the instant Release returns.
+	require.Eventually(t, func() bool { return remote.releaseCalls.Load() == 1 },
+		time.Second, time.Millisecond, "async remote release never landed")
 }
 
 func TestLocalFallbackConcurrencyState_RemoteRejectsAfterLocalAdmits(t *testing.T) {
@@ -111,7 +118,7 @@ func TestLocalFallbackConcurrencyState_RemoteRejectsAfterLocalAdmits(t *testing.
 
 	// No lease was actually held (remote rejected), so Release is a no-op.
 	require.NoError(t, s.Release(context.Background(), "req-1", FlowControlKey{}))
-	require.Zero(t, remote.releaseCalls)
+	require.Zero(t, remote.releaseCalls.Load())
 }
 
 func TestLocalFallbackConcurrencyState_RemoteFailureDegradesWithinLocalCap(t *testing.T) {
@@ -131,7 +138,7 @@ func TestLocalFallbackConcurrencyState_RemoteFailureDegradesWithinLocalCap(t *te
 
 	// Releasing the first frees the local-fallback slot for a third.
 	require.NoError(t, s.Release(context.Background(), "req-1", FlowControlKey{}))
-	require.Zero(t, remote.releaseCalls, "a degraded (local-fallback) lease must not call remote Release")
+	require.Zero(t, remote.releaseCalls.Load(), "a degraded (local-fallback) lease must not call remote Release")
 
 	outcome, err = s.Admit(context.Background(), &stubFlowControlRequest{id: "req-3"})
 	require.NoError(t, err)

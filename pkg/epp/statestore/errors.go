@@ -19,8 +19,7 @@ package statestore
 import "errors"
 
 // ErrBackendUnavailable indicates a StateStore backend (Local or Remote)
-// could not service a request. The Local provider never returns this in
-// Phase 1, since it has no external dependency; it is defined here so Phase 2's
-// Remote provider and its FailOpen/LocalFallback degradation logic can use a
-// stable sentinel error.
+// could not service a request. The Local provider never returns this, since
+// it has no external dependency; the Remote provider and its FailOpen/
+// LocalFallback degradation logic use it as a stable sentinel error.
 var ErrBackendUnavailable = errors.New("statestore: backend unavailable")

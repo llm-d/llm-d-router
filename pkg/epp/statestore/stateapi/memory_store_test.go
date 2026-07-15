@@ -18,7 +18,9 @@ package stateapi
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -116,6 +118,58 @@ func TestMemoryConcurrencyStore_AdmitReleaseRespectsGlobalMax(t *testing.T) {
 	require.Equal(t, ConcurrencyOutcomeAdmitted, s.Admit("req-3", key))
 }
 
+// TestMemoryConcurrencyStore_AdmitUnderConcurrencyRespectsGlobalMax guards the
+// property store.go documents as "globalMaxConcurrency (remote authority,
+// precise)": concurrent Admit calls for the same FlowKey but different
+// requestIDs land on different leaseShards (shard is keyed by requestID), so
+// the shard mutex alone cannot make the shared counter's check-then-increment
+// atomic across requestIDs. tryAdmit's CAS loop is what actually closes this;
+// -race cannot catch a regression here because every access to counter is
+// already a properly synchronized atomic op — the bug is a lost admission
+// decision (TOCTOU), not a data race.
+func TestMemoryConcurrencyStore_AdmitUnderConcurrencyRespectsGlobalMax(t *testing.T) {
+	t.Parallel()
+	const globalMax = 8
+	const racers = 64 // concurrent Admits contending for the single remaining slot
+	const rounds = 20
+
+	for round := 0; round < rounds; round++ {
+		s := newMemoryConcurrencyStore(context.Background(), Config{GlobalMaxConcurrency: globalMax, LeaseTTL: time.Minute})
+		key := FlowKey{ID: "tenant-a", Priority: 0}
+
+		// Fill globalMax-1 slots sequentially (uncontended) so every racer
+		// below observes the identical stale counter value (globalMax-1) when
+		// it Loads, instead of needing to collide mid-ramp against a counter
+		// that's also moving.
+		for i := 0; i < globalMax-1; i++ {
+			require.Equal(t, ConcurrencyOutcomeAdmitted, s.Admit(fmt.Sprintf("round-%d-seed-%d", round, i), key))
+		}
+
+		var admitted atomic.Int64
+		var ready, wg sync.WaitGroup
+		start := make(chan struct{})
+		ready.Add(racers)
+		wg.Add(racers)
+		for i := 0; i < racers; i++ {
+			go func(i int) {
+				defer wg.Done()
+				ready.Done()
+				<-start // all racers fire Admit at once, all seeing the same stale counter value
+				if s.Admit(fmt.Sprintf("round-%d-racer-%d", round, i), key) == ConcurrencyOutcomeAdmitted {
+					admitted.Add(1)
+				}
+			}(i)
+		}
+		ready.Wait()
+		close(start)
+		wg.Wait()
+
+		require.LessOrEqualf(t, admitted.Load(), int64(1),
+			"round %d: only 1 of the %d racers contending for the single remaining slot should be admitted, got %d",
+			round, racers, admitted.Load())
+	}
+}
+
 func TestMemoryConcurrencyStore_AdmitIsIdempotent(t *testing.T) {
 	t.Parallel()
 	s := newMemoryConcurrencyStore(context.Background(), Config{GlobalMaxConcurrency: 1, LeaseTTL: time.Minute})
@@ -154,13 +208,13 @@ func TestMemoryConcurrencyStore_SweepReclaimsLeakedLeases(t *testing.T) {
 		LeaseTTL:             10 * time.Millisecond,
 		SweepInterval:        5 * time.Millisecond,
 	})
-	s.mu.Lock()
+	s.counterMu.Lock()
 	s.now = func() time.Time {
 		mu.Lock()
 		defer mu.Unlock()
 		return fakeNow
 	}
-	s.mu.Unlock()
+	s.counterMu.Unlock()
 
 	key := FlowKey{ID: "tenant-a", Priority: 0}
 	require.Equal(t, ConcurrencyOutcomeAdmitted, s.Admit("leaked-req", key))
