@@ -115,7 +115,8 @@ func TestEndToEnd(t *testing.T) {
 	)
 }
 
-var _ = ginkgo.BeforeSuite(func() {
+// There is only special setup to be done before process #1
+var _ = ginkgo.SynchronizedBeforeSuite(func() {
 	testutils.RequireParallelProcessesMatch(numProcesses)
 
 	if k8sContext == "" {
@@ -125,6 +126,11 @@ var _ = ginkgo.BeforeSuite(func() {
 	setupK8sClient()
 	createCRDs()
 	renderObjects = createRender(getNamespace())
+}, func() {
+	if ginkgo.GinkgoParallelProcess() != 1 {
+		testConfig = testutils.NewTestConfig(k8sContext)
+		setupK8sClient()
+	}
 })
 
 // ReportAfterSuite receives the full suite report and uses report.SuiteSucceeded
