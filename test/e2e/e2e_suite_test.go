@@ -254,10 +254,11 @@ func setupK8sClient() {
 }
 
 // setupNameSpace sets up the specified namespace if it doesn't exist
-func setupNameSpace() {
+func setupNameSpace() bool {
+	ginkgo.By(fmt.Sprintf("Setup namespace %s", getNamespace()))
 	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, getNamespace(), metav1.GetOptions{})
 	if err == nil {
-		return
+		return false
 	}
 	gomega.Expect(errors.IsNotFound(err)).To(gomega.BeTrue())
 
@@ -269,13 +270,14 @@ func setupNameSpace() {
 	}
 	_, err = testConfig.KubeCli.CoreV1().Namespaces().Create(testConfig.Context, namespace, metav1.CreateOptions{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	createdNameSpace = true
 
 	ginkgo.By("Ensuring namespace exists: " + getNamespace())
 	testutils.EventuallyExists(testConfig, func() error {
 		return testConfig.K8sClient.Get(testConfig.Context,
 			types.NamespacedName{Name: getNamespace()}, &corev1.Namespace{})
 	})
+
+	return true
 }
 
 // createCRDs creates the Inference Extension CRDs used for testing.
