@@ -806,12 +806,8 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects = createInferencePool(1, true)
 
-<<<<<<< HEAD
 			modelServers := createModelServersDecodeKV(1)
-			epp := createEndPointPicker(kvExternalTokenizerConfig)
-=======
 			epp := createEndPointPicker(kvExternalTokenizerConfig())
->>>>>>> 574c8b00 (review)
 			nsName := getNamespace()
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
