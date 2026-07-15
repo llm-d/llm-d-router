@@ -64,6 +64,23 @@ func TestRecordPrefixCacheMetrics(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), llmdHitLength.GetSampleCount())
 	require.Equal(t, float64(10), llmdHitLength.GetSampleSum())
+
+	recordPrefixCacheHitRatioStats("test-plugin", "test-type", 0.8, 0.5, 0.2)
+
+	maxH, err := getHistogram(llmdPrefixCacheMaxHitRatio, "test-plugin", "test-type")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), maxH.GetSampleCount())
+	require.InDelta(t, 0.8, maxH.GetSampleSum(), 1e-9)
+
+	avgH, err := getHistogram(llmdPrefixCacheAvgHitRatio, "test-plugin", "test-type")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), avgH.GetSampleCount())
+	require.InDelta(t, 0.5, avgH.GetSampleSum(), 1e-9)
+
+	stdDevH, err := getHistogram(llmdPrefixCacheStdDevHitRatio, "test-plugin", "test-type")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), stdDevH.GetSampleCount())
+	require.InDelta(t, 0.2, stdDevH.GetSampleSum(), 1e-9)
 }
 
 func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*dto.Histogram, error) {
@@ -79,6 +96,9 @@ func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*d
 }
 
 func resetMetrics() {
+	llmdPrefixCacheMaxHitRatio.Reset()
+	llmdPrefixCacheAvgHitRatio.Reset()
+	llmdPrefixCacheStdDevHitRatio.Reset()
 	prefixCacheSize.Reset()
 	llmdPrefixCacheSize.Reset()
 	prefixCacheHitRatio.Reset()

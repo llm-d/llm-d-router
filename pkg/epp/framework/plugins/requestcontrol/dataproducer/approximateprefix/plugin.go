@@ -238,10 +238,17 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		totalBlocks += len(hashes)
 	}
 
+	endpointHitRatios := make([]float64, 0, len(pods))
 	for _, pod := range pods {
 		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().NamespacedName)]
 		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
+		if totalBlocks > 0 {
+			endpointHitRatios = append(endpointHitRatios, float64(matchLen)/float64(totalBlocks))
+		}
 	}
+
+	max, avg, std := calculateHitRatioStats(endpointHitRatios)
+	recordPrefixCacheHitRatioStats(p.typedName.Name, p.typedName.Type, max, avg, std)
 
 	state := &SchedulingContextState{
 		PerPromptHashes:    perPromptHashes,

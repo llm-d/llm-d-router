@@ -30,7 +30,7 @@ var (
 	llmdPrefixCacheMaxHitRatio = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "precise_prefix_indexer_max_hit_ratio",
+			Name:      "prefix_indexer_max_hit_ratio",
 			Help:      metricsutil.HelpMsgWithStability("Ratio of matched KV blocks to total prompt KV blocks at the best-matched endpoint.", compbasemetrics.ALPHA),
 			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
 		},
@@ -40,7 +40,7 @@ var (
 	llmdPrefixCacheAvgHitRatio = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "precise_prefix_indexer_avg_hit_ratio",
+			Name:      "prefix_indexer_avg_hit_ratio",
 			Help:      metricsutil.HelpMsgWithStability("Average Ratio of matched KV blocks to total prompt KV blocks across all candidate endpoints.", compbasemetrics.ALPHA),
 			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
 		},
@@ -50,7 +50,7 @@ var (
 	llmdPrefixCacheStdDevHitRatio = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "precise_prefix_indexer_std_dev_hit_ratio",
+			Name:      "prefix_indexer_std_dev_hit_ratio",
 			Help:      metricsutil.HelpMsgWithStability("Standard Deviation in ratio of matched KV blocks to total prompt KV blocks across all candidate endpoints.", compbasemetrics.ALPHA),
 			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
 		},
