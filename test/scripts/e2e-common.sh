@@ -37,6 +37,6 @@ run_ginkgo_suite() {
     echo "Label filter: ${E2E_LABEL_FILTER}"
     go test -v -timeout 45m "${pkg}" -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
   else
-    go test -v -timeout 45m "${pkg}" -ginkgo.v -ginkgo.fail-fast
+    ginkgo run --procs=${E2E_NUM_PROCS} --timeout 45m -v --fail-fast "${pkg}"
   fi
 }
