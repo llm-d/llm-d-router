@@ -101,12 +101,10 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 		ginkgo.It("should recover and route to surviving pods", func() {
 			nsName := getNamespace()
 
-			modelServers := createModelServersDecode(2)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
 			infPoolObjects := createInferencePool(1)
 
+			modelServers := createModelServersDecode(2)
 			epp := createEndPointPicker(simpleConfig)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
@@ -150,6 +148,8 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				MustPassRepeatedly(3).Should(gomega.Succeed())
 
 			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
 	})
 
@@ -160,10 +160,8 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(2)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
 
 			epp := createEndPointPicker(simpleConfig)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
@@ -202,7 +200,10 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			ginkgo.By("Verifying requests succeed consistently after recovery")
 			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).WithArguments(nsName).
 				MustPassRepeatedly(3).Should(gomega.Succeed())
+
 			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
 	})
 
@@ -213,10 +214,8 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(1)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
 
 			epp := createEndPointPicker(simpleConfig)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
 			_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
@@ -251,7 +250,10 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
 				return nsHdr
 			}, eppRecoveryTimeout, 2*time.Second).Should(gomega.Equal(nsName))
+
 			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
 	})
 
@@ -262,10 +264,8 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(1)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
 
 			epp := createEndPointPicker(simpleConfig)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
 			ginkgo.By("Verifying requests succeed before EPP disruption")
 			nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
@@ -303,7 +303,10 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				}
 				return nil
 			}, eppRecoveryTimeout, 2*time.Second).Should(gomega.Succeed())
+
 			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
 	})
 
@@ -314,10 +317,8 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(1)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
 
 			epp := createEndPointPicker(simpleConfig)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
 			ginkgo.By("Verifying requests succeed before disruption")
 			nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
@@ -357,7 +358,10 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			<-done
 
 			ginkgo.By(fmt.Sprintf("Traffic results: %d successes, %d failures", tc.successes(), tc.failures()))
+
 			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
 	})
 
