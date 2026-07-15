@@ -19,6 +19,7 @@ package payload
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -41,8 +42,11 @@ const (
 	// AttrInputMessages is gen_ai.input.messages: the structured request
 	// messages (role/parts), serialised to JSON when recorded on a span event.
 	AttrInputMessages = "gen_ai.input.messages"
-	// AttrSystemInstructions is gen_ai.system_instructions: system message(s)
-	// supplied separately from the chat history.
+	// AttrSystemInstructions is gen_ai.system_instructions: system-level
+	// instruction *text*, per the upstream semantic convention. Non-text
+	// system content (e.g. images in a system message) is dropped and marked
+	// on llm_d.payload.truncated; multiple system-role messages and multiple
+	// text parts within one message are joined with "\n\n".
 	AttrSystemInstructions = "gen_ai.system_instructions"
 
 	// AttrTruncated is llm_d.payload.truncated (llm-d extension): true when
@@ -81,17 +85,52 @@ type part struct {
 }
 
 // extraction is the intermediate result of converting a parsed request body
-// into semantic-convention form.
+// into semantic-convention form. system is a plain string (concatenation of
+// text-only system content) per the semconv definition of
+// gen_ai.system_instructions.
 type extraction struct {
 	messages []chatMessage
-	system   []part
+	system   string
 	// truncated is set when content was dropped: inline blob parts (no offload
-	// backend exists in Phase 1) or non-textual prompts (token IDs).
+	// backend exists in Phase 1), non-textual prompts (token IDs), or non-text
+	// content on a system-role message (system instructions are text-only).
 	truncated bool
 }
 
 func (e extraction) empty() bool {
-	return len(e.messages) == 0 && len(e.system) == 0 && !e.truncated
+	return len(e.messages) == 0 && e.system == "" && !e.truncated
+}
+
+// partsToTextString extracts the concatenated text of parts, joining multiple
+// text parts with a blank line. Non-text parts (uri, blob, etc.) are dropped
+// and mark *truncated. This is how system-role content is normalised into the
+// plain-string value required by gen_ai.system_instructions.
+func partsToTextString(parts []part, truncated *bool) string {
+	var texts []string
+	for _, p := range parts {
+		if p.Type == partTypeText {
+			if p.Content != "" {
+				texts = append(texts, p.Content)
+			}
+			continue
+		}
+		*truncated = true
+	}
+	return strings.Join(texts, "\n\n")
+}
+
+// appendSystemText joins additional system-instruction text with any already
+// captured, using a blank-line separator so multiple system messages remain
+// legible.
+func appendSystemText(existing, next string) string {
+	switch {
+	case next == "":
+		return existing
+	case existing == "":
+		return next
+	default:
+		return existing + "\n\n" + next
+	}
 }
 
 // Capturer records request payloads as GenAI span events on the active
@@ -154,7 +193,7 @@ func (c *Capturer) CaptureRequest(ctx context.Context, body *fwkrh.InferenceRequ
 	if kv, ok := c.inlineJSON(ctx, ref, AttrInputMessages, ext.messages, len(ext.messages) > 0, &ext.truncated); ok {
 		attrs = append(attrs, kv)
 	}
-	if kv, ok := c.inlineJSON(ctx, ref, AttrSystemInstructions, ext.system, len(ext.system) > 0, &ext.truncated); ok {
+	if kv, ok := c.inlineString(ctx, ref, AttrSystemInstructions, ext.system, &ext.truncated); ok {
 		attrs = append(attrs, kv)
 	}
 	if ext.truncated {
@@ -169,7 +208,9 @@ func (c *Capturer) CaptureRequest(ctx context.Context, body *fwkrh.InferenceRequ
 // inlineJSON serialises v and offers it to the backend. It returns the
 // attribute to attach when the backend accepts the payload inline; on
 // ErrPayloadTooLarge the attribute is dropped and *truncated is set (Phase 1
-// has no offload backend to fall back to).
+// has no offload backend to fall back to). Any other Store error is logged
+// so unexpected backend failures aren't lost silently — the attribute is
+// still dropped and *truncated set to keep the request path infallible.
 func (c *Capturer) inlineJSON(ctx context.Context, ref PayloadRef, key string, v any, present bool, truncated *bool) (attribute.KeyValue, bool) {
 	if !present {
 		return attribute.KeyValue{}, false
@@ -181,10 +222,31 @@ func (c *Capturer) inlineJSON(ctx context.Context, ref PayloadRef, key string, v
 		return attribute.KeyValue{}, false
 	}
 	if _, err := c.store.Store(ctx, ref, data); err != nil {
+		if !errors.Is(err, ErrPayloadTooLarge) {
+			c.logger.Error(err, "payload store rejected attribute", "attribute", key)
+		}
 		*truncated = true
 		return attribute.KeyValue{}, false
 	}
 	return attribute.String(key, string(data)), true
+}
+
+// inlineString attaches v as a plain string attribute after offering its bytes
+// to the backend for the size check. Used for attributes whose semantic
+// convention is a plain string (gen_ai.system_instructions). Follows the same
+// error contract as inlineJSON.
+func (c *Capturer) inlineString(ctx context.Context, ref PayloadRef, key, v string, truncated *bool) (attribute.KeyValue, bool) {
+	if v == "" {
+		return attribute.KeyValue{}, false
+	}
+	if _, err := c.store.Store(ctx, ref, []byte(v)); err != nil {
+		if !errors.Is(err, ErrPayloadTooLarge) {
+			c.logger.Error(err, "payload store rejected attribute", "attribute", key)
+		}
+		*truncated = true
+		return attribute.KeyValue{}, false
+	}
+	return attribute.String(key, v), true
 }
 
 // extract converts the parsed request body into semantic-convention messages.
@@ -207,13 +269,14 @@ func extractChatCompletions(req *fwkrh.ChatCompletionsRequest) extraction {
 	var ext extraction
 	for _, msg := range req.Messages {
 		parts := contentToParts(msg.Content, &ext.truncated)
-		if len(parts) == 0 {
+		// System-level guidance is recorded as gen_ai.system_instructions, a
+		// plain string per the upstream convention; non-text parts (media,
+		// blobs) are dropped and flagged via llm_d.payload.truncated.
+		if msg.Role == "system" || msg.Role == "developer" {
+			ext.system = appendSystemText(ext.system, partsToTextString(parts, &ext.truncated))
 			continue
 		}
-		// System-level guidance is recorded as gen_ai.system_instructions, not
-		// as an input message, per the upstream convention.
-		if msg.Role == "system" || msg.Role == "developer" {
-			ext.system = append(ext.system, parts...)
+		if len(parts) == 0 {
 			continue
 		}
 		ext.messages = append(ext.messages, chatMessage{Role: msg.Role, Parts: parts})
@@ -283,7 +346,10 @@ func extractCompletions(req *fwkrh.CompletionsRequest) extraction {
 
 func extractAnthropicMessages(req *fwkrh.MessagesRequest) extraction {
 	var ext extraction
-	ext.system = anthropicContentToParts(req.System, &ext.truncated)
+	// Anthropic's `system` field is text-oriented (either a bare string or a
+	// list of content blocks); non-text blocks are dropped as truncated to
+	// match the semconv definition of gen_ai.system_instructions.
+	ext.system = partsToTextString(anthropicContentToParts(req.System, &ext.truncated), &ext.truncated)
 	for _, msg := range req.Messages {
 		parts := anthropicContentToParts(msg.Content, &ext.truncated)
 		if len(parts) == 0 {

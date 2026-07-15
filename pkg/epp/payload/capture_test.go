@@ -108,16 +108,54 @@ func TestCaptureChatCompletions(t *testing.T) {
 		t.Fatalf("unexpected user parts: %+v", msgs[0].Parts)
 	}
 
-	sysJSON, ok := eventAttr(t, stub, AttrSystemInstructions)
+	sys, ok := eventAttr(t, stub, AttrSystemInstructions)
 	if !ok {
 		t.Fatal("event missing gen_ai.system_instructions")
 	}
-	if !strings.Contains(sysJSON, "You are terse.") {
-		t.Fatalf("system instructions missing content: %s", sysJSON)
+	// gen_ai.system_instructions is a plain string per the upstream semconv,
+	// not a JSON-serialised []part. Guard against regressing to the old shape.
+	if sys != "You are terse." {
+		t.Fatalf("system instructions want plain string %q, got %q", "You are terse.", sys)
 	}
 
 	if _, ok := eventAttr(t, stub, AttrTruncated); ok {
 		t.Error("unexpected llm_d.payload.truncated on fully-inline capture")
+	}
+}
+
+// TestCaptureSystemInstructionsPlainString covers the semconv-compliance path:
+// multiple system messages are joined into one plain-string attribute, and
+// non-text system content is dropped and flagged as truncated.
+func TestCaptureSystemInstructionsPlainString(t *testing.T) {
+	body := &fwkrh.InferenceRequestBody{
+		ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{
+				{Role: "system", Content: fwkrh.Content{Raw: "You are terse."}},
+				{Role: "developer", Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+					{Type: "text", Text: "Answer in French."},
+					{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/style-guide.png"}},
+				}}},
+				{Role: "user", Content: fwkrh.Content{Raw: "Bonjour."}},
+			},
+		},
+	}
+
+	stub := captureOnSpan(t, inlineCapturer(4096), body)
+
+	sys, ok := eventAttr(t, stub, AttrSystemInstructions)
+	if !ok {
+		t.Fatal("event missing gen_ai.system_instructions")
+	}
+	// Multiple system-role messages are joined with a blank-line separator.
+	want := "You are terse.\n\nAnswer in French."
+	if sys != want {
+		t.Fatalf("system instructions want %q, got %q", want, sys)
+	}
+	// Any content that isn't a text part (e.g. an image on a system message)
+	// is dropped and must mark the event truncated so operators know the
+	// captured value isn't the whole system message.
+	if v, ok := eventAttr(t, stub, AttrTruncated); !ok || v != truncatedTrue {
+		t.Error("expected llm_d.payload.truncated=true when non-text system content is dropped")
 	}
 }
 

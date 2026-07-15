@@ -461,8 +461,12 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 
 				// Opt-in GenAI payload capture: record the prompt on the gateway
-				// span once the request has been scheduled. Never fails the request.
-				s.payloadCapturer.CaptureRequest(ctx, parseResult.Body)
+				// span once the request has been scheduled. Never fails the
+				// request. The nil check makes the disabled path explicit at
+				// the callsite (Capturer.CaptureRequest also guards internally).
+				if s.payloadCapturer != nil {
+					s.payloadCapturer.CaptureRequest(ctx, parseResult.Body)
+				}
 
 				reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
 				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
