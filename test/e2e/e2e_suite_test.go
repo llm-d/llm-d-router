@@ -76,7 +76,7 @@ var (
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
-	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.2", ginkgo.GinkgoLogr)
+	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.2", ginkgo.GinkgoLogr)
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
@@ -147,6 +147,7 @@ var _ = ginkgo.AfterSuite(func() {
 		}
 		if eppPortForwardSession != nil {
 			eppPortForwardSession.Terminate()
+			eppPortForwardSession = nil
 		}
 	}
 })
@@ -378,7 +379,14 @@ func createInferencePool(numTargetPorts int, toDelete bool) []string {
 	return testutils.CreateObjsFromYaml(testConfig, infPoolYaml, nsName)
 }
 
+// startEPPMetricsPortForward is a no-op outside an existing-cluster run (k8sContext
+// unset) and safe to call repeatedly; it starts at most one port-forward session,
+// reused until AfterSuite terminates it.
 func startEPPMetricsPortForward() {
+	if k8sContext == "" || eppPortForwardSession != nil {
+		return
+	}
+
 	pods, err := testConfig.KubeCli.CoreV1().Pods(getNamespace()).List(testConfig.Context, metav1.ListOptions{
 		LabelSelector: "app=e2e-epp",
 	})

@@ -472,6 +472,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdFlowControlPoolSaturation)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestEnqueueDuration)
+		metrics.Registry.MustRegister(llmdFlowControlRequestsTotal)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(DataLayerPollErrorsTotal)
@@ -541,6 +542,7 @@ func Reset() {
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	flowControlDispatchCycleDuration.Reset()
 	llmdFlowControlDispatchCycleDuration.Reset()
+	llmdFlowControlRequestsTotal.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	DataLayerPollErrorsTotal.Reset()
@@ -847,6 +849,11 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 	flowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
 	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
+}
+
+// IncFlowControlRequestsTotal increments the total request counter for a given outcome.
+func IncFlowControlRequestsTotal(outcome, priority, inferencePool string) {
+	llmdFlowControlRequestsTotal.WithLabelValues(outcome, priority, inferencePool).Inc()
 }
 
 // RecordInferenceModelRewriteDecision records the routing decision for InferenceModelRewrite.
