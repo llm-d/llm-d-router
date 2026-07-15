@@ -12,6 +12,7 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -214,7 +215,14 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 		return append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls, nsName)...)
 	}
 	objs := testutils.CreateUnstructuredObjs(testConfig, eppYamls)
-	return append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {})...)
+	objects = append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {})...)
+
+	gomega.Eventually(func() error {
+		_, _, err := tryCompletion(simplePrompt, simModelName)
+		return err
+	}, readyTimeout, 1*time.Second).Should(gomega.Succeed())
+
+	return objects
 }
 
 func usesTokenProducer(eppConfig string) bool {
