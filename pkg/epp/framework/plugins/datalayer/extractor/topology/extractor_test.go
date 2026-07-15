@@ -460,12 +460,14 @@ func TestNoLabel_EndpointDelete_RemovesFromMap(t *testing.T) {
 func TestLabel_ZoneAndRegion(t *testing.T) {
 	_, epH, _ := getHandlers(t, &params{
 		Hostname: "my/hostname",
+		Rack:     "my/rack",
 		Zone:     "my/zone",
 		Region:   "my/region",
 	})
 
 	ep := newRankEndpoint("worker-z1", 0, map[string]string{
 		"my/hostname": "host-1",
+		"my/rack":     "rack-7",
 		"my/zone":     "us-east-1a",
 		"my/region":   "us-east-1",
 	})
@@ -480,6 +482,9 @@ func TestLabel_ZoneAndRegion(t *testing.T) {
 	if got.Hostname != "host-1" {
 		t.Errorf("hostname = %q, want %q", got.Hostname, "host-1")
 	}
+	if got.Rack != "rack-7" {
+		t.Errorf("rack = %q, want %q", got.Rack, "rack-7")
+	}
 	if got.Zone != "us-east-1a" {
 		t.Errorf("zone = %q, want %q", got.Zone, "us-east-1a")
 	}
@@ -493,6 +498,7 @@ func TestLabel_ZoneAndRegionDefault(t *testing.T) {
 
 	ep := newRankEndpoint("worker-z2", 0, map[string]string{
 		defaultHostnameLabel: "host-2",
+		defaultRackLabel:     "rack-2",
 		defaultZoneLabel:     "eu-west-1b",
 		defaultRegionLabel:   "eu-west-1",
 	})
@@ -506,6 +512,9 @@ func TestLabel_ZoneAndRegionDefault(t *testing.T) {
 	}
 	if got.Hostname != "host-2" {
 		t.Errorf("hostname = %q, want %q", got.Hostname, "host-2")
+	}
+	if got.Rack != "rack-2" {
+		t.Errorf("rack = %q, want %q", got.Rack, "rack-2")
 	}
 	if got.Zone != "eu-west-1b" {
 		t.Errorf("zone = %q, want %q", got.Zone, "eu-west-1b")

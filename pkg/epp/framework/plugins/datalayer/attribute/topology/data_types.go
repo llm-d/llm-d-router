@@ -37,6 +37,8 @@ var TopologyAttributeKey = plugin.NewDataKey("Topology", TopologyExtractorType)
 type Topology struct {
 	// Hostname identifies the node on which the endpoint runs.
 	Hostname string
+	// Rack identifies the failure domain rack of the endpoint.
+	Rack string
 	// Zone identifies the failure domain zone of the endpoint.
 	Zone string
 	// Region identifies the geographic region of the endpoint.

@@ -52,6 +52,7 @@ var podGVK = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
 
 const (
 	defaultHostnameLabel = corev1.LabelHostname
+	defaultRackLabel     = "topology.kubernetes.io/rack"
 	defaultZoneLabel     = corev1.LabelTopologyZone
 	defaultRegionLabel   = corev1.LabelTopologyRegion
 )
@@ -60,11 +61,14 @@ const (
 // Each field names the pod label used to read the corresponding topology value.
 // When a field is empty, the corresponding default Kubernetes topology label is used.
 // When the hostname label is absent on a pod, spec.hostname is used as a fallback.
-// Zone and region have no fallback.
+// Zone, rack, and region have no fallback.
 type params struct {
 	// Hostname is the pod label name whose value is used as the topology hostname.
 	// Defaults to kubernetes.io/hostname.
 	Hostname string `json:"hostname,omitempty"`
+	// Rack is the pod label name whose value is used as the topology rack.
+	// Defaults to topology.kubernetes.io/rack.
+	Rack string `json:"rack,omitempty"`
 	// Zone is the pod label name whose value is used as the topology zone.
 	// Defaults to topology.kubernetes.io/zone.
 	Zone string `json:"zone,omitempty"`
@@ -78,6 +82,7 @@ type params struct {
 type TopologyExtractor struct {
 	typedName     fwkplugin.TypedName
 	hostnameLabel string
+	rackLabel     string
 	zoneLabel     string
 	regionLabel   string
 	dk            fwkplugin.DataKey
@@ -105,6 +110,9 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 	if p.Hostname == "" {
 		p.Hostname = defaultHostnameLabel
 	}
+	if p.Rack == "" {
+		p.Rack = defaultRackLabel
+	}
 	if p.Zone == "" {
 		p.Zone = defaultZoneLabel
 	}
@@ -117,6 +125,7 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 	return &TopologyExtractor{
 		typedName:     fwkplugin.TypedName{Type: attrtopology.TopologyExtractorType, Name: name},
 		hostnameLabel: p.Hostname,
+		rackLabel:     p.Rack,
 		zoneLabel:     p.Zone,
 		regionLabel:   p.Region,
 		dk:            attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(name),
@@ -189,6 +198,7 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	}
 
 	hn := meta.Labels[h.ext.hostnameLabel]
+	rack := meta.Labels[h.ext.rackLabel]
 	zone := meta.Labels[h.ext.zoneLabel]
 	region := meta.Labels[h.ext.regionLabel]
 
@@ -205,11 +215,12 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 		h.ext.mu.Unlock()
 	}
 
-	if hn == "" && zone == "" && region == "" {
+	if hn == "" && rack == "" && zone == "" && region == "" {
 		return nil
 	}
 	event.Endpoint.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{
 		Hostname: hn,
+		Rack:     rack,
 		Zone:     zone,
 		Region:   region,
 	})
@@ -275,10 +286,11 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 	h.ext.mu.Unlock()
 
 	for _, ep := range eps {
-		// Preserve zone/region already set from the endpoint event.
+		// Preserve rack/zone/region already set from the endpoint event.
 		topo := &attrtopology.Topology{Hostname: hostname}
 		if raw, ok := ep.GetAttributes().Get(h.ext.dk.String()); ok {
 			if existing, ok := raw.(*attrtopology.Topology); ok {
+				topo.Rack = existing.Rack
 				topo.Zone = existing.Zone
 				topo.Region = existing.Region
 			}
