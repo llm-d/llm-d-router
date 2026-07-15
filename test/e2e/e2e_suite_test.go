@@ -308,14 +308,9 @@ func createEnvoy(nsName string) ([]string, *gexec.Session) {
 	return envoyObjects, portForwardSession
 }
 
-func createInferencePool(numTargetPorts int, toDelete bool) []string {
+func createInferencePool(numTargetPorts int) []string {
 	poolName := simModelName + "-inference-pool"
 	nsName := getNamespace()
-
-	if toDelete {
-		objName := []string{"inferencepool/" + poolName}
-		testutils.DeleteObjects(testConfig, objName, nsName)
-	}
 
 	infPoolYaml := testutils.ReadYaml(inferExtManifest)
 	// targetPorts is substituted into `targetPorts: ${TARGET_PORTS}` in inference-pools.yaml.
