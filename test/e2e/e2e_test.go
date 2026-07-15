@@ -172,7 +172,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			startEPPMetricsPortForward()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -246,7 +246,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				epp := createEndPointPicker(config)
 				nsName := getNamespace()
 
-				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 				gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -285,7 +285,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				epp := createEndPointPicker(config)
 				nsName := getNamespace()
 
-				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 				gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -322,7 +322,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				epp := createEndPointPicker(config)
 				nsName := getNamespace()
 
-				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 				gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -370,7 +370,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				epp := createEndPointPicker(config)
 				nsName := getNamespace()
 
-				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 				gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -421,7 +421,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(pdConfig)
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -447,7 +447,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(pdConfig)
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -480,7 +480,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			startEPPMetricsPortForward()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -542,7 +542,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(decodeOnlyConfig)
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -575,8 +575,8 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				startEPPMetricsPortForward()
 			}
 
-			encodePods := getPodNames(encodeSelector)
-			prefillDecodePods := getPodNames(prefillDecodeSelector)
+			encodePods := getPodNames(encodeSelector, nsName)
+			prefillDecodePods := getPodNames(prefillDecodeSelector, nsName)
 			gomega.Expect(encodePods).Should(gomega.HaveLen(encodeReplicas))
 			gomega.Expect(prefillDecodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -650,9 +650,9 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				startEPPMetricsPortForward()
 			}
 
-			encodePods := getPodNames(encodeSelector)
-			prefillPods := getPodNames(prefillSelector)
-			decodePods := getPodNames(decodeSelector)
+			encodePods := getPodNames(encodeSelector, nsName)
+			prefillPods := getPodNames(prefillSelector, nsName)
+			decodePods := getPodNames(decodeSelector, nsName)
 			gomega.Expect(encodePods).Should(gomega.HaveLen(encodeReplicas))
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
@@ -736,7 +736,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				startEPPMetricsPortForward()
 			}
 
-			epdPods := getPodNames(epdSingleSelector)
+			epdPods := getPodNames(epdSingleSelector, nsName)
 			gomega.Expect(epdPods).Should(gomega.HaveLen(replicas))
 
 			// Text completion: encode skipped, routes to decode profile -> single deployment
@@ -815,7 +815,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(kvExternalTokenizerConfig())
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -850,7 +850,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(scaleConfig)
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -863,7 +863,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			scaleDeployment(nsName, modelServers, 1)
 
-			scaledUpPrefillPods, scaledUpDecodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			scaledUpPrefillPods, scaledUpDecodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(scaledUpPrefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(scaledUpDecodePods).Should(gomega.HaveLen(2))
 
@@ -881,7 +881,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			scaleDeployment(nsName, modelServers, -1)
 
-			scaledDownPrefillPods, scaledDownDecodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			scaledDownPrefillPods, scaledDownDecodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(scaledDownPrefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(scaledDownDecodePods).Should(gomega.HaveLen(1))
 			gomega.Expect(scaledDownDecodePods[0]).Should(gomega.BeElementOf(scaledUpDecodePods))
@@ -907,7 +907,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(dataParallelConfig)
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 

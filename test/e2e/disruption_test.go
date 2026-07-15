@@ -50,9 +50,9 @@ func sendRawCompletion() (int, error) {
 
 // podGone returns true when the named pod no longer appears in the pod list
 // and at least minRemaining pods exist.
-func podGone(podName string, minRemaining int) func() bool {
+func podGone(podName string, nsName string, minRemaining int) func() bool {
 	return func() bool {
-		_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+		_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 		for _, pod := range currentDecode {
 			if pod == podName {
 				return false
@@ -63,9 +63,9 @@ func podGone(podName string, minRemaining int) func() bool {
 }
 
 // eppPodReady returns true when a new EPP pod (not oldPodName) is Running and Ready.
-func eppPodReady(oldPodName string) func() bool {
+func eppPodReady(oldPodName string, nsName string) func() bool {
 	return func() bool {
-		pods := getPods(map[string]string{"app": "e2e-epp"})
+		pods := getPods(map[string]string{"app": "e2e-epp"}, nsName)
 		for _, p := range pods {
 			if p.Name == oldPodName {
 				continue
@@ -109,7 +109,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			epp := createEndPointPicker(simpleConfig)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(2))
 
@@ -123,7 +123,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			deletePodByName(targetPod, 0)
 
 			ginkgo.By("Waiting for killed pod to be replaced")
-			gomega.Eventually(podGone(targetPod, 1), podRemovalTimeout, 1*time.Second).Should(gomega.BeTrue())
+			gomega.Eventually(podGone(targetPod, nsName, 1), podRemovalTimeout, 1*time.Second).Should(gomega.BeTrue())
 
 			ginkgo.By("Verifying new requests eventually route to a pod other than the killed one")
 			gomega.Eventually(func() error {
@@ -142,7 +142,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Waiting for replacement pod to become ready")
 			gomega.Eventually(func() int {
-				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
@@ -164,7 +164,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			epp := createEndPointPicker(simpleConfig)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(2))
 
@@ -194,7 +194,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Waiting for replacement pod")
 			gomega.Eventually(func() int {
-				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
@@ -216,7 +216,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			epp := createEndPointPicker(simpleConfig)
 			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
-			_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
 			ginkgo.By("Verifying requests succeed before disruption")
@@ -228,7 +228,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Waiting for all pods to be removed")
 			gomega.Eventually(func() int {
-				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, podRemovalTimeout, 1*time.Second).Should(gomega.Equal(0))
 
@@ -269,7 +269,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			gomega.Expect(nsHdr).Should(gomega.Equal(getNamespace()))
 
 			ginkgo.By("Finding EPP pod")
-			eppPods := getPods(map[string]string{"app": "e2e-epp"})
+			eppPods := getPods(map[string]string{"app": "e2e-epp"}, nsName)
 			gomega.Expect(eppPods).Should(gomega.HaveLen(1))
 			eppPodName := eppPods[0].Name
 
@@ -287,7 +287,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				"requests should fail while EPP is down")
 
 			ginkgo.By("Waiting for EPP to recover")
-			gomega.Eventually(eppPodReady(eppPodName), readyTimeout, 2*time.Second).Should(gomega.BeTrue())
+			gomega.Eventually(eppPodReady(eppPodName, nsName), readyTimeout, 2*time.Second).Should(gomega.BeTrue())
 
 			ginkgo.By("Verifying requests succeed after EPP recovery")
 			gomega.Eventually(func() error {
@@ -332,7 +332,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Waiting for all pods to be removed")
 			gomega.Eventually(func() int {
-				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, podRemovalTimeout, 1*time.Second).Should(gomega.Equal(0))
 
