@@ -138,6 +138,7 @@ func TestInFlightLoadProducer_Extract(t *testing.T) {
 
 	producer := newTestProducer(t)
 	endpointName := "test-endpoint"
+	endpointID := fullEndpointName(endpointName)
 
 	endpoint := newStubSchedulingEndpoint(endpointName)
 	ctx := context.Background()
@@ -159,12 +160,9 @@ func TestInFlightLoadProducer_Extract(t *testing.T) {
 	require.Equal(t, int64(0), load.Requests)
 	require.Equal(t, int64(0), load.Tokens)
 
-	// Drive counters up through PreRequest so the StateStore is updated.
-	for i := 0; i < 5; i++ {
-		req := makeTokenRequest(fmt.Sprintf("req-%d", i), 40) // 40 input + output = 100 tokens
-		res := makeSchedulingResult(endpointName)
-		producer.PreRequest(ctx, req, res)
-	}
+	// Update trackers
+	producer.requestTracker.add(endpointID, 5)
+	producer.tokenTracker.add(endpointID, 500)
 
 	// Verify values are updated dynamically without calling Produce
 	val2, ok := endpoint.Get(key)

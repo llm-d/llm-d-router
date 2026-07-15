@@ -37,7 +37,8 @@ type Handle interface {
 	// nil when no recorder is configured.
 	Metrics() MetricsRecorder
 
-	// SharedState returns the cross-replica state store shared by all plugins.
+	// SharedState returns the SharedStateStore configured for this EPP instance.
+	// Returns nil when no store is configured.
 	SharedState() SharedStateStore
 }
 
@@ -63,9 +64,9 @@ type PodListFunc func() []types.NamespacedName
 type eppHandle struct {
 	ctx context.Context
 	HandlePlugins
-	podList          PodListFunc
-	metricsRecorder  MetricsRecorder
-	sharedStateStore SharedStateStore
+	podList              PodListFunc
+	metricsRecorder      MetricsRecorder
+	sharedStateStoreName string
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -115,9 +116,15 @@ func (h *eppHandle) Metrics() MetricsRecorder {
 	return h.metricsRecorder
 }
 
-// SharedState returns the cross-replica state store.
+// SharedState returns the SharedStateStore plugin identified by the configured
+// name. The lookup is performed lazily so the store plugin can be instantiated
+// after the Handle is created.
 func (h *eppHandle) SharedState() SharedStateStore {
-	return h.sharedStateStore
+	if h.sharedStateStoreName == "" {
+		return nil
+	}
+	s, _ := PluginByType[SharedStateStore](h, h.sharedStateStoreName)
+	return s
 }
 
 // HandleOption configures an eppHandle constructed via NewEppHandle.
@@ -133,12 +140,11 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 	}
 }
 
-// WithSharedStateStore sets the SharedStateStore used by the handle.
-func WithSharedStateStore(store SharedStateStore) HandleOption {
+// WithSharedStateStoreName sets the name of the SharedStateStore plugin that
+// SharedState() will look up. An empty name means no store is configured.
+func WithSharedStateStoreName(name string) HandleOption {
 	return func(h *eppHandle) {
-		if store != nil {
-			h.sharedStateStore = store
-		}
+		h.sharedStateStoreName = name
 	}
 }
 
@@ -148,15 +154,13 @@ func NewEppHandle(ctx context.Context, podList PodListFunc, opts ...HandleOption
 		HandlePlugins: &eppHandlePlugins{
 			plugins: map[string]Plugin{},
 		},
-		podList:          podList,
-		sharedStateStore: NewLocalStateStore(),
+		podList: podList,
 	}
 	for _, opt := range opts {
 		opt(h)
 	}
 	return h
 }
-
 
 // PluginByType retrieves the specified plugin by name and verifies its type
 func PluginByType[P Plugin](handlePlugins HandlePlugins, name string) (P, error) {

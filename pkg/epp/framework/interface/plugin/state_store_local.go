@@ -16,17 +16,49 @@ limitations under the License.
 
 package plugin
 
-import "sync"
+import (
+	"encoding/json"
+	"os"
+	"sync"
+)
+
+const LocalStateStoreType = "local-state-store"
+
+// ReplicaID uniquely identifies one EPP replica.
+type ReplicaID string
+
+// replicaID returns a ReplicaID from the POD_NAME environment variable,
+// falling back to "local" when unset.
+func replicaID() ReplicaID {
+	if name := os.Getenv("POD_NAME"); name != "" {
+		return ReplicaID(name)
+	}
+	return "local"
+}
 
 var _ SharedStateStore = (*LocalStateStore)(nil)
 
 // LocalStateStore is an in-memory SharedStateStore backed by a sync.Map.
 type LocalStateStore struct {
-	data sync.Map
+	typedName TypedName
+	self      ReplicaID
+	data      sync.Map
 }
 
-func NewLocalStateStore() *LocalStateStore {
-	return &LocalStateStore{}
+func NewLocalStateStore(name string, self ReplicaID) *LocalStateStore {
+	return &LocalStateStore{
+		typedName: TypedName{Type: LocalStateStoreType, Name: name},
+		self:      self,
+	}
+}
+
+// LocalStateStoreFactory creates a LocalStateStore from plugin config.
+func LocalStateStoreFactory(name string, _ *json.Decoder, _ Handle) (Plugin, error) {
+	return NewLocalStateStore(name, replicaID()), nil
+}
+
+func (s *LocalStateStore) TypedName() TypedName {
+	return s.typedName
 }
 
 func (s *LocalStateStore) Set(key StateKey, id string, value any) {

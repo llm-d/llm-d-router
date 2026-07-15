@@ -16,9 +16,10 @@ limitations under the License.
 
 package plugin
 
-// SharedStateStore is a cross-plugin state store on the Handle.
+// SharedStateStore is a cross-plugin state store.
 // Plugins namespace their data via StateKey.
 type SharedStateStore interface {
+	Plugin
 	Get(key StateKey, id string) (any, bool)
 	Set(key StateKey, id string, value any)
 	Publish(key StateKey, id string, supplier func() any)

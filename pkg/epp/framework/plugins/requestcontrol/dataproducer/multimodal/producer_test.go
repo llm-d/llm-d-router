@@ -43,13 +43,13 @@ func TestFactory(t *testing.T) {
 	raw, err := json.Marshal(map[string]any{"cacheSizeInMBPerServer": 4})
 	require.NoError(t, err)
 
-	created, err := Factory("mm-producer", plugin.StrictDecoder(raw), &testHandle{ctx: context.Background(), state: plugin.NewLocalStateStore()})
+	created, err := Factory("mm-producer", plugin.StrictDecoder(raw), &testHandle{ctx: context.Background()})
 	require.NoError(t, err)
 	require.NotNil(t, created)
 	assert.Equal(t, "mm-producer", created.TypedName().Name)
 	assert.Equal(t, ProducerType, created.TypedName().Type)
 
-	_, err = Factory("bad", plugin.StrictDecoder(json.RawMessage(`{"cacheSizeInMBPerServer":"bad"}`)), &testHandle{ctx: context.Background(), state: plugin.NewLocalStateStore()})
+	_, err = Factory("bad", plugin.StrictDecoder(json.RawMessage(`{"cacheSizeInMBPerServer":"bad"}`)), &testHandle{ctx: context.Background()})
 	require.Error(t, err)
 }
 
@@ -210,7 +210,6 @@ func TestExtractEndpointRemovesDeletedPod(t *testing.T) {
 type testHandle struct {
 	ctx     context.Context
 	podList func() []k8stypes.NamespacedName
-	state   plugin.SharedStateStore
 }
 
 func (h *testHandle) Context() context.Context {
@@ -236,7 +235,7 @@ func (h *testHandle) Metrics() plugin.MetricsRecorder {
 }
 
 func (h *testHandle) SharedState() plugin.SharedStateStore {
-	return h.state
+	return nil
 }
 
 func (h *testHandle) PodList() []k8stypes.NamespacedName {

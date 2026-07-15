@@ -584,6 +584,9 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(preciseproducer.PluginType, preciseproducer.PluginFactory)
 	fwkplugin.Register(p2psource.PluginType, p2psource.PluginFactory)
 
+	// State store plugins
+	fwkplugin.Register(fwkplugin.LocalStateStoreType, fwkplugin.LocalStateStoreFactory)
+
 	// Flow Control plugins
 	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, globalstrict.GlobalStrictFairnessPolicyFactory)
 	fwkplugin.Register(roundrobin.RoundRobinFairnessPolicyType, roundrobin.RoundRobinFairnessPolicyFactory)
@@ -704,7 +707,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 		ctx,
 		makePodListFunc(ds),
 		fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry),
-		fwkplugin.WithSharedStateStore(fwkplugin.NewLocalStateStore()),
+		fwkplugin.WithSharedStateStoreName(rawConfig.SharedStateStore),
 	)
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)

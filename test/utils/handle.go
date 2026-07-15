@@ -29,8 +29,7 @@ import (
 type testHandle struct {
 	ctx context.Context
 	plugin.HandlePlugins
-	metricsRecorder  plugin.MetricsRecorder
-	sharedStateStore plugin.SharedStateStore
+	metricsRecorder plugin.MetricsRecorder
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -47,7 +46,7 @@ func (h *testHandle) Metrics() plugin.MetricsRecorder {
 }
 
 func (h *testHandle) SharedState() plugin.SharedStateStore {
-	return h.sharedStateStore
+	return nil
 }
 
 type testHandlePlugins struct {
@@ -80,7 +79,6 @@ func NewTestHandle(ctx context.Context) plugin.Handle {
 		HandlePlugins: &testHandlePlugins{
 			plugins: map[string]plugin.Plugin{},
 		},
-		metricsRecorder:  prometheus.NewRegistry(),
-		sharedStateStore: plugin.NewLocalStateStore(),
+		metricsRecorder: prometheus.NewRegistry(),
 	}
 }
