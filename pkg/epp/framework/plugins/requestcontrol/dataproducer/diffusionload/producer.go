@@ -15,10 +15,12 @@ limitations under the License.
 */
 
 // Package diffusionload tracks the outstanding declared cost of in-flight
-// image generation requests per endpoint. Unlike LLM requests, whose output
-// length is unknown at admission, a diffusion request declares its compute
-// cost in the body (inference steps x output resolution x image count), so
-// the tracked load reflects actual GPU work rather than request count.
+// diffusion requests per endpoint. Unlike LLM requests, whose output length
+// is unknown at admission, a diffusion request declares its compute cost in
+// the body, so the tracked load reflects actual GPU work rather than request
+// count. Image generation is the only diffusion request type currently
+// recognized; its cost is measured in step-pixels (inference steps x output
+// pixels x image count).
 package diffusionload
 
 import (
@@ -45,10 +47,6 @@ import (
 
 const (
 	DiffusionLoadProducerType = diffusionloadconstants.DiffusionLoadProducerType
-
-	// pixelsPerCostUnit normalizes declared pixel counts into megapixel-scale
-	// cost units so a 1024x1024 single-image request costs one unit per step.
-	pixelsPerCostUnit = 1024 * 1024
 
 	defaultNumInferenceSteps = 50
 	defaultSize              = "1024x1024"
@@ -112,7 +110,7 @@ var (
 	_ requestcontrol.PreRequest            = &DiffusionLoadProducer{}
 	_ requestcontrol.ResponseBodyProcessor = &DiffusionLoadProducer{}
 	_ requestcontrol.DataProducer          = &DiffusionLoadProducer{}
-	_ datalayer.EndpointExtractor          = (*DiffusionLoadProducer)(nil)
+	_ datalayer.EndpointExtractor          = &DiffusionLoadProducer{}
 	_ datalayer.Registrant                 = &DiffusionLoadProducer{}
 )
 
@@ -184,10 +182,6 @@ func (p *DiffusionLoadProducer) Extract(ctx context.Context, event datalayer.End
 
 	switch event.Type {
 	case datalayer.EventDelete:
-		// Assumes the datalayer delivers the same Endpoint pointer for delete as
-		// for the preceding add. When the endpoint was replaced under the same
-		// NamespacedName, the pointers differ and the stale delete is ignored so
-		// it does not drop the live endpoint's counter.
 		if registered, ok := p.registeredEndpoints.Load(id); ok && registered != event.Endpoint {
 			log.FromContext(ctx).V(logutil.DEFAULT).Info("Ignoring stale delete for replaced endpoint", "endpoint", id)
 			break
@@ -212,7 +206,7 @@ func (p *DiffusionLoadProducer) Produce(_ context.Context, _ *fwksched.Inference
 			continue
 		}
 		id := endpoint.GetMetadata().NamespacedName.String()
-		endpoint.Put(p.dk.String(), &attrdiffusion.DiffusionLoad{CostUnits: p.costTracker.get(id)})
+		endpoint.Put(p.dk.String(), &attrdiffusion.DiffusionLoad{Cost: p.costTracker.get(id)})
 	}
 	return nil
 }
@@ -233,7 +227,7 @@ func (p *DiffusionLoadProducer) PreRequest(ctx context.Context, request *fwksche
 
 	cost := p.requestCost(request)
 	if cost == 0 {
-		// Not an image generation request; nothing to track.
+		// Not a diffusion request; nothing to track.
 		return
 	}
 
@@ -258,7 +252,7 @@ func (p *DiffusionLoadProducer) PreRequest(ctx context.Context, request *fwksche
 		)
 	}
 
-	log.FromContext(ctx).V(logutil.DEBUG).Info("Tracked diffusion request cost", "requestID", request.RequestID, "costUnits", cost)
+	log.FromContext(ctx).V(logutil.DEBUG).Info("Tracked diffusion request cost", "requestID", request.RequestID, "cost", cost)
 }
 
 // ResponseBody releases the request's cost contribution when the response
@@ -280,14 +274,19 @@ func (p *DiffusionLoadProducer) ResponseBody(
 	}
 }
 
-// requestCost returns the declared cost of the request in step-megapixel
-// units, or 0 when the request is not an image generation request. Fields the
-// client omitted fall back to the configured defaults.
+// requestCost returns the declared cost of the request, or 0 when the request
+// does not carry a recognized diffusion body. Fields the client omitted fall
+// back to the configured defaults.
 func (p *DiffusionLoadProducer) requestCost(request *fwksched.InferenceRequest) int64 {
-	if request.Body == nil || request.Body.Images == nil {
+	if request.Body == nil {
 		return 0
 	}
 	images := request.Body.Images
+	if images == nil {
+		// Only diffusion requests declare a cost; all other request types
+		// are left untracked.
+		return 0
+	}
 
 	steps := p.defaultSteps
 	if images.NumInferenceSteps != nil && *images.NumInferenceSteps > 0 {
@@ -306,11 +305,7 @@ func (p *DiffusionLoadProducer) requestCost(request *fwksched.InferenceRequest) 
 		n = *images.N
 	}
 
-	cost := steps * n * pixels / pixelsPerCostUnit
-	if cost < 1 {
-		cost = 1
-	}
-	return cost
+	return steps * n * pixels
 }
 
 // parseSizePixels parses a "WIDTHxHEIGHT" size string into a pixel count.
@@ -334,7 +329,7 @@ func addedCostKey(endpointID, profileName string) string {
 	return endpointID + "|" + profileName + "|addedCost"
 }
 
-func (p *DiffusionLoadProducer) GetCostUnits(eid string) int64 {
+func (p *DiffusionLoadProducer) GetCost(eid string) int64 {
 	return p.costTracker.get(eid)
 }
 

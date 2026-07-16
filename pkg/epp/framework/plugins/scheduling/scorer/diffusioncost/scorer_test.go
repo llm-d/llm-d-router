@@ -58,9 +58,9 @@ func newTestEndpoint(name string) scheduling.Endpoint {
 	return newStubEndpoint(name)
 }
 
-func newTestEndpointWithCost(name string, costUnits int64) scheduling.Endpoint {
+func newTestEndpointWithCost(name string, cost int64) scheduling.Endpoint {
 	ep := newStubEndpoint(name)
-	ep.Put(attrdiffusion.DiffusionLoadDataKey.String(), &attrdiffusion.DiffusionLoad{CostUnits: costUnits})
+	ep.Put(attrdiffusion.DiffusionLoadDataKey.String(), &attrdiffusion.DiffusionLoad{Cost: cost})
 	return ep
 }
 
@@ -123,10 +123,10 @@ func TestDiffusionCostScorer_ProducerName(t *testing.T) {
 
 	// Cost under the named key is read; cost under the default key is ignored.
 	ep := newStubEndpoint("pod-a")
-	ep.Put(namedKey.String(), &attrdiffusion.DiffusionLoad{CostUnits: 7})
-	require.Equal(t, int64(7), scorer.costUnits(context.Background(), ep))
+	ep.Put(namedKey.String(), &attrdiffusion.DiffusionLoad{Cost: 7})
+	require.Equal(t, int64(7), scorer.declaredCost(context.Background(), ep))
 
 	other := newStubEndpoint("pod-b")
-	other.Put(attrdiffusion.DiffusionLoadDataKey.String(), &attrdiffusion.DiffusionLoad{CostUnits: 7})
-	require.Equal(t, int64(0), scorer.costUnits(context.Background(), other))
+	other.Put(attrdiffusion.DiffusionLoadDataKey.String(), &attrdiffusion.DiffusionLoad{Cost: 7})
+	require.Equal(t, int64(0), scorer.declaredCost(context.Background(), other))
 }

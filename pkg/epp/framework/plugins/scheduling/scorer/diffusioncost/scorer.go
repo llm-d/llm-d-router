@@ -15,11 +15,11 @@ limitations under the License.
 */
 
 // Package diffusioncost scores endpoints by the outstanding declared cost of
-// their in-flight image generation requests, produced by the
-// diffusion-load-producer. Where active-request scoring treats every request
-// as equal work, this scorer weighs requests by declared diffusion cost
-// (inference steps x resolution x image count), so two queued low-step
-// thumbnails do not count the same as one queued high-step full-size render.
+// their in-flight diffusion requests, produced by the diffusion-load-producer.
+// Where active-request scoring treats every request as equal work, this
+// scorer weighs requests by their declared diffusion cost, so two queued
+// low-step thumbnails do not count the same as one queued high-step
+// full-size render.
 package diffusioncost
 
 import (
@@ -119,7 +119,7 @@ func (s *DiffusionCost) Score(ctx context.Context, _ *scheduling.InferenceReques
 	maxCost := int64(0)
 
 	for _, endpoint := range endpoints {
-		cost := s.costUnits(ctx, endpoint)
+		cost := s.declaredCost(ctx, endpoint)
 		costs[endpoint] = cost
 		logCosts[endpoint.GetMetadata().NamespacedName.String()] = cost
 		if cost > maxCost {
@@ -127,8 +127,7 @@ func (s *DiffusionCost) Score(ctx context.Context, _ *scheduling.InferenceReques
 		}
 	}
 
-	// TODO: change the log level before submission
-	log.FromContext(ctx).V(logutil.DEFAULT).Info("Diffusion cost units", "endpointCosts", logCosts, "maxCost", maxCost)
+	log.FromContext(ctx).V(logutil.TRACE).Info("Diffusion load", "endpointCosts", logCosts, "maxCost", maxCost)
 
 	scoredEndpointsMap := make(map[scheduling.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
@@ -143,7 +142,7 @@ func (s *DiffusionCost) Score(ctx context.Context, _ *scheduling.InferenceReques
 	return scoredEndpointsMap
 }
 
-func (s *DiffusionCost) costUnits(ctx context.Context, endpoint scheduling.Endpoint) int64 {
+func (s *DiffusionCost) declaredCost(ctx context.Context, endpoint scheduling.Endpoint) int64 {
 	val, ok := endpoint.Get(s.diffusionLoadDataKey.String())
 	if !ok {
 		return 0
@@ -156,5 +155,5 @@ func (s *DiffusionCost) costUnits(ctx context.Context, endpoint scheduling.Endpo
 			"attributeType", fmt.Sprintf("%T", val))
 		return 0
 	}
-	return load.CostUnits
+	return load.Cost
 }

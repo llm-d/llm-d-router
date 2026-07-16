@@ -111,23 +111,23 @@ func TestDiffusionLoadProducer_RequestCost(t *testing.T) {
 				Size:              "1024x1024",
 				N:                 ptr.To[int64](2),
 			}),
-			want: 60, // 30 steps x 1 MP x 2 images
+			want: 30 * 2 * 1024 * 1024, // 30 steps x 2 images x 1024x1024 pixels
 		},
 		{
 			name: "all fields defaulted",
 			request: makeImagesRequest("r", &fwkrh.ImagesGenerationsRequest{
 				Prompt: "p",
 			}),
-			want: 50, // 50 default steps x 1 MP default size x 1 image
+			want: 50 * 1024 * 1024, // 50 default steps x default 1024x1024 x 1 image
 		},
 		{
-			name: "sub-megapixel size scales down",
+			name: "smaller size scales down",
 			request: makeImagesRequest("r", &fwkrh.ImagesGenerationsRequest{
 				Prompt:            "p",
 				NumInferenceSteps: ptr.To[int64](20),
 				Size:              "512x512",
 			}),
-			want: 5, // 20 steps x 0.25 MP
+			want: 20 * 512 * 512,
 		},
 		{
 			name: "malformed size falls back to default",
@@ -136,16 +136,16 @@ func TestDiffusionLoadProducer_RequestCost(t *testing.T) {
 				NumInferenceSteps: ptr.To[int64](10),
 				Size:              "huge",
 			}),
-			want: 10,
+			want: 10 * 1024 * 1024,
 		},
 		{
-			name: "tiny request clamps to one unit",
+			name: "tiny request keeps its exact declared cost",
 			request: makeImagesRequest("r", &fwkrh.ImagesGenerationsRequest{
 				Prompt:            "p",
 				NumInferenceSteps: ptr.To[int64](1),
 				Size:              "64x64",
 			}),
-			want: 1,
+			want: 64 * 64,
 		},
 	}
 
@@ -162,7 +162,7 @@ func TestDiffusionLoadProducer_ConfiguredDefaults(t *testing.T) {
 	producer := newTestProducer(t, Config{DefaultNumInferenceSteps: 8, DefaultSize: "512x512"})
 
 	cost := producer.requestCost(makeImagesRequest("r", &fwkrh.ImagesGenerationsRequest{Prompt: "p"}))
-	require.Equal(t, int64(2), cost) // 8 steps x 0.25 MP
+	require.Equal(t, int64(8*512*512), cost)
 }
 
 func TestDiffusionLoadProducerFactory_InvalidConfig(t *testing.T) {
@@ -198,9 +198,11 @@ func TestDiffusionLoadProducer_Lifecycle(t *testing.T) {
 		Size:              "1024x1024",
 	})
 
+	const pixels = int64(1024 * 1024)
+
 	// PreRequest commits the declared cost to the chosen endpoint.
 	producer.PreRequest(ctx, request, result)
-	require.Equal(t, int64(30), producer.GetCostUnits(eid))
+	require.Equal(t, 30*pixels, producer.GetCost(eid))
 
 	// A second request accumulates.
 	request2 := makeImagesRequest("req-2", &fwkrh.ImagesGenerationsRequest{
@@ -208,22 +210,22 @@ func TestDiffusionLoadProducer_Lifecycle(t *testing.T) {
 		NumInferenceSteps: ptr.To[int64](10),
 	})
 	producer.PreRequest(ctx, request2, result)
-	require.Equal(t, int64(40), producer.GetCostUnits(eid))
+	require.Equal(t, 40*pixels, producer.GetCost(eid))
 
 	// Intermediate chunk does not release.
 	producer.ResponseBody(ctx, request, &requestcontrol.Response{RequestID: "req-1"}, nil)
-	require.Equal(t, int64(40), producer.GetCostUnits(eid))
+	require.Equal(t, 40*pixels, producer.GetCost(eid))
 
 	// EndOfStream releases exactly the request's own contribution.
 	producer.ResponseBody(ctx, request, &requestcontrol.Response{RequestID: "req-1", EndOfStream: true}, nil)
-	require.Equal(t, int64(10), producer.GetCostUnits(eid))
+	require.Equal(t, 10*pixels, producer.GetCost(eid))
 
 	// Releasing the same request again is a no-op.
 	producer.ResponseBody(ctx, request, &requestcontrol.Response{RequestID: "req-1", EndOfStream: true}, nil)
-	require.Equal(t, int64(10), producer.GetCostUnits(eid))
+	require.Equal(t, 10*pixels, producer.GetCost(eid))
 
 	producer.ResponseBody(ctx, request2, &requestcontrol.Response{RequestID: "req-2", EndOfStream: true}, nil)
-	require.Equal(t, int64(0), producer.GetCostUnits(eid))
+	require.Equal(t, int64(0), producer.GetCost(eid))
 }
 
 func TestDiffusionLoadProducer_NonImageRequestNotTracked(t *testing.T) {
@@ -235,7 +237,7 @@ func TestDiffusionLoadProducer_NonImageRequestNotTracked(t *testing.T) {
 
 	request := &fwksched.InferenceRequest{RequestID: "req-1", Body: &fwkrh.InferenceRequestBody{}}
 	producer.PreRequest(context.Background(), request, makeSchedulingResult(endpoint))
-	require.Equal(t, int64(0), producer.GetCostUnits(eid))
+	require.Equal(t, int64(0), producer.GetCost(eid))
 }
 
 func TestDiffusionLoadProducer_Extract(t *testing.T) {
@@ -255,10 +257,10 @@ func TestDiffusionLoadProducer_Extract(t *testing.T) {
 	// Commit some cost, then deletion cleans up the tracker.
 	request := makeImagesRequest("req-1", &fwkrh.ImagesGenerationsRequest{Prompt: "p", NumInferenceSteps: ptr.To[int64](30)})
 	producer.PreRequest(ctx, request, makeSchedulingResult(endpoint))
-	require.Equal(t, int64(30), producer.GetCostUnits(eid))
+	require.Equal(t, int64(30*1024*1024), producer.GetCost(eid))
 
 	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: endpoint}))
-	require.Equal(t, int64(0), producer.GetCostUnits(eid))
+	require.Equal(t, int64(0), producer.GetCost(eid))
 }
 
 func TestDiffusionLoadProducer_Produce(t *testing.T) {
@@ -273,7 +275,7 @@ func TestDiffusionLoadProducer_Produce(t *testing.T) {
 	require.NoError(t, producer.Produce(ctx, nil, []fwksched.Endpoint{endpoint}))
 	val, ok := endpoint.Get(producer.dk.String())
 	require.True(t, ok)
-	require.Equal(t, int64(0), val.(*attrdiffusion.DiffusionLoad).CostUnits)
+	require.Equal(t, int64(0), val.(*attrdiffusion.DiffusionLoad).Cost)
 
 	// After committing cost, Produce publishes the live snapshot.
 	request := makeImagesRequest("req-1", &fwkrh.ImagesGenerationsRequest{Prompt: "p", NumInferenceSteps: ptr.To[int64](30)})
@@ -282,7 +284,7 @@ func TestDiffusionLoadProducer_Produce(t *testing.T) {
 	require.NoError(t, producer.Produce(ctx, nil, []fwksched.Endpoint{endpoint}))
 	val, ok = endpoint.Get(producer.dk.String())
 	require.True(t, ok)
-	require.Equal(t, int64(30), val.(*attrdiffusion.DiffusionLoad).CostUnits)
+	require.Equal(t, int64(30*1024*1024), val.(*attrdiffusion.DiffusionLoad).Cost)
 }
 
 func TestDiffusionLoadProducer_Produces(t *testing.T) {
