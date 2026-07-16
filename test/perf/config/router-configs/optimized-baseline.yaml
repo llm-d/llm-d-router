@@ -12,7 +12,7 @@ router:
     image:
       registry: ghcr.io/llm-d
       repository: llm-d-router-endpoint-picker
-      tag: latest
+      tag: main
       pullPolicy: Always
     flags:
       v: 4

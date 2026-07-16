@@ -8,7 +8,7 @@ epp:
   image:
     registry: ghcr.io/llm-d
     repository: llm-d-router-endpoint-picker
-    tag: latest
+    tag: main
     pullPolicy: Always
   extProcPort: 9002
   # gRPC port serving EPP liveness and readiness checks, 9003 if unset.

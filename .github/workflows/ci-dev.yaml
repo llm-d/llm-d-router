@@ -47,6 +47,6 @@ jobs:
       tag: ${{ needs.set-params.outputs.tag }}
       prerelease: true
       chart-suffix: ""
-      epp-additional-tags: ghcr.io/llm-d/${{ needs.set-params.outputs.epp_base_name }}:latest
-      sidecar-additional-tags: ghcr.io/llm-d/${{ needs.set-params.outputs.sidecar_base_name }}:latest
+      epp-additional-tags: ghcr.io/llm-d/${{ needs.set-params.outputs.epp_base_name }}:main
+      sidecar-additional-tags: ghcr.io/llm-d/${{ needs.set-params.outputs.sidecar_base_name }}:main
 
