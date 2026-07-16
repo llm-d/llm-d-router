@@ -391,16 +391,10 @@ func TestPredictedLatencyFactory(t *testing.T) {
 			expectErr:  false,
 		},
 		{
-			name:       "invalid samplingMean <= 0",
-			pluginName: "bad-sampling-mean",
-			jsonParams: `{"samplingMean": -1.0}`,
-			expectErr:  true,
-		},
-		{
-			name:       "invalid maxSampledTokens < 0",
-			pluginName: "bad-max-tokens",
-			jsonParams: `{"maxDecodeTokenSamplesForPrediction": -1}`,
-			expectErr:  true,
+			name:       "deprecated sampling params are accepted and ignored",
+			pluginName: "deprecated-sampling-params",
+			jsonParams: `{"samplingMean": -1.0, "maxDecodeTokenSamplesForPrediction": -1}`,
+			expectErr:  false,
 		},
 		{
 			name:       "invalid sloBufferFactor <= 0",

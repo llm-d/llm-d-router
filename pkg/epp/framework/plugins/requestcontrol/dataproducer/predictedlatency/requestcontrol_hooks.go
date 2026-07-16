@@ -149,15 +149,15 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 
 	if predictedLatencyCtx.ttft == 0 {
 		if pl.config.StreamingMode && !response.EndOfStream {
-			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now, pl.config.SamplingMean, pl.config.MaxDecodeTokenSamplesForPrediction)
+			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now)
 		}
 	} else {
-		processTokenForLatencyPrediction(ctx, pl.typedName.Name, pl.typedName.Type, pl.latencypredictor, pl.config.EndpointRoleLabel, predictedLatencyCtx, targetMetadata, now, pl.config.SamplingMean, pl.config.MaxDecodeTokenSamplesForPrediction)
+		processTokenForLatencyPrediction(ctx, predictedLatencyCtx, now)
 	}
 
 	if response.EndOfStream {
 		if !pl.config.StreamingMode {
-			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now, pl.config.SamplingMean, pl.config.MaxDecodeTokenSamplesForPrediction)
+			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now)
 		}
 
 		if predictedLatencyCtx.ttft > 0 {
@@ -247,12 +247,9 @@ func processFirstTokenForLatencyPrediction(
 	endpointRoleLabel string,
 	predictedLatencyCtx *predictedLatencyCtx,
 	now time.Time,
-	samplingMean float64,
-	maxDecodeTokenSamplesForPrediction int,
 ) {
 	logger := log.FromContext(ctx)
 
-	initializeSampler(ctx, predictedLatencyCtx, samplingMean, maxDecodeTokenSamplesForPrediction)
 	predictedLatencyCtx.ttft = float64(now.Sub(predictedLatencyCtx.requestReceivedTimestamp).Milliseconds())
 	predictedLatencyCtx.generatedTokenCount = 1
 
@@ -286,15 +283,6 @@ func processFirstTokenForLatencyPrediction(
 	refreshLastSeenMetrics(ctx, predictedLatencyCtx)
 }
 
-func initializeSampler(ctx context.Context, predictedLatencyCtx *predictedLatencyCtx, samplingMean float64, maxDecodeTokenSamplesForPrediction int) {
-	if predictedLatencyCtx.decodeTokenSampler == nil {
-		logger := log.FromContext(ctx)
-		requestID := predictedLatencyCtx.schedulingRequest.Headers[reqcommon.RequestIDHeaderKey]
-		predictedLatencyCtx.decodeTokenSampler = newDecodeTokenSampler(requestID, samplingMean, maxDecodeTokenSamplesForPrediction)
-		logger.V(logutil.DEBUG).Info("Initialized token sampler for first token", "request_id", requestID, "next_prediction_token", predictedLatencyCtx.decodeTokenSampler.getNextSampleToken())
-	}
-}
-
 func predictFirstTPOT(ctx context.Context, predictedLatencyCtx *predictedLatencyCtx) {
 	logger := log.FromContext(ctx)
 	targetName := predictedLatencyCtx.targetMetadata.NamespacedName.Name
@@ -309,67 +297,20 @@ func predictFirstTPOT(ctx context.Context, predictedLatencyCtx *predictedLatency
 	}
 }
 
-// processTokenForLatencyPrediction records actual inter-token latency, sampled predictions, and advances timestamp.
+// processTokenForLatencyPrediction records the actual TPOT for the token and advances the timestamp.
 func processTokenForLatencyPrediction(
 	ctx context.Context,
-	pluginName, pluginType string,
-	predictor latencypredictor.PredictorInterface,
-	endpointRoleLabel string,
 	predictedLatencyCtx *predictedLatencyCtx,
-	targetEndpointMetadata *fwkdl.EndpointMetadata,
 	now time.Time,
-	samplingMean float64,
-	maxDecodeTokenSamplesForPrediction int,
 ) {
 	logger := log.FromContext(ctx)
-
-	if predictedLatencyCtx.decodeTokenSampler == nil {
-		requestID := predictedLatencyCtx.schedulingRequest.Headers[reqcommon.RequestIDHeaderKey]
-		predictedLatencyCtx.decodeTokenSampler = newDecodeTokenSampler(requestID, samplingMean, maxDecodeTokenSamplesForPrediction)
-		logger.V(logutil.DEBUG).Info("Initialized token sampler for subsequent tokens", "request_id", requestID, "next_prediction_token", predictedLatencyCtx.decodeTokenSampler.getNextSampleToken())
-	}
 
 	latencyMs := float64(now.Sub(predictedLatencyCtx.lastTokenTimestamp).Milliseconds())
 	predictedLatencyCtx.generatedTokenCount++
 
-	if predictedLatencyCtx.generatedTokenCount == 2 || predictedLatencyCtx.decodeTokenSampler.shouldPredict(predictedLatencyCtx.generatedTokenCount) {
-		predictedLatencyCtx.tpotObservations = append(predictedLatencyCtx.tpotObservations, latencyMs)
-	}
 	if predictedLatencyCtx.generatedTokenCount == 2 {
 		logger.V(logutil.DEBUG).Info("First inter-token latency observed",
-			"actual_tpot_ms", latencyMs,
-			"predicted_tpot_ms", predictedLatencyCtx.avgPredictedTPOT)
-	}
-
-	m, err := getLatestMetricsForProfile(predictedLatencyCtx, "")
-	if err != nil {
-		logger.V(logutil.DEBUG).Info("Skipping TPOT prediction due to missing metrics or schedulingResult", "error", err)
-		return
-	}
-
-	if predictedLatencyCtx.decodeTokenSampler.shouldPredict(predictedLatencyCtx.generatedTokenCount) {
-		in := buildPredictionRequest(
-			endpointRoleLabel,
-			targetEndpointMetadata,
-			m,
-			predictedLatencyCtx.inputTokenCount,
-			predictedLatencyCtx.generatedTokenCount,
-			0,
-		)
-		start := time.Now()
-		p, err := predictor.Predict(ctx, in)
-		dur := time.Since(start)
-		if err != nil || p == nil {
-			logger.V(logutil.DEBUG).Error(err, "TPOT predict failed", "duration_ms", dur.Milliseconds())
-			predictedLatencyCtx.predictedTPOTObservations = append(predictedLatencyCtx.predictedTPOTObservations, 0)
-			predictedLatencyCtx.avgPredictedTPOT = calculateRunningAverage(predictedLatencyCtx.avgPredictedTPOT, 0, len(predictedLatencyCtx.predictedTPOTObservations))
-		} else {
-			logger.V(logutil.DEBUG).Info("TPOT predict succeeded", "value_ms", p.TPOT, "duration_ms", dur.Milliseconds())
-			predictedLatencyCtx.predictedTPOTObservations = append(predictedLatencyCtx.predictedTPOTObservations, p.TPOT)
-			predictedLatencyCtx.avgPredictedTPOT = calculateRunningAverage(predictedLatencyCtx.avgPredictedTPOT, p.TPOT, len(predictedLatencyCtx.predictedTPOTObservations))
-		}
-		recordRequestTPOTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyCtx.schedulingRequest.TargetModel, predictedLatencyCtx.incomingModelName, dur.Seconds())
-		predictedLatencyCtx.decodeTokenSampler.recordPrediction(predictedLatencyCtx.generatedTokenCount)
+			"actual_tpot_ms", latencyMs)
 	}
 
 	predictedLatencyCtx.lastTokenTimestamp = now
