@@ -143,6 +143,11 @@ type config struct {
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
 	// Max capacity size of the LRU indexer in number of entries per server (pod).
 	LRUCapacityPerServer int `json:"lruCapacityPerServer"`
+
+	// autoTuneMaxPrefixTokens, set internally (never from JSON), derives the cap
+	// per endpoint from the model's max_model_len. Enabled when AutoTune is on and
+	// MaxPrefixTokensToMatch was left at its default (no operator-pinned cap).
+	autoTuneMaxPrefixTokens bool
 }
 
 // defaultConfig provides sensible defaults for the prefix cache plugins.
