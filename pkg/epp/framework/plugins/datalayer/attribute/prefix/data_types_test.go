@@ -55,3 +55,34 @@ func TestPrefixCacheMatchInfo_CloneCopiesCachedBlockCount(t *testing.T) {
 	assert.Equal(t, 240, orig.CachedBlockCount())
 	assert.Equal(t, 1, clone.CachedBlockCount())
 }
+
+func TestPrefixCacheMatchInfo_CachedBlocksByTierDefaultsToNil(t *testing.T) {
+	info := NewPrefixCacheMatchInfo(5, 10, 16)
+	// Nil distinguishes producers without tier data from a producer that saw
+	// zero cached blocks in every tier.
+	assert.Nil(t, info.CachedBlocksByTier())
+}
+
+func TestPrefixCacheMatchInfo_WithCachedBlocksByTier(t *testing.T) {
+	info := NewPrefixCacheMatchInfo(5, 10, 16).WithCachedBlocksByTier(map[string]int{"gpu": 3, "cpu": 2})
+	assert.Equal(t, map[string]int{"gpu": 3, "cpu": 2}, info.CachedBlocksByTier())
+
+	empty := NewPrefixCacheMatchInfo(0, 10, 16).WithCachedBlocksByTier(map[string]int{})
+	assert.NotNil(t, empty.CachedBlocksByTier())
+	assert.Empty(t, empty.CachedBlocksByTier())
+}
+
+func TestPrefixCacheMatchInfo_CloneDeepCopiesCachedBlocksByTier(t *testing.T) {
+	orig := NewPrefixCacheMatchInfo(5, 10, 16).WithCachedBlocksByTier(map[string]int{"gpu": 3, "cpu": 2})
+	clone, ok := orig.Clone().(*PrefixCacheMatchInfo)
+	require.True(t, ok)
+	assert.Equal(t, orig.CachedBlocksByTier(), clone.CachedBlocksByTier())
+
+	// Mutating the clone's map must not affect the original.
+	clone.CachedBlocksByTier()["gpu"] = 99
+	assert.Equal(t, 3, orig.CachedBlocksByTier()["gpu"])
+
+	nilClone, ok := NewPrefixCacheMatchInfo(5, 10, 16).Clone().(*PrefixCacheMatchInfo)
+	require.True(t, ok)
+	assert.Nil(t, nilClone.CachedBlocksByTier())
+}
