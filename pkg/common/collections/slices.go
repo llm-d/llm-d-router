@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package utils
+package collections
 
 // SliceMap applies a function to each element of a slice and returns a new
 // slice with the results.

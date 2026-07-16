@@ -28,8 +28,8 @@ import (
 
 	kvctok "github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 // Config holds the configuration for the Indexer module.
@@ -153,7 +153,7 @@ func (k *Indexer) ScoreTokens(
 	podIdentifiers []string,
 	extraFeatures []*kvblock.BlockExtraFeatures,
 ) (map[string]float64, error) {
-	tracer := telemetry.Tracer("llm-d-kv-cache/pkg/kvcache")
+	tracer := tracing.Tracer("llm-d-router/pkg/kvcache")
 	ctx, span := tracer.Start(ctx, "llm_d.kv_cache.score_tokens",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
