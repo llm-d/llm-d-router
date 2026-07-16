@@ -135,7 +135,7 @@ func (a APIType) String() string {
 // JSON request field names used for token limits in prefill/decode staging.
 // Do not mutate these slices.
 var (
-	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens}
+	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens, requestFieldMinTokens}
 	responsesStyleTokenLimitFields = []string{requestFieldMaxOutputTokens}
 	generateStyleTokenLimitFields  = []string{requestFieldMaxTokens, requestFieldMinTokens}
 )
