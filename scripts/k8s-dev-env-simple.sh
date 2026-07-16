@@ -111,7 +111,7 @@ export PRE_IO_TRANSFER_CONFIG=$(build_io_config "io_sender")
 export INF_IO_TRANSFER_CONFIG=$(build_io_config "io_both")
 export POST_IO_TRANSFER_CONFIG=$(build_io_config "io_receiver")
 
-export VLLM_LOGGING_LEVEL="DEBUG"
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 
 # Python dependencies for the terratorch plugin
 export IO_PROCESSOR_PLUGIN="${IO_PROCESSOR_PLUGIN:-terratorch_segmentation}"
