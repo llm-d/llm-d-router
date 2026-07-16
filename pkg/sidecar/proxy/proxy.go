@@ -63,6 +63,9 @@ type Config struct {
 	// ECConnector is the name of the EC protocol between encoder and prefiller (for EPD mode).
 	// If empty, encoder stage is skipped.
 	ECConnector string
+	// IOConnector is the name of the IO protocol between preprocessor, inference and postprocessor (for IO disaggregation mode).
+	// If empty, IO processor stages are skipped.
+	IOConnector string
 	// DataParallelSize is the value passed to the vLLM server's --DATA_PARALLEL-SIZE argument.
 	DataParallelSize int
 
@@ -260,6 +263,8 @@ type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, p2pRout
 // so the body fields are not forwarded.
 type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, p2pRouting, reqcommon.APIType)
 
+type ioConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)
+
 // Server is the reverse proxy server
 type Server struct {
 	logger             logr.Logger
@@ -269,12 +274,15 @@ type Server struct {
 	allowlistValidator *AllowlistValidator
 	handlePDConnector  pdConnectorHandler // handles the Prefiller-Decoder connector request
 	handleECConnector  ecConnectorHandler // handles the Encoder disaggregation connector request.
+	handleIOConnector  ioConnectorHandler // handles the IO processing disaggregation connector request.
 	prefillerURLPrefix string
 	encoderURLPrefix   string
 
 	decoderProxy        http.Handler                          // decoder proxy handler
 	prefillerProxies    *lru.Cache[string, http.Handler]      // cached prefiller proxy handlers
 	encoderProxies      *lru.Cache[string, http.Handler]      // cached encoder proxy handlers
+	preprocessProxies   *lru.Cache[string, http.Handler]      // cached preprocess proxy handlers
+	inferenceProxies    *lru.Cache[string, http.Handler]      // cached inference proxy handlers
 	mooncakeEngineIDs   *lru.Cache[string, map[string]string] // cached mooncake dp_rank->engine_id per prefill host:port
 	dataParallelProxies map[string]http.Handler               // Proxies to other vLLM servers
 	forwardDataParallel bool                                  // Use special Data Parallel work around
@@ -375,11 +383,15 @@ func NewProxy(config Config) *Server {
 	prefillerCache, _ := lru.New[string, http.Handler](1024)
 	encoderCache, _ := lru.New[string, http.Handler](1024)
 	mooncakeEngineIDs, _ := lru.New[string, map[string]string](1024)
+	preprocessCache, _ := lru.New[string, http.Handler](1024)        // nolint:errcheck
+	inferenceCache, _ := lru.New[string, http.Handler](1024)         // nolint:errcheck
 
 	server := &Server{
 		readyCh:             make(chan struct{}),
 		prefillerProxies:    prefillerCache,
 		encoderProxies:      encoderCache,
+		preprocessProxies:   preprocessCache,
+		inferenceProxies:    inferenceCache,
 		mooncakeEngineIDs:   mooncakeEngineIDs,
 		prefillerURLPrefix:  "http://",
 		encoderURLPrefix:    "http://",
@@ -400,6 +412,10 @@ func NewProxy(config Config) *Server {
 		if config.UseTLSForEncoder {
 			server.encoderURLPrefix = "https://"
 		}
+	}
+
+	if config.IOConnector != "" {
+		server.setIOConnector()
 	}
 
 	return server
@@ -579,6 +595,29 @@ func (s *Server) setECConnector() {
 	}
 }
 
+func (s *Server) setIOConnector() {
+	ioConnector := s.config.IOConnector
+
+	if ioConnector == "" {
+		// No IO connector specified, disaggregated IO processing will be skipped.
+		return
+	}
+
+	switch ioConnector {
+	case constants.IOExampleConnector:
+		s.handleIOConnector = s.handleIOSharedStorage
+	case constants.IOP2PConnector:
+		s.handleIOConnector = s.handleIOP2P
+	default:
+		// Unknown io connector value, skip disaggregated IO processing. Validate() should
+		// have rejected this earlier; reaching here means the validation was
+		// bypassed (e.g., programmatic config) and the binary degrades.
+		s.logger.Info("warning: unknown io-connector; disaggregated IO processing will be skipped",
+			"ioConnector", ioConnector, "supported", supportedIOConnectorNamesStr)
+		return
+	}
+}
+
 func (s *Server) createRoutes() http.Handler {
 	// Configure handlers
 	mux := http.NewServeMux()
@@ -614,6 +653,15 @@ func (s *Server) createRoutes() http.Handler {
 		grpcPaths = append(grpcPaths, sglangapiv1.SglangService_Generate_FullMethodName)
 		registerInferenceRoute(sglangapiv1.SglangService_Generate_FullMethodName, reqcommon.APITypeSGLangGenerate)
 	}
+
+	handler := s.disaggregatedIOProcessorHandler(reqcommon.DetectAPIType(reqcommon.PathPooling))
+	mux.HandleFunc("POST "+reqcommon.PathPooling, handler)
+	mux.HandleFunc("POST "+reqcommon.PathPooling+"/{$}", func(w http.ResponseWriter, r *http.Request) {
+		r = r.Clone(r.Context())
+		r.URL.Path = reqcommon.PathPooling
+		r.URL.RawPath = ""
+		handler(w, r)
+	})
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 
@@ -682,5 +730,23 @@ func (s *Server) encoderProxyHandler(hostPort string) (http.Handler, error) {
 		s.encoderProxies,
 		s.encoderURLPrefix,
 		s.config.InsecureSkipVerifyForEncoder,
+	)
+}
+
+func (s *Server) preprocessProxyHandler(hostPort string) (http.Handler, error) {
+	return s.createProxyHandler(
+		hostPort,
+		s.preprocessProxies,
+		"http://",
+		true,
+	)
+}
+
+func (s *Server) inferenceProxyHandler(hostPort string) (http.Handler, error) {
+	return s.createProxyHandler(
+		hostPort,
+		s.inferenceProxies,
+		"http://",
+		true,
 	)
 }

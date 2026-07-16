@@ -106,6 +106,12 @@ const (
 	StageDecode        = "decode"
 	StageNone          = "none"
 	StageNonePrefilled = "none-prefilled"
+
+	// PreprocessEndpointHeader is the header name used to indicate Preprocess worker <ip:port>
+	PreprocessEndpointHeader = "x-preprocess-host-port"
+
+	// InfereceEndpointsHeader is the header name used to indicate Inference workers <ip:port> list
+	InfereceEndpointsHeader = "x-inference-hosts-ports"
 )
 
 // IsTCPPort reports whether port is in 1-65535.

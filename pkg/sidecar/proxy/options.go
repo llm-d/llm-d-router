@@ -60,6 +60,7 @@ const (
 	dataParallelSize          = "data-parallel-size"
 	kvConnector               = "kv-connector"
 	ecConnector               = "ec-connector"
+	ioConnector               = "io-connector"
 	mooncakeBootstrapPortFlag = "mooncake-bootstrap-port"
 	ecMooncakePortFlag        = "ec-mooncake-port"
 	ecMooncakePodIPFlag       = "ec-mooncake-pod-ip"
@@ -109,9 +110,12 @@ const (
 	defaultMoRIIOParallelDecodeWaitTimeout = 30 * time.Second
 
 	// TLS stages
-	prefillStage = "prefiller"
-	decodeStage  = "decoder"
-	encodeStage  = "encoder"
+	prefillStage     = "prefiller"
+	decodeStage      = "decoder"
+	encodeStage      = "encoder"
+	preprocessStage  = "preprocess"
+	inferenceStage   = "inference"
+	postprocessStage = "postprocess"
 )
 
 // yamlConfiguration represents structure of YAML configuration for sidecar proxy
@@ -145,6 +149,7 @@ type yamlConfiguration struct {
 	EnableToolCallingTelemetry *bool    `json:"enable-tool-calling-telemetry,omitempty"`
 	MetricsPort                int      `json:"metrics-port,omitempty"`
 	MetricsCertDir             string   `json:"metrics-cert-dir,omitempty"`
+	IOConnector                string   `json:"io-connector,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -190,6 +195,12 @@ var (
 		constants.ECConnectorMooncake: {},
 	}
 
+	// supportedIOConnectors defines all valid IO connector types
+	supportedIOConnectors = map[string]struct{}{
+		constants.IOExampleConnector: {},
+		constants.IOP2PConnector:     {},
+	}
+
 	// supportedTLSStages defines all valid stages for TLS configuration
 	supportedTLSStages = map[string]struct{}{
 		prefillStage: {},
@@ -199,8 +210,9 @@ var (
 
 	supportedKVConnectorNamesStr = strings.Join([]string{constants.KVConnectorNIXLV2, constants.KVConnectorSharedStorage, constants.KVConnectorSGLang, constants.KVConnectorMooncake, constants.KVConnectorOffloading}, ", ")
 	supportedECConnectorNamesStr = strings.Join([]string{constants.ECExampleConnector, constants.ECConnectorNIXL, constants.ECConnectorMooncake}, ", ")
+	supportedIOConnectorNamesStr = strings.Join([]string{constants.IOExampleConnector, constants.IOP2PConnector}, ", ")
 
-	supportedTLSStageNamesStr = strings.Join([]string{prefillStage, decodeStage, encodeStage}, ", ")
+	supportedTLSStageNamesStr = strings.Join([]string{prefillStage, decodeStage, encodeStage, preprocessStage, inferenceStage, postprocessStage}, ", ")
 )
 
 // NewOptions returns a new Options struct initialized with default values.
@@ -282,6 +294,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"the KV protocol between prefiller and decoder. Supported: "+supportedKVConnectorNamesStr)
 	fs.StringVar(&opts.ECConnector, ecConnector, opts.ECConnector,
 		"the EC protocol between encoder and prefiller (for EPD mode). Supported: "+supportedECConnectorNamesStr+". Leave empty to skip encoder stage.")
+	fs.StringVar(&opts.IOConnector, ioConnector, opts.IOConnector,
+		"the IO protocol between preprocessor, inference and postprocesor (for IO disaggregation mode). Supported: "+supportedIOConnectorNamesStr+". Leave empty to skip IO disaggregation stage.")
 	fs.IntVar(&opts.MooncakeBootstrapPort, mooncakeBootstrapPortFlag, opts.MooncakeBootstrapPort,
 		"the port used to query the Mooncake bootstrap endpoint on prefill pods (only used with --kv-connector=mooncake)")
 	fs.IntVar(&opts.ECMooncakePort, ecMooncakePortFlag, opts.ECMooncakePort,
@@ -635,7 +649,12 @@ func (opts *Options) Validate() error {
 			return fmt.Errorf("--ec-connector must be one of: %s", supportedECConnectorNamesStr)
 		}
 	}
-
+	// Validate IO connector if provided
+	if opts.IOConnector != "" {
+		if _, ok := supportedIOConnectors[opts.IOConnector]; !ok {
+			return fmt.Errorf("--io-connector must be one of: %s", supportedIOConnectorNamesStr)
+		}
+	}
 	// Validate TLS stages
 	if err := validateStages(opts.enableTLS, supportedTLSStages, "--enable-tls"); err != nil {
 		return err
@@ -793,6 +812,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.ECConnector != "" && !opts.isFlagSet(ecConnector) {
 		opts.ECConnector = cfg.ECConnector
+	}
+	if cfg.IOConnector != "" && !opts.isFlagSet(ioConnector) {
+		opts.IOConnector = cfg.IOConnector
 	}
 
 	if cfg.EnableSSRFProtection != nil && !opts.isFlagSet(enableSSRFProtection) {
