@@ -59,6 +59,15 @@ generate-proto: protoc-gen-go protoc-gen-go-grpc ## Generate Golang code from pr
 		--go-grpc_out=module=github.com/llm-d/llm-d-router:. \
 		pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto/*.proto
 
+.PHONY: generate-proto-stateapi
+generate-proto-stateapi: protoc-gen-go protoc-gen-go-grpc ## Generate Golang code for the internal State API (RFC #1593 feasibility spike).
+	PATH="$(LOCALBIN):$$PATH" $(PROTOC) \
+		-I pkg/epp/statestore/stateapi/proto \
+		-I . \
+		--go_out=module=github.com/llm-d/llm-d-router:. \
+		--go-grpc_out=module=github.com/llm-d/llm-d-router:. \
+		pkg/epp/statestore/stateapi/proto/*.proto
+
 .PHONY: protoc-gen-go
 protoc-gen-go: $(PROTOC_GEN_GO) ## Download protoc-gen-go locally if necessary.
 $(PROTOC_GEN_GO): $(LOCALBIN)

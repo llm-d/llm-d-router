@@ -285,3 +285,91 @@ func TestValidateConfigFlagsMutuallyExclusive(t *testing.T) {
 		}
 	}
 }
+
+// invalidMode is not a real EppMode/StateAccessMode value, used across
+// TestValidateEppMode and TestValidateStateAccessMode to exercise the
+// unknown-value rejection path.
+const invalidMode = "not-a-real-mode"
+
+func TestValidateEppMode(t *testing.T) {
+	newValidOpts := func() *Options {
+		opts := NewOptions()
+		opts.PoolName = "epp-mode-pool" // bypass the pool/selector validation
+		// Validate() consults opts.fs for deprecated-flag checks, so it must be
+		// populated even though this test doesn't parse any argv flags.
+		opts.AddFlags(pflag.NewFlagSet("epp-mode-test", pflag.ContinueOnError))
+		return opts
+	}
+
+	if opts := newValidOpts(); opts.EppMode != EppModeClassic {
+		t.Errorf("default EppMode = %q, want %q", opts.EppMode, EppModeClassic)
+	}
+
+	opts := newValidOpts()
+	opts.EppMode = invalidMode
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for an unknown epp-mode, but it succeeded")
+	}
+
+	opts = newValidOpts()
+	opts.EppMode = EppModeStateless
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for stateless mode without stateful-epp-address, but it succeeded")
+	}
+
+	opts = newValidOpts()
+	opts.EppMode = EppModeStateless
+	opts.StatefulEPPAddress = "stateful-epp:9004"
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Validate() failed for stateless mode with stateful-epp-address set: %v", err)
+	}
+
+	opts = newValidOpts()
+	opts.EppMode = EppModeStateful
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Validate() failed for stateful mode: %v", err)
+	}
+}
+
+func TestValidateStateAccessMode(t *testing.T) {
+	newValidOpts := func() *Options {
+		opts := NewOptions()
+		opts.PoolName = "state-access-mode-pool"
+		opts.AddFlags(pflag.NewFlagSet("state-access-mode-test", pflag.ContinueOnError))
+		return opts
+	}
+
+	if opts := newValidOpts(); opts.StateAccessModeInflight != StateAccessModeFailOpen ||
+		opts.StateAccessModePrefix != StateAccessModeFailOpen ||
+		opts.StateAccessModeFlowControl != StateAccessModeLocalFallback {
+		t.Errorf("default state access modes = (%q, %q, %q), want (%q, %q, %q)",
+			opts.StateAccessModeInflight, opts.StateAccessModePrefix, opts.StateAccessModeFlowControl,
+			StateAccessModeFailOpen, StateAccessModeFailOpen, StateAccessModeLocalFallback)
+	}
+
+	opts := newValidOpts()
+	opts.StateAccessModeInflight = invalidMode
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for an unknown state-access-mode-inflight, but it succeeded")
+	}
+
+	opts = newValidOpts()
+	opts.StateAccessModePrefix = invalidMode
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for an unknown state-access-mode-prefix, but it succeeded")
+	}
+
+	opts = newValidOpts()
+	opts.StateAccessModeFlowControl = invalidMode
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for an unknown state-access-mode-flowcontrol, but it succeeded")
+	}
+
+	opts = newValidOpts()
+	opts.StateAccessModeInflight = StateAccessModeLocal
+	opts.StateAccessModePrefix = StateAccessModeLocal
+	opts.StateAccessModeFlowControl = StateAccessModeLocal
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Validate() failed with all state access modes set to Local: %v", err)
+	}
+}

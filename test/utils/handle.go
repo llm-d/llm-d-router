@@ -18,11 +18,13 @@ package utils
 
 import (
 	"context"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	statepb "github.com/llm-d/llm-d-router/pkg/epp/statestore/stateapi/proto/gen"
 )
 
 // testHandle is an implementation of plugin.Handle for test purposes
@@ -43,6 +45,14 @@ func (h *testHandle) PodList() []types.NamespacedName {
 
 func (h *testHandle) Metrics() plugin.MetricsRecorder {
 	return h.metricsRecorder
+}
+
+func (h *testHandle) RemoteStateClient() (statepb.StateAPIClient, time.Duration, bool) {
+	return nil, 0, false
+}
+
+func (h *testHandle) StateAccessMode() plugin.StateAccessModeConfig {
+	return plugin.StateAccessModeConfig{}
 }
 
 type testHandlePlugins struct {

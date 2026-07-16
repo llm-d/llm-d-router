@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -17,6 +18,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/nohitlru"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
+	statepb "github.com/llm-d/llm-d-router/pkg/epp/statestore/stateapi/proto/gen"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -61,6 +63,14 @@ func (h *fakeHandle) PodList() []k8stypes.NamespacedName {
 
 func (h *fakeHandle) Metrics() plugin.MetricsRecorder {
 	return nil
+}
+
+func (h *fakeHandle) RemoteStateClient() (statepb.StateAPIClient, time.Duration, bool) {
+	return nil, 0, false
+}
+
+func (h *fakeHandle) StateAccessMode() plugin.StateAccessModeConfig {
+	return plugin.StateAccessModeConfig{}
 }
 
 type stubPlugin struct {

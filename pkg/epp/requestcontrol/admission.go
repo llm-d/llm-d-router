@@ -19,6 +19,7 @@ package requestcontrol
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -31,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/statestore"
 	requtil "github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
@@ -135,15 +137,60 @@ func (lac *LegacyAdmissionController) Admit(
 type FlowControlAdmissionController struct {
 	flowController flowController
 	poolName       string
+
+	// state, when non-nil, additionally gates admission on a fleet-wide
+	// concurrency lease after the local FlowController admits a request
+	// (RFC #1593 feasibility spike, stateless mode only). nil in classic and
+	// stateful mode: those keep today's exact admission semantics and error
+	// granularity (translateFlowControlOutcome), never going through this path.
+	state statestore.FlowControlState
 }
 
 // NewFlowControlAdmissionController creates a new FlowControlAdmissionController.
-func NewFlowControlAdmissionController(fc flowController, poolName string) *FlowControlAdmissionController {
-	return &FlowControlAdmissionController{
+func NewFlowControlAdmissionController(fc flowController, poolName string, opts ...FlowControlAdmissionControllerOption) *FlowControlAdmissionController {
+	fcac := &FlowControlAdmissionController{
 		flowController: fc,
 		poolName:       poolName,
 	}
+	for _, opt := range opts {
+		opt(fcac)
+	}
+	return fcac
 }
+
+// FlowControlAdmissionControllerOption configures optional behavior of a
+// FlowControlAdmissionController constructed via NewFlowControlAdmissionController.
+type FlowControlAdmissionControllerOption func(*FlowControlAdmissionController)
+
+// WithConcurrencyLease additionally gates admission on a fleet-wide
+// concurrency lease (pkg/epp/statestore.ConcurrencyState) after the local
+// FlowController admits a request, per the RFC's LocalFallback degradation
+// strategy: local queue admission always runs unchanged; the remote check
+// runs only after, and on remote failure a local concurrency cap
+// (localMaxConcurrency) is used instead. localMaxConcurrency <= 0 means no
+// local fallback cap.
+//
+// fc (the flowController already held by the controller) is reused directly
+// as the local pkg/epp/statestore.FlowControlBackend: its EnqueueAndWait
+// signature already matches, so it is passed in here rather than
+// re-resolved from the controller to keep construction order explicit.
+func WithConcurrencyLease(fc flowController, remote statestore.ConcurrencyState, timeout time.Duration, localMaxConcurrency int64) FlowControlAdmissionControllerOption {
+	return func(fcac *FlowControlAdmissionController) {
+		local := statestore.NewLocalFlowControlState(fc)
+		fcac.state = statestore.NewLocalFallbackFlowControlState(local, remote, timeout, localMaxConcurrency)
+	}
+}
+
+// ConcurrencyReleaser is implemented by AdmissionController implementations
+// that hold a fleet-wide concurrency lease requiring release at response
+// completion (RFC #1593 feasibility spike, stateless mode only). Director
+// checks for this via a type assertion, since AdmissionController itself has
+// no Release method — classic/stateful admission never needs one.
+type ConcurrencyReleaser interface {
+	ReleaseConcurrency(ctx context.Context, requestID, fairnessID string, priority int)
+}
+
+var _ ConcurrencyReleaser = (*FlowControlAdmissionController)(nil)
 
 // Admit implements the AdmissionController interface by checking for saturation on sheddable requests first, then
 // deferring to the Flow Control system.
@@ -167,10 +214,50 @@ func (fcac *FlowControlAdmissionController) Admit(
 		modelName:         reqCtx.IncomingModelName,
 	}
 
+	if fcac.state != nil {
+		outcome, err := fcac.state.Admit(ctx, fcReq)
+		logger.V(logutil.DEBUG).Info("Flow control + concurrency lease outcome",
+			"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)
+		return translateConcurrencyOutcome(outcome, err)
+	}
+
 	outcome, err := fcac.flowController.EnqueueAndWait(ctx, fcReq)
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)
 	return translateFlowControlOutcome(outcome, err)
+}
+
+// ReleaseConcurrency releases a previously admitted concurrency lease. A
+// no-op when no concurrency lease is configured (classic/stateful mode, or
+// this request was rejected before a lease was ever held).
+func (fcac *FlowControlAdmissionController) ReleaseConcurrency(ctx context.Context, requestID, fairnessID string, priority int) {
+	if fcac.state == nil {
+		return
+	}
+	_ = fcac.state.Release(ctx, requestID, statestore.FlowControlKey{ID: fairnessID, Priority: priority})
+}
+
+// translateConcurrencyOutcome maps the coarse outcome of the concurrency-lease
+// composition (pkg/epp/statestore.FlowControlOutcome) to the public
+// errcommon.Error contract used by the Director. Unlike
+// translateFlowControlOutcome, this collapses the local FlowController's
+// richer rejection/eviction reasons (capacity, no-endpoints, TTL, context
+// cancellation) into a single "rejected" signal, since
+// statestore.localFallbackConcurrencyState's local step reports only
+// Admitted/Rejected — a documented simplification for this feasibility spike.
+func translateConcurrencyOutcome(outcome statestore.FlowControlOutcome, err error) error {
+	switch outcome {
+	case statestore.FlowControlOutcomeAdmitted, statestore.FlowControlOutcomeDegraded:
+		return nil
+	case statestore.FlowControlOutcomeRejected:
+		msg := "request rejected by flow control"
+		if err != nil {
+			msg = err.Error()
+		}
+		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}}
+	default:
+		return errcommon.Error{Code: errcommon.Internal, Msg: fmt.Sprintf("unhandled concurrency outcome: %v", outcome)}
+	}
 }
 
 // flowControlRequest is an adapter that implements the FlowControlRequest interface.

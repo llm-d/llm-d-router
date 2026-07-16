@@ -32,7 +32,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/credentials/insecure"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -132,6 +135,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
+	"github.com/llm-d/llm-d-router/pkg/epp/statestore"
+	"github.com/llm-d/llm-d-router/pkg/epp/statestore/stateapi"
+	statepb "github.com/llm-d/llm-d-router/pkg/epp/statestore/stateapi/proto/gen"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
 	"github.com/llm-d/llm-d-router/version"
 )
@@ -174,6 +180,18 @@ type Runner struct {
 	healthGRPCServer *grpc.Server
 	healthGRPCPort   int
 	draining         *atomic.Bool
+
+	// Stateful/stateless mode (RFC #1593 feasibility spike). eppMode is
+	// stashed from opts so runWithGracefulShutdown (which only receives mgr
+	// and drainTimeout) can decide which runnables to start. remoteStateClient
+	// is the shared gRPC State API client, built once in
+	// parseConfigurationPhaseTwo and reused by initAdmissionControl so the
+	// producers and the flow-control concurrency lease share one connection.
+	// stateAPIGRPCServer/stateAPIPort are populated only in stateful mode.
+	eppMode            string
+	remoteStateClient  statepb.StateAPIClient
+	stateAPIGRPCServer *grpc.Server
+	stateAPIPort       int
 }
 
 // WithExecutableName sets the name of the executable containing the runner.
@@ -283,12 +301,21 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 	serveErr := make(chan error, 1)
 	go func() {
 		g := newRunnableGroup()
-		g.Add("ext-proc", func(c context.Context) error {
-			return r.serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(c)
-		})
+		// A stateful replica (RFC #1593 feasibility spike) never serves ext-proc
+		// traffic; it only exposes the internal State API and health.
+		if r.eppMode != runserver.EppModeStateful {
+			g.Add("ext-proc", func(c context.Context) error {
+				return r.serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(c)
+			})
+		}
 		g.Add("health", func(c context.Context) error {
 			return runnable.NoLeaderElection(runnable.GRPCServer("health", r.healthGRPCServer, r.healthGRPCPort)).Start(c)
 		})
+		if r.stateAPIGRPCServer != nil {
+			g.Add("state-api", func(c context.Context) error {
+				return runnable.NoLeaderElection(runnable.GRPCServer("state-api", r.stateAPIGRPCServer, r.stateAPIPort)).Start(c)
+			})
+		}
 		serveErr <- g.Run(serveCtx)
 	}()
 
@@ -333,6 +360,10 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 // The returned Datastore is **only** meant to be used in the integration test.
 // Optional managerOverrides are applied to the controller manager options before creation.
 func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, managerOverrides []func(*ctrl.Options)) (ctrl.Manager, datastore.Datastore, error) {
+	// Stashed so runWithGracefulShutdown (which only receives mgr and
+	// drainTimeout) knows which runnables to start (RFC #1593 feasibility spike).
+	r.eppMode = opts.EppMode
+
 	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
@@ -341,6 +372,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	setupLog.Info("Raw config after phase one", "config", toRawMap(rawConfig))
 
 	epf := r.setupMetricsCollection(opts)
+	statestore.RegisterMetrics(ctrlmetrics.Registry)
 	gknn, err := extractGKNN(opts.PoolName, opts.PoolGroup, opts.PoolNamespace, opts.EndpointSelector)
 	if err != nil {
 		setupLog.Error(err, "Failed to extract GKNN")
@@ -361,12 +393,28 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		setupLog.Error(err, "Failed to setup datastore")
 		return nil, nil, err
 	}
-	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
 		return nil, nil, err
 	}
 	setupLog.Info("EPP config after phase two", "config", eppConfig)
+
+	// --- Stateful mode: State API server (RFC #1593 feasibility spike) ---
+	// Built here (not started) so runWithGracefulShutdown can add it as a
+	// runnable alongside health, keeping it out of the controller-runtime
+	// manager for the same graceful-drain reasons as ext-proc/health.
+	if opts.EppMode == runserver.EppModeStateful {
+		store := stateapi.NewMemoryStore(ctx, stateapi.Config{GlobalMaxConcurrency: opts.GlobalMaxConcurrency})
+		if opts.StateAPIArtificialDelay > 0 {
+			store = stateapi.NewArtificialDelayStore(store, opts.StateAPIArtificialDelay)
+		}
+		stateAPISrv := grpc.NewServer()
+		statepb.RegisterStateAPIServer(stateAPISrv, stateapi.NewServer(store))
+		r.stateAPIGRPCServer = stateAPISrv
+		r.stateAPIPort = opts.StateAPIPort
+		setupLog.Info("State API server configured (stateful mode)", "port", opts.StateAPIPort)
+	}
 
 	// --- Setup Metrics Server ---
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
@@ -388,16 +436,30 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		}(),
 	}
 
+	// leaderElectionEnabled derives from --epp-mode when set (RFC #1593
+	// feasibility spike): stateful forces leader election on (readiness only
+	// for the leader, matching the RFC's "single active-passive stateful
+	// replica" semantics); stateless forces it off (all replicas Ready
+	// simultaneously, none participate in leader election). classic keeps
+	// today's --ha-enable-leader-election exactly as configured.
+	leaderElectionEnabled := opts.EnableLeaderElection
+	switch opts.EppMode {
+	case runserver.EppModeStateful:
+		leaderElectionEnabled = true
+	case runserver.EppModeStateless:
+		leaderElectionEnabled = false
+	}
+
 	isLeader := &atomic.Bool{}
 	isLeader.Store(false)
 
-	mgr, err := runserver.NewDefaultManager(controllerCfg, *gknn, cfg, metricsServerOptions, opts.EnableLeaderElection, managerOverrides...)
+	mgr, err := runserver.NewDefaultManager(controllerCfg, *gknn, cfg, metricsServerOptions, leaderElectionEnabled, managerOverrides...)
 	if err != nil {
 		setupLog.Error(err, "Failed to create controller manager")
 		return nil, nil, err
 	}
 
-	if opts.EnableLeaderElection {
+	if leaderElectionEnabled {
 		setupLog.Info("Leader election enabled")
 		go func() {
 			<-mgr.Elected()
@@ -488,7 +550,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	r.draining = &atomic.Bool{}
 	r.serverRunner = serverRunner
 	r.healthGRPCPort = opts.GRPCHealthPort
-	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters)
+	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, leaderElectionEnabled, supporters)
 	return mgr, ds, nil
 }
 
@@ -695,12 +757,57 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 	}
 }
 
-func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
+func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore, opts *runserver.Options) (*config.Config, error) {
 	logger := log.FromContext(ctx)
 
 	applyDeprecatedEnvFeatureGate(enableExperimentalFlowControlLayer, "Flow Control layer", flowcontrol.FeatureGate, rawConfig)
 
-	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
+	handleOpts := []fwkplugin.HandleOption{fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry)}
+
+	// Stateless mode: dial the stateful EPP's State API once and share the
+	// connection between the Handle (for producers) and initAdmissionControl
+	// (for the concurrency lease), via r.remoteStateClient.
+	if opts.EppMode == runserver.EppModeStateless && opts.StatefulEPPAddress != "" {
+		conn, err := grpc.NewClient(opts.StatefulEPPAddress,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			// The stateful EPP is a single active-passive instance behind a
+			// Service, so a pod restart is a real (if brief) connection drop.
+			// grpc-go's default backoff (up to 120s MaxDelay) and the absence
+			// of keepalive pings compound into tens of seconds of the client
+			// silently serving off local fallback before it even attempts a
+			// reconnect, dwarfing the ~10s Kubernetes replacement-pod
+			// readiness time this design is meant to bound recovery by.
+			grpc.WithConnectParams(grpc.ConnectParams{
+				Backoff: backoff.Config{
+					BaseDelay:  200 * time.Millisecond,
+					Multiplier: backoff.DefaultConfig.Multiplier,
+					Jitter:     backoff.DefaultConfig.Jitter,
+					MaxDelay:   2 * time.Second,
+				},
+			}),
+			// PermitWithoutStream so idle periods (no inflight/prefix/lease
+			// calls in flight) still get pinged; otherwise a dead connection
+			// with no active RPC isn't detected until the next call is made.
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                5 * time.Second,
+				Timeout:             2 * time.Second,
+				PermitWithoutStream: true,
+			}),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to stateful EPP State API at %q: %w", opts.StatefulEPPAddress, err)
+		}
+		r.remoteStateClient = statepb.NewStateAPIClient(conn)
+		handleOpts = append(handleOpts, fwkplugin.WithRemoteStateClient(r.remoteStateClient, opts.StateAPIRemoteTimeout))
+		handleOpts = append(handleOpts, fwkplugin.WithStateAccessMode(fwkplugin.StateAccessModeConfig{
+			Inflight:    fwkplugin.StateAccessMode(opts.StateAccessModeInflight),
+			Prefix:      fwkplugin.StateAccessMode(opts.StateAccessModePrefix),
+			FlowControl: fwkplugin.StateAccessMode(opts.StateAccessModeFlowControl),
+		}))
+		setupLog.Info("Connected to stateful EPP State API (stateless mode)", "address", opts.StatefulEPPAddress)
+	}
+
+	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), handleOpts...)
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 
@@ -890,13 +997,21 @@ func (r *Runner) initAdmissionControl(
 			UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
 		},
 	)
-	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName), registry
+	var admissionOpts []requestcontrol.FlowControlAdmissionControllerOption
+	if opts.EppMode == runserver.EppModeStateless && r.remoteStateClient != nil &&
+		opts.StateAccessModeFlowControl != runserver.StateAccessModeLocal {
+		concurrency := statestore.NewRemoteConcurrencyState(r.remoteStateClient)
+		admissionOpts = append(admissionOpts, requestcontrol.WithConcurrencyLease(fc, concurrency, opts.StateAPIRemoteTimeout, opts.LocalMaxConcurrency))
+		setupLog.Info("Flow control concurrency lease enabled (stateless mode)")
+	}
+	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName, admissionOpts...), registry
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
 // It builds the EPP server stack without a Kubernetes cluster or controller manager.
 func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapi.EndpointPickerConfig) error {
 	epf := r.setupMetricsCollection(opts)
+	statestore.RegisterMetrics(ctrlmetrics.Registry)
 
 	namespace := resolvePoolNamespace(opts.PoolNamespace)
 	poolName := opts.PoolName
@@ -936,7 +1051,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		"(InferenceModelRewrite, InferenceObjective reconciler, and any " +
 		"k8s-notification-source data layer plugins); see docs/discovery.md")
 
-	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err

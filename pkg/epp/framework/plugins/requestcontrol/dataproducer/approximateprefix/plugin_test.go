@@ -33,6 +33,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+	"github.com/llm-d/llm-d-router/pkg/epp/statestore"
 )
 
 func testHandle() plugin.Handle {
@@ -193,6 +194,104 @@ func TestPreRequest(t *testing.T) {
 		assert.NotEmpty(t, p.indexer().Get(allHashes[1][0]))
 		assert.NotEmpty(t, p.indexer().Get(allHashes[2][0]))
 	})
+}
+
+// --- RFC #1593 feasibility spike: remote state wiring ---
+
+type commitCall struct {
+	requestID, endpointID string
+	hashes                []uint64
+}
+
+// fakePrefixState is a hand-rolled statestore.PrefixState for exercising the
+// producer's remote-state wiring without a real gRPC server.
+type fakePrefixState struct {
+	matchBatch  map[uint64][]string
+	commitCalls []commitCall
+}
+
+func (f *fakePrefixState) GetPrefixMatch(ctx context.Context, hash uint64) []string {
+	return f.GetPrefixMatchBatch(ctx, []uint64{hash})[hash]
+}
+func (f *fakePrefixState) GetPrefixMatchBatch(_ context.Context, _ []uint64) map[uint64][]string {
+	return f.matchBatch
+}
+func (f *fakePrefixState) CommitPrefix(_ context.Context, requestID, endpointID string, hashes []uint64) error {
+	f.commitCalls = append(f.commitCalls, commitCall{requestID, endpointID, hashes})
+	return nil
+}
+func (f *fakePrefixState) RemoveEndpoint(context.Context, string) {}
+
+var _ statestore.PrefixState = (*fakePrefixState)(nil)
+
+func TestProduce_UsesRemoteStateBatchReadWhenConfigured(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+	config := config{
+		BlockSizeTokens:        1,
+		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
+	assert.NoError(t, err)
+
+	endpointID := k8stypes.NamespacedName{Name: "pod1"}.String()
+	fake := &fakePrefixState{matchBatch: map[uint64][]string{}}
+	p.state = fake
+
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model1",
+		Body:        tokenizedBody([]uint32{1, 2}),
+	}
+	perPromptHashes := prefixhash.GetBlockHashes(context.Background(), req, config.BlockSizeTokens, defaultMaxPrefixBlocks)
+	fake.matchBatch[uint64(perPromptHashes[0][0])] = []string{endpointID}
+	fake.matchBatch[uint64(perPromptHashes[0][1])] = []string{endpointID}
+
+	err = p.Produce(context.Background(), req, []fwksched.Endpoint{endpoint})
+	assert.NoError(t, err)
+
+	// The local indexer is empty, so a match here can only have come from the
+	// remote batch read, confirming Produce consulted p.state rather than
+	// p.indexerInst.
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType).String()
+	info, ok := endpoint.Get(key)
+	assert.True(t, ok)
+	assert.Equal(t, 2, info.(*attrprefix.PrefixCacheMatchInfo).MatchBlocks())
+}
+
+func TestPreRequest_CommitsRemoteStateWhenConfigured(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+	config := config{
+		BlockSizeTokens:        1,
+		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	}
+	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
+	fake := &fakePrefixState{}
+	p.state = fake
+
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	req1 := &fwksched.InferenceRequest{
+		RequestID:   "req-1",
+		TargetModel: "test-model1",
+		Body:        tokenizedBody([]uint32{1, 2}),
+	}
+	_ = p.Produce(context.Background(), req1, []fwksched.Endpoint{endpoint1})
+
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint1}},
+		},
+	}
+	p.PreRequest(context.Background(), req1, res)
+	p.wg.Wait()
+
+	assert.Len(t, fake.commitCalls, 1)
+	assert.Equal(t, "req-1", fake.commitCalls[0].requestID)
+	assert.Equal(t, endpoint1.GetMetadata().NamespacedName.String(), fake.commitCalls[0].endpointID)
+	assert.Len(t, fake.commitCalls[0].hashes, 2)
 }
 
 func TestDataProducerValidation(t *testing.T) {

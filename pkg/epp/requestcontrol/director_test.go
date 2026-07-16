@@ -77,6 +77,26 @@ func (m *mockAdmissionController) Admit(context.Context, *handlers.RequestContex
 	return m.admitErr
 }
 
+// mockConcurrencyReleaserAdmissionController additionally implements
+// ConcurrencyReleaser, mirroring FlowControlAdmissionController when
+// WithConcurrencyLease is configured (RFC #1593 feasibility spike).
+type mockConcurrencyReleaserAdmissionController struct {
+	mockAdmissionController
+	releaseCalls  int
+	lastRequestID string
+	lastFairness  string
+	lastPriority  int
+}
+
+func (m *mockConcurrencyReleaserAdmissionController) ReleaseConcurrency(_ context.Context, requestID, fairnessID string, priority int) {
+	m.releaseCalls++
+	m.lastRequestID = requestID
+	m.lastFairness = fairnessID
+	m.lastPriority = priority
+}
+
+var _ ConcurrencyReleaser = (*mockConcurrencyReleaserAdmissionController)(nil)
+
 type mockScheduler struct {
 	scheduleResults *fwksched.SchedulingResult
 	scheduleErr     error
@@ -1443,6 +1463,54 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 			assert.True(t, resp.EndOfStream, "EndOfStream should be true for last chunk")
 		}
 	}
+}
+
+func TestDirector_HandleResponseBody_ReleasesConcurrencyLease(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	ds := datastore.NewDatastore(t.Context(), nil, 0)
+	mockSched := &mockScheduler{}
+	endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
+	admissionController := &mockConcurrencyReleaserAdmissionController{}
+	// No ResponseStreaming plugins configured: this specifically exercises the
+	// path where HandleResponseBody's early return (no plugins registered)
+	// would otherwise skip the release call entirely.
+	director := NewDirectorWithConfig(ds, mockSched, admissionController, endpointCandidates, NewConfig())
+
+	reqCtx := &handlers.RequestContext{
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: "tenant-a"},
+		Priority:          3,
+		Request: &handlers.Request{
+			Headers: map[string]string{reqcommon.RequestIDHeaderKey: "test-req-release"},
+		},
+		Response: &handlers.Response{},
+	}
+
+	director.HandleResponseBody(ctx, reqCtx, false)
+	assert.Zero(t, admissionController.releaseCalls, "must not release before EndOfStream")
+
+	director.HandleResponseBody(ctx, reqCtx, true)
+	require.Equal(t, 1, admissionController.releaseCalls)
+	assert.Equal(t, "test-req-release", admissionController.lastRequestID)
+	assert.Equal(t, "tenant-a", admissionController.lastFairness)
+	assert.Equal(t, 3, admissionController.lastPriority)
+}
+
+func TestDirector_HandleResponseBody_ReleaseConcurrencyLeaseIsNoOpWithoutSchedulingRequest(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	ds := datastore.NewDatastore(t.Context(), nil, 0)
+	mockSched := &mockScheduler{}
+	endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
+	admissionController := &mockConcurrencyReleaserAdmissionController{}
+	director := NewDirectorWithConfig(ds, mockSched, admissionController, endpointCandidates, NewConfig())
+
+	reqCtx := &handlers.RequestContext{
+		Request:  &handlers.Request{Headers: map[string]string{reqcommon.RequestIDHeaderKey: "test-req"}},
+		Response: &handlers.Response{},
+	}
+
+	director.HandleResponseBody(ctx, reqCtx, true) // must not panic despite nil SchedulingRequest
+
+	assert.Zero(t, admissionController.releaseCalls)
 }
 
 func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
