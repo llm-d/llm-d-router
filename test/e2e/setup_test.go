@@ -12,11 +12,9 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -223,17 +221,6 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 	}, readyTimeout, 1*time.Second).Should(gomega.Succeed())
 
 	return objects
-}
-
-func usesTokenProducer(eppConfig string) bool {
-	cfg, _, err := configloader.LoadRawConfig([]byte(eppConfig), ginkgo.GinkgoLogr)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	for _, plugin := range cfg.Plugins {
-		if plugin.Type == tokenizer.PluginType {
-			return true
-		}
-	}
-	return false
 }
 
 // testWrapper wraps tests with the setup and teardown code needed.
