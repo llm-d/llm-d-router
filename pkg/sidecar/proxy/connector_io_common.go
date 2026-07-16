@@ -24,7 +24,6 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
-	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -49,7 +48,7 @@ func (s *Server) fanoutInference(
 		return fmt.Errorf("fanoutInfernce: no inference hostPorts provided (requestID=%s)", requestID)
 	}
 
-	s.logger.V(logging.DEBUG).Info("executing inference for preprocessed request items", "count", len(inferenceRequests), "requestID", requestID, "inferenceHostPorts", inferenceHostPorts)
+	s.logger.Info("executing inference for preprocessed request items", "count", len(inferenceRequests), "requestID", requestID, "inferenceHostPorts", inferenceHostPorts)
 
 	grp, gctx := errgroup.WithContext(ctx)
 	for idx, inferenceRequest := range inferenceRequests {
@@ -92,7 +91,7 @@ func (s *Server) fanoutInference(
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(requestHeaderRequestID, infReqID)
 
-			s.logger.V(logging.DEBUG).Info("sending inference request", "inference requestID", infReqID, "to", hostPort)
+			s.logger.Info("sending inference request", "inference requestID", infReqID, "to", hostPort)
 
 			pw := &bufferedResponseWriter{}
 			inferenceHandler.ServeHTTP(pw, req)
@@ -110,7 +109,7 @@ func (s *Server) fanoutInference(
 				}
 			}
 
-			s.logger.V(logging.DEBUG).Info("inference request completed", "inference requestID", infReqID)
+			s.logger.Info("inference request completed", "inference requestID", infReqID)
 			return nil
 		})
 	}
@@ -130,7 +129,7 @@ func (s *Server) fanoutInferenceCollect(
 		if err := json.Unmarshal(pw.bodyBytes(), &inferenceResponse); err != nil {
 			return fmt.Errorf("failed to parse inference response for item %d: %w", idx, err)
 		}
-		if v := s.logger.V(logging.DEBUG); v.Enabled() {
+		if v := s.logger; v.Enabled() {
 			v.Info("inference response",
 				"item", idx,
 				"requestID", requestID,
@@ -146,7 +145,7 @@ func (s *Server) fanoutInferenceCollect(
 }
 
 func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preprocessHostPort string, allowedInferenceInstances []string) {
-	s.logger.V(logging.DEBUG).Info("running IO disaggregated protocol", "preprocessor", preprocessHostPort, "inferenceCount", len(allowedInferenceInstances))
+	s.logger.Info("running IO disaggregated protocol", "preprocessor", preprocessHostPort, "inferenceCount", len(allowedInferenceInstances))
 
 	rawBody, ioProcessorRequest, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -187,7 +186,7 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 	preprocessReq.Header.Set("Content-Type", "application/json")
 	preprocessReq.Header.Set(requestHeaderRequestID, requestID)
 
-	s.logger.V(logging.DEBUG).Info("executing preprocessing", "requestID", requestID, "preprocessHostPort", preprocessHostPort)
+	s.logger.Info("executing preprocessing", "requestID", requestID, "preprocessHostPort", preprocessHostPort)
 	pw := &bufferedResponseWriter{}
 	preprocessHandler.ServeHTTP(pw, preprocessReq)
 
@@ -249,6 +248,6 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 	req.Header.Set(requestHeaderRequestID, fmt.Sprintf("pooling-%s", requestID))
 
 	// Decoder proxy in this case is the postprocessor instance. It sends the request to the vLLM server (localhost:vLLMPort)
-	s.logger.V(logging.DEBUG).Info("executing postprocessing", "requestID", requestID)
+	s.logger.Info("executing postprocessing", "requestID", requestID)
 	s.decoderProxy.ServeHTTP(w, req)
 }

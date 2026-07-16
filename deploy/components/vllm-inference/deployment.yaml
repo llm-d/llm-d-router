@@ -17,23 +17,6 @@ spec:
         llm-d.ai/component: ${INF_ROLE}
         llm-d.ai/role: ${INF_ROLE}
     spec:
-      initContainers:
-        - name: install-deps
-          image: ${VLLM_IMAGE}
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/sh
-            - -c
-            - |
-              mkdir -p /python-deps
-
-              [ -z "${PYTHON_DEPENDENCIES}" ] || 
-              python3 -m pip install \
-                ${PYTHON_DEPENDENCIES} \
-                -t /python-deps
-          volumeMounts:
-            - name: python-deps
-              mountPath: /python-deps
       containers:
         - name: vllm-${INF_ROLE}
           image: ${VLLM_IMAGE}
@@ -98,12 +81,12 @@ spec:
             - name: PYTHONHASHSEED
               value: "42"
             - name: PYTHONPATH
-              value: "/opt/venv/lib/python3.12/site-packages:/python-deps"
+              value: "/opt/venv/lib/python3.12/site-packages"
+            - name: VLLM_LOGGING_LEVEL
+              value: ${VLLM_LOGGING_LEVEL}
           volumeMounts:
             - name: cache
               mountPath: /tmp/cache
-            - name: python-deps
-              mountPath: /python-deps
           resources:
             requests:
               cpu: ${INF_CPU_RESOURCES}
@@ -115,6 +98,4 @@ spec:
               nvidia.com/gpu: ${INF_GPU_RESOURCES_LIM}
       volumes:
         - name: cache
-          emptyDir: {}
-        - name: python-deps
           emptyDir: {}

@@ -1,0 +1,55 @@
+# Sample EPP configuration for running IO disaggregation
+#
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+  parameters:
+    maxNumOfEndpoints: 1
+- name: ${INF_ROLE}-maxScore
+  type: max-score-picker
+  parameters:
+    maxNumOfEndpoints: 2
+- name: passthroughParser
+  type: passthrough-parser
+- type: label-selector-filter
+  name: ${PRE_ROLE}-filter
+  parameters:
+    matchLabels:
+      llm-d.ai/role: ${PRE_ROLE}
+- type: label-selector-filter
+  name: ${INF_ROLE}-filter
+  parameters:
+    matchLabels:
+      llm-d.ai/role: ${INF_ROLE}
+- type: label-selector-filter
+  name: ${POST_ROLE}-filter
+  parameters:
+    matchLabels:
+      llm-d.ai/role: ${POST_ROLE}
+- type: io-disagg-profile-handler
+  parameters:
+    deciders:
+      preprocess: always-disagg-preprocess-decider
+      inference: always-disagg-inference-decider
+- type: always-disagg-preprocess-decider
+- type: always-disagg-inference-decider
+schedulingProfiles:
+- name: preprocess
+  plugins:
+  - pluginRef: ${PRE_ROLE}-filter
+- name: inference
+  plugins:
+  - pluginRef: ${INF_ROLE}-filter
+  - pluginRef: ${INF_ROLE}-maxScore
+- name: postprocess
+  plugins:
+  - pluginRef: ${POST_ROLE}-filter
+  # maxScore is the single-endpoint picker (maxNumOfEndpoints: 1) because the
+  # Envoy proxy requires exactly one target per request.
+  # See: https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/414
+  - pluginRef: maxScore
+requestHandler:
+  parsers:
+  - pluginRef: passthroughParser

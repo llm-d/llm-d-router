@@ -16,6 +16,7 @@ spec:
         app: ${APP_NAME}
         llm-d.ai/component: ${POST_ROLE}
         llm-d.ai/role: ${POST_ROLE}
+        llm-d.ai/engine-type: vllm-render
     spec:
       initContainers:
         # Routing sidecar - proxies requests from port TARGET_PORT to vllm on port POST_TARGET_PORT
@@ -37,27 +38,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-        - name: install-deps
-          image: ${VLLM_CPU_IMAGE}
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/sh
-            - -c
-            - |
-              mkdir -p /python-deps
-
-              [ -z "${PYTHON_DEPENDENCIES}" ] || 
-              python3 -m pip install \
-                ${PYTHON_DEPENDENCIES} \
-                -t /python-deps && \
-                sed -i '482s/^/# /' /python-deps/terratorch/vllm/plugins/segmentation/segmentation_io_processor.py && \
-                sed -i '483s/^    //' /python-deps/terratorch/vllm/plugins/segmentation/segmentation_io_processor.py && \
-                sed 's/^/    /' /patches/extra_code.py >> /python-deps/terratorch/vllm/plugins/segmentation/segmentation_io_processor.py
-          volumeMounts:
-            - name: python-deps
-              mountPath: /python-deps
-            - name: extra-code-patch
-              mountPath: /patches
       containers:
         - name: vllm-${POST_ROLE}
           image: ${VLLM_CPU_IMAGE}
@@ -123,12 +103,12 @@ spec:
             - name: PYTHONHASHSEED
               value: "42"
             - name: PYTHONPATH
-              value: "/opt/venv/lib/python3.12/site-packages:/python-deps"
+              value: "/opt/venv/lib/python3.12/site-packages"
+            - name: VLLM_LOGGING_LEVEL
+              value: ${VLLM_LOGGING_LEVEL}
           volumeMounts:
             - name: cache
               mountPath: /tmp/cache
-            - name: python-deps
-              mountPath: /python-deps
           resources:
             requests:
               cpu: ${POST_CPU_RESOURCES}
@@ -139,8 +119,3 @@ spec:
       volumes:
         - name: cache
           emptyDir: {}
-        - name: python-deps
-          emptyDir: {}    
-        - name: extra-code-patch
-          configMap:
-            name: extra-code-patch

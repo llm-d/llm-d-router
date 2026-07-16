@@ -112,6 +112,7 @@ The plugin comes with built-in support for the following engines:
 -   `atom`
 -   `trtllm-serve`
 -   `triton-tensorrt-llm`
+-   `vllm-render`
 
 To correctly establish the mapping, model server Pods should be labeled using the `engineLabelKey` with the engine type as follows:
 

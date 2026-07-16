@@ -239,6 +239,21 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheBlockSizeSpec:  "",
 		CacheNumBlocksSpec:  "",
 	},
+	// "vllm-render" is for vLLM instances running in render mode ("vllm launch render"),
+	// used as encode/preprocess/postprocess workers in E/PD, E/P/D and IO processing disaggregation
+	// topologies. These workers handle multimodal encoding or IO pre- and post-processing
+	// and do not expose the standard vLLM LLM inference metrics, so all metric specs are
+	// intentionally left empty.
+	{
+		Name:                "vllm-render",
+		QueuedRequestsSpec:  "",
+		RunningRequestsSpec: "",
+		KVUsageSpec:         "",
+		LoRASpec:            "",
+		CacheInfoSpec:       "",
+		CacheBlockSizeSpec:  "",
+		CacheNumBlocksSpec:  "",
+	},
 }
 
 // defaultEngineName is the default engine used when defaultEngine is not specified.

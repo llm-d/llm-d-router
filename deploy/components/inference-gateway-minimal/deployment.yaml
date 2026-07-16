@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${EPP_NAME}
+  labels:
+    app: ${EPP_NAME}
+spec:
+  replicas: ${EPP_REPLICA_COUNT}
+  selector:
+    matchLabels:
+      app: ${EPP_NAME}
+  template:
+    metadata:
+      namespace: ${NAMESPACE}
+      name: ${EPP_NAME}
+      labels:
+        app: ${EPP_NAME}
+    spec:
+      serviceAccountName: ${EPP_NAME}
+      terminationGracePeriodSeconds: 130
+      containers:
+        - name: envoy-proxy
+          image: docker.io/envoyproxy/envoy:distroless-v1.33.2
+          command:
+            - envoy
+          args:
+            - "--service-node"
+            - "envoy-proxy"
+            - "--log-level"
+            - "warn"
+            - "--cpuset-threads"
+            - "--drain-strategy"
+            - "immediate"
+            - "--drain-time-s"
+            - "60"
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+          env:
+            - name: NS_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: http-8081
+              containerPort: 8081
+              protocol: TCP
+            - name: metrics-19001
+              containerPort: 19001
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "4"
+              memory: "8Gi"
+            limits:
+              cpu: "8"
+              memory: "16Gi"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 19001
+              scheme: HTTP
+            failureThreshold: 1
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+              readOnly: true
+        - name: epp
+          image: ${EPP_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --pool-namespace
+            - "${NAMESPACE}"
+            - --endpoint-selector
+            - "app=${APP_NAME}"
+            - --endpoint-target-ports
+            - ${TARGET_PORT_STR}
+            - --v
+            - ${EPP_LOG_LEVEL}
+            - --zap-encoder
+            - "json"
+            - --grpc-port
+            - "9002"
+            - --grpc-health-port
+            - "9003"
+            - --config-file
+            - "/etc/epp/epp-config.yaml"
+            - --metrics-endpoint-auth=false
+            - --ha-enable-leader-election=false
+          ports:
+            - containerPort: 5557
+            - containerPort: 9002
+            - containerPort: 9003
+            - name: metrics
+              containerPort: 9090
+          livenessProbe:
+            grpc:
+              port: 9003
+              service: envoy.service.ext_proc.v3.ExternalProcessor
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            grpc:
+              port: 9003
+              service: envoy.service.ext_proc.v3.ExternalProcessor
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: epp-config
+              mountPath: /etc/epp
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: envoy-config
+          configMap:
+            name: envoy
+            items:
+              - key: envoy.yaml
+                path: envoy.yaml
+        - name: epp-config
+          configMap:
+            name: epp-config
