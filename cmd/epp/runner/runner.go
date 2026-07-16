@@ -332,6 +332,7 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 //
 // The returned Datastore is **only** meant to be used in the integration test.
 // Optional managerOverrides are applied to the controller manager options before creation.
+
 func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, managerOverrides []func(*ctrl.Options)) (ctrl.Manager, datastore.Datastore, error) {
 	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
 	if err != nil {
@@ -386,6 +387,10 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 			return nil
 		}(),
+	}
+
+	if err := runserver.ConfigureMetricsTLS(opts, &metricsServerOptions); err != nil {
+		return nil, nil, err
 	}
 
 	isLeader := &atomic.Bool{}
