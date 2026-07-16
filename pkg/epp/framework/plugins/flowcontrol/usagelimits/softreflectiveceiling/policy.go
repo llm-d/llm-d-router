@@ -17,9 +17,12 @@
 // The proportional behavior is encoded entirely in the ComputeLimit return
 // values, which requires per-band tick state. This is a deliberate deviation
 // from the UsageLimitPolicy interface guidance that policies be stateless:
-// the fractional open rate is only observable across ticks. Concurrency
-// safety is preserved -- the counters are pointer-atomic and slice growth
-// is serialized by mu.
+// the fractional open rate is only observable across ticks. Counters are
+// keyed by priority value (not rank) so a band's alternation state is
+// preserved when the active priority set changes at runtime -- e.g. when a
+// new priority arrives via dynamic InferenceObjective provisioning in the
+// flow-control registry. Concurrency safety is provided by sync.Map plus
+// pointer-atomic counters.
 package softreflectiveceiling
 
 import (
@@ -64,10 +67,10 @@ func Factory(name string, rawConfig *json.Decoder, handle fwkplugin.Handle) (fwk
 type policy struct {
 	name string
 
-	mu sync.Mutex
-	// counters holds one tick counter per band. Pointers (rather than values)
-	// ensure slice growth never copies an atomic value.
-	counters []*atomic.Int64
+	// counters maps priority value to a tick counter. Keyed by priority (not
+	// rank) so that adding or removing a priority band at runtime does not
+	// reassign an existing band's counter to a different priority.
+	counters sync.Map
 }
 
 var _ flowcontrol.UsageLimitPolicy = (*policy)(nil)
@@ -98,9 +101,7 @@ func (p *policy) ComputeLimit(_ context.Context, saturation float64, priorities 
 		return ceilings
 	}
 
-	counters := p.bandCounters(n)
-
-	for i := range priorities {
+	for i, priority := range priorities {
 		if i == 0 {
 			ceilings[i] = 1.0
 			continue
@@ -116,7 +117,7 @@ func (p *policy) ComputeLimit(_ context.Context, saturation float64, priorities 
 		default:
 			// 1e-9 guards against round-off when saturation is very near 1.0.
 			period := int64(math.Max(1, math.Round(saturation/(1.0-saturation+1e-9))))
-			tick := counters[i].Add(1)
+			tick := p.counterFor(priority).Add(1)
 			if tick%period == 0 {
 				ceilings[i] = 1.0
 			} else {
@@ -128,14 +129,14 @@ func (p *policy) ComputeLimit(_ context.Context, saturation float64, priorities 
 	return ceilings
 }
 
-// bandCounters returns a slice of length >= n. The mutex guards growth only;
-// the returned slice is safe to read concurrently because each entry is a
-// stable pointer that other callers either share or do not yet observe.
-func (p *policy) bandCounters(n int) []*atomic.Int64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for len(p.counters) < n {
-		p.counters = append(p.counters, new(atomic.Int64))
+// counterFor returns the tick counter for a given priority, creating it on
+// first use. sync.Map.LoadOrStore ensures concurrent first-writers converge
+// on a single counter instance without an external mutex.
+func (p *policy) counterFor(priority int) *atomic.Int64 {
+	if v, ok := p.counters.Load(priority); ok {
+		return v.(*atomic.Int64)
 	}
-	return p.counters
+	fresh := new(atomic.Int64)
+	actual, _ := p.counters.LoadOrStore(priority, fresh)
+	return actual.(*atomic.Int64)
 }

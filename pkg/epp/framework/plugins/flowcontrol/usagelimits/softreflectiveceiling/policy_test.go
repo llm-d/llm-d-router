@@ -183,8 +183,8 @@ func TestComputeLimit_AlternationLongerPeriod(t *testing.T) {
 }
 
 func TestComputeLimit_GrowingPriorities(t *testing.T) {
-	// Counters slice grows as the active priority domain expands. Verify no
-	// panic and that band 0 remains ungated.
+	// Counters are allocated per-priority on first sight; the active priority
+	// domain can expand mid-flight without panic and band 0 stays ungated.
 	p := newTestPolicy()
 	_ = p.ComputeLimit(context.Background(), 0.7, []int{100, -50})
 	got := p.ComputeLimit(context.Background(), 0.7, []int{100, 50, 0, -50})
@@ -193,5 +193,40 @@ func TestComputeLimit_GrowingPriorities(t *testing.T) {
 	}
 	if got[0] != 1.0 {
 		t.Errorf("ceilings[0]=%v, want 1.0", got[0])
+	}
+}
+
+func TestComputeLimit_StatePersistsAcrossPrioritySetChanges(t *testing.T) {
+	// A counter belongs to a priority, not to its rank. When a new priority
+	// is added between existing ones (e.g. via dynamic InferenceObjective
+	// provisioning in the flow-control registry), an existing band's
+	// alternation state must continue from where it left off rather than be
+	// reset by rank reassignment.
+	//
+	// Start with priorities=[100, -50], saturation=0.75.
+	// N=2: ceiling[1] = 1 - 0.75 = 0.25 (gated), period = round(0.75/0.25) = 3.
+	// After 5 calls, priority -50's tick counter is at 5.
+	p := newTestPolicy()
+	for i := 0; i < 5; i++ {
+		p.ComputeLimit(context.Background(), 0.75, []int{100, -50})
+	}
+
+	// Insert priority 0 between the existing two. With rank-indexed counters
+	// this would move -50's tick state onto the fresh priority 0.
+	got := p.ComputeLimit(context.Background(), 0.75, []int{100, 0, -50})
+
+	// N=3 at saturation=0.75:
+	//   ceiling[1] = 1 - 0.75/2 = 0.625 (gated), period = round(0.75/0.25) = 3.
+	//   ceiling[2] = 1 - 1.5/2  = 0.25  (gated), period = 3.
+	// Priority -50 (rank 2) continues from tick 5: increments to 6, 6%3 == 0
+	// so it opens on this call.
+	if got[2] != 1.0 {
+		t.Errorf("ceilings[2] (priority -50 after inserting priority 0) = %v, want 1.0; state must persist across priority-set changes",
+			got[2])
+	}
+	// Priority 0 (rank 1, first sight) starts from tick 0: increments to 1,
+	// 1%3 != 0, so it stays closed.
+	if got[1] != 0.0 {
+		t.Errorf("ceilings[1] (new priority 0) = %v, want 0.0; new priority starts fresh at tick=1", got[1])
 	}
 }
