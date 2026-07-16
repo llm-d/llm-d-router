@@ -133,15 +133,21 @@ func (lac *LegacyAdmissionController) Admit(
 // FlowControlAdmissionController delegates admission decisions to the Flow Control layer.
 // It uses the provided Flow Controller to enqueue the request and await an outcome.
 type FlowControlAdmissionController struct {
-	flowController flowController
-	poolName       string
+	flowController     flowController
+	poolName           string
+	endpointCandidates contracts.EndpointCandidates
 }
 
 // NewFlowControlAdmissionController creates a new FlowControlAdmissionController.
-func NewFlowControlAdmissionController(fc flowController, poolName string) *FlowControlAdmissionController {
+func NewFlowControlAdmissionController(
+	fc flowController,
+	poolName string,
+	endpointCandidates contracts.EndpointCandidates,
+) *FlowControlAdmissionController {
 	return &FlowControlAdmissionController{
-		flowController: fc,
-		poolName:       poolName,
+		flowController:     fc,
+		poolName:           poolName,
+		endpointCandidates: endpointCandidates,
 	}
 }
 
@@ -170,7 +176,13 @@ func (fcac *FlowControlAdmissionController) Admit(
 	outcome, err := fcac.flowController.EnqueueAndWait(ctx, fcReq)
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)
-	return translateFlowControlOutcome(outcome, err)
+	// A TTL eviction signals backpressure (429) when serving capacity exists, but genuine unavailability (503) when
+	// the pool is empty. Probe pool emptiness (nil metadata = whole pool) only on that path.
+	ttlPoolEmpty := false
+	if outcome == types.QueueOutcomeEvictedTTL {
+		ttlPoolEmpty = len(fcac.endpointCandidates.Locate(ctx, nil)) == 0
+	}
+	return translateFlowControlOutcome(outcome, err, ttlPoolEmpty)
 }
 
 // flowControlRequest is an adapter that implements the FlowControlRequest interface.
@@ -216,7 +228,11 @@ func (r *flowControlRequest) FlowKey() flowcontrol.FlowKey {
 
 // translateFlowControlOutcome maps the context-rich outcome of the Flow Control layer to the public errcommon.Error
 // contract used by the Director.
-func translateFlowControlOutcome(outcome types.QueueOutcome, err error) error {
+//
+// Error codes encode availability: ResourceExhausted (429) means capacity exists but is contended (backpressure),
+// ServiceUnavailable (503) means no serving capacity exists right now. A queue-wait TTL eviction is therefore 429
+// when the pool has endpoints and 503 (ttlPoolEmpty) when it does not.
+func translateFlowControlOutcome(outcome types.QueueOutcome, err error, ttlPoolEmpty bool) error {
 	msg := "request rejected by flow control"
 	if err != nil {
 		msg = err.Error()
@@ -231,7 +247,10 @@ func translateFlowControlOutcome(outcome types.QueueOutcome, err error) error {
 		// No serving capacity exists (e.g. pool scaled to zero): signal genuine unavailability rather than backpressure.
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no endpoints available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
 	case types.QueueOutcomeEvictedTTL:
-		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)}}
+		if ttlPoolEmpty {
+			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
+		}
+		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: "request timed out in queue: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)}}
 	case types.QueueOutcomeEvictedContextCancelled:
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "client disconnected: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled)}}
 	case types.QueueOutcomeRejectedOther, types.QueueOutcomeEvictedOther:
