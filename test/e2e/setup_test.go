@@ -36,7 +36,7 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${VLLM_EXTRA_ARGS_E}":       "--force-dummy-tokenizer",
 		"${VLLM_EXTRA_ARGS_P}":       "--force-dummy-tokenizer",
 		"${VLLM_EXTRA_ARGS_D}":       "--force-dummy-tokenizer",
-		"${VLLM_RENDER_URL}":         fmt.Sprintf("http://vllm-render.%s.svc.cluster.local:%s", nsName, vllmRenderPort),
+		"${VLLM_RENDER_URL}":         fmt.Sprintf("http://vllm-render.%s.svc.cluster.local:%s", baseNsName, vllmRenderPort),
 		"${VLLM_RENDER_PORT}":        vllmRenderPort,
 	}
 	for k, v := range extra {
