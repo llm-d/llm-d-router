@@ -42,5 +42,5 @@ jobs:
       sidecar-image-name: ${{ needs.set-params.outputs.sidecar_name }}
       tag: ${{ needs.set-params.outputs.tag }}
       prerelease: true
-      chart-suffix: "-dev"
+      chart-suffix: ""
 

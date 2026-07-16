@@ -657,7 +657,7 @@ def main():
     # Resolve relative defaults
     default_sim_deploy = os.path.join(script_dir, "config", "llm-d-sim-deployment.yaml")
     default_sim_svc = os.path.join(script_dir, "config", "llm-d-sim-service.yaml")
-    default_router_chart = "oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev"
+    default_router_chart = "oci://ghcr.io/llm-d/charts/llm-d-router-standalone"
     default_perf_chart = os.path.abspath(os.path.join(script_dir, "..", "..", "..", "..", "inference-perf", "deploy", "inference-perf"))
     default_perf_job = os.path.join(script_dir, "config", "shared_prefix_job1.yaml")
     default_results_dir = os.path.abspath(os.path.join(script_dir, "results"))
