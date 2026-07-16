@@ -291,13 +291,7 @@ func testWrapper(test func()) func() {
 				testutils.DeleteObjects(testConfig, envoyObjects, nsName)
 
 				if createdNameSpace {
-					ginkgo.By("Deleting namespace " + getNamespace())
-					err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, getNamespace(), metav1.DeleteOptions{})
-					gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-					gomega.Eventually(func() bool {
-						_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, getNamespace(), metav1.GetOptions{})
-						return apierrors.IsNotFound(err)
-					}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.BeTrue())
+					deleteNameSpace(getNamespace())
 				}
 			} else {
 				// The test failed

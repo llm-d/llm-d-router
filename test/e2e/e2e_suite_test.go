@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -102,8 +103,9 @@ var (
 	readyTimeout = env.GetEnvDuration("READY_TIMEOUT", defaultReadyTimeout, ginkgo.GinkgoLogr)
 	interval     = defaultInterval
 
-	crdObjects    []string
-	renderObjects []string
+	crdObjects        []string
+	renderObjects     []string
+	createdRendererNS bool
 
 	eppPortForwardSession *gexec.Session
 )
@@ -125,7 +127,9 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() {
 	testConfig = testutils.NewTestConfig(k8sContext)
 	setupK8sClient()
 	createCRDs()
-	renderObjects = createRender(getNamespace())
+	// If we are running tests in parallel, create the renderer in the "base namespace"
+	createdRendererNS = setupNameSpaceHelper(baseNsName)
+	renderObjects = createRender(baseNsName)
 }, func() {
 	if ginkgo.GinkgoParallelProcess() != 1 {
 		testConfig = testutils.NewTestConfig(k8sContext)
@@ -165,7 +169,10 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 			ginkgo.By("Keeping created Kubernetes objects due to suite failure (E2E_KEEP_CLUSTER_ON_FAILURE=true)")
 		} else {
 			ginkgo.By("Deleting created Kubernetes objects")
-			testutils.DeleteObjects(testConfig, renderObjects, getNamespace())
+			testutils.DeleteObjects(testConfig, renderObjects, baseNsName)
+			if createdRendererNS {
+				deleteNameSpace(baseNsName)
+			}
 			testutils.DeleteObjects(testConfig, crdObjects, "")
 		}
 	}
@@ -255,29 +262,43 @@ func setupK8sClient() {
 
 // setupNameSpace sets up the specified namespace if it doesn't exist
 func setupNameSpace() bool {
-	ginkgo.By("Setup namespace " + getNamespace())
-	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, getNamespace(), metav1.GetOptions{})
+	return setupNameSpaceHelper(getNamespace())
+}
+
+func setupNameSpaceHelper(nsName string) bool {
+	ginkgo.By("Setup namespace " + nsName)
+	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
 	if err == nil {
 		return false
 	}
 	gomega.Expect(errors.IsNotFound(err)).To(gomega.BeTrue())
 
-	ginkgo.By("Creating namespace " + getNamespace())
+	ginkgo.By("Creating namespace " + nsName)
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: getNamespace(),
+			Name: nsName,
 		},
 	}
 	_, err = testConfig.KubeCli.CoreV1().Namespaces().Create(testConfig.Context, namespace, metav1.CreateOptions{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	ginkgo.By("Ensuring namespace exists: " + getNamespace())
+	ginkgo.By("Ensuring namespace exists: " + nsName)
 	testutils.EventuallyExists(testConfig, func() error {
 		return testConfig.K8sClient.Get(testConfig.Context,
-			types.NamespacedName{Name: getNamespace()}, &corev1.Namespace{})
+			types.NamespacedName{Name: nsName}, &corev1.Namespace{})
 	})
 
 	return true
+}
+
+func deleteNameSpace(nsName string) {
+	ginkgo.By("Deleting namespace " + nsName)
+	err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, nsName, metav1.DeleteOptions{})
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(func() bool {
+		_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.BeTrue())
 }
 
 // createCRDs creates the Inference Extension CRDs used for testing.
