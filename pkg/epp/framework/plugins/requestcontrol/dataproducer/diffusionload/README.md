@@ -2,15 +2,15 @@
 
 **Type:** `diffusion-load-producer`
 
-Tracks the outstanding declared cost of in-flight image generation requests per endpoint and publishes it as the `DiffusionLoad` endpoint attribute, consumed by the `diffusion-cost-scorer`.
+Tracks the outstanding declared cost of in-flight diffusion requests per endpoint and publishes it as the `DiffusionLoad` endpoint attribute, consumed by the `diffusion-cost-scorer`.
 
-Unlike LLM requests, whose output length is unknown at admission, an image generation request declares its compute cost in the body. The producer converts the declared fields into step-megapixel cost units:
+Unlike LLM requests, whose output length is unknown at admission, a diffusion request declares its compute cost in the body. Image generation is the only diffusion request type currently recognized; its declared cost is:
 
 ```
-cost = num_inference_steps x (width x height / 1024^2) x n
+cost = num_inference_steps x width x height x n
 ```
 
-clamped to a minimum of one unit. Fields the client omitted fall back to the configured defaults. The cost is committed to the chosen endpoint when the request is scheduled and released when its response stream ends (with the plugin-state janitor as a TTL backstop, matching `inflight-load-producer`). Requests without an image generation body contribute no cost.
+Fields the client omitted fall back to the configured defaults. The cost is committed to the chosen endpoint when the request is scheduled and released when its response stream ends. Requests without a recognized diffusion body contribute no cost.
 
 The producer is registered as the default for the `DiffusionLoad` data key, so configuring a consumer (e.g. `diffusion-cost-scorer`) auto-creates it with defaults.
 
