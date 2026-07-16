@@ -14,7 +14,6 @@ import (
 	"github.com/onsi/gomega/gexec"
 	corev1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -271,7 +270,7 @@ func setupNameSpaceHelper(nsName string) bool {
 	if err == nil {
 		return false
 	}
-	gomega.Expect(errors.IsNotFound(err)).To(gomega.BeTrue())
+	gomega.Expect(apierrors.IsNotFound(err)).To(gomega.BeTrue())
 
 	ginkgo.By("Creating namespace " + nsName)
 	namespace := &corev1.Namespace{
