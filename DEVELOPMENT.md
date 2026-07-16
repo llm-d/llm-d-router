@@ -615,7 +615,7 @@ kubectl --context kind-e2e-tests get pods
 | `NAMESPACE` | `default` | Namespace to deploy test resources into |
 | `CONTAINER_RUNTIME` | `docker` | Container runtime used to load images into Kind (`docker` or `podman`) |
 | `READY_TIMEOUT` | `3m` | How long to wait for resources to become ready |
-| `EPP_IMAGE` | `ghcr.io/llm-d/llm-d-router-endpoint-picker:dev` | EPP image loaded into the Kind cluster |
+| `EPP_IMAGE` | `ghcr.io/llm-d/llm-d-router-endpoint-picker:latest` | EPP image loaded into the Kind cluster |
 | `DISAGG_E` | `false` | Deploy a separate Encoder pod. See [Inference Disaggregation Modes](#inference-disaggregation-modes) |
 | `DISAGG_P` | `false` | Deploy a separate Prefill pod. See [Inference Disaggregation Modes](#inference-disaggregation-modes) |
 | `VLLM_DATA_PARALLEL_SIZE` | `1` | Number of data-parallel ranks per vLLM pod. Applies to all pod types. Set to `2`+ to enable multi-rank inference. See [Combining Scenarios with Data Parallel and KV Cache](#combining-scenarios-with-data-parallel-and-kv-cache) |
@@ -624,7 +624,7 @@ kubectl --context kind-e2e-tests get pods
 | `VLLM_EXTRA_ARGS_D` | _(empty)_ | Additional flags for the Decode vLLM container (e.g. `--tensor-parallel-size=2`) |
 | `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. Supported values: `echo` (returns the input prompt as the response), `random` (returns a random sentence from a pre-defined bank) |
-| `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` | Routing sidecar image loaded into the Kind cluster |
+| `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:latest` | Routing sidecar image loaded into the Kind cluster |
 | `VLLM_RENDER_IMAGE` | `vllm/vllm-openai-cpu:v0.21.0` | vLLM renderer image loaded into the Kind cluster |
 
 ### Coverage

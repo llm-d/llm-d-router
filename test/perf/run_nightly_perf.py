@@ -118,8 +118,8 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
     release_name = os.path.splitext(os.path.basename(router_config_path))[0]
     
     epp_registry = os.environ.get("EPP_REGISTRY", "ghcr.io/llm-d")
-    epp_repository = os.environ.get("EPP_REPOSITORY", "llm-d-router-endpoint-picker-dev")
-    epp_tag = os.environ.get("EPP_TAG", "main")
+    epp_repository = os.environ.get("EPP_REPOSITORY", "llm-d-router-endpoint-picker")
+    epp_tag = os.environ.get("EPP_TAG", "latest")
     
     cpu_limit = double_cpu(epp_cpu)
     mem_limit = double_memory(epp_memory)
