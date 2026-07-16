@@ -35,7 +35,8 @@ run_ginkgo_suite() {
   local pkg="$1"
   if [ -n "${E2E_LABEL_FILTER:-}" ]; then
     echo "Label filter: ${E2E_LABEL_FILTER}"
-    go test -v -timeout 45m "${pkg}" -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
+    # Tests not being run in parallel using Ginkgo
+    E2E_NUM_PROCS=1 go test -v -timeout 45m "${pkg}" -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
   else
     ginkgo run --procs=${E2E_NUM_PROCS} --timeout 45m -v --fail-fast "${pkg}"
   fi
