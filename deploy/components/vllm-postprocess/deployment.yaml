@@ -1,0 +1,146 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${POST_DEPLOYMENT_NAME}
+  labels:
+    app: ${APP_NAME}
+spec:
+  replicas: ${POST_REPLICA_COUNT}
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      llm-d.ai/component: ${POST_ROLE}
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        llm-d.ai/component: ${POST_ROLE}
+        llm-d.ai/role: ${POST_ROLE}
+    spec:
+      initContainers:
+        # Routing sidecar - proxies requests from port TARGET_PORT to vllm on port POST_TARGET_PORT
+        # Scenario patches add --io-connector
+        - name: routing-sidecar
+          image: ${SIDECAR_IMAGE}
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          args:
+            - "--port=${TARGET_PORT}"
+            - "--vllm-port=${POST_TARGET_PORT}"
+            - "--secure-proxy=false"
+          ports:
+            - name: sidecar-http
+              containerPort: ${TARGET_PORT}
+              protocol: TCP
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+        - name: install-deps
+          image: ${VLLM_CPU_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /python-deps
+
+              [ -z "${PYTHON_DEPENDENCIES}" ] || 
+              python3 -m pip install \
+                ${PYTHON_DEPENDENCIES} \
+                -t /python-deps && \
+                sed -i '482s/^/# /' /python-deps/terratorch/vllm/plugins/segmentation/segmentation_io_processor.py && \
+                sed -i '483s/^    //' /python-deps/terratorch/vllm/plugins/segmentation/segmentation_io_processor.py && \
+                sed 's/^/    /' /patches/extra_code.py >> /python-deps/terratorch/vllm/plugins/segmentation/segmentation_io_processor.py
+          volumeMounts:
+            - name: python-deps
+              mountPath: /python-deps
+            - name: extra-code-patch
+              mountPath: /patches
+      containers:
+        - name: vllm-${POST_ROLE}
+          image: ${VLLM_CPU_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - "vllm"
+          args:
+            - "launch"
+            - "render"
+            - ${MODEL_NAME}
+            - "--io-processor-plugin"
+            - ${IO_PROCESSOR_PLUGIN}
+            - "--skip-tokenizer-init"
+            - "--enable-mm-embeds"
+            - "--port"
+            - ${POST_TARGET_PORT_STR}
+          ports:
+            - name: http
+              containerPort: ${POST_TARGET_PORT}
+            - name: tcp-io
+              containerPort: ${IO_PORT}
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: ${POST_TARGET_PORT}
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: ${POST_TARGET_PORT}
+            periodSeconds: 10
+            failureThreshold: 5
+            timeoutSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: ${POST_TARGET_PORT}
+            periodSeconds: 5
+            failureThreshold: 1
+            timeoutSeconds: 1
+          env:
+            - name: HOME
+              value: /tmp/cache
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: PORT
+              value: ${POST_TARGET_PORT_STR}
+            - name: PYTHONHASHSEED
+              value: "42"
+            - name: PYTHONPATH
+              value: "/opt/venv/lib/python3.12/site-packages:/python-deps"
+          volumeMounts:
+            - name: cache
+              mountPath: /tmp/cache
+            - name: python-deps
+              mountPath: /python-deps
+          resources:
+            requests:
+              cpu: ${POST_CPU_RESOURCES}
+              memory: ${POST_MEMORY_RESOURCES}
+            limits:
+              cpu: ${POST_CPU_RESOURCES_LIM}
+              memory: ${POST_MEMORY_RESOURCES_LIM}
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: python-deps
+          emptyDir: {}    
+        - name: extra-code-patch
+          configMap:
+            name: extra-code-patch

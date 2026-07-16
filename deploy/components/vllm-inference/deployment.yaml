@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${INF_DEPLOYMENT_NAME}
+  labels:
+    app: ${APP_NAME}
+spec:
+  replicas: ${INF_REPLICA_COUNT}
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      llm-d.ai/component: ${INF_ROLE}
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        llm-d.ai/component: ${INF_ROLE}
+        llm-d.ai/role: ${INF_ROLE}
+    spec:
+      initContainers:
+        - name: install-deps
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /python-deps
+
+              [ -z "${PYTHON_DEPENDENCIES}" ] || 
+              python3 -m pip install \
+                ${PYTHON_DEPENDENCIES} \
+                -t /python-deps
+          volumeMounts:
+            - name: python-deps
+              mountPath: /python-deps
+      containers:
+        - name: vllm-${INF_ROLE}
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - "vllm"
+          args:
+            - "serve"
+            - ${MODEL_NAME}
+            - "--skip-tokenizer-init"
+            - "--enforce-eager"
+            - "--enable-mm-embeds"
+            - "--port"
+            - ${TARGET_PORT_STR}
+          ports:
+            - name: http
+              containerPort: ${TARGET_PORT}
+              protocol: TCP
+            - name: tcp-io
+              containerPort: ${IO_PORT}
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: ${TARGET_PORT}
+            failureThreshold: 60  # Allow up to 10 minutes (60 * 10s)
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health # Use /health/ready if available in your version
+              port: ${TARGET_PORT}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: ${TARGET_PORT}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          env:
+            - name: HOME
+              value: /tmp/cache
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: PORT
+              value: ${TARGET_PORT_STR}
+            - name: PYTHONHASHSEED
+              value: "42"
+            - name: PYTHONPATH
+              value: "/opt/venv/lib/python3.12/site-packages:/python-deps"
+          volumeMounts:
+            - name: cache
+              mountPath: /tmp/cache
+            - name: python-deps
+              mountPath: /python-deps
+          resources:
+            requests:
+              cpu: ${INF_CPU_RESOURCES}
+              memory: ${INF_MEMORY_RESOURCES}
+              nvidia.com/gpu: ${INF_GPU_RESOURCES}
+            limits:
+              cpu: ${INF_CPU_RESOURCES_LIM}
+              memory: ${INF_MEMORY_RESOURCES_LIM}
+              nvidia.com/gpu: ${INF_GPU_RESOURCES_LIM}
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: python-deps
+          emptyDir: {}

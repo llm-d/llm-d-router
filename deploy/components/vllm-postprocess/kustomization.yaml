@@ -1,0 +1,12 @@
+# ------------------------------------------------------------------------------
+# VLLM Postprocessing Component
+#
+# Postprocessing deployment — always present in every scenario. Includes routing sidecar.
+# Configurable via Kustomize patches per scenario for:
+#   - connector args (--io-connector)
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- deployment.yaml
