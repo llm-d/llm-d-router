@@ -174,6 +174,49 @@ false
 {{- end -}}
 
 {{/*
+Return "true" if EPP is configured with secure (TLS) serving, "false" if
+router.epp.flags.secure-serving is explicitly set to false. Defaults to true
+so that the Envoy ext_proc cluster uses TLS by default.
+*/}}
+{{- define "llm-d-router.proxy.eppSecureServing" -}}
+{{- $flags := .Values.router.epp.flags | default dict -}}
+{{- $secureServing := index $flags "secure-serving" -}}
+{{- if and (not (kindIs "invalid" $secureServing)) (eq (toString $secureServing) "false") -}}
+false
+{{- else -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+Envoy health-check tls_options block for the ext_proc cluster.
+Emitted only when EPP runs with TLS (secure-serving != false).
+Callers must indent to match the surrounding YAML context.
+*/}}
+{{- define "llm-d-router.proxy.envoyExtProcTLSOptions" -}}
+{{- if eq (include "llm-d-router.proxy.eppSecureServing" .) "true" -}}
+tls_options:
+  alpn_protocols: ["h2"]
+{{- end -}}
+{{- end -}}
+
+{{/*
+Envoy transport_socket block for the ext_proc cluster.
+Emitted only when EPP runs with TLS (secure-serving != false).
+Callers must indent to match the surrounding YAML context.
+*/}}
+{{- define "llm-d-router.proxy.envoyExtProcTransportSocket" -}}
+{{- if eq (include "llm-d-router.proxy.eppSecureServing" .) "true" -}}
+transport_socket:
+  name: "envoy.transport_sockets.tls"
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+    common_tls_context:
+      validation_context:
+{{- end -}}
+{{- end -}}
+
+{{/*
 Normalize a scalar, comma-separated string, or list of ports into a
 comma-separated numeric string.
 */}}
@@ -296,7 +339,12 @@ Standalone uses proxy presets merged with explicit proxy overrides.
   {{- $proxyType := include "llm-d-router.proxyType" . -}}
   {{- $presets := index $proxy "presets" | default dict -}}
   {{- $preset := deepCopy ((index $presets $proxyType) | default dict) -}}
+  {{- $userArgs := index $proxy "args" | default list -}}
+  {{- $presetArgs := index $preset "args" | default list -}}
   {{- $resolved = mergeOverwrite $preset $proxy -}}
+  {{- if empty $userArgs -}}
+    {{- $_ := set $resolved "args" $presetArgs -}}
+  {{- end -}}
   {{- if eq $proxyType "agentgateway" -}}
     {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . | int -}}
     {{- $ports := index $resolved "ports" | default list -}}

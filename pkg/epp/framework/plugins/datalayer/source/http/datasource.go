@@ -19,11 +19,13 @@ package http
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"runtime/debug"
 	"slices"
@@ -60,8 +62,23 @@ type HTTPDataSource[T any] struct {
 	exts []fwkdl.PollingExtractor[T]
 }
 
-// NewHTTPDataSource constructs a typed polling dispatcher.
-func NewHTTPDataSource[T any](scheme, path string, skipCertVerification bool,
+// TLSOptions configures the https transport. The zero value verifies the target
+// against the system CA pool with no client certificate.
+type TLSOptions struct {
+	// SkipVerify disables verification of the target's server certificate.
+	SkipVerify bool
+	// CACertPath is a PEM CA bundle used to verify the target instead of the
+	// system pool. Ignored when SkipVerify is set.
+	CACertPath string
+	// ClientCertPath and ClientKeyPath present a client certificate for mTLS.
+	// Both must be set together.
+	ClientCertPath string
+	ClientKeyPath  string
+}
+
+// NewHTTPDataSource constructs a typed polling dispatcher. For https, tlsOpts configures
+// server verification (CACertPath) and optional mTLS (ClientCertPath/ClientKeyPath).
+func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 	pluginType, pluginName string, parser func(io.Reader) (T, error)) (*HTTPDataSource[T], error) {
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
@@ -73,8 +90,12 @@ func NewHTTPDataSource[T any](scheme, path string, skipCertVerification bool,
 		},
 	}
 	if scheme == "https" {
+		tlsCfg, err := tlsClientConfig(tlsOpts)
+		if err != nil {
+			return nil, err
+		}
 		httpsTransport := baseTransport.Clone()
-		httpsTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: skipCertVerification}
+		httpsTransport.TLSClientConfig = tlsCfg
 		cl.Transport = httpsTransport
 	}
 	return &HTTPDataSource[T]{
@@ -84,6 +105,46 @@ func NewHTTPDataSource[T any](scheme, path string, skipCertVerification bool,
 		client:    cl,
 		parser:    parser,
 	}, nil
+}
+
+var (
+	ErrReadCACert     = errors.New("reading CA cert")
+	ErrNoValidCACerts = errors.New("no valid CA certs")
+	ErrLoadClientCert = errors.New("loading client cert")
+)
+
+// caCertPool loads a PEM CA bundle for TLS verification.
+func caCertPool(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w %s: %w", ErrReadCACert, path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%w in %s", ErrNoValidCACerts, path)
+	}
+	return pool, nil
+}
+
+// tlsClientConfig builds a tls.Config: server verification via CACertPath (or the
+// system pool), plus an mTLS client certificate when ClientCertPath is set.
+func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
+	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify}
+	if !opts.SkipVerify && opts.CACertPath != "" {
+		pool, err := caCertPool(opts.CACertPath)
+		if err != nil {
+			return nil, err
+		}
+		cfg.RootCAs = pool
+	}
+	if opts.ClientCertPath != "" || opts.ClientKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(opts.ClientCertPath, opts.ClientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+	return cfg, nil
 }
 
 func (s *HTTPDataSource[T]) TypedName() fwkplugin.TypedName { return s.typedName }

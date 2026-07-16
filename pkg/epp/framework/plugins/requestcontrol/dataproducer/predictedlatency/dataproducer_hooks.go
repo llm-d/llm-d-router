@@ -26,6 +26,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
@@ -57,6 +58,12 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 			prefixCacheScore = 0.0
 		}
 		predictedLatencyCtx.prefixCacheScoresForEndpoints[endpoint.GetMetadata().NamespacedName.Name] = prefixCacheScore
+
+		// Capture the in-flight load here, in the DAG-ordered Produce hook, and
+		// reuse it for both the prediction features and the dispatch-time training
+		// features. Re-reading the live attribute in PreRequest would make the
+		// value depend on undefined PreRequest hook ordering.
+		predictedLatencyCtx.inFlightLoadForEndpoints[endpoint.GetMetadata().NamespacedName.String()] = pl.readInFlightLoad(endpoint)
 	}
 	if !pl.config.PredictInProduce {
 		logger.V(logutil.DEBUG).Info("PredictInProduce disabled, skipping predictions")
@@ -117,6 +124,7 @@ func (pl *PredictedLatency) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			pl.prefixMatchDataKey:                attrprefix.PrefixCacheMatchInfo{},
+			pl.inFlightLoadDataKey:               attrconcurrency.InFlightLoad{},
 			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{},
 		},
 	}

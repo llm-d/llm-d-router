@@ -19,7 +19,7 @@ However, it is relatively new and may contain bugs. The `/v1/chat/completions` f
 - [EPP-Phase Header and Routing](#epp-phase-header-and-routing)
 - [Request Format Configuration](#request-format-configuration)
 - [Completions Requests (/v1/completions)](#completions-requests-v1completions)
-- [Text-Only Requests (no images)](#text-only-requests-no-images)
+- [Text-Only Requests (no images)](#text-only-requests-no-images-v1chatcompletions)
 - [Questions](#questions)
 
 ## Pipeline Overview

@@ -70,7 +70,7 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods [
 	return 0.0
 }
 
-// testHarness provides a unified, mock-based testing environment for the ShardProcessor. It centralizes all mock state
+// testHarness provides a unified, mock-based testing environment for the Processor. It centralizes all mock state
 // and provides helper methods for setting up tests and managing the processor's lifecycle.
 type testHarness struct {
 	t *testing.T
@@ -115,7 +115,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
 
-	// Wire up the harness to provide the mock implementations for the shard's dependencies.
+	// Wire up the harness to provide the mock implementations for the processor's dependencies.
 	h.ManagedQueueFunc = h.managedQueue
 	h.AllOrderedPriorityLevelsFunc = h.allOrderedPriorityLevels
 	h.PriorityBandAccessorFunc = h.priorityBandAccessor
@@ -143,7 +143,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		expiryCleanupInterval,
 		100,
 		h.logger)
-	require.NotNil(t, h.processor, "NewShardProcessor should not return nil")
+	require.NotNil(t, h.processor, "NewProcessor should not return nil")
 
 	t.Cleanup(func() { h.Stop() })
 
@@ -209,7 +209,7 @@ func (h *testHarness) addQueue(key flowcontrol.FlowKey) *mocks.MockManagedQueue 
 
 // --- Mock Interface Implementations ---
 
-// managedQueue provides the mock implementation for the `RegistryShard` interface.
+// managedQueue provides the mock implementation for the `registry data-plane` interface.
 func (h *testHarness) managedQueue(key flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -219,7 +219,7 @@ func (h *testHarness) managedQueue(key flowcontrol.FlowKey) (contracts.ManagedQu
 	return nil, fmt.Errorf("test setup error: no queue for %q", key)
 }
 
-// allOrderedPriorityLevels provides the mock implementation for the `RegistryShard` interface.
+// allOrderedPriorityLevels provides the mock implementation for the `registry data-plane` interface.
 func (h *testHarness) allOrderedPriorityLevels() []int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -234,7 +234,7 @@ func (h *testHarness) allOrderedPriorityLevels() []int {
 	return prios
 }
 
-// priorityBandAccessor provides the mock implementation for the `RegistryShard` interface. It acts as a factory for a
+// priorityBandAccessor provides the mock implementation for the `registry data-plane` interface. It acts as a factory for a
 // fully-configured, stateless mock that is safe for concurrent use.
 func (h *testHarness) priorityBandAccessor(p int) (flowcontrol.PriorityBandAccessor, error) {
 	band := &fwkfcmocks.MockPriorityBandAccessor{PriorityV: p}
@@ -261,7 +261,7 @@ func (h *testHarness) priorityBandAccessor(p int) (flowcontrol.PriorityBandAcces
 	return band, nil
 }
 
-// fairnessPolicy provides the mock implementation for the RegistryShard interface.
+// fairnessPolicy provides the mock implementation for the registry data-plane interface.
 func (h *testHarness) fairnessPolicy(p int) (flowcontrol.FairnessPolicy, error) {
 	policy := &fwkfcmocks.MockFairnessPolicy{}
 	// If the test provided a custom implementation, use it.
@@ -288,8 +288,8 @@ func (h *testHarness) fairnessPolicy(p int) (flowcontrol.FairnessPolicy, error) 
 	return policy, nil
 }
 
-// TestShardProcessor contains all tests for the `ShardProcessor`.
-func TestShardProcessor(t *testing.T) {
+// TestProcessor contains all tests for the `Processor`.
+func TestProcessor(t *testing.T) {
 	t.Parallel()
 
 	// Integration tests use the processor's main `Run` loop to verify the complete end-to-end lifecycle of a request, from
@@ -708,13 +708,13 @@ func TestShardProcessor(t *testing.T) {
 				expectHasCap bool
 			}{
 				{
-					name:         "should deny item if shard byte capacity exceeded",
+					name:         "should deny item if global byte capacity exceeded",
 					itemByteSize: 1,
 					stats:        contracts.AggregateStats{TotalByteSize: 100, TotalCapacityBytes: 100},
 					expectHasCap: false,
 				},
 				{
-					name:         "should deny item if shard request capacity exceeded",
+					name:         "should deny item if global request capacity exceeded",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 10,
@@ -755,7 +755,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: false,
 				},
 				{
-					name:         "should allow item if both shard and band have byte capacity",
+					name:         "should allow item if both global and band have byte capacity",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 200, TotalByteSize: 100,
@@ -766,7 +766,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: true,
 				},
 				{
-					name:         "should allow item if both shard and band have request capacity",
+					name:         "should allow item if both global and band have request capacity",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 5,
@@ -790,7 +790,7 @@ func TestShardProcessor(t *testing.T) {
 				},
 				// --- Mixed dimension tests ---
 				{
-					name:         "should deny if shard bytes ok but band requests exceeded",
+					name:         "should deny if global bytes ok but band requests exceeded",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 200, TotalByteSize: 50,
@@ -802,7 +802,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: false,
 				},
 				{
-					name:         "should deny if shard requests ok but band bytes exceeded",
+					name:         "should deny if global requests ok but band bytes exceeded",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 200, TotalByteSize: 50,
@@ -827,7 +827,7 @@ func TestShardProcessor(t *testing.T) {
 				},
 				// --- Boundary value tests ---
 				{
-					name:         "should allow when shard bytes exactly at capacity after add",
+					name:         "should allow when global bytes exactly at capacity after add",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 110, TotalByteSize: 100,
@@ -838,7 +838,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: true,
 				},
 				{
-					name:         "should deny when shard bytes one over capacity after add",
+					name:         "should deny when global bytes one over capacity after add",
 					itemByteSize: 11,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 110, TotalByteSize: 100,
@@ -849,7 +849,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: false,
 				},
 				{
-					name:         "should allow when shard requests exactly at capacity after add",
+					name:         "should allow when global requests exactly at capacity after add",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 9,
@@ -860,7 +860,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: true,
 				},
 				{
-					name:         "should deny when shard requests one over capacity after add",
+					name:         "should deny when global requests one over capacity after add",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 10,

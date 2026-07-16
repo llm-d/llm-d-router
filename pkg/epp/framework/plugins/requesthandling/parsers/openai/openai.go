@@ -39,6 +39,8 @@ const (
 	chatCompletionsAPI = "chat/completions"
 	completionsAPI     = "completions"
 	embeddingsAPI      = "embeddings"
+	// imagesGenerationsAPI is the OpenAI-compatible image generation endpoint/
+	imagesGenerationsAPI = "images/generations"
 
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
@@ -92,6 +94,7 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			conversationsAPI,
 			chatCompletionsAPI + "/render",
 			completionsAPI + "/render",
+			imagesGenerationsAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -197,6 +200,9 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/embeddings") {
 		return embeddingsAPI
 	}
+	if request.MatchPathSuffix(path, "/images/generations") {
+		return imagesGenerationsAPI
+	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
 	return completionsAPI
@@ -242,6 +248,13 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 			return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
 		}
 		return nil, errors.New("invalid embeddings request: must have input field")
+
+	case imagesGenerationsAPI:
+		var images fwkrh.ImagesGenerationsRequest
+		if err := json.Unmarshal(rawBody, &images); err == nil && images.Prompt != "" {
+			return &fwkrh.InferenceRequestBody{Images: &images}, nil
+		}
+		return nil, errors.New("invalid images generations request: must have prompt field")
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}

@@ -61,7 +61,6 @@ absorb further processing modes as they are added.
   - [The sidecar model (llm-d-router)](#the-sidecar-model-llm-d-router)
   - [The coordinator model](#the-coordinator-model)
   - [Side by side](#side-by-side)
-  - [Why move orchestration out of the sidecar](#why-move-orchestration-out-of-the-sidecar)
 - [Creating a new step (plugin)](#creating-a-new-step-plugin)
   - [The Step contract](#the-step-contract)
   - [Steps over five points](#steps-over-five-points)
