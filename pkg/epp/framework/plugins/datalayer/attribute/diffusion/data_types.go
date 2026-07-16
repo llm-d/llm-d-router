@@ -30,12 +30,12 @@ var DiffusionLoadDataKey = plugin.NewDataKey("DiffusionLoadDataKey", diffusionlo
 // DiffusionLoad captures the outstanding declared diffusion work an endpoint
 // has committed to, as tracked by the EPP.
 type DiffusionLoad struct {
-	// CostUnits is the sum of the declared cost of in-flight image generation
-	// requests routed to this endpoint, in step-megapixel units
-	// (inference steps x output megapixels x image count). Updated by
-	// PreRequest (when an endpoint is chosen) and released when the request's
-	// response stream ends.
-	CostUnits int64
+	// Cost is the sum of the declared cost of in-flight diffusion requests
+	// routed to this endpoint. The unit is defined by the producing plugin;
+	// scoring only compares values from the same producer, so any consistent
+	// unit works. Updated by PreRequest (when an endpoint is chosen) and
+	// released when the request's response stream ends.
+	Cost int64
 }
 
 // Clone returns an independent copy of the DiffusionLoad.
