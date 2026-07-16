@@ -8,9 +8,11 @@ The ceiling controls **dispatch**, not admission. Requests continue to be enqueu
 
 ## Why choose this policy?
 
-- **Priority-Aware Backpressure**: The highest-priority band is never gated. Progressively lower bands are gated first as saturation rises, holding their items in queue while higher-priority work continues to dispatch.
-- **Smooth Degradation**: A band is not simply closed at a fixed threshold. Once its reflective ceiling is reached, the band alternates open and closed across calls so that its effective dispatch rate degrades in proportion to how far saturation has risen past that ceiling.
-- **No Tuning**: The algorithm derives its behavior entirely from the number of active priority bands and the observed saturation. There are no thresholds to configure.
+- **Continuous Rate Control**: Once a band's ceiling is reached, the policy alternates open and closed across calls so that the effective dispatch rate degrades continuously with saturation. This is unlike step-function gating (`static-usage-limit-policy`, `priority-holdback-policy`), which is either fully open or fully closed at a fixed threshold.
+- **Saturation-Adaptive Ceilings**: The per-band ceilings shift with the observed saturation itself. Under light load, lower bands see permissive ceilings; under heavy load, ceilings compress toward zero. Fixed-threshold policies (`priority-holdback-policy`, `static-usage-limit-policy`) hold their thresholds regardless of current load.
+- **No Policy Parameters**: Behavior is derived entirely from saturation and the active priority count. Suits deployments that prefer a single well-defined schedule over per-environment tuning.
+
+Deployments that need to bound the lowest band's gating aggressiveness explicitly should use `priority-holdback-policy` instead.
 
 ## What it does
 
