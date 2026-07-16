@@ -89,7 +89,7 @@ var (
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
 
 	// numProcesses is the number of parallel processes that will be used by the tests.
-	// Theorectically this value could be gotten from the Ginkgo Suite Configuration.
+	// Theoretically this value could be gotten from the Ginkgo Suite Configuration.
 	// However, that needs to be done while the tests are running and has shown to not
 	// always allow the baseNsName field to be set correctly.
 	numProcesses = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
@@ -255,7 +255,7 @@ func setupK8sClient() {
 
 // setupNameSpace sets up the specified namespace if it doesn't exist
 func setupNameSpace() bool {
-	ginkgo.By(fmt.Sprintf("Setup namespace %s", getNamespace()))
+	ginkgo.By("Setup namespace " + getNamespace())
 	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, getNamespace(), metav1.GetOptions{})
 	if err == nil {
 		return false

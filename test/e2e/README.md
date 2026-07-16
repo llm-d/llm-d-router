@@ -21,7 +21,7 @@ The end-to-end tests are designed to validate end-to-end Gateway API Inference E
 ## Running the End-to-End Tests in Parallel
 
 By default the end to end tests run in groups that run in parallel to each other on the same Kubernetes cluster.
-As each group is setup various Kubernetes objects aare created for the test group. They include the Namespace,
+As each group is setup various Kubernetes objects are created for the test group. They include the Namespace,
 the Envoy Deployment and Service, ServiceAccount, EPP Service, and RBAC. When running on Kind each Namespace is
 assigned its own pair of NodePorts for Envoy and the EPP's metrics port. When the test group ends the created
 Kubernetes objects are delete.
