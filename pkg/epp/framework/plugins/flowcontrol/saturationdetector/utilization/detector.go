@@ -107,33 +107,70 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //
 // It returns an aggregate saturation signal where:
 //
-//	Saturation = Average(PodSaturationScore)
+//	Saturation = Max(PodSaturationScore)   // hottest endpoint drives the pool
 //
 // For each pod, the score is determined by the most constrained resource (Compute or Memory):
 //
 //	PodScore = Max(WaitingQueue / QueueThreshold, KVCacheUsage / KVCacheThreshold)
-func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint) float64 {
+//
+// Aggregation is the MAX across endpoints (roofline at the pool level): the pool
+// is saturated as soon as its hottest endpoint is, so a single overloaded
+// endpoint is not diluted by idle ones. (Previously an unweighted average, which
+// let one hot endpoint be averaged away by idle/prefill pods.)
+func (d *Detector) Saturation(ctx context.Context, candidates []datalayer.Endpoint) float64 {
+	return d.SaturationWithInFlight(ctx, candidates, 0)
+}
+
+// SaturationWithInFlight is Saturation, but with `inFlight` extra requests
+// attributed to the pool's waiting queues. `inFlight` is the number of
+// gate-passing dispatches the flow controller has issued that are not yet
+// reflected in the scraped WaitingQueueSize (the metrics are refreshed on a
+// poller, default 50ms, while the dispatch loop runs at ~1ms). Without this
+// credit the controller bursts many dispatches against a stale-low waiting
+// count before the next scrape catches up, overshooting the gate; crediting the
+// in-flight count into the queue term makes the gate hold within one scrape
+// window. The credit is spread evenly across the non-stale endpoints and only
+// affects the queue-depth term (the fast, controllable signal); the KV-cache
+// term is left as measured (it lags physically and is already conservative).
+//
+// Saturation(ctx, c) == SaturationWithInFlight(ctx, c, 0).
+func (d *Detector) SaturationWithInFlight(_ context.Context, candidates []datalayer.Endpoint, inFlight int) float64 {
 	if len(candidates) == 0 {
 		return 1.0
 	}
 
-	var totalScore float64
+	// Count non-stale endpoints so the in-flight credit is spread only across
+	// endpoints that actually contribute a measured score.
+	nonStale := 0
+	for _, e := range candidates {
+		m := e.GetMetrics()
+		if m != nil && time.Since(m.UpdateTime) <= d.config.MetricsStalenessThreshold {
+			nonStale++
+		}
+	}
+	var perEndpointCredit float64
+	if inFlight > 0 && nonStale > 0 {
+		perEndpointCredit = float64(inFlight) / float64(nonStale)
+	}
+
+	var maxScore float64
 	for _, e := range candidates {
 		metrics := e.GetMetrics()
 
 		if metrics == nil || time.Since(metrics.UpdateTime) > d.config.MetricsStalenessThreshold {
-			totalScore += 1.0
+			// Stale/missing metrics are treated as fully saturated (conservative).
+			maxScore = max(maxScore, 1.0)
 			continue
 		}
 
-		qRatio := float64(metrics.WaitingQueueSize) / float64(d.config.QueueDepthThreshold)
+		qRatio := (float64(metrics.WaitingQueueSize) + perEndpointCredit) / float64(d.config.QueueDepthThreshold)
 		kvRatio := metrics.KVCacheUsagePercent / d.config.KVCacheUtilThreshold
 
 		// Roofline Analysis: The pod is saturated if either resource is exhausted.
-		totalScore += max(qRatio, kvRatio)
+		maxScore = max(maxScore, max(qRatio, kvRatio))
 	}
 
-	return totalScore / float64(len(candidates))
+	return maxScore
 }
 
 // Filter blocks traffic to specific pods that are physically saturated or exceeding their safety limits.

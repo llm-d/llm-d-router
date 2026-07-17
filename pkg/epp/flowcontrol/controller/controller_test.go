@@ -56,6 +56,12 @@ func (m *mockSaturationDetector) Saturation(_ context.Context, _ []datalayer.End
 	return 0.0
 }
 
+func (m *mockSaturationDetector) SaturationWithInFlight(
+	_ context.Context, _ []datalayer.Endpoint, _ int,
+) float64 {
+	return 0.0
+}
+
 // testHarness holds the `FlowController` and its dependencies under test.
 type testHarness struct {
 	fc  *FlowController

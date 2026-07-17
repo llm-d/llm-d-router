@@ -216,8 +216,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod2: Q=0/5(0.0), KV=0.2/0.9(0.22). Max=0.22...
 				makePodMetric("pod2", 0, 0.2, baseTime),
 			},
-			// Avg(0.2, 0.222...) = 0.2111...
-			wantSaturation: (0.2 + (0.2 / 0.9)) / 2.0,
+			// Max(0.2, 0.222...) = 0.222...  (pool = hottest endpoint)
+			wantSaturation: 0.2 / 0.9,
 		},
 		{
 			name: "Multiple pods, one good, one stale",
@@ -227,8 +227,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod2 (Stale): 1.0.
 				makePodMetric("pod2", 0, 0.2, baseTime.Add(-300*time.Millisecond)),
 			},
-			// Avg(0.2, 1.0) = 0.6
-			wantSaturation: 0.6,
+			// Max(0.2, 1.0) = 1.0
+			wantSaturation: 1.0,
 		},
 		{
 			name: "Multiple pods, one good, one bad (high queue)",
@@ -238,8 +238,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod2 (Bad): Q=15/5(3.0). Max=3.0.
 				makePodMetric("pod2", 15, 0.2, baseTime),
 			},
-			// Avg(0.2, 3.0) = 1.6
-			wantSaturation: 1.6,
+			// Max(0.2, 3.0) = 3.0  (hottest endpoint drives the pool)
+			wantSaturation: 3.0,
 		},
 		{
 			name: "Multiple pods, all bad capacity",
@@ -251,8 +251,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod3 (High KV): 0.99/0.90 = 1.1
 				makePodMetric("pod3", 1, 0.99, baseTime),
 			},
-			// Avg(1.0, 4.0, 1.1) = 6.1 / 3 = 2.033...
-			wantSaturation: (1.0 + 4.0 + 1.1) / 3.0,
+			// Max(1.0, 4.0, 1.1) = 4.0
+			wantSaturation: 4.0,
 		},
 		{
 			name: "Queue depth exactly at threshold",
@@ -280,6 +280,45 @@ func TestDetector_Saturation(t *testing.T) {
 			require.InDelta(t, tc.wantSaturation, got, 1e-4, "Saturation mismatch")
 		})
 	}
+}
+
+func TestDetector_SaturationWithInFlight(t *testing.T) {
+	t.Parallel()
+
+	baseTime := time.Now()
+	// Queue=3 so the in-flight credit maps cleanly: credit of 3 == +1.0 qRatio.
+	config := &Config{
+		QueueDepthThreshold:       3,
+		KVCacheUtilThreshold:      1.0,
+		MetricsStalenessThreshold: 100 * time.Millisecond,
+	}
+	detector := NewDetector("test-detector", *config, logr.Discard())
+
+	// Single fresh pod with an empty real waiting queue and low KV.
+	pods := []fwkdl.Endpoint{makePodMetric("pod1", 0, 0.1, baseTime)}
+
+	// inFlight=0 must equal the plain Saturation() (interface contract).
+	got0 := detector.SaturationWithInFlight(context.Background(), pods, 0)
+	require.InDelta(t, detector.Saturation(context.Background(), pods), got0, 1e-9,
+		"SaturationWithInFlight(...,0) must equal Saturation(...)")
+	require.InDelta(t, 0.1, got0, 1e-4, "empty queue, KV=0.1/1.0 -> 0.1")
+
+	// inFlight credit inflates the queue term: (0+3)/3 = 1.0 > KV(0.1) -> 1.0.
+	got3 := detector.SaturationWithInFlight(context.Background(), pods, 3)
+	require.InDelta(t, 1.0, got3, 1e-4, "credit of 3 over threshold 3 -> qRatio 1.0")
+
+	// More credit scales past 1.0 (overload depth): (0+6)/3 = 2.0.
+	got6 := detector.SaturationWithInFlight(context.Background(), pods, 6)
+	require.InDelta(t, 2.0, got6, 1e-4, "credit of 6 over threshold 3 -> qRatio 2.0")
+
+	// Credit is spread across non-stale endpoints: 2 pods, credit 6 -> +3 each ->
+	// (0+3)/3 = 1.0 per pod, max = 1.0.
+	twoPods := []fwkdl.Endpoint{
+		makePodMetric("pod1", 0, 0.1, baseTime),
+		makePodMetric("pod2", 0, 0.1, baseTime),
+	}
+	gotSpread := detector.SaturationWithInFlight(context.Background(), twoPods, 6)
+	require.InDelta(t, 1.0, gotSpread, 1e-4, "credit 6 spread over 2 pods -> +3 each -> 1.0")
 }
 
 func TestDetector_Filter(t *testing.T) {

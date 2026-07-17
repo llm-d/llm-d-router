@@ -113,6 +113,14 @@ func (d *switchableDetector) Saturation(_ context.Context, _ []datalayer.Endpoin
 	return 1.0
 }
 
+// SaturationWithInFlight delegates to Saturation; this mock reserves slots via
+// its own atomic counter, so the controller-supplied credit is not used here.
+func (d *switchableDetector) SaturationWithInFlight(
+	ctx context.Context, endpoints []datalayer.Endpoint, _ int,
+) float64 {
+	return d.Saturation(ctx, endpoints)
+}
+
 func (d *switchableDetector) Unblock(limit int64) {
 	d.limit.Store(limit)
 	d.blocked.Store(false)

@@ -933,6 +933,12 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, endpoints []fwk
 	return 0.5
 }
 
+func (m *mockSaturationDetector) SaturationWithInFlight(
+	ctx context.Context, endpoints []fwkdl.Endpoint, _ int,
+) float64 {
+	return 0.5
+}
+
 func (m *mockSource) Collect(_ context.Context, _ fwkdl.Endpoint) error {
 	return nil
 }
