@@ -29,6 +29,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -1452,6 +1453,119 @@ func TestEndpointDelete_Missing(t *testing.T) {
 	assert.NotPanics(t, func() {
 		ds.EndpointDelete(types.NamespacedName{Name: "nonexistent", Namespace: "default"})
 	})
+}
+
+// storeThenNilFactory simulates the benign duplicate-start race: a concurrent upsert stores the
+// endpoint between the caller's pods-map miss and NewEndpoint returning nil.
+type storeThenNilFactory struct {
+	ds *datastore
+}
+
+func (f *storeThenNilFactory) NewEndpoint(_ context.Context, meta *fwkdl.EndpointMetadata) fwkdl.Endpoint {
+	f.ds.pods.Store(meta.NamespacedName, fwkdl.NewEndpoint(meta, fwkdl.NewMetrics()))
+	return nil
+}
+
+func (f *storeThenNilFactory) UpdateEndpoint(_ context.Context, _ fwkdl.Endpoint) {}
+
+func (f *storeThenNilFactory) ReleaseEndpoint(_ fwkdl.Endpoint) {}
+
+// collectorRegistryFactory mimics Runtime's collector registry semantics: NewEndpoint returns nil
+// while a collector is still registered for the endpoint, and ReleaseEndpoint deregisters only
+// after a delay, mirroring the delete-event dispatch that runs before collector removal in
+// Runtime.ReleaseEndpoint. An upsert landing in that window observes a pods-map miss and a nil
+// endpoint at once — the dropped-registration case.
+type collectorRegistryFactory struct {
+	mu         sync.Mutex
+	registered map[types.NamespacedName]bool
+}
+
+func (f *collectorRegistryFactory) NewEndpoint(_ context.Context, meta *fwkdl.EndpointMetadata) fwkdl.Endpoint {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.registered[meta.NamespacedName] {
+		return nil
+	}
+	f.registered[meta.NamespacedName] = true
+	return fwkdl.NewEndpoint(meta, fwkdl.NewMetrics())
+}
+
+func (f *collectorRegistryFactory) UpdateEndpoint(_ context.Context, _ fwkdl.Endpoint) {}
+
+func (f *collectorRegistryFactory) ReleaseEndpoint(ep fwkdl.Endpoint) {
+	time.Sleep(50 * time.Microsecond)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.registered, ep.GetMetadata().NamespacedName)
+}
+
+// TestPodUpdateOrAddIfNotExist_RegistrationDropReturnsError verifies that a dropped endpoint
+// registration (NewEndpoint returns nil with no surviving pods-map entry) is reported to the
+// caller instead of leaving the pod silently untracked, and that a retry succeeds once the
+// collector can start again. Regression test for the silent-drop mechanism in #2060.
+func TestPodUpdateOrAddIfNotExist_RegistrationDropReturnsError(t *testing.T) {
+	ctx := context.Background()
+	factory := &mockEndpointFactory{returnNil: true}
+	ds := NewDatastore(ctx, factory)
+	require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(inferencePool)))
+
+	err := ds.PodUpdateOrAddIfNotExist(ctx, pod1)
+	require.Error(t, err)
+	assert.Empty(t, ds.PodList(AllPodsPredicate))
+
+	// The retry (the reconciler's requeue) succeeds once the collector can start.
+	factory.returnNil = false
+	require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod1))
+	assert.Len(t, ds.PodList(AllPodsPredicate), 1)
+}
+
+// TestUpsertEndpoint_ConcurrentStoreDuringNilIsBenign verifies the duplicate-start race is not
+// reported as an error: when a concurrent upsert has stored the endpoint by the time NewEndpoint
+// returns nil, the datastore is consistent and the upsert is a no-op.
+func TestUpsertEndpoint_ConcurrentStoreDuringNilIsBenign(t *testing.T) {
+	ctx := context.Background()
+	factory := &storeThenNilFactory{}
+	ds := NewDatastore(ctx, factory).(*datastore)
+	factory.ds = ds
+	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
+
+	created, err := ds.upsertEndpoint(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: "10.0.0.1"})
+
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Len(t, ds.PodList(AllPodsPredicate), 1)
+}
+
+// TestDatastore_ConcurrentAddRemoveCompleteness hammers concurrent delete/upsert of the same pod
+// and asserts the completeness invariant: an upsert either stores the pod or returns an error the
+// caller can retry on. Without the dropped-registration error, an upsert overlapping an in-flight
+// delete leaves the pod silently missing until the next pod event (#2060).
+func TestDatastore_ConcurrentAddRemoveCompleteness(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &collectorRegistryFactory{registered: map[types.NamespacedName]bool{}})
+	require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(inferencePool)))
+
+	for i := 0; i < 200; i++ {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			ds.PodDelete(pod1.Name)
+		}()
+		go func() {
+			defer wg.Done()
+			// The racing upsert may observe the dropped-registration error; the retry below is
+			// what must converge.
+			_ = ds.PodUpdateOrAddIfNotExist(ctx, pod1)
+		}()
+		wg.Wait()
+
+		// The reconciler's requeue loop: retry until the registration lands.
+		require.Eventually(t, func() bool {
+			return ds.PodUpdateOrAddIfNotExist(ctx, pod1) == nil
+		}, 5*time.Second, time.Millisecond, "iteration %d: upsert never converged", i)
+		require.Len(t, ds.PodList(AllPodsPredicate), 1, "iteration %d: pod missing after successful upsert", i)
+	}
 }
 
 func TestDiscoveryNotifier_WorksAlongsideDirectUpsert(t *testing.T) {

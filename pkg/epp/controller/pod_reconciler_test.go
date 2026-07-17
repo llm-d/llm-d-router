@@ -35,6 +35,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
@@ -227,5 +228,51 @@ func TestPodReconciler(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// nilEndpointFactory always fails endpoint registration, standing in for a collector that is
+// still registered for the endpoint (upsert overlapping an in-flight delete) or fails to start.
+type nilEndpointFactory struct{}
+
+func (nilEndpointFactory) NewEndpoint(_ context.Context, _ *fwkdl.EndpointMetadata) fwkdl.Endpoint {
+	return nil
+}
+
+func (nilEndpointFactory) UpdateEndpoint(_ context.Context, _ fwkdl.Endpoint) {}
+
+func (nilEndpointFactory) ReleaseEndpoint(_ fwkdl.Endpoint) {}
+
+// TestPodReconciler_ErrorsOnRegistrationDrop verifies that Reconcile surfaces a dropped endpoint
+// registration as an error so controller-runtime requeues the pod, rather than leaving it
+// untracked until the next pod event (#2060).
+func TestPodReconciler_ErrorsOnRegistrationDrop(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+
+	incomingPod := testutil.FromBase(basePod1).
+		Labels(map[string]string{"some-key": "some-val"}).
+		ReadyCondition().ObjRef()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(incomingPod).Build()
+
+	testPool := &v1.InferencePool{
+		Spec: v1.InferencePoolSpec{
+			TargetPorts: []v1.Port{{Number: v1.PortNumber(int32(8000))}},
+			Selector: v1.LabelSelector{
+				MatchLabels: map[v1.LabelKey]v1.LabelValue{"some-key": "some-val"},
+			},
+		},
+	}
+	store := datastore.NewDatastore(t.Context(), nilEndpointFactory{})
+	_ = store.PoolSet(t.Context(), fakeClient, pool.InferencePoolToEndpointPool(testPool))
+
+	podReconciler := &PodReconciler{Reader: fakeClient, Datastore: store}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: incomingPod.Name, Namespace: incomingPod.Namespace}}
+
+	if _, err := podReconciler.Reconcile(context.Background(), req); err == nil {
+		t.Error("expected Reconcile to return an error for a dropped endpoint registration, got nil")
+	}
+	if pods := store.PodList(datastore.AllPodsPredicate); len(pods) != 0 {
+		t.Errorf("expected no pods in datastore, got %d", len(pods))
 	}
 }
