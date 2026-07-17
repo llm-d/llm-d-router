@@ -169,7 +169,7 @@ Prometheus will be accessible at `http://localhost:30090`. To use a different ho
 PROM_ENABLED=true KIND_PROM_HOST_PORT=30091 make env-dev-kind
 ```
 
-Grafana dashboards for the Inference Gateway (EPP) live in the
+Grafana dashboards for the llm-d Router live in the
 [llm-d monorepo](https://github.com/llm-d/llm-d/tree/main/guides/recipes/observability/grafana/dashboards).
 See [Observability Setup](https://github.com/llm-d/llm-d/blob/main/docs/operations/observability/setup.md)
 for install and import instructions.
