@@ -17,88 +17,18 @@ limitations under the License.
 package preciseprefixcache
 
 import (
-	"errors"
-	"fmt"
-
-	"github.com/prometheus/client_golang/prometheus"
-	compbasemetrics "k8s.io/component-base/metrics"
-
-	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
-	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	approximateprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 )
-
-var (
-	llmdPrefixCacheMaxHitRatio = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "prefix_indexer_max_hit_ratio",
-			Help:      metricsutil.HelpMsgWithStability("Ratio of matched KV blocks to total prompt KV blocks at the best-matched endpoint.", compbasemetrics.ALPHA),
-			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
-		},
-		[]string{"plugin_name", "plugin_type"},
-	)
-
-	llmdPrefixCacheAvgHitRatio = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "prefix_indexer_avg_hit_ratio",
-			Help:      metricsutil.HelpMsgWithStability("Average Ratio of matched KV blocks to total prompt KV blocks across all candidate endpoints.", compbasemetrics.ALPHA),
-			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
-		},
-		[]string{"plugin_name", "plugin_type"},
-	)
-
-	llmdPrefixCacheStdDevHitRatio = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "prefix_indexer_std_dev_hit_ratio",
-			Help:      metricsutil.HelpMsgWithStability("Standard Deviation in ratio of matched KV blocks to total prompt KV blocks across all candidate endpoints.", compbasemetrics.ALPHA),
-			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
-		},
-		[]string{"plugin_name", "plugin_type"},
-	)
-
-	llmdPrefixCacheHitRatio = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "prefix_indexer_hit_ratio",
-			Help:      metricsutil.HelpMsgWithStability("Ratio of prefix length matched to total prefix length in the cache lookup.", compbasemetrics.ALPHA),
-			Buckets:   []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
-		},
-		[]string{"plugin_name", "plugin_type"},
-	)
-)
-
-func registerMetrics(registerer prometheus.Registerer) error {
-	if registerer == nil {
-		return errors.New("precise prefix cache metrics registerer is required")
-	}
-	for _, collector := range []prometheus.Collector{
-		llmdPrefixCacheMaxHitRatio,
-		llmdPrefixCacheAvgHitRatio,
-		llmdPrefixCacheStdDevHitRatio,
-		llmdPrefixCacheHitRatio,
-	} {
-		if err := registerer.Register(collector); err != nil {
-			var alreadyRegistered prometheus.AlreadyRegisteredError
-			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == collector {
-				continue
-			}
-			return fmt.Errorf("register precise prefix cache metric: %w", err)
-		}
-	}
-	return nil
-}
 
 func recordPrefixCacheMatch(pluginName, pluginType string, matchedLength, totalLength float64) {
 	if totalLength > 0 {
 		hitRatio := matchedLength / totalLength
-		llmdPrefixCacheHitRatio.WithLabelValues(pluginName, pluginType).Observe(hitRatio)
+		approximateprefix.LlmdPrefixCacheHitRatio.WithLabelValues(pluginName, pluginType).Observe(hitRatio)
 	}
 }
 
 func recordPrefixCacheHitRatioStats(pluginName, pluginType string, maxHitRatio float64, avgHitRatio float64, stdDevHitRatio float64) {
-	llmdPrefixCacheMaxHitRatio.WithLabelValues(pluginName, pluginType).Observe(maxHitRatio)
-	llmdPrefixCacheAvgHitRatio.WithLabelValues(pluginName, pluginType).Observe(avgHitRatio)
-	llmdPrefixCacheStdDevHitRatio.WithLabelValues(pluginName, pluginType).Observe(stdDevHitRatio)
+	approximateprefix.LlmdPrefixCacheMaxHitRatio.WithLabelValues(pluginName, pluginType).Observe(maxHitRatio)
+	approximateprefix.LlmdPrefixCacheAvgHitRatio.WithLabelValues(pluginName, pluginType).Observe(avgHitRatio)
+	approximateprefix.LlmdPrefixCacheStdDevHitRatio.WithLabelValues(pluginName, pluginType).Observe(stdDevHitRatio)
 }

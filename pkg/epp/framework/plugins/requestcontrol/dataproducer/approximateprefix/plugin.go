@@ -152,7 +152,7 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
 	}
-	if err := registerMetrics(handle.Metrics()); err != nil {
+	if err := RegisterMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
 	// Surface the override to the operator so a too-small configured value is

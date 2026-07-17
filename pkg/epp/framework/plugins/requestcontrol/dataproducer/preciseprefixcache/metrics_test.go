@@ -18,6 +18,7 @@ package preciseprefixcache
 import (
 	"testing"
 
+	approximateprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
@@ -28,13 +29,13 @@ func TestRegisterMetrics(t *testing.T) {
 	t.Cleanup(resetMetrics)
 
 	registry := prometheus.NewRegistry()
-	require.NoError(t, registerMetrics(registry))
+	require.NoError(t, approximateprefix.RegisterMetrics(registry))
 	// second call must be idempotent
-	require.NoError(t, registerMetrics(registry))
+	require.NoError(t, approximateprefix.RegisterMetrics(registry))
 }
 
 func TestRegisterMetrics_NilRegisterer(t *testing.T) {
-	require.Error(t, registerMetrics(nil))
+	require.Error(t, approximateprefix.RegisterMetrics(nil))
 }
 
 func TestRecordPrefixCacheMatch_FullHit(t *testing.T) {
@@ -43,17 +44,17 @@ func TestRecordPrefixCacheMatch_FullHit(t *testing.T) {
 
 	recordPrefixCacheHitRatioStats("p", "t", 0.5, 0.4, 0.2)
 
-	maxH, err := getHistogram(llmdPrefixCacheMaxHitRatio, "p", "t")
+	maxH, err := getHistogram(approximateprefix.LlmdPrefixCacheMaxHitRatio, "p", "t")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), maxH.GetSampleCount())
 	require.InDelta(t, 0.5, maxH.GetSampleSum(), 1e-9)
 
-	avgH, err := getHistogram(llmdPrefixCacheAvgHitRatio, "p", "t")
+	avgH, err := getHistogram(approximateprefix.LlmdPrefixCacheAvgHitRatio, "p", "t")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), avgH.GetSampleCount())
 	require.InDelta(t, 0.4, avgH.GetSampleSum(), 1e-9)
 
-	stdDevH, err := getHistogram(llmdPrefixCacheStdDevHitRatio, "p", "t")
+	stdDevH, err := getHistogram(approximateprefix.LlmdPrefixCacheStdDevHitRatio, "p", "t")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stdDevH.GetSampleCount())
 	require.InDelta(t, 0.2, stdDevH.GetSampleSum(), 1e-9)
@@ -72,7 +73,7 @@ func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*d
 }
 
 func resetMetrics() {
-	llmdPrefixCacheMaxHitRatio.Reset()
-	llmdPrefixCacheAvgHitRatio.Reset()
-	llmdPrefixCacheStdDevHitRatio.Reset()
+	approximateprefix.LlmdPrefixCacheMaxHitRatio.Reset()
+	approximateprefix.LlmdPrefixCacheAvgHitRatio.Reset()
+	approximateprefix.LlmdPrefixCacheStdDevHitRatio.Reset()
 }

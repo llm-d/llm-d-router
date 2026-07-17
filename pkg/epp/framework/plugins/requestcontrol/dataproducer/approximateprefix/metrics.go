@@ -28,7 +28,7 @@ import (
 )
 
 var (
-	llmdPrefixCacheMaxHitRatio = prometheus.NewHistogramVec(
+	LlmdPrefixCacheMaxHitRatio = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "prefix_indexer_max_hit_ratio",
@@ -38,7 +38,7 @@ var (
 		[]string{"plugin_name", "plugin_type"},
 	)
 
-	llmdPrefixCacheAvgHitRatio = prometheus.NewHistogramVec(
+	LlmdPrefixCacheAvgHitRatio = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "prefix_indexer_avg_hit_ratio",
@@ -48,7 +48,7 @@ var (
 		[]string{"plugin_name", "plugin_type"},
 	)
 
-	llmdPrefixCacheStdDevHitRatio = prometheus.NewHistogramVec(
+	LlmdPrefixCacheStdDevHitRatio = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "prefix_indexer_std_dev_hit_ratio",
@@ -67,7 +67,7 @@ var (
 		[]string{},
 	)
 
-	llmdPrefixCacheSize = prometheus.NewGaugeVec(
+	LlmdPrefixCacheSize = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "prefix_indexer_size",
@@ -86,7 +86,7 @@ var (
 		[]string{},
 	)
 
-	llmdPrefixCacheHitRatio = prometheus.NewHistogramVec(
+	LlmdPrefixCacheHitRatio = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "prefix_indexer_hit_ratio",
@@ -106,7 +106,7 @@ var (
 		[]string{},
 	)
 
-	llmdPrefixCacheHitLength = prometheus.NewHistogramVec(
+	LlmdPrefixCacheHitLength = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "prefix_indexer_hit_bytes",
@@ -117,20 +117,20 @@ var (
 	)
 )
 
-func registerMetrics(registerer prometheus.Registerer) error {
+func RegisterMetrics(registerer prometheus.Registerer) error {
 	if registerer == nil {
 		return errors.New("approximate prefix metrics registerer is required")
 	}
 	for _, collector := range []prometheus.Collector{
-		llmdPrefixCacheMaxHitRatio,
-		llmdPrefixCacheAvgHitRatio,
-		llmdPrefixCacheStdDevHitRatio,
+		LlmdPrefixCacheMaxHitRatio,
+		LlmdPrefixCacheAvgHitRatio,
+		LlmdPrefixCacheStdDevHitRatio,
 		prefixCacheSize,
-		llmdPrefixCacheSize,
+		LlmdPrefixCacheSize,
 		prefixCacheHitRatio,
-		llmdPrefixCacheHitRatio,
+		LlmdPrefixCacheHitRatio,
 		prefixCacheHitLength,
-		llmdPrefixCacheHitLength,
+		LlmdPrefixCacheHitLength,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -146,24 +146,24 @@ func registerMetrics(registerer prometheus.Registerer) error {
 // recordPrefixCacheSize records the size of the prefix indexer in megabytes.
 func recordPrefixCacheSize(pluginName, pluginType string, size int64) {
 	prefixCacheSize.WithLabelValues().Set(float64(size))
-	llmdPrefixCacheSize.WithLabelValues(pluginName, pluginType).Set(float64(size))
+	LlmdPrefixCacheSize.WithLabelValues(pluginName, pluginType).Set(float64(size))
 }
 
 // recordPrefixCacheMatch records both the hit ratio and hit length for a prefix indexer match.
 // matchedLength is the number of characters that matched, and totalLength is the total prefix length.
 func recordPrefixCacheMatch(pluginName, pluginType string, matchedLength, totalLength int) {
 	prefixCacheHitLength.WithLabelValues().Observe(float64(matchedLength))
-	llmdPrefixCacheHitLength.WithLabelValues(pluginName, pluginType).Observe(float64(matchedLength))
+	LlmdPrefixCacheHitLength.WithLabelValues(pluginName, pluginType).Observe(float64(matchedLength))
 
 	if totalLength > 0 {
 		ratio := float64(matchedLength) / float64(totalLength)
 		prefixCacheHitRatio.WithLabelValues().Observe(ratio)
-		llmdPrefixCacheHitRatio.WithLabelValues(pluginName, pluginType).Observe(ratio)
+		LlmdPrefixCacheHitRatio.WithLabelValues(pluginName, pluginType).Observe(ratio)
 	}
 }
 
 func recordPrefixCacheHitRatioStats(pluginName, pluginType string, maxHitRatio, avgHitRatio, stdDevHitRatio float64) {
-	llmdPrefixCacheMaxHitRatio.WithLabelValues(pluginName, pluginType).Observe(maxHitRatio)
-	llmdPrefixCacheAvgHitRatio.WithLabelValues(pluginName, pluginType).Observe(avgHitRatio)
-	llmdPrefixCacheStdDevHitRatio.WithLabelValues(pluginName, pluginType).Observe(stdDevHitRatio)
+	LlmdPrefixCacheMaxHitRatio.WithLabelValues(pluginName, pluginType).Observe(maxHitRatio)
+	LlmdPrefixCacheAvgHitRatio.WithLabelValues(pluginName, pluginType).Observe(avgHitRatio)
+	LlmdPrefixCacheStdDevHitRatio.WithLabelValues(pluginName, pluginType).Observe(stdDevHitRatio)
 }

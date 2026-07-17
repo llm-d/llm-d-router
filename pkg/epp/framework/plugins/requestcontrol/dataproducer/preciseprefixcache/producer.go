@@ -41,6 +41,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
+	approximateprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -143,7 +144,7 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
 	}
-	if err := registerMetrics(handle.Metrics()); err != nil {
+	if err := approximateprefix.RegisterMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
 
