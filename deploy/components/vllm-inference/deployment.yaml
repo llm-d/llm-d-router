@@ -60,6 +60,8 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
           env:
+            - name: USER
+              value: "vllm"
             - name: HOME
               value: /tmp/cache
             - name: POD_IP

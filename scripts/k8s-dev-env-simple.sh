@@ -113,6 +113,9 @@ export POST_IO_TRANSFER_CONFIG=$(build_io_config "io_receiver")
 
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 
+export RENDERER_NUM_WORKERS="${RENDERER_NUM_WORKERS:-1}"
+export RENDERER_NUM_WORKERS_STR="\"${RENDERER_NUM_WORKERS}\""
+
 # Python dependencies for the terratorch plugin
 export IO_PROCESSOR_PLUGIN="${IO_PROCESSOR_PLUGIN:-terratorch_segmentation}"
 
@@ -149,7 +152,7 @@ export POST_CPU_RESOURCES_LIM="${POST_CPU_RESOURCES_LIM:-8}"
 export POST_MEMORY_RESOURCES_LIM="${POST_MEMORY_RESOURCES_LIM:-8G}"
 
 export POST_TARGET_PORT="${POST_TARGET_PORT:-8200}"
-export POST_TARGET_PORT_STR="\"${POST_TARGET_PORT:-8200}\""
+export POST_TARGET_PORT_STR="\"${POST_TARGET_PORT}\""
 
 # ------------------------------------------------------------------------------
 # Deployment
