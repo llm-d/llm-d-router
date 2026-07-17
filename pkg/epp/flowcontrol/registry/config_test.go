@@ -23,9 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
@@ -51,18 +49,6 @@ func newTestPriorityBandPolicyDefaults() PriorityBandPolicyDefaults {
 			},
 		},
 	}
-}
-
-// mockCapabilityChecker is a test double for verifying that NewConfig correctly delegates compatibility checks.
-type mockCapabilityChecker struct {
-	checkCompatibilityFunc func(p flowcontrol.OrderingPolicy, q queue.RegisteredQueueName) error
-}
-
-func (m *mockCapabilityChecker) CheckCompatibility(p flowcontrol.OrderingPolicy, q queue.RegisteredQueueName) error {
-	if m.checkCompatibilityFunc != nil {
-		return m.checkCompatibilityFunc(p, q)
-	}
-	return nil
 }
 
 // mustBand is a helper to simplify test table setup.
@@ -158,9 +144,6 @@ func TestNewConfig(t *testing.T) {
 				WithDefaultPriorityBand(&PriorityBandConfig{
 					Queue: "CustomQueue",
 				}),
-				withCapabilityChecker(&mockCapabilityChecker{
-					checkCompatibilityFunc: func(flowcontrol.OrderingPolicy, queue.RegisteredQueueName) error { return nil },
-				}),
 			},
 			defaults: newTestPriorityBandPolicyDefaults(),
 			assertion: func(t *testing.T, cfg *Config) {
@@ -241,30 +224,6 @@ func TestNewConfig(t *testing.T) {
 			defaults:  PriorityBandPolicyDefaults{}, // Zero value: nil policies trigger the error path.
 			expectErr: true,
 		},
-
-		// --- Compatibility Checks ---
-		{
-			name: "ShouldError_WhenCapabilityCheckerFails",
-			opts: []ConfigOption{
-				WithPriorityBand(mustBand(t, 1)),
-				withCapabilityChecker(&mockCapabilityChecker{
-					checkCompatibilityFunc: func(flowcontrol.OrderingPolicy, queue.RegisteredQueueName) error {
-						return contracts.ErrPolicyQueueIncompatible
-					},
-				}),
-			},
-			defaults:      newTestPriorityBandPolicyDefaults(),
-			expectErr:     true,
-			expectedErrIs: contracts.ErrPolicyQueueIncompatible,
-		},
-		{
-			name: "ShouldError_WhenDefaultRuntimeCheckerDetectsUnknownQueue",
-			opts: []ConfigOption{
-				WithPriorityBand(mustBand(t, 1, WithQueue("non-existent-queue"))),
-			},
-			defaults:  newTestPriorityBandPolicyDefaults(),
-			expectErr: true,
-		},
 	}
 
 	for _, tc := range testCases {
@@ -299,7 +258,6 @@ func TestNewPriorityBandConfig(t *testing.T) {
 			Type: edf.EDFOrderingPolicyType,
 			Name: edf.EDFOrderingPolicyType,
 		},
-		RequiredQueueCapabilitiesV: []flowcontrol.QueueCapability{flowcontrol.CapabilityPriorityConfigurable},
 	}
 	mockRRFairness := &fwkfcmocks.MockFairnessPolicy{
 		TypedNameV: plugin.TypedName{
@@ -347,20 +305,16 @@ func TestNewPriorityBandConfig(t *testing.T) {
 		assert.Nil(t, pb)
 	})
 
-	t.Run("ShouldDefaultToHeap_WhenPolicyRequiresIt", func(t *testing.T) {
+	t.Run("ShouldDefaultToPriorityQueue_RegardlessOfPolicy", func(t *testing.T) {
 		t.Parallel()
-		pb, err := NewPriorityBandConfig(10, defaults, WithOrderingPolicy(mockEDFOrdering), WithFairnessPolicy(mockGSFairness))
+		// Every flow now uses the single priority queue, regardless of ordering policy.
+		edfBand, err := NewPriorityBandConfig(10, defaults, WithOrderingPolicy(mockEDFOrdering), WithFairnessPolicy(mockGSFairness))
 		require.NoError(t, err)
-		assert.Equal(t, queue.RegisteredQueueName(queue.PriorityQueueName), pb.Queue,
-			"EDF requires PriorityConfigurable, so should default to the PriorityQueue")
-	})
+		assert.Equal(t, queue.RegisteredQueueName(queue.PriorityQueueName), edfBand.Queue)
 
-	t.Run("ShouldDefaultToList_WhenPolicyDoesNotRequirePriority", func(t *testing.T) {
-		t.Parallel()
-		pb, err := NewPriorityBandConfig(20, defaults, WithOrderingPolicy(mockFCFSOrdering), WithFairnessPolicy(mockGSFairness))
+		fcfsBand, err := NewPriorityBandConfig(20, defaults, WithOrderingPolicy(mockFCFSOrdering), WithFairnessPolicy(mockGSFairness))
 		require.NoError(t, err)
-		assert.Equal(t, queue.RegisteredQueueName(queue.ListQueueName), pb.Queue,
-			"FCFS does not require PriorityConfigurable, so should default to ListQueue")
+		assert.Equal(t, queue.RegisteredQueueName(queue.PriorityQueueName), fcfsBand.Queue)
 	})
 }
 
@@ -463,16 +417,6 @@ func TestNewConfig_DefaultNegativePriorityBand(t *testing.T) {
 		require.NotNil(t, cfg.DefaultNegativePriorityBand)
 		// MaxBytes=0 gets defaulted to 1GB via applyDefaults
 		assert.Equal(t, defaultPriorityBandMaxBytes, cfg.DefaultNegativePriorityBand.MaxBytes)
-	})
-
-	t.Run("ShouldValidateNegativeBandTemplate", func(t *testing.T) {
-		t.Parallel()
-		_, err := NewConfig(defaults,
-			WithDefaultNegativePriorityBand(&PriorityBandConfig{
-				Queue: "non-existent-queue",
-			}),
-		)
-		require.Error(t, err, "Should fail validation for invalid queue in negative band template")
 	})
 
 	t.Run("ShouldCloneNegativeBandTemplate", func(t *testing.T) {

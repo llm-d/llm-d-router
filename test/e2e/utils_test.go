@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -15,6 +14,8 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
+	"sigs.k8s.io/yaml"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,7 +23,6 @@ import (
 	apilabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -212,81 +212,6 @@ func removeEmptyLabels(inputs []string) []string {
 	return outputs
 }
 
-func isModelReal(modelName string) bool {
-	req, err := http.NewRequest("GET", "https://huggingface.co/api/models/"+modelName, nil)
-	if err != nil {
-		return false
-	}
-	if token := os.Getenv("HF_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-
-	return resp.StatusCode == http.StatusOK
-}
-
-// removeRenderSidecar takes a slice of YAML strings (each may contain multiple
-// objects separated by "---") and returns the same slice with the vllm-render
-// container and the model-cache volume stripped from any Deployment.
-func removeRenderSidecar(inputs []string) []string {
-	outputs := make([]string, len(inputs))
-	for idx, input := range inputs {
-		docs := strings.Split(input, "\n---")
-		rendered := make([]string, 0, len(docs))
-		for _, doc := range docs {
-			if strings.TrimSpace(doc) == "" {
-				continue
-			}
-			rendered = append(rendered, filterDocument(doc))
-		}
-		outputs[idx] = strings.Join(rendered, "\n---\n")
-	}
-	return outputs
-}
-
-func filterDocument(doc string) string {
-	obj := &unstructured.Unstructured{}
-	err := yaml.Unmarshal([]byte(doc), &obj.Object)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	if len(obj.Object) == 0 {
-		return doc
-	}
-	if obj.GetKind() == kubernetesDeploymentKind {
-		removePodSpecListItem(obj, "containers", "vllm-render")
-		removePodSpecListItem(obj, "initContainers", "vllm-render")
-		removePodSpecListItem(obj, "volumes", "model-cache")
-	}
-	out, err := yaml.Marshal(obj.Object)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	return strings.TrimRight(string(out), "\n")
-}
-
-func removePodSpecListItem(obj *unstructured.Unstructured, fieldName, itemName string) {
-	path := []string{"spec", "template", "spec", fieldName}
-	items, found, err := unstructured.NestedSlice(obj.Object, path...)
-	if err != nil || !found {
-		return
-	}
-	filtered := make([]any, 0, len(items))
-	for _, item := range items {
-		if m, ok := item.(map[string]any); ok && m["name"] == itemName {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	if len(filtered) == 0 {
-		unstructured.RemoveNestedField(obj.Object, path...)
-		return
-	}
-	err = unstructured.SetNestedSlice(obj.Object, filtered, path...)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-}
-
 // eppExtraArgs are appended to the "epp" container's args in the Deployment
 // created by createEndPointPickerHelper.
 //
@@ -328,6 +253,7 @@ func appendArgsToEppContainer(doc string, args []string) string {
 	}
 	path := []string{"spec", "template", "spec", "containers"}
 	containers, found, err := unstructured.NestedSlice(obj.Object, path...)
+
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	if !found {
 		return doc

@@ -17,12 +17,18 @@ limitations under the License.
 package prefix
 
 import (
+	"maps"
+
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 )
 
 var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
+
+// SpeculativeTierKey is the CachedBlocksByTier key for speculative index
+// entries, which carry no engine-reported device tier.
+const SpeculativeTierKey = "speculative"
 
 type PrefixCacheMatchInfo struct {
 	// matched prefix length in blocks. For the precise prefix cache this is the
@@ -39,6 +45,12 @@ type PrefixCacheMatchInfo struct {
 	// the prefix-based PD decider) get an accurate cached-token figure rather
 	// than a tier-attenuated one. Defaults to matchBlocks when not set.
 	cachedBlockCount int
+	// per device tier, the unweighted count of contiguous cached prefix blocks
+	// the endpoint holds in that tier, from the first block until the first
+	// block missing from that tier. A block held in several tiers counts once
+	// per tier. Speculative index entries count under SpeculativeTierKey.
+	// Nil when the producer supplies no tier data.
+	cachedBlocksByTier map[string]int
 }
 
 func NewPrefixCacheMatchInfo(matchBlocks int, totalBlocks int, blockSizeTokens int) *PrefixCacheMatchInfo {
@@ -75,11 +87,27 @@ func (p *PrefixCacheMatchInfo) CachedBlockCount() int {
 	return p.cachedBlockCount
 }
 
+// WithCachedBlocksByTier sets the per-device-tier contiguous cached-block
+// counts and returns the receiver for chaining. Takes ownership of the map;
+// the caller must not mutate it after the call.
+func (p *PrefixCacheMatchInfo) WithCachedBlocksByTier(cachedBlocksByTier map[string]int) *PrefixCacheMatchInfo {
+	p.cachedBlocksByTier = cachedBlocksByTier
+	return p
+}
+
+// CachedBlocksByTier returns, per device tier, the unweighted count of
+// contiguous cached prefix blocks the endpoint holds in that tier. Nil means
+// the producer supplies no tier data. Callers must not mutate the map.
+func (p *PrefixCacheMatchInfo) CachedBlocksByTier() map[string]int {
+	return p.cachedBlocksByTier
+}
+
 func (p *PrefixCacheMatchInfo) Clone() fwkdl.Cloneable {
 	return &PrefixCacheMatchInfo{
-		matchBlocks:      p.matchBlocks,
-		totalBlocks:      p.totalBlocks,
-		blockSizeTokens:  p.blockSizeTokens,
-		cachedBlockCount: p.cachedBlockCount,
+		matchBlocks:        p.matchBlocks,
+		totalBlocks:        p.totalBlocks,
+		blockSizeTokens:    p.blockSizeTokens,
+		cachedBlockCount:   p.cachedBlockCount,
+		cachedBlocksByTier: maps.Clone(p.cachedBlocksByTier),
 	}
 }

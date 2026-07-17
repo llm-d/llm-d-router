@@ -1,37 +1,44 @@
 # Agent Identity
 
 **Type:** `agent-identity`
-**Interfaces:** `requestcontrol.PreAdmitter`
+**Interfaces:** `requestcontrol.RequestHeaderProcessor`
 
-Resolves a per-session identity from agent-specific HTTP headers and writes it into `InferenceRequest.FairnessID`, so every turn of an agent session lands in the same flow-control fairness queue.
+Resolves a per-session identity from agent-specific HTTP headers and stores it as a request attribute (`"agent-identity"`) for use by other subsystems. The Director then derives `FairnessID` from this attribute when no explicit fairness header is present, so every turn of an agent session lands in the same flow-control fairness queue.
 
 ## What It Does
 
-The plugin runs after request assembly and before admission control. If the request does not already carry an explicit fairness ID (`x-llm-d-inference-fairness-id`, or its deprecated alias `x-gateway-inference-fairness-id`), it inspects a fixed set of agent session headers and copies the first non-empty value into `FairnessID`. The flow-control layer keys its queues on `FlowKey{ID: FairnessID, Priority}`, so this turns "all turns from one agent session" into "all turns share one queue."
+The plugin runs after request assembly and before admission control. It inspects a fixed set of agent session headers and stores the first non-empty value as a request attribute via `request.PutAttribute("agent-identity", value)`.
 
-Without it, every request from a given agent session falls into the default fairness queue alongside unrelated traffic, and per-session fairness, prefix-cache affinity, and per-tenant rate limiting all collapse to per-request granularity.
+The plugin stores the identity as a request attribute only — it does not set `FairnessID`. The Director reads the `"agent-identity"` attribute and derives `FairnessID` from it when no explicit `x-llm-d-inference-fairness-id` header is present. This separation means the agent identity is available as a reliable signal to other subsystems (scheduling, KV cache control, etc.) without being conflated with flow-control identity.
 
 ## How It Works
 
-1. If `request.FairnessID` is already non-empty, return immediately — an explicit upstream `x-llm-d-inference-fairness-id` (or its deprecated alias `x-gateway-inference-fairness-id`) is read into `FairnessID` before the plugin runs and always wins over a derived one.
-2. Otherwise, walk the priority list of agent session headers and copy the first non-empty match into `request.FairnessID`. Operator-supplied entries from `additionalSessionHeaders` come first, followed by the built-in defaults in this order:
+1. Walk the priority list of agent session headers and store the first non-empty match as the `"agent-identity"` request attribute. Operator-supplied entries from `additionalSessionHeaders` come first, followed by the built-in defaults in this order:
    1. `x-claude-code-session-id` (Claude Code)
    2. `x-session-affinity` (OpenCode)
    3. `session-id` (Codex)
    4. `session_id` (Codex, legacy underscored fallback)
-3. If nothing matches, leave `FairnessID` empty and return — the director applies `metadata.DefaultFairnessID` after the plugin returns, so the request is still admitted, just into the shared default queue.
+2. If nothing matches, no attribute is stored — the Director falls through to `metadata.DefaultFairnessID`, so the request is still admitted, just into the shared default queue.
+
+After the plugin returns, the Director checks:
+1. If `x-llm-d-inference-fairness-id` header is set → use as FairnessID (explicit always wins).
+2. Else if `"agent-identity"` attribute exists → copy to FairnessID.
+3. Else → `"default-flow"`.
 
 The plugin is stateless and safe under concurrent use.
 
 ## Inputs Consumed
 
 - `scheduling.InferenceRequest.Headers` — read-only lookup of the session headers above (built-in defaults plus any from `additionalSessionHeaders`). Keys are expected lowercase (Envoy normalizes inbound headers).
-- `scheduling.InferenceRequest.FairnessID` — read to detect an upstream override; written when an agent header matches.
+
+## Outputs Produced
+
+- `scheduling.InferenceRequest` attribute `"agent-identity"` (`string`) — set when a session header matches.
 
 ## Configuration
 
 **Location:** Top-level `plugins:` list in the `EndpointPickerConfig`.
-**Enabled by default:** No. Add a `- type: agent-identity` entry to enable; the runner discovers it as a `PreAdmitter` and wires it in.
+**Enabled by default:** No. Add a `- type: agent-identity` entry to enable; the runner discovers it as a `RequestHeaderProcessor` and wires it in.
 
 ### Parameters
 

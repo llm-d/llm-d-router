@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
@@ -41,14 +40,6 @@ func TestSLODeadlinePolicy_WithName(t *testing.T) {
 	t.Parallel()
 	policy := newSLODeadlinePolicy().withName("test-name")
 	assert.Equal(t, "test-name", policy.Name())
-}
-
-func TestSLODeadlinePolicy_RequiredQueueCapabilities(t *testing.T) {
-	t.Parallel()
-	policy := newSLODeadlinePolicy()
-	caps := policy.RequiredQueueCapabilities()
-	require.Len(t, caps, 1)
-	assert.Equal(t, flowcontrol.CapabilityPriorityConfigurable, caps[0])
 }
 
 // makeSLOItem builds a QueueItemAccessor with the given SLO header and received time.
