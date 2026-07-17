@@ -51,6 +51,19 @@ const (
 	maxWindowDurationMs = 10000
 )
 
+// balanceMode selects the quantity balanced across replicas within a window.
+type balanceMode string
+
+const (
+	// balanceByRequests balances placement by request count (the default).
+	balanceByRequests balanceMode = "requests"
+	// balanceByTokens balances placement by prefix-block (token) load, charging a
+	// prefix only the blocks a replica must still prefill - blocks already held from
+	// an earlier request sharing that prefix are free. Spreads long-prompt requests
+	// so no replica saturates on stacked prefixes while shorter ones pack together.
+	balanceByTokens balanceMode = "tokens"
+)
+
 // config defines the configuration for the burst prefix cache producer.
 type config struct {
 	// WindowDurationMs is the batch window T in milliseconds. Requests arriving
@@ -78,6 +91,10 @@ type config struct {
 	// is reached, Produce returns an error instead of letting a sustained burst or
 	// a long window grow the batch unbounded. -1 disables the cap.
 	MaxBatchSize int `json:"maxBatchSize"`
+	// BalanceBy selects the quantity balanced across replicas within a window:
+	// "requests" (default) or "tokens". See balanceMode. An empty value defaults
+	// to "requests".
+	BalanceBy balanceMode `json:"balanceBy"`
 }
 
 // defaultConfig provides sensible defaults for the burst prefix cache producer.
@@ -88,6 +105,7 @@ var defaultConfig = config{
 	MaxPrefixTokensToMatch: 0,
 	MinColocateBlocks:      defaultMinColocateBlocks,
 	MaxBatchSize:           defaultMaxBatchSize,
+	BalanceBy:              balanceByRequests,
 }
 
 // entry is one request collected into a batch window.

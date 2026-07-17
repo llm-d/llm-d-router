@@ -443,10 +443,13 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdInterTokenLatency)
 		metrics.Registry.MustRegister(inferencePoolAvgKVCache)
 		metrics.Registry.MustRegister(llmdInferencePoolAvgKVCache)
+		metrics.Registry.MustRegister(llmdInferencePoolStdDevKVCache)
 		metrics.Registry.MustRegister(inferencePoolAvgQueueSize)
 		metrics.Registry.MustRegister(llmdInferencePoolAvgQueueSize)
+		metrics.Registry.MustRegister(llmdInferencePoolStdDevQueueSize)
 		metrics.Registry.MustRegister(inferencePoolAvgRunningRequests)
 		metrics.Registry.MustRegister(llmdInferencePoolAvgRunningRequests)
+		metrics.Registry.MustRegister(llmdInferencePoolStdDevRunningRequests)
 		metrics.Registry.MustRegister(inferencePoolReadyPods)
 		metrics.Registry.MustRegister(llmdInferencePoolReadyEndpoints)
 		metrics.Registry.MustRegister(schedulerE2ELatency)
@@ -469,6 +472,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdFlowControlPoolSaturation)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestEnqueueDuration)
+		metrics.Registry.MustRegister(llmdFlowControlRequestsTotal)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(DataLayerPollErrorsTotal)
@@ -509,10 +513,13 @@ func Reset() {
 	llmdInterTokenLatency.Reset()
 	inferencePoolAvgKVCache.Reset()
 	llmdInferencePoolAvgKVCache.Reset()
+	llmdInferencePoolStdDevKVCache.Reset()
 	inferencePoolAvgQueueSize.Reset()
 	llmdInferencePoolAvgQueueSize.Reset()
+	llmdInferencePoolStdDevQueueSize.Reset()
 	inferencePoolAvgRunningRequests.Reset()
 	llmdInferencePoolAvgRunningRequests.Reset()
+	llmdInferencePoolStdDevRunningRequests.Reset()
 	inferencePoolReadyPods.Reset()
 	llmdInferencePoolReadyEndpoints.Reset()
 	schedulerE2ELatency.Reset()
@@ -535,6 +542,7 @@ func Reset() {
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	flowControlDispatchCycleDuration.Reset()
 	llmdFlowControlDispatchCycleDuration.Reset()
+	llmdFlowControlRequestsTotal.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	DataLayerPollErrorsTotal.Reset()
@@ -706,6 +714,18 @@ func RecordInferencePoolAvgRunningRequests(name string, runningRequests float64)
 	llmdInferencePoolAvgRunningRequests.WithLabelValues(name).Set(runningRequests)
 }
 
+func RecordInferencePoolStdDevKVCache(name string, utilization float64) {
+	llmdInferencePoolStdDevKVCache.WithLabelValues(name).Set(utilization)
+}
+
+func RecordInferencePoolStdDevQueueSize(name string, queueSize float64) {
+	llmdInferencePoolStdDevQueueSize.WithLabelValues(name).Set(queueSize)
+}
+
+func RecordInferencePoolStdDevRunningRequests(name string, runningRequests float64) {
+	llmdInferencePoolStdDevRunningRequests.WithLabelValues(name).Set(runningRequests)
+}
+
 func RecordInferencePoolReadyPods(name string, runningPods float64) {
 	inferencePoolReadyPods.WithLabelValues(name).Set(runningPods)
 	llmdInferencePoolReadyEndpoints.WithLabelValues(name).Set(runningPods)
@@ -829,6 +849,11 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 	flowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
 	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
+}
+
+// IncFlowControlRequestsTotal increments the total request counter for a given outcome.
+func IncFlowControlRequestsTotal(outcome, priority, inferencePool string) {
+	llmdFlowControlRequestsTotal.WithLabelValues(outcome, priority, inferencePool).Inc()
 }
 
 // RecordInferenceModelRewriteDecision records the routing decision for InferenceModelRewrite.

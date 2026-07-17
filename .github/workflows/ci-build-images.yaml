@@ -19,6 +19,14 @@ on:
         required: false
         type: string
         default: ''
+      epp-additional-tags:
+        required: false
+        type: string
+        default: ''
+      sidecar-additional-tags:
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -60,6 +68,7 @@ jobs:
           prerelease: ${{ inputs.prerelease }}
           commit-sha: ${{ github.sha }}
           push: 'true'
+          additional-tags: ${{ inputs.epp-additional-tags }}
 
   build-sidecar:
     runs-on: ubuntu-latest
@@ -93,6 +102,7 @@ jobs:
           prerelease: ${{ inputs.prerelease }}
           commit-sha: ${{ github.sha }}
           push: 'true'
+          additional-tags: ${{ inputs.sidecar-additional-tags }}
 
   push-helm-charts:
     needs: [build-epp, build-sidecar]

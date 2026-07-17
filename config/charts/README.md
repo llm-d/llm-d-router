@@ -119,7 +119,7 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 | `router.epp.replicas` | Number of EPP replicas. Set > 1 to enable multi-replica EPP. | `1` |
 | `router.epp.extProcPort` | Port EPP uses for external processing gRPC communication. | `9002` |
 | `router.epp.image.registry` | EPP container image registry. | `ghcr.io/llm-d` |
-| `router.epp.image.repository` | EPP container image repository. | `llm-d-router-endpoint-picker-dev` |
+| `router.epp.image.repository` | EPP container image repository. | `llm-d-router-endpoint-picker` |
 | `router.epp.image.tag` | EPP container image tag. | `main` |
 | `router.epp.image.pullPolicy` | EPP container image pull policy. | `Always` |
 | `router.epp.env` | Extra environment variables for EPP container. | `[]` |

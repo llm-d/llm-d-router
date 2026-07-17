@@ -285,6 +285,7 @@ plugins:
   - type: prefix-based-pd-decider
     parameters:
       nonCachedTokens: 8
+      promptTokens: 0
   - type: disagg-profile-handler
     parameters:
       profiles:
@@ -348,6 +349,7 @@ plugins:
   - type: prefix-based-pd-decider
     parameters:
       nonCachedTokens: 8
+      promptTokens: 0
   - type: disagg-profile-handler
     parameters:
       profiles:
@@ -397,21 +399,27 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 **How It Works**
 - Once a decode pod is selected, the decider checks how many tokens from the incoming prompt have already been sent to this pod
 
-- If the remaining non-cached suffix length is longer than the configured threshold (nonCachedTokens), disaggregation is triggered – the prefill will run remotely on a prefill pod, and decode locally on the decode pod
+- If the prompt length is shorter than the configured prompt length threshold (promptTokens), the full request runs locally on the decode worker without remote prefill
 
-- If the non-cached suffix is shorter or equal to the threshold, the full request runs locally on the decode worker without remote prefill
+- If the remaining non-cached suffix length is at least the configured threshold (nonCachedTokens), disaggregation is triggered: the prefill will run remotely on a prefill pod, and decode locally on the decode pod
+
+- If the non-cached suffix is shorter than the threshold, the full request runs locally on the decode worker without remote prefill
 
 **Configuration**
 ```yaml
 - type: prefix-based-pd-decider
   parameters:
     nonCachedTokens: 8
+    promptTokens: 0
 ```
 
 **Parameter:**
 
 - `nonCachedTokens`: Number of non-cached tokens that trigger disaggregation
   - If set to 0, disaggregation never occurs for any request
+- `promptTokens`: Minimum prompt length in tokens before prefix-cache-based disaggregation logic is applied
+  - If set to 0, the prompt-length gate is disabled
+  - If set to a positive value, requests with fewer prompt tokens run locally on the decode worker without remote prefill
 
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.
@@ -533,6 +541,8 @@ Specifies which KV transfer protocol the sidecar uses to coordinate prefill/deco
 
 With `offloading`, the sidecar dispatches prefill and decode concurrently. It injects role-keyed `kv_transfer_params`: the prefiller receives `{"decode": {"kv_request_id": <id>}}` (no peer address), and the decoder receives `{"prefill": {"kv_request_id": <id>, "remote_host": <prefiller host>, "remote_port": <p2p-connector-port>}}` so it can pull KV from the prefiller. The prefiller host comes from the `x-prefiller-host-port` header; the port is `--p2p-connector-port`.
 
+When the request also carries the `x-kv-cache-source-host-port` header (set by the EPP `p2p-source-producer` to a peer holding more cached prefix than the pod computing the prefix), the sidecar injects an additional `p2p` key so vLLM pulls that cached prefix over the P2P tier instead of recomputing it. Under disaggregation the prefiller leg carries `{"decode": {...}, "p2p": {"kv_request_id": <own id>, "remote_host": <source host>, "remote_port": <p2p-connector-port>}}` (the only supported multi-key combination); without a prefiller the decoder-only request carries `{"p2p": {...}}` alone. A malformed or disallowed source header is ignored and the request proceeds unchanged, as is any source header on a connector that cannot pull over the P2P tier: only `offloading`, or NIXLv2 with `--enable-p2p-pull`, honors it. For the pulled blocks to be servable, the source pod must offload its generated (decode-phase) KV: set `offload_prompt_only: false` in its `kv_connector_extra_config` (the default `true` offloads only prefill blocks).
+
 Both prefill and decode pods require the following `--kv-transfer-config`:
 
 ```json
@@ -567,6 +577,7 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
 | `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port, injected as `remote_port` on the decode leg so the decoder can pull KV. |
+| `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
 
 ---
 

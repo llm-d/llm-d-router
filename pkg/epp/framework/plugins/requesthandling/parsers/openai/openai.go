@@ -39,6 +39,8 @@ const (
 	chatCompletionsAPI = "chat/completions"
 	completionsAPI     = "completions"
 	embeddingsAPI      = "embeddings"
+	// imagesGenerationsAPI is the OpenAI-compatible image generation endpoint/
+	imagesGenerationsAPI = "images/generations"
 
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
@@ -59,7 +61,10 @@ const (
 )
 
 // compile-time type validation
-var _ fwkrh.Parser = &OpenAIParser{}
+var (
+	_ fwkrh.Parser            = &OpenAIParser{}
+	_ fwkrh.ModelNameRewriter = &OpenAIParser{}
+)
 
 // OpenAIParser implements the fwkrh.Parser interface for OpenAI API
 // https://developers.openai.com/api/reference/overview
@@ -92,6 +97,7 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			conversationsAPI,
 			chatCompletionsAPI + "/render",
 			completionsAPI + "/render",
+			imagesGenerationsAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -118,11 +124,24 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		return nil, err
 	}
 	extractedBody.Payload = fwkrh.PayloadMap(bodyMap)
+	if model, ok := bodyMap["model"].(string); ok {
+		extractedBody.Model = model
+	}
 	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(apiType, bodyMap)
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		extractedBody.Stream = true
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// RewriteModelName writes the resolved model into the request payload map.
+func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
+	m, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
+		return payload, nil
+	}
+	m["model"] = model
+	return m, nil
 }
 
 // maxOutputTokensForAPI normalizes the per-API output-token cap field into a
@@ -197,6 +216,9 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/embeddings") {
 		return embeddingsAPI
 	}
+	if request.MatchPathSuffix(path, "/images/generations") {
+		return imagesGenerationsAPI
+	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
 	return completionsAPI
@@ -242,6 +264,13 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 			return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
 		}
 		return nil, errors.New("invalid embeddings request: must have input field")
+
+	case imagesGenerationsAPI:
+		var images fwkrh.ImagesGenerationsRequest
+		if err := json.Unmarshal(rawBody, &images); err == nil && images.Prompt != "" {
+			return &fwkrh.InferenceRequestBody{Images: &images}, nil
+		}
+		return nil, errors.New("invalid images generations request: must have prompt field")
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}

@@ -24,8 +24,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
-	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -50,12 +50,26 @@ type RequestPayload interface {
 	AsMap() (PayloadMap, bool)
 }
 
+// Marshaler is implemented by payloads that serialize themselves back to the bytes
+// forwarded downstream. Payloads that do not are forwarded unchanged.
+type Marshaler interface {
+	Marshal() ([]byte, error)
+}
+
+// MarshalablePayload is a RequestPayload that can serialize itself back to bytes.
+// Only such payloads are worth mutating, since only they are re-marshaled on repackage.
+type MarshalablePayload interface {
+	RequestPayload
+	Marshaler
+}
+
 // PayloadMap represents a JSON request body unmarshaled into a map.
 type PayloadMap map[string]any
 
 func (p PayloadMap) isRequestPayload()         {}
 func (p PayloadMap) IsParsed() bool            { return true }
 func (p PayloadMap) AsMap() (PayloadMap, bool) { return p, p != nil }
+func (p PayloadMap) Marshal() ([]byte, error)  { return json.Marshal(map[string]any(p)) }
 
 // PayloadProto represents a gRPC request body unmarshaled into a proto.Message.
 type PayloadProto struct {
@@ -75,7 +89,8 @@ func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
-// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest, or MessagesRequest.
+// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest,
+// ImagesGenerationsRequest, or MessagesRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
@@ -91,6 +106,8 @@ type InferenceRequestBody struct {
 	Embeddings *EmbeddingsRequest `json:"embeddings,omitempty"`
 	// GenerateRequest is the representation of the vLLM /inference/v1/generate request body.
 	Generate *GenerateRequest `json:"generate,omitempty"`
+	// ImagesGenerationsRequest is the representation of the OpenAI /v1/images/generations request body.
+	Images *ImagesGenerationsRequest `json:"images,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
@@ -109,6 +126,10 @@ type InferenceRequestBody struct {
 	// It is nil when the client did not specify a cap. Consumers such as output
 	// token estimators use it as an upper bound. Derived, not round-tripped.
 	MaxOutputTokens *int64 `json:"-"`
+
+	// Model is the incoming client-facing model name extracted by the parser, empty
+	// if absent. Not round-tripped; the forwarded model lives in Payload.
+	Model string `json:"-"`
 }
 
 // MaxOutputTokensFromPayload returns the client-requested output-token cap read
@@ -439,6 +460,27 @@ func (e *EmbeddingsRequest) String() string {
 		return nilStr
 	}
 	return fmt.Sprintf("{InputType: %T}", e.Input)
+}
+
+// ImagesGenerationsRequest represents the OpenAI /v1/images/generations request body
+// structure.
+type ImagesGenerationsRequest struct {
+	// Prompt is the text description of the desired image(s).
+	Prompt string `json:"prompt"`
+	// N is the number of images to generate. Nil means the server default (1).
+	N *int64 `json:"n,omitempty"`
+	// Size is the requested image size as "WIDTHxHEIGHT" (e.g. "1024x1024").
+	Size string `json:"size,omitempty"`
+	// NumInferenceSteps is the number of denoising steps. Nil means the server default.
+	NumInferenceSteps *int64 `json:"num_inference_steps,omitempty"`
+}
+
+func (i *ImagesGenerationsRequest) String() string {
+	if i == nil {
+		return nilStr
+	}
+	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v}",
+		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps)
 }
 
 // GenerateRequest is a structured representation of the fields we parse out of the vLLM

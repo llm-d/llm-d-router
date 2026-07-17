@@ -112,6 +112,12 @@ func newDataProducer(_ context.Context, name string, cfg config) (*dataProducer,
 	if cfg.MaxBatchSize != unlimitedBatchSize && cfg.MaxBatchSize < 1 {
 		return nil, fmt.Errorf("invalid configuration: maxBatchSize must be -1 (unlimited) or >= 1 (current value: %d)", cfg.MaxBatchSize)
 	}
+	if cfg.BalanceBy == "" {
+		cfg.BalanceBy = balanceByRequests
+	}
+	if cfg.BalanceBy != balanceByRequests && cfg.BalanceBy != balanceByTokens {
+		return nil, fmt.Errorf("invalid configuration: balanceBy must be %q or %q (current value: %q)", balanceByRequests, balanceByTokens, cfg.BalanceBy)
+	}
 
 	maxBlocks := defaultMaxPrefixBlocks
 	if cfg.MaxPrefixTokensToMatch > 0 {
@@ -192,7 +198,7 @@ func (p *dataProducer) seal(b *batch) {
 	entries := b.entries
 	p.mu.Unlock()
 
-	assign(entries, p.config.MaxPerReplica, p.config.MinColocateBlocks)
+	assign(entries, p.config.MaxPerReplica, p.config.MinColocateBlocks, p.config.BalanceBy == balanceByTokens)
 	close(b.sealed)
 }
 

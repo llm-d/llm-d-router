@@ -27,9 +27,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
-	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
-	tokenizerTypes "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
+	kvctok "github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -69,7 +70,7 @@ type tokenizerPluginConfig struct {
 	//
 	// Deprecated: the UDS tokenizer backend is deprecated and will be removed
 	// in a future release. Migrate to the `vllm` HTTP /render backend.
-	TokenizerConfig tokenization.UdsTokenizerConfig `json:"udsTokenizerConfig,omitempty"`
+	TokenizerConfig kvctok.UdsTokenizerConfig `json:"udsTokenizerConfig,omitempty"`
 	// VLLM configures the vLLM /render backend.
 	VLLM *vllmConfig `json:"vllm,omitempty"`
 	// Estimate selects the tokenizer-free byte-packing backend; mutually

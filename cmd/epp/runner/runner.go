@@ -91,8 +91,8 @@ import (
 	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/preadmitter/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -101,6 +101,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
+	endpointattributefilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointattribute"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
@@ -332,6 +333,7 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 //
 // The returned Datastore is **only** meant to be used in the integration test.
 // Optional managerOverrides are applied to the controller manager options before creation.
+
 func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, managerOverrides []func(*ctrl.Options)) (ctrl.Manager, datastore.Datastore, error) {
 	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
 	if err != nil {
@@ -355,7 +357,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		return nil, nil, err
 	}
 
-	ds, err := setupDatastore(ctx, epf, int32(opts.ModelServerMetricsPort), startCrdReconcilers,
+	ds, err := setupDatastore(ctx, epf, startCrdReconcilers,
 		gknn.Namespace, gknn.Name, opts.EndpointSelector, opts.EndpointTargetPorts)
 	if err != nil {
 		setupLog.Error(err, "Failed to setup datastore")
@@ -386,6 +388,10 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 			return nil
 		}(),
+	}
+
+	if err := runserver.ConfigureMetricsTLS(opts, &metricsServerOptions); err != nil {
+		return nil, nil, err
 	}
 
 	isLeader := &atomic.Bool{}
@@ -520,18 +526,18 @@ func NewEndpointPoolFromOptions(
 	return pool, nil
 }
 
-func setupDatastore(ctx context.Context, epFactory datalayer.EndpointFactory, modelServerMetricsPort int32,
+func setupDatastore(ctx context.Context, epFactory datalayer.EndpointFactory,
 	startCrdReconcilers bool, namespace, name string, endpointSelector labels.Selector, endpointTargetPorts []int) (datastore.Datastore, error) {
 
 	if startCrdReconcilers {
-		return datastore.NewDatastore(ctx, epFactory, modelServerMetricsPort), nil
+		return datastore.NewDatastore(ctx, epFactory), nil
 	}
 	endpointPool, err := NewEndpointPoolFromOptions(namespace, name, endpointSelector, endpointTargetPorts)
 	if err != nil {
 		setupLog.Error(err, "Failed to construct endpoint pool from options")
 		return nil, err
 	}
-	return datastore.NewDatastore(ctx, epFactory, modelServerMetricsPort).WithEndpointPool(endpointPool), nil
+	return datastore.NewDatastore(ctx, epFactory).WithEndpointPool(endpointPool), nil
 }
 
 // registerInTreePlugins registers the factory functions of all known plugins
@@ -543,6 +549,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(bylabel.EncodeRoleType, bylabel.EncodeRoleFactory)
 	fwkplugin.Register(bylabel.DecodeRoleType, bylabel.DecodeRoleFactory)
 	fwkplugin.Register(bylabel.PrefillRoleType, bylabel.PrefillRoleFactory)
+	fwkplugin.Register(endpointattributefilter.EndpointAttributeFilterType, endpointattributefilter.EndpointAttributeFilterFactory)
 	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, sessionaffinityfilter.Factory)
 
 	// dataparallel profile handler
@@ -637,7 +644,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(utilization.UtilizationDetectorType, utilization.UtilizationDetectorFactory)
 	// register discovery plugins
 	fwkplugin.Register(discoveryfile.PluginType, discoveryfile.Factory)
-	// register pre-admission processor plugins
+	// register request header processor plugins
 	fwkplugin.Register(agentidentity.PluginType, agentidentity.PluginFactory)
 }
 
@@ -904,7 +911,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		poolName = "epp"
 	}
 	pool := datalayer.NewEndpointPool(namespace, poolName)
-	ds := datastore.NewDatastore(ctx, epf, int32(opts.ModelServerMetricsPort)).WithEndpointPool(pool)
+	ds := datastore.NewDatastore(ctx, epf).WithEndpointPool(pool)
 
 	// On bare metal / Slurm / Ray (or any deployment without the K8s Downward
 	// API), neither --pool-namespace nor the NAMESPACE env var is set, so the

@@ -19,10 +19,8 @@ package registry
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
@@ -46,7 +44,7 @@ const (
 	// It is set to 1 GB.
 	defaultPriorityBandMaxBytes uint64 = 1_000_000_000
 	// defaultQueue is the default queue implementation for flows.
-	defaultQueue queue.RegisteredQueueName = queue.ListQueueName
+	defaultQueue queue.RegisteredQueueName = queue.PriorityQueueName
 	// defaultFlowGCTimeout is the default duration of inactivity after which an idle flow is garbage collected.
 	// This also serves as the interval for the periodic garbage collection scan.
 	defaultFlowGCTimeout time.Duration = 5 * time.Minute
@@ -54,50 +52,6 @@ const (
 	// priority band is garbage collected. Set to 2x flow GC timeout to ensure flows are cleaned up first.
 	defaultPriorityBandGCTimeout time.Duration = 2 * defaultFlowGCTimeout
 )
-
-// --- Capability Checking ---
-
-// capabilityChecker abstracts the logic required to validate if a policy is compatible with a queue.
-type capabilityChecker interface {
-	CheckCompatibility(p flowcontrol.OrderingPolicy, q queue.RegisteredQueueName) error
-}
-
-// runtimeCapabilityChecker is the default implementation used in production.
-// It instantiates the actual plugins to inspect their required and provided capabilities.
-type runtimeCapabilityChecker struct{}
-
-func (r *runtimeCapabilityChecker) CheckCompatibility(p flowcontrol.OrderingPolicy, q queue.RegisteredQueueName) error {
-	requiredCapabilities := p.RequiredQueueCapabilities()
-
-	// We pass nil for the comparator as we only need to inspect static capabilities here.
-	tempQueue, err := queue.NewQueueFromName(q, nil)
-	if err != nil {
-		return fmt.Errorf("failed to instantiate queue type %q: %w", q, err)
-	}
-
-	if len(requiredCapabilities) == 0 {
-		return nil // The policy is compatible with any queue type.
-	}
-
-	queueCapabilities := tempQueue.Capabilities()
-	capabilitySet := make(map[flowcontrol.QueueCapability]struct{}, len(queueCapabilities))
-	for _, cap := range queueCapabilities {
-		capabilitySet[cap] = struct{}{}
-	}
-
-	for _, req := range requiredCapabilities {
-		if _, ok := capabilitySet[req]; !ok {
-			return fmt.Errorf(
-				"policy %q is not compatible with queue %q: missing capability %q: %w",
-				p.TypedName().Name,
-				tempQueue.Name(),
-				req,
-				contracts.ErrPolicyQueueIncompatible,
-			)
-		}
-	}
-	return nil
-}
 
 // --- Configuration ---
 
@@ -112,13 +66,13 @@ type PriorityBandPolicyDefaults struct {
 // Config holds the master configuration for the entire FlowRegistry.
 // It serves as the top-level blueprint, defining global settings and the templates for its priority bands.
 type Config struct {
-	// MaxBytes defines an optional, global maximum total byte size limit aggregated across all priority bands and shards.
+	// MaxBytes defines an optional, global maximum total byte size limit aggregated across all priority bands.
 	// The `controller.FlowController` enforces this limit in addition to per-band capacity limits.
 	// A value of 0 signifies that this global limit is ignored, and only per-band limits apply.
 	// Optional: Defaults to 0.
 	MaxBytes uint64
 
-	// MaxRequests defines an optional, global maximum total request count aggregated across all priority bands and shards.
+	// MaxRequests defines an optional, global maximum total request count aggregated across all priority bands.
 	// The `controller.FlowController` enforces this limit in addition to per-band capacity limits.
 	// A value of 0 signifies that this global limit is ignored, and only per-band limits apply.
 	// Optional: Defaults to 0.
@@ -145,7 +99,7 @@ type Config struct {
 	FlowGCTimeout time.Duration
 
 	// PriorityBandGCTimeout defines the duration of inactivity after which a dynamically provisioned priority band
-	// is garbage collected. A band is considered idle when it has no flows and no buffered requests across all shards.
+	// is garbage collected. A band is considered idle when it has no flows and no buffered requests.
 	// Must be >= FlowGCTimeout to ensure flows are collected before bands.
 	// Optional: Defaults to `defaultPriorityBandGCTimeout` (10 minutes).
 	PriorityBandGCTimeout time.Duration
@@ -185,14 +139,14 @@ type PriorityBandConfig struct {
 	FairnessPolicy flowcontrol.FairnessPolicy
 
 	// Queue specifies the default name of the SafeQueue implementation for flow queues in this band.
-	// Optional: Defaults to defaultQueue ("ListQueue").
+	// Optional: Defaults to defaultQueue ("PriorityQueue").
 	Queue queue.RegisteredQueueName
 
-	// MaxBytes defines the maximum total byte size for this priority band, aggregated across all shards.
+	// MaxBytes defines the maximum total byte size for this priority band.
 	// Optional: Defaults to defaultPriorityBandMaxBytes (1 GB).
 	MaxBytes uint64
 
-	// MaxRequests defines the maximum total request count for this priority band, aggregated across all shards.
+	// MaxRequests defines the maximum total request count for this priority band.
 	// A value of 0 signifies no request-count limit is enforced.
 	// Optional: Defaults to defaultPriorityBandMaxRequests (5000).
 	MaxRequests uint64
@@ -212,10 +166,8 @@ func (p *PriorityBandConfig) String() string {
 // --- Config Functional Options ---
 
 // configBuilder holds the intermediate state during NewConfig.
-// It allows us to manage build-time dependencies (like capabilityChecker) without polluting the final Config struct.
 type configBuilder struct {
-	config  *Config
-	checker capabilityChecker
+	config *Config
 }
 
 // ConfigOption defines a functional option for configuring the registry.
@@ -294,19 +246,6 @@ func WithDefaultNegativePriorityBand(band *PriorityBandConfig) ConfigOption {
 	}
 }
 
-// withCapabilityChecker overrides the compatibility checker used during validation.
-// It is intended for use only in internal unit tests.
-// test-only
-func withCapabilityChecker(checker capabilityChecker) ConfigOption {
-	return func(b *configBuilder) error {
-		if checker == nil {
-			return errors.New("cannot set nil CapabilityChecker")
-		}
-		b.checker = checker
-		return nil
-	}
-}
-
 // --- PriorityBandConfig Functional Options ---
 
 // PriorityBandConfigOption defines a functional option for configuring a single PriorityBandConfig.
@@ -334,7 +273,7 @@ func WithFairnessPolicy(policy flowcontrol.FairnessPolicy) PriorityBandConfigOpt
 	}
 }
 
-// WithQueue sets the queue implementation (e.g., "ListQueue") for flows in this band.
+// WithQueue sets the queue implementation (e.g., "PriorityQueue") for flows in this band.
 func WithQueue(name queue.RegisteredQueueName) PriorityBandConfigOption {
 	return func(p *PriorityBandConfig) error {
 		if name == "" {
@@ -376,7 +315,6 @@ func NewConfig(defaults PriorityBandPolicyDefaults, opts ...ConfigOption) (*Conf
 			PriorityBandGCTimeout: defaultPriorityBandGCTimeout,
 			PriorityBands:         make(map[int]*PriorityBandConfig),
 		},
-		checker: &runtimeCapabilityChecker{},
 	}
 
 	for _, opt := range opts {
@@ -424,7 +362,7 @@ func NewConfig(defaults PriorityBandPolicyDefaults, opts ...ConfigOption) (*Conf
 		builder.config.PriorityBands[0] = &zero
 	}
 
-	if err := builder.config.validate(builder.checker); err != nil {
+	if err := builder.config.validate(); err != nil {
 		return nil, fmt.Errorf("invalid registry config: %w", err)
 	}
 	return builder.config, nil
@@ -465,11 +403,6 @@ func (p *PriorityBandConfig) applyDefaults(defaults PriorityBandPolicyDefaults) 
 	}
 	if p.Queue == "" {
 		p.Queue = defaultQueue
-		// If the policy requires priority configurability (like EDF), we must use a heap.
-		// Otherwise, we prefer the ListQueue for performance (O(1) vs O(log n)).
-		if slices.Contains(p.OrderingPolicy.RequiredQueueCapabilities(), flowcontrol.CapabilityPriorityConfigurable) {
-			p.Queue = queue.PriorityQueueName
-		}
 	}
 	if p.MaxBytes == 0 {
 		p.MaxBytes = defaultPriorityBandMaxBytes
@@ -484,7 +417,7 @@ func (p *PriorityBandConfig) applyDefaults(defaults PriorityBandPolicyDefaults) 
 }
 
 // validate checks the integrity of a single band's configuration.
-func (p *PriorityBandConfig) validate(checker capabilityChecker) error {
+func (p *PriorityBandConfig) validate() error {
 	if p.OrderingPolicy == nil {
 		return fmt.Errorf("OrderingPolicy instance is missing for priority band %d", p.Priority)
 	}
@@ -494,17 +427,11 @@ func (p *PriorityBandConfig) validate(checker capabilityChecker) error {
 	if p.Queue == "" {
 		return fmt.Errorf("Queue required for priority band %d", p.Priority)
 	}
-	if checker != nil {
-		if err := checker.CheckCompatibility(p.OrderingPolicy, p.Queue); err != nil {
-			return fmt.Errorf("priority band %d configuration error: %w",
-				p.Priority, err)
-		}
-	}
 	return nil
 }
 
 // validate checks global constraints and delegates band validation.
-func (c *Config) validate(checker capabilityChecker) error {
+func (c *Config) validate() error {
 	if c.FlowGCTimeout <= 0 {
 		return errors.New("flowGCTimeout must be positive")
 	}
@@ -519,21 +446,21 @@ func (c *Config) validate(checker capabilityChecker) error {
 	// We use a dummy priority since the template itself doesn't have a fixed priority.
 	templateValidationCopy := *c.DefaultPriorityBand
 	templateValidationCopy.Priority = 0
-	if err := templateValidationCopy.validate(checker); err != nil {
+	if err := templateValidationCopy.validate(); err != nil {
 		return fmt.Errorf("invalid DefaultPriorityBand configuration: %w", err)
 	}
 
 	if c.DefaultNegativePriorityBand != nil {
 		negTemplateCopy := *c.DefaultNegativePriorityBand
 		negTemplateCopy.Priority = -1
-		if err := negTemplateCopy.validate(checker); err != nil {
+		if err := negTemplateCopy.validate(); err != nil {
 			return fmt.Errorf("invalid DefaultNegativePriorityBand configuration: %w", err)
 		}
 	}
 
 	// Validate statically configured bands.
 	for _, band := range c.PriorityBands {
-		if err := band.validate(checker); err != nil {
+		if err := band.validate(); err != nil {
 			return err
 		}
 	}

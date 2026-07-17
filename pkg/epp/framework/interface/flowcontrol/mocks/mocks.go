@@ -146,15 +146,13 @@ type MockFlowQueueAccessor struct {
 	PeekV           flowcontrol.QueueItemAccessor
 	FlowKeyV        flowcontrol.FlowKey
 	OrderingPolicyV flowcontrol.OrderingPolicy
-	CapabilitiesV   []flowcontrol.QueueCapability
 }
 
-func (m *MockFlowQueueAccessor) Name() string                                { return m.NameV }
-func (m *MockFlowQueueAccessor) Len() int                                    { return m.LenV }
-func (m *MockFlowQueueAccessor) ByteSize() uint64                            { return m.ByteSizeV }
-func (m *MockFlowQueueAccessor) OrderingPolicy() flowcontrol.OrderingPolicy  { return m.OrderingPolicyV }
-func (m *MockFlowQueueAccessor) FlowKey() flowcontrol.FlowKey                { return m.FlowKeyV }
-func (m *MockFlowQueueAccessor) Capabilities() []flowcontrol.QueueCapability { return m.CapabilitiesV }
+func (m *MockFlowQueueAccessor) Name() string                               { return m.NameV }
+func (m *MockFlowQueueAccessor) Len() int                                   { return m.LenV }
+func (m *MockFlowQueueAccessor) ByteSize() uint64                           { return m.ByteSizeV }
+func (m *MockFlowQueueAccessor) OrderingPolicy() flowcontrol.OrderingPolicy { return m.OrderingPolicyV }
+func (m *MockFlowQueueAccessor) FlowKey() flowcontrol.FlowKey               { return m.FlowKeyV }
 
 func (m *MockFlowQueueAccessor) Peek() flowcontrol.QueueItemAccessor {
 	return m.PeekV
@@ -205,9 +203,8 @@ var _ flowcontrol.PriorityBandAccessor = &MockPriorityBandAccessor{}
 // Simple accessors are configured with public value fields (e.g., TypedNameV).
 // Complex methods with logic are configured with function fields (e.g., LessFunc).
 type MockOrderingPolicy struct {
-	TypedNameV                 plugin.TypedName
-	LessFunc                   func(a, b flowcontrol.QueueItemAccessor) bool
-	RequiredQueueCapabilitiesV []flowcontrol.QueueCapability
+	TypedNameV plugin.TypedName
+	LessFunc   func(a, b flowcontrol.QueueItemAccessor) bool
 }
 
 func (m *MockOrderingPolicy) TypedName() plugin.TypedName { return m.TypedNameV }
@@ -217,10 +214,6 @@ func (m *MockOrderingPolicy) Less(a, b flowcontrol.QueueItemAccessor) bool {
 		return m.LessFunc(a, b)
 	}
 	return false
-}
-
-func (m *MockOrderingPolicy) RequiredQueueCapabilities() []flowcontrol.QueueCapability {
-	return m.RequiredQueueCapabilitiesV
 }
 
 var _ flowcontrol.OrderingPolicy = &MockOrderingPolicy{}

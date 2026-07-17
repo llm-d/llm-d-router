@@ -17,11 +17,20 @@ limitations under the License.
 package server
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/require"
+)
+
+const (
+	testPoolName   = "test-pool"
+	testConfigFile = "fake-config.yaml"
 )
 
 // TestEndpointTargetPorts
@@ -89,7 +98,7 @@ func TestEndpointTargetPorts(t *testing.T) {
 			opts.AddFlags(tt.fs)
 
 			argv := make([]string, 0, 4+len(tt.args))
-			argv = append(argv, "--endpoint-selector", "app=vllm", "--config-file", "fake-config.yaml") // avoid an options validation error
+			argv = append(argv, "--endpoint-selector", "app=vllm", "--config-file", testConfigFile) // avoid an options validation error
 			argv = append(argv, tt.args...)
 
 			if err := tt.fs.Parse(argv); err != nil {
@@ -200,7 +209,7 @@ func TestGRPCFlags(t *testing.T) {
 			opts.AddFlags(fs)
 
 			argv := make([]string, 0, 4+len(tt.args))
-			argv = append(argv, "--pool-name", "test-pool", "--config-file", "fake-config.yaml")
+			argv = append(argv, "--pool-name", testPoolName, "--config-file", testConfigFile)
 			argv = append(argv, tt.args...)
 
 			if err := fs.Parse(argv); err != nil {
@@ -234,14 +243,14 @@ func TestGRPCFlags(t *testing.T) {
 
 func TestValidateDirectValues(t *testing.T) {
 	opts := NewOptions()
-	opts.PoolName = "test-pool" // bypass other validations
+	opts.PoolName = testPoolName // bypass other validations
 	opts.GRPCMaxRecvMsgSize = -5
 	if err := opts.Validate(); err == nil {
 		t.Errorf("Expected Validate() to fail for negative GRPCMaxRecvMsgSize, but it succeeded")
 	}
 
 	opts = NewOptions()
-	opts.PoolName = "test-pool"
+	opts.PoolName = testPoolName
 	opts.GRPCMaxSendMsgSize = -5
 	if err := opts.Validate(); err == nil {
 		t.Errorf("Expected Validate() to fail for negative GRPCMaxSendMsgSize, but it succeeded")
@@ -266,4 +275,92 @@ func TestDrainTimeoutFlag(t *testing.T) {
 	if opts.DrainTimeout != 30*time.Second {
 		t.Errorf("DrainTimeout = %v, want 30s", opts.DrainTimeout)
 	}
+}
+
+func TestValidateConfigFlagsMutuallyExclusive(t *testing.T) {
+	opts := NewOptions()
+	opts.PoolName = "config-flags-pool" // bypass the pool/selector validation
+	opts.ConfigFile = testConfigFile
+	opts.ConfigText = "fake: config"
+
+	err := opts.Validate()
+	if err == nil {
+		t.Fatalf("Expected Validate() to fail when both config flags are set, but it succeeded")
+	}
+	for _, want := range []string{"config-file", "config-text"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate() error must reference the %q flag, got: %v", want, err)
+		}
+	}
+}
+
+func TestMetricsMTLSFlags(t *testing.T) {
+	fs := pflag.NewFlagSet("metrics-mtls", pflag.ContinueOnError)
+	opts := NewOptions()
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{
+		"--pool-name", testPoolName, "--config-file", testConfigFile,
+		"--metrics-cert-dir", "/etc/epp-tls",
+		"--metrics-client-ca-file", "/etc/epp-ca/ca.crt",
+	}))
+	require.Equal(t, "/etc/epp-tls", opts.MetricsCertDir)
+	require.Equal(t, "/etc/epp-ca/ca.crt", opts.MetricsClientCAFile)
+}
+
+func TestValidateMetricsMTLS(t *testing.T) {
+	tests := []struct {
+		name         string
+		clientCA     string
+		certDir      string
+		endpointAuth bool
+		wantErr      error
+	}{
+		{name: "neither set"},
+		{name: "endpoint auth only", endpointAuth: true},
+		{name: "mTLS (cert dir + client CA)", clientCA: "ca.crt", certDir: "tls"},
+		{name: "cert dir + endpoint auth", certDir: "tls", endpointAuth: true},
+		{name: "cert dir + client CA + auth", clientCA: "ca.crt", certDir: "tls", endpointAuth: true},
+		{name: "cert dir only, no auth (fail-open)", certDir: "tls", wantErr: errMetricsTLSWithoutAuth},
+		{name: "client CA without cert dir", clientCA: "ca.crt", wantErr: errMetricsClientCARequiresCertDir},
+		{name: "client CA without cert dir, auth on", clientCA: "ca.crt", endpointAuth: true, wantErr: errMetricsClientCARequiresCertDir},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.AddFlags(pflag.NewFlagSet(tc.name, pflag.ContinueOnError))
+			opts.PoolName = testPoolName
+			opts.MetricsClientCAFile = tc.clientCA
+			opts.MetricsCertDir = tc.certDir
+			opts.MetricsEndpointAuth = tc.endpointAuth
+			err := opts.Validate()
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestCompleteMetricsCertFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	missing := NewOptions()
+	missing.AddFlags(pflag.NewFlagSet("missing", pflag.ContinueOnError))
+	missing.MetricsCertDir = dir
+	require.ErrorIs(t, missing.Complete(), errMetricsCertUnreadable)
+
+	// tls.crt present but tls.key still missing: partial cert must fail.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.crt"), []byte("x"), 0o600))
+	partial := NewOptions()
+	partial.AddFlags(pflag.NewFlagSet("partial", pflag.ContinueOnError))
+	partial.MetricsCertDir = dir
+	require.ErrorIs(t, partial.Complete(), errMetricsCertUnreadable)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.key"), []byte("x"), 0o600))
+
+	present := NewOptions()
+	present.AddFlags(pflag.NewFlagSet("present", pflag.ContinueOnError))
+	present.MetricsCertDir = dir
+	require.NoError(t, present.Complete())
 }

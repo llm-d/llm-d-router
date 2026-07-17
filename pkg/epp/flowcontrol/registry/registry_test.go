@@ -94,7 +94,7 @@ func newRegistryTestHarness(t *testing.T, opts harnessOptions) *registryTestHarn
 	}
 }
 
-// assertFlowExists synchronously checks if a flow's queue exists on the first shard.
+// assertFlowExists synchronously checks if a flow's queue exists.
 func (h *registryTestHarness) assertFlowExists(key flowcontrol.FlowKey, msgAndArgs ...any) {
 	h.t.Helper()
 	_, err := h.fr.ManagedQueue(key)
@@ -170,17 +170,12 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 		badBand, err := NewPriorityBandConfig(highPriority, defaults, WithQueue(badQueueName))
 		require.NoError(t, err)
 
-		// Create a Config that uses a mock checker to bypass the strict validation.
-		// The default checker would reject "non-existent-policy", but our mock says it's fine.
-		// This allows us to instantiate the Registry with a latent configuration bomb.
+		// An unknown queue name passes config validation (queue construction is deferred) and only
+		// fails later at JIT flow registration. This instantiates the Registry with a latent
+		// configuration bomb that detonates on first use.
 		cfg, err := NewConfig(
 			defaults,
 			WithPriorityBand(badBand),
-			withCapabilityChecker(&mockCapabilityChecker{
-				checkCompatibilityFunc: func(flowcontrol.OrderingPolicy, queue.RegisteredQueueName) error {
-					return nil // Approve everything.
-				},
-			}),
 		)
 		require.NoError(t, err)
 
@@ -196,7 +191,7 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 		assert.ErrorContains(t, err, "no SafeQueue registered", "The returned error must propagate the reason")
 	})
 
-	t.Run("Handle_Shards_ShouldReturnAllActiveShardsAndBeACopy", func(t *testing.T) {
+	t.Run("Handle_GetDataPlane_ShouldReturnNonNil", func(t *testing.T) {
 		t.Parallel()
 		// Create a registry
 		h := newRegistryTestHarness(t, harnessOptions{})
@@ -1001,12 +996,12 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 		assert.False(t, exists3, "Band 3 should be collected")
 	})
 
-	t.Run("ShouldCollectBand_AcrossMultipleShards", func(t *testing.T) {
+	t.Run("ShouldCollectBand_AfterFlowIdle", func(t *testing.T) {
 		t.Parallel()
 		h := newRegistryTestHarness(t, harnessOptions{})
 		key := flowcontrol.FlowKey{ID: "test-flow", Priority: dynamicPrio}
 
-		// Create flow on all shards
+		// Create flow
 		h.openConnectionOnFlow(key)
 		// Verify band exists
 		_, ok := h.fr.priorityBands.Load(dynamicPrio)
@@ -1324,20 +1319,16 @@ func TestFlowRegistry_FlowErrorScoping(t *testing.T) {
 	t.Parallel()
 	defaults := newTestPriorityBandPolicyDefaults()
 
-	// Create a registry with a capability checker that passes validation but using a queue name that doesn't exist.
+	// Use a queue name that doesn't exist. It passes config validation (queue construction is
+	// deferred) so the failure surfaces only when a flow is provisioned.
 	failQueueName := queue.RegisteredQueueName("NonExistentQueue")
-	mockChecker := &mockCapabilityChecker{
-		checkCompatibilityFunc: func(p flowcontrol.OrderingPolicy, q queue.RegisteredQueueName) error {
-			return nil // Bypass validation.
-		},
-	}
 
 	// Set the failing queue as the default band so the priority provisioned
 	// below inherits it and flow initialization fails.
 	failingBand, err := NewPriorityBandConfig(0, defaults, WithQueue(failQueueName))
 	require.NoError(t, err)
 
-	cfg, err := NewConfig(defaults, withCapabilityChecker(mockChecker), WithDefaultPriorityBand(failingBand))
+	cfg, err := NewConfig(defaults, WithDefaultPriorityBand(failingBand))
 	require.NoError(t, err)
 
 	registry := NewFlowRegistry(cfg, logr.Discard())

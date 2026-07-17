@@ -85,7 +85,7 @@ Creates a new `kind` cluster (or reuses an existing one) in the `default` namesp
 > [!NOTE]
 > You can pre-pull external images to avoid slow downloads:
 > ```
-> docker pull ghcr.io/llm-d/llm-d-inference-sim:v0.9.2
+> docker pull ghcr.io/llm-d/llm-d-inference-sim:v0.10.2
 > docker pull vllm/vllm-openai-cpu:v0.21.0
 > ```
 
@@ -447,7 +447,7 @@ The `deploy/components/` directory contains all reusable Kustomize components:
 - `vllm-decode/` — Decode pod with routing sidecar
 
 **Deployment overlays** — applied on top of the base components:
-- `overlays/simulator/` — adds `--mode=${VLLM_SIM_MODE}`, vllm renderer sidecar, KV cache args, and `--zmq-endpoint` on Decode. Included by default in all dev scenario overlays.
+- `overlays/simulator/` — adds `--mode=${VLLM_SIM_MODE}`, KV cache args, and `--zmq-endpoint` on Decode. Included by default in all dev scenario overlays.
 - `overlays/real-vllm/` — adds `--kv-events-config` on Decode, `--ec-transfer-config` on Encode, and a shared PVC for encoder embeddings.
 
 **Infrastructure components** — shared cluster infrastructure:
@@ -523,12 +523,12 @@ a shared PVC (`ec-cache-pvc`) for encoder embeddings transfer.
 
 | Component | What it adds | When to use |
 |---|---|---|
-| `overlays/simulator/` | `--mode=${VLLM_SIM_MODE}`, vLLM renderer, KV cache args, `--zmq-endpoint` on Decode | Dev/test with simulator image |
+| `overlays/simulator/` | `--mode=${VLLM_SIM_MODE}`, KV cache args, `--zmq-endpoint` on Decode | Dev/test with simulator image |
 | `overlays/real-vllm/` | `--kv-events-config` on Decode (per-pod ZMQ publisher), `--ec-transfer-config` on Encode, ec-cache PVC | Production with real vLLM image |
 
 | Variable | Default | Description |
 |---|---|---|
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.9.2` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`). Defaults to the simulator image. |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`). Defaults to the simulator image. |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. `echo` returns the input prompt as the response (useful for routing validation). `random` returns random sentences from a pre-defined bank. Only applies when using the simulator overlay. |
 
 ### Cleanup
@@ -622,7 +622,7 @@ kubectl --context kind-e2e-tests get pods
 | `VLLM_EXTRA_ARGS_E` | _(empty)_ | Additional flags for the Encoder vLLM container (e.g. `--mm-processor-kwargs={}`) |
 | `VLLM_EXTRA_ARGS_P` | _(empty)_ | Additional flags for the Prefill vLLM container (e.g. `--gpu-memory-utilization=0.9`) |
 | `VLLM_EXTRA_ARGS_D` | _(empty)_ | Additional flags for the Decode vLLM container (e.g. `--tensor-parallel-size=2`) |
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.9.2` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. Supported values: `echo` (returns the input prompt as the response), `random` (returns a random sentence from a pre-defined bank) |
 | `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` | Routing sidecar image loaded into the Kind cluster |
 | `VLLM_RENDER_IMAGE` | `vllm/vllm-openai-cpu:v0.21.0` | vLLM renderer image loaded into the Kind cluster |
