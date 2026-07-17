@@ -55,8 +55,6 @@ Use when hand-tuned, per-band ceiling values are required and the algorithmic do
 - Ceilings must be monotonically non-increasing when priorities are sorted highest-first.
 - `shape`, `minCeiling`, and `maxCeiling` must not be set; they are rejected at config load time.
 
-When the policy receives an active priority with no entry in the map (priorities are dynamic at runtime), it returns `0.0` for that priority, consistent with the `UsageLimitPolicy` contract that `0.0` represents a fully gated priority.
-
 **Parameters:**
 
 - `shape` (string, optional, default: `"linear"`): Interpolation curve. Currently only `"linear"` is supported.

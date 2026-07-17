@@ -56,7 +56,6 @@ func PolicyFactory(name string, params *json.Decoder, _ plugin.Handle) (plugin.P
 type priorityHoldbackPolicy struct {
 	name      string
 	cMax      float64
-	cMin      float64
 	computeFn func(priorities []int) (ceilings []float64)
 	// enableSinglePriorityBypass controls whether a single active priority skips holdback
 	// and receives cMax directly. This optimization applies to algorithmic domains (rank, value)
@@ -71,7 +70,6 @@ func newPriorityHoldbackPolicy(cfg config) *priorityHoldbackPolicy {
 	p := &priorityHoldbackPolicy{
 		name: PolicyType,
 		cMax: cfg.maxCeiling,
-		cMin: cfg.minCeiling,
 	}
 	switch cfg.domain {
 	case domainRank:
@@ -162,10 +160,7 @@ func computeLimitLinearProportional(cMin, cMax float64, priorities []int) (ceili
 	return ceilings
 }
 
-// computeLimitExplicit looks up each priority in the configured map and returns the ceiling slice
-// in the same order as the input. Missing entries return 0.0, consistent with the UsageLimitPolicy
-// contract where 0.0 represents a fully gated priority. This provides a safe default without
-// introducing additional fallback semantics.
+// computeLimitExplicit looks up each configured priority ceiling.
 func computeLimitExplicit(ceilings map[int]float64, priorities []int) []float64 {
 	result := make([]float64, len(priorities))
 	for i, p := range priorities {

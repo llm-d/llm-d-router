@@ -116,7 +116,6 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 		domain: *safeCfg.Domain,
 	}
 	if *safeCfg.Domain == domainExplicit {
-		cfg.shape = defaultShape
 		cfg.ceilings = safeCfg.Ceilings
 	} else {
 		cfg.shape = *safeCfg.Shape
@@ -196,6 +195,9 @@ func validateConfig(cfg *apiConfig) error {
 	if cfg.MinCeiling != nil && cfg.MaxCeiling != nil && *cfg.MinCeiling >= *cfg.MaxCeiling {
 		errs = append(errs, fmt.Errorf("minCeiling (%f) must be strictly less than maxCeiling (%f)",
 			*cfg.MinCeiling, *cfg.MaxCeiling))
+	}
+	if len(cfg.Ceilings) > 0 {
+		errs = append(errs, errors.New("ceilings must not be set when domain is not \"explicit\""))
 	}
 
 	return errors.Join(errs...)

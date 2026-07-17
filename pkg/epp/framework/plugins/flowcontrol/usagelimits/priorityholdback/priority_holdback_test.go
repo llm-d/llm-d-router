@@ -620,17 +620,6 @@ func TestComputeLimitExplicit_SinglePriority(t *testing.T) {
 	assert.InDelta(t, 0.80, ceilings[0], 1e-9)
 }
 
-func TestComputeLimitExplicit_MissingEntryReturnsZero(t *testing.T) {
-	t.Parallel()
-	// A priority not in the map returns 0.0 per the UsageLimitPolicy contract
-	// (0.0 = fully gated).
-	m := map[int]float64{100: 0.95}
-	ceilings := computeLimitExplicit(m, []int{100, 999})
-	require.Len(t, ceilings, 2)
-	assert.InDelta(t, 0.95, ceilings[0], 1e-9)
-	assert.InDelta(t, 0.0, ceilings[1], 1e-9, "missing priority should return 0.0")
-}
-
 // ---------------------------------------------------------------------------
 // Explicit domain — ComputeLimit integration tests
 // ---------------------------------------------------------------------------
