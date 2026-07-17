@@ -71,7 +71,6 @@ func newPriorityHoldbackPolicy(cfg config) *priorityHoldbackPolicy {
 	p := &priorityHoldbackPolicy{
 		name: PolicyType,
 		cMax: cfg.maxCeiling,
-		cMin: cfg.minCeiling,
 	}
 	switch cfg.domain {
 	case domainRank:
@@ -155,9 +154,7 @@ func computeLimitLinearProportional(cMin, cMax float64, priorities []int, ceilin
 	}
 }
 
-// computeLimitExplicit looks up each priority in the configured map and writes the ceiling
-// into the caller-provided buffer in the same order as the input. Missing entries default to 0.0,
-// consistent with the UsageLimitPolicy contract where 0.0 represents a fully gated priority.
+// computeLimitExplicit looks up each configured priority ceiling.
 func computeLimitExplicit(ceilings map[int]float64, priorities []int, out []float64) {
 	for i, p := range priorities {
 		out[i] = ceilings[p]
