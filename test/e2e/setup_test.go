@@ -14,8 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	configloader "github.com/llm-d/llm-d-router/pkg/epp/config/loader"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -26,7 +24,6 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${MODEL_NAME}":              simModelName,
 		"${POOL_NAME}":               poolName,
 		"${VLLM_IMAGE}":              vllmSimImage,
-		"${VLLM_RENDER_IMAGE}":       vllmRenderImage,
 		"${SIDECAR_IMAGE}":           sideCarImage,
 		"${VLLM_DATA_PARALLEL_SIZE}": "1",
 		"${VLLM_SIM_MODE}":           "echo",
@@ -35,9 +32,11 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${EPP_NAME}":                "e2e-epp",
 		"${NAMESPACE}":               nsName,
 		"${HF_TOKEN}":                os.Getenv("HF_TOKEN"),
-		"${VLLM_EXTRA_ARGS_E}":       "",
-		"${VLLM_EXTRA_ARGS_P}":       "",
-		"${VLLM_EXTRA_ARGS_D}":       "",
+		"${VLLM_EXTRA_ARGS_E}":       "--force-dummy-tokenizer",
+		"${VLLM_EXTRA_ARGS_P}":       "--force-dummy-tokenizer",
+		"${VLLM_EXTRA_ARGS_D}":       "--force-dummy-tokenizer",
+		"${VLLM_RENDER_URL}":         fmt.Sprintf("http://vllm-render.%s.svc.cluster.local:%s", nsName, vllmRenderPort),
+		"${VLLM_RENDER_PORT}":        vllmRenderPort,
 	}
 	for k, v := range extra {
 		subs[k] = v
@@ -48,10 +47,6 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 	// Remove labels with empty values (produced when ${DECODE_ROLE} is empty)
 	manifests = removeEmptyLabels(manifests)
 	manifests = removeEmptyArgs(manifests)
-	// remove render sidecar if model is simulated
-	if !isModelReal(subs["${MODEL_NAME}"]) {
-		manifests = removeRenderSidecar(manifests)
-	}
 	objects := testutils.CreateObjsFromYaml(testConfig, manifests, nsName)
 	podsInDeploymentsReady(nsName, objects)
 	return objects
@@ -130,6 +125,18 @@ func createModelServersEPDUnified(replicas int) []string {
 	})
 }
 
+func createRender(nsName string) []string {
+	renderYamls := substituteMany(testutils.ReadYaml(renderManifest),
+		map[string]string{
+			"${MODEL_NAME}":        kvModelName,
+			"${VLLM_RENDER_IMAGE}": vllmRenderImage,
+			"${VLLM_RENDER_PORT}":  vllmRenderPort,
+		})
+	objects := testutils.CreateObjsFromYaml(testConfig, renderYamls, nsName)
+	podsInDeploymentsReady(nsName, objects)
+	return objects
+}
+
 func createEndPointPicker(eppConfig string) []string {
 	objects := createEndPointPickerHelper(eppConfig, 1, false, true)
 	podsInDeploymentsReady(getNamespace(), objects)
@@ -175,21 +182,14 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 	eppYamls := testutils.ReadYaml(eppManifest)
 	eppYamls = substituteMany(eppYamls,
 		map[string]string{
-			"${EPP_NAME}":          eppName,
-			"${EPP_IMAGE}":         eppImage,
-			"${VLLM_RENDER_IMAGE}": vllmRenderImage,
-			// The render sidecar needs a real, fetchable model. Sim tests
-			// don't query it; the cost is paying weights-load on every EPP.
-			"${MODEL_NAME}":             kvModelName,
+			"${EPP_NAME}":               eppName,
+			"${EPP_IMAGE}":              eppImage,
 			"${NAMESPACE}":              nsName,
 			"${POOL_NAME}":              simModelName + "-inference-pool",
 			"${METRICS_ENDPOINT_AUTH}":  "false",
 			"${EPP_REPLICA_COUNT}":      strconv.Itoa(replicas),
 			"${ENABLE_LEADER_ELECTION}": strconv.FormatBool(isLeaderElectionEnabled),
 		})
-	if !usesTokenProducer(eppConfig) {
-		eppYamls = removeRenderSidecar(eppYamls)
-	}
 	eppYamls = appendEppArgs(eppYamls, eppExtraArgs)
 
 	if waitForReady {
@@ -197,15 +197,4 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 	}
 	objs := testutils.CreateUnstructuredObjs(testConfig, eppYamls)
 	return append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {})...)
-}
-
-func usesTokenProducer(eppConfig string) bool {
-	cfg, _, err := configloader.LoadRawConfig([]byte(eppConfig), ginkgo.GinkgoLogr)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	for _, plugin := range cfg.Plugins {
-		if plugin.Type == tokenizer.PluginType {
-			return true
-		}
-	}
-	return false
 }

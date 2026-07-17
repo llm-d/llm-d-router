@@ -59,6 +59,7 @@ var (
 	baseTransport = &http.Transport{
 		MaxIdleConns:        maxIdleConnections,
 		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+		IdleConnTimeout:     maxIdleTime,
 		// TODO: set additional timeouts, transport options, etc.
 	}
 )

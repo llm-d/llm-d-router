@@ -54,6 +54,8 @@ const (
 	serviceAccountManifest = "../../deploy/components/inference-gateway/service-accounts.yaml"
 	// servicesManifest is the manifest for the EPP's service resources.
 	servicesManifest = "../../deploy/environments/dev/e2e-infra/services.yaml"
+	// renderManifest is the manifest for the standalone vLLM render deployment and service.
+	renderManifest = "../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
 
 	// CI shards scheduler e2e specs with label filters.
 	extendedTestLabel      = "Extended"
@@ -79,6 +81,7 @@ var (
 	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.2", ginkgo.GinkgoLogr)
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
+	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
 	numProcesses     = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
 	// baseNsName is the base of the namespace in which the K8S objects will be created
@@ -95,6 +98,7 @@ var (
 	rbacObjects           []string
 	serviceAccountObjects []string
 	serviceObjects        []string
+	renderObjects         []string
 	infPoolObjects        []string
 	createdNameSpace      bool
 
@@ -133,6 +137,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
 	serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls, nsName)
 	serviceObjects = testutils.ApplyYAMLFile(testConfig, servicesManifest, nsName)
+	renderObjects = createRender(nsName)
 
 	// Prevent failure in tests due to InferencePool not existing before the test
 	infPoolObjects = createInferencePool(1, false)
@@ -190,6 +195,7 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 			nsName := getNamespace()
 			ginkgo.By("Deleting created Kubernetes objects")
 			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, renderObjects, nsName)
 			testutils.DeleteObjects(testConfig, serviceObjects, nsName)
 			testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
 			testutils.DeleteObjects(testConfig, rbacObjects, nsName)
@@ -242,7 +248,7 @@ func setupK8sCluster() {
 	kindLoadImage(vllmSimImage)
 	kindLoadImage(eppImage)
 	kindLoadImage(sideCarImage)
-	if loadRenderImage {
+	if loadRenderImage && vllmRenderImage != vllmSimImage {
 		kindLoadImage(vllmRenderImage)
 	}
 }
