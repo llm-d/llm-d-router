@@ -75,14 +75,24 @@ func NewCollector() *Collector {
 	return &Collector{done: make(chan struct{})}
 }
 
-// Start launches the collection goroutine.
-// Each PollingDispatcher owns its extractors; the Collector calls Dispatch per tick.
-func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, dispatchers []fwkdl.PollingDispatcher) error {
-	if len(dispatchers) == 0 {
+// Start launches the collection goroutines for polling and streaming dispatchers.
+func (c *Collector) Start(
+	ctx context.Context,
+	pollingTicker Ticker,
+	ep fwkdl.Endpoint,
+	pollers []fwkdl.PollingDispatcher,
+	streamers []fwkdl.StreamingDispatcher,
+) error {
+	if len(pollers) == 0 && len(streamers) == 0 {
 		return errors.New("cannot start collector with empty dispatchers")
 	}
-	for _, d := range dispatchers {
-		if d == nil {
+	for _, p := range pollers {
+		if p == nil {
+			return errors.New("cannot add nil dispatcher")
+		}
+	}
+	for _, s := range streamers {
+		if s == nil {
 			return errors.New("cannot add nil dispatcher")
 		}
 	}
@@ -97,11 +107,11 @@ func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
-	go c.run(ctx, ticker, ep, dispatchers)
+	go c.run(ctx, pollingTicker, ep, pollers, streamers)
 	return nil
 }
 
-// Stop cancels the collection goroutine and blocks until it has exited. Idempotent.
+// Stop cancels the collection goroutines and blocks until all have exited. Idempotent.
 func (c *Collector) Stop() {
 	c.mu.Lock()
 	cancel := c.cancel
@@ -112,18 +122,49 @@ func (c *Collector) Stop() {
 	}
 }
 
-func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, dispatchers []fwkdl.PollingDispatcher) {
-	defer func() {
+func (c *Collector) run(
+	ctx context.Context,
+	pollingTicker Ticker,
+	ep fwkdl.Endpoint,
+	pollers []fwkdl.PollingDispatcher,
+	streamers []fwkdl.StreamingDispatcher,
+) {
+	var wg sync.WaitGroup
+
+	if len(pollers) > 0 && pollingTicker != nil {
+		wg.Add(1)
+		go c.runPolling(ctx, pollingTicker, ep, pollers, &wg)
+	}
+
+	for _, s := range streamers {
+		wg.Add(1)
+		go c.runStreaming(ctx, ep, s, &wg)
+	}
+
+	go func() {
+		wg.Wait()
+		if pollingTicker != nil {
+			pollingTicker.Stop()
+		}
 		close(c.done)
-		ticker.Stop()
 	}()
+}
+
+func (c *Collector) runPolling(
+	ctx context.Context,
+	pollingTicker Ticker,
+	ep fwkdl.Endpoint,
+	dispatchers []fwkdl.PollingDispatcher,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
 	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().GetIPAddress())
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.Channel():
+		case <-pollingTicker.Channel():
 			for _, disp := range dispatchers {
 				if ctx.Err() != nil {
 					return
@@ -137,5 +178,21 @@ func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, d
 				cancel()
 			}
 		}
+	}
+}
+
+func (c *Collector) runStreaming(
+	ctx context.Context,
+	ep fwkdl.Endpoint,
+	disp fwkdl.StreamingDispatcher,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().GetIPAddress())
+
+	if err := disp.Start(ctx, ep); err != nil && ctx.Err() == nil {
+		tn := disp.TypedName()
+		metrics.RecordDataLayerPollError(tn.Type)
+		logger.V(logging.DEBUG).Info("streaming failed", "source", tn, "err", err)
 	}
 }

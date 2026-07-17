@@ -175,6 +175,47 @@ func (p *pollingDispatchers) Dispatchers() map[string]fwkdl.PollingDispatcher {
 func (p *pollingDispatchers) Count() int    { p.mu.RLock(); defer p.mu.RUnlock(); return len(p.m) }
 func (p *pollingDispatchers) IsEmpty() bool { return p.Count() == 0 }
 
+// streamingDispatchers stores StreamingDispatchers keyed by source name.
+type streamingDispatchers struct {
+	mu sync.RWMutex
+	m  map[string]fwkdl.StreamingDispatcher
+}
+
+func newStreamingDispatchers() *streamingDispatchers {
+	return &streamingDispatchers{m: make(map[string]fwkdl.StreamingDispatcher)}
+}
+
+func (s *streamingDispatchers) Register(disp fwkdl.StreamingDispatcher) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name := disp.TypedName().Name
+	if _, exists := s.m[name]; exists {
+		return fmt.Errorf("duplicate %s source name %q", variantStreaming, name)
+	}
+	s.m[name] = disp
+	return nil
+}
+
+func (s *streamingDispatchers) Get(name string) (fwkdl.StreamingDispatcher, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d, ok := s.m[name]
+	return d, ok
+}
+
+func (s *streamingDispatchers) Dispatchers() map[string]fwkdl.StreamingDispatcher {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]fwkdl.StreamingDispatcher, len(s.m))
+	for k, v := range s.m {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *streamingDispatchers) Count() int    { s.mu.RLock(); defer s.mu.RUnlock(); return len(s.m) }
+func (s *streamingDispatchers) IsEmpty() bool { return s.Count() == 0 }
+
 // notificationManager owns the registered NotificationSources.
 // GVK uniqueness is enforced per-Configure-call by a caller-owned gvk tracker
 // (see runtime.go); the manager itself is pure typed storage.

@@ -30,17 +30,21 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
+	sourcezmq "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/zmqmetrics"
 )
 
 var (
-	ErrSourceTypeCollision    = errors.New("source type registered across variants")
-	ErrDuplicateExtractorType = errors.New("duplicate extractor type configured for the same source")
+	ErrSourceTypeCollision       = errors.New("source type registered across variants")
+	ErrDuplicateExtractorType    = errors.New("duplicate extractor type configured for the same source")
+	ErrConflictingMetricsSources = errors.New("conflicting metrics sources configured")
 )
 
 type sourceVariant string
 
 const (
 	variantPolling      sourceVariant = "polling"
+	variantStreaming    sourceVariant = "streaming"
 	variantNotification sourceVariant = "notification"
 	variantEndpoint     sourceVariant = "endpoint"
 )
@@ -50,6 +54,7 @@ type Runtime struct {
 	pollingInterval time.Duration // used for polling sources
 
 	dispatchers  *pollingDispatchers
+	streaming    *streamingDispatchers
 	notification *notificationManager
 	endpoint     *endpointManager
 	extractors   *extractorMap
@@ -57,7 +62,7 @@ type Runtime struct {
 	pendingMu            sync.Mutex
 	pendingRegistrations []fwkdl.PendingRegistration // code-registered (source-type, extractor) pairs, resolved by Configure()
 
-	collectors *collectorManager // per-endpoint poller, keyed by namespaced name
+	collectors *collectorManager // per-endpoint poller and streamer, keyed by namespaced name
 	logger     logr.Logger       // Set in Configure; used where no context is available (e.g. ReleaseEndpoint).
 }
 
@@ -75,6 +80,7 @@ func NewRuntime(pollingInterval time.Duration) *Runtime {
 	return &Runtime{
 		pollingInterval: interval,
 		dispatchers:     newPollingDispatchers(),
+		streaming:       newStreamingDispatchers(),
 		notification:    newNotificationManager(),
 		endpoint:        newEndpointManager(),
 		extractors:      newExtractorMap(),
@@ -124,8 +130,16 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 				return err
 			}
 
-			// PollingDispatchers own their extractors; notification/endpoint use extractorMap.
+			// PollingDispatchers and StreamingDispatchers own their extractors; notification/endpoint use extractorMap.
 			if disp, ok := src.(fwkdl.PollingDispatcher); ok {
+				for _, ext := range srcCfg.Extractors {
+					if err := disp.AppendExtractor(ext); err != nil {
+						return fmt.Errorf("dispatcher %s rejected extractor %s: %w",
+							src.TypedName(), ext.TypedName(), err)
+					}
+					markBound(srcName, ext.TypedName().Type)
+				}
+			} else if disp, ok := src.(fwkdl.StreamingDispatcher); ok {
 				for _, ext := range srcCfg.Extractors {
 					if err := disp.AppendExtractor(ext); err != nil {
 						return fmt.Errorf("dispatcher %s rejected extractor %s: %w",
@@ -149,6 +163,9 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 	}
 
 	if err := r.validateNoCrossVariantCollisions(); err != nil {
+		return err
+	}
+	if err := r.validateMetricSourceConflicts(); err != nil {
 		return err
 	}
 
@@ -197,6 +214,11 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 				return fmt.Errorf("dispatcher %s rejected pending extractor %s: %w",
 					matchedSrc.TypedName(), pending.Extractor.TypedName(), err)
 			}
+		} else if disp, ok := matchedSrc.(fwkdl.StreamingDispatcher); ok {
+			if err := disp.AppendExtractor(pending.Extractor); err != nil {
+				return fmt.Errorf("dispatcher %s rejected pending extractor %s: %w",
+					matchedSrc.TypedName(), pending.Extractor.TypedName(), err)
+			}
 		} else {
 			r.extractors.Append(srcName, pending.Extractor)
 		}
@@ -205,6 +227,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 
 	logger.Info("Datalayer runtime configured",
 		"pollers", r.dispatchers.Count(),
+		"streamers", r.streaming.Count(),
 		"notifiers", r.notification.Count(),
 		"endpointSources", r.endpoint.Count())
 	return nil
@@ -234,6 +257,9 @@ func (r *Runtime) registerSource(src fwkplugin.Plugin, g *gvk) error {
 	if _, ok := src.(fwkdl.PollingDispatcher); ok {
 		variants = append(variants, string(variantPolling))
 	}
+	if _, ok := src.(fwkdl.StreamingDispatcher); ok {
+		variants = append(variants, string(variantStreaming))
+	}
 	if _, ok := src.(fwkdl.NotificationSource); ok {
 		variants = append(variants, string(variantNotification))
 	}
@@ -241,13 +267,15 @@ func (r *Runtime) registerSource(src fwkplugin.Plugin, g *gvk) error {
 		variants = append(variants, string(variantEndpoint))
 	}
 	if len(variants) > 1 {
-		return fmt.Errorf("source %s implements multiple variant interfaces (%v); a source must implement exactly one of PollingDispatcher, NotificationSource, EndpointSource",
+		return fmt.Errorf("source %s implements multiple variant interfaces (%v); a source must implement exactly one of PollingDispatcher, StreamingDispatcher, NotificationSource, EndpointSource",
 			src.TypedName().String(), variants)
 	}
 
 	switch s := src.(type) {
 	case fwkdl.PollingDispatcher:
 		return r.dispatchers.Register(s)
+	case fwkdl.StreamingDispatcher:
+		return r.streaming.Register(s)
 	case fwkdl.NotificationSource:
 		if err := g.Check(s); err != nil {
 			return err
@@ -288,6 +316,11 @@ func (r *Runtime) validateNoCrossVariantCollisions() error {
 			return err
 		}
 	}
+	for name, disp := range r.streaming.Dispatchers() {
+		if err := check(name, disp, variantStreaming); err != nil {
+			return err
+		}
+	}
 
 	var firstErr error
 	r.notification.Range(func(name string, src fwkdl.NotificationSource) bool {
@@ -308,6 +341,25 @@ func (r *Runtime) validateNoCrossVariantCollisions() error {
 		return true
 	})
 	return firstErr
+}
+
+func (r *Runtime) validateMetricSourceConflicts() error {
+	var hasHTTP, hasZMQ bool
+	for _, disp := range r.dispatchers.Dispatchers() {
+		if disp.TypedName().Type == sourcemetrics.MetricsDataSourceType {
+			hasHTTP = true
+		}
+	}
+	for _, disp := range r.streaming.Dispatchers() {
+		if disp.TypedName().Type == sourcezmq.ZMQDataSourceType {
+			hasZMQ = true
+		}
+	}
+	if hasHTTP && hasZMQ {
+		return fmt.Errorf("%w: cannot configure both %q and %q concurrently",
+			ErrConflictingMetricsSources, sourcemetrics.MetricsDataSourceType, sourcezmq.ZMQDataSourceType)
+	}
+	return nil
 }
 
 // findSourceByType walks every variant manager and returns the matching source.
@@ -337,8 +389,17 @@ func (r *Runtime) findSourceByType(sourceType string, gvkFilter *schema.GroupVer
 		}
 	}
 
+	var streamingHit sourceHit
+	for name, disp := range r.streaming.Dispatchers() {
+		if matches(disp) {
+			streamingHit = sourceHit{variant: variantStreaming, name: name, src: disp}
+			break
+		}
+	}
+
 	matched, err := findUnique(sourceType,
 		pollingHit,
+		streamingHit,
 		r.notification.findFirst(matches),
 		r.endpoint.findFirst(matches),
 	)
@@ -373,12 +434,17 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 
 	endpoint := fwkdl.NewEndpoint(endpointMetadata, nil)
 
-	dispatchers := make([]fwkdl.PollingDispatcher, 0, r.dispatchers.Count())
+	pollers := make([]fwkdl.PollingDispatcher, 0, r.dispatchers.Count())
 	for _, d := range r.dispatchers.Dispatchers() {
-		dispatchers = append(dispatchers, d)
+		pollers = append(pollers, d)
 	}
-	if len(dispatchers) == 0 {
-		logger.Info("No polling sources configured, creating endpoint without collector")
+	streamers := make([]fwkdl.StreamingDispatcher, 0, r.streaming.Count())
+	for _, s := range r.streaming.Dispatchers() {
+		streamers = append(streamers, s)
+	}
+
+	if len(pollers) == 0 && len(streamers) == 0 {
+		logger.Info("No polling or streaming sources configured, creating endpoint without collector")
 		r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint})
 		return endpoint
 	}
@@ -392,7 +458,7 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 	}
 
 	ticker := NewTimeTicker(r.pollingInterval)
-	if err := collector.Start(ctx, ticker, endpoint, dispatchers); err != nil {
+	if err := collector.Start(ctx, ticker, endpoint, pollers, streamers); err != nil {
 		logger.Error(err, "failed to start collector for endpoint", "endpoint", key)
 		r.collectors.Remove(key)
 		return nil

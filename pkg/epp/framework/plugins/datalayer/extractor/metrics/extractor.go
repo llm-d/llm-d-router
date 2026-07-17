@@ -185,7 +185,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().NamespacedName)
 	if updated {
 		clone.UpdateTime = time.Now()
-		logger.V(logutil.TRACE).Info("Refreshed metrics",
+		logger.V(logutil.DEBUG).Info("Refreshed metrics",
 			"metrics", mapping.MetricNames(),
 			"updated", clone,
 		)
@@ -243,7 +243,6 @@ func populateLoRAMetrics(clone *fwkdl.Metrics, metric *dto.Metric, errs *[]error
 // blockSizeLabelName and numBlocksLabelName allow engines to use different label names
 // (e.g. SGLang uses "page_size" and "num_pages" instead of "block_size" and "num_gpu_blocks").
 func populateCacheInfoMetrics(clone *fwkdl.Metrics, metric *dto.Metric, blockSizeLabelName, numBlocksLabelName string, errs *[]error) {
-	clone.CacheBlockSize = 0
 	for _, label := range metric.GetLabel() {
 		switch label.GetName() {
 		case blockSizeLabelName:
@@ -263,6 +262,9 @@ func populateCacheInfoMetrics(clone *fwkdl.Metrics, metric *dto.Metric, blockSiz
 				}
 			}
 		}
+	}
+	if clone.CacheBlockSize > 0 && clone.CacheNumBlocks > 0 {
+		clone.KvCacheMaxTokenCapacity = clone.CacheBlockSize * clone.CacheNumBlocks
 	}
 }
 
