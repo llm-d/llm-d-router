@@ -9,7 +9,7 @@ scenario-specific patches. The atomic components live in `deploy/components/`:
 | `vllm-decode/` | Decode pod — always deployed, includes routing sidecar (removed in EPD scenario) |
 | `vllm-prefill/` | Prefill pod — deployed when `DISAGG_P=true` |
 | `vllm-encode/` | Encoder pod — deployed when `DISAGG_E=true` |
-| `overlays/simulator/` | Adds `--mode=${VLLM_SIM_MODE}`, vLLM render, KV cache and ZMQ args (included by all scenario overlays) |
+| `overlays/simulator/` | Adds `--mode=${VLLM_SIM_MODE}`, KV cache and ZMQ args (included by all scenario overlays) |
 
 These overlays are used by both `scripts/kind-dev-env.sh` (for local KIND clusters)
 and e2e tests (via `kustomize build` + env var substitution).
@@ -70,6 +70,8 @@ Variables substituted at deploy time via `envsubst` or Go test `substituteMany`:
 | `VLLM_IMAGE` | vLLM container image (simulator or real) | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` |
 | `SIDECAR_IMAGE` | Routing sidecar image | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` |
 | `VLLM_RENDER_IMAGE` | vLLM render sidecar image | `vllm/vllm-openai-cpu:v0.21.0` |
+| `VLLM_RENDER_PORT` | Port the vllm-render Service listens on | `8082` |
+| `VLLM_RENDER_URL` | URL of the vllm-render Service used by decode/encode/prefill pods | `http://vllm-render:${VLLM_RENDER_PORT}` |
 | `MODEL_NAME` | Model name passed to vLLM. Can be a real HuggingFace model (e.g. `TinyLlama/TinyLlama-1.1B-Chat-v1.0`, `Qwen/Qwen3-VL-2B-Instruct`) or an arbitrary name when using the simulator (e.g. `food-review`) | `food-review` |
 | `POOL_NAME` | InferencePool name | `food-review-inference-pool` |
 | `VLLM_REPLICA_COUNT_E` | Encode deployment replicas | `1` |

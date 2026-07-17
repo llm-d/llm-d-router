@@ -297,11 +297,17 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 			maxMatch = matchLen
 		}
 		cachedBlocks := 0
+		cachedBlocksByTier := map[string]int{}
 		for _, lu := range lookups {
 			cachedBlocks += matchedBlockCount(lu.keys, lu.keyToPods, addr)
+			for tier, count := range matchedBlockCountByTier(lu.keys, lu.keyToPods, addr) {
+				cachedBlocksByTier[tier] += count
+			}
 		}
 		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).WithCachedBlockCount(cachedBlocks))
+			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
+				WithCachedBlockCount(cachedBlocks).
+				WithCachedBlocksByTier(cachedBlocksByTier))
 	}
 
 	if p.speculativeEnabled {

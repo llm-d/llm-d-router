@@ -65,7 +65,6 @@ func newFlowControlTestHandle(t *testing.T) fwkplugin.Handle {
 			Type: edf.EDFOrderingPolicyType,
 			Name: edf.EDFOrderingPolicyType,
 		},
-		RequiredQueueCapabilitiesV: []fwkfc.QueueCapability{fwkfc.CapabilityPriorityConfigurable},
 	})
 	handle.AddPlugin(usagelimits.StaticUsageLimitPolicyType, usagelimits.DefaultPolicy())
 	return handle

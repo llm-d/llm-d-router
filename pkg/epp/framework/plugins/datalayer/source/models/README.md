@@ -20,6 +20,8 @@ The Models Data Source polls inference server pods for model information and pas
 - `scheme` (string, optional, default: `"http"`): Protocol scheme: `"http"` or `"https"`.
 - `path` (string, optional, default: `"/v1/models"`): URL path for the models API endpoint.
 - `insecureSkipVerify` (bool, optional, default: `true`): Skip TLS certificate verification.
+- `caCertPath` (string, optional): PEM CA bundle to verify the target's server cert.
+- `clientCertPath` / `clientKeyPath` (string, optional): client certificate for mTLS. Set both together.
 
 ```yaml
 - type: models-data-source

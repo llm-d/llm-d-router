@@ -50,12 +50,26 @@ type RequestPayload interface {
 	AsMap() (PayloadMap, bool)
 }
 
+// Marshaler is implemented by payloads that serialize themselves back to the bytes
+// forwarded downstream. Payloads that do not are forwarded unchanged.
+type Marshaler interface {
+	Marshal() ([]byte, error)
+}
+
+// MarshalablePayload is a RequestPayload that can serialize itself back to bytes.
+// Only such payloads are worth mutating, since only they are re-marshaled on repackage.
+type MarshalablePayload interface {
+	RequestPayload
+	Marshaler
+}
+
 // PayloadMap represents a JSON request body unmarshaled into a map.
 type PayloadMap map[string]any
 
 func (p PayloadMap) isRequestPayload()         {}
 func (p PayloadMap) IsParsed() bool            { return true }
 func (p PayloadMap) AsMap() (PayloadMap, bool) { return p, p != nil }
+func (p PayloadMap) Marshal() ([]byte, error)  { return json.Marshal(map[string]any(p)) }
 
 // PayloadProto represents a gRPC request body unmarshaled into a proto.Message.
 type PayloadProto struct {
@@ -112,6 +126,10 @@ type InferenceRequestBody struct {
 	// It is nil when the client did not specify a cap. Consumers such as output
 	// token estimators use it as an upper bound. Derived, not round-tripped.
 	MaxOutputTokens *int64 `json:"-"`
+
+	// Model is the incoming client-facing model name extracted by the parser, empty
+	// if absent. Not round-tripped; the forwarded model lives in Payload.
+	Model string `json:"-"`
 }
 
 // MaxOutputTokensFromPayload returns the client-requested output-token cap read
