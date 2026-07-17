@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	compbasemetrics "k8s.io/component-base/metrics"
@@ -43,24 +44,55 @@ var requestInflight = prometheus.NewGaugeVec(
 	[]string{"model_name", "target_model_name", "fairness_id", "priority"},
 )
 
+// inflightRequests and inflightTokens track per-endpoint in-flight load. The
+// producer's concurrency trackers set them from the live counter value on
+// every counter update and delete the series when the endpoint is removed.
+var inflightRequests = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "inflight_requests",
+		Help:      metricsutil.HelpMsgWithStability("Current number of in-flight requests per endpoint, as tracked by the in-flight load producer.", compbasemetrics.ALPHA),
+	},
+	[]string{"endpoint_name", "namespace", "producer_name"},
+)
+
+var inflightTokens = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "inflight_tokens",
+		Help:      metricsutil.HelpMsgWithStability("Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.", compbasemetrics.ALPHA),
+	},
+	[]string{"endpoint_name", "namespace", "producer_name"},
+)
+
 // registerMetrics registers the producer-owned metrics with the plugin's metrics
-// recorder. The per-model gauge is shared across producers and the per-endpoint
-// collector carries a producer-specific descriptor, so an already-registered
-// equivalent collector is a benign no-op.
-func registerMetrics(registerer prometheus.Registerer, collector prometheus.Collector) error {
+// recorder. All metrics are shared package-level vectors, so a second producer
+// instance re-registering them is a benign no-op; the producer_name label keeps
+// each instance's per-endpoint series distinct.
+func registerMetrics(registerer prometheus.Registerer) error {
 	if registerer == nil {
 		return errors.New("inflight load metrics registerer is required")
 	}
-	for _, c := range []prometheus.Collector{requestInflight, collector} {
-		if err := registerer.Register(c); err != nil {
+	for _, collector := range []prometheus.Collector{requestInflight, inflightRequests, inflightTokens} {
+		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
-			if errors.As(err, &alreadyRegistered) {
+			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == collector {
 				continue
 			}
 			return fmt.Errorf("register inflight load metric: %w", err)
 		}
 	}
 	return nil
+}
+
+// splitNamespacedName splits a "namespace/name" key (the string form of a
+// k8s types.NamespacedName) into its name and namespace. A key with no
+// separator is treated as a bare name with an empty namespace.
+func splitNamespacedName(id string) (name, namespace string) {
+	if i := strings.IndexByte(id, '/'); i >= 0 {
+		return id[i+1:], id[:i]
+	}
+	return id, ""
 }
 
 // requestInflightLabels carries the gauge label values captured at admission so

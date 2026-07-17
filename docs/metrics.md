@@ -168,9 +168,9 @@ Three metrics covering ext_proc gRPC stream lifecycle. Disabled by default; enab
 
 In-flight load, emitted under the `llm_d_epp_` prefix. Present only when an `InFlightLoadProducer` is
 configured: the producer owns these metrics and registers them through the plugin metrics recorder. The
-per-endpoint gauges read the producer's live per-endpoint counters (the same source as the
-`/debug/plugins/state` dump and the token-load scorer); the per-model `request_inflight` gauge is moved
-by the producer as requests are admitted and completed.
+per-endpoint gauges are updated from the producer's live per-endpoint counters as requests are admitted
+and released (the same source as the `/debug/plugins/state` dump and the token-load scorer); the
+per-model `request_inflight` gauge is moved by the producer as requests are admitted and completed.
 
 ### `inflight_requests`
 

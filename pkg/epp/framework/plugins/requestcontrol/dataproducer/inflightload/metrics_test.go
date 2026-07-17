@@ -32,7 +32,6 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-router/pkg/epp/metrics/collectors"
 )
 
 func makeInflightRequest(requestID, incomingModel, fairnessID string, priority int) *fwksched.InferenceRequest {
@@ -240,16 +239,16 @@ func TestNewRequestInflightLabels(t *testing.T) {
 	}
 }
 
-// registerMetrics is idempotent for the shared gauge and registers a distinct per-producer collector,
-// so two producers register into one registry and both emit per-endpoint series.
+// Two producers share the vec-backed gauges; the producer_name label keeps their per-endpoint
+// series distinct.
 func TestRegisterMetrics_MultiProducer(t *testing.T) {
-	requestInflight.Reset()
-	reg := prometheus.NewRegistry()
+	inflightRequests.Reset()
+	inflightTokens.Reset()
 
-	a := &fakeSnapshotter{requests: map[string]int64{"ns1/ep1": 1}}
-	b := &fakeSnapshotter{requests: map[string]int64{"ns2/ep2": 2}}
-	require.NoError(t, registerMetrics(reg, collectors.NewInFlightLoadCollector("a", a)))
-	require.NoError(t, registerMetrics(reg, collectors.NewInFlightLoadCollector("b", b)))
+	a := newConcurrencyTracker(inflightRequests, "a")
+	b := newConcurrencyTracker(inflightRequests, "b")
+	a.add("ns1/ep1", 1)
+	b.add("ns2/ep2", 2)
 
 	expected := `
 # HELP llm_d_epp_inflight_requests [ALPHA] Current number of in-flight requests per endpoint, as tracked by the in-flight load producer.
@@ -257,17 +256,102 @@ func TestRegisterMetrics_MultiProducer(t *testing.T) {
 llm_d_epp_inflight_requests{endpoint_name="ep1",namespace="ns1",producer_name="a"} 1
 llm_d_epp_inflight_requests{endpoint_name="ep2",namespace="ns2",producer_name="b"} 2
 `
-	require.NoError(t, promtestutil.GatherAndCompare(reg, strings.NewReader(expected), "llm_d_epp_inflight_requests"))
+	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expected), "llm_d_epp_inflight_requests"))
+}
+
+// registerMetrics is idempotent: re-registering the shared package-level vectors is a benign no-op.
+func TestRegisterMetrics_Idempotent(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	require.NoError(t, registerMetrics(reg))
+	require.NoError(t, registerMetrics(reg))
 }
 
 func TestRegisterMetrics_NilRegisterer(t *testing.T) {
-	require.Error(t, registerMetrics(nil, nil))
+	require.Error(t, registerMetrics(nil))
 }
 
-type fakeSnapshotter struct {
-	requests map[string]int64
-	tokens   map[string]int64
+// TestInflightGauges_Lifecycle drives a request through admission, completion, and endpoint
+// removal, asserting the per-endpoint gauge series mirror the live counters at each step.
+func TestInflightGauges_Lifecycle(t *testing.T) {
+	inflightRequests.Reset()
+	inflightTokens.Reset()
+	producer := newTestProducer(t)
+	ctx := context.Background()
+
+	expect := func(t *testing.T, requests, tokens int64) {
+		t.Helper()
+		expectedRequests := fmt.Sprintf(`
+# HELP llm_d_epp_inflight_requests [ALPHA] Current number of in-flight requests per endpoint, as tracked by the in-flight load producer.
+# TYPE llm_d_epp_inflight_requests gauge
+llm_d_epp_inflight_requests{endpoint_name="ep1",namespace="default",producer_name="inflight-load-producer"} %d
+`, requests)
+		require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expectedRequests), "llm_d_epp_inflight_requests"))
+		expectedTokens := fmt.Sprintf(`
+# HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.
+# TYPE llm_d_epp_inflight_tokens gauge
+llm_d_epp_inflight_tokens{endpoint_name="ep1",namespace="default",producer_name="inflight-load-producer"} %d
+`, tokens)
+		require.NoError(t, promtestutil.CollectAndCompare(inflightTokens, strings.NewReader(expectedTokens), "llm_d_epp_inflight_tokens"))
+	}
+
+	// Admission: 4 input + 6 estimated output = 10 tokens, 1 request.
+	req := makeTokenRequest("req-gauge-lifecycle", 4)
+	res := makeSchedulingResult("ep1")
+	producer.PreRequest(ctx, req, res)
+	expect(t, 1, 10)
+
+	// Completion: series stay present at zero.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	expect(t, 0, 0)
+
+	// Endpoint removal deletes the series.
+	producer.DeleteEndpoint(fullEndpointName("ep1"))
+	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(""), "llm_d_epp_inflight_requests"))
+	require.NoError(t, promtestutil.CollectAndCompare(inflightTokens, strings.NewReader(""), "llm_d_epp_inflight_tokens"))
 }
 
-func (f *fakeSnapshotter) InFlightRequestsSnapshot() map[string]int64 { return f.requests }
-func (f *fakeSnapshotter) InFlightTokensSnapshot() map[string]int64   { return f.tokens }
+// TestInflightGauges_OrphanRelease covers releases that land on an orphaned counter after an
+// endpoint flap: publishing after the orphan decrement leaves the live series unchanged, and
+// publishing a fully deleted endpoint does not resurrect its series.
+func TestInflightGauges_OrphanRelease(t *testing.T) {
+	inflightRequests.Reset()
+
+	tracker := newConcurrencyTracker(inflightRequests, "p")
+	counter := tracker.add("ns/ep", 1)
+
+	tracker.delete("ns/ep")
+	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(""), "llm_d_epp_inflight_requests"))
+
+	tracker.add("ns/ep", 5)
+
+	// A release routed to the orphaned counter must not move the live series.
+	decrementClamped(counter, 1)
+	tracker.publish("ns/ep")
+	expected := `
+# HELP llm_d_epp_inflight_requests [ALPHA] Current number of in-flight requests per endpoint, as tracked by the in-flight load producer.
+# TYPE llm_d_epp_inflight_requests gauge
+llm_d_epp_inflight_requests{endpoint_name="ep",namespace="ns",producer_name="p"} 5
+`
+	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expected), "llm_d_epp_inflight_requests"))
+
+	tracker.delete("ns/ep")
+	tracker.publish("ns/ep")
+	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(""), "llm_d_epp_inflight_requests"))
+}
+
+func TestSplitNamespacedName(t *testing.T) {
+	cases := []struct {
+		id, wantName, wantNS string
+	}{
+		{"ns/ep", "ep", "ns"},
+		{"bare", "bare", ""},
+		{"ns/ep/extra", "ep/extra", "ns"},
+	}
+	for _, c := range cases {
+		name, ns := splitNamespacedName(c.id)
+		if name != c.wantName || ns != c.wantNS {
+			t.Errorf("splitNamespacedName(%q) = (%q,%q), want (%q,%q)", c.id, name, ns, c.wantName, c.wantNS)
+		}
+	}
+}
