@@ -418,8 +418,11 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 		RequestID:   "req-by-tier",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{promptA, promptB},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{
+					{TokenIDs: promptA},
+					{TokenIDs: promptB},
+				},
 			},
 		},
 	}
