@@ -58,7 +58,7 @@ Unlike the static usage limit policy, this policy is **not** framework-injected.
 
 ## Trade-offs
 
-- **Not Stateless**: The alternation pattern is only observable across calls, so the policy keeps one policy-wide atomic tick counter -- a deliberate deviation from the `UsageLimitPolicy` contract's guidance that implementations be stateless. The state is bounded and used only for dispatch spreading; two calls with the same `(saturation, priorities)` will not always return the same result.
+- **Not Stateless**: The alternation pattern is only observable across calls, so the policy keeps one policy-wide atomic tick counter. This is small bounded state that the `UsageLimitPolicy` contract permits for dispatch spreading, but it means the policy is not a pure function of its inputs: two calls with the same `(saturation, priorities)` will not always return the same result.
 - **Coarse Rate Control**: The effective dispatch rate is `1 / period` for integer `period`, so the gated dispatch rate transitions in discrete steps rather than smoothly with saturation.
 - **Rank-Only, Not Magnitude**: The ceiling depends only on the rank of each priority, not the numeric spacing between them. Two adjacent bands with a wide gap in priority values are treated the same as two bands with a small gap.
 - **Requires Multiple Bands**: With a single band the policy degenerates to always-open. Differentiation begins at two or more bands.
