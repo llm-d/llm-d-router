@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package softreflectiveceiling
 
 import (
@@ -153,7 +169,7 @@ func TestComputeLimit_ReflectiveFormula(t *testing.T) {
 
 func TestComputeLimit_Alternation(t *testing.T) {
 	// At N=2, saturation=0.7: reflective ceiling[1] = 0.3, so band 1 is
-	// gated. period = round(0.7/0.3) = 2. The internal counter increments
+	// gated. period = round(0.7/0.3) = 2. The shared tick increments
 	// 1,2,3,4,...; tick%2==0 is open. Expected pattern: closed, open,
 	// closed, open, ...
 	p := newTestPolicy()
@@ -183,8 +199,8 @@ func TestComputeLimit_AlternationLongerPeriod(t *testing.T) {
 }
 
 func TestComputeLimit_GrowingPriorities(t *testing.T) {
-	// Counters are allocated per-priority on first sight; the active priority
-	// domain can expand mid-flight without panic and band 0 stays ungated.
+	// The active priority domain can expand mid-flight without panic and
+	// band 0 stays ungated.
 	p := newTestPolicy()
 	_ = p.ComputeLimit(context.Background(), 0.7, []int{100, -50})
 	got := p.ComputeLimit(context.Background(), 0.7, []int{100, 50, 0, -50})
@@ -196,37 +212,50 @@ func TestComputeLimit_GrowingPriorities(t *testing.T) {
 	}
 }
 
-func TestComputeLimit_StatePersistsAcrossPrioritySetChanges(t *testing.T) {
-	// A counter belongs to a priority, not to its rank. When a new priority
-	// is added between existing ones (e.g. via dynamic InferenceObjective
-	// provisioning in the flow-control registry), an existing band's
-	// alternation state must continue from where it left off rather than be
-	// reset by rank reassignment.
+func TestComputeLimit_NoStarvationUnderRisingSaturation(t *testing.T) {
+	// Regression test for a starvation bug where per-band alternation
+	// counters could desynchronize under a rising-saturation ramp, letting
+	// a lower gated band's open ticks land on a higher gated band's closed
+	// ticks. Because the dispatch loop aborts at the first gated band, the
+	// lower band would then receive zero dispatch even while claiming
+	// ceiling=1.0 on some calls.
 	//
-	// Start with priorities=[100, -50], saturation=0.75.
-	// N=2: ceiling[1] = 1 - 0.75 = 0.25 (gated), period = round(0.75/0.25) = 3.
-	// After 5 calls, priority -50's tick counter is at 5.
+	// Scenario: priorities=[100, 0, -50]. Warm up at sat=0.6 where only
+	// band 2 is gated (period 2), then run at sat=0.7 where bands 1 and 2
+	// are both gated (period 2). With the fix (single shared tick), every
+	// call must produce monotone ceilings across ranks -- either all gated
+	// bands open together or all closed together.
 	p := newTestPolicy()
-	for i := 0; i < 5; i++ {
-		p.ComputeLimit(context.Background(), 0.75, []int{100, -50})
+	priorities := []int{100, 0, -50}
+
+	for i := 0; i < 3; i++ {
+		p.ComputeLimit(context.Background(), 0.6, priorities)
 	}
 
-	// Insert priority 0 between the existing two. With rank-indexed counters
-	// this would move -50's tick state onto the fresh priority 0.
-	got := p.ComputeLimit(context.Background(), 0.75, []int{100, 0, -50})
-
-	// N=3 at saturation=0.75:
-	//   ceiling[1] = 1 - 0.75/2 = 0.625 (gated), period = round(0.75/0.25) = 3.
-	//   ceiling[2] = 1 - 1.5/2  = 0.25  (gated), period = 3.
-	// Priority -50 (rank 2) continues from tick 5: increments to 6, 6%3 == 0
-	// so it opens on this call.
-	if got[2] != 1.0 {
-		t.Errorf("ceilings[2] (priority -50 after inserting priority 0) = %v, want 1.0; state must persist across priority-set changes",
-			got[2])
+	band1Open := 0
+	band2Open := 0
+	const iterations = 100
+	for i := 0; i < iterations; i++ {
+		got := p.ComputeLimit(context.Background(), 0.7, priorities)
+		if got[1] == 1.0 {
+			band1Open++
+		}
+		if got[2] == 1.0 {
+			band2Open++
+		}
+		// Monotonicity: whenever band 2 is open, band 1 must also be open;
+		// otherwise the dispatch loop aborts at band 1 and band 2 is
+		// unreachable regardless of its ceiling.
+		if got[2] == 1.0 && got[1] != 1.0 {
+			t.Errorf("call %d: band 2 open (1.0) while band 1 closed (%v); dispatch loop would abort at band 1 and starve band 2",
+				i, got[1])
+		}
 	}
-	// Priority 0 (rank 1, first sight) starts from tick 0: increments to 1,
-	// 1%3 != 0, so it stays closed.
-	if got[1] != 0.0 {
-		t.Errorf("ceilings[1] (new priority 0) = %v, want 0.0; new priority starts fresh at tick=1", got[1])
+
+	if band1Open != band2Open {
+		t.Errorf("band1Open=%d, band2Open=%d; gated bands must open on the same calls", band1Open, band2Open)
+	}
+	if band2Open == 0 {
+		t.Errorf("band 2 opened %d times over %d calls; expected non-zero (starvation regression)", band2Open, iterations)
 	}
 }

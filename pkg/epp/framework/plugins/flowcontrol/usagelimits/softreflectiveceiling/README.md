@@ -22,7 +22,7 @@ For each call, the policy receives the current pool `saturation` (from the confi
 
     ceiling[i] = 1 - i * saturation / (N - 1)
 
-where `N = len(priorities)`. Band 0 is never gated (`ceiling[0] = 1.0`).
+where `N = len(priorities)`. Band 0 receives `ceiling[0] = 1.0` and dispatches while saturation is below 1.0. At `saturation >= 1.0` the Flow Controller halts every band, including band 0, because it gates on `saturation >= ceiling`.
 
 **Per-band decision:**
 
@@ -32,9 +32,9 @@ where `N = len(priorities)`. Band 0 is never gated (`ceiling[0] = 1.0`).
 
         period = round(saturation / (1 - saturation))
 
-    so that, on average, the band dispatches once every `period` calls. Higher saturation lengthens the gated intervals; the effective dispatch rate approximates `(1 - saturation) / saturation`.
+    so that, on average, each gated band's ceiling is open on 1 out of every `period` calls. Higher saturation lengthens the gated intervals; the effective dispatch rate approximates `(1 - saturation) / saturation`.
 
-The per-band tick counters are bounded internal state used only to spread dispatch evenly across calls. Signal conditioning (smoothing, hysteresis, trend detection) is delegated to the Saturation Detector layer per the `UsageLimitPolicy` contract.
+All gated bands share a single policy-wide tick, so on any given call either every gated band's ceiling is open or every gated band's ceiling is closed. That monotonicity across ranks is required because the Flow Controller's dispatch loop aborts at the first band whose ceiling gates. The shared tick is bounded state used only to spread dispatch evenly across calls; signal conditioning (smoothing, hysteresis, trend detection) is delegated to the Saturation Detector layer per the `UsageLimitPolicy` contract.
 
 ## Inputs consumed
 
@@ -58,7 +58,7 @@ Unlike the static usage limit policy, this policy is **not** framework-injected.
 
 ## Trade-offs
 
-- **Not Stateless**: The `UsageLimitPolicy` contract prefers stateless implementations. The alternation pattern is only observable across calls, so the policy keeps a small, bounded, per-band atomic counter. Concurrency safety is preserved via pointer-atomic counters with a mutex guarding slice growth.
+- **Not Stateless**: The alternation pattern is only observable across calls, so the policy keeps one policy-wide atomic tick counter -- a deliberate deviation from the `UsageLimitPolicy` contract's guidance that implementations be stateless. The state is bounded and used only for dispatch spreading; two calls with the same `(saturation, priorities)` will not always return the same result.
 - **Coarse Rate Control**: The effective dispatch rate is `1 / period` for integer `period`, so the gated dispatch rate transitions in discrete steps rather than smoothly with saturation.
 - **Rank-Only, Not Magnitude**: The ceiling depends only on the rank of each priority, not the numeric spacing between them. Two adjacent bands with a wide gap in priority values are treated the same as two bands with a small gap.
 - **Requires Multiple Bands**: With a single band the policy degenerates to always-open. Differentiation begins at two or more bands.

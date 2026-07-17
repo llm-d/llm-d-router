@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // Package softreflectiveceiling implements a UsageLimitPolicy that gates
 // lower-priority bands proportionally as saturation rises. For each band i
 // (priorities ordered highest first) it computes a reflective ceiling
@@ -5,24 +21,23 @@
 //	ceiling[i] = 1 - i*saturation/(N-1)
 //
 // When saturation reaches a band's ceiling the policy alternates ceiling=1.0
-// and ceiling=0.0 across calls so that, on average, the band dispatches at
-// 1/period of the tick rate, where period = round(saturation/(1-saturation)).
-// Band 0 (highest priority) is never gated.
+// and ceiling=0.0 across calls so that, on average, each gated band's
+// ceiling is open on 1/period of calls, where
+// period = round(saturation/(1-saturation)).
 //
-// The per-band tick counter is bounded state used only to spread dispatch
-// evenly across ticks. It is not signal conditioning (trend detection,
-// smoothing) -- that responsibility belongs to the SaturationDetector layer
-// per the flowcontrol.UsageLimitPolicy contract.
+// A single policy-wide tick counter drives the alternation. All gated bands
+// share it, so on any given call either every gated band's ceiling is open
+// or every gated band's ceiling is closed. This monotonicity is required by
+// the dispatch loop, which stops at the first band whose ceiling is at or
+// below current saturation. Per-band counters would drift out of phase as
+// bands enter gating at different saturations, so a lower gated band's
+// open ticks would repeatedly land on a higher gated band's closed ticks
+// and the lower band would starve.
 //
-// The proportional behavior is encoded entirely in the ComputeLimit return
-// values, which requires per-band tick state. This is a deliberate deviation
-// from the UsageLimitPolicy interface guidance that policies be stateless:
-// the fractional open rate is only observable across ticks. Counters are
-// keyed by priority value (not rank) so a band's alternation state is
-// preserved when the active priority set changes at runtime -- e.g. when a
-// new priority arrives via dynamic InferenceObjective provisioning in the
-// flow-control registry. Concurrency safety is provided by sync.Map plus
-// pointer-atomic counters.
+// The single tick is small bounded state used only for dispatch spreading,
+// which the UsageLimitPolicy contract permits. Signal conditioning (trend
+// detection, smoothing) is not permitted here; it belongs in the
+// SaturationDetector layer.
 package softreflectiveceiling
 
 import (
@@ -30,7 +45,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"sync"
 	"sync/atomic"
 
 	"github.com/go-logr/logr"
@@ -67,10 +81,11 @@ func Factory(name string, rawConfig *json.Decoder, handle fwkplugin.Handle) (fwk
 type policy struct {
 	name string
 
-	// counters maps priority value to a tick counter. Keyed by priority (not
-	// rank) so that adding or removing a priority band at runtime does not
-	// reassign an existing band's counter to a different priority.
-	counters sync.Map
+	// tick advances once per ComputeLimit call in which at least one band is
+	// in the alternating regime. All gated bands read the same value, so the
+	// per-call gating decision is monotone across ranks -- required because
+	// the dispatch loop stops at the first band whose ceiling has gated.
+	tick atomic.Int64
 }
 
 var _ flowcontrol.UsageLimitPolicy = (*policy)(nil)
@@ -86,10 +101,9 @@ func (p *policy) TypedName() fwkplugin.TypedName {
 }
 
 // ComputeLimit returns per-band ceilings. priorities[0] is the highest
-// priority band and is never gated. For lower bands, when saturation reaches
-// the band's reflective ceiling, the band alternates between ceiling=1.0 and
-// ceiling=0.0 across calls with period round(saturation/(1-saturation)),
-// approximating proportional dispatch.
+// priority band and receives ceiling=1.0. Lower bands whose reflective
+// ceiling has been reached alternate between 1.0 and 0.0 with period
+// round(saturation/(1-saturation)), producing a proportional duty cycle.
 func (p *policy) ComputeLimit(_ context.Context, saturation float64, priorities []int) []float64 {
 	n := len(priorities)
 	ceilings := make([]float64, n)
@@ -101,7 +115,21 @@ func (p *policy) ComputeLimit(_ context.Context, saturation float64, priorities 
 		return ceilings
 	}
 
-	for i, priority := range priorities {
+	// Ceilings decrease monotonically with rank, so any band is at or past
+	// its reflective ceiling iff the lowest band is (whose ceiling is
+	// 1 - saturation). Advance the shared tick only when at least one band
+	// is in the alternating regime; below that saturation the policy is a
+	// pure function of its inputs.
+	inAlternatingRegime := saturation >= 1.0-saturation && saturation < 1.0
+
+	var open bool
+	if inAlternatingRegime {
+		// 1e-9 guards against round-off when saturation is very near 1.0.
+		period := int64(math.Max(1, math.Round(saturation/(1.0-saturation+1e-9))))
+		open = p.tick.Add(1)%period == 0
+	}
+
+	for i := range priorities {
 		if i == 0 {
 			ceilings[i] = 1.0
 			continue
@@ -115,10 +143,7 @@ func (p *policy) ComputeLimit(_ context.Context, saturation float64, priorities 
 		case saturation >= 1.0:
 			ceilings[i] = 0.0
 		default:
-			// 1e-9 guards against round-off when saturation is very near 1.0.
-			period := int64(math.Max(1, math.Round(saturation/(1.0-saturation+1e-9))))
-			tick := p.counterFor(priority).Add(1)
-			if tick%period == 0 {
+			if open {
 				ceilings[i] = 1.0
 			} else {
 				ceilings[i] = 0.0
@@ -127,16 +152,4 @@ func (p *policy) ComputeLimit(_ context.Context, saturation float64, priorities 
 	}
 
 	return ceilings
-}
-
-// counterFor returns the tick counter for a given priority, creating it on
-// first use. sync.Map.LoadOrStore ensures concurrent first-writers converge
-// on a single counter instance without an external mutex.
-func (p *policy) counterFor(priority int) *atomic.Int64 {
-	if v, ok := p.counters.Load(priority); ok {
-		return v.(*atomic.Int64)
-	}
-	fresh := new(atomic.Int64)
-	actual, _ := p.counters.LoadOrStore(priority, fresh)
-	return actual.(*atomic.Int64)
 }
