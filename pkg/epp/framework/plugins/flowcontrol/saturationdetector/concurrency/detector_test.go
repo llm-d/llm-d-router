@@ -512,7 +512,7 @@ func TestDetector_HybridSaturation(t *testing.T) {
 		wantSaturation float64
 	}{
 		{name: "empty", requests: 0, tokens: 0, wantSaturation: 0.0},
-		{name: "tokens_dominate", requests: 2, tokens: 80, wantSaturation: 0.8},  // max(0.2, 0.8)
+		{name: "tokens_dominate", requests: 2, tokens: 80, wantSaturation: 0.8},   // max(0.2, 0.8)
 		{name: "requests_dominate", requests: 9, tokens: 10, wantSaturation: 0.9}, // max(0.9, 0.1)
 		{name: "request_dimension_saturates_first", requests: 10, tokens: 5, wantSaturation: 1.0},
 		{name: "token_dimension_saturates_first", requests: 1, tokens: 100, wantSaturation: 1.0},
