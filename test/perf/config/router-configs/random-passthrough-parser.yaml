@@ -1,5 +1,5 @@
-# Consolidated router configuration for optimized-baseline guide
-
+# Router configuration that picks random backend and uses the passthrough parser
+# which avoids JSON serialization.
 router:
   extraServicePorts:
     - name: http
@@ -24,24 +24,15 @@ router:
         apiVersion: llm-d.ai/v1alpha1
         kind: EndpointPickerConfig
         plugins:
-        - type: queue-scorer
-        - type: kv-cache-utilization-scorer
-        - type: approx-prefix-cache-producer
-          parameters:
-            maxPrefixTokensToMatch: 100000
-        - type: prefix-cache-scorer
-        - type: no-hit-lru-scorer
+        - type: random-picker
+        - type: passthrough-parser
+        requestHandler:
+          parsers:
+          - pluginRef: passthrough-parser
         schedulingProfiles:
         - name: default
           plugins:
-          - pluginRef: queue-scorer
-            weight: 2
-          - pluginRef: kv-cache-utilization-scorer
-            weight: 2
-          - pluginRef: prefix-cache-scorer
-            weight: 3
-          - pluginRef: no-hit-lru-scorer
-            weight: 2
+          - pluginRef: random-picker
 
   inferencePool:
     failureMode: "FailOpen"
@@ -56,7 +47,7 @@ router:
       - "--log-level"
       - "warn"
       - "--concurrency"
-      - "8"
+      - "32"
       - "--drain-strategy"
       - "immediate"
       - "--drain-time-s"

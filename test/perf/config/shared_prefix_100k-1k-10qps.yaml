@@ -37,7 +37,7 @@ config:
   data:
     type: shared_prefix
     shared_prefix:
-      num_groups: 150               # Number of distinct prefix, Note: the number of users is num_groups * num_prompts_per_group
+      num_groups: 10               # Number of distinct prefix, Note: the number of users is num_groups * num_prompts_per_group
       num_prompts_per_group: 5      # Number of unique questions per group (prefix)
       system_prompt_len: 95000       # Length of the first prefix (in tokens), simulate initialization of a system prompt
       question_len: 5000             # Length of the unique question part (in tokens)
