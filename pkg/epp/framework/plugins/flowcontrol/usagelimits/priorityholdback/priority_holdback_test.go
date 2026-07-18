@@ -173,7 +173,7 @@ func TestComputeLimit_EmptyPriorities(t *testing.T) {
 	t.Parallel()
 	policy := newPriorityHoldbackPolicy(config{
 		shape:      shapeLinear,
-		domain:     domainRank,
+		domain:     DomainRank,
 		minCeiling: 0.5,
 		maxCeiling: 1.0,
 	})
@@ -191,9 +191,9 @@ func TestComputeLimit_SinglePriority(t *testing.T) {
 		domain string
 		cMax   float64
 	}{
-		{"rank domain", domainRank, 1.0},
-		{"value domain", domainValue, 1.0},
-		{"custom maxCeiling", domainRank, 0.9},
+		{"rank domain", DomainRank, 1.0},
+		{"value domain", DomainValue, 1.0},
+		{"custom maxCeiling", DomainRank, 0.9},
 	}
 
 	for _, tc := range tests {
@@ -628,7 +628,7 @@ func TestComputeLimit_ExplicitDomain_SinglePriority(t *testing.T) {
 	t.Parallel()
 	// Explicit domain does not apply the single-priority bypass; it uses the mapped ceiling.
 	policy := newPriorityHoldbackPolicy(config{
-		domain:   domainExplicit,
+		domain:   DomainExplicit,
 		ceilings: map[int]float64{100: 0.80},
 	})
 
@@ -641,7 +641,7 @@ func TestComputeLimit_ExplicitDomain_SinglePriority(t *testing.T) {
 func TestComputeLimit_ExplicitDomain_MultiplePriorities(t *testing.T) {
 	t.Parallel()
 	policy := newPriorityHoldbackPolicy(config{
-		domain:   domainExplicit,
+		domain:   DomainExplicit,
 		ceilings: map[int]float64{100: 0.95, 50: 0.70, 10: 0.30},
 	})
 
@@ -655,7 +655,7 @@ func TestComputeLimit_ExplicitDomain_MultiplePriorities(t *testing.T) {
 func TestComputeLimit_ExplicitDomain_EmptyPriorities(t *testing.T) {
 	t.Parallel()
 	policy := newPriorityHoldbackPolicy(config{
-		domain:   domainExplicit,
+		domain:   DomainExplicit,
 		ceilings: map[int]float64{100: 0.95},
 	})
 

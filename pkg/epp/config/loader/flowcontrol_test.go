@@ -600,3 +600,104 @@ func (p *constantPointEightPolicy) ComputeLimit(_ context.Context, _ float64, pr
 }
 
 var _ fwkfc.UsageLimitPolicy = (*constantPointEightPolicy)(nil)
+
+type mockExplicitPolicy struct {
+	fwkfc.UsageLimitPolicy
+	domain   string
+	ceilings map[int]float64
+}
+
+func (m *mockExplicitPolicy) Domain() string {
+	return m.domain
+}
+
+func (m *mockExplicitPolicy) Ceilings() map[int]float64 {
+	return m.ceilings
+}
+
+func TestBuildFlowControlConfig_ExplicitDomainValidation(t *testing.T) {
+	t.Parallel()
+	
+	const policyName = "mock-explicit"
+	
+	t.Run("Success - Config is valid", func(t *testing.T) {
+		t.Parallel()
+		handle := newFlowControlTestHandle(t)
+		handle.AddPlugin(policyName, &mockExplicitPolicy{
+			domain:   "explicit",
+			ceilings: map[int]float64{0: 1.0, 100: 0.8},
+		})
+		
+		apiConfig := &configapi.FlowControlConfig{
+			UsageLimitPolicyPluginRef: policyName,
+			PriorityBands: []configapi.PriorityBandConfig{
+				{Priority: 100},
+			},
+		}
+		
+		cfg, err := buildFlowControlConfig(apiConfig, handle)
+		require.NoError(t, err)
+		assert.NotNil(t, cfg)
+	})
+
+	t.Run("Error - Dynamic templates configured", func(t *testing.T) {
+		t.Parallel()
+		handle := newFlowControlTestHandle(t)
+		handle.AddPlugin(policyName, &mockExplicitPolicy{
+			domain:   "explicit",
+			ceilings: map[int]float64{0: 1.0, 100: 0.8},
+		})
+		
+		apiConfig := &configapi.FlowControlConfig{
+			UsageLimitPolicyPluginRef: policyName,
+			DefaultPriorityBand:       &configapi.PriorityBandConfig{Priority: 0},
+			PriorityBands: []configapi.PriorityBandConfig{
+				{Priority: 100},
+			},
+		}
+		
+		_, err := buildFlowControlConfig(apiConfig, handle)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot be used with dynamic priority band templates")
+	})
+
+	t.Run("Error - Priority 0 missing from ceilings", func(t *testing.T) {
+		t.Parallel()
+		handle := newFlowControlTestHandle(t)
+		handle.AddPlugin(policyName, &mockExplicitPolicy{
+			domain:   "explicit",
+			ceilings: map[int]float64{100: 0.8},
+		})
+		
+		apiConfig := &configapi.FlowControlConfig{
+			UsageLimitPolicyPluginRef: policyName,
+			PriorityBands: []configapi.PriorityBandConfig{
+				{Priority: 100},
+			},
+		}
+		
+		_, err := buildFlowControlConfig(apiConfig, handle)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "priority band 0 must have a configured ceiling")
+	})
+
+	t.Run("Error - Configured priority band missing from ceilings", func(t *testing.T) {
+		t.Parallel()
+		handle := newFlowControlTestHandle(t)
+		handle.AddPlugin(policyName, &mockExplicitPolicy{
+			domain:   "explicit",
+			ceilings: map[int]float64{0: 1.0},
+		})
+		
+		apiConfig := &configapi.FlowControlConfig{
+			UsageLimitPolicyPluginRef: policyName,
+			PriorityBands: []configapi.PriorityBandConfig{
+				{Priority: 100},
+			},
+		}
+		
+		_, err := buildFlowControlConfig(apiConfig, handle)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "priority band 100 must have a configured ceiling")
+	})
+}
