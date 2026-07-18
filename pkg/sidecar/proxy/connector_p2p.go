@@ -21,8 +21,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -56,10 +58,11 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	}
 
 	kvRequestID := newUUID()
+	prefillP2PPort := s.p2pPortFor(prefillPodHostPort)
 	s.logger.Info("running P2P protocol",
 		"prefill_host", extractHost(prefillPodHostPort),
 		"kv_request_id", kvRequestID,
-		"p2p_connector_port", s.config.P2PConnectorPort)
+		"p2p_connector_port", prefillP2PPort)
 
 	// Prefill leg: store KV under kv_request_id, no peer address. Capped to a
 	// single output token so the prefiller returns as soon as KV is stored.
@@ -102,7 +105,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		requestFieldP2PPrefillParams: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
 			requestFieldRemoteHost:  extractHost(prefillPodHostPort),
-			requestFieldRemotePort:  s.config.P2PConnectorPort,
+			requestFieldRemotePort:  prefillP2PPort,
 		},
 	}
 
@@ -243,8 +246,35 @@ func (s *Server) p2pSourceParams(sourceHostPort string) map[string]any {
 	return map[string]any{
 		requestFieldKVRequestID: newUUID(),
 		requestFieldRemoteHost:  extractHost(sourceHostPort),
-		requestFieldRemotePort:  s.config.P2PConnectorPort,
+		requestFieldRemotePort:  s.p2pPortFor(sourceHostPort),
 	}
+}
+
+// p2pPortFor resolves the P2P tier control port on the target endpoint. With
+// data parallelism the sidecar serves rank r on <base port>+r
+// (data_parallel.go) and vLLM binds rank r's P2P tier on
+// <p2p-connector-port>+r, so the rank encoded in the routed endpoint's port
+// selects the matching P2P port. All pods in the pool are assumed to share
+// the sidecar's port layout and DP size. A port outside the rank range (or
+// unparsable) falls back to the base P2P port, which is rank 0's tier.
+func (s *Server) p2pPortFor(targetHostPort string) int {
+	base := s.config.P2PConnectorPort
+	if s.config.DataParallelSize <= 1 || s.dpBasePort == 0 {
+		return base
+	}
+	_, portStr, err := net.SplitHostPort(targetHostPort)
+	if err != nil {
+		return base
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return base
+	}
+	rank := port - s.dpBasePort
+	if rank < 0 || rank >= s.config.DataParallelSize {
+		return base
+	}
+	return base + rank
 }
 
 // decodeWithP2PSource serves a decoder-only request through the local vLLM
@@ -275,7 +305,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 	s.logger.Info("running P2P source protocol",
 		"source_host", extractHost(sourceHostPort),
 		"kv_request_id", p2pParams[requestFieldKVRequestID],
-		"p2p_connector_port", s.config.P2PConnectorPort)
+		"p2p_connector_port", p2pParams[requestFieldRemotePort])
 
 	newBody, err := json.Marshal(requestData)
 	if err != nil {

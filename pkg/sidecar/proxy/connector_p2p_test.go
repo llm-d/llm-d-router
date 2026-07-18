@@ -119,3 +119,44 @@ var _ = DescribeTable("p2pPullAvailable",
 	Entry("the flag has no effect on sglang", KVConnectorSGLang, true, false),
 	Entry("the flag has no effect on shared-storage", KVConnectorSharedStorage, true, false),
 )
+
+var _ = DescribeTable("p2pPortFor",
+	func(dpSize, dpBasePort int, target string, want int) {
+		s := &Server{
+			dpBasePort: dpBasePort,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: dpSize},
+		}
+		Expect(s.p2pPortFor(target)).To(Equal(want))
+	},
+	Entry("single DP uses the base port regardless of target", 1, 8000, "10.0.0.5:8003", 7777),
+	Entry("rank 0 target uses the base port", 4, 8000, "10.0.0.5:8000", 7777),
+	Entry("rank 2 target offsets by 2", 4, 8000, "10.0.0.5:8002", 7779),
+	Entry("last rank target offsets by dpSize-1", 4, 8000, "10.0.0.5:8003", 7780),
+	Entry("port below the base falls back to the base port", 4, 8000, "10.0.0.5:7999", 7777),
+	Entry("port beyond the rank range falls back to the base port", 4, 8000, "10.0.0.5:8004", 7777),
+	Entry("target without a port falls back to the base port", 4, 8000, "10.0.0.5", 7777),
+	Entry("unparsable port falls back to the base port", 4, 8000, "10.0.0.5:http", 7777),
+	Entry("zero base port disables derivation", 4, 0, "10.0.0.5:8002", 7777),
+)
+
+var _ = Describe("p2pSourceParams", func() {
+	It("offsets remote_port by the source endpoint's DP rank", func() {
+		s := &Server{
+			dpBasePort: 8000,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
+		}
+		params := s.p2pSourceParams("10.0.0.9:8002")
+		Expect(params[requestFieldRemoteHost]).To(Equal("10.0.0.9"))
+		Expect(params[requestFieldRemotePort]).To(Equal(7779))
+		Expect(params[requestFieldKVRequestID]).ToNot(BeEmpty())
+	})
+
+	It("keeps rank derivation on Clone, which rank servers rely on", func() {
+		s := &Server{
+			dpBasePort: 8000,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
+		}
+		params := s.Clone().p2pSourceParams("10.0.0.9:8002")
+		Expect(params[requestFieldRemotePort]).To(Equal(7779))
+	})
+})
