@@ -251,13 +251,15 @@ func (s *Server) p2pSourceParams(sourceHostPort string) map[string]any {
 	}
 }
 
-// p2pPortFor resolves the P2P tier control port on the target endpoint. With
-// data parallelism the sidecar serves rank r on <base port>+r
-// (data_parallel.go) and vLLM binds rank r's P2P tier on
-// <p2p-connector-port>+r, so the rank encoded in the routed endpoint's port
-// selects the matching P2P port. All pods in the pool are assumed to share
-// the sidecar's port layout and DP size. A port outside the rank range (or
-// unparsable) falls back to the base P2P port, which is rank 0's tier.
+// p2pPortFor resolves the P2P tier control port on the target endpoint. The
+// sidecar serves rank r on <base port>+r (data_parallel.go), so the routed
+// endpoint's port encodes the pod-local rank. vLLM binds the tier at
+// <p2p-connector-port> + the global data_parallel_index, so the mapping is
+// correct when each pod is its own DP group (local rank == global index).
+// Multi-pod DP groups (e.g. LWS wide-EP) need the source's global rank
+// supplied per request instead; this derivation is the per-pod fallback. A
+// port outside the rank range (or unparsable) falls back to the base P2P
+// port, which is rank 0's tier.
 func (s *Server) p2pPortFor(targetHostPort string) int {
 	base := s.config.P2PConnectorPort
 	if s.config.DataParallelSize <= 1 || s.dpBasePort == 0 {
