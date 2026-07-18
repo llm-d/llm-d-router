@@ -13,7 +13,7 @@ The EPP acts as the routing intelligence engine. Its resource usage scales prima
 #### CPU Allocation
 - **Rule of Thumb**: Allocate **0.5 to 1.0 CPU cores per request/second** of expected throughput for large agentic workloads (approximately 100k input / 1k output tokens).
 - **Scaling Behavior**: CPU utilization scales linearly with the request rate, and increases with both the input prompt size and output token length.
-- **Prefix Matching Overhead**: Increasing the `maxPrefixBlocksToMatch` parameter increases EPP CPU utilization. At lower throughputs, a large prefix block limit (such as 6250 blocks) can increase EPP CPU utilization by over 100% compared to a small limit (256 blocks) due to the overhead of searching and matching blocks.
+- **Prefix Matching Overhead**: Increasing the `maxPrefixBlocksToMatch` parameter (deprecated; use `maxPrefixTokensToMatch` instead) increases EPP CPU utilization. At lower throughputs, a large prefix block limit (such as 6250 blocks) can increase EPP CPU utilization by over 100% compared to a small limit (256 blocks) due to the overhead of searching and matching blocks.
 - **Idle CPU Scaling**: Idle CPU usage of the EPP container scales with the number of model-serving pods in the cluster due to continuous metric scraping. For example, in a cluster with 100 model-serving pods, the idle CPU usage of the EPP container grows to approximately **7.5 cores**.
 
 #### Memory Allocation
