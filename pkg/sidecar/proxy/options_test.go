@@ -641,6 +641,24 @@ func TestValidateOffloadingDP(t *testing.T) {
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
 	})
+
+	t.Run("rejects a rank port beyond 65535", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 4
+		opts.P2PConnectorPort = 65533
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "exceeds 65535")
+	})
+
+	t.Run("allows the highest rank port at 65535", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 4
+		opts.P2PConnectorPort = 65532
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+	})
 }
 
 func TestValidateEnableP2PPull(t *testing.T) {

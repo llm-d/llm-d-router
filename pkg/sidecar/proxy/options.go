@@ -510,6 +510,12 @@ func (opts *Options) Validate() error {
 	if opts.P2PConnectorPort < 1 || opts.P2PConnectorPort > 65535 {
 		return fmt.Errorf("--p2p-connector-port must be between 1 and 65535, got %d", opts.P2PConnectorPort)
 	}
+	// The injected port is offset by the target's DP rank, so the highest
+	// rank's port must stay in range too.
+	if opts.DataParallelSize > 1 && opts.P2PConnectorPort+opts.DataParallelSize-1 > 65535 {
+		return fmt.Errorf("--p2p-connector-port %d plus data-parallel rank %d exceeds 65535",
+			opts.P2PConnectorPort, opts.DataParallelSize-1)
+	}
 
 	// --enable-p2p-pull composes the OffloadingConnector P2P tier alongside NIXL
 	// via MultiConnector; it is only meaningful with the NIXLv2 PD connector.

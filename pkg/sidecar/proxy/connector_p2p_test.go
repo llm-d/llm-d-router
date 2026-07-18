@@ -137,6 +137,7 @@ var _ = DescribeTable("p2pPortFor",
 	Entry("target without a port falls back to the base port", 4, 8000, "10.0.0.5", 7777),
 	Entry("unparsable port falls back to the base port", 4, 8000, "10.0.0.5:http", 7777),
 	Entry("zero base port disables derivation", 4, 0, "10.0.0.5:8002", 7777),
+	Entry("scheme-prefixed target derives the rank", 4, 8000, "http://10.0.0.5:8002", 7779),
 )
 
 var _ = Describe("p2pSourceParams", func() {
@@ -157,6 +158,16 @@ var _ = Describe("p2pSourceParams", func() {
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
 		}
 		params := s.Clone().p2pSourceParams("10.0.0.9:8002")
+		Expect(params[requestFieldRemotePort]).To(Equal(7779))
+	})
+
+	It("derives both host and port from a scheme-prefixed source", func() {
+		s := &Server{
+			dpBasePort: 8000,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
+		}
+		params := s.p2pSourceParams("http://10.0.0.9:8002")
+		Expect(params[requestFieldRemoteHost]).To(Equal("10.0.0.9"))
 		Expect(params[requestFieldRemotePort]).To(Equal(7779))
 	})
 })

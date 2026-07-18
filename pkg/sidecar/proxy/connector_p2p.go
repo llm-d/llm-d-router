@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -262,6 +263,8 @@ func (s *Server) p2pPortFor(targetHostPort string) int {
 	if s.config.DataParallelSize <= 1 || s.dpBasePort == 0 {
 		return base
 	}
+	// Backward compatible behavior: trim `http:` prefix (see createProxyHandler).
+	targetHostPort, _ = strings.CutPrefix(targetHostPort, "http://")
 	_, portStr, err := net.SplitHostPort(targetHostPort)
 	if err != nil {
 		return base
