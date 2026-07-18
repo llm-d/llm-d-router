@@ -58,7 +58,7 @@ Configuration used: [#1287](https://github.com/llm-d/llm-d-router/issues/1287#is
 These were run against 0.9.0 EPP container image.
 
 #### Output Length and Prefix Matching Complexity
-This table shows EPP peak resource usage at a constant request rate of 50 requests/second with a 100k input token workload, varying the output token length and the `maxPrefixBlocksToMatch` configuration.
+This table shows EPP peak resource usage at a constant request rate of 50 requests/second with a 100k input token workload, varying the output token length and the `maxPrefixTokensToMatch` configuration.
 
 | Input Tokens | Output Tokens | maxPrefixBlocksToMatch | Peak CPU (Cores) | Peak Memory (GiB) |
 | :--- | :--- | :--- | :--- | :--- |
