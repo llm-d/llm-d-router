@@ -30,19 +30,20 @@ const (
 	shapeLinear = "linear"
 )
 
-// domain constants define how priority levels are mapped to positions in the ceiling range.
+// Domain values define how priority levels are mapped to positions in the ceiling range.
+// They are exported so other packages (for example, configuration loader) can validate policy-specific constraints.
 const (
-	// domainRank maps by ordinal rank, ignoring numerical priority values.
-	domainRank = "rank"
-	// domainValue maps proportionally to numerical priority values.
-	domainValue = "value"
-	// domainExplicit uses a caller-supplied map of priority level to ceiling value directly.
-	domainExplicit = "explicit"
+	// DomainRank maps by ordinal rank, ignoring numerical priority values.
+	DomainRank = "rank"
+	// DomainValue maps proportionally to numerical priority values.
+	DomainValue = "value"
+	// DomainExplicit uses a caller-supplied map of priority level to ceiling value directly.
+	DomainExplicit = "explicit"
 )
 
 const (
 	defaultShape              = shapeLinear
-	defaultDomain             = domainRank
+	defaultDomain             = DomainRank
 	defaultMaxCeiling float64 = 1.0
 )
 
@@ -80,7 +81,7 @@ type apiConfig struct {
 	// Ceilings maps each priority level to its admission ceiling in [0.0, 1.0].
 	//
 	// Required when domain is "explicit". Ceilings must be monotonically non-increasing
-	// when priorities are sorted highest-first. Unused when domain is not "explicit".
+	// when priorities are sorted highest-first. Unused and rejected when domain is not "explicit".
 	Ceilings map[int]float64 `json:"ceilings,omitempty"`
 }
 
@@ -115,7 +116,7 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 	cfg := &config{
 		domain: *safeCfg.Domain,
 	}
-	if *safeCfg.Domain == domainExplicit {
+	if *safeCfg.Domain == DomainExplicit {
 		cfg.ceilings = safeCfg.Ceilings
 	} else {
 		cfg.shape = *safeCfg.Shape
@@ -128,7 +129,7 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 
 // checkRequired verifies that mandatory fields are present before defaulting.
 func checkRequired(cfg *apiConfig) error {
-	if cfg.Domain != nil && *cfg.Domain == domainExplicit {
+	if cfg.Domain != nil && *cfg.Domain == DomainExplicit {
 		if len(cfg.Ceilings) == 0 {
 			return errors.New("ceilings is required when domain is \"explicit\"")
 		}
@@ -145,7 +146,7 @@ func applyDefaults(cfg *apiConfig) {
 	if cfg.Domain == nil {
 		cfg.Domain = ptr.To(defaultDomain)
 	}
-	if *cfg.Domain == domainExplicit {
+	if *cfg.Domain == DomainExplicit {
 		// shape and maxCeiling defaults do not apply for the explicit domain.
 		return
 	}
@@ -160,7 +161,7 @@ func applyDefaults(cfg *apiConfig) {
 // validateConfig checks the constraints of the fully defaulted configuration.
 // It aggregates all validation failures rather than failing on the first error.
 func validateConfig(cfg *apiConfig) error {
-	if cfg.Domain != nil && *cfg.Domain == domainExplicit {
+	if cfg.Domain != nil && *cfg.Domain == DomainExplicit {
 		return validateExplicitConfig(cfg)
 	}
 
@@ -177,10 +178,10 @@ func validateConfig(cfg *apiConfig) error {
 
 	if cfg.Domain != nil {
 		switch *cfg.Domain {
-		case domainRank, domainValue:
+		case DomainRank, DomainValue:
 		default:
 			errs = append(errs, fmt.Errorf("unsupported domain %q, must be one of: %q, %q, %q",
-				*cfg.Domain, domainRank, domainValue, domainExplicit))
+				*cfg.Domain, DomainRank, DomainValue, DomainExplicit))
 		}
 	}
 

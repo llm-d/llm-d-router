@@ -63,29 +63,50 @@ type priorityHoldbackPolicy struct {
 	// where the interpolation math degenerates with one input. The explicit domain does not use it
 	// because the operator already supplied the ceiling for that priority.
 	enableSinglePriorityBypass bool
+
+	domain   string
+	ceilings map[int]float64
 }
 
 var _ flowcontrol.UsageLimitPolicy = &priorityHoldbackPolicy{}
 
 func newPriorityHoldbackPolicy(cfg config) *priorityHoldbackPolicy {
 	p := &priorityHoldbackPolicy{
-		name: PolicyType,
-		cMax: cfg.maxCeiling,
+		name:     PolicyType,
+		cMax:     cfg.maxCeiling,
+		domain:   cfg.domain,
+		ceilings: cfg.ceilings,
 	}
 	switch cfg.domain {
-	case domainRank:
+	case DomainRank:
 		p.enableSinglePriorityBypass = true
 		p.computeFn = computeLimitStepwiseSpread
-	case domainValue:
+	case DomainValue:
 		p.enableSinglePriorityBypass = true
 		p.computeFn = computeLimitLinearProportional
-	case domainExplicit:
+	case DomainExplicit:
 		p.enableSinglePriorityBypass = false
 		p.computeFn = func(_, _ float64, priorities []int, ceilings []float64) {
 			computeLimitExplicit(cfg.ceilings, priorities, ceilings)
 		}
 	}
 	return p
+}
+}
+
+func (p *priorityHoldbackPolicy) Domain() string {
+	return p.domain
+}
+
+func (p *priorityHoldbackPolicy) Ceilings() map[int]float64 {
+	if p.ceilings == nil {
+		return nil
+	}
+	out := make(map[int]float64, len(p.ceilings))
+	for k, v := range p.ceilings {
+		out[k] = v
+	}
+	return out
 }
 
 func (p *priorityHoldbackPolicy) withName(name string) *priorityHoldbackPolicy {
@@ -155,6 +176,8 @@ func computeLimitLinearProportional(cMin, cMax float64, priorities []int, ceilin
 }
 
 // computeLimitExplicit looks up each configured priority ceiling.
+// Precondition: configuration validation guarantees that every active
+// priority band has a corresponding ceiling entry.
 func computeLimitExplicit(ceilings map[int]float64, priorities []int, out []float64) {
 	for i, p := range priorities {
 		out[i] = ceilings[p]
