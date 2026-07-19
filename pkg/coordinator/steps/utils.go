@@ -218,8 +218,7 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 	}
 
 	entries := make([]pipeline.MultimodalEntry, n)
-	for i := range n {
-		hash, ok := rawHashes[i].(string)
+	for i := range entries {
 		if !ok {
 			return nil, fmt.Errorf("mm_hashes[%d] must be a string: %w", i, pipeline.ErrBadRequest)
 		}
