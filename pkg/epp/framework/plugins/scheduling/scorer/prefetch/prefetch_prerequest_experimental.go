@@ -54,20 +54,23 @@ func digestToFilenamePathSuffix(digest []byte, groupIdx int) string {
 //   - <digest> is the 12-hex fs-connector fingerprint over the vLLM cache
 //     config (Digest). The router cannot reliably recompute it, so the
 //     operator reads it from the vLLM pod and supplies it directly.
-//   - <groupIdx> is the KV-cache group index (GroupIdx, typically 0).
+//   - <groupIdx> ranges over [0, KVCacheGroupCount). A block is written under
+//     every group folder, so paths are emitted for each group. Standard
+//     single-group models use KVCacheGroupCount=1; hybrid/mixed-attention
+//     models split the cache into several groups.
 //   - <rank> ranges over [0, TpSize*PpSize*PcpSize*DcpSize); every worker
 //     shares the same base prefix (file_mapper.py:117), so each rank folder
 //     is the base with "_r<rank>" appended.
 type KVFilePathBaseParams struct {
-	RootDir          string `json:"rootDir"`
-	ModelName        string `json:"modelName"`
-	Digest           string `json:"digest"`
-	GroupIdx         int    `json:"groupIdx"`
-	GpuBlocksPerFile int    `json:"gpuBlocksPerFile"`
-	TpSize           int    `json:"tpSize"`
-	PpSize           int    `json:"ppSize"`
-	PcpSize          int    `json:"pcpSize"`
-	DcpSize          int    `json:"dcpSize"`
+	RootDir           string `json:"rootDir"`
+	ModelName         string `json:"modelName"`
+	Digest            string `json:"digest"`
+	KVCacheGroupCount int    `json:"kvCacheGroupCount"`
+	GpuBlocksPerFile  int    `json:"gpuBlocksPerFile"`
+	TpSize            int    `json:"tpSize"`
+	PpSize            int    `json:"ppSize"`
+	PcpSize           int    `json:"pcpSize"`
+	DcpSize           int    `json:"dcpSize"`
 }
 
 // IsSet returns true if a base path can be built. RootDir, ModelName, and the
@@ -78,6 +81,9 @@ func (b *KVFilePathBaseParams) IsSet() bool {
 
 // SetDefaults applies default values to unset KVFilePathBaseParams fields.
 func (b *KVFilePathBaseParams) SetDefaults() {
+	if b.KVCacheGroupCount < 1 {
+		b.KVCacheGroupCount = 1
+	}
 	if b.GpuBlocksPerFile < 1 {
 		b.GpuBlocksPerFile = 1
 	}
@@ -104,18 +110,20 @@ func (b *KVFilePathBaseParams) basePath() string {
 }
 
 // digestToFullPath returns the complete on-disk file path for a block-hash
-// digest on the given rank, built entirely from operator config:
-// "<base>_r<rank>/<hhh>/<hh>_g<groupIdx>/<hash>.bin".
-func (b *KVFilePathBaseParams) digestToFullPath(rank int, digest []byte) string {
-	suffix := digestToFilenamePathSuffix(digest, b.GroupIdx)
+// digest on the given rank and KV-cache group, built entirely from operator
+// config: "<base>_r<rank>/<hhh>/<hh>_g<groupIdx>/<hash>.bin".
+func (b *KVFilePathBaseParams) digestToFullPath(rank, groupIdx int, digest []byte) string {
+	suffix := digestToFilenamePathSuffix(digest, groupIdx)
 	return fmt.Sprintf("%s_r%d/%s", b.basePath(), rank, filepath.FromSlash(suffix))
 }
 
 // digestsToFilePaths returns the file paths to prefetch for the given
-// block-hash digests on the given rank. The fs-connector aggregates
-// GpuBlocksPerFile vLLM blocks into one on-disk file, naming it after the
-// last block's hash — so when n>1, only digests at indices n-1, 2n-1, 3n-1,
-// ... correspond to files on disk. When fewer than n digests are present, no
+// block-hash digests on the given rank, across every KV-cache group. The
+// fs-connector aggregates GpuBlocksPerFile vLLM blocks into one on-disk file,
+// naming it after the last block's hash — so when n>1, only digests at indices
+// n-1, 2n-1, 3n-1, ... correspond to files on disk. Each such block is written
+// under every group folder, so the selected digests are emitted once per group
+// in [0, KVCacheGroupCount). When fewer than n digests are present, no
 // aggregated file has been written for this request yet and nil is returned.
 func digestsToFilePaths(base *KVFilePathBaseParams, rank int, digests [][]byte) []string {
 	if len(digests) == 0 {
@@ -129,18 +137,23 @@ func digestsToFilePaths(base *KVFilePathBaseParams, rank int, digests [][]byte) 
 		// No aggregated file has been written for this request yet.
 		return nil
 	}
-
-	if n == 1 {
-		paths := make([]string, 0, len(digests))
-		for _, d := range digests {
-			paths = append(paths, base.digestToFullPath(rank, d))
-		}
-		return paths
+	groupCount := base.KVCacheGroupCount
+	if groupCount < 1 {
+		groupCount = 1
 	}
 
-	paths := make([]string, 0, len(digests)/n)
+	// Digests that name an on-disk file: every n-th block (the last of each
+	// aggregated group). For n==1 this is every digest.
+	fileDigests := make([][]byte, 0, len(digests)/n+1)
 	for i := n - 1; i < len(digests); i += n {
-		paths = append(paths, base.digestToFullPath(rank, digests[i]))
+		fileDigests = append(fileDigests, digests[i])
+	}
+
+	paths := make([]string, 0, len(fileDigests)*groupCount)
+	for g := 0; g < groupCount; g++ {
+		for _, d := range fileDigests {
+			paths = append(paths, base.digestToFullPath(rank, g, d))
+		}
 	}
 	return paths
 }
@@ -452,7 +465,7 @@ func (p *PrefetchPrerequestHandler) PreRequest(ctx context.Context, request *sch
 					base := p.kvFilePathBase
 					totalRanks := base.TpSize * base.PpSize * base.PcpSize * base.DcpSize
 					filesPerRank := (len(digests) + base.GpuBlocksPerFile - 1) / base.GpuBlocksPerFile
-					allFilePaths := make([]string, 0, filesPerRank*totalRanks)
+					allFilePaths := make([]string, 0, filesPerRank*totalRanks*base.KVCacheGroupCount)
 
 					for rank := 0; rank < totalRanks; rank++ {
 						fullPaths := digestsToFilePaths(base, rank, digests)

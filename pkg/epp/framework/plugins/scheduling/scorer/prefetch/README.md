@@ -101,8 +101,8 @@ Where:
 - `<rank>` = `parallel_config.rank` for the worker that wrote the file. Ranks are iterated
   `[0, Tp×Pp×Pcp×Dcp)` from the operator-supplied parallel sizes.
 - `<hhh>/<hh>` = first 5 hex chars of the block hash, sharded into two subdirectories.
-- `<group_idx>` = KV cache group index, supplied via the `groupIdx` config field
-  (typically `0`).
+- `<group_idx>` = KV cache group index, iterated `[0, kvCacheGroupCount)` from the
+  operator-supplied group count (`1` for standard single-group models).
 - `<hash>` = full block-hash digest (64 hex chars for SHA256-CBOR, 16 for FNV64a).
   **The same filename appears under every `_r<rank>` folder, but each rank's file holds a
   different byte content (that rank's local KV shard).**
@@ -118,14 +118,25 @@ later — never a request failure. There is no setting that blocks the request p
 
 ## On-path latency overhead
 
-Only two things run on the request's critical path: computing the block-hash
-digests and enqueuing the file paths onto the work queue. Both happen in the
-plugin's `PreRequest`, just before the request is handed to the proxy.
+Only two things run on the request's critical path: computing the block-hash digests
+and enqueuing the file paths onto the work queue. Both happen in the plugin's `PreRequest`,
+just before the request is handed to the proxy, and both are cheap:
 
-The worker-pool file reads are **off-path**. The plugin only enqueues on-path; the
-16 workers then read the files after handoff, concurrently with the request's
-backend token generation and with the on-path processing of subsequent requests.
-Those reads form a `handoff -> off-path read` phase that is never part of any
+- **Enqueue is a non-blocking channel send.** If a worker slot is free the path is
+  queued instantly; if the queue is full the path is dropped immediately rather than
+  waited on. Therefore the enqueue cost is negligible.
+- **Digest computation is pure CPU work over an already-tokenized prompt.**
+  Tokenization happens earlier in the token-producer; `PreRequest` only hashes the
+  request's existing token blocks with SHA256-CBOR, chained per block.
+  <!-- That is a few hundred small SHA-256 computations even for a ~16K-token prompt
+  (256 blocks) — hardware-accelerated by CPU SHA extensions — so it completes in well
+  under a millisecond. -->
+
+The worker-pool file reads are **off-path**. The plugin only enqueues on-path; the 16
+workers then read the files after handoff, concurrently with the request's backend
+token generation and with the on-path processing of subsequent requests.
+
+<!-- Those reads form a `handoff -> off-path read` phase that is never part of any
 request's `received -> handoff` span, so they add no latency to the request that
 triggered them. The on-path cost is therefore digest hashing plus a non-blocking
 channel send: well under 1 ms per request (the enqueue itself ~0.1 ms, the whole
@@ -151,7 +162,7 @@ request-handling goroutines. It is a small (~6ms or 6%) effect and, being CPU co
 is tunable via `maxConcurrentFiles` and pod CPU sizing. The cost directly
 attributable to prefetch remains the sub-millisecond on-path `PreRequest` step;
 the file reads are off-path. **The prefetch plugin's on-path overhead is
-negligible.**
+negligible.** -->
 
 ## Configuration
 
@@ -173,7 +184,7 @@ parameters in the EPP config.
 | `rootDir` | string | — | Root directory of the KV-cache file system mount |
 | `modelName` | string | — | Model name (e.g. `meta-llama/Llama-3.1-8B-Instruct`); `/` is replaced by `_` for the on-disk folder |
 | `digest` | string | — | The 12-hex fs-connector fingerprint that forms the `<safeModelName>_<digest>` base folder; read from the vLLM pod |
-| `groupIdx` | int | `0` | KV cache group index for the `<hh>_g<N>` folder |
+| `kvCacheGroupCount` | int | `1` | Number of KV cache groups; paths fan out across `_g0 .. _g<N-1>`. `1` for standard single-group models; larger for hybrid/mixed-attention models |
 | `gpuBlocksPerFile` | int | `1` | Number of GPU blocks vLLM stores per file; the plugin emits one path per file (every Nth digest) |
 | `tpSize` | int | `1` | Tensor-parallel size |
 | `ppSize` | int | `1` | Pipeline-parallel size |
@@ -252,7 +263,7 @@ pluginsCustomConfig:
             rootDir: /mnt/kv-cache-storage
             modelName: Qwen/Qwen3-8B
             digest: "07d7b166f256"
-            groupIdx: 0
+            kvCacheGroupCount: 1
             gpuBlocksPerFile: 8
             tpSize: 1
             ppSize: 1
@@ -299,14 +310,12 @@ path generation is not compatible with other KV-cache storage backends.
   signal; sustained skips mean the pool is undersized — raise `maxConcurrentFiles` or
   `workQueueSize`. There is no on-path waiting knob: a full queue always drops
   immediately to keep the request path fast.
-- **Operator-supplied digest and sizes are load-bearing.** The `digest`, `groupIdx`, and
-  parallel sizes must match the running vLLM deployment. A mismatch produces paths that
-  never resolve, so prefetch silently no-ops (missing files are skipped). On a vLLM
-  restart that shifts the fingerprint, the operator must update `digest`.
-- **Single-group only.** The plugin emits paths for a single `groupIdx`. Models with
-  multiple KV cache groups (sliding-window + full-attention, mamba hybrids) prefetch only
-  the configured group. Multi-group support is a follow-up.
-- **Single vLLM deployment per plugin instance.** One `(digest, groupIdx)` pair is
+- **Operator-supplied digest and sizes are load-bearing.** The `digest`,
+  `kvCacheGroupCount`, and parallel sizes must match the running vLLM deployment. A
+  mismatch produces paths that never resolve, so prefetch silently no-ops (missing files
+  are skipped). On a vLLM restart that shifts the fingerprint, the operator must update
+  `digest`.
+- **Single vLLM deployment per plugin instance.** One `(digest, kvCacheGroupCount)` pair is
   configured per instance. Routing to multiple vLLM deployments with different parallelism
   or model configs from a single plugin instance is not supported.
 - **Single model only.** `PreRequest` uses one static `kvFilePathBase` and does not read
@@ -320,7 +329,7 @@ path generation is not compatible with other KV-cache storage backends.
 - **Path generation must match vLLM exactly.** The emitted paths have to reproduce the
   fs-connector's layout byte-for-byte: the block-hash algorithm and its inputs
   (`sha256_cbor`, `hashSeed`, `blockSizeTokens`), the `<digest>` fingerprint, the
-  parallel-rank fan-out, `gpuBlocksPerFile`, and `groupIdx` all have to equal the running
+  parallel-rank fan-out, `gpuBlocksPerFile`, and `kvCacheGroupCount` all have to equal the running
   vLLM and connector values. Any drift — a vLLM version that changes the fingerprint field
   set or the on-disk layout — produces non-matching paths and silently disables prefetch
   (missing files are skipped). The plugin cannot detect the mismatch; correctness depends
