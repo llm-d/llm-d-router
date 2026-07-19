@@ -551,13 +551,7 @@ func (fr *FlowRegistry) buildFlowComponents(
 	if !ok {
 		return nil, nil, fmt.Errorf("priority band %d not found: %w", key.Priority, contracts.ErrPriorityBandNotFound)
 	}
-
-	q, err := queue.NewQueueFromName(bandConfig.Queue, bandConfig.OrderingPolicy)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to instantiate queue %q for flow %s: %w",
-			bandConfig.Queue, key, err)
-	}
-	return bandConfig.OrderingPolicy, q, nil
+	return bandConfig.OrderingPolicy, queue.New(bandConfig.OrderingPolicy), nil
 }
 
 // propagateStatsDelta is the top-level, lock-free aggregator for all statistics.
