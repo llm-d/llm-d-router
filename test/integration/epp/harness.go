@@ -258,7 +258,10 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 		runner, dataStore = r, ds
 		backend = metricsBackend(&mockDataSourceBackend{mockDataSource: mockDataSource})
 
-		mgrCtx, mgrCancel = context.WithCancel(ctx)
+		// Fresh cancellable context per attempt, derived from the stable parent ctx; the
+		// previous attempt's context is cancelled before retrying, so it does not nest
+		// (fatcontext flags the reassignment of the outer mgrCtx, which is intentional here).
+		mgrCtx, mgrCancel = context.WithCancel(ctx) //nolint:fatcontext
 		mgrDone = make(chan struct{})
 		mgrErr := make(chan error, 1)
 		go func() {
