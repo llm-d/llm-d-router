@@ -169,6 +169,8 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	placeholderTokenID := 0
 	if len(fullTokenIDs) > 0 {
 		bos = fullTokenIDs[0]
+		// Only the upper bound is checked here; offset >= 0 is guaranteed by
+		// extractMultimodalEntries. A negative offset would index out of range.
 		if entry.Placeholder.Offset < len(fullTokenIDs) {
 			placeholderTokenID = fullTokenIDs[entry.Placeholder.Offset]
 		}

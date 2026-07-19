@@ -132,6 +132,33 @@ func TestExtractMultimodalEntries(t *testing.T) {
 		}
 	})
 
+	t.Run("valid_two_images", func(t *testing.T) {
+		features := map[string]any{
+			"mm_hashes": map[string]any{"image": []any{"hash1", "hash2"}},
+			"mm_placeholders": map[string]any{"image": []any{
+				map[string]any{"offset": float64(1), "length": float64(3)},
+				map[string]any{"offset": float64(5), "length": float64(2)},
+			}},
+			"kwargs_data": map[string]any{"image": []any{"d1", "d2"}},
+		}
+		entries, err := extractMultimodalEntries(features)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("expected 2 entries, got %d", len(entries))
+		}
+		want := []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash1", KwargsData: "d1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Index: 1, Hash: "hash2", KwargsData: "d2", Placeholder: pipeline.PlaceholderRange{Offset: 5, Length: 2}},
+		}
+		for i, w := range want {
+			if entries[i] != w {
+				t.Errorf("entry %d: expected %+v, got %+v", i, w, entries[i])
+			}
+		}
+	})
+
 	t.Run("length_mismatch_placeholders", func(t *testing.T) {
 		features := map[string]any{
 			"mm_hashes": map[string]any{"image": []any{"hash1", "hash2"}},
