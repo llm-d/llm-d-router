@@ -282,7 +282,7 @@ func testWrapper(test func()) func() {
 				}
 			} else {
 				// The test failed
-				dumpPodsAndLogs(getNamespace())
+				testutils.DumpPodsAndLogs(testConfig, nsName)
 			}
 		})
 

@@ -43,22 +43,18 @@ var twoImages = []imageSpec{
 	{Hash: "e2e-image-hash-1", Offset: 4, Length: 5},
 }
 
-var _ = ginkgo.Describe("Direct gateway /inference/v1/generate encode against encode-only", ginkgo.Label(extendedTestLabel), func() {
+var _ = ginkgo.Describe("Direct gateway /inference/v1/generate encode against encode-only", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
 	// Uses single-profile-handler (generateEncodeConfig) so the EPP routes
 	// directly to encode pods without requiring a decode stage first.
 	ginkgo.It("returns ec_transfer_params for encode bodies", func() {
 		nsName := getNamespace()
-		infPoolObjects = createInferencePool(1, true)
+		infPoolObjects := createInferencePool(1)
 
 		encodeReplicas := 1
 		modelServers := createModelServersEncodeOnly(encodeReplicas)
 		epp := createEndPointPicker(generateEncodeConfig)
-		ginkgo.DeferCleanup(func() {
-			testutils.DeleteObjects(testConfig, epp, nsName)
-			testutils.DeleteObjects(testConfig, modelServers, nsName)
-		})
 
-		encodePods := getPodNames(encodeSelector)
+		encodePods := getPodNames(encodeSelector, nsName)
 		gomega.Expect(encodePods).Should(gomega.HaveLen(encodeReplicas))
 
 		ginkgo.By("Encode_Generate: single-image encode body returns ec_transfer_params")
@@ -74,25 +70,25 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate encode against en
 			parsed := expectGenerateOK(resp, raw)
 			expectECTransferParams(parsed, raw)
 		}
-	})
-})
 
-var _ = ginkgo.Describe("Direct gateway /inference/v1/generate prefill against prefill-only", ginkgo.Label(extendedTestLabel), func() {
+		testutils.DeleteObjects(testConfig, epp, nsName)
+		testutils.DeleteObjects(testConfig, modelServers, nsName)
+		testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+	})
+}))
+
+var _ = ginkgo.Describe("Direct gateway /inference/v1/generate prefill against prefill-only", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
 	// Uses single-profile-handler (generatePrefillConfig) so the EPP routes
 	// directly to prefill pods without requiring a decode stage first.
 	ginkgo.It("returns kv_transfer_params for prefill bodies", func() {
 		nsName := getNamespace()
-		infPoolObjects = createInferencePool(1, true)
+		infPoolObjects := createInferencePool(1)
 
 		prefillReplicas := 1
 		modelServers := createModelServersPrefillOnly(prefillReplicas)
 		epp := createEndPointPicker(generatePrefillConfig)
-		ginkgo.DeferCleanup(func() {
-			testutils.DeleteObjects(testConfig, epp, nsName)
-			testutils.DeleteObjects(testConfig, modelServers, nsName)
-		})
 
-		prefillPods := getPodNames(prefillSelector)
+		prefillPods := getPodNames(prefillSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 
 		ginkgo.By("TwoImages_Prefill: combined two-image prefill body returns kv_transfer_params")
@@ -102,8 +98,12 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate prefill against p
 			parsed := expectGenerateOK(resp, raw)
 			expectKVTransferParams(parsed, raw)
 		}
+
+		testutils.DeleteObjects(testConfig, epp, nsName)
+		testutils.DeleteObjects(testConfig, modelServers, nsName)
+		testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 	})
-})
+}))
 
 // imageFeatures builds the features map that encode and prefill share:
 // mm_hashes, mm_placeholders, kwargs_data, all keyed by modality
@@ -237,7 +237,7 @@ func expectKVTransferParams(parsed map[string]any, raw []byte) {
 		"kv_transfer_params is empty: %s", string(raw))
 }
 
-var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via sidecar", ginkgo.Label(sharedStorageTestLabel, disaggTestLabel), func() {
+var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via sidecar", ginkgo.Label(sharedStorageTestLabel, disaggTestLabel), ginkgo.Ordered, testWrapper(func() {
 	// Regression test for https://github.com/llm-d/llm-d-router/issues/1461:
 	// the pd-sidecar previously had no route for /inference/v1/generate, so
 	// token-in P/D requests silently fell through to decode-only. This test
@@ -246,18 +246,14 @@ var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via si
 	// disaggregatedPrefillHandler rather than the decoder catch-all.
 	ginkgo.It("routes token-in generate to the prefill pod", func() {
 		nsName := getNamespace()
-		infPoolObjects = createInferencePool(1, true)
+		infPoolObjects := createInferencePool(1)
 
 		prefillReplicas := 1
 		decodeReplicas := 1
 		modelServers := createModelServersPDSharedStorage(decodeReplicas)
 		epp := createEndPointPicker(pdConfig)
-		ginkgo.DeferCleanup(func() {
-			testutils.DeleteObjects(testConfig, epp, nsName)
-			testutils.DeleteObjects(testConfig, modelServers, nsName)
-		})
 
-		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 		gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -275,8 +271,12 @@ var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via si
 		gomega.Expect(prefillCountAfter).To(gomega.BeNumerically(">", prefillCountBefore),
 			"prefill pod should have received the generate request; sidecar must route "+
 				"/inference/v1/generate through disaggregatedPrefillHandler, not the decoder catch-all")
+
+		testutils.DeleteObjects(testConfig, epp, nsName)
+		testutils.DeleteObjects(testConfig, modelServers, nsName)
+		testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 	})
-})
+}))
 
 // simpleTokenGenerateBody builds a minimal /inference/v1/generate body with
 // enough token IDs to exceed the prefix-based-pd-decider nonCachedTokens
