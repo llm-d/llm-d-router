@@ -705,7 +705,7 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
 	logger := log.FromContext(ctx)
 
-	applyDeprecatedEnvFeatureGate(enableExperimentalFlowControlLayer, "Flow Control layer", flowcontrol.FeatureGate, rawConfig)
+	applyDeprecatedEnvFeatureGate(enableExperimentalFlowControlLayer, "Flow Control layer", flowcontrol.FeatureGate, rawConfig, r.featureGates)
 
 	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
 	r.PluginHandle = handle
@@ -751,7 +751,11 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	return cfg, nil
 }
 
-func applyDeprecatedEnvFeatureGate(envVar, featureName, featureGate string, rawConfig *configapi.EndpointPickerConfig) {
+// applyDeprecatedEnvFeatureGate honors the deprecated envVar by enabling
+// featureGate both in rawConfig (consumed by InstantiateAndConfigure) and in
+// featureGates (the map populated during parseConfigurationPhaseOne that
+// initAdmissionControl and other phase-one-gated decisions read).
+func applyDeprecatedEnvFeatureGate(envVar, featureName, featureGate string, rawConfig *configapi.EndpointPickerConfig, featureGates map[string]bool) {
 	if _, ok := os.LookupEnv(envVar); ok {
 		setupLog.Info(fmt.Sprintf("Enabling the experimental %s using environment variables is deprecated and will be removed in next version", featureName))
 		if env.GetEnvBool(envVar, false, setupLog) {
@@ -759,6 +763,7 @@ func applyDeprecatedEnvFeatureGate(envVar, featureName, featureGate string, rawC
 				rawConfig.FeatureGates = make(configapi.FeatureGates, 0)
 			}
 			rawConfig.FeatureGates = append(rawConfig.FeatureGates, featureGate)
+			featureGates[featureGate] = true
 		}
 	}
 }

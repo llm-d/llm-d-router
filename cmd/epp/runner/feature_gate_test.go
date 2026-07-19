@@ -22,6 +22,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
 
@@ -48,5 +50,35 @@ featureGates:
 		_, err := r.parseConfigurationPhaseOne(ctx, opts)
 		require.NoError(t, err)
 		require.False(t, r.featureGates[runserver.HAPopulateNonLeaderDatastoreFeatureGate])
+	})
+}
+
+// TestApplyDeprecatedEnvFeatureGate verifies that the deprecated
+// ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER env var enables the flowControl gate
+// in both rawConfig.FeatureGates (read by InstantiateAndConfigure) and the
+// featureGates map populated during parseConfigurationPhaseOne (read by
+// initAdmissionControl). A regression here silently strands the EPP on the
+// legacy admission controller despite the env var being set.
+func TestApplyDeprecatedEnvFeatureGate(t *testing.T) {
+	t.Run("env var true enables the gate in both targets", func(t *testing.T) {
+		t.Setenv(enableExperimentalFlowControlLayer, "true")
+
+		rawConfig := &configapi.EndpointPickerConfig{}
+		featureGates := map[string]bool{flowcontrol.FeatureGate: false}
+
+		applyDeprecatedEnvFeatureGate(enableExperimentalFlowControlLayer, "Flow Control layer", flowcontrol.FeatureGate, rawConfig, featureGates)
+
+		require.Contains(t, rawConfig.FeatureGates, flowcontrol.FeatureGate)
+		require.True(t, featureGates[flowcontrol.FeatureGate])
+	})
+
+	t.Run("env var unset leaves both targets untouched", func(t *testing.T) {
+		rawConfig := &configapi.EndpointPickerConfig{}
+		featureGates := map[string]bool{flowcontrol.FeatureGate: false}
+
+		applyDeprecatedEnvFeatureGate(enableExperimentalFlowControlLayer, "Flow Control layer", flowcontrol.FeatureGate, rawConfig, featureGates)
+
+		require.Empty(t, rawConfig.FeatureGates)
+		require.False(t, featureGates[flowcontrol.FeatureGate])
 	})
 }
