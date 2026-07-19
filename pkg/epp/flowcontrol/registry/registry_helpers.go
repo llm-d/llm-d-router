@@ -26,7 +26,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
-// priorityBand holds all managedQueues and configuration for a single priority level within a shard.
+// priorityBand holds all managedQueues and configuration for a single priority level.
 type priorityBand struct {
 	// --- Immutable (set at construction) ---
 
@@ -38,10 +38,10 @@ type priorityBand struct {
 	// It is initialized once at creation via fairnessPolicy.NewState() and exposed via GetPolicyState().
 	policyState any
 
-	// --- State Protected by the parent shard's mu ---
+	// --- State Protected by the registry's mu ---
 
 	// config is the local copy of the band's definition.
-	// It is updated during dynamic scaling events (updateConfig), protected by the parent shard's mutex.
+	// It is updated during dynamic scaling events (updateConfig), protected by the registry's mutex.
 	config PriorityBandConfig
 
 	// queues holds all managedQueue instances within this band, keyed by their logical ID string.
@@ -52,8 +52,8 @@ type priorityBand struct {
 	priorityBandAccessor *priorityBandAccessor
 }
 
-// initPriorityBand constructs the runtime state for a single priority level and registers it within the shard.
-// This is used by both newShard (initialization) and addPriorityBand (dynamic provisioning).
+// initPriorityBand constructs the runtime state for a single priority level and registers it within the registry.
+// This is used during registry initialization and by addPriorityBand (dynamic provisioning).
 // The caller MUST hold fr.mu (Write Lock) as this method modifies the orderedPriorityLevels slice.
 func (fr *FlowRegistry) initPriorityBand(bandConfig *PriorityBandConfig) {
 	policyState := bandConfig.FairnessPolicy.NewState(context.Background())
@@ -159,8 +159,7 @@ func (fr *FlowRegistry) synchronizeFlow(
 		return
 	}
 
-	fr.logger.V(logging.TRACE).Info("Creating new queue for flow instance.",
-		"flowKey", key, "queueType", q.Name())
+	fr.logger.V(logging.TRACE).Info("Creating new queue for flow instance.", "flowKey", key)
 
 	mq := newManagedQueue(q, policy, key, fr.logger, fr.propagateStatsDelta)
 	band.queues[key.ID] = mq
@@ -192,7 +191,7 @@ func (fr *FlowRegistry) deleteFlow(key flowcontrol.FlowKey) {
 // --- `priorityBandAccessor` ---
 
 // priorityBandAccessor implements PriorityBandAccessor.
-// It provides a read-only, concurrent-safe view of a single priority band within a shard.
+// It provides a read-only, concurrent-safe view of a single priority band.
 type priorityBandAccessor struct {
 	registry *FlowRegistry
 	band     *priorityBand
@@ -249,7 +248,7 @@ func (a *priorityBandAccessor) Queue(id string) flowcontrol.FlowQueueAccessor {
 //
 // To minimize lock contention, this implementation snapshots the queue accessors under a read lock and then executes
 // the callback on the snapshot, outside of the lock. This ensures that a potentially slow policy (the callback) does
-// not block other operations on the shard.
+// not block other operations on the registry.
 func (a *priorityBandAccessor) IterateQueues(callback func(queue flowcontrol.FlowQueueAccessor) bool) {
 	a.registry.mu.RLock()
 	accessors := make([]flowcontrol.FlowQueueAccessor, 0, len(a.band.queues))

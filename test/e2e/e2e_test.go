@@ -27,6 +27,11 @@ const (
 	// running vLLM with E/P/D (Encode/Prefill/Decode)
 	ePDDisaggDir = "../../deploy/environments/dev/e-p-d"
 
+	// encodeOnlyDir is the single-component kustomize path for encode-only pods.
+	encodeOnlyDir = "../../deploy/components/vllm-encode"
+	// prefillOnlyDir is the single-component kustomize path for prefill-only pods.
+	prefillOnlyDir = "../../deploy/components/vllm-prefill"
+
 	simplePrompt = "Hello my name is Andrew, I have a doctorate in Rocket Science, and I like interplanetary space exploration"
 	extraPrompt  = "Why is the sky sometimes blue and sometimes red close to sunset?"
 
@@ -784,7 +789,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			infPoolObjects = createInferencePool(1, true)
 
 			modelServers := createModelServersDecodeKV(1)
-			epp := createEndPointPicker(kvConfig)
+			epp := createEndPointPicker(kvConfig())
 			nsName := getNamespace()
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
@@ -807,7 +812,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			infPoolObjects = createInferencePool(1, true)
 
 			modelServers := createModelServersDecodeKV(1)
-			epp := createEndPointPicker(kvExternalTokenizerConfig)
+			epp := createEndPointPicker(kvExternalTokenizerConfig())
 			nsName := getNamespace()
 
 			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)

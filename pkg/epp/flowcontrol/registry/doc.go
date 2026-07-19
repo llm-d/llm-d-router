@@ -16,13 +16,13 @@ limitations under the License.
 
 // Package registry provides the concrete implementation of the `contracts.FlowRegistry` interface.
 //
-// This package implements the flow control state machine using a sharded architecture to enable scalable, parallel
-// request processing. It separates the orchestration control plane from the request-processing data plane.
+// This package implements the flow control state machine. It separates the orchestration control plane from the
+// request-processing data plane, and is composed of three core types:
 //
-//   - `FlowRegistry`: The top-level orchestrator (Control Plane). It manages the lifecycle of all flows and shards,
-//     handling registration, garbage collection, and scaling operations.
-//   - `registryShard`: A slice of the data plane. It holds a partition of the total state and provides a
-//     read-optimized, concurrent-safe view for a single `controller.FlowController` worker.
+//   - `FlowRegistry`: The top-level orchestrator and single source of truth. It manages the lifecycle of all flows and
+//     priority bands, handling registration, garbage collection, and dynamic priority-band provisioning. It also
+//     exposes a read-optimized, concurrent-safe data-plane view for the `controller` Processor.
+//   - `priorityBand`: The runtime state for a single priority level, holding its managed queues and configuration.
 //   - `managedQueue`: A stateful decorator around a SafeQueue. It is the fundamental unit of state,
 //     responsible for atomically tracking statistics (e.g., length and byte size) and ensuring data consistency.
 package registry

@@ -443,6 +443,40 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 	assert.Equal(t, 3, len(state2.PerPromptHashes[0]), "should fall back to MaxPrefixBlocksToMatch when MaxPrefixTokensToMatch is 0")
 }
 
+// TestMaxPrefixBothCapsZeroMatchesEverything verifies that zeroing both caps
+// hashes the whole prompt rather than nothing. The prompt length is already
+// bounded by the model server's context window, so an absent cap is an implicit
+// max_model_len cap.
+func TestMaxPrefixBothCapsZeroMatchesEverything(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+	cfg := config{
+		BlockSizeTokens:        1,
+		MaxPrefixTokensToMatch: 0,
+		MaxPrefixBlocksToMatch: 0,
+		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
+	)
+
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model",
+		Body:        tokenizedBody([]uint32{1, 2, 3, 4}),
+	}
+
+	err = p.Produce(context.Background(), req, []fwksched.Endpoint{endpoint})
+	assert.NoError(t, err)
+
+	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
+	assert.NoError(t, err)
+	assert.Equal(t, 4, len(state.PerPromptHashes[0]), "both caps at 0 should hash every block in the prompt")
+}
+
 // TestGetBlockSize_AutotuneClampsBelowMinimum verifies that when AutoTune is on and
 // the endpoint reports a small CacheBlockSize, GetBlockSize floors the result at
 // minBlockSizeTokens to bound EPP indexer memory. See issue #1158.

@@ -1,12 +1,9 @@
 package e2e
 
 import (
-	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -15,6 +12,8 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
+	"sigs.k8s.io/yaml"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,7 +21,6 @@ import (
 	apilabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -212,81 +210,6 @@ func removeEmptyLabels(inputs []string) []string {
 	return outputs
 }
 
-func isModelReal(modelName string) bool {
-	req, err := http.NewRequest("GET", "https://huggingface.co/api/models/"+modelName, nil)
-	if err != nil {
-		return false
-	}
-	if token := os.Getenv("HF_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-
-	return resp.StatusCode == http.StatusOK
-}
-
-// removeRenderSidecar takes a slice of YAML strings (each may contain multiple
-// objects separated by "---") and returns the same slice with the vllm-render
-// container and the model-cache volume stripped from any Deployment.
-func removeRenderSidecar(inputs []string) []string {
-	outputs := make([]string, len(inputs))
-	for idx, input := range inputs {
-		docs := strings.Split(input, "\n---")
-		rendered := make([]string, 0, len(docs))
-		for _, doc := range docs {
-			if strings.TrimSpace(doc) == "" {
-				continue
-			}
-			rendered = append(rendered, filterDocument(doc))
-		}
-		outputs[idx] = strings.Join(rendered, "\n---\n")
-	}
-	return outputs
-}
-
-func filterDocument(doc string) string {
-	obj := &unstructured.Unstructured{}
-	err := yaml.Unmarshal([]byte(doc), &obj.Object)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	if len(obj.Object) == 0 {
-		return doc
-	}
-	if obj.GetKind() == kubernetesDeploymentKind {
-		removePodSpecListItem(obj, "containers", "vllm-render")
-		removePodSpecListItem(obj, "initContainers", "vllm-render")
-		removePodSpecListItem(obj, "volumes", "model-cache")
-	}
-	out, err := yaml.Marshal(obj.Object)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	return strings.TrimRight(string(out), "\n")
-}
-
-func removePodSpecListItem(obj *unstructured.Unstructured, fieldName, itemName string) {
-	path := []string{"spec", "template", "spec", fieldName}
-	items, found, err := unstructured.NestedSlice(obj.Object, path...)
-	if err != nil || !found {
-		return
-	}
-	filtered := make([]any, 0, len(items))
-	for _, item := range items {
-		if m, ok := item.(map[string]any); ok && m["name"] == itemName {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	if len(filtered) == 0 {
-		unstructured.RemoveNestedField(obj.Object, path...)
-		return
-	}
-	err = unstructured.SetNestedSlice(obj.Object, filtered, path...)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-}
-
 // eppExtraArgs are appended to the "epp" container's args in the Deployment
 // created by createEndPointPickerHelper.
 //
@@ -328,6 +251,7 @@ func appendArgsToEppContainer(doc string, args []string) string {
 	}
 	path := []string{"spec", "template", "spec", "containers"}
 	containers, found, err := unstructured.NestedSlice(obj.Object, path...)
+
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	if !found {
 		return doc
@@ -480,135 +404,4 @@ func parseRequestCountFromMetrics(metricsOutput string) int {
 		}
 	}
 	return 0
-}
-
-// dumpPodsAndLogs dumps all pod statuses and their logs to the Ginkgo writer.
-// Call this before cleanup to insure the information is available when CI tests fail.
-func dumpPodsAndLogs(nsName string) {
-	if testConfig == nil || testConfig.KubeCli == nil {
-		ginkgo.GinkgoWriter.Println("Skipping pod dump: cluster not initialized")
-		return
-	}
-
-	ginkgo.GinkgoWriter.Printf("\n=== Dumping pod states and logs (namespace: %s) ===\n", nsName)
-
-	ctx, cancel := context.WithTimeout(testConfig.Context, 30*time.Second)
-	defer cancel()
-
-	pods, err := testConfig.KubeCli.CoreV1().Pods(nsName).List(ctx, v1.ListOptions{})
-	if err != nil {
-		ginkgo.GinkgoWriter.Printf("Failed to list pods: %v\n", err)
-		return
-	}
-
-	ginkgo.GinkgoWriter.Printf("Total pods found: %d\n\n", len(pods.Items))
-
-	// Print summary table (like kubectl get pods)
-	ginkgo.GinkgoWriter.Printf("%-55s %-8s %-22s %-8s %-6s\n", "NAME", "READY", "STATUS", "RESTARTS", "AGE")
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		ready, total := 0, len(pod.Spec.Containers)
-		restarts := int32(0)
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.Ready {
-				ready++
-			}
-			restarts += cs.RestartCount
-		}
-		status := string(pod.Status.Phase)
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.State.Waiting != nil {
-				status = cs.State.Waiting.Reason
-				break
-			}
-		}
-		age := ""
-		if !pod.CreationTimestamp.IsZero() {
-			d := time.Since(pod.CreationTimestamp.Time).Round(time.Second)
-			age = d.String()
-		}
-		ginkgo.GinkgoWriter.Printf("%-55s %-8s %-22s %-8d %-6s\n",
-			pod.Name, fmt.Sprintf("%d/%d", ready, total), status, restarts, age)
-	}
-	ginkgo.GinkgoWriter.Println()
-
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		ginkgo.GinkgoWriter.Printf("--- Pod: %s | Phase: %s | Node: %s ---\n",
-			pod.Name, pod.Status.Phase, pod.Spec.NodeName)
-
-		for _, cs := range pod.Status.InitContainerStatuses {
-			printContainerStatus("init", cs)
-		}
-		for _, cs := range pod.Status.ContainerStatuses {
-			printContainerStatus("container", cs)
-		}
-
-		restarted := map[string]bool{}
-		for _, cs := range pod.Status.InitContainerStatuses {
-			if cs.RestartCount > 0 {
-				restarted[cs.Name] = true
-			}
-		}
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.RestartCount > 0 {
-				restarted[cs.Name] = true
-			}
-		}
-
-		for _, c := range pod.Spec.InitContainers {
-			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, true)
-			}
-			dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, false)
-		}
-		for _, c := range pod.Spec.Containers {
-			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, true)
-			}
-			dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, false)
-		}
-	}
-	ginkgo.GinkgoWriter.Println("=== End of pod dump ===")
-}
-
-func printContainerStatus(kind string, cs corev1.ContainerStatus) {
-	status := fmt.Sprintf("  [%s] %s | ready=%v restarts=%d", kind, cs.Name, cs.Ready, cs.RestartCount)
-	if cs.State.Waiting != nil {
-		status += " | Waiting: " + cs.State.Waiting.Reason
-	}
-	if cs.State.Terminated != nil {
-		status += fmt.Sprintf(" | Terminated: %s (exit %d)", cs.State.Terminated.Reason, cs.State.Terminated.ExitCode)
-	}
-	ginkgo.GinkgoWriter.Println(status)
-}
-
-func dumpContainerLogs(ctx context.Context, nsName, podName, containerName string, previous bool) {
-	tailLines := int64(100)
-	req := testConfig.KubeCli.CoreV1().Pods(nsName).GetLogs(podName, &corev1.PodLogOptions{
-		Container: containerName,
-		TailLines: &tailLines,
-		Previous:  previous,
-	})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to stream logs: %v\n", podName, containerName, err)
-		return
-	}
-	defer func() {
-		if err := stream.Close(); err != nil {
-			ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to close log stream: %v\n", podName, containerName, err)
-		}
-	}()
-
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, stream); err != nil {
-		ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to read logs: %v\n", podName, containerName, err)
-		return
-	}
-	label := "last 100 lines"
-	if previous {
-		label = "previous instance, last 100 lines"
-	}
-	ginkgo.GinkgoWriter.Printf("  [logs] %s/%s (%s):\n%s\n", podName, containerName, label, buf.String())
 }

@@ -54,6 +54,12 @@ const (
 	serviceAccountManifest = "../../deploy/components/inference-gateway/service-accounts.yaml"
 	// servicesManifest is the manifest for the EPP's service resources.
 	servicesManifest = "../../deploy/environments/dev/e2e-infra/services.yaml"
+	// renderManifest is the manifest for the standalone vLLM render deployment and service.
+	renderManifest = "../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
+
+	// defaultPort is the envoy gateway's NodePort.
+	defaultPort        = 30080
+	defaultMetricsPort = 32090
 
 	// CI shards scheduler e2e specs with label filters.
 	extendedTestLabel      = "Extended"
@@ -65,8 +71,8 @@ const (
 )
 
 var (
-	basePort        = env.GetEnvInt("E2E_PORT", 30080, ginkgo.GinkgoLogr)
-	baseMetricsPort = env.GetEnvInt("E2E_METRICS_PORT", 32090, ginkgo.GinkgoLogr)
+	basePort        = env.GetEnvInt("E2E_PORT", defaultPort, ginkgo.GinkgoLogr)
+	baseMetricsPort = env.GetEnvInt("E2E_METRICS_PORT", defaultMetricsPort, ginkgo.GinkgoLogr)
 
 	testConfig *testutils.TestConfig
 
@@ -79,10 +85,11 @@ var (
 	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.2", ginkgo.GinkgoLogr)
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
+	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
 	numProcesses     = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
 	// baseNsName is the base of the namespace in which the K8S objects will be created
-	baseNsName = env.GetEnvString("NAMESPACE", getDefaultNsName(), ginkgo.GinkgoLogr)
+	baseNsName = env.GetEnvString("NAMESPACE", testutils.DefaultNsName(numProcesses, "e2e"), ginkgo.GinkgoLogr)
 
 	// k8sContext is the Kubernetes context to work with
 	k8sContext = env.GetEnvString("K8S_CONTEXT", "", ginkgo.GinkgoLogr)
@@ -95,6 +102,7 @@ var (
 	rbacObjects           []string
 	serviceAccountObjects []string
 	serviceObjects        []string
+	renderObjects         []string
 	infPoolObjects        []string
 	createdNameSpace      bool
 
@@ -110,11 +118,7 @@ func TestEndToEnd(t *testing.T) {
 }
 
 var _ = ginkgo.BeforeSuite(func() {
-	suiteConfig, _ := ginkgo.GinkgoConfiguration()
-	if numProcesses != suiteConfig.ParallelTotal {
-		ginkgo.Fail(fmt.Sprintf("The value of the environment variable `E2E_NUM_PROCS` (%d) is not equal to the number of ginkgo processes being run (%d)",
-			numProcesses, suiteConfig.ParallelTotal))
-	}
+	testutils.RequireParallelProcessesMatch(numProcesses)
 
 	if k8sContext == "" {
 		setupK8sCluster()
@@ -133,6 +137,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
 	serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls, nsName)
 	serviceObjects = testutils.ApplyYAMLFile(testConfig, servicesManifest, nsName)
+	renderObjects = createRender(nsName)
 
 	// Prevent failure in tests due to InferencePool not existing before the test
 	infPoolObjects = createInferencePool(1, false)
@@ -158,12 +163,8 @@ var _ = ginkgo.AfterSuite(func() {
 // ReportAfterEach only fires for individual specs and would miss setup/teardown failures.
 var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 	if !report.SuiteSucceeded {
-		if numProcesses > 1 {
-			for idx := range numProcesses {
-				dumpPodsAndLogs(fmt.Sprintf("%s-%d", baseNsName, idx+1))
-			}
-		} else {
-			dumpPodsAndLogs(baseNsName)
+		for idx := range numProcesses {
+			testutils.DumpPodsAndLogs(testConfig, testutils.NamespaceForProcess(baseNsName, numProcesses, idx+1))
 		}
 	}
 
@@ -190,6 +191,7 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 			nsName := getNamespace()
 			ginkgo.By("Deleting created Kubernetes objects")
 			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, renderObjects, nsName)
 			testutils.DeleteObjects(testConfig, serviceObjects, nsName)
 			testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
 			testutils.DeleteObjects(testConfig, rbacObjects, nsName)
@@ -208,20 +210,11 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 // Create the Kubernetes cluster for the E2E tests and load the local images
 func setupK8sCluster() {
 	// extraPortMappings is substituted into `extraPortMappings: ${EXTRA_PORT_MAPPINGS}` in the Kind
-	// cluster configuration. Each item must use 2-space indentation to match that field's level in the
-	// YAML. If the field is ever reindented in Kind cluster configuration (kindClusterConfig), update
-	// the format string here too.
-	var extraPortMappingsBuilder strings.Builder
-	for idx := range numProcesses {
-		inc := idx * 100
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n  - containerPort: %d", 30080+inc)
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n    hostPort: %d", basePort+inc)
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n    protocol: TCP")
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n  - containerPort: %d", 32090+inc)
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n    hostPort: %d", baseMetricsPort+inc)
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n    protocol: TCP")
-	}
-	extraPortMappings := extraPortMappingsBuilder.String()
+	// cluster configuration below; keep its indentation in sync with testutils.BuildExtraPortMappings.
+	extraPortMappings := testutils.BuildExtraPortMappings(numProcesses,
+		[2]int{defaultPort, basePort},
+		[2]int{defaultMetricsPort, baseMetricsPort},
+	)
 
 	command := exec.Command("kind", "create", "cluster", "--name", kindClusterName, "--config", "-")
 	stdin, err := command.StdinPipe()
@@ -242,7 +235,7 @@ func setupK8sCluster() {
 	kindLoadImage(vllmSimImage)
 	kindLoadImage(eppImage)
 	kindLoadImage(sideCarImage)
-	if loadRenderImage {
+	if loadRenderImage && vllmRenderImage != vllmSimImage {
 		kindLoadImage(vllmRenderImage)
 	}
 }
@@ -402,46 +395,21 @@ func startEPPMetricsPortForward() {
 	time.Sleep(3 * time.Second)
 }
 
-// getPort is used by the E2E tests to get the port of the envoy service for their setup.
-// When the tests are running in parallel, there will be up to N processes running. Each process
-// will have it's own envoy instance with its own nodePort. The nodePorts will be of the form
-// 30080, 30180, 30280, etc. In a more general sense they are of the form:
-// (the base port) + 100 * (the process number minus one). The goal is that the port for process
-// one, is the base port specified by the user.
+// getPort returns the envoy service's NodePort for this process. See testutils.ProcessPort.
 func getPort() int {
-	return basePort + 100*(ginkgo.GinkgoParallelProcess()-1)
+	return testutils.ProcessPort(basePort)
 }
 
-// getMetricsPort is used by the E2E tests to get the EPP's metrics port for their setup.
-// When the tests are running in parallel, there will be up to N processes running. Each process
-// will have it's own EPP instance with its own metrics nodePort. The nodePorts will be of the form
-// 32090, 32190, 32290, etc. In a more general sense they are of the form:
-// (the base metrics port) + 100 * (the process number minus one). The goal is that the metrics port
-// for process one, is the base metrics port specified by the user.
+// getMetricsPort returns the EPP's metrics NodePort for this process. See testutils.ProcessPort.
 func getMetricsPort() int {
-	return baseMetricsPort + 100*(ginkgo.GinkgoParallelProcess()-1)
+	return testutils.ProcessPort(baseMetricsPort)
 }
 
-// getNamespace returns the namespace being used by each and every test. When the tests run in
-// parallel, each test is assigned its own namespace to provide isolation between the tests.
-// If the tests are not being run in parallel, then the namespace used is simply the base namespace
-// setup by the NAMESPACE environment variable, defaulting to "default".
-// If the tests are running in parallel, the namespace names will be of the form baseName-N, where
-// baseName is the base namespace setup by the NAMESPACE environment variable, defaulting to "e2e"
-// and N is the process number.
+// getNamespace returns the namespace being used by the current process. Each
+// parallel process is assigned its own namespace to provide isolation between
+// the tests running in it. See testutils.Namespace.
 func getNamespace() string {
-	if numProcesses == 1 {
-		return baseNsName
-	}
-	return fmt.Sprintf("%s-%d", baseNsName, ginkgo.GinkgoParallelProcess())
-}
-
-// getDefaultNsName is used in setting the default base namespace.
-func getDefaultNsName() string {
-	if numProcesses == 1 {
-		return "default"
-	}
-	return "e2e"
+	return testutils.Namespace(baseNsName, numProcesses)
 }
 
 const kindClusterConfig = `

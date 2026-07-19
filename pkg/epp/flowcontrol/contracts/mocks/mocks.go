@@ -159,21 +159,17 @@ func (m *MockEndpointCandidates) Locate(ctx context.Context, requestMetadata map
 // It is used for tests that need to control the exact return values of a queue's methods without simulating the queue's
 // internal logic or state.
 type MockSafeQueue struct {
-	NameV         string
-	CapabilitiesV []flowcontrol.QueueCapability
-	LenV          int
-	ByteSizeV     uint64
-	PeekV         flowcontrol.QueueItemAccessor
-	AddFunc       func(item flowcontrol.QueueItemAccessor)
-	RemoveFunc    func(handle flowcontrol.QueueItemHandle) (flowcontrol.QueueItemAccessor, error)
-	CleanupFunc   func(predicate contracts.PredicateFunc) []flowcontrol.QueueItemAccessor
-	DrainFunc     func() []flowcontrol.QueueItemAccessor
+	LenV        int
+	ByteSizeV   uint64
+	PeekV       flowcontrol.QueueItemAccessor
+	AddFunc     func(item flowcontrol.QueueItemAccessor)
+	RemoveFunc  func(handle flowcontrol.QueueItemHandle) (flowcontrol.QueueItemAccessor, error)
+	CleanupFunc func(predicate contracts.PredicateFunc) []flowcontrol.QueueItemAccessor
+	DrainFunc   func() []flowcontrol.QueueItemAccessor
 }
 
-func (m *MockSafeQueue) Name() string                                { return m.NameV }
-func (m *MockSafeQueue) Capabilities() []flowcontrol.QueueCapability { return m.CapabilitiesV }
-func (m *MockSafeQueue) Len() int                                    { return m.LenV }
-func (m *MockSafeQueue) ByteSize() uint64                            { return m.ByteSizeV }
+func (m *MockSafeQueue) Len() int         { return m.LenV }
+func (m *MockSafeQueue) ByteSize() uint64 { return m.ByteSizeV }
 
 func (m *MockSafeQueue) Peek() flowcontrol.QueueItemAccessor {
 	return m.PeekV
@@ -331,9 +327,7 @@ func (m *MockManagedQueue) Drain() []flowcontrol.QueueItemAccessor {
 	return drained
 }
 
-func (m *MockManagedQueue) FlowKey() flowcontrol.FlowKey                { return m.FlowKeyV }
-func (m *MockManagedQueue) Name() string                                { return "" }
-func (m *MockManagedQueue) Capabilities() []flowcontrol.QueueCapability { return nil }
+func (m *MockManagedQueue) FlowKey() flowcontrol.FlowKey { return m.FlowKeyV }
 func (m *MockManagedQueue) OrderingPolicy() flowcontrol.OrderingPolicy {
 	if m.OrderingPolicyFunc != nil {
 		return m.OrderingPolicyFunc()

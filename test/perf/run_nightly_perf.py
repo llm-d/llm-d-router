@@ -118,7 +118,7 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
     release_name = os.path.splitext(os.path.basename(router_config_path))[0]
     
     epp_registry = os.environ.get("EPP_REGISTRY", "ghcr.io/llm-d")
-    epp_repository = os.environ.get("EPP_REPOSITORY", "llm-d-router-endpoint-picker-dev")
+    epp_repository = os.environ.get("EPP_REPOSITORY", "llm-d-router-endpoint-picker")
     epp_tag = os.environ.get("EPP_TAG", "main")
     
     cpu_limit = double_cpu(epp_cpu)
@@ -657,7 +657,7 @@ def main():
     # Resolve relative defaults
     default_sim_deploy = os.path.join(script_dir, "config", "llm-d-sim-deployment.yaml")
     default_sim_svc = os.path.join(script_dir, "config", "llm-d-sim-service.yaml")
-    default_router_chart = "oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev"
+    default_router_chart = "oci://ghcr.io/llm-d/charts/llm-d-router-standalone"
     default_perf_chart = os.path.abspath(os.path.join(script_dir, "..", "..", "..", "..", "inference-perf", "deploy", "inference-perf"))
     default_perf_job = os.path.join(script_dir, "config", "shared_prefix_job1.yaml")
     default_results_dir = os.path.abspath(os.path.join(script_dir, "results"))
