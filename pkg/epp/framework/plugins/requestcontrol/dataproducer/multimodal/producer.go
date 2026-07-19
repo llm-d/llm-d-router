@@ -225,10 +225,6 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 	return nil
 }
 
-func (p *Producer) extractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
-	return extractMMItems(request)
-}
-
 // ExtractMMItems returns deterministic, unique multimodal encoder-cache items
 // for a request. Tokenized multimodal features are preferred because they carry
 // placeholder lengths; if unavailable, typed structured media blocks are hashed

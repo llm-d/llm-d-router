@@ -22,7 +22,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -33,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 )
 
 func TestLRUCapacityFromCacheSizeMB(t *testing.T) {
