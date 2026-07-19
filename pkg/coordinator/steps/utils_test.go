@@ -24,6 +24,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
+const testHash = "abc123"
+
 func TestReadErrorBody_CapsOversizedBody(t *testing.T) {
 	body := readErrorBody(strings.NewReader(strings.Repeat("a", maxErrorBodySize*4)))
 	if len(body) != maxErrorBodySize {
@@ -99,7 +101,7 @@ func TestExtractMultimodalEntries(t *testing.T) {
 
 	t.Run("valid_single_image", func(t *testing.T) {
 		features := map[string]any{
-			"mm_hashes": map[string]any{"image": []any{"abc123"}},
+			"mm_hashes": map[string]any{"image": []any{testHash}},
 			"mm_placeholders": map[string]any{"image": []any{
 				map[string]any{"offset": float64(1), "length": float64(3)},
 			}},
@@ -113,8 +115,8 @@ func TestExtractMultimodalEntries(t *testing.T) {
 			t.Fatalf("expected 1 entry, got %d", len(entries))
 		}
 		e := entries[0]
-		if e.Hash != "abc123" {
-			t.Errorf("hash: expected abc123, got %v", e.Hash)
+		if e.Hash != testHash {
+			t.Errorf("hash: expected %s, got %v", testHash, e.Hash)
 		}
 		if e.Placeholder.Offset != 1 {
 			t.Errorf("offset: expected 1, got %v", e.Placeholder.Offset)
@@ -167,7 +169,7 @@ func TestExtractMultimodalEntries(t *testing.T) {
 
 	t.Run("absent_kwargs_resolves_from_cache", func(t *testing.T) {
 		features := map[string]any{
-			"mm_hashes": map[string]any{"image": []any{"abc123"}},
+			"mm_hashes": map[string]any{"image": []any{testHash}},
 			"mm_placeholders": map[string]any{"image": []any{
 				map[string]any{"offset": float64(1), "length": float64(3)},
 			}},
@@ -179,8 +181,8 @@ func TestExtractMultimodalEntries(t *testing.T) {
 		if len(entries) != 1 {
 			t.Fatalf("expected 1 entry, got %d", len(entries))
 		}
-		if entries[0].Hash != "abc123" {
-			t.Errorf("hash: expected abc123, got %v", entries[0].Hash)
+		if entries[0].Hash != testHash {
+			t.Errorf("hash: expected %s, got %v", testHash, entries[0].Hash)
 		}
 		if entries[0].KwargsData != "" {
 			t.Errorf("kwargs: expected empty (resolve from cache), got %q", entries[0].KwargsData)

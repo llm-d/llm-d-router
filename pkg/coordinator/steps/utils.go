@@ -121,27 +121,15 @@ func coerceParamsMap(logger logr.Logger, v any, label string) map[string]any {
 
 // toIntSlice converts a JSON-unmarshalled []any of numeric elements to []int.
 // Each element must be a non-negative integer represented as float64 or json.Number.
+// Callers wrap the returned error with their own field context.
 func toIntSlice(values []any) ([]int, error) {
 	out := make([]int, 0, len(values))
-	for _, v := range values {
-		switch n := v.(type) {
-		case float64:
-			if n < 0 || n != math.Trunc(n) {
-				return nil, fmt.Errorf("render: invalid token in prompt array: %v (must be a non-negative integer): %w", v, pipeline.ErrBadRequest)
-			}
-			out = append(out, int(n))
-		case json.Number:
-			i, err := n.Int64()
-			if err != nil {
-				return nil, fmt.Errorf("render: invalid token in prompt array: %v: %w", v, pipeline.ErrBadRequest)
-			}
-			if i < 0 {
-				return nil, fmt.Errorf("render: invalid token in prompt array: %v (must be a non-negative integer): %w", v, pipeline.ErrBadRequest)
-			}
-			out = append(out, int(i))
-		default:
-			return nil, fmt.Errorf("render: invalid token in prompt array: %T: %w", v, pipeline.ErrBadRequest)
+	for i, v := range values {
+		n, err := anyToNonNegativeInt(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid token at index %d: %v: %w", i, err, pipeline.ErrBadRequest)
 		}
+		out = append(out, n)
 	}
 	return out, nil
 }
