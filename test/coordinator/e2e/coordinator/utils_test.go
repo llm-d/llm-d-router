@@ -41,7 +41,7 @@ func getPodNames(labels map[string]string) []string {
 	podList := corev1.PodList{}
 	selector := apilabels.SelectorFromSet(labels)
 	err := testConfig.K8sClient.List(testConfig.Context, &podList,
-		&client.ListOptions{Namespace: nsName, LabelSelector: selector})
+		&client.ListOptions{Namespace: getNamespace(), LabelSelector: selector})
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
 	names := make([]string, 0, len(podList.Items))
@@ -59,7 +59,7 @@ func podsInDeploymentsReady(objects []string) {
 	isDeploymentReady := func(deploymentName string) bool {
 		var deployment appsv1.Deployment
 		err := testConfig.K8sClient.Get(testConfig.Context,
-			types.NamespacedName{Namespace: nsName, Name: deploymentName}, &deployment)
+			types.NamespacedName{Namespace: getNamespace(), Name: deploymentName}, &deployment)
 		if err != nil || deployment.Spec.Replicas == nil {
 			return false
 		}

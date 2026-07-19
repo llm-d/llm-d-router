@@ -44,6 +44,10 @@
 # Tokenization
 /pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/          @vMaroon @liu-cong @sagearc @llm-d/router-maintainers
 
+# KV-cache subsystem — indexer, KV-block index, KV-events
+/pkg/kvcache/                                                              @vMaroon @liu-cong @hyeongyun0916 @yankay @sagearc @llm-d/router-maintainers
+/pkg/kvevents/                                                             @vMaroon @liu-cong @hyeongyun0916 @yankay @sagearc @llm-d/router-maintainers
+
 # Request handling
 /pkg/epp/framework/interface/requesthandling/                             @zetxqx @llm-d/router-maintainers
 /pkg/epp/framework/plugins/requesthandling/                               @zetxqx @llm-d/router-maintainers

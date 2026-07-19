@@ -100,21 +100,11 @@ type OrderingPolicy interface {
 	plugin.Plugin
 
 	// Less reports whether item 'a' should be dispatched before item 'b'.
-	// This makes the policy act as a sort.Interface for the queue.
+	// This makes the policy act as a sort.Interface for the queue, determining the dispatch order
+	// (the queue's head is the highest-priority item per this comparator).
 	//
-	// Invariants:
-	//   - Returning true means 'a' has higher priority than 'b'.
-	//   - If the queue supports CapabilityPriorityConfigurable, this function determines the heap order.
+	// Invariant: returning true means 'a' has higher priority than 'b'.
 	Less(a, b QueueItemAccessor) bool
-
-	// RequiredQueueCapabilities returns the set of capabilities that a SafeQueue MUST support to effectively apply this
-	// policy.
-	//
-	// For example:
-	//   - "fcfs-ordering-policy" coupled with CapabilityFIFO is O(1).
-	//   - "edf-ordering-policy" (Earliest Deadline First) REQUIRES CapabilityPriorityConfigurable (Heap) to function
-	//     correctly.
-	RequiredQueueCapabilities() []QueueCapability
 }
 
 // SaturationDetector provides real-time load signals.
@@ -145,8 +135,8 @@ type SaturationDetector interface {
 // as described in [/pkg/epp/flowcontrol/contracts.SaturationDetector]
 //
 // Architecture (Stateless Singleton):
-// UsageLimitPolicy plugins are Singletons. A single instance handles limit computation for all priority bands
-// across all shards. The plugin MUST be stateless: it is a pure function that maps the current saturation and
+// UsageLimitPolicy plugins are Singletons. A single instance handles limit computation for all priority bands.
+// The plugin MUST be stateless: it is a pure function that maps the current saturation and
 // active priority domain to a set of ceilings. Any signal conditioning (trend detection, smoothing) belongs in
 // the SaturationDetector layer, not here.
 //

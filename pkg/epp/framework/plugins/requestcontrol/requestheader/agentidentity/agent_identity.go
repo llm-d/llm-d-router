@@ -14,8 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package agentidentity provides a PreAdmitter plugin that resolves
-// agent identity from provider-specific headers into the FairnessID field.
+// Package agentidentity provides a RequestHeaderProcessor plugin that resolves
+// agent identity from provider-specific headers and stores it as a request
+// attribute for use by other subsystems (flow control, scheduling, KV cache, etc.).
 package agentidentity
 
 import (
@@ -30,8 +31,12 @@ import (
 )
 
 const (
-	PluginType = "agent-identity"
-
+	// AgentIdentityKey is the request-attribute key under which
+	// this plugin publishes the resolved agent identity.
+	// Downstream consumers such as the Director read it
+	// via scheduling.ReadRequestAttribute to derive the FairnessID.
+	AgentIdentityKey        = "agent-identity"
+	PluginType              = "agent-identity"
 	ClaudeCodeSessionHeader = "x-claude-code-session-id"
 	OpenCodeSessionHeader   = "x-session-affinity"
 	// CodexSessionHeader is the current (Codex >= 0.131.0) hyphenated form.
@@ -92,9 +97,10 @@ func mergeHeaders(extras, defaults []string) []string {
 }
 
 // compile-time interface assertion
-var _ requestcontrol.PreAdmitter = &Plugin{}
+var _ requestcontrol.RequestHeaderProcessor = &Plugin{}
 
-// Plugin resolves agent identity from provider-specific headers into FairnessID.
+// Plugin resolves agent identity from provider-specific headers and stores it
+// as a request attribute for use by other subsystems.
 type Plugin struct {
 	typedName       plugin.TypedName
 	priorityHeaders []string
@@ -104,17 +110,12 @@ func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-func (p *Plugin) PreAdmit(_ context.Context, request *scheduling.InferenceRequest) error {
-	if request.FairnessID != "" {
-		return nil
-	}
-
+func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceRequest) error {
 	for _, header := range p.priorityHeaders {
 		if id := request.Headers[header]; id != "" {
-			request.FairnessID = id
+			request.PutAttribute(AgentIdentityKey, id)
 			return nil
 		}
 	}
-
 	return nil
 }

@@ -94,6 +94,7 @@ const inlineImageDataURI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAA
 // tears the workload down. expectedImages is the number of images in the
 // request; when > 0 the encoder log assertions are also verified.
 func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages int) {
+	nsName := getNamespace()
 	var (
 		coordinator  []string
 		modelServers []string
@@ -162,7 +163,7 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 	coordinator = createCoordinator(coordinatorConfigNIXL)
 
 	req, err := http.NewRequest(http.MethodPost,
-		gatewayBaseURL+"/v1/chat/completions",
+		gatewayBaseURL()+"/v1/chat/completions",
 		bytes.NewReader(body))
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
@@ -178,7 +179,7 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 		"coordinator returned non-200: body=%s", string(raw))
 	gomega.Expect(raw).NotTo(gomega.BeEmpty(), "coordinator returned empty body")
-	verifyCoordinatorSteps(expectedSteps, expectedImages, true, true)
+	verifyCoordinatorSteps(nsName, expectedSteps, expectedImages, true, true)
 }
 
 // verifyCoordinatorSteps fetches the coordinator pod logs and asserts that
@@ -188,7 +189,7 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 // sub-requests, plus, when ecNIXL is set, the ec_transfer_params total via the
 // "merged encode response" marker. The kv/ec params surface in the logs only
 // for the NIXL connectors, so those checks are gated accordingly.
-func verifyCoordinatorSteps(expectedSteps []string, expectedImages int, kvNIXL, ecNIXL bool) {
+func verifyCoordinatorSteps(nsName string, expectedSteps []string, expectedImages int, kvNIXL, ecNIXL bool) {
 	ginkgo.By("Verifying coordinator logs contain all pipeline steps")
 
 	args := []string{"logs", "deployment/llm-d-coordinator",

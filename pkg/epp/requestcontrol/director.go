@@ -20,7 +20,6 @@ package requestcontrol
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -49,6 +48,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -244,6 +244,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	logger := log.FromContext(ctx)
 
+	// Record the client-facing model for every request, including forwarded-unchanged ones.
+	reqCtx.IncomingModelName = inferenceRequestBody.Model
+
 	err = d.modelRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody)
 	if err != nil {
 		return reqCtx, err
@@ -276,11 +279,16 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
-	if err := d.runPreAdmissionPlugins(ctx, reqCtx.SchedulingRequest); err != nil {
+	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
+	// Derive FairnessID from agent-identity attribute if not already set by explicit header.
 	if reqCtx.SchedulingRequest.FairnessID == "" {
-		reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
+		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey); ok && agentID != "" {
+			reqCtx.SchedulingRequest.FairnessID = agentID
+		} else {
+			reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
+		}
 	}
 
 	// Admit may block until flow control admits the request.
@@ -356,45 +364,47 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 }
 
 func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
-	if v, ok := inferenceRequestBody.Payload.(fwkrh.PayloadMap); ok {
-		// Mutate the model name inside the map, this is currently only supported if the payload is a PayloadMap.
-		_, err := d.mutateModel(ctx, reqCtx, v)
-		if err != nil {
-			return err
-		}
+	logger := log.FromContext(ctx)
+	rewriter, ok := reqCtx.Parser.(fwkrh.ModelNameRewriter)
+	if !ok {
+		logger.Info("Warning: parser does not implement ModelNameRewriter, skipping model rewrite")
+		return nil
 	}
-	return nil
-}
-
-func (d *Director) mutateModel(ctx context.Context, reqCtx *handlers.RequestContext, bodyMap map[string]any) (*handlers.RequestContext, error) {
-	reqCtx.IncomingModelName, _ = bodyMap["model"].(string)
+	payload, ok := inferenceRequestBody.Payload.(fwkrh.MarshalablePayload)
+	if !ok {
+		logger.Info("Warning: payload does not implement MarshalablePayload, skipping model rewrite")
+		return nil
+	}
 	if reqCtx.TargetModelName == "" {
 		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
 	d.applyWeightedModelRewrite(ctx, reqCtx)
 	if reqCtx.TargetModelName == "" {
-		return reqCtx, errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
+		return errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
 	}
-	bodyMap["model"] = reqCtx.TargetModelName
-	return reqCtx, nil
+	mutated, err := rewriter.RewriteModelName(payload, reqCtx.TargetModelName)
+	if err != nil {
+		return err
+	}
+	// Store the result back so repackage serializes the mutated payload.
+	inferenceRequestBody.Payload = mutated
+	return nil
 }
 
 func (d *Director) repackage(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
-	logger := log.FromContext(ctx)
-	switch v := inferenceRequestBody.Payload.(type) {
-	case fwkrh.PayloadMap:
-		requestBodyBytes, err := json.Marshal(v)
-		if err != nil {
-			logger.Error(err, "Error marshalling request body")
-			return errcommon.Error{Code: errcommon.Internal, Msg: "Error marshalling request body"}
-		}
-		reqCtx.Request.RawBody = requestBodyBytes
-		reqCtx.RequestSize = len(requestBodyBytes)
-	case fwkrh.PayloadProto, fwkrh.RawPayload:
+	marshaler, ok := inferenceRequestBody.Payload.(fwkrh.Marshaler)
+	if !ok {
+		// Payload forwarded unchanged (raw or proto).
 		reqCtx.RequestSize = len(reqCtx.Request.RawBody)
-	default:
-		return errcommon.Error{Code: errcommon.BadRequest, Msg: "Unsupported llmRequest parsedBody"}
+		return nil
 	}
+	requestBodyBytes, err := marshaler.Marshal()
+	if err != nil {
+		log.FromContext(ctx).Error(err, "Error marshalling request body")
+		return errcommon.Error{Code: errcommon.Internal, Msg: "Error marshalling request body"}
+	}
+	reqCtx.Request.RawBody = requestBodyBytes
+	reqCtx.RequestSize = len(requestBodyBytes)
 	return nil
 }
 
@@ -590,19 +600,19 @@ func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.I
 	}
 }
 
-func (d *Director) runPreAdmissionPlugins(ctx context.Context, request *fwksched.InferenceRequest) error {
-	if len(d.requestControlPlugins.preAdmissionPlugins) == 0 {
+func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwksched.InferenceRequest) error {
+	if len(d.requestControlPlugins.requestHeaderPlugins) == 0 {
 		return nil
 	}
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
-	for _, plugin := range d.requestControlPlugins.preAdmissionPlugins {
-		loggerDebug.Info("Running PreAdmitter plugin", "plugin", plugin.TypedName())
+	for _, plugin := range d.requestControlPlugins.requestHeaderPlugins {
+		loggerDebug.Info("Running RequestHeaderProcessor plugin", "plugin", plugin.TypedName())
 		before := time.Now()
-		if err := plugin.PreAdmit(ctx, request); err != nil {
+		if err := plugin.RequestHeader(ctx, request); err != nil {
 			return err
 		}
-		metrics.RecordPluginProcessingLatency(fwkrc.PreAdmissionExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
-		loggerDebug.Info("Completed running PreAdmitter plugin successfully", "plugin", plugin.TypedName())
+		metrics.RecordPluginProcessingLatency(fwkrc.RequestHeaderExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		loggerDebug.Info("Completed running RequestHeaderProcessor plugin successfully", "plugin", plugin.TypedName())
 	}
 	return nil
 }
