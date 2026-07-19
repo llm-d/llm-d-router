@@ -25,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -43,6 +44,9 @@ const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
 	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
+	// requestInflightStateKey holds the single per-request entry whose OnEvicted
+	// decrements the request_inflight gauge exactly once.
+	requestInflightStateKey fwkplugin.StateKey = "inflight-request-gauge"
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
@@ -97,17 +101,23 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
 	}
 
-	return &InFlightLoadProducer{
+	producer := &InFlightLoadProducer{
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
-		requestTracker:           newConcurrencyTracker(),
-		tokenTracker:             newConcurrencyTracker(),
+		requestTracker:           newConcurrencyTracker(inflightRequests, name),
+		tokenTracker:             newConcurrencyTracker(inflightTokens, name),
 		tokenEstimator:           NewSimpleTokenEstimatorWithConfig(outputRatio, cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		uncachedRequestTokensDk:  attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name),
 		PluginState:              fwkplugin.NewPluginState(ctx),
-	}, nil
+	}
+
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
+	}
+
+	return producer, nil
 }
 
 var (
@@ -149,6 +159,11 @@ type addedTokensEntry struct {
 	tokenCounter   *atomic.Int64
 	requestCounter *atomic.Int64
 	requests       atomic.Int32
+	// endpointID plus the tracker back-references let OnEvicted republish the
+	// live gauge series after decrementing the captured counter instances.
+	endpointID     string
+	tokenTracker   *concurrencyTracker
+	requestTracker *concurrencyTracker
 }
 
 var _ fwkplugin.EvictableStateData = (*addedTokensEntry)(nil)
@@ -164,6 +179,9 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 	clone := &addedTokensEntry{
 		tokenCounter:   e.tokenCounter,
 		requestCounter: e.requestCounter,
+		endpointID:     e.endpointID,
+		tokenTracker:   e.tokenTracker,
+		requestTracker: e.requestTracker,
 	}
 	clone.tokens.Store(e.tokens.Load())
 	clone.requests.Store(e.requests.Load())
@@ -173,9 +191,36 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
 	if t := e.tokens.Swap(0); t != 0 {
 		decrementClamped(e.tokenCounter, t)
+		e.tokenTracker.publish(e.endpointID)
 	}
 	if e.requests.Swap(0) != 0 {
 		decrementClamped(e.requestCounter, 1)
+		e.requestTracker.publish(e.endpointID)
+	}
+}
+
+// requestInflightEntry decrements the per-model request_inflight gauge once when
+// the request leaves the picker. The decremented guard makes OnEvicted safe to
+// fire from both the end-of-stream Delete and the janitor reaper.
+type requestInflightEntry struct {
+	labels      requestInflightLabels
+	decremented atomic.Bool
+}
+
+var _ fwkplugin.EvictableStateData = (*requestInflightEntry)(nil)
+
+func (e *requestInflightEntry) Clone() fwkplugin.StateData {
+	if e == nil {
+		return nil
+	}
+	clone := &requestInflightEntry{labels: e.labels}
+	clone.decremented.Store(e.decremented.Load())
+	return clone
+}
+
+func (e *requestInflightEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
+	if e.decremented.CompareAndSwap(false, true) {
+		decRequestInflight(e.labels)
 	}
 }
 
@@ -354,6 +399,13 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		return
 	}
 
+	// One per-model gauge increment per request; the state entry's OnEvicted
+	// decrements it exactly once on completion or reaper cleanup.
+	if labels := newRequestInflightLabels(request); labels.modelName != "" {
+		incRequestInflight(labels)
+		p.PluginState.Write(request.RequestID, requestInflightStateKey, &requestInflightEntry{labels: labels})
+	}
+
 	inputTokens := p.tokenEstimator.EstimateInput(request)
 
 	for profileName, profileResult := range result.ProfileResults {
@@ -377,8 +429,11 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		tokenCounter := p.tokenTracker.add(eid, tokens)
 
 		entry := &addedTokensEntry{
+			endpointID:     eid,
 			tokenCounter:   tokenCounter,
 			requestCounter: requestCounter,
+			tokenTracker:   p.tokenTracker,
+			requestTracker: p.requestTracker,
 		}
 		entry.tokens.Store(tokens)
 		entry.requests.Store(1)
@@ -498,6 +553,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
 		if t := entry.tokens.Swap(0); t != 0 {
 			decrementClamped(entry.tokenCounter, t)
+			p.tokenTracker.publish(eid)
 		}
 	}
 }
@@ -596,15 +652,40 @@ func (p *InFlightLoadProducer) GetRequests(eid string) int64 {
 	return p.requestTracker.get(eid)
 }
 
-// concurrencyTracker manages thread-safe counters for inflight requests.
+// concurrencyTracker manages thread-safe counters for inflight requests and
+// mirrors each endpoint's live counter value into its gauge series.
 type concurrencyTracker struct {
-	mu     sync.RWMutex
-	counts map[string]*atomic.Int64
+	mu           sync.RWMutex
+	counts       map[string]*atomic.Int64
+	gauge        *prometheus.GaugeVec
+	producerName string
 }
 
-func newConcurrencyTracker() *concurrencyTracker {
+func newConcurrencyTracker(gauge *prometheus.GaugeVec, producerName string) *concurrencyTracker {
 	return &concurrencyTracker{
-		counts: make(map[string]*atomic.Int64),
+		counts:       make(map[string]*atomic.Int64),
+		gauge:        gauge,
+		producerName: producerName,
+	}
+}
+
+// setGaugeLocked writes the endpoint's gauge series. Callers must hold t.mu.
+func (t *concurrencyTracker) setGaugeLocked(endpointID string, value int64) {
+	name, namespace := splitNamespacedName(endpointID)
+	t.gauge.WithLabelValues(name, namespace, t.producerName).Set(float64(value))
+}
+
+// publish syncs the endpoint's gauge series to the live counter value. The
+// write lock totally orders publishes, so the last one observes all prior
+// counter updates and the gauge converges; a decrement on an orphaned counter
+// (endpoint flap) republishes the live counter unchanged. A missing entry
+// means the endpoint was deleted: skip the write so a late release cannot
+// resurrect the deleted series.
+func (t *concurrencyTracker) publish(endpointID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if counter, ok := t.counts[endpointID]; ok {
+		t.setGaugeLocked(endpointID, counter.Load())
 	}
 }
 
@@ -634,10 +715,11 @@ func (t *concurrencyTracker) inc(endpointID string) *atomic.Int64 {
 	return t.add(endpointID, 1)
 }
 
-// add applies delta to the endpoint's counter, creating it if absent, and returns the exact
-// *atomic.Int64 instance that was mutated. Callers retain the returned pointer so the matching
-// decrement always lands on this same instance, even if the endpoint is later deleted (flap) and a
-// new counter is created under the same ID. See addedTokensEntry.
+// add applies delta to the endpoint's counter, creating it if absent, publishes the resulting
+// value to the gauge series, and returns the exact *atomic.Int64 instance that was mutated.
+// Callers retain the returned pointer so the matching decrement always lands on this same
+// instance, even if the endpoint is later deleted (flap) and a new counter is created under the
+// same ID. See addedTokensEntry.
 func (t *concurrencyTracker) add(endpointID string, delta int64) *atomic.Int64 {
 	t.mu.RLock()
 	counter, exists := t.counts[endpointID]
@@ -645,6 +727,7 @@ func (t *concurrencyTracker) add(endpointID string, delta int64) *atomic.Int64 {
 
 	if exists {
 		counter.Add(delta)
+		t.publish(endpointID)
 		return counter
 	}
 
@@ -653,12 +736,14 @@ func (t *concurrencyTracker) add(endpointID string, delta int64) *atomic.Int64 {
 
 	if counter, exists = t.counts[endpointID]; exists {
 		counter.Add(delta)
+		t.setGaugeLocked(endpointID, counter.Load())
 		return counter
 	}
 
 	counter = &atomic.Int64{}
 	counter.Store(delta)
 	t.counts[endpointID] = counter
+	t.setGaugeLocked(endpointID, counter.Load())
 	return counter
 }
 
@@ -692,4 +777,6 @@ func (t *concurrencyTracker) delete(endpointID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.counts, endpointID)
+	name, namespace := splitNamespacedName(endpointID)
+	t.gauge.DeleteLabelValues(name, namespace, t.producerName)
 }

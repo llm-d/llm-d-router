@@ -262,8 +262,8 @@ func TestInFlightLoadProducer_DumpState(t *testing.T) {
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker: newConcurrencyTracker(),
-		tokenTracker:   newConcurrencyTracker(),
+		requestTracker: newConcurrencyTracker(inflightRequests, "test"),
+		tokenTracker:   newConcurrencyTracker(inflightTokens, "test"),
 	}
 	podA := fullEndpointName("pod-a")
 	podB := fullEndpointName("pod-b")
@@ -291,8 +291,8 @@ func TestInFlightLoadProducer_DumpStateCapsEndpoints(t *testing.T) {
 	t.Parallel()
 
 	producer := &InFlightLoadProducer{
-		requestTracker: newConcurrencyTracker(),
-		tokenTracker:   newConcurrencyTracker(),
+		requestTracker: newConcurrencyTracker(inflightRequests, "test"),
+		tokenTracker:   newConcurrencyTracker(inflightTokens, "test"),
 	}
 	for i := range maxDebugDumpEndpoints + 5 {
 		endpointID := fullEndpointName(fmt.Sprintf("pod-%03d", i))
