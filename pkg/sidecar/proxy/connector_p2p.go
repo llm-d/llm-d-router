@@ -31,6 +31,7 @@ import (
 
 	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // handleP2P implements the vLLM OffloadingConnector P2P orchestration contract. The
@@ -74,12 +75,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	}
 	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
 	prefillData[requestFieldKVTransferParams] = prefillKVParams
-	prefillData[requestFieldStream] = false
-	delete(prefillData, requestFieldStreamOptions)
-	prefillData[requestFieldMaxTokens] = 1
-	if _, ok := prefillData[requestFieldMaxCompletionTokens]; ok {
-		prefillData[requestFieldMaxCompletionTokens] = 1
-	}
+	reqcommon.PrimeSingleTokenRequest(prefillData, requestData)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {

@@ -137,8 +137,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	switch format {
 	case gateway.FormatChatCompletions:
 		body := maps.Clone(reqCtx.Body)
-		body["stream"] = false
-		delete(body, "stream_options")
+		reqcommon.PrimeSingleTokenRequest(body, reqCtx.Body)
 		tokens := map[string]any{
 			"token_ids": reqCtx.TokenIDs,
 		}
@@ -150,7 +149,6 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			tokens["features"] = tokensFeatures
 		}
 		body["tokens"] = tokens
-		body["max_tokens"] = 1
 		body["kv_transfer_params"] = kvParams
 		if len(ecParams) > 0 {
 			body["ec_transfer_params"] = ecParams

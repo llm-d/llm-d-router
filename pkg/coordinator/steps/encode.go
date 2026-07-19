@@ -201,8 +201,8 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
 				},
 			},
-			"max_tokens": 1,
 		}
+		reqcommon.PrimeSingleTokenRequest(body, reqCtx.Body)
 		return body
 	default:
 		return map[string]any{

@@ -35,6 +35,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
@@ -47,8 +48,8 @@ const (
 
 	requestFieldKVTransferParams     = "kv_transfer_params"
 	requestFieldECTransferParams     = "ec_transfer_params"
-	requestFieldMaxTokens            = "max_tokens"
-	requestFieldMaxCompletionTokens  = "max_completion_tokens"
+	requestFieldMaxTokens            = reqcommon.FieldMaxTokens
+	requestFieldMaxCompletionTokens  = reqcommon.FieldMaxCompletionTokens
 	requestFieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	requestFieldMinTokens            = "min_tokens"
 	requestFieldSamplingParams       = "sampling_params"
@@ -58,8 +59,8 @@ const (
 	requestFieldRemoteEngineID       = "remote_engine_id"
 	requestFieldRemoteHost           = "remote_host"
 	requestFieldRemotePort           = "remote_port"
-	requestFieldStream               = "stream"
-	requestFieldStreamOptions        = "stream_options"
+	requestFieldStream               = reqcommon.FieldStream
+	requestFieldStreamOptions        = reqcommon.FieldStreamOptions
 	requestFieldCacheHitThreshold    = "cache_hit_threshold"
 	requestFieldContinueFinalMessage = "continue_final_message"
 	requestFieldAddGenerationPrompt  = "add_generation_prompt"
