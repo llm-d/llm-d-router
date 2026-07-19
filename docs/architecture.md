@@ -11,7 +11,7 @@
   - [`Plugins` Configuration](#plugins-configuration)
   - [`SchedulingProfiles` Configuration](#schedulingprofiles-configuration)
   - [Available plugins](#available-plugins)
-- [Metric Scraping](#metric-scraping)
+- [Metric Scraping and the Data Layer](#metric-scraping-and-the-data-layer)
 - [Disaggregated Encode/Prefill/Decode (E/P/D)](#disaggregated-encodeprefilldecode-epd)
 - [InferencePool & InferenceModel Design](#inferencepool--inferencemodel-design)
   - [Current Assumptions](#current-assumptions)
@@ -214,7 +214,7 @@ To learn more about the available plugins, check the plugins [README.md](../pkg/
 
 ---
 
-## Metric Scraping
+## Metric Scraping and the Data Layer
 
 The data layer follows a Source -> Extract -> Attribute lifecycle:
 
