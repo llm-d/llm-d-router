@@ -212,7 +212,7 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 			// reaching vLLM as garbage tokens.
 			tokenIDs, err := toIntSlice(p)
 			if err != nil {
-				return err
+				return fmt.Errorf("render: %w", err)
 			}
 			reqCtx.TokenIDs = tokenIDs
 			logger.V(logutil.DEFAULT).Info("prompt is token array, skipping render", "token_ids_len", len(tokenIDs))
