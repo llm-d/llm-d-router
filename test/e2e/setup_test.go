@@ -230,7 +230,7 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 // to inject the setup and teardown code.
 func testWrapper(test func()) func() {
 	var (
-		nsName           = getNamespace()
+		nsName           string
 		createdNameSpace bool
 
 		rbacObjects           []string
@@ -241,6 +241,7 @@ func testWrapper(test func()) func() {
 	)
 	return func() {
 		ginkgo.BeforeAll(func() {
+			nsName = getNamespace()
 			createdNameSpace = setupNameSpace()
 
 			envoyObjects, portForwardSession = createEnvoy(nsName)
@@ -278,7 +279,7 @@ func testWrapper(test func()) func() {
 				testutils.DeleteObjects(testConfig, envoyObjects, nsName)
 
 				if createdNameSpace {
-					deleteNameSpace(getNamespace())
+					deleteNameSpace(nsName)
 				}
 			} else {
 				// The test failed
