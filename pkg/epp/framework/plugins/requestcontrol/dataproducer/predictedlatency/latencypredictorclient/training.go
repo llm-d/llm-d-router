@@ -221,6 +221,12 @@ func (p *Predictor) ValidateTrainingEntry(entry TrainingEntry) error {
 	if entry.PrefixCacheScore < 0.0 || entry.PrefixCacheScore > 1.0 {
 		return fmt.Errorf("prefix_cache_score must be between 0.0 and 1.0, got %f", entry.PrefixCacheScore)
 	}
+	if entry.EncoderInputSize < 0 {
+		return fmt.Errorf("encoder_input_size must be non-negative, got %d", entry.EncoderInputSize)
+	}
+	if entry.EncoderMatchedSize < 0 || entry.EncoderMatchedSize > entry.EncoderInputSize {
+		return fmt.Errorf("encoder_matched_size must be between 0 and encoder_input_size (%d), got %d", entry.EncoderInputSize, entry.EncoderMatchedSize)
+	}
 	return nil
 }
 

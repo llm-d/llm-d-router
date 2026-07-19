@@ -21,9 +21,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
@@ -36,6 +38,64 @@ func TestProducesConsumes(t *testing.T) {
 
 	consumes := pl.Consumes()
 	assert.Contains(t, consumes.Required, attrprefix.PrefixCacheMatchInfoDataKey)
+	assert.NotContains(t, consumes.Required, attrmm.EncoderCacheMatchInfoKey,
+		"encoder-cache match data must not be consumed when the feature is disabled")
+}
+
+func TestConsumes_EncoderCacheFeatureEnabled(t *testing.T) {
+	cfg := DefaultConfig
+	cfg.UseEncoderCacheFeatures = true
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, cfg, nil)
+
+	consumes := pl.Consumes()
+	assert.Contains(t, consumes.Required, attrmm.EncoderCacheMatchInfoKey)
+}
+
+// TestProduce_CapturesEncoderCacheSizes verifies that Produce reads the
+// multimodal encoder-cache match data attached to endpoints and captures the
+// request's input size plus the per-endpoint matched size, leaving endpoints
+// without match data (text-only requests) at 0.
+func TestProduce_CapturesEncoderCacheSizes(t *testing.T) {
+	cfg := DefaultConfig
+	cfg.PredictInProduce = false
+	cfg.UseEncoderCacheFeatures = true
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, cfg, nil)
+
+	request := createTestInferenceRequest("encoder-test", 0, 0)
+	matched := createTestEndpoint("pod-matched", 0.1, 0, 0)
+	unmatched := createTestEndpoint("pod-unmatched", 0.1, 0, 0)
+
+	items := []attrmm.MatchItem{{Hash: "img-a", Size: 1}, {Hash: "img-b", Size: 1}}
+	matched.Put(pl.encoderCacheDataKey.String(), attrmm.NewEncoderCacheMatchInfo(items[:1], items))
+	unmatched.Put(pl.encoderCacheDataKey.String(), attrmm.NewEncoderCacheMatchInfo(nil, items))
+
+	require.NoError(t, pl.Produce(context.Background(), request, []fwksched.Endpoint{matched, unmatched}))
+
+	plCtx, err := pl.getPredictedLatencyContextForRequest(request)
+	require.NoError(t, err)
+	assert.Equal(t, 2, plCtx.encoderInputSize)
+	assert.Equal(t, 1, plCtx.encoderMatchedSizeForEndpoints["pod-matched"])
+	assert.Equal(t, 0, plCtx.encoderMatchedSizeForEndpoints["pod-unmatched"])
+}
+
+// TestProduce_EncoderCacheFeatureDisabledIgnoresMatchData is the negative
+// control: with the feature off, attached match data is not read.
+func TestProduce_EncoderCacheFeatureDisabledIgnoresMatchData(t *testing.T) {
+	cfg := DefaultConfig
+	cfg.PredictInProduce = false
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, cfg, nil)
+
+	request := createTestInferenceRequest("encoder-disabled-test", 0, 0)
+	endpoint := createTestEndpoint("pod-a", 0.1, 0, 0)
+	items := []attrmm.MatchItem{{Hash: "img-a", Size: 1}}
+	endpoint.Put(pl.encoderCacheDataKey.String(), attrmm.NewEncoderCacheMatchInfo(items, items))
+
+	require.NoError(t, pl.Produce(context.Background(), request, []fwksched.Endpoint{endpoint}))
+
+	plCtx, err := pl.getPredictedLatencyContextForRequest(request)
+	require.NoError(t, err)
+	assert.Equal(t, 0, plCtx.encoderInputSize)
+	assert.Empty(t, plCtx.encoderMatchedSizeForEndpoints)
 }
 
 // TestProduce_CancelledContextDoesNotPublish verifies that when the
