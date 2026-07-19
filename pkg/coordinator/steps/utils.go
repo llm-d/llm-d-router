@@ -185,10 +185,18 @@ func extractTokenIDs(raw any) ([]int, error) {
 	return toIntSlice(arr)
 }
 
-// extractMultimodalEntries builds []pipeline.MultimodalEntry from the three parallel
+// extractMultimodalEntries builds []pipeline.MultimodalEntry from the parallel
 // slices in a generate-format features map. Returns nil when features is nil or
-// mm_hashes.image is absent or empty (text-only request). Returns ErrBadRequest when
-// the three slices have different lengths or contain unexpected types.
+// mm_hashes.image is absent or empty (text-only request).
+//
+// mm_hashes and mm_placeholders are required and must be the same length.
+// kwargs_data is optional: an absent field means every item resolves from the
+// encoder cache by hash (a cache-hit request), so each entry's KwargsData is "".
+// When present, kwargs_data must be parallel to mm_hashes, but an individual
+// item may be null (a cache hit within a mixed batch), which maps to "".
+//
+// Returns ErrBadRequest when required slices have different lengths or any
+// element has an unexpected type.
 func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEntry, error) {
 	if features == nil {
 		return nil, nil
@@ -206,14 +214,17 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 	rawPlaceholders, _ := mmPlaceholders[ModalityImage].([]any)
 
 	kwargsData, _ := features["kwargs_data"].(map[string]any)
-	rawKwargs, _ := kwargsData[ModalityImage].([]any)
+	rawKwargs, hasKwargs := kwargsData[ModalityImage].([]any)
 
 	n := len(rawHashes)
 	if len(rawPlaceholders) != n {
 		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, mm_placeholders has %d: %w",
 			n, len(rawPlaceholders), pipeline.ErrBadRequest)
 	}
-	if len(rawKwargs) != n {
+	// When present, kwargs_data is parallel to mm_hashes: full length with null
+	// placeholders for cached items, never a shortened list. The whole field is
+	// absent for metadata-only (cache-hit) requests.
+	if hasKwargs && len(rawKwargs) != n {
 		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, kwargs_data has %d: %w",
 			n, len(rawKwargs), pipeline.ErrBadRequest)
 	}
@@ -238,9 +249,17 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 			return nil, fmt.Errorf("mm_placeholders[%d].length: %v: %w", i, err, pipeline.ErrBadRequest)
 		}
 
-		kwarg, ok := rawKwargs[i].(string)
-		if !ok {
-			return nil, fmt.Errorf("kwargs_data[%d] must be a string: %w", i, pipeline.ErrBadRequest)
+		// Empty KwargsData is the sentinel for "resolve from cache": either the
+		// whole kwargs_data field is absent or this item is null.
+		var kwarg string
+		if hasKwargs {
+			switch k := rawKwargs[i].(type) {
+			case string:
+				kwarg = k
+			case nil:
+			default:
+				return nil, fmt.Errorf("kwargs_data[%d] must be a string or null: %w", i, pipeline.ErrBadRequest)
+			}
 		}
 
 		entries[i] = pipeline.MultimodalEntry{

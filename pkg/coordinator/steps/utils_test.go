@@ -164,4 +164,67 @@ func TestExtractMultimodalEntries(t *testing.T) {
 			t.Errorf("expected ErrBadRequest, got %v", err)
 		}
 	})
+
+	t.Run("absent_kwargs_resolves_from_cache", func(t *testing.T) {
+		features := map[string]any{
+			"mm_hashes": map[string]any{"image": []any{"abc123"}},
+			"mm_placeholders": map[string]any{"image": []any{
+				map[string]any{"offset": float64(1), "length": float64(3)},
+			}},
+		}
+		entries, err := extractMultimodalEntries(features)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 entry, got %d", len(entries))
+		}
+		if entries[0].Hash != "abc123" {
+			t.Errorf("hash: expected abc123, got %v", entries[0].Hash)
+		}
+		if entries[0].KwargsData != "" {
+			t.Errorf("kwargs: expected empty (resolve from cache), got %q", entries[0].KwargsData)
+		}
+	})
+
+	t.Run("mixed_batch_null_kwargs_item", func(t *testing.T) {
+		features := map[string]any{
+			"mm_hashes": map[string]any{"image": []any{"hash1", "hash2"}},
+			"mm_placeholders": map[string]any{"image": []any{
+				map[string]any{"offset": float64(1), "length": float64(3)},
+				map[string]any{"offset": float64(4), "length": float64(3)},
+			}},
+			"kwargs_data": map[string]any{"image": []any{"dGVuc29y", nil}},
+		}
+		entries, err := extractMultimodalEntries(features)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("expected 2 entries, got %d", len(entries))
+		}
+		if entries[0].KwargsData != "dGVuc29y" {
+			t.Errorf("entry 0 kwargs: expected dGVuc29y, got %q", entries[0].KwargsData)
+		}
+		if entries[1].KwargsData != "" {
+			t.Errorf("entry 1 kwargs: expected empty (cache hit), got %q", entries[1].KwargsData)
+		}
+	})
+
+	t.Run("kwargs_wrong_type", func(t *testing.T) {
+		features := map[string]any{
+			"mm_hashes": map[string]any{"image": []any{"hash1"}},
+			"mm_placeholders": map[string]any{"image": []any{
+				map[string]any{"offset": float64(1), "length": float64(3)},
+			}},
+			"kwargs_data": map[string]any{"image": []any{float64(42)}},
+		}
+		_, err := extractMultimodalEntries(features)
+		if err == nil {
+			t.Fatal("expected error for non-string kwargs item")
+		}
+		if !errors.Is(err, pipeline.ErrBadRequest) {
+			t.Errorf("expected ErrBadRequest, got %v", err)
+		}
+	})
 }
