@@ -22,12 +22,6 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
-const (
-	// ExperimentalDatalayerFeatureGate is deprecated. The data layer is now enabled by default.
-	// This gate is a no-op and will be removed in a future version.
-	ExperimentalDatalayerFeatureGate = "dataLayer"
-)
-
 // PoolInfo represents the DataStore information needed for endpoints.
 type PoolInfo interface {
 	PoolGet() (*EndpointPool, error)

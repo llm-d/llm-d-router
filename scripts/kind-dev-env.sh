@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${IMAGE_REGISTRY:=ghcr.io/llm-d}"
 
 # Set a default VLLM_SIMULATOR_TAG if not provided
-export VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v0.9.2}"
+export VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v0.10.2}"
 
 # VLLM_IMAGE: the vLLM container image to deploy. Can be a simulator or real vLLM image
 # (e.g., vllm/vllm-openai:v0.16.0 for production). Defaults to the simulator image.
@@ -65,6 +65,8 @@ export SIDECAR_IMAGE
 # Set a default VLLM_RENDER_IMAGE if not provided (CPU-only vLLM image that
 # runs `vllm launch render` for the token-producer plugin's HTTP backend).
 export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.21.0}"
+export VLLM_RENDER_PORT="${VLLM_RENDER_PORT:-8082}"
+export VLLM_RENDER_URL="${VLLM_RENDER_URL:-http://vllm-render:${VLLM_RENDER_PORT}}"
 
 # Set the inference pool name for the deployment
 export POOL_NAME="${POOL_NAME:-${MODEL_NAME_SAFE}-inference-pool}"
@@ -198,17 +200,34 @@ for cmd in kind kubectl ${CONTAINER_RUNTIME}; do
     fi
 done
 
-# Prometheus config-reloader needs sufficient inotify resources
-if [ "${PROM_ENABLED}" == "true" ]; then
-  INOTIFY_INSTANCES=$(cat /proc/sys/fs/inotify/max_user_instances)
-  if [ "${INOTIFY_INSTANCES}" -lt 512 ]; then
-    echo "Error: fs.inotify.max_user_instances is ${INOTIFY_INSTANCES} (need >= 512) for Prometheus."
+# The Prometheus config-reloader needs a sufficient inotify instance limit. The
+# argument is the limit read from the kernel backing the kind node: the host on
+# Linux, the runtime VM on macOS. A non-numeric value means the limit could not
+# be read; warn and skip rather than fail or compare a garbage string.
+check_inotify_limit() {
+  local limit="$1"
+  if ! [[ "${limit}" =~ ^[0-9]+$ ]]; then
+    echo "Warning: could not read fs.inotify.max_user_instances; skipping Prometheus inotify check." >&2
+    return 0
+  fi
+  if [ "${limit}" -lt 512 ]; then
+    echo "Error: fs.inotify.max_user_instances is ${limit} (need >= 512) for Prometheus."
     echo ""
+    echo "Raise it on the kind node's kernel. On Linux this is the host:"
     echo "  sudo sysctl -w fs.inotify.max_user_instances=512"
-    echo ""
     echo "To persist: echo 'fs.inotify.max_user_instances=512' | sudo tee /etc/sysctl.d/99-inotify.conf"
+    echo ""
+    echo "On macOS the kind node runs in the container runtime VM; raise it there, e.g.:"
+    echo "  ${CONTAINER_RUNTIME} exec ${CLUSTER_NAME}-control-plane sysctl -w fs.inotify.max_user_instances=512"
     exit 1
   fi
+}
+
+# On Linux the host kernel is shared with kind's node containers, so the limit
+# can be verified before creating the cluster to fail fast. Hosts where kind
+# runs inside a VM have no inotify proc file and are checked from the node below.
+if [ "${PROM_ENABLED}" == "true" ] && [ -r /proc/sys/fs/inotify/max_user_instances ]; then
+  check_inotify_limit "$(cat /proc/sys/fs/inotify/max_user_instances)"
 fi
 
 # TARGET_PORTS is substituted directly into the `targetPorts: ${TARGET_PORTS}` field
@@ -264,6 +283,13 @@ set -x
 # Hotfix for https://github.com/kubernetes-sigs/kind/issues/3880
 CONTAINER_NAME="${CLUSTER_NAME}-control-plane"
 ${CONTAINER_RUNTIME} exec ${CONTAINER_NAME} /bin/bash -c "sysctl net.ipv4.conf.all.arp_ignore=0"
+
+# Hosts where kind runs inside a VM (e.g. macOS) have no inotify proc file, so
+# the limit is read from the node, whose kernel is the runtime VM's. The host
+# case is handled by the fast-fail check before cluster creation.
+if [ "${PROM_ENABLED}" == "true" ] && [ ! -r /proc/sys/fs/inotify/max_user_instances ]; then
+  check_inotify_limit "$(${CONTAINER_RUNTIME} exec "${CONTAINER_NAME}" cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || true)"
+fi
 
 # Wait for all pods to be ready
 kubectl --context ${KUBE_CONTEXT} -n kube-system wait --for=condition=Ready --all pods --timeout=300s
@@ -382,17 +408,23 @@ kubectl --context ${KUBE_CONTEXT} delete configmap epp-config --ignore-not-found
 envsubst '$MODEL_NAME' < ${EPP_CONFIG} > ${TEMP_FILE}
 kubectl --context ${KUBE_CONTEXT} create configmap epp-config --from-file=epp-config.yaml=${TEMP_FILE}
 
+# The replica count is changed in some end to end tests
+export EPP_REPLICA_COUNT=1
+# Some end to end tests enable leader election
+export ENABLE_LEADER_ELECTION=false
+
 # Deploy Istio base (shared infrastructure)
 kubectl kustomize --enable-helm deploy/environments/dev/base-kind-istio \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
-  ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
-${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE}' \
+  ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${VLLM_RENDER_PORT} ${VLLM_RENDER_URL} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
+  ${EPP_REPLICA_COUNT} ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} \
+  ${VLLM_DATA_PARALLEL_SIZE} ${ENABLE_LEADER_ELECTION}' \
   | kubectl --context ${KUBE_CONTEXT} apply -f -
 
 # Deploy scenario-specific vLLM components
 kubectl kustomize --enable-helm ${KUSTOMIZE_DIR} \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
-  ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${TARGET_PORTS} ${NAMESPACE} \
+  ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${VLLM_RENDER_PORT} ${VLLM_RENDER_URL} ${TARGET_PORTS} ${NAMESPACE} \
   ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE} \
   ${KV_CONNECTOR_TYPE} ${EC_CONNECTOR_TYPE} ${CONNECTOR_TYPE} ${KV_CACHE_ENABLED} ${HF_TOKEN} ${VLLM_SIM_MODE} \
   ${DECODE_ROLE} ${VLLM_EXTRA_ARGS_E} ${VLLM_EXTRA_ARGS_P} ${VLLM_EXTRA_ARGS_D}' \

@@ -30,7 +30,6 @@ import (
 	testclock "k8s.io/utils/clock/testing"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
-	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 )
@@ -94,7 +93,7 @@ func newRegistryTestHarness(t *testing.T, opts harnessOptions) *registryTestHarn
 	}
 }
 
-// assertFlowExists synchronously checks if a flow's queue exists on the first shard.
+// assertFlowExists synchronously checks if a flow's queue exists.
 func (h *registryTestHarness) assertFlowExists(key flowcontrol.FlowKey, msgAndArgs ...any) {
 	h.t.Helper()
 	_, err := h.fr.ManagedQueue(key)
@@ -165,38 +164,20 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 	t.Run("ShouldFail_WhenJITFails", func(t *testing.T) {
 		t.Parallel()
 
-		defaults := newTestPriorityBandPolicyDefaults()
-		badQueueName := queue.RegisteredQueueName("non-existent-queue")
-		badBand, err := NewPriorityBandConfig(highPriority, defaults, WithQueue(badQueueName))
-		require.NoError(t, err)
+		h := newRegistryTestHarness(t, harnessOptions{})
+		// Priority 999 has no configured band, so flow provisioning fails at JIT registration.
+		key := flowcontrol.FlowKey{ID: "test-flow", Priority: 999}
 
-		// Create a Config that uses a mock checker to bypass the strict validation.
-		// The default checker would reject "non-existent-policy", but our mock says it's fine.
-		// This allows us to instantiate the Registry with a latent configuration bomb.
-		cfg, err := NewConfig(
-			defaults,
-			WithPriorityBand(badBand),
-			withCapabilityChecker(&mockCapabilityChecker{
-				checkCompatibilityFunc: func(flowcontrol.OrderingPolicy, queue.RegisteredQueueName) error {
-					return nil // Approve everything.
-				},
-			}),
-		)
-		require.NoError(t, err)
-
-		h := newRegistryTestHarness(t, harnessOptions{config: cfg})
-		key := flowcontrol.FlowKey{ID: "test-flow", Priority: highPriority}
-
-		err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+		err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
 			t.Fatal("Callback must not be executed when the flow fails to register JIT")
 			return nil
 		})
 
 		require.Error(t, err, "WithConnection must return an error for a failed flow JIT registration")
-		assert.ErrorContains(t, err, "no SafeQueue registered", "The returned error must propagate the reason")
+		assert.ErrorIs(t, err, contracts.ErrPriorityBandNotFound, "The returned error must propagate the reason")
 	})
 
-	t.Run("Handle_Shards_ShouldReturnAllActiveShardsAndBeACopy", func(t *testing.T) {
+	t.Run("Handle_GetDataPlane_ShouldReturnNonNil", func(t *testing.T) {
 		t.Parallel()
 		// Create a registry
 		h := newRegistryTestHarness(t, harnessOptions{})
@@ -1001,12 +982,12 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 		assert.False(t, exists3, "Band 3 should be collected")
 	})
 
-	t.Run("ShouldCollectBand_AcrossMultipleShards", func(t *testing.T) {
+	t.Run("ShouldCollectBand_AfterFlowIdle", func(t *testing.T) {
 		t.Parallel()
 		h := newRegistryTestHarness(t, harnessOptions{})
 		key := flowcontrol.FlowKey{ID: "test-flow", Priority: dynamicPrio}
 
-		// Create flow on all shards
+		// Create flow
 		h.openConnectionOnFlow(key)
 		// Verify band exists
 		_, ok := h.fr.priorityBands.Load(dynamicPrio)
@@ -1088,33 +1069,24 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 		t.Parallel()
 		h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
 
+		// Priority dynamicPrio has no configured band, so flow provisioning fails after the band
+		// lease is optimistically acquired - exercising the lease-rollback path.
 		key := flowcontrol.FlowKey{ID: "jit-fail-flow", Priority: dynamicPrio}
 
-		// Manually create the priority band
-		err := h.fr.ensurePriorityBand(dynamicPrio)
-		require.NoError(t, err)
-
-		// Corrupt the config to make buildFlowComponents fail
-		// We set an invalid queue name AFTER the band is created but BEFORE the first flow tries to use it
-		h.fr.mu.Lock()
-		h.fr.config.PriorityBands[dynamicPrio].Queue = "NonExistentQueue"
-		h.fr.mu.Unlock()
-
-		// Attempt to open connection - JIT should fail during buildFlowComponents
-		err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+		err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
 			t.Fatal("Should not reach callback when JIT fails")
 			return nil
 		})
+		require.Error(t, err, "WithConnection should fail when flow provisioning fails")
+		require.ErrorIs(t, err, contracts.ErrPriorityBandNotFound, "Error should identify the missing band")
 
-		require.Error(t, err, "WithConnection should fail when buildFlowComponents fails")
-		require.Contains(t, err.Error(), "NonExistentQueue", "Error should mention the invalid queue")
+		// The flow state must be cleaned up so a later connection can retry.
+		_, exists := h.fr.flowStates.Load(key)
+		assert.False(t, exists, "Flow state should be removed after JIT failure")
 
-		// Verify the flow was cleaned up
-		h.assertFlowDoesNotExist(key, "Flow should not exist after JIT failure")
-
-		// Verify band lease was released - band should have zero leaseCount
+		// The band lease acquired before provisioning must be released.
 		val, ok := h.fr.priorityBandStates.Load(dynamicPrio)
-		require.True(t, ok, "Band state should still exist")
+		require.True(t, ok, "Band lease state should still exist")
 		state := val.(*priorityBandState)
 
 		state.mu.Lock()
@@ -1324,20 +1296,9 @@ func TestFlowRegistry_FlowErrorScoping(t *testing.T) {
 	t.Parallel()
 	defaults := newTestPriorityBandPolicyDefaults()
 
-	// Create a registry with a capability checker that passes validation but using a queue name that doesn't exist.
-	failQueueName := queue.RegisteredQueueName("NonExistentQueue")
-	mockChecker := &mockCapabilityChecker{
-		checkCompatibilityFunc: func(p flowcontrol.OrderingPolicy, q queue.RegisteredQueueName) error {
-			return nil // Bypass validation.
-		},
-	}
-
-	// Set the failing queue as the default band so the priority provisioned
-	// below inherits it and flow initialization fails.
-	failingBand, err := NewPriorityBandConfig(0, defaults, WithQueue(failQueueName))
-	require.NoError(t, err)
-
-	cfg, err := NewConfig(defaults, withCapabilityChecker(mockChecker), WithDefaultPriorityBand(failingBand))
+	// Priority 100 has no configured band, so every flow provisioning attempt fails with
+	// ErrPriorityBandNotFound. That failure must be scoped to all concurrent waiters.
+	cfg, err := NewConfig(defaults)
 	require.NoError(t, err)
 
 	registry := NewFlowRegistry(cfg, logr.Discard())
@@ -1346,7 +1307,6 @@ func TestFlowRegistry_FlowErrorScoping(t *testing.T) {
 		Priority: 100,
 		ID:       "flow-should-fail",
 	}
-	registry.ApplyDesiredPriorities(map[int]struct{}{100: {}})
 
 	// Simulate contention:
 	// We acquire the registry RLock while flow infrastructure is provisioned.

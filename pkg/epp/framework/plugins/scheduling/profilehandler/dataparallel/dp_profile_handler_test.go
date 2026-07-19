@@ -130,7 +130,10 @@ func TestProfileHandlerFactory(t *testing.T) {
 				assert.Nil(t, plugin)
 			} else {
 				assert.NoError(t, err)
-				assert.NotNil(t, plugin)
+				require.NotNil(t, plugin)
+				handler, ok := plugin.(*ProfileHandler)
+				require.True(t, ok)
+				assert.Equal(t, tt.expectedPort, handler.primaryPort)
 			}
 		})
 	}

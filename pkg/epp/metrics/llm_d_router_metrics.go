@@ -208,6 +208,33 @@ var (
 		poolLabels,
 	)
 
+	llmdInferencePoolStdDevKVCache = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "std_dev_kv_cache_utilization",
+			Help:      metricsutil.HelpMsgWithStability("The standard deviation kv cache utilization for an inference server pool.", compbasemetrics.ALPHA),
+		},
+		poolLabels,
+	)
+
+	llmdInferencePoolStdDevQueueSize = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "std_dev_queue_size",
+			Help:      metricsutil.HelpMsgWithStability("The standard deviation number of requests pending in the model server queue.", compbasemetrics.ALPHA),
+		},
+		poolLabels,
+	)
+
+	llmdInferencePoolStdDevRunningRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "std_dev_running_requests",
+			Help:      metricsutil.HelpMsgWithStability("The standard deviation number of running requests across model servers in the pool.", compbasemetrics.ALPHA),
+		},
+		poolLabels,
+	)
+
 	llmdInferencePoolReadyEndpoints = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
@@ -327,6 +354,15 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Current saturation level of the inference pool (0.0 = empty, 1.0 = fully saturated).", compbasemetrics.ALPHA),
 		},
 		[]string{"inference_pool"},
+	)
+
+	llmdFlowControlRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_requests_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of requests processed by the Flow Control layer.", compbasemetrics.ALPHA),
+		},
+		[]string{"outcome", "priority", "inference_pool"},
 	)
 )
 

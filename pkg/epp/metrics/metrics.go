@@ -100,13 +100,13 @@ var (
 		modelLabels,
 	)
 
-	// Deprecated: Use llm_d_epp_request_sizes instead.
+	// Deprecated: Use llm_d_epp_request_size_bytes instead.
 	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	requestSizes = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "request_sizes",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_sizes] Inference objective requests size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_size_bytes] Inference objective requests size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
 			// Use buckets ranging from 1000 bytes (1KB) to 10^9 bytes (1GB).
 			Buckets: []float64{
 				64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, // More fine-grained up to 64KB
@@ -117,13 +117,13 @@ var (
 		modelLabels,
 	)
 
-	// Deprecated: Use llm_d_epp_response_sizes instead.
+	// Deprecated: Use llm_d_epp_response_size_bytes instead.
 	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	responseSizes = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "response_sizes",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_response_sizes] Inference objective responses size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_response_size_bytes] Inference objective responses size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
 			// Most models have a response token < 8192 tokens. Each token, in average, has 4 characters.
 			// 8192 * 4 = 32768.
 			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536},
@@ -131,63 +131,63 @@ var (
 		modelLabels,
 	)
 
-	// Deprecated: Use llm_d_epp_input_tokens instead.
+	// Deprecated: Use llm_d_epp_request_input_tokens instead.
 	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	inputTokens = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "input_tokens",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_input_tokens] Inference objective input token count distribution for requests in each model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_input_tokens] Inference objective input token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			// Most models have a input context window less than 1 million tokens.
 			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
 		},
 		modelLabels,
 	)
 
-	// Deprecated: Use llm_d_epp_output_tokens instead.
+	// Deprecated: Use llm_d_epp_request_output_tokens instead.
 	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	outputTokens = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "output_tokens",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_output_tokens] Inference objective output token count distribution for requests in each model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_output_tokens] Inference objective output token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			// Most models generates output less than 8192 tokens.
 			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192},
 		},
 		modelLabels,
 	)
 
-	// Deprecated: Use llm_d_epp_prompt_cached_tokens instead.
+	// Deprecated: Use llm_d_epp_request_cached_tokens instead.
 	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	promptCachedTokens = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "prompt_cached_tokens",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_prompt_cached_tokens] Inference objective prompt cached token count distribution for requests in each model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_cached_tokens] Inference objective prompt cached token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			// Most models have a input context window less than 1 million tokens.
 			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
 		},
 		modelLabels,
 	)
 
-	// Deprecated: Use llm_d_epp_running_requests instead.
+	// Deprecated: Use llm_d_epp_request_running instead.
 	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	runningRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "running_requests",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_running_requests] Inference objective number of running requests in each model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_running] Inference objective number of running requests in each model.", compbasemetrics.ALPHA),
 		},
 		[]string{"model_name"},
 	)
 
-	// Deprecated: Use llm_d_epp_normalized_time_per_output_token_seconds instead.
+	// Deprecated: Use llm_d_epp_request_ntpot_seconds instead.
 	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
 	normalizedTimePerOutputToken = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "normalized_time_per_output_token_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_normalized_time_per_output_token_seconds] Inference objective latency divided by number of output tokens in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_ntpot_seconds] Inference objective latency divided by number of output tokens in seconds for each model and target model.", compbasemetrics.ALPHA),
 			// From few milliseconds per token to multiple seconds per token
 			Buckets: []float64{
 				0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
@@ -443,10 +443,13 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdInterTokenLatency)
 		metrics.Registry.MustRegister(inferencePoolAvgKVCache)
 		metrics.Registry.MustRegister(llmdInferencePoolAvgKVCache)
+		metrics.Registry.MustRegister(llmdInferencePoolStdDevKVCache)
 		metrics.Registry.MustRegister(inferencePoolAvgQueueSize)
 		metrics.Registry.MustRegister(llmdInferencePoolAvgQueueSize)
+		metrics.Registry.MustRegister(llmdInferencePoolStdDevQueueSize)
 		metrics.Registry.MustRegister(inferencePoolAvgRunningRequests)
 		metrics.Registry.MustRegister(llmdInferencePoolAvgRunningRequests)
+		metrics.Registry.MustRegister(llmdInferencePoolStdDevRunningRequests)
 		metrics.Registry.MustRegister(inferencePoolReadyPods)
 		metrics.Registry.MustRegister(llmdInferencePoolReadyEndpoints)
 		metrics.Registry.MustRegister(schedulerE2ELatency)
@@ -469,6 +472,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdFlowControlPoolSaturation)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestEnqueueDuration)
+		metrics.Registry.MustRegister(llmdFlowControlRequestsTotal)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(DataLayerPollErrorsTotal)
@@ -509,10 +513,13 @@ func Reset() {
 	llmdInterTokenLatency.Reset()
 	inferencePoolAvgKVCache.Reset()
 	llmdInferencePoolAvgKVCache.Reset()
+	llmdInferencePoolStdDevKVCache.Reset()
 	inferencePoolAvgQueueSize.Reset()
 	llmdInferencePoolAvgQueueSize.Reset()
+	llmdInferencePoolStdDevQueueSize.Reset()
 	inferencePoolAvgRunningRequests.Reset()
 	llmdInferencePoolAvgRunningRequests.Reset()
+	llmdInferencePoolStdDevRunningRequests.Reset()
 	inferencePoolReadyPods.Reset()
 	llmdInferencePoolReadyEndpoints.Reset()
 	schedulerE2ELatency.Reset()
@@ -533,6 +540,9 @@ func Reset() {
 	llmdFlowControlPoolSaturation.Reset()
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
+	flowControlDispatchCycleDuration.Reset()
+	llmdFlowControlDispatchCycleDuration.Reset()
+	llmdFlowControlRequestsTotal.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	DataLayerPollErrorsTotal.Reset()
@@ -704,6 +714,18 @@ func RecordInferencePoolAvgRunningRequests(name string, runningRequests float64)
 	llmdInferencePoolAvgRunningRequests.WithLabelValues(name).Set(runningRequests)
 }
 
+func RecordInferencePoolStdDevKVCache(name string, utilization float64) {
+	llmdInferencePoolStdDevKVCache.WithLabelValues(name).Set(utilization)
+}
+
+func RecordInferencePoolStdDevQueueSize(name string, queueSize float64) {
+	llmdInferencePoolStdDevQueueSize.WithLabelValues(name).Set(queueSize)
+}
+
+func RecordInferencePoolStdDevRunningRequests(name string, runningRequests float64) {
+	llmdInferencePoolStdDevRunningRequests.WithLabelValues(name).Set(runningRequests)
+}
+
 func RecordInferencePoolReadyPods(name string, runningPods float64) {
 	inferencePoolReadyPods.WithLabelValues(name).Set(runningPods)
 	llmdInferencePoolReadyEndpoints.WithLabelValues(name).Set(runningPods)
@@ -827,6 +849,11 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 	flowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
 	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
+}
+
+// IncFlowControlRequestsTotal increments the total request counter for a given outcome.
+func IncFlowControlRequestsTotal(outcome, priority, inferencePool string) {
+	llmdFlowControlRequestsTotal.WithLabelValues(outcome, priority, inferencePool).Inc()
 }
 
 // RecordInferenceModelRewriteDecision records the routing decision for InferenceModelRewrite.

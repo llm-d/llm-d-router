@@ -174,6 +174,49 @@ false
 {{- end -}}
 
 {{/*
+Return "true" if EPP is configured with secure (TLS) serving, "false" if
+router.epp.flags.secure-serving is explicitly set to false. Defaults to true
+so that the Envoy ext_proc cluster uses TLS by default.
+*/}}
+{{- define "llm-d-router.proxy.eppSecureServing" -}}
+{{- $flags := .Values.router.epp.flags | default dict -}}
+{{- $secureServing := index $flags "secure-serving" -}}
+{{- if and (not (kindIs "invalid" $secureServing)) (eq (toString $secureServing) "false") -}}
+false
+{{- else -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+Envoy health-check tls_options block for the ext_proc cluster.
+Emitted only when EPP runs with TLS (secure-serving != false).
+Callers must indent to match the surrounding YAML context.
+*/}}
+{{- define "llm-d-router.proxy.envoyExtProcTLSOptions" -}}
+{{- if eq (include "llm-d-router.proxy.eppSecureServing" .) "true" -}}
+tls_options:
+  alpn_protocols: ["h2"]
+{{- end -}}
+{{- end -}}
+
+{{/*
+Envoy transport_socket block for the ext_proc cluster.
+Emitted only when EPP runs with TLS (secure-serving != false).
+Callers must indent to match the surrounding YAML context.
+*/}}
+{{- define "llm-d-router.proxy.envoyExtProcTransportSocket" -}}
+{{- if eq (include "llm-d-router.proxy.eppSecureServing" .) "true" -}}
+transport_socket:
+  name: "envoy.transport_sockets.tls"
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+    common_tls_context:
+      validation_context:
+{{- end -}}
+{{- end -}}
+
+{{/*
 Normalize a scalar, comma-separated string, or list of ports into a
 comma-separated numeric string.
 */}}
@@ -269,13 +312,20 @@ Return the standalone EPP model-server target ports.
 {{- end -}}
 
 {{/*
-Return the agentgateway model Service ports.
+Return the agentgateway standalone logical backend service name.
+Derives the name from .Values.router.modelServers.matchLabels.app,
+falling back to .Release.Name if not set.
 */}}
-{{- define "llm-d-router.agentgateway.modelServicePorts" -}}
-{{- $proxyValues := .Values.router.proxy | default dict -}}
-{{- $agentgateway := index $proxyValues "agentgateway" | default dict -}}
-{{- $service := index $agentgateway "service" | default dict -}}
-{{- include "llm-d-router.normalizedPortList" (dict "path" ".Values.router.proxy.agentgateway.service.ports" "value" (index $service "ports")) -}}
+{{- define "llm-d-router.agentgateway.logicalBackendName" -}}
+{{- $appLabel := "" -}}
+{{- if and .Values.router.modelServers .Values.router.modelServers.matchLabels -}}
+  {{- $appLabel = index .Values.router.modelServers.matchLabels "app" | default "" -}}
+{{- end -}}
+{{- if not (empty $appLabel) -}}
+  {{- $appLabel -}}
+{{- else -}}
+  {{- .Release.Name -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -289,7 +339,12 @@ Standalone uses proxy presets merged with explicit proxy overrides.
   {{- $proxyType := include "llm-d-router.proxyType" . -}}
   {{- $presets := index $proxy "presets" | default dict -}}
   {{- $preset := deepCopy ((index $presets $proxyType) | default dict) -}}
+  {{- $userArgs := index $proxy "args" | default list -}}
+  {{- $presetArgs := index $preset "args" | default list -}}
   {{- $resolved = mergeOverwrite $preset $proxy -}}
+  {{- if empty $userArgs -}}
+    {{- $_ := set $resolved "args" $presetArgs -}}
+  {{- end -}}
   {{- if eq $proxyType "agentgateway" -}}
     {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . | int -}}
     {{- $ports := index $resolved "ports" | default list -}}
@@ -329,30 +384,15 @@ Return the rendered proxy ConfigMap data.
 {{- toYaml $data -}}
 {{- end -}}
 
-{{/*
-Render labels from the standalone endpoint selector for the generated model Service.
-Only equality-based selectors are supported because Service selectors are a map.
-*/}}
-{{- define "llm-d-router.agentgateway.modelServiceSelectorLabels" -}}
-{{- if and .Values.router.modelServers .Values.router.modelServers.matchLabels -}}
-{{- range $key, $value := .Values.router.modelServers.matchLabels -}}
-{{- printf "%s: %s\n" ($key | quote) ($value | quote) -}}
-{{- end -}}
-{{- else -}}
-  {{- fail ".Values.modelServers.matchLabels is required when creating an agentgateway model Service" -}}
-{{- end -}}
-{{- end -}}
+
 
 {{/*
 Render the default standalone agentgateway proxy config template.
 */}}
 {{- define "llm-d-router.proxy.agentgatewayConfig" -}}
-{{- $proxyValues := .Values.router.proxy | default dict -}}
-{{- $agentgateway := index $proxyValues "agentgateway" | default dict -}}
-{{- $service := index $agentgateway "service" | default dict -}}
-{{- $serviceName := index $service "name" | default "" -}}
-{{- $serviceNamespace := index $service "namespace" | default .Release.Namespace -}}
-{{- $servicePorts := splitList "," (include "llm-d-router.agentgateway.modelServicePorts" .) -}}
+{{- $serviceName := include "llm-d-router.agentgateway.logicalBackendName" . -}}
+{{- $serviceNamespace := .Release.Namespace -}}
+{{- $servicePorts := splitList "," (include "llm-d-router.standaloneEndpointTargetPorts" .) -}}
 {{- $backendPort := index $servicePorts 0 -}}
 {{- $listenerPort := include "llm-d-router.standaloneProxyListenerPort" . | int -}}
 config:

@@ -42,6 +42,101 @@ Metrics defined by llm-d Router are in addition to Inference Gateway metrics. Fo
 > This metric is maintained for backward compatibility with the deprecated
 > `pd-profile-handler`. New deployments should use `disagg_decision_total`.
 
+## Flow Control Metrics
+
+Exposed when the `flowControl` feature gate is enabled. All carry the `llm_d_epp_` prefix.
+
+### `flow_control_request_queue_duration_seconds`
+
+*   **Type:** Histogram
+*   **Labels:**
+    *   `fairness_id`: string (the tenant or flow identifier for fairness rotation)
+    *   `priority`: string (the priority band, e.g., "0", "10")
+    *   `outcome`: string (`Dispatched`, `RejectedCapacity`, `RejectedOther`, `EvictedTTL`, `EvictedContextCancelled`, `EvictedOther`)
+    *   `inference_pool`: string
+    *   `model_name`: string
+    *   `target_model_name`: string
+*   **Release Stage:** ALPHA
+*   **Description:** Total time a request spends in the Flow Control layer, from enqueue to final outcome.
+*   **Usage:** Primary latency signal for flow control. Rising p99 indicates backends are saturated or capacity limits are too tight.
+
+### `flow_control_dispatch_cycle_duration_seconds`
+
+*   **Type:** Histogram
+*   **Release Stage:** ALPHA
+*   **Description:** Time taken for each internal dispatch cycle.
+*   **Usage:** Measures the overhead of the dispatch loop itself. Rising values indicate increasing cost per cycle from saturation detection, priority band iteration, or fairness evaluation.
+
+### `flow_control_request_enqueue_duration_seconds`
+
+*   **Type:** Histogram
+*   **Labels:**
+    *   `fairness_id`: string (the tenant or flow identifier)
+    *   `priority`: string (the priority band)
+    *   `outcome`: string
+*   **Release Stage:** ALPHA
+*   **Description:** Time taken to enqueue a request into the Flow Control layer.
+*   **Usage:** Measures the time spent in capacity checks and queue insertion within the processor.
+
+### `flow_control_queue_size`
+
+*   **Type:** Gauge
+*   **Labels:**
+    *   `fairness_id`: string (the tenant or flow identifier)
+    *   `priority`: string (the priority band)
+    *   `inference_pool`: string
+    *   `model_name`: string
+    *   `target_model_name`: string
+*   **Release Stage:** ALPHA
+*   **Description:** Current number of requests actively held in the Flow Control queue.
+*   **Usage:** Tracks queue depth per priority band and tenant. A steadily growing value indicates the dispatch rate is lower than the arrival rate.
+
+### `flow_control_queue_bytes`
+
+*   **Type:** Gauge
+*   **Labels:**
+    *   `fairness_id`: string (the tenant or flow identifier)
+    *   `priority`: string (the priority band)
+    *   `inference_pool`: string
+    *   `model_name`: string
+    *   `target_model_name`: string
+*   **Release Stage:** ALPHA
+*   **Description:** Current total size in bytes of requests actively held in the Flow Control queue.
+*   **Usage:** Tracks memory pressure from queued requests. Compare against the configured `maxBytes` capacity to gauge how close a band is to rejecting new requests.
+
+### `flow_control_pool_saturation`
+
+*   **Type:** Gauge
+*   **Labels:**
+    *   `inference_pool`: string
+*   **Release Stage:** ALPHA
+*   **Description:** Current saturation level of the inference pool (0.0 = empty, 1.0 = fully saturated).
+*   **Usage:** When saturation reaches the usage limit threshold, the dispatch cycle skips dispatching and requests remain queued. Sustained 1.0 indicates all backends are at capacity.
+
+### `flow_control_requests_total`
+
+*   **Type:** Counter
+*   **Labels:**
+    *   `outcome`: string — the terminal outcome of the request. One of:
+        *   `Dispatched` — request was forwarded to a backend
+        *   `RejectedCapacity` — request was rejected because the queue was at capacity
+        *   `RejectedNoEndpoints` — request was rejected at the capacity boundary while the candidate pool had no endpoints (surfaces as HTTP 503 rather than 429)
+        *   `RejectedOther` — request was rejected for another reason (e.g., controller shutdown)
+        *   `EvictedTTL` — request exceeded its time-to-live while waiting in the queue
+        *   `EvictedContextCancelled` — client disconnected before the request was dispatched
+        *   `EvictedOther` — request was evicted for another reason
+    *   `priority`: string (the priority band, e.g., `"0"`, `"10"`)
+    *   `inference_pool`: string
+*   **Release Stage:** ALPHA
+*   **Description:** Total number of requests processed by the Flow Control layer, incremented once per request after its terminal outcome is determined.
+*   **Usage:** Provides a direct signal for rejection and eviction rates without log parsing. Unlike `flow_control_request_queue_duration_seconds_count`, this counter also captures controller-level early rejections where no queue item is created (e.g., rejection during controller shutdown), covering cases the histogram misses.
+*   **Actionability:**
+    *   A rising rate of `outcome="RejectedCapacity"` indicates the queue capacity limits are too tight or backends are persistently saturated — consider tuning `maxBytes`/`maxRequests` or scaling backends.
+    *   A rising rate of `outcome="RejectedNoEndpoints"` indicates the inference pool has scaled to zero or all endpoints are unregistered — investigate pool health and scaling configuration.
+    *   A rising rate of `outcome="EvictedTTL"` indicates requests are waiting longer than their TTL allows — investigate backend throughput or tighten admission.
+    *   `outcome="Dispatched"` is the healthy baseline; compare it against total request rate to derive the acceptance ratio.
+
+
 ## Opt-in ext_proc Stream Metrics
 
 Three metrics covering ext_proc gRPC stream lifecycle. Disabled by default; enable with `--enable-grpc-stream-metrics`. These metrics are emitted under the `llm_d_epp_` prefix (separate from `llm_d_inference_scheduler_*`).

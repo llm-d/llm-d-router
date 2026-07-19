@@ -32,6 +32,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 )
 
 func testHandle() plugin.Handle {
@@ -138,7 +139,7 @@ func TestPreRequest(t *testing.T) {
 		p.wg.Wait()
 
 		// 4. Verify indexer was updated
-		perPromptHashes := getBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks)
+		perPromptHashes := prefixhash.GetBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks)
 		for _, promptHashes := range perPromptHashes {
 			for _, hash := range promptHashes {
 				pods := p.indexer().Get(hash)
@@ -182,7 +183,7 @@ func TestPreRequest(t *testing.T) {
 			p.PreRequest(context.Background(), req, res)
 			p.wg.Wait()
 
-			perPromptHashes := getBlockHashes(context.Background(), req, config.BlockSizeTokens, defaultMaxPrefixBlocks)
+			perPromptHashes := prefixhash.GetBlockHashes(context.Background(), req, config.BlockSizeTokens, defaultMaxPrefixBlocks)
 			allHashes = append(allHashes, perPromptHashes[0])
 		}
 
@@ -440,6 +441,40 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 	state2, err := plugin.ReadPluginStateKey[*SchedulingContextState](p2.PluginState(), req2.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	assert.NoError(t, err)
 	assert.Equal(t, 3, len(state2.PerPromptHashes[0]), "should fall back to MaxPrefixBlocksToMatch when MaxPrefixTokensToMatch is 0")
+}
+
+// TestMaxPrefixBothCapsZeroMatchesEverything verifies that zeroing both caps
+// hashes the whole prompt rather than nothing. The prompt length is already
+// bounded by the model server's context window, so an absent cap is an implicit
+// max_model_len cap.
+func TestMaxPrefixBothCapsZeroMatchesEverything(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+	cfg := config{
+		BlockSizeTokens:        1,
+		MaxPrefixTokensToMatch: 0,
+		MaxPrefixBlocksToMatch: 0,
+		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
+	)
+
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model",
+		Body:        tokenizedBody([]uint32{1, 2, 3, 4}),
+	}
+
+	err = p.Produce(context.Background(), req, []fwksched.Endpoint{endpoint})
+	assert.NoError(t, err)
+
+	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
+	assert.NoError(t, err)
+	assert.Equal(t, 4, len(state.PerPromptHashes[0]), "both caps at 0 should hash every block in the prompt")
 }
 
 // TestGetBlockSize_AutotuneClampsBelowMinimum verifies that when AutoTune is on and
@@ -831,4 +866,79 @@ func TestPrefixPluginMatchesSameTokens(t *testing.T) {
 	state2, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req2.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 
 	assert.Equal(t, state1.PerPromptHashes, state2.PerPromptHashes, "identical token IDs must produce identical hashes")
+}
+
+func TestDumpState(t *testing.T) {
+	idx := newIndexer(context.Background(), 100, "test-name", "test-type")
+	podA := server{ServerID: ServerID{Namespace: "ns", Name: "pod-a"}}
+	podB := server{ServerID: ServerID{Namespace: "ns", Name: "pod-b"}}
+	idx.Add([]blockHash{1001, 1002, 1003}, podA)
+	idx.Add([]blockHash{2001, 2002}, podB)
+
+	p := &dataProducer{indexerInst: idx}
+	payload, err := p.DumpState()
+	assert.NoError(t, err)
+	// Block hashes are derived from prompt content and must never reach the dump.
+	assert.NotContains(t, string(payload), "1001")
+
+	var got prefixIndexState
+	assert.NoError(t, json.Unmarshal(payload, &got))
+	assert.Equal(t, prefixIndexState{
+		Pods: []podBlockCount{
+			{Pod: "ns/pod-a", Blocks: 3},
+			{Pod: "ns/pod-b", Blocks: 2},
+		},
+		TotalPods: 2,
+		MaxPods:   maxDebugDumpPods,
+	}, got)
+}
+
+func TestDumpStateCapsPods(t *testing.T) {
+	idx := newIndexer(context.Background(), 1000, "test-name", "test-type")
+	const extra = 5
+	for i := 0; i < maxDebugDumpPods+extra; i++ {
+		pod := server{ServerID: ServerID{Namespace: "ns", Name: fmt.Sprintf("pod-%03d", i)}}
+		hashes := make([]blockHash, i+1)
+		for j := range hashes {
+			hashes[j] = blockHash(i*1000 + j)
+		}
+		idx.Add(hashes, pod)
+	}
+
+	p := &dataProducer{indexerInst: idx}
+	payload, err := p.DumpState()
+	assert.NoError(t, err)
+
+	var got prefixIndexState
+	assert.NoError(t, json.Unmarshal(payload, &got))
+	// The dump is partial: TotalPods exceeds the returned count, capped at MaxPods.
+	assert.Equal(t, maxDebugDumpPods+extra, got.TotalPods)
+	assert.Greater(t, got.TotalPods, got.MaxPods)
+	assert.Len(t, got.Pods, maxDebugDumpPods)
+	// The pod holding the most blocks is listed first.
+	assert.Equal(t, "ns/pod-104", got.Pods[0].Pod)
+	assert.Equal(t, maxDebugDumpPods+extra, got.Pods[0].Blocks)
+}
+
+func TestDumpStateEmpty(t *testing.T) {
+	// A nil indexer should still produce valid JSON instead of panicking.
+	p := &dataProducer{}
+	payload, err := p.DumpState()
+	assert.NoError(t, err)
+	assert.True(t, json.Valid(payload))
+
+	var got prefixIndexState
+	assert.NoError(t, json.Unmarshal(payload, &got))
+	assert.Empty(t, got.Pods)
+	assert.Equal(t, maxDebugDumpPods, got.MaxPods)
+
+	// A live indexer with nothing tracked yet reports zero pods.
+	p.indexerInst = newIndexer(context.Background(), 100, "test-name", "test-type")
+	payload, err = p.DumpState()
+	assert.NoError(t, err)
+
+	got = prefixIndexState{}
+	assert.NoError(t, json.Unmarshal(payload, &got))
+	assert.Equal(t, 0, got.TotalPods)
+	assert.Empty(t, got.Pods)
 }

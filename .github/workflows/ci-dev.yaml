@@ -14,10 +14,13 @@ permissions:
 
 jobs:
   set-params:
+    if: github.event.repository.fork != true
     runs-on: ubuntu-latest
     outputs:
       epp_name: ${{ steps.version.outputs.epp_name }}
       sidecar_name: ${{ steps.version.outputs.sidecar_name }}
+      epp_base_name: ${{ steps.version.outputs.epp_base_name }}
+      sidecar_base_name: ${{ steps.version.outputs.sidecar_base_name }}
       tag: ${{ steps.tag.outputs.tag }}
     steps:
       - name: Set image names
@@ -26,6 +29,8 @@ jobs:
           repo="${GITHUB_REPOSITORY##*/}"
           echo "epp_name=${repo}-endpoint-picker-dev" >> "$GITHUB_OUTPUT"
           echo "sidecar_name=${repo}-disagg-sidecar-dev" >> "$GITHUB_OUTPUT"
+          echo "epp_base_name=${repo}-endpoint-picker" >> "$GITHUB_OUTPUT"
+          echo "sidecar_base_name=${repo}-disagg-sidecar" >> "$GITHUB_OUTPUT"
 
       - name: Set branch name as tag
         id: tag
@@ -33,6 +38,7 @@ jobs:
           echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
   build-and-push:
+    if: github.event.repository.fork != true
     needs: set-params
     uses: ./.github/workflows/ci-build-images.yaml
     with:
@@ -40,5 +46,7 @@ jobs:
       sidecar-image-name: ${{ needs.set-params.outputs.sidecar_name }}
       tag: ${{ needs.set-params.outputs.tag }}
       prerelease: true
-      chart-suffix: "-dev"
+      chart-suffix: ""
+      epp-additional-tags: ghcr.io/llm-d/${{ needs.set-params.outputs.epp_base_name }}:main
+      sidecar-additional-tags: ghcr.io/llm-d/${{ needs.set-params.outputs.sidecar_base_name }}:main
 

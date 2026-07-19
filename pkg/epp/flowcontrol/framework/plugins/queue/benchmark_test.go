@@ -28,37 +28,27 @@ import (
 
 var benchmarkFlowKey = flowcontrol.FlowKey{ID: "benchmark-flow"}
 
-// BenchmarkQueues runs a series of benchmarks against all registered queue implementations.
+// BenchmarkQueues runs a series of benchmarks against the priority queue implementation.
 func BenchmarkQueues(b *testing.B) {
-	for queueName, constructor := range RegisteredQueues {
-		b.Run(string(queueName), func(b *testing.B) {
-			// All queue implementations must support the default enqueue time comparator.
-			q, err := constructor(enqueueTimePolicy)
-			if err != nil {
-				b.Fatalf("Failed to construct queue '%s': %v", queueName, err)
-			}
+	b.Run(PriorityQueueName, func(b *testing.B) {
+		q := New(enqueueTimePolicy)
 
-			b.Run("AddRemove", func(b *testing.B) {
-				benchmarkAddRemove(b, q)
-			})
-
-			b.Run("AddPeekRemove", func(b *testing.B) {
-				benchmarkAddPeekRemove(b, q)
-			})
-
-			b.Run("AddPeekTailRemove", func(b *testing.B) {
-				benchmarkAddPeekTailRemove(b, q)
-			})
-
-			b.Run("BulkAddThenBulkRemove", func(b *testing.B) {
-				benchmarkBulkAddThenBulkRemove(b, q)
-			})
-
-			b.Run("HighContention", func(b *testing.B) {
-				benchmarkHighContention(b, q)
-			})
+		b.Run("AddRemove", func(b *testing.B) {
+			benchmarkAddRemove(b, q)
 		})
-	}
+
+		b.Run("AddPeekRemove", func(b *testing.B) {
+			benchmarkAddPeekRemove(b, q)
+		})
+
+		b.Run("BulkAddThenBulkRemove", func(b *testing.B) {
+			benchmarkBulkAddThenBulkRemove(b, q)
+		})
+
+		b.Run("HighContention", func(b *testing.B) {
+			benchmarkHighContention(b, q)
+		})
+	})
 }
 
 // benchmarkAddRemove measures the throughput of tightly coupled Add and Remove operations in parallel. This is a good
@@ -79,10 +69,10 @@ func benchmarkAddRemove(b *testing.B, q contracts.SafeQueue) {
 	})
 }
 
-// benchmarkAddPeekRemove measures the throughput of a serial Add, PeekHead, and Remove sequence. This simulates a
+// benchmarkAddPeekRemove measures the throughput of a serial Add, Peek, and Remove sequence. This simulates a
 // common consumer pattern where a single worker peeks at an item before deciding to process and remove it.
 func benchmarkAddPeekRemove(b *testing.B, q contracts.SafeQueue) {
-	// Pre-add one item so PeekHead doesn't fail on the first iteration.
+	// Pre-add one item so Peek doesn't fail on the first iteration.
 	initialItem := mocks.NewMockQueueItemAccessor(1, "initial", benchmarkFlowKey)
 	q.Add(initialItem)
 
@@ -91,11 +81,11 @@ func benchmarkAddPeekRemove(b *testing.B, q contracts.SafeQueue) {
 	for b.Loop() {
 		item := mocks.NewMockQueueItemAccessor(1, "item", benchmarkFlowKey)
 		q.Add(item)
-		peeked := q.PeekHead()
+		peeked := q.Peek()
 		if peeked == nil {
 			// In a concurrent benchmark, this could happen if the queue becomes empty.
 			// In a serial one, it's a fatal error.
-			b.Fatal("PeekHead failed")
+			b.Fatal("Peek failed")
 		}
 
 		_, err := q.Remove(peeked.Handle())
@@ -121,38 +111,13 @@ func benchmarkBulkAddThenBulkRemove(b *testing.B, q contracts.SafeQueue) {
 
 		// Remove the same number of items
 		for range items {
-			peeked := q.PeekHead()
+			peeked := q.Peek()
 			if peeked == nil {
-				b.Fatal("PeekHead failed")
+				b.Fatal("Peek failed")
 			}
 			if _, err := q.Remove(peeked.Handle()); err != nil {
 				b.Fatalf("Remove failed: %v", err)
 			}
-		}
-	}
-}
-
-// benchmarkAddPeekTailRemove measures the throughput of a serial Add, PeekTail, and Remove sequence. This is useful for
-// understanding the performance of accessing the lowest-priority item.
-func benchmarkAddPeekTailRemove(b *testing.B, q contracts.SafeQueue) {
-	// Pre-add one item so PeekTail doesn't fail on the first iteration.
-	initialItem := mocks.NewMockQueueItemAccessor(1, "initial", benchmarkFlowKey)
-	q.Add(initialItem)
-
-	b.ReportAllocs()
-
-	for b.Loop() {
-		item := mocks.NewMockQueueItemAccessor(1, "item", benchmarkFlowKey)
-		q.Add(item)
-
-		peeked := q.PeekTail()
-		if peeked == nil {
-			b.Fatal("PeekTail failed")
-		}
-
-		_, err := q.Remove(peeked.Handle())
-		if err != nil {
-			b.Fatalf("Remove failed: %v", err)
 		}
 	}
 }
@@ -190,7 +155,7 @@ func benchmarkHighContention(b *testing.B, q contracts.SafeQueue) {
 	// Consumers drive the benchmark.
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			peeked := q.PeekHead()
+			peeked := q.Peek()
 			if peeked != nil {
 				_, _ = q.Remove(peeked.Handle())
 			}

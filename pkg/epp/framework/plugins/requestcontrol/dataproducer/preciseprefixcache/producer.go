@@ -21,13 +21,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache"
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents/engineadapter"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvevents"
+	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -64,7 +65,19 @@ type PluginConfig struct {
 	SpeculativeTTL string `json:"speculativeTTL"`
 }
 
-var _ requestcontrol.DataProducer = &Producer{}
+var (
+	_ requestcontrol.DataProducer = &Producer{}
+	_ plugin.StateDumper          = &Producer{}
+)
+
+// subscriberManager is the subset of kvevents.SubscriberManager the producer
+// relies on, narrowed so tests can substitute a fake.
+type subscriberManager interface {
+	EnsureSubscriber(ctx context.Context, podIdentifier, endpoint, topicFilter string, remoteSocket bool) error
+	RemoveSubscriber(ctx context.Context, podIdentifier string)
+	GetActiveSubscribers() ([]string, []string)
+	Shutdown(ctx context.Context)
+}
 
 // Producer is a DataProducer plugin that maintains a KV-block prefix-cache
 // index by subscribing to vLLM KV-events and writes per-endpoint
@@ -79,7 +92,7 @@ type Producer struct {
 	kvCacheIndexer kvCacheIndexer
 	tokenProcessor kvblock.TokenProcessor
 
-	subscribersManager *kvevents.SubscriberManager
+	subscribersManager subscriberManager
 	kvEventsConfig     *kvevents.Config
 
 	kvBlockScorer kvcache.KVBlockScorer
@@ -227,6 +240,70 @@ func (p *Producer) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
+// Debug-dump caps keep the payload bounded. A list is partial when its matching
+// TotalX exceeds MaxX.
+const (
+	maxDumpSubscribers        = 100
+	maxDumpSpeculativeEntries = 100
+)
+
+// precisePrefixState is the snapshot returned by DumpState. The KV-block index
+// is keyed by prompt-derived block hashes and is not enumerable, so it is not
+// reported; the active subscriber pod identities and the live speculative
+// request ids are enumerated (sorted and capped) for debugging.
+type precisePrefixState struct {
+	Subscribers             []string `json:"subscribers"`
+	TotalSubscribers        int      `json:"totalSubscribers"`
+	MaxSubscribers          int      `json:"maxSubscribers"`
+	SpeculativeIndexing     bool     `json:"speculativeIndexing"`
+	SpeculativeEntries      []string `json:"speculativeEntries"`
+	TotalSpeculativeEntries int      `json:"totalSpeculativeEntries"`
+	MaxSpeculativeEntries   int      `json:"maxSpeculativeEntries"`
+	BlockSizeTokens         int      `json:"blockSizeTokens"`
+}
+
+// DumpState reports the producer's bounded operational state: the active
+// KV-event subscriber pod identities, whether speculative indexing is on and
+// the live speculative request ids, and the block size in tokens. Both lists
+// are sorted and capped; the prompt-derived block index is not exposed.
+func (p *Producer) DumpState() (json.RawMessage, error) {
+	subscribers := []string{}
+	var totalSubscribers int
+	if p.subscribersManager != nil {
+		ids, _ := p.subscribersManager.GetActiveSubscribers()
+		totalSubscribers = len(ids)
+		subscribers = sortedCapped(ids, maxDumpSubscribers)
+	}
+	speculativeEntries := []string{}
+	var totalSpeculativeEntries int
+	if p.speculativeCache != nil {
+		keys := p.speculativeCache.Keys()
+		totalSpeculativeEntries = len(keys)
+		speculativeEntries = sortedCapped(keys, maxDumpSpeculativeEntries)
+	}
+	return json.Marshal(precisePrefixState{
+		Subscribers:             subscribers,
+		TotalSubscribers:        totalSubscribers,
+		MaxSubscribers:          maxDumpSubscribers,
+		SpeculativeIndexing:     p.speculativeEnabled,
+		SpeculativeEntries:      speculativeEntries,
+		TotalSpeculativeEntries: totalSpeculativeEntries,
+		MaxSpeculativeEntries:   maxDumpSpeculativeEntries,
+		BlockSizeTokens:         p.blockSizeTokens,
+	})
+}
+
+// sortedCapped returns a sorted copy of in (never nil, so empty lists serialize
+// as [] not null), truncated to limit entries.
+func sortedCapped(in []string, limit int) []string {
+	out := append([]string{}, in...)
+	sort.Strings(out)
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
 // Produces declares the PrefixCacheMatchInfoDataKey published per endpoint,
 // name-bound to this producer instance.
 func (p *Producer) Produces() map[plugin.DataKey]any {
@@ -322,11 +399,17 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 			maxMatch = matchLen
 		}
 		cachedBlocks := 0
+		cachedBlocksByTier := map[string]int{}
 		for _, lu := range lookups {
 			cachedBlocks += matchedBlockCount(lu.keys, lu.keyToPods, addr)
+			for tier, count := range matchedBlockCountByTier(lu.keys, lu.keyToPods, addr) {
+				cachedBlocksByTier[tier] += count
+			}
 		}
 		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).WithCachedBlockCount(cachedBlocks))
+			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
+				WithCachedBlockCount(cachedBlocks).
+				WithCachedBlocksByTier(cachedBlocksByTier))
 	}
 
 	if p.speculativeEnabled {

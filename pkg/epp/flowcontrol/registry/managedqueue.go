@@ -45,7 +45,7 @@ import (
 //     This ensures the update to the underlying queue and the update to the internal counters occur as a single, atomic
 //     transaction.
 //  2. Synchronous Propagation: Statistics deltas are propagated synchronously within this critical section,
-//     guaranteeing a non-negativity invariant across the entire system (Shard/Registry aggregates).
+//     guaranteeing a non-negativity invariant across the entire system (registry aggregates).
 //  3. Lock-Free Reads (Atomics): The counters use `atomic.Int64`, allowing high-frequency accessors (`Len()`,
 //     `ByteSize()`) to read statistics without acquiring the mutex.
 //
@@ -60,7 +60,7 @@ type managedQueue struct {
 	policy flowcontrol.OrderingPolicy
 	logger logr.Logger
 
-	// onStatsDelta is the callback used to propagate statistics changes up to the parent shard.
+	// onStatsDelta is the callback used to propagate statistics changes up to the registry.
 	onStatsDelta propagateStatsDeltaFunc
 
 	// --- State Protected by `mu` ---
@@ -93,10 +93,7 @@ func newManagedQueue(
 	logger logr.Logger,
 	onStatsDelta propagateStatsDeltaFunc,
 ) *managedQueue {
-	mqLogger := logger.WithName("managed-queue").WithValues(
-		"flowKey", key,
-		"queueType", queue.Name(),
-	)
+	mqLogger := logger.WithName("managed-queue").WithValues("flowKey", key)
 	mq := &managedQueue{
 		queue:        queue,
 		policy:       policy,
@@ -113,8 +110,7 @@ func (mq *managedQueue) FlowQueueAccessor() flowcontrol.FlowQueueAccessor {
 	return mq.flowQueueAccessor
 }
 
-// Add performs an atomic check on the parent shard's lifecycle state before adding the item to the underlying queue.
-// This is the critical enforcement point that prevents new requests from entering a draining shard.
+// Add enqueues an item into the underlying queue and atomically updates the queue's statistics under the lock.
 func (mq *managedQueue) Add(item flowcontrol.QueueItemAccessor) error {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
@@ -178,11 +174,11 @@ func (mq *managedQueue) ByteSize() uint64 {
 	return uint64(mq.byteSize.Load())
 }
 
-// propagateStatsDeltaLocked updates the queue's statistics and propagates the delta to the parent shard.
+// propagateStatsDeltaLocked updates the queue's statistics and propagates the delta to the registry.
 // It must be called while holding the `managedQueue.mu` lock.
 //
 // Invariant Check: This function panics if a statistic becomes negative. This enforces the non-negative invariant
-// locally, which mathematically guarantees that the aggregated statistics (Shard/Registry level) also remain
+// locally, which mathematically guarantees that the aggregated statistics (registry level) also remain
 // non-negative.
 func (mq *managedQueue) propagateStatsDeltaLocked(lenDelta, byteSizeDelta int64) {
 	newLen := mq.len.Add(lenDelta)
@@ -191,7 +187,7 @@ func (mq *managedQueue) propagateStatsDeltaLocked(lenDelta, byteSizeDelta int64)
 	}
 	mq.byteSize.Add(byteSizeDelta)
 
-	// Propagate the delta up to the parent shard. This propagation is lock-free and eventually consistent.
+	// Propagate the delta up to the registry. This propagation is lock-free and eventually consistent.
 	mq.onStatsDelta(mq.key.Priority, lenDelta, byteSizeDelta)
 }
 
@@ -223,12 +219,7 @@ type flowQueueAccessor struct {
 var _ flowcontrol.FlowQueueAccessor = &flowQueueAccessor{}
 
 // --- Read-only pass-through methods to the underlying SafeQueue ---
-func (a *flowQueueAccessor) Name() string { return a.mq.queue.Name() }
-func (a *flowQueueAccessor) Capabilities() []flowcontrol.QueueCapability {
-	return a.mq.queue.Capabilities()
-}
-func (a *flowQueueAccessor) PeekHead() flowcontrol.QueueItemAccessor { return a.mq.queue.PeekHead() }
-func (a *flowQueueAccessor) PeekTail() flowcontrol.QueueItemAccessor { return a.mq.queue.PeekTail() }
+func (a *flowQueueAccessor) Peek() flowcontrol.QueueItemAccessor { return a.mq.queue.Peek() }
 
 // --- Read-only methods from the managedQueue wrapper ---
 func (a *flowQueueAccessor) Len() int                                   { return a.mq.Len() }

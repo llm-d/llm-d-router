@@ -7,7 +7,7 @@ echo "Using container tool: ${CONTAINER_RUNTIME}"
 # Set a default EPP_TAG if not provided
 EPP_TAG="${EPP_TAG:-dev}"
 # Set a default VLLM_SIMULATOR_TAG if not provided
-VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v0.9.2}"
+VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v0.10.2}"
 # Set the default routing side car image tag
 SIDECAR_TAG="${SIDECAR_TAG:-dev}"
 
@@ -17,6 +17,7 @@ export SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar
 export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.21.0}"
 # CI e2e jobs load image artifacts before invoking make. These toggles keep
 # image-pull from fetching runner-only images that are already loaded locally.
+PULL_EPP_IMAGE="${PULL_EPP_IMAGE:-true}"
 PULL_SIDECAR_IMAGE="${PULL_SIDECAR_IMAGE:-true}"
 PULL_VLLM_RENDER_IMAGE="${PULL_VLLM_RENDER_IMAGE:-true}"
 
@@ -53,7 +54,9 @@ echo "vLLM Render Image:   ${VLLM_RENDER_IMAGE}"
 echo "----------------------------------------------------"
 
 echo "Pulling dependencies..."
-ensure_image "${EPP_IMAGE}"
+if [ "${PULL_EPP_IMAGE}" = "true" ]; then
+  ensure_image "${EPP_IMAGE}"
+fi
 ensure_image "${VLLM_IMAGE}"
 if [ "${PULL_SIDECAR_IMAGE}" = "true" ]; then
   ensure_image "${SIDECAR_IMAGE}"

@@ -17,11 +17,13 @@ limitations under the License.
 package approximateprefix
 
 import (
+	"math"
 	"time"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 )
 
 // indexerInterface maintains an LRU cache of prompt prefix hashes and the server(s) that might have that
@@ -31,13 +33,15 @@ type indexerInterface interface {
 	Add(hashes []blockHash, server server)
 	RemovePod(server ServerID)
 	Pods() []ServerID
+	PodBlockCounts() map[ServerID]int
 }
 
 // podSet holds a set of pods that may have a specific prefix hash.
 type podSet map[ServerID]struct{}
 
-// blockHash is a hash of a block of request data.
-type blockHash uint64
+// blockHash is a hash of a block of request data. It aliases prefixhash.BlockHash
+// so this package and other prefix-aware producers share one block-hash type.
+type blockHash = prefixhash.BlockHash
 
 // server contains information about a specific server/pod and its cache capacity.
 type server struct {
@@ -96,7 +100,8 @@ const (
 	defaultBlockSizeTokens = 16
 
 	// defaultMaxPrefixBlocks is the fallback block cap, consulted only when
-	// MaxPrefixTokensToMatch is 0; the default token cap otherwise supersedes it.
+	// MaxPrefixTokensToMatch is 0 and MaxPrefixBlocksToMatch is non-zero; the
+	// default token cap otherwise supersedes it.
 	// Two long requests with the same prefix up to this limit will be indistinguishable.
 	// This parameter provides a trade-off between cache size, prefix matching speed and matching
 	// accuracy. Use a small value if most requests are short to reduce cache size and speed up the
@@ -108,6 +113,12 @@ const (
 	// that covers the long-prompt use cases seen in production. It takes precedence
 	// over defaultMaxPrefixBlocks: maxBlocks = defaultMaxPrefixTokens / blockSizeTokens.
 	defaultMaxPrefixTokens = 131072
+
+	// unlimitedPrefixBlocks is the block cap used when both MaxPrefixTokensToMatch
+	// and MaxPrefixBlocksToMatch are 0. Prompt length is already bounded by the
+	// model server's context window, so an absent cap matches at most one context
+	// window of tokens.
+	unlimitedPrefixBlocks = math.MaxInt
 
 	// defaultLRUCapacityPerServer is the default capacity of the LRU indexer per server.
 	// The indexer is an approximation to the actual prefix LRU cache state on the model servers per server (pod).
@@ -132,11 +143,12 @@ type config struct {
 	BlockSize int `json:"blockSize"`
 	// Deprecated: use MaxPrefixTokensToMatch, which caps prefix matching in tokens
 	// independent of BlockSizeTokens. MaxPrefixBlocksToMatch applies only when
-	// MaxPrefixTokensToMatch is 0.
+	// MaxPrefixTokensToMatch is 0. Setting both to 0 matches the whole prompt.
 	MaxPrefixBlocksToMatch int `json:"maxPrefixBlocksToMatch"`
 	// MaxPrefixTokensToMatch is the maximum number of prefix tokens to match.
 	// When set (> 0), it takes precedence over MaxPrefixBlocksToMatch by computing
-	// maxBlocks = MaxPrefixTokensToMatch / blockSizeTokens.
+	// maxBlocks = MaxPrefixTokensToMatch / blockSizeTokens. Setting both caps to 0
+	// matches the whole prompt.
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
 	// Max capacity size of the LRU indexer in number of entries per server (pod).
 	LRUCapacityPerServer int `json:"lruCapacityPerServer"`

@@ -26,8 +26,8 @@
 /apix/config/                                                             @shmuelk @llm-d/router-maintainers
 
 # Proxy sidecar
-/cmd/pd-sidecar/                                                          @shmuelk @llm-d/router-maintainers
-/pkg/sidecar/                                                             @shmuelk @llm-d/router-maintainers
+/cmd/pd-sidecar/                                                          @shmuelk @roytman @llm-d/router-maintainers
+/pkg/sidecar/                                                             @shmuelk @roytman @llm-d/router-maintainers
 
 # SLO + latency-prediction subsystem
 /pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier/             @kaushikmitr @llm-d/router-maintainers
@@ -44,6 +44,14 @@
 # Tokenization
 /pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/          @vMaroon @liu-cong @sagearc @llm-d/router-maintainers
 
+# KV-cache subsystem — indexer, KV-block index, KV-events
+/pkg/kvcache/                                                              @vMaroon @liu-cong @hyeongyun0916 @yankay @sagearc @llm-d/router-maintainers
+/pkg/kvevents/                                                             @vMaroon @liu-cong @hyeongyun0916 @yankay @sagearc @llm-d/router-maintainers
+
 # Request handling
 /pkg/epp/framework/interface/requesthandling/                             @zetxqx @llm-d/router-maintainers
 /pkg/epp/framework/plugins/requesthandling/                               @zetxqx @llm-d/router-maintainers
+
+# Coordinator
+/cmd/coordinator/                                                         @shmuelk @roytman @llm-d/router-maintainers
+/pkg/coordinator/                                                         @shmuelk @roytman @llm-d/router-maintainers

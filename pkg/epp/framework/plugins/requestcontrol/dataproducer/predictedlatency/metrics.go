@@ -136,7 +136,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.InferenceObjectiveSubsystem,
 			Name:      "request_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_tpot_seconds] Inference model TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_streaming_tpot_seconds] Inference model TPOT distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
 			Buckets:   tpotBuckets,
 		},
 		modelLabels,

@@ -1,0 +1,129 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package burstprefix
+
+import (
+	"time"
+
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+)
+
+const (
+	// PluginType is the unique identifier for the burst prefix cache producer plugin.
+	PluginType = "burst-prefix-cache-producer"
+
+	// unlimitedPerReplica is the MaxPerReplica sentinel that disables the
+	// per-replica cap, sending every sample of a group to a single replica.
+	unlimitedPerReplica = -1
+
+	// unlimitedBatchSize is the MaxBatchSize sentinel that disables the
+	// per-window cap on accumulated requests.
+	unlimitedBatchSize = -1
+
+	defaultWindowDurationMs  = 100
+	defaultMaxPerReplica     = unlimitedPerReplica
+	defaultBlockSizeTokens   = 64
+	defaultMinColocateBlocks = 0
+	defaultMaxBatchSize      = 1000
+
+	// defaultMaxPrefixBlocks caps how many leading blocks form a group key.
+	// Two prompts identical up to this many blocks are treated as one group.
+	defaultMaxPrefixBlocks = 2048
+
+	// maxWindowDurationMs bounds the batch window. Every request waits up to this
+	// long, so a misconfigured large value is rejected at construction rather than
+	// stalling every request.
+	maxWindowDurationMs = 10000
+)
+
+// balanceMode selects the quantity balanced across replicas within a window.
+type balanceMode string
+
+const (
+	// balanceByRequests balances placement by request count (the default).
+	balanceByRequests balanceMode = "requests"
+	// balanceByTokens balances placement by prefix-block (token) load, charging a
+	// prefix only the blocks a replica must still prefill - blocks already held from
+	// an earlier request sharing that prefix are free. Spreads long-prompt requests
+	// so no replica saturates on stacked prefixes while shorter ones pack together.
+	balanceByTokens balanceMode = "tokens"
+)
+
+// config defines the configuration for the burst prefix cache producer.
+type config struct {
+	// WindowDurationMs is the batch window T in milliseconds. Requests arriving
+	// within one window are assigned jointly so samples sharing a prompt
+	// co-locate on the same replica(s).
+	WindowDurationMs int `json:"windowDurationMs"`
+	// MaxPerReplica caps how many samples of one group are assigned to a single
+	// replica (k). -1 disables the cap (all samples of a group to one replica).
+	MaxPerReplica int `json:"maxPerReplica"`
+	// BlockSizeTokens is the token block size used to compute prefix hashes.
+	BlockSizeTokens int `json:"blockSizeTokens"`
+	// MaxPrefixTokensToMatch caps prefix matching in tokens. When > 0 it sets
+	// maxBlocks = MaxPrefixTokensToMatch / BlockSizeTokens; otherwise
+	// defaultMaxPrefixBlocks applies.
+	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
+	// MinColocateBlocks is the minimum shared leading blocks for inter-unit prefix
+	// co-location, and the minimum a single (non-duplicated) request must share
+	// with another request to gain an affinity at all. 0 disables both: only
+	// identical groups are placed and placement is purely load-balanced. A larger
+	// value avoids co-locating on a trivial shared preamble. Co-location is always
+	// bounded by a per-replica fair-share cap, so raising this never lets
+	// prefix-sharing units stampede onto one replica.
+	MinColocateBlocks int `json:"minColocateBlocks"`
+	// MaxBatchSize caps how many requests one window may accumulate. Once the cap
+	// is reached, Produce returns an error instead of letting a sustained burst or
+	// a long window grow the batch unbounded. -1 disables the cap.
+	MaxBatchSize int `json:"maxBatchSize"`
+	// BalanceBy selects the quantity balanced across replicas within a window:
+	// "requests" (default) or "tokens". See balanceMode. An empty value defaults
+	// to "requests".
+	BalanceBy balanceMode `json:"balanceBy"`
+}
+
+// defaultConfig provides sensible defaults for the burst prefix cache producer.
+var defaultConfig = config{
+	WindowDurationMs:       defaultWindowDurationMs,
+	MaxPerReplica:          defaultMaxPerReplica,
+	BlockSizeTokens:        defaultBlockSizeTokens,
+	MaxPrefixTokensToMatch: 0,
+	MinColocateBlocks:      defaultMinColocateBlocks,
+	MaxBatchSize:           defaultMaxBatchSize,
+	BalanceBy:              balanceByRequests,
+}
+
+// entry is one request collected into a batch window.
+type entry struct {
+	hashes [][]prefixhash.BlockHash
+	pods   []fwksched.Endpoint
+	// enqueued is when the request joined the batch, used to report the window wait.
+	enqueued time.Time
+	// assigned is the replica this request is steered to, filled when the batch
+	// is sealed. nil means no affinity (singleton group or empty prompt): the
+	// request is scored 0 on every endpoint so other scorers decide.
+	assigned fwksched.Endpoint
+}
+
+// batch accumulates requests arriving within one window and releases them
+// together once sealed.
+type batch struct {
+	entries []*entry
+	sealed  chan struct{}
+	closed  bool
+}

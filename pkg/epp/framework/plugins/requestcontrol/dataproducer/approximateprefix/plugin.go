@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -52,6 +54,7 @@ var minBlockSizeTokens = 64
 var (
 	_ requestcontrol.DataProducer = &dataProducer{}
 	_ requestcontrol.PreRequest   = &dataProducer{}
+	_ plugin.StateDumper          = &dataProducer{}
 )
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
@@ -67,6 +70,55 @@ type dataProducer struct {
 // TypedName returns the type and name of the plugin.
 func (p *dataProducer) TypedName() plugin.TypedName {
 	return p.typedName
+}
+
+const maxDebugDumpPods = 100
+
+// prefixIndexState is the sanitized snapshot returned by DumpState. It carries
+// per-pod block counts only; the prompt-derived block hashes are never exposed.
+// The dump is partial when TotalPods exceeds MaxPods.
+type prefixIndexState struct {
+	Pods      []podBlockCount `json:"pods"`
+	TotalPods int             `json:"totalPods"`
+	MaxPods   int             `json:"maxPods"`
+}
+
+type podBlockCount struct {
+	Pod    string `json:"pod"`
+	Blocks int    `json:"blocks"`
+}
+
+// DumpState reports how many prefix-cache blocks the indexer currently tracks
+// per pod, ordered by block count and capped to maxDebugDumpPods so the debug
+// payload stays bounded when a pool has many pods.
+func (p *dataProducer) DumpState() (json.RawMessage, error) {
+	return json.Marshal(p.snapshotState())
+}
+
+func (p *dataProducer) snapshotState() prefixIndexState {
+	state := prefixIndexState{MaxPods: maxDebugDumpPods}
+	if p.indexerInst == nil {
+		return state
+	}
+
+	counts := p.indexerInst.PodBlockCounts()
+	state.TotalPods = len(counts)
+	state.Pods = make([]podBlockCount, 0, len(counts))
+	for pod, blocks := range counts {
+		state.Pods = append(state.Pods, podBlockCount{Pod: pod.String(), Blocks: blocks})
+	}
+
+	sort.SliceStable(state.Pods, func(a, b int) bool {
+		if state.Pods[a].Blocks != state.Pods[b].Blocks {
+			return state.Pods[a].Blocks > state.Pods[b].Blocks
+		}
+		return state.Pods[a].Pod < state.Pods[b].Pod
+	})
+
+	if len(state.Pods) > maxDebugDumpPods {
+		state.Pods = state.Pods[:maxDebugDumpPods]
+	}
+	return state
 }
 
 // Produces returns the data produced by the plugin.
@@ -175,11 +227,7 @@ func (p *dataProducer) PluginState() *plugin.PluginState {
 // Produce is called by the director before scheduling requests.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
 	blockSize := p.GetBlockSize(pods)
-	maxBlocks := p.config.MaxPrefixBlocksToMatch
-	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
-		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
-	}
-	perPromptHashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
+	perPromptHashes := prefixhash.GetBlockHashes(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
 
 	prefixCacheServers := make(map[ServerID]int)
 	totalBlocks := 0
@@ -305,6 +353,24 @@ func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
 		return minBlockSizeTokens
 	}
 	return blockSize
+}
+
+// resolveMaxBlocks returns the per-request cap on hashed prefix blocks.
+//
+// MaxPrefixTokensToMatch wins when set, converting tokens to blocks at the
+// effective block size. Zeroing both caps means unlimited: prompt length is
+// already bounded by the model server's context window, so the whole prompt is
+// at most one context window of tokens. A token cap smaller than the block size
+// still resolves to 0 and hashes nothing; that is a misconfiguration, not a
+// request for unlimited matching.
+func (p *dataProducer) resolveMaxBlocks(blockSize int) int {
+	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
+		return p.config.MaxPrefixTokensToMatch / blockSize
+	}
+	if p.config.MaxPrefixBlocksToMatch == 0 {
+		return unlimitedPrefixBlocks
+	}
+	return p.config.MaxPrefixBlocksToMatch
 }
 
 // ApproxPrefixCacheFactory is the factory function for the prefix cache data producer plugin.

@@ -35,7 +35,7 @@ set -o pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Images under these llm-d-owned registries may use ':latest'.
-OWNED_IMAGE_RE='image:[[:space:]]*"?(ghcr\.io|quay\.io)/llm-d/'
+OWNED_IMAGE_RE='image:[[:space:]]*['\''"]?(ghcr\.io|quay\.io)/llm-d/'
 
 WARN_ONLY=false
 

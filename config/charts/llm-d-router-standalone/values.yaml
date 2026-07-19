@@ -33,16 +33,7 @@ router:
       limits:
         memory: 16Gi
 
-    # Agentgateway-specific settings used by the built-in preset when
-    # proxyType=agentgateway. service.name is required.
-    agentgateway:
-      service:
-        create: true
-        name: ""
-        namespace: ""
-        # Must match inferencePool.targetPorts.
-        ports:
-          - 8000
+
 
     # Built-in standalone proxy presets. The selected preset is merged with the
     # top-level proxy.* fields below, so explicit user overrides still win.
@@ -69,6 +60,11 @@ router:
                       socket_address:
                         address: 0.0.0.0
                         port_value: 19001
+                    additional_addresses:
+                    - address:
+                        socket_address:
+                          address: "::"
+                          port_value: 19001
                     filter_chains:
                       - filters:
                           - name: envoy.filters.network.http_connection_manager
@@ -102,6 +98,11 @@ router:
                       socket_address:
                         address: 0.0.0.0
                         port_value: 8081
+                    additional_addresses:
+                    - address:
+                        socket_address:
+                          address: "::"
+                          port_value: 8081
                     per_connection_buffer_limit_bytes: 32768
                     access_log:
                       - name: envoy.access_loggers.file
@@ -223,14 +224,8 @@ router:
                         reuse_connection: true
                         grpc_health_check:
                           service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
-                        tls_options:
-                          alpn_protocols: ["h2"]
-                    transport_socket:
-                      name: "envoy.transport_sockets.tls"
-                      typed_config:
-                        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-                        common_tls_context:
-                          validation_context:
+              {{ include "llm-d-router.proxy.envoyExtProcTLSOptions" . | indent 10 }}
+              {{ include "llm-d-router.proxy.envoyExtProcTransportSocket" . | indent 6 }}
                     typed_extension_protocol_options:
                       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
                         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions

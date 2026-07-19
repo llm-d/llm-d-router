@@ -35,18 +35,18 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-// maxCleanupWorkers caps the number of concurrent workers for background cleanup tasks. This prevents a single shard
+// maxCleanupWorkers caps the number of concurrent workers for background cleanup tasks. This prevents the processor
 // from overwhelming the Go scheduler with too many goroutines.
 const maxCleanupWorkers = 4
 
-// ErrProcessorBusy is a sentinel error returned by the processor's Submit method indicating that the processor's.
+// ErrProcessorBusy is a sentinel error returned by the processor's Submit method indicating that the processor's
 // internal buffer is momentarily full and cannot accept new work.
-var ErrProcessorBusy = errors.New("shard processor is busy")
+var ErrProcessorBusy = errors.New("processor is busy")
 
 // Processor is the core worker of the FlowController.
 //
-// It is paired one-to-one with a RegistryShard instance and is responsible for all request lifecycle operations on that
-// shard, from the point an item is successfully submitted to it.
+// A single Processor owns the entire request data plane and is responsible for all request lifecycle operations from
+// the point an item is successfully submitted to it.
 //
 // # Request Lifecycle Management & Ownership
 //
@@ -80,6 +80,12 @@ type Processor struct {
 
 	// enqueueChan is the entry point for new requests.
 	enqueueChan chan *FlowItem
+
+	// poolEmpty caches whether the candidate pool had zero endpoints as of the most recent dispatchCycle. enqueue reads
+	// it to distinguish a queue-capacity rejection caused by genuine unavailability (no backends, e.g. scale-from-zero)
+	// from one caused by backpressure against a contended but non-empty pool. Only accessed from the Run goroutine, so
+	// it needs no synchronization.
+	poolEmpty bool
 
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
@@ -120,21 +126,21 @@ func NewProcessor(
 //
 // Ownership Contract:
 //   - Returns nil: The item was successfully handed off.
-//     The ShardProcessor takes responsibility for calling Finalize on the item.
+//     The Processor takes responsibility for calling Finalize on the item.
 //   - Returns error: The item was not handed off.
 //     Ownership of the FlowItem remains with the caller, who is responsible for calling Finalize.
 //
 // Possible errors:
 //   - ErrProcessorBusy: The processor's input channel is full.
 //   - types.ErrFlowControllerNotRunning: The processor is shutting down.
-func (sp *Processor) Submit(item *FlowItem) error {
-	if sp.isShuttingDown.Load() {
+func (p *Processor) Submit(item *FlowItem) error {
+	if p.isShuttingDown.Load() {
 		return types.ErrFlowControllerNotRunning
 	}
 	select { // The default case makes this select non-blocking.
-	case sp.enqueueChan <- item:
+	case p.enqueueChan <- item:
 		return nil // Ownership transferred.
-	case <-sp.lifecycleCtx.Done():
+	case <-p.lifecycleCtx.Done():
 		return types.ErrFlowControllerNotRunning
 	default:
 		return ErrProcessorBusy
@@ -146,49 +152,49 @@ func (sp *Processor) Submit(item *FlowItem) error {
 //
 // Ownership Contract:
 //   - Returns nil: The item was successfully handed off.
-//     The ShardProcessor takes responsibility for calling Finalize on the item.
+//     The Processor takes responsibility for calling Finalize on the item.
 //   - Returns error: The item was not handed off.
 //     Ownership of the FlowItem remains with the caller, who is responsible for calling Finalize.
 //
 // Possible errors:
 //   - ctx.Err(): The provided context was cancelled or its deadline exceeded.
 //   - types.ErrFlowControllerNotRunning: The processor is shutting down.
-func (sp *Processor) SubmitOrBlock(ctx context.Context, item *FlowItem) error {
-	if sp.isShuttingDown.Load() {
+func (p *Processor) SubmitOrBlock(ctx context.Context, item *FlowItem) error {
+	if p.isShuttingDown.Load() {
 		return types.ErrFlowControllerNotRunning
 	}
 
 	select { // The absence of a default case makes this call blocking.
-	case sp.enqueueChan <- item:
+	case p.enqueueChan <- item:
 		return nil // Ownership transferred.
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-sp.lifecycleCtx.Done():
+	case <-p.lifecycleCtx.Done():
 		return types.ErrFlowControllerNotRunning
 	}
 }
 
-// Run is the main operational loop for the shard processor. It must be run as a goroutine.
+// Run is the main operational loop for the processor. It must be run as a goroutine.
 // It uses a `select` statement to interleave accepting new requests with dispatching existing ones, balancing
 // responsiveness with throughput.
-func (sp *Processor) Run(ctx context.Context) {
-	sp.logger.V(logutil.DEFAULT).Info("Shard processor run loop starting.")
-	defer sp.logger.V(logutil.DEFAULT).Info("Shard processor run loop stopped.")
+func (p *Processor) Run(ctx context.Context) {
+	p.logger.V(logutil.DEFAULT).Info("Processor run loop starting.")
+	defer p.logger.V(logutil.DEFAULT).Info("Processor run loop stopped.")
 
-	sp.wg.Add(1)
-	go sp.runCleanupSweep(ctx)
+	p.wg.Add(1)
+	go p.runCleanupSweep(ctx)
 
 	// Create a ticker for periodic dispatch attempts to avoid tight loops
-	dispatchTicker := sp.clock.NewTicker(time.Millisecond)
+	dispatchTicker := p.clock.NewTicker(time.Millisecond)
 	defer dispatchTicker.Stop()
 
 	var gcCh <-chan time.Time
 	var priorityBandUpdateCh <-chan map[int]struct{}
-	if sp.registryBackground != nil {
-		gcTicker := sp.clock.NewTicker(sp.registryBackground.FlowGCTimeout())
+	if p.registryBackground != nil {
+		gcTicker := p.clock.NewTicker(p.registryBackground.FlowGCTimeout())
 		defer gcTicker.Stop()
 		gcCh = gcTicker.C()
-		priorityBandUpdateCh = sp.registryBackground.PriorityBandUpdateChannel()
+		priorityBandUpdateCh = p.registryBackground.PriorityBandUpdateChannel()
 	}
 
 	// This is the main worker loop. It continuously processes incoming requests and dispatches queued requests until the
@@ -205,35 +211,35 @@ func (sp *Processor) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			sp.shutdown()
-			sp.wg.Wait()
+			p.shutdown()
+			p.wg.Wait()
 			return
-		case item, ok := <-sp.enqueueChan:
+		case item, ok := <-p.enqueueChan:
 			if !ok { // Should not happen in practice, but is a clean shutdown signal.
-				sp.shutdown()
-				sp.wg.Wait()
+				p.shutdown()
+				p.wg.Wait()
 				return
 			}
 			// This is a safeguard against logic errors in the distributor.
 			if item == nil {
-				sp.logger.Error(nil, "Logic error: nil item received on shard processor enqueue channel, ignoring.")
+				p.logger.Error(nil, "Logic error: nil item received on processor enqueue channel, ignoring.")
 				continue
 			}
-			sp.enqueue(item)
-			sp.dispatchCycle(ctx) // Process immediately when an item arrives
+			p.enqueue(item)
+			p.dispatchCycle(ctx) // Process immediately when an item arrives
 		case <-dispatchTicker.C():
-			sp.dispatchCycle(ctx) // Periodically attempt to dispatch from queues
+			p.dispatchCycle(ctx) // Periodically attempt to dispatch from queues
 		case desired := <-priorityBandUpdateCh:
-			sp.registryBackground.ApplyDesiredPriorities(desired)
+			p.registryBackground.ApplyDesiredPriorities(desired)
 		case <-gcCh:
-			sp.registryBackground.ExecuteGCCycle()
+			p.registryBackground.ExecuteGCCycle()
 		}
 	}
 }
 
 // enqueue processes an item received from the enqueueChan.
 // It handles capacity checks, checks for external finalization, and either admits the item to a queue or rejects it.
-func (sp *Processor) enqueue(item *FlowItem) {
+func (p *Processor) enqueue(item *FlowItem) {
 
 	req := item.OriginalRequest()
 	key := req.FlowKey()
@@ -255,32 +261,41 @@ func (sp *Processor) enqueue(item *FlowItem) {
 	// This is an optimistic check to avoid unnecessary processing on items already considered dead.
 	// The ultimate guarantee of cleanup for any races is the runCleanupSweep mechanism.
 	if finalState := outcome; finalState != nil {
-		sp.logger.V(logutil.TRACE).Info("Item finalized externally before processing, discarding.",
+		p.logger.V(logutil.TRACE).Info("Item finalized externally before processing, discarding.",
 			"outcome", finalState.Outcome, "err", finalState.Err, "flowKey", key, "requestID", req.ID())
 		return
 	}
 
 	// --- Configuration Validation ---
-	managedQ, err := sp.registry.ManagedQueue(key)
+	managedQ, err := p.registry.ManagedQueue(key)
 	if err != nil {
 		finalErr := fmt.Errorf("configuration error: failed to get queue for flow key %s: %w", key, err)
-		sp.logger.Error(finalErr, "Rejecting request, queue lookup failed", "flowKey", key, "requestID", req.ID())
+		p.logger.Error(finalErr, "Rejecting request, queue lookup failed", "flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		return
 	}
 
-	_, err = sp.registry.PriorityBandAccessor(key.Priority)
+	_, err = p.registry.PriorityBandAccessor(key.Priority)
 	if err != nil {
 		finalErr := fmt.Errorf("configuration error: failed to get priority band for priority %d: %w", key.Priority, err)
-		sp.logger.Error(finalErr, "Rejecting request, priority band lookup failed", "flowKey", key, "requestID", req.ID())
+		p.logger.Error(finalErr, "Rejecting request, priority band lookup failed", "flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		return
 	}
 
 	// --- Capacity Check ---
 	// This check is safe because it is performed by the single-writer Run goroutine.
-	if ok, stats := sp.hasCapacity(key.Priority, req.ByteSize()); !ok {
-		sp.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
+	if ok, stats := p.hasCapacity(key.Priority, req.ByteSize()); !ok {
+		// When the pool has no endpoints, the queue is acting as a scale-from-zero waiting room. A capacity rejection in
+		// that state reflects genuine unavailability (surfaced as 503), not backpressure against a contended pool (429).
+		if p.poolEmpty {
+			p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity with no endpoints",
+				"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize())
+			item.FinalizeWithOutcome(types.QueueOutcomeRejectedNoEndpoints, fmt.Errorf("%w: %w",
+				types.ErrRejected, types.ErrNoEndpoints))
+			return
+		}
+		p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
 			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
 			"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
 			"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
@@ -293,20 +308,20 @@ func (sp *Processor) enqueue(item *FlowItem) {
 	// The item is admitted. The ManagedQueue.Add implementation is responsible for calling item.SetHandle() atomically.
 	if err := managedQ.Add(item); err != nil {
 		finalErr := fmt.Errorf("failed to add item to queue for flow key %s: %w", key, err)
-		sp.logger.Error(finalErr, "Rejecting request, queue add failed",
+		p.logger.Error(finalErr, "Rejecting request, queue add failed",
 			"flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		return
 	}
-	sp.logger.V(logutil.TRACE).Info("Item enqueued.",
+	p.logger.V(logutil.TRACE).Info("Item enqueued.",
 		"flowKey", key, "requestID", req.ID())
 }
 
-// hasCapacity checks if the shard and the specific priority band have enough capacity.
+// hasCapacity checks if the global limits and the specific priority band have enough capacity.
 // This check reflects actual resource utilization, including "zombie" items (finalized but unswept), to prevent
 // physical resource overcommitment.
-func (sp *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.AggregateStats) {
-	stats := sp.registry.Stats()
+func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.AggregateStats) {
+	stats := p.registry.Stats()
 	if stats.TotalCapacityBytes > 0 && stats.TotalByteSize+itemByteSize > stats.TotalCapacityBytes {
 		return false, stats
 	}
@@ -339,42 +354,43 @@ func (sp *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contr
 // However, if a selected item is saturated (cannot be scheduled), the cycle stops immediately. This enforces HoL
 // blocking to respect the policy's decision and prevent priority inversion, where dispatching lower-priority work might
 // exacerbate the saturation affecting the high-priority item.
-func (sp *Processor) dispatchCycle(ctx context.Context) bool {
+func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	dispatchCycleStart := time.Now()
 	defer func() {
 		metrics.RecordFlowControlDispatchCycleDuration(time.Since(dispatchCycleStart))
 	}()
 
-	pool := sp.endpointCandidates.Locate(ctx, nil)
-	saturation := sp.saturationDetector.Saturation(ctx, pool)
+	pool := p.endpointCandidates.Locate(ctx, nil)
+	p.poolEmpty = len(pool) == 0
+	saturation := p.saturationDetector.Saturation(ctx, pool)
 
 	// Record pool saturation metric
-	metrics.RecordFlowControlPoolSaturation(sp.poolName, saturation)
+	metrics.RecordFlowControlPoolSaturation(p.poolName, saturation)
 
-	priorities := sp.registry.AllOrderedPriorityLevels()
-	ceilings := sp.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities)
+	priorities := p.registry.AllOrderedPriorityLevels()
+	ceilings := p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities)
 
 	for i, priority := range priorities {
 		// --- Viability Check (Saturation/HoL Blocking) ---
 		// Check before selecting an item: if we are already saturated for this priority, stop immediately.
 		usageLimit := ceilings[i]
 		if saturation >= usageLimit {
-			sp.logger.V(logutil.DEBUG).Info("Priority band is saturated; enforcing HoL blocking.",
+			p.logger.V(logutil.DEBUG).Info("Priority band is saturated; enforcing HoL blocking.",
 				"priority", priority, "saturation", saturation, "usageLimit", usageLimit)
 			// Stop the dispatch cycle entirely to respect strict policy decision and prevent priority inversion where
 			// lower-priority work might exacerbate the saturation affecting high-priority work.
 			return false
 		}
 
-		originalBand, err := sp.registry.PriorityBandAccessor(priority)
+		originalBand, err := p.registry.PriorityBandAccessor(priority)
 		if err != nil {
-			sp.logger.Error(err, "Failed to get PriorityBandAccessor, skipping band", "priority", priority)
+			p.logger.Error(err, "Failed to get PriorityBandAccessor, skipping band", "priority", priority)
 			continue
 		}
 
-		item, err := sp.selectItem(ctx, originalBand)
+		item, err := p.selectItem(ctx, originalBand)
 		if err != nil {
-			sp.logger.Error(err, "Failed to select item, skipping priority band for this cycle",
+			p.logger.Error(err, "Failed to select item, skipping priority band for this cycle",
 				"priority", priority)
 			continue // Continue to the next band to maximize work conservation.
 		}
@@ -384,8 +400,8 @@ func (sp *Processor) dispatchCycle(ctx context.Context) bool {
 
 		// --- Dispatch ---
 		req := item.OriginalRequest()
-		if err := sp.dispatchItem(item); err != nil {
-			sp.logger.Error(err, "Failed to dispatch item, skipping priority band for this cycle",
+		if err := p.dispatchItem(item); err != nil {
+			p.logger.Error(err, "Failed to dispatch item, skipping priority band for this cycle",
 				"flowKey", req.FlowKey(), "requestID", req.ID())
 			continue // Continue to the next band to maximize work conservation.
 		}
@@ -395,11 +411,11 @@ func (sp *Processor) dispatchCycle(ctx context.Context) bool {
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.
-func (sp *Processor) selectItem(
+func (p *Processor) selectItem(
 	ctx context.Context,
 	flowGroup flowcontrol.PriorityBandAccessor,
 ) (flowcontrol.QueueItemAccessor, error) {
-	fairnessP, err := sp.registry.FairnessPolicy(flowGroup.Priority())
+	fairnessP, err := p.registry.FairnessPolicy(flowGroup.Priority())
 	if err != nil {
 		return nil, fmt.Errorf("could not get FairnessPolicy: %w", err)
 	}
@@ -413,14 +429,14 @@ func (sp *Processor) selectItem(
 	}
 	// The queue itself is responsible for explicit ordering via its configured OrderingPolicy.
 	// We simply peek at the head.
-	return queue.PeekHead(), nil
+	return queue.Peek(), nil
 }
 
 // dispatchItem handles the final steps of dispatching an item: removing it from the queue and finalizing its outcome.
-func (sp *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
+func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 	req := itemAcc.OriginalRequest()
 	key := req.FlowKey()
-	managedQ, err := sp.registry.ManagedQueue(key)
+	managedQ, err := p.registry.ManagedQueue(key)
 	if err != nil {
 		return fmt.Errorf("failed to get ManagedQueue for flow %s: %w", key, err)
 	}
@@ -429,26 +445,26 @@ func (sp *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 	if err != nil {
 		// This happens benignly if the item was already removed by the cleanup sweep loop.
 		// We log it at a low level for visibility but return nil so the dispatch cycle proceeds.
-		sp.logger.V(logutil.DEBUG).Info("Failed to remove item during dispatch (likely already finalized and swept).",
+		p.logger.V(logutil.DEBUG).Info("Failed to remove item during dispatch (likely already finalized and swept).",
 			"flowKey", key, "requestID", req.ID(), "error", err)
 		return nil
 	}
 
 	removedItem := removedItemAcc.(*FlowItem)
-	sp.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
+	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
 	removedItem.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
 	return nil
 }
 
 // runCleanupSweep starts a background goroutine that periodically scans all queues for externally finalized items
 // ("zombie" items) and removes them in batches.
-func (sp *Processor) runCleanupSweep(ctx context.Context) {
-	defer sp.wg.Done()
-	logger := sp.logger.WithName("runCleanupSweep")
-	logger.V(logutil.DEFAULT).Info("Shard cleanup sweep goroutine starting.")
-	defer logger.V(logutil.DEFAULT).Info("Shard cleanup sweep goroutine stopped.")
+func (p *Processor) runCleanupSweep(ctx context.Context) {
+	defer p.wg.Done()
+	logger := p.logger.WithName("runCleanupSweep")
+	logger.V(logutil.DEFAULT).Info("Cleanup sweep goroutine starting.")
+	defer logger.V(logutil.DEFAULT).Info("Cleanup sweep goroutine stopped.")
 
-	ticker := sp.clock.NewTicker(sp.cleanupSweepInterval)
+	ticker := p.clock.NewTicker(p.cleanupSweepInterval)
 	defer ticker.Stop()
 
 	for {
@@ -456,14 +472,14 @@ func (sp *Processor) runCleanupSweep(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C():
-			sp.sweepFinalizedItems()
+			p.sweepFinalizedItems()
 		}
 	}
 }
 
 // sweepFinalizedItems performs a single scan of all queues, removing finalized items in batch and releasing their
 // memory.
-func (sp *Processor) sweepFinalizedItems() {
+func (p *Processor) sweepFinalizedItems() {
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
 			return itemAcc.(*FlowItem).FinalState() != nil
@@ -474,20 +490,20 @@ func (sp *Processor) sweepFinalizedItems() {
 				"count", len(removedItems))
 		}
 	}
-	sp.processAllQueuesConcurrently("sweepFinalizedItems", processFn)
+	p.processAllQueuesConcurrently("sweepFinalizedItems", processFn)
 }
 
 // shutdown handles the graceful termination of the processor, ensuring all pending items (in channel and queues) are
 // Finalized.
-func (sp *Processor) shutdown() {
-	sp.shutdownOnce.Do(func() {
-		sp.isShuttingDown.Store(true)
-		sp.logger.V(logutil.DEFAULT).Info("Shard processor shutting down.")
+func (p *Processor) shutdown() {
+	p.shutdownOnce.Do(func() {
+		p.isShuttingDown.Store(true)
+		p.logger.V(logutil.DEFAULT).Info("Processor shutting down.")
 
 	DrainLoop: // Drain the enqueueChan to finalize buffered items.
 		for {
 			select {
-			case item := <-sp.enqueueChan:
+			case item := <-p.enqueueChan:
 				if item == nil {
 					continue
 				}
@@ -500,12 +516,12 @@ func (sp *Processor) shutdown() {
 		}
 		// We do not close enqueueChan because external goroutines (Controller) send on it.
 		// The channel will be garbage collected when the processor terminates.
-		sp.evictAll()
+		p.evictAll()
 	})
 }
 
-// evictAll drains all queues on the shard, finalizes every item, and releases their memory.
-func (sp *Processor) evictAll() {
+// evictAll drains all queues, finalizes every item, and releases their memory.
+func (p *Processor) evictAll() {
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		key := managedQ.FlowQueueAccessor().FlowKey()
 		removedItems := managedQ.Drain()
@@ -525,66 +541,72 @@ func (sp *Processor) evictAll() {
 			item.FinalizeWithOutcome(outcome, errShutdown)
 		}
 	}
-	sp.processAllQueuesConcurrently("evictAll", processFn)
+	p.processAllQueuesConcurrently("evictAll", processFn)
 }
 
-// processAllQueuesConcurrently iterates over all queues in all priority bands on the shard and executes the given
+// processAllQueuesConcurrently iterates over all queues in all priority bands and executes the given
 // `processFn` for each queue using a dynamically sized worker pool.
-func (sp *Processor) processAllQueuesConcurrently(
+func (p *Processor) processAllQueuesConcurrently(
 	ctxName string,
 	processFn func(mq contracts.ManagedQueue, logger logr.Logger),
 ) {
-	logger := sp.logger.WithName(ctxName)
+	logger := p.logger.WithName(ctxName)
 
-	// Phase 1: Collect all queues to be processed into a single slice.
-	// This avoids holding locks on the shard while processing, and allows us to determine the optimal number of workers.
-	var queuesToProcess []flowcontrol.FlowQueueAccessor
-	for _, priority := range sp.registry.AllOrderedPriorityLevels() {
-		band, err := sp.registry.PriorityBandAccessor(priority)
+	type resolvedQueue struct {
+		mq     contracts.ManagedQueue
+		logger logr.Logger
+	}
+
+	// Phase 1: Collect all queues and resolve ManagedQueue handles in one pass.
+	// This avoids holding registry locks while processing, and allows us to determine the optimal number of workers.
+	var resolvedQueues []resolvedQueue
+	for _, priority := range p.registry.AllOrderedPriorityLevels() {
+		band, err := p.registry.PriorityBandAccessor(priority)
 		if err != nil {
 			logger.Error(err, "Failed to get PriorityBandAccessor", "priority", priority)
 			continue
 		}
 		band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
-			queuesToProcess = append(queuesToProcess, queue)
-			return true // Continue iterating.
+			key := queue.FlowKey()
+			mq, err := p.registry.ManagedQueue(key)
+			if err != nil {
+				logger.V(logutil.DEBUG).Info("Skipping queue; ManagedQueue no longer resolvable",
+					"flowKey", key, "err", err)
+				return true
+			}
+			resolvedQueues = append(resolvedQueues, resolvedQueue{
+				mq: mq,
+				logger: logger.WithValues(
+					"flowKey", key,
+					"flowID", key.ID,
+					"flowPriority", key.Priority),
+			})
+			return true
 		})
 	}
 
-	if len(queuesToProcess) == 0 {
+	if len(resolvedQueues) == 0 {
 		return
 	}
 
 	// Phase 2: Determine the optimal number of workers.
-	// We cap the number of workers to a reasonable fixed number to avoid overwhelming the scheduler when many shards are
-	// running. We also don't need more workers than there are queues.
-	numWorkers := min(maxCleanupWorkers, len(queuesToProcess))
+	numWorkers := min(maxCleanupWorkers, len(resolvedQueues))
 
-	// Phase 3: Create a worker pool to process the queues.
-	tasks := make(chan flowcontrol.FlowQueueAccessor)
+	// Phase 3: Create a worker pool to process the resolved queues.
+	tasks := make(chan resolvedQueue)
 
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Go(func() {
-			for q := range tasks {
-				key := q.FlowKey()
-				queueLogger := logger.WithValues(
-					"flowKey", key,
-					"flowID", key.ID,
-					"flowPriority", key.Priority)
-				managedQ, err := sp.registry.ManagedQueue(key)
-				if err != nil {
-					queueLogger.Error(err, "Failed to get ManagedQueue")
-					continue
-				}
-				processFn(managedQ, queueLogger)
+			for task := range tasks {
+				processFn(task.mq, task.logger)
 			}
 		})
 	}
 
 	// Feed the channel with all the queues to be processed.
-	for _, q := range queuesToProcess {
-		tasks <- q
+	for _, task := range resolvedQueues {
+		tasks <- task
 	}
 	close(tasks) // Close the channel to signal workers to exit.
 	wg.Wait()    // Wait for all workers to finish.

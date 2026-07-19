@@ -51,7 +51,7 @@ func tokenLimitMap(req map[string]any, apiType APIType) (map[string]any, bool) {
 	return sp, true
 }
 
-func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType APIType) {
+func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType APIType) {
 	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
 	s.logger.V(4).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
 
@@ -75,7 +75,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	if s.config.MoRIIOParallelDispatch && s.config.MoRIIOWriteMode {
 		// MoRI-IO requires transfer_id to carry the "tx" prefix for message routing.
 		transferID := "tx" + uuidStr
-		s.runNIXLProtocolV2WriteParallel(w, r, original, completionRequest, uuidStr, transferID, prefillPodHostPort)
+		s.runNIXLProtocolV2WriteParallel(w, r, original, completionRequest, uuidStr, transferID, prefillPodHostPort, kvCacheSource)
 		return
 	}
 
@@ -167,6 +167,9 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			requestFieldRemotePort:      nil,
 		}
 	}
+
+	// Compose the OffloadingConnector p2p pull onto the NIXL prefill leg.
+	s.addP2PPullToPrefill(completionRequest[requestFieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
 
 	completionRequest[requestFieldStream] = false
 	delete(completionRequest, requestFieldStreamOptions)
@@ -440,7 +443,7 @@ retryLoop:
 // two upstream calls in parallel so decode's block allocation overlaps prefill.
 func (s *Server) runNIXLProtocolV2WriteParallel(
 	w http.ResponseWriter, r *http.Request, original []byte,
-	completionRequest map[string]any, uuidStr, transferID, prefillPodHostPort string,
+	completionRequest map[string]any, uuidStr, transferID, prefillPodHostPort, kvCacheSource string,
 ) {
 	s.logger.V(4).Info("running NIXL protocol V2 (concurrent dispatch)",
 		"url", prefillPodHostPort, "request_id", uuidStr)
@@ -492,6 +495,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			pkv["remote_dp_size_local"] = s.config.MoRIIODPSizeLocal
 		}
 	}
+	// Compose the OffloadingConnector p2p pull onto the NIXL prefill leg.
+	s.addP2PPullToPrefill(completionRequest[requestFieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+
 	completionRequest[requestFieldStream] = false
 	delete(completionRequest, requestFieldStreamOptions)
 	completionRequest[requestFieldMaxTokens] = 1
