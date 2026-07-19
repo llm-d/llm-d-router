@@ -149,9 +149,9 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			tokens["features"] = tokensFeatures
 		}
 		body["tokens"] = tokens
-		body["kv_transfer_params"] = kvParams
+		body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(ecParams) > 0 {
-			body["ec_transfer_params"] = ecParams
+			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 
@@ -161,17 +161,17 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			prompt = reqCtx.TokenIDs
 		}
 		body := map[string]any{
-			"request_id":         reqCtx.RequestID,
-			"model":              reqCtx.Model,
-			"prompt":             prompt,
-			"max_tokens":         1,
-			"kv_transfer_params": kvParams,
+			"request_id":                    reqCtx.RequestID,
+			"model":                         reqCtx.Model,
+			"prompt":                        prompt,
+			reqcommon.FieldMaxTokens:        1,
+			reqcommon.FieldKVTransferParams: kvParams,
 		}
 		if features != nil {
 			body["features"] = features
 		}
 		if len(ecParams) > 0 {
-			body["ec_transfer_params"] = ecParams
+			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 
@@ -180,10 +180,10 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			"request_id": reqCtx.RequestID,
 			"token_ids":  reqCtx.TokenIDs,
 			"model":      reqCtx.Model,
-			"sampling_params": map[string]any{
-				"max_tokens": 1,
+			reqcommon.FieldSamplingParams: map[string]any{
+				reqcommon.FieldMaxTokens: 1,
 				"extra_args": map[string]any{
-					"kv_transfer_params": kvParams,
+					reqcommon.FieldKVTransferParams: kvParams,
 				},
 			},
 		}
@@ -191,7 +191,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			body["features"] = features
 		}
 		if len(ecParams) > 0 {
-			body["ec_transfer_params"] = ecParams
+			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 	}
