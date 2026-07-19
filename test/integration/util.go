@@ -693,6 +693,10 @@ func WaitExtProcReady(port int, mgrErr <-chan error) error {
 				if err != nil {
 					return err
 				}
+				// A nil here means the manager returned (context cancelled): it is
+				// shutting down, not ready. Mirror the pre-dial block rather than
+				// handing the caller a dying server.
+				return errors.New("manager exited before ext-proc server became ready")
 			default:
 			}
 			return nil
