@@ -53,6 +53,7 @@ func TestExtractTokenIDs(t *testing.T) {
 		{name: "empty_array", input: []any{}, wantErr: true},
 		{name: "negative_token", input: []any{float64(-1)}, wantErr: true},
 		{name: "non_integer_token", input: []any{float64(1.5)}, wantErr: true},
+		{name: "overflow_float_token", input: []any{float64(1e19)}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
