@@ -141,13 +141,20 @@ func anyToNonNegativeInt(v any) (int, error) {
 		if n < 0 || n != math.Trunc(n) {
 			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
 		}
-		return int(n), nil
+		// An in-range integer-valued float64 round-trips through int; a value
+		// too large to fit does not (the conversion saturates), so this rejects
+		// overflow without depending on the fragile float64(MaxInt) boundary.
+		i := int(n)
+		if float64(i) != n {
+			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
+		}
+		return i, nil
 	case json.Number:
 		i, err := n.Int64()
 		if err != nil {
 			return 0, err
 		}
-		if i < 0 {
+		if i < 0 || i > math.MaxInt {
 			return 0, fmt.Errorf("expected non-negative integer, got %d", i)
 		}
 		return int(i), nil
@@ -219,6 +226,7 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 
 	entries := make([]pipeline.MultimodalEntry, n)
 	for i := range entries {
+		hash, ok := rawHashes[i].(string)
 		if !ok {
 			return nil, fmt.Errorf("mm_hashes[%d] must be a string: %w", i, pipeline.ErrBadRequest)
 		}
