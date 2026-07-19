@@ -23,28 +23,40 @@ import (
 )
 
 func TestGetFreePort(t *testing.T) {
-	tests := []struct {
-		name string
-	}{
-		{name: "returns a bindable port"},
-		{name: "returns a distinct bindable port on repeat call"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			port, err := GetFreePort()
-			if err != nil {
-				t.Fatalf("GetFreePort() returned error: %v", err)
-			}
-			if port <= 0 || port > 65535 {
-				t.Fatalf("GetFreePort() returned out-of-range port %d", port)
-			}
+	// Allocating several ports while holding each listener open proves three
+	// properties at once: every port is in range, every port is bindable, and no
+	// two allocations collide. Distinctness holds only while the prior port stays
+	// bound - GetFreePort closes its own listener, so two bare calls may repeat a
+	// port; keeping the listener open is what forces the OS to hand out a new one.
+	const numPorts = 8
 
-			// The returned port must be actually bindable on IPv4 localhost.
-			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-			if err != nil {
-				t.Fatalf("port %d returned by GetFreePort() is not bindable: %v", port, err)
-			}
+	seen := make(map[int]bool, numPorts)
+	held := make([]net.Listener, 0, numPorts)
+	t.Cleanup(func() {
+		for _, ln := range held {
 			_ = ln.Close()
-		})
+		}
+	})
+
+	for i := 0; i < numPorts; i++ {
+		port, err := GetFreePort()
+		if err != nil {
+			t.Fatalf("call %d: GetFreePort() returned error: %v", i, err)
+		}
+		if port <= 0 || port > 65535 {
+			t.Fatalf("call %d: GetFreePort() returned out-of-range port %d", i, port)
+		}
+		if seen[port] {
+			t.Fatalf("call %d: GetFreePort() returned duplicate port %d while it was still bound", i, port)
+		}
+		seen[port] = true
+
+		// The returned port must be bindable on IPv4 localhost; hold it open so the
+		// next iteration cannot be handed the same port back.
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			t.Fatalf("call %d: port %d returned by GetFreePort() is not bindable: %v", i, port, err)
+		}
+		held = append(held, ln)
 	}
 }
