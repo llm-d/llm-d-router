@@ -228,6 +228,12 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 		if !ok {
 			return nil, fmt.Errorf("mm_placeholders[%d] must be an object: %w", i, pipeline.ErrBadRequest)
 		}
+		// The non-negative guarantee here is load-bearing, not just input
+		// hygiene. EncodeStep.buildEncodeTokenIDs indexes fullTokenIDs[offset]
+		// (guarded only on the upper bound) and allocates make([]int, 1+length);
+		// a negative offset or length panics there. vLLM's own schema declares
+		// these as plain ints and accepts negatives, so this stays stricter
+		// deliberately. Do not relax it to a plain int parse.
 		offset, err := anyToNonNegativeInt(pMap["offset"])
 		if err != nil {
 			return nil, fmt.Errorf("mm_placeholders[%d].offset: %v: %w", i, err, pipeline.ErrBadRequest)
