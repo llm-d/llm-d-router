@@ -19,6 +19,7 @@ package eviction
 import (
 	"context"
 	"net"
+	"sync"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,6 +38,17 @@ type RequestEvictor struct {
 	queue            *EvictionQueue
 	evictor          Evictor
 	evictionRegistry *EvictionRegistry
+
+	// mu guards the fields below.
+	mu sync.Mutex
+	// pendingEvictions holds the IDs of requests whose eviction has been issued but whose stream has
+	// not yet terminated. Populated by EvictN before the eviction signal is sent; consumed exactly
+	// once by cleanupRequest when the stream terminates.
+	pendingEvictions map[string]struct{}
+	// evictionTerminatedListener, if set, is invoked with the request ID each time an evicted
+	// request's stream terminates. It may be called from ext_proc handler goroutines and must be
+	// safe for concurrent use.
+	evictionTerminatedListener func(requestID string)
 }
 
 // NewRequestEvictor creates a RequestEvictor with the given policies and evictor.
@@ -53,7 +65,28 @@ func NewRequestEvictor(
 		queue:            NewEvictionQueue(ordering, filter),
 		evictor:          evictor,
 		evictionRegistry: registry,
+		pendingEvictions: make(map[string]struct{}),
 	}
+}
+
+// SetEvictionTerminatedListener registers a callback invoked once per evicted request when its
+// stream terminates. This is the confirmation signal for eviction pacing: the request is dead from
+// the EPP's perspective, even though the engine may not have freed its resources yet.
+// Must be called before the RequestEvictor is in use.
+func (p *RequestEvictor) SetEvictionTerminatedListener(listener func(requestID string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.evictionTerminatedListener = listener
+}
+
+// PeekVictimPriority returns the priority of the next request that would be evicted, or false if
+// no evictable requests exist. It does not modify the queue.
+func (p *RequestEvictor) PeekVictimPriority() (priority int, ok bool) {
+	item := p.queue.Peek()
+	if item == nil {
+		return 0, false
+	}
+	return item.Priority, true
 }
 
 // EvictionRegistry returns the shared eviction registry.
@@ -142,11 +175,14 @@ func (p *RequestEvictor) ResponseBody(
 		"inFlight", p.queue.InFlightLen())
 }
 
-// EvictN attempts to evict up to n requests from the eviction queue.
-// Each request is only removed from tracking after a successful eviction. If the eviction fails,
-// the request remains in the queue for a future eviction attempt.
+// EvictN attempts to evict up to n requests from the eviction queue, in victim-policy order,
+// stopping at the first victim whose priority is not strictly below priorityBound. The bound
+// enforces strict priority dominance across a whole multi-revocation decision: the victim head
+// check alone does not cover later victims, which come off the heap at priorities at or above the
+// head's. Each request is only removed from tracking after a successful eviction. If the eviction
+// fails, the request remains in the queue for a future eviction attempt.
 // Returns the request IDs that were successfully evicted.
-func (p *RequestEvictor) EvictN(ctx context.Context, n int) ([]string, error) {
+func (p *RequestEvictor) EvictN(ctx context.Context, n int, priorityBound int) ([]string, error) {
 	logger := log.FromContext(ctx)
 	evicted := make([]string, 0, n)
 
@@ -157,8 +193,23 @@ func (p *RequestEvictor) EvictN(ctx context.Context, n int) ([]string, error) {
 		}
 		item := items[0]
 
+		if item.Priority >= priorityBound {
+			// The heap orders victims lowest-priority first, so no remaining victim can be below the
+			// bound either. Re-tracking races a concurrent completion: if cleanupRequest ran between
+			// the pop and this Track, the entry is re-inserted dead and survives until a future
+			// decision evicts it, which then stalls the pacing gate for one ConfirmationTimeout. The
+			// window is sub-microsecond and the cost is bounded, so it is tolerated.
+			p.queue.Track(item)
+			break
+		}
+
+		// Mark before the eviction signal is sent so that cleanupRequest observes the marker no matter
+		// how quickly the stream terminates.
+		p.markPendingEviction(item.RequestID)
 		if err := p.evictor.Evict(ctx, item); err != nil {
 			logger.Error(err, "Failed to evict request, re-tracking", "requestID", item.RequestID, "targetURL", item.TargetURL)
+			p.unmarkPendingEviction(item.RequestID)
+			// Same tolerated re-track-vs-completion window as the bound branch above.
 			p.queue.Track(item)
 			continue
 		}
@@ -179,12 +230,43 @@ func (p *RequestEvictor) Stats() (inFlight int, evictable int) {
 // cleanupRequest removes a request from all tracking structures.
 // If the evictor supports cleanup (e.g., ImmediateResponseEvictor), it also
 // cleans up evictor-internal state to prevent unbounded map growth.
+// If the request had been evicted, the eviction-terminated listener is notified exactly once.
 func (p *RequestEvictor) cleanupRequest(requestID string) {
 	p.queue.Untrack(requestID)
 	p.evictionRegistry.Deregister(requestID)
 	if c, ok := p.evictor.(EvictorWithCleanup); ok {
 		c.Cleanup(requestID)
 	}
+	if listener := p.consumePendingEviction(requestID); listener != nil {
+		listener(requestID)
+	}
+}
+
+// markPendingEviction records that an eviction has been issued for the request.
+func (p *RequestEvictor) markPendingEviction(requestID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pendingEvictions[requestID] = struct{}{}
+}
+
+// unmarkPendingEviction removes the pending-eviction marker after a failed eviction attempt.
+func (p *RequestEvictor) unmarkPendingEviction(requestID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.pendingEvictions, requestID)
+}
+
+// consumePendingEviction removes the pending-eviction marker if present and returns the listener
+// to notify, or nil if the request was not evicted or was already consumed. Consuming under the
+// same lock as marking guarantees at-most-once notification across the idempotent cleanup paths.
+func (p *RequestEvictor) consumePendingEviction(requestID string) func(requestID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.pendingEvictions[requestID]; !ok {
+		return nil
+	}
+	delete(p.pendingEvictions, requestID)
+	return p.evictionTerminatedListener
 }
 
 // EvictorWithCleanup is an optional interface for evictors that maintain per-request state
