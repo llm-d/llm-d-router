@@ -94,7 +94,7 @@ type Datastore interface {
 	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
 	// PodUpdateOrAddIfNotExist stores or updates the endpoints for the given pod. It returns an
 	// error when an endpoint registration was dropped (see upsertEndpoint); the pod is then not
-	// tracked by the datastore and the caller must retry (e.g. by requeueing the reconcile).
+	// tracked by the datastore and the caller must retry (e.g. by requeuing the reconcile).
 	PodUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.Pod) error
 	PodDelete(podName string)
 
