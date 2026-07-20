@@ -96,9 +96,25 @@ func buildMMFeatures(entries []pipeline.MultimodalEntry, includeKwargs bool) map
 		"mm_placeholders": map[string][]any{ModalityImage: placeholders},
 	}
 	if includeKwargs {
-		features["kwargs_data"] = map[string][]string{ModalityImage: kwargs}
+		features["kwargs_data"] = mmKwargsField(kwargs)
 	}
 	return features
+}
+
+// mmKwargsField builds the kwargs_data feature value from per-entry KwargsData
+// strings. The empty string is our internal "resolve from cache" sentinel and
+// MUST serialize as JSON null, not "": vLLM treats null (or an absent field) as
+// a cache-hit item to fetch from the encoder cache by hash, whereas "" is decoded
+// as an inline tensor and fails with "Input data was truncated". Non-empty entries
+// are the base64 tensor blobs and are forwarded verbatim.
+func mmKwargsField(kwargs []string) map[string][]any {
+	items := make([]any, len(kwargs))
+	for i, k := range kwargs {
+		if k != "" {
+			items[i] = k
+		}
+	}
+	return map[string][]any{ModalityImage: items}
 }
 
 // coerceParamsMap coerces a transfer-params value from an upstream response to a
@@ -180,6 +196,31 @@ func extractTokenIDs(raw any) ([]int, error) {
 	return toIntSlice(arr)
 }
 
+// mmImageArray reads features[field][ModalityImage] as a JSON array. present is
+// false when field or its image entry is absent or null, a valid "no such
+// modality" state rather than an error. A present value of the wrong type
+// (field not an object, or the image entry not an array) is ErrBadRequest, so a
+// malformed request fails loudly instead of being silently coerced to absent.
+func mmImageArray(features map[string]any, field string) (arr []any, present bool, err error) {
+	rawField, ok := features[field]
+	if !ok || rawField == nil {
+		return nil, false, nil
+	}
+	m, ok := rawField.(map[string]any)
+	if !ok {
+		return nil, false, fmt.Errorf("%s must be an object: %w", field, pipeline.ErrBadRequest)
+	}
+	rawImage, ok := m[ModalityImage]
+	if !ok || rawImage == nil {
+		return nil, false, nil
+	}
+	arr, ok = rawImage.([]any)
+	if !ok {
+		return nil, false, fmt.Errorf("%s[%s] must be an array: %w", field, ModalityImage, pipeline.ErrBadRequest)
+	}
+	return arr, true, nil
+}
+
 // extractMultimodalEntries builds []pipeline.MultimodalEntry from the parallel
 // slices in a generate-format features map. Returns nil when features is nil or
 // mm_hashes.image is absent or empty (text-only request).
@@ -190,26 +231,35 @@ func extractTokenIDs(raw any) ([]int, error) {
 // When present, kwargs_data must be parallel to mm_hashes, but an individual
 // item may be null (a cache hit within a mixed batch), which maps to "".
 //
-// Returns ErrBadRequest when required slices have different lengths or any
-// element has an unexpected type.
+// Returns ErrBadRequest when a present field has the wrong type, required slices
+// have different lengths, or any element has an unexpected type.
 func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEntry, error) {
 	if features == nil {
 		return nil, nil
 	}
-	mmHashes, _ := features["mm_hashes"].(map[string]any)
-	if mmHashes == nil {
-		return nil, nil
+	rawHashes, _, err := mmImageArray(features, "mm_hashes")
+	if err != nil {
+		return nil, err
 	}
-	rawHashes, _ := mmHashes[ModalityImage].([]any)
+	// mmImageArray returns a nil slice whenever the field is absent, so the
+	// length check subsumes the presence check here.
 	if len(rawHashes) == 0 {
 		return nil, nil
 	}
 
-	mmPlaceholders, _ := features["mm_placeholders"].(map[string]any)
-	rawPlaceholders, _ := mmPlaceholders[ModalityImage].([]any)
+	rawPlaceholders, present, err := mmImageArray(features, "mm_placeholders")
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		return nil, fmt.Errorf("mm_placeholders[%s] is required when mm_hashes[%s] is set: %w",
+			ModalityImage, ModalityImage, pipeline.ErrBadRequest)
+	}
 
-	kwargsData, _ := features["kwargs_data"].(map[string]any)
-	rawKwargs, hasKwargs := kwargsData[ModalityImage].([]any)
+	rawKwargs, hasKwargs, err := mmImageArray(features, "kwargs_data")
+	if err != nil {
+		return nil, err
+	}
 
 	n := len(rawHashes)
 	if len(rawPlaceholders) != n {
