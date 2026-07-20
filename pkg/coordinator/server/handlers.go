@@ -66,7 +66,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	}
 	parseDuration := time.Since(parseStart)
 
-	stream, _ := parsed["stream"].(bool)
+	stream, _ := parsed[reqcommon.FieldStream].(bool)
 	model, _ := parsed["model"].(string)
 
 	requestID := r.Header.Get(reqcommon.RequestIDHeaderKey)

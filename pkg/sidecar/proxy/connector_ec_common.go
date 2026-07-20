@@ -15,6 +15,7 @@ import (
 	"net/http"
 
 	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -94,7 +95,8 @@ func extractMMItems(requestData map[string]any) []map[string]any {
 
 // buildEncoderRequest creates a per-item encoder request: a deep copy of the
 // original chat-completions request with only the multimodal item in
-// messages[0].content (text removed) and max_tokens=1, stream disabled.
+// messages[0].content (text removed), capped to a single output token, and
+// stream disabled.
 func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) map[string]any {
 	encoderRequest := make(map[string]any)
 	for k, v := range originalRequest {
@@ -111,9 +113,7 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 	}
 
 	encoderRequest["messages"] = messages
-	encoderRequest["max_tokens"] = 1
-	encoderRequest["stream"] = false
-	delete(encoderRequest, "stream_options")
+	reqcommon.PrimeSingleTokenRequest(encoderRequest, originalRequest)
 
 	return encoderRequest
 }

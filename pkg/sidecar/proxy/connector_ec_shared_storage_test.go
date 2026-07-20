@@ -197,6 +197,43 @@ func TestBuildEncoderRequest(t *testing.T) {
 	assert.Equal(t, "image_url", content[0]["type"])
 }
 
+// TestBuildEncoderRequest_MaxCompletionTokens is a regression test: a shallow
+// copy previously left the client's max_completion_tokens value untouched
+// alongside the newly-capped max_tokens=1, so a reasoning-model client's
+// large max_completion_tokens would survive uncapped into the encoder request.
+func TestBuildEncoderRequest_MaxCompletionTokens(t *testing.T) {
+	originalRequest := map[string]any{
+		"model": "test-model",
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "image_url",
+						"image_url": map[string]any{
+							"url": "https://example.com/image.jpg",
+						},
+					},
+				},
+			},
+		},
+		"max_tokens":            50,
+		"max_completion_tokens": 100,
+	}
+
+	mmItem := map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "https://example.com/image.jpg",
+		},
+	}
+
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+
+	assert.Equal(t, 1, encoderRequest["max_tokens"])
+	assert.Equal(t, 1, encoderRequest["max_completion_tokens"])
+}
+
 func TestMMItemURL(t *testing.T) {
 	tests := []struct {
 		name     string
