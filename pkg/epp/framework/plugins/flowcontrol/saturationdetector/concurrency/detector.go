@@ -121,24 +121,28 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 
 // Saturation calculates the saturation level of the pool.
 //
-// It returns an aggregate saturation signal where each dimension is evaluated as:
+// In "requests" and "tokens" mode it returns an aggregate signal, evaluated as:
 //
 //	Saturation = Total Inflight / Total Capacity.
 //
-// In "hybrid" mode both the request and token dimensions are computed and the larger
-// (more saturated) of the two is returned, so the pool reports saturated as soon as
-// either dimension is exhausted.
+// In "hybrid" mode saturation is instead evaluated per endpoint as
+// max(requestRatio, tokenRatio) and averaged across endpoints. Evaluating each
+// endpoint independently ensures an endpoint saturated on either dimension is
+// reflected in the pool signal.
 func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
 	if len(endpoints) == 0 {
 		return 1.0
 	}
 
 	var reqInflight, reqCapacity, tokInflight, tokCapacity int64
+	var endpointCount int
+	var hybridSatSum float64
 	for _, e := range endpoints {
 		if e == nil {
 			continue
 		}
 
+		endpointCount++
 		reqCapacity += d.config.maxConcurrency
 		tokCapacity += d.config.maxTokenConcurrency
 
@@ -149,13 +153,20 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 		load := d.getLoad(e.GetAttributes())
 		reqInflight += load.Requests
 		tokInflight += load.Tokens
+		hybridSatSum += max(
+			ratio(load.Requests, d.config.maxConcurrency),
+			ratio(load.Tokens, d.config.maxTokenConcurrency),
+		)
 	}
 
 	switch d.config.mode {
 	case modeTokens:
 		return ratio(tokInflight, tokCapacity)
 	case modeHybrid:
-		return max(ratio(reqInflight, reqCapacity), ratio(tokInflight, tokCapacity))
+		if endpointCount == 0 {
+			return 1.0
+		}
+		return hybridSatSum / float64(endpointCount)
 	default:
 		return ratio(reqInflight, reqCapacity)
 	}
