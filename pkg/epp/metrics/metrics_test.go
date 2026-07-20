@@ -903,7 +903,7 @@ func TestRequestProcessingLatency(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer want.Close()
-	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_router_epp_request_processing_duration_seconds"); err != nil {
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_epp_request_processing_duration_seconds"); err != nil {
 		t.Error(err)
 	}
 }
@@ -930,7 +930,7 @@ func TestResponseProcessingLatency(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer want.Close()
-	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_router_epp_response_processing_duration_seconds"); err != nil {
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_epp_response_processing_duration_seconds"); err != nil {
 		t.Error(err)
 	}
 }

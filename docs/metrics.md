@@ -110,6 +110,15 @@ Label `{name}` (the pool name).
 | `scheduler_e2e_duration_seconds` | Histogram | End-to-end scheduling latency. |
 | `scheduler_attempts_total` | Counter | Scheduling attempts; labels `{status, target_model_name, endpoint_name, namespace, port}`. |
 
+### EPP processing overhead
+
+Unlabelled. Together these cover the EPP's own cost on the request and response paths.
+
+| Name | Type | Notes |
+|---|---|---|
+| `request_processing_duration_seconds` | Histogram | Request orchestration latency, from receipt through endpoint selection and request preparation; excludes admission control. |
+| `response_processing_duration_seconds` | Histogram | Response handling latency, accumulated across the response handlers; excludes model-server generation time. |
+
 ### Plugin, info, and model rewrite
 
 | Name | Type | Notes |
