@@ -27,6 +27,10 @@ import (
 
 const testHash = "abc123"
 
+// testKwargs is a base64 tensor blob standing in for a real (non-cache-hit)
+// kwargs_data entry.
+const testKwargs = "dGVuc29y"
+
 func TestReadErrorBody_CapsOversizedBody(t *testing.T) {
 	body := readErrorBody(strings.NewReader(strings.Repeat("a", maxErrorBodySize*4)))
 	if len(body) != maxErrorBodySize {
@@ -225,7 +229,7 @@ func TestExtractMultimodalEntries(t *testing.T) {
 				map[string]any{"offset": float64(1), "length": float64(3)},
 				map[string]any{"offset": float64(4), "length": float64(3)},
 			}},
-			"kwargs_data": map[string]any{"image": []any{"dGVuc29y", nil}},
+			"kwargs_data": map[string]any{"image": []any{testKwargs, nil}},
 		}
 		entries, err := extractMultimodalEntries(features)
 		if err != nil {
@@ -234,7 +238,7 @@ func TestExtractMultimodalEntries(t *testing.T) {
 		if len(entries) != 2 {
 			t.Fatalf("expected 2 entries, got %d", len(entries))
 		}
-		if entries[0].KwargsData != "dGVuc29y" {
+		if entries[0].KwargsData != testKwargs {
 			t.Errorf("entry 0 kwargs: expected dGVuc29y, got %q", entries[0].KwargsData)
 		}
 		if entries[1].KwargsData != "" {
@@ -366,9 +370,9 @@ func TestBuildMMFeatures_CacheHitSentinelSerializesAsNull(t *testing.T) {
 	})
 
 	t.Run("mixed batch keeps inline, nulls cache hits", func(t *testing.T) {
-		features := buildMMFeatures([]pipeline.MultimodalEntry{entry("dGVuc29y"), entry("")}, true)
+		features := buildMMFeatures([]pipeline.MultimodalEntry{entry(testKwargs), entry("")}, true)
 		items := mmImageKwargs(t, features)
-		if len(items) != 2 || items[0] != "dGVuc29y" || items[1] != nil {
+		if len(items) != 2 || items[0] != testKwargs || items[1] != nil {
 			t.Fatalf("expected [\"dGVuc29y\", null], got %#v", items)
 		}
 	})
