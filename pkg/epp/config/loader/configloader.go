@@ -432,10 +432,10 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 		return &cfg, nil
 	}
 
-	if ref := rawDataConfig.SharedStateStorePluginRef; ref != "" {
-		store, ok := handle.Plugin(ref).(fwkdl.SharedStateStore)
+	if ref := rawDataConfig.CrossReplicaStorePluginRef; ref != "" {
+		store, ok := handle.Plugin(ref).(fwkdl.CrossReplicaStore)
 		if !ok {
-			return nil, fmt.Errorf("the plugin %s is not a fwkdl.SharedStateStore", ref)
+			return nil, fmt.Errorf("the plugin %s is not a fwkdl.CrossReplicaStore", ref)
 		}
 		cfg.Store = store
 	}

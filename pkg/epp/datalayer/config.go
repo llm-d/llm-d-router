@@ -29,7 +29,7 @@ import (
 // the set-up phase.
 type Config struct {
 	Sources []DataSourceConfig // the data sources configured in the data layer
-	Store   fwkdl.SharedStateStore
+	Store   fwkdl.CrossReplicaStore
 }
 
 func (c *Config) String() string {

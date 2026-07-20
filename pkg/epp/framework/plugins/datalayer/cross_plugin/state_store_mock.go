@@ -28,9 +28,9 @@ import (
 
 const LocalStateStoreType = "local-state-store"
 
-var _ fwkdl.SharedStateStore = (*LocalStateStore)(nil)
+var _ fwkdl.CrossReplicaStore = (*LocalStateStore)(nil)
 
-// LocalStateStore is an in-memory mock SharedStateStore for single-replica
+// LocalStateStore is an in-memory mock CrossReplicaStore for single-replica
 // deployments and testing. No cross-replica sync is performed.
 type LocalStateStore struct {
 	typedName fwkplugin.TypedName

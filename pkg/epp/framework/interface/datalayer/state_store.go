@@ -25,11 +25,11 @@ import (
 // StateKey namespaces cross-EPP shared state.
 type StateKey string
 
-// SharedStateStore is a cross-EPP state store for sharing state across replicas.
+// CrossReplicaStore is a cross-EPP state store for sharing state across replicas.
 // Implementations own the sync mechanism (e.g., Redis pub/sub, gossip) and the
 // aggregation strategy (e.g., sum for in-flight load, union for cache state).
 // The store can dispatch per StateKey for different aggregation strategies.
-type SharedStateStore interface {
+type CrossReplicaStore interface {
 	fwkplugin.Plugin
 
 	// Set writes a value for the given key and endpoint. The runtime calls
@@ -46,16 +46,16 @@ type SharedStateStore interface {
 	Delete(ctx context.Context, key StateKey, endpointID string) error
 }
 
-// SharedStateContributor is an opt-in interface for endpoint extractors that
+// CrossReplicaContributor is an opt-in interface for endpoint extractors that
 // want their installed attributes to reflect cross-replica aggregate state.
 // The plugin's Extract method is unchanged; the runtime detects this interface
 // and wires the store transparently.
-type SharedStateContributor interface {
-	SharedState() SharedStateSpec
+type CrossReplicaContributor interface {
+	CrossReplicaState() CrossReplicaSpec
 }
 
-// SharedStateSpec declares what a SharedStateContributor publishes and where.
-type SharedStateSpec struct {
+// CrossReplicaSpec declares what a CrossReplicaContributor publishes and where.
+type CrossReplicaSpec struct {
 	// StateKey namespaces this contributor's data in the store.
 	StateKey StateKey
 

@@ -53,7 +53,7 @@ type Runtime struct {
 	notification *notificationManager
 	endpoint     *endpointManager
 	extractors   *extractorMap
-	store        fwkdl.SharedStateStore
+	store        fwkdl.CrossReplicaStore
 
 	pendingMu            sync.Mutex
 	pendingRegistrations []fwkdl.PendingRegistration // code-registered (source-type, extractor) pairs, resolved by Configure()
@@ -446,8 +446,8 @@ func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger,
 				if err := epExt.Extract(ctx, *processed); err != nil {
 					logger.Error(err, "endpoint extractor failed", "extractor", ext.TypedName())
 				}
-				if contributor, ok := ext.(fwkdl.SharedStateContributor); ok && r.store != nil {
-					spec := contributor.SharedState()
+				if contributor, ok := ext.(fwkdl.CrossReplicaContributor); ok && r.store != nil {
+					spec := contributor.CrossReplicaState()
 					endpointID := processed.Endpoint.GetMetadata().GetNamespacedName().String()
 					switch processed.Type {
 					case fwkdl.EventAddOrUpdate:

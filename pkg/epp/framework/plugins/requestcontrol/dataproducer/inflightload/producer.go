@@ -116,7 +116,7 @@ var (
 	_ requestcontrol.DataProducer          = &InFlightLoadProducer{}
 	_ datalayer.EndpointExtractor          = (*InFlightLoadProducer)(nil)
 	_ datalayer.Registrant                 = &InFlightLoadProducer{}
-	_ datalayer.SharedStateContributor     = (*InFlightLoadProducer)(nil)
+	_ datalayer.CrossReplicaContributor    = (*InFlightLoadProducer)(nil)
 	_ fwkplugin.ConsumerPlugin             = &InFlightLoadProducer{}
 	_ fwkplugin.StateDumper                = &InFlightLoadProducer{}
 )
@@ -279,9 +279,9 @@ func (p *InFlightLoadProducer) RegisterDependencies(r datalayer.Registrar) error
 	})
 }
 
-// SharedState declares the cross-EPP state this plugin contributes.
-func (p *InFlightLoadProducer) SharedState() datalayer.SharedStateSpec {
-	return datalayer.SharedStateSpec{
+// CrossReplicaState declares the cross-EPP state this plugin contributes.
+func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
+	return datalayer.CrossReplicaSpec{
 		StateKey:     datalayer.StateKey("inflight:" + p.typedName.Name),
 		AttributeKey: p.dk.String(),
 		Supply: func(endpointID string) func() datalayer.Cloneable {

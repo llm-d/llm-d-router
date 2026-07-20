@@ -129,7 +129,7 @@ func NewDirectorWithConfig(
 	admissionController AdmissionController,
 	endpointCandidates contracts.EndpointCandidates,
 	config *Config,
-	store fwkdl.SharedStateStore,
+	store fwkdl.CrossReplicaStore,
 ) *Director {
 	return &Director{
 		datastore:             datastore,
@@ -202,7 +202,7 @@ type Director struct {
 	admissionController   AdmissionController
 	endpointCandidates    contracts.EndpointCandidates
 	requestControlPlugins Config
-	store                 fwkdl.SharedStateStore
+	store                 fwkdl.CrossReplicaStore
 	// We just need a pointer to an int32 variable since Priority is a pointer in InferenceObjective.
 	// No need to set this in the constructor, since the value we want is the default (0)
 	// and value types cannot be nil.
@@ -622,8 +622,8 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
 			return err
 		}
-		if contributor, ok := p.(fwkdl.SharedStateContributor); ok && d.store != nil {
-			spec := contributor.SharedState()
+		if contributor, ok := p.(fwkdl.CrossReplicaContributor); ok && d.store != nil {
+			spec := contributor.CrossReplicaState()
 			for _, ep := range endpoints {
 				if ep == nil || ep.GetMetadata() == nil {
 					continue
