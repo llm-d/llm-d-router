@@ -36,6 +36,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 var (
@@ -80,12 +81,12 @@ func setupInitialNotificationSyncTest(t *testing.T) (context.Context, ctrl.Manag
 
 	namespace := "notification-sync-" + uuid.New().String()[:8]
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
-	require.NoError(t, K8sClient().Create(context.Background(), ns))
+	require.NoError(t, eppharness.K8sClient().Create(context.Background(), ns))
 	t.Cleanup(func() {
-		_ = K8sClient().Delete(context.Background(), ns)
+		_ = eppharness.K8sClient().Delete(context.Background(), ns)
 	})
 
-	mgr, mgrClient := setupTestManager(t, Config(), namespace)
+	mgr, mgrClient := setupTestManager(t, eppharness.Config(), namespace)
 	ctx, cancel := context.WithTimeout(context.Background(), testContextTimeout)
 	t.Cleanup(cancel)
 
@@ -97,7 +98,7 @@ func setupInitialNotificationSyncTest(t *testing.T) (context.Context, ctrl.Manag
 		Sources: []datalayer.DataSourceConfig{
 			{Plugin: src, Extractors: []fwkplugin.Plugin{extractor}},
 		},
-	}, Logger()))
+	}, eppharness.Logger()))
 	require.NoError(t, runtime.Start(ctx, mgr))
 	require.Error(t, runtime.CheckReady(), "notification runtime reported ready before manager startup")
 
@@ -180,7 +181,7 @@ func setupRuntimeWithExtractor(r *datalayer.Runtime, extractorName string) (*moc
 			{Plugin: src, Extractors: []fwkplugin.Plugin{ext}},
 		},
 	}
-	return ext, r.Configure(cfg, Logger())
+	return ext, r.Configure(cfg, eppharness.Logger())
 }
 
 func TestRuntimeNotificationDispatch(t *testing.T) {
@@ -288,7 +289,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 						{Plugin: src, Extractors: []fwkplugin.Plugin{ext1, ext2}},
 					},
 				}
-				return ext1, r.Configure(cfg, Logger())
+				return ext1, r.Configure(cfg, eppharness.Logger())
 			},
 			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-multi", s.namespace)
@@ -311,7 +312,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 						{Plugin: src, Extractors: []fwkplugin.Plugin{errExtractor, workingExtractor}},
 					},
 				}
-				return workingExtractor, r.Configure(cfg, Logger())
+				return workingExtractor, r.Configure(cfg, eppharness.Logger())
 			},
 			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-error", s.namespace)
@@ -363,7 +364,7 @@ func TestRuntimeNotificationWithRuntime(t *testing.T) {
 			{Plugin: src, Extractors: []fwkplugin.Plugin{extractor}},
 		},
 	}
-	require.NoError(t, r.Configure(cfg, Logger()))
+	require.NoError(t, r.Configure(cfg, eppharness.Logger()))
 
 	require.NoError(t, r.Start(setup.ctx, setup.mgr))
 
@@ -392,7 +393,7 @@ func TestRuntimeNotificationDifferentGVKs(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, Logger()))
+	require.NoError(t, r.Configure(cfg, eppharness.Logger()))
 	require.NoError(t, r.Start(setup.ctx, setup.mgr))
 
 	pod := newTestPod("test-pod-gvk", setup.namespace)

@@ -42,6 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
@@ -133,16 +134,16 @@ schedulingProfiles:
   - pluginRef: decode-filter
   - pluginRef: prefix-cache-scorer
   - pluginRef: max-score-picker
-`, modelMyModelTarget, renderer.URL, server.Addr(), endpoint, server.Addr(), rolloutName, TestPoolName, bylabel.RoleLabel)
-	h := NewTestHarness(ctx, t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
-	h.WithPods([]PodState{P(0, 0, 0.1), P(1, 0, 0.1), P(2, 0, 0.1), P(3, 0, 0.1)})
+`, modelMyModelTarget, renderer.URL, server.Addr(), endpoint, server.Addr(), rolloutName, eppharness.TestPoolName, bylabel.RoleLabel)
+	h := eppharness.NewTestHarness(ctx, t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
+	h.WithPods([]eppharness.PodState{eppharness.P(0, 0, 0.1), eppharness.P(1, 0, 0.1), eppharness.P(2, 0, 0.1), eppharness.P(3, 0, 0.1)})
 
 	// The new revision has decode pods but no prefill pod, so requests stay on
 	// v1 while revision decisions are coordinated in Redis.
 	for i := range 4 {
 		pod := &corev1.Pod{}
 		key := types.NamespacedName{Namespace: h.Namespace, Name: fmt.Sprintf("pod-%d", i)}
-		require.NoError(t, k8sClient.Get(ctx, key, pod))
+		require.NoError(t, eppharness.K8sClient().Get(ctx, key, pod))
 		pod.Labels[disaggregatedsetrollout.DefaultRevisionLabel] = "v1"
 		pod.Labels[bylabel.RoleLabel] = "decode"
 		if i == 2 {
@@ -151,7 +152,7 @@ schedulingProfiles:
 		if i == 3 {
 			pod.Labels[disaggregatedsetrollout.DefaultRevisionLabel] = "v2"
 		}
-		require.NoError(t, k8sClient.Update(ctx, pod))
+		require.NoError(t, eppharness.K8sClient().Update(ctx, pod))
 	}
 	h.WaitForSync(4, modelMyModel)
 	require.Eventually(t, func() bool {
