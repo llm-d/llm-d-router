@@ -236,13 +236,29 @@ func TestHandleInference_OverlongRequestIDIsRejected(t *testing.T) {
 	}
 }
 
-func TestHandleInference_GenerateRouteRegistered(t *testing.T) {
-	srv := newTestServer(nil)
-	req := httptest.NewRequest(http.MethodPost, gateway.DefaultGeneratePath,
-		strings.NewReader(`{"model":"m","token_ids":[1,2,3]}`))
-	rec := httptest.NewRecorder()
-	srv.httpServer.Handler.ServeHTTP(rec, req)
-	if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
-		t.Fatalf("route %s not registered: got HTTP %d", gateway.DefaultGeneratePath, rec.Code)
+func TestRoutesRegistered(t *testing.T) {
+	const inferenceBody = `{"model":"m","token_ids":[1,2,3]}`
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"chat completions", http.MethodPost, gateway.PathChatCompletions, inferenceBody},
+		{"completions", http.MethodPost, gateway.PathCompletions, inferenceBody},
+		{"generate", http.MethodPost, gateway.DefaultGeneratePath, inferenceBody},
+		{"healthz", http.MethodGet, "/healthz", ""},
+		{"readyz", http.MethodGet, "/readyz", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(nil)
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			srv.httpServer.Handler.ServeHTTP(rec, req)
+			if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
+				t.Fatalf("route %s %s not registered: got HTTP %d", tt.method, tt.path, rec.Code)
+			}
+		})
 	}
 }
