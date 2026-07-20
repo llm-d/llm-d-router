@@ -45,10 +45,6 @@ func (h *testHandle) Metrics() plugin.MetricsRecorder {
 	return h.metricsRecorder
 }
 
-func (h *testHandle) SharedState() plugin.SharedStateStore {
-	return nil
-}
-
 type testHandlePlugins struct {
 	plugins map[string]plugin.Plugin
 }

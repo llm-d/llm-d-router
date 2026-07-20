@@ -53,6 +53,7 @@ type Runtime struct {
 	notification *notificationManager
 	endpoint     *endpointManager
 	extractors   *extractorMap
+	store        fwkdl.SharedStateStore
 
 	pendingMu            sync.Mutex
 	pendingRegistrations []fwkdl.PendingRegistration // code-registered (source-type, extractor) pairs, resolved by Configure()
@@ -95,6 +96,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 	numSources := 0
 	if cfg != nil {
 		numSources = len(cfg.Sources)
+		r.store = cfg.Store
 	}
 	logger.Info("Configuring datalayer runtime", "numSources", numSources)
 
@@ -443,6 +445,27 @@ func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger,
 			if epExt, ok := ext.(fwkdl.EndpointExtractor); ok {
 				if err := epExt.Extract(ctx, *processed); err != nil {
 					logger.Error(err, "endpoint extractor failed", "extractor", ext.TypedName())
+				}
+				if contributor, ok := ext.(fwkdl.SharedStateContributor); ok && r.store != nil {
+					spec := contributor.SharedState()
+					endpointID := processed.Endpoint.GetMetadata().GetNamespacedName().String()
+					switch processed.Type {
+					case fwkdl.EventAddOrUpdate:
+						processed.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
+							Get: func() fwkdl.Cloneable {
+								if val, ok, _ := r.store.Get(ctx, spec.StateKey, endpointID); ok {
+									if c, ok := val.(fwkdl.Cloneable); ok {
+										return c
+									}
+								}
+								return nil
+							},
+						})
+					case fwkdl.EventDelete:
+						if err := r.store.Delete(ctx, spec.StateKey, endpointID); err != nil {
+							logger.Error(err, "failed to delete shared state", "extractor", ext.TypedName(), "key", spec.StateKey)
+						}
+					}
 				}
 			}
 		}

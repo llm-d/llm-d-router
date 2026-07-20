@@ -234,10 +234,6 @@ func (h *testHandle) Metrics() plugin.MetricsRecorder {
 	return nil
 }
 
-func (h *testHandle) SharedState() plugin.SharedStateStore {
-	return nil
-}
-
 func (h *testHandle) PodList() []k8stypes.NamespacedName {
 	if h.podList == nil {
 		return nil

@@ -36,10 +36,6 @@ type Handle interface {
 	// Metrics returns a recorder plugins can use to register metrics. It may return
 	// nil when no recorder is configured.
 	Metrics() MetricsRecorder
-
-	// SharedState returns the SharedStateStore configured for this EPP instance.
-	// Returns nil when no store is configured.
-	SharedState() SharedStateStore
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -64,9 +60,8 @@ type PodListFunc func() []types.NamespacedName
 type eppHandle struct {
 	ctx context.Context
 	HandlePlugins
-	podList              PodListFunc
-	metricsRecorder      MetricsRecorder
-	sharedStateStoreName string
+	podList         PodListFunc
+	metricsRecorder MetricsRecorder
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -116,17 +111,6 @@ func (h *eppHandle) Metrics() MetricsRecorder {
 	return h.metricsRecorder
 }
 
-// SharedState returns the SharedStateStore plugin identified by the configured
-// name. The lookup is performed lazily so the store plugin can be instantiated
-// after the Handle is created.
-func (h *eppHandle) SharedState() SharedStateStore {
-	if h.sharedStateStoreName == "" {
-		return nil
-	}
-	s, _ := PluginByType[SharedStateStore](h, h.sharedStateStoreName)
-	return s
-}
-
 // HandleOption configures an eppHandle constructed via NewEppHandle.
 type HandleOption func(*eppHandle)
 
@@ -137,14 +121,6 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 		if recorder != nil {
 			h.metricsRecorder = recorder
 		}
-	}
-}
-
-// WithSharedStateStoreName sets the name of the SharedStateStore plugin that
-// SharedState() will look up. An empty name means no store is configured.
-func WithSharedStateStoreName(name string) HandleOption {
-	return func(h *eppHandle) {
-		h.sharedStateStoreName = name
 	}
 }
 

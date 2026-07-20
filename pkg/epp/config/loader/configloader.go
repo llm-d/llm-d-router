@@ -432,6 +432,14 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 		return &cfg, nil
 	}
 
+	if ref := rawDataConfig.SharedStateStorePluginRef; ref != "" {
+		store, ok := handle.Plugin(ref).(fwkdl.SharedStateStore)
+		if !ok {
+			return nil, fmt.Errorf("the plugin %s is not a fwkdl.SharedStateStore", ref)
+		}
+		cfg.Store = store
+	}
+
 	for _, source := range rawDataConfig.Sources {
 		if sourcePlugin, ok := handle.Plugin(source.PluginRef).(fwkdl.DataSource); ok {
 			sourceConfig := datalayer.DataSourceConfig{

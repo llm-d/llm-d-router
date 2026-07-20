@@ -63,13 +63,6 @@ type EndpointPickerConfig struct {
 	RequestHandler *RequestHandlerConfig `json:"requestHandler,omitempty"`
 
 	// +optional
-	// SharedStateStore names the plugin instance to use as the cross-plugin
-	// shared state store. The reference is to the name of an entry in the
-	// Plugins section. If omitted, no shared state store is used and plugins
-	// that read shared state fall back to local data.
-	SharedStateStore string `json:"sharedStateStore,omitempty"`
-
-	// +optional
 	// SaturationDetector specifies which saturation detector plugin to use.
 	//
 	// Deprecated: use flowControl.saturationDetector instead. If both are set, the new field is used.
@@ -103,9 +96,6 @@ func (cfg EndpointPickerConfig) String() string {
 	}
 	if cfg.RequestHandler != nil {
 		parts = append(parts, fmt.Sprintf("RequestHandler: %v", cfg.RequestHandler))
-	}
-	if cfg.SharedStateStore != "" {
-		parts = append(parts, "SharedStateStore: "+cfg.SharedStateStore)
 	}
 	if cfg.SaturationDetector != nil {
 		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", cfg.SaturationDetector))
@@ -248,13 +238,19 @@ type DataLayerConfig struct {
 	// endpoints. This enables running the EPP without a Kubernetes cluster.
 	// If omitted, the EPP uses the default Kubernetes-based discovery.
 	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
+	// +optional
+	// SharedStateStorePluginRef names the plugin instance to use as the cross-EPP
+	// shared state store. The reference is to the name of an entry in the
+	// top-level Plugins section. If omitted, no shared state store is used
+	// and plugins that read shared state fall back to local data.
+	SharedStateStorePluginRef string `json:"sharedStateStorePluginRef,omitempty"`
 }
 
 func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v, Discovery: %v}", dlc.Sources, dlc.Discovery)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v, SharedStateStorePluginRef: %s}", dlc.Sources, dlc.Discovery, dlc.SharedStateStorePluginRef)
 }
 
 // DiscoveryConfig references the EndpointDiscovery plugin to use.

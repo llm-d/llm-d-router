@@ -851,7 +851,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
 
 				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
-				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
+				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config, nil)
 				if len(test.rewrites) > 0 {
 					mockDs := &mockDatastore{
 						pods:     ds.PodList(datastore.AllPodsPredicate),
@@ -1178,7 +1178,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			mockDs := &mockDatastore{rewrites: test.rewrites}
 			endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(mockDs), time.Minute)
-			director := NewDirectorWithConfig(mockDs, &mockScheduler{}, &mockAdmissionController{}, endpointCandidates, NewConfig())
+			director := NewDirectorWithConfig(mockDs, &mockScheduler{}, &mockAdmissionController{}, endpointCandidates, NewConfig(), nil)
 
 			reqCtx := &handlers.RequestContext{
 				IncomingModelName: test.incomingModel,
@@ -1299,6 +1299,7 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 		&mockAdmissionController{},
 		endpointCandidates,
 		NewConfig().WithResponseReceivedPlugins(pr1),
+		nil,
 	)
 
 	reqCtx := &handlers.RequestContext{
@@ -1372,6 +1373,7 @@ func TestDirector_HandleResponseHeader_SessionAffinity(t *testing.T) {
 				&mockAdmissionController{},
 				endpointCandidates,
 				NewConfig().WithResponseReceivedPlugins(test.plugin),
+				nil,
 			)
 
 			reqCtx := &handlers.RequestContext{
@@ -1397,7 +1399,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	ds := datastore.NewDatastore(t.Context(), nil)
 	mockSched := &mockScheduler{}
 	endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
-	director := NewDirectorWithConfig(ds, mockSched, nil, endpointCandidates, NewConfig().WithResponseStreamingPlugins(ps1))
+	director := NewDirectorWithConfig(ds, mockSched, nil, endpointCandidates, NewConfig().WithResponseStreamingPlugins(ps1), nil)
 
 	reqCtx := &handlers.RequestContext{
 		Request: &handlers.Request{
@@ -1456,7 +1458,7 @@ func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	ds := datastore.NewDatastore(t.Context(), nil)
-	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
+	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin), nil)
 
 	const numChunks = 50
 	reqCtx := newResponseBodyTestRequestContext("ordering-test-request", 0)
@@ -1487,7 +1489,7 @@ func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 func TestDirector_HandleResponseBody_DuplicateRequestIDQueuesAreIndependent(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	plugin := newBlockingResponseStreamingPlugin()
-	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
+	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin), nil)
 
 	const requestID = "duplicate-request-id"
 	firstReqCtx := newResponseBodyTestRequestContext(requestID, 0)
@@ -1839,7 +1841,7 @@ func newConditionalDecodeDirector(t *testing.T, scheduleResult *fwksched.Schedul
 	mockSched := &mockScheduler{scheduleResults: scheduleResult}
 	cfg := NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil))
 	candidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
-	dir := NewDirectorWithConfig(ds, mockSched, &mockAdmissionController{}, candidates, cfg)
+	dir := NewDirectorWithConfig(ds, mockSched, &mockAdmissionController{}, candidates, cfg, nil)
 	return dir, ctx
 }
 

@@ -64,6 +64,7 @@ import (
 	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
+	statestore "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
@@ -444,7 +445,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
 	endpointCandidates, admissionController, priorityBandControlPlane := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
-	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig, eppConfig.DataConfig.Store)
 
 	serverRunner := &runserver.ExtProcServerRunner{
 		GrpcPort:                         opts.GRPCPort,
@@ -585,7 +586,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(p2psource.PluginType, p2psource.PluginFactory)
 
 	// State store plugins
-	fwkplugin.Register(fwkplugin.LocalStateStoreType, fwkplugin.LocalStateStoreFactory)
+	fwkplugin.Register(statestore.LocalStateStoreType, statestore.LocalStateStoreFactory)
 
 	// Flow Control plugins
 	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, globalstrict.GlobalStrictFairnessPolicyFactory)
@@ -707,7 +708,6 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 		ctx,
 		makePodListFunc(ds),
 		fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry),
-		fwkplugin.WithSharedStateStoreName(rawConfig.SharedStateStore),
 	)
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
@@ -976,7 +976,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// File-discovery mode has no InferenceObjective reconciler to drive the
 	// control plane; static bands from config apply at registry construction.
 	endpointCandidates, admissionController, _ := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
-	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig, eppConfig.DataConfig.Store)
 
 	gknn := common.GKNN{
 		NamespacedName: types.NamespacedName{Name: poolName, Namespace: namespace},

@@ -43,8 +43,6 @@ const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
 	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
-
-	inflightStateKeyPrefix = "inflight"
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
@@ -105,8 +103,6 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		tokenTracker:             newConcurrencyTracker(),
 		tokenEstimator:           NewSimpleTokenEstimatorWithConfig(outputRatio, cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
-		state:                    handle.SharedState(),
-		stateKey:                 fwkplugin.StateKey(inflightStateKeyPrefix + ":" + name),
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		uncachedRequestTokensDk:  attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name),
@@ -120,6 +116,7 @@ var (
 	_ requestcontrol.DataProducer          = &InFlightLoadProducer{}
 	_ datalayer.EndpointExtractor          = (*InFlightLoadProducer)(nil)
 	_ datalayer.Registrant                 = &InFlightLoadProducer{}
+	_ datalayer.SharedStateContributor     = (*InFlightLoadProducer)(nil)
 	_ fwkplugin.ConsumerPlugin             = &InFlightLoadProducer{}
 	_ fwkplugin.StateDumper                = &InFlightLoadProducer{}
 )
@@ -131,8 +128,6 @@ type InFlightLoadProducer struct {
 	tokenEstimator           TokenEstimator
 	addEstimatedOutputTokens bool
 	PluginState              *fwkplugin.PluginState
-	state                    fwkplugin.SharedStateStore
-	stateKey                 fwkplugin.StateKey
 	dk                       fwkplugin.DataKey
 	prefixMatchInfoDK        fwkplugin.DataKey
 	uncachedRequestTokensDk  fwkplugin.DataKey
@@ -284,6 +279,22 @@ func (p *InFlightLoadProducer) RegisterDependencies(r datalayer.Registrar) error
 	})
 }
 
+// SharedState declares the cross-EPP state this plugin contributes.
+func (p *InFlightLoadProducer) SharedState() datalayer.SharedStateSpec {
+	return datalayer.SharedStateSpec{
+		StateKey:     datalayer.StateKey("inflight:" + p.typedName.Name),
+		AttributeKey: p.dk.String(),
+		Supply: func(endpointID string) func() datalayer.Cloneable {
+			return func() datalayer.Cloneable {
+				return &attrconcurrency.InFlightLoad{
+					Requests: p.requestTracker.get(endpointID),
+					Tokens:   p.tokenTracker.get(endpointID),
+				}
+			}
+		},
+	}
+}
+
 // Extract handles endpoint lifecycle events to manage dynamic attributes.
 func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.EndpointEvent) error {
 	if event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
@@ -307,21 +318,8 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
 	case datalayer.EventAddOrUpdate:
 		p.registeredEndpoints.Store(id, event.Endpoint)
-		if p.state != nil {
-			p.state.Publish(p.stateKey, id, func() any {
-				return &attrconcurrency.InFlightLoad{
-					Requests: p.requestTracker.get(id),
-					Tokens:   p.tokenTracker.get(id),
-				}
-			})
-		}
 		event.Endpoint.GetAttributes().Put(p.dk.String(), &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
-				if p.state != nil {
-					if val, ok := p.state.Get(p.stateKey, id); ok {
-						return val.(*attrconcurrency.InFlightLoad)
-					}
-				}
 				return &attrconcurrency.InFlightLoad{
 					Requests: p.requestTracker.get(id),
 					Tokens:   p.tokenTracker.get(id),
@@ -605,9 +603,6 @@ func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 func (p *InFlightLoadProducer) DeleteEndpoint(endpointID string) {
 	p.requestTracker.delete(endpointID)
 	p.tokenTracker.delete(endpointID)
-	if p.state != nil {
-		p.state.Delete(p.stateKey, endpointID)
-	}
 }
 
 func (p *InFlightLoadProducer) GetTokens(eid string) int64 {

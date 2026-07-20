@@ -19,6 +19,7 @@ package datalayer
 import (
 	"fmt"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -28,6 +29,7 @@ import (
 // the set-up phase.
 type Config struct {
 	Sources []DataSourceConfig // the data sources configured in the data layer
+	Store   fwkdl.SharedStateStore
 }
 
 func (c *Config) String() string {
