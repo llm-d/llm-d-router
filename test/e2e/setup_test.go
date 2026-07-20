@@ -268,7 +268,7 @@ func testWrapper(test func()) func() {
 
 		ginkgo.AfterAll(func() {
 			// Only cleanup if the test succeeded
-			if !ginkgo.CurrentSpecReport().Failed() {
+			if !(ginkgo.CurrentSpecReport().Failed() && keepClusterOnFailure) {
 				testutils.DeleteObjects(testConfig, rbacObjects, nsName)
 				testutils.DeleteObjects(testConfig, serviceObjects, nsName)
 				testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
