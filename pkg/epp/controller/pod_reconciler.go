@@ -59,9 +59,6 @@ func (c *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, fmt.Errorf("unable to get pod - %w", err)
 	}
 
-	// Returning the error makes controller-runtime requeue with backoff, so an endpoint
-	// registration dropped by an upsert racing an in-flight delete is retried instead of
-	// leaving the pod untracked until the next pod event.
 	if err := c.updateDatastore(ctx, pod); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update datastore for pod %s - %w", req.NamespacedName, err)
 	}

@@ -203,7 +203,7 @@ func TestPodReconciler(t *testing.T) {
 				store := datastore.NewDatastore(t.Context(), epf)
 				_ = store.PoolSet(t.Context(), fakeClient, pool.InferencePoolToEndpointPool(test.pool))
 				for _, pod := range test.existingPods {
-					store.PodUpdateOrAddIfNotExist(t.Context(), pod)
+					_ = store.PodUpdateOrAddIfNotExist(t.Context(), pod)
 				}
 
 				podReconciler := &PodReconciler{Reader: fakeClient, Datastore: store}
@@ -231,21 +231,8 @@ func TestPodReconciler(t *testing.T) {
 	}
 }
 
-// nilEndpointFactory always fails endpoint registration, standing in for a collector that is
-// still registered for the endpoint (upsert overlapping an in-flight delete) or fails to start.
-type nilEndpointFactory struct{}
-
-func (nilEndpointFactory) NewEndpoint(_ context.Context, _ *fwkdl.EndpointMetadata) fwkdl.Endpoint {
-	return nil
-}
-
-func (nilEndpointFactory) UpdateEndpoint(_ context.Context, _ fwkdl.Endpoint) {}
-
-func (nilEndpointFactory) ReleaseEndpoint(_ fwkdl.Endpoint) {}
-
 // TestPodReconciler_ErrorsOnRegistrationDrop verifies that Reconcile surfaces a dropped endpoint
-// registration as an error so controller-runtime requeues the pod, rather than leaving it
-// untracked until the next pod event (#2060).
+// registration as an error so controller-runtime requeues the pod (#2060).
 func TestPodReconciler_ErrorsOnRegistrationDrop(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -263,7 +250,11 @@ func TestPodReconciler_ErrorsOnRegistrationDrop(t *testing.T) {
 			},
 		},
 	}
-	store := datastore.NewDatastore(t.Context(), nilEndpointFactory{})
+	// The factory stands in for a collector that is still registered for the endpoint (upsert
+	// overlapping an in-flight delete) or fails to start.
+	store := datastore.NewDatastore(t.Context(), &datalayer.FakeEndpointFactory{
+		NewEndpointFn: func(_ context.Context, _ *fwkdl.EndpointMetadata) fwkdl.Endpoint { return nil },
+	})
 	_ = store.PoolSet(t.Context(), fakeClient, pool.InferencePoolToEndpointPool(testPool))
 
 	podReconciler := &PodReconciler{Reader: fakeClient, Datastore: store}

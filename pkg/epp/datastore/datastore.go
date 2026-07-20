@@ -44,7 +44,11 @@ import (
 
 var (
 	errPoolNotSynced = errors.New("InferencePool is not initialized in data store")
-	AllPodsPredicate = func(_ fwkdl.Endpoint) bool { return true }
+	// errRegistrationDropped reports an endpoint that could not be tracked: its collector is
+	// still registered from an earlier registration (an upsert overlapping an in-flight delete)
+	// or failed to start. Callers match it with errors.Is to decide whether to retry.
+	errRegistrationDropped = errors.New("endpoint registration dropped: collector already registered or failed to start")
+	AllPodsPredicate       = func(_ fwkdl.Endpoint) bool { return true }
 )
 
 const (
@@ -135,6 +139,11 @@ type datastore struct {
 	// key: types.NamespacedName, value: fwkdl.Endpoint
 	pods *sync.Map
 	epf  datalayer.EndpointFactory
+	// needsResync forces the next PoolSet to run podResyncAll even when the pool is unchanged.
+	// PoolSet stores the pool before resyncing, so without this flag a PoolSet retried after a
+	// resync failure would compare the incoming pool against the already-stored identical pool
+	// and skip the resync. Guarded by mu.
+	needsResync bool
 }
 
 func (ds *datastore) WithEndpointPool(pool *datalayer.EndpointPool) Datastore {
@@ -172,7 +181,7 @@ func (ds *datastore) PoolSet(ctx context.Context, reader client.Reader, endpoint
 	selectorChanged := oldEndpointPool == nil || !selectorEqual(oldEndpointPool.Selector, endpointPool.Selector)
 	targetPortsChanged := oldEndpointPool != nil && !slices.Equal(oldEndpointPool.TargetPorts, endpointPool.TargetPorts)
 
-	if selectorChanged || targetPortsChanged {
+	if selectorChanged || targetPortsChanged || ds.needsResync {
 		logger.V(logutil.DEFAULT).Info("Updating endpoints", "selector", endpointPool.Selector, "targetPortsChanged", targetPortsChanged)
 		// A full resync is required to address the following cases:
 		// 1) At startup, the pod events may get processed before the pool is synced with the datastore,
@@ -183,8 +192,10 @@ func (ds *datastore) PoolSet(ctx context.Context, reader client.Reader, endpoint
 		// 3) If the targetPorts changed, we need to resync to remove orphaned rank endpoints that no longer
 		//    exist in the new targetPorts configuration.
 		if err := ds.podResyncAll(ctx, reader); err != nil {
+			ds.needsResync = true
 			return fmt.Errorf("failed to update pods according to the pool selector - %w", err)
 		}
+		ds.needsResync = false
 	}
 
 	return nil
@@ -295,27 +306,22 @@ func (ds *datastore) PodUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 	pool := ds.pool
 	ds.mu.RUnlock()
 
-	added, err := ds.podUpdateOrAddIfNotExist(ctx, pod, pool)
-	if err != nil {
-		return err
+	if pool == nil {
+		// Without the pool's target ports the pod cannot be mapped to endpoints; the resync
+		// triggered when the pool syncs picks the pod up.
+		log.FromContext(ctx).V(logutil.DEBUG).Info("Skipping pod upsert, InferencePool not synced", "name", pod.Name)
+		return nil
 	}
-	logger := log.FromContext(ctx)
-	if added {
-		logger.V(logutil.DEFAULT).Info("Pod added", "name", pod.Name)
-	} else {
-		logger.V(logutil.DEFAULT).Info("Pod already exists", "name", pod.Name)
-	}
-	return nil
+	return ds.podUpdateOrAddIfNotExist(ctx, pod, pool)
 }
 
 // podUpdateOrAddIfNotExist is the lock-free inner implementation.
-// Callers must ensure pool is a consistent snapshot (either read under lock
+// Callers must ensure pool is a non-nil consistent snapshot (either read under lock
 // or already held, as in podResyncAll which runs under ds.mu.Lock via PoolSet).
-// It returns whether any endpoint was newly created, and a joined error covering every
-// endpoint of the pod whose registration was dropped.
-func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.Pod, pool *datalayer.EndpointPool) (bool, error) {
+// It returns a joined error covering every endpoint of the pod whose registration was dropped.
+func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.Pod, pool *datalayer.EndpointPool) error {
 	if pool == nil {
-		return false, nil
+		return nil
 	}
 
 	labels := make(map[string]string, len(pod.GetLabels()))
@@ -359,6 +365,14 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 			added = true
 		}
 	}
+	logger := log.FromContext(ctx)
+	if len(errs) == 0 {
+		if added {
+			logger.V(logutil.DEFAULT).Info("Pod added", "name", pod.Name)
+		} else {
+			logger.V(logutil.DEFAULT).Info("Pod already exists", "name", pod.Name)
+		}
+	}
 
 	// remove endpoints that are no longer active in the pool
 	for idx, port := range pool.TargetPorts {
@@ -373,7 +387,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 		}
 	}
 
-	return added, errors.Join(errs...)
+	return errors.Join(errs...)
 }
 
 func (ds *datastore) PodDelete(podName string) {
@@ -389,8 +403,6 @@ func (ds *datastore) PodDelete(podName string) {
 
 func (ds *datastore) EndpointUpsert(ctx context.Context, meta *fwkdl.EndpointMetadata) {
 	if _, err := ds.upsertEndpoint(ctx, meta); err != nil {
-		// Discovery sources have no requeue mechanism, so surface the drop loudly; the endpoint
-		// stays untracked until the source re-emits it.
 		log.FromContext(ctx).Error(err, "failed to register endpoint", "endpoint", meta.NamespacedName)
 	}
 }
@@ -405,34 +417,35 @@ func (ds *datastore) EndpointDelete(id types.NamespacedName) {
 // Returns true if the endpoint was newly created, false if it already existed.
 // Shared by EndpointUpsert and podUpdateOrAddIfNotExist.
 //
-// It returns an error when the endpoint's registration was dropped: NewEndpoint returns nil when
-// a collector is already registered for this endpoint or its collector failed to start. If a
-// concurrent upsert has stored the entry, the datastore is consistent and the nil is benign. But
-// when the pods map has no entry either — the upsert overlapped an in-flight delete that removed
-// the entry before deregistering the collector, or the collector failed to start — the endpoint
-// is untracked and the caller must retry.
+// It returns an error wrapping errRegistrationDropped when the endpoint cannot be tracked:
+// NewEndpoint returns nil when a collector is still registered for this endpoint or the
+// collector failed to start. When a concurrent upsert has stored an entry for the key, this
+// call's metadata is applied through the update path; when no entry exists (the upsert
+// overlapped an in-flight delete that removed the entry before deregistering the collector,
+// or the collector failed to start), the endpoint is untracked and the caller must retry.
 func (ds *datastore) upsertEndpoint(ctx context.Context, meta *fwkdl.EndpointMetadata) (bool, error) {
-	existing, ok := ds.pods.Load(meta.NamespacedName)
-	if !ok {
+	for {
+		if existing, ok := ds.pods.Load(meta.NamespacedName); ok {
+			ep := existing.(fwkdl.Endpoint)
+			if ep.GetMetadata().Equal(meta) {
+				return false, nil
+			}
+			ep.UpdateMetadata(meta)
+			ds.epf.UpdateEndpoint(ctx, ep)
+			return false, nil
+		}
 		ep := ds.epf.NewEndpoint(ds.parentCtx, meta)
 		if ep == nil {
 			if _, ok := ds.pods.Load(meta.NamespacedName); ok {
-				return false, nil
+				// A concurrent upsert won the registration; apply this call's metadata through
+				// the update path above.
+				continue
 			}
-			return false, fmt.Errorf(
-				"endpoint %s registration dropped: collector already registered or failed to start",
-				meta.NamespacedName)
+			return false, fmt.Errorf("endpoint %s: %w", meta.NamespacedName, errRegistrationDropped)
 		}
 		ds.pods.Store(meta.NamespacedName, ep)
 		return true, nil
 	}
-	ep := existing.(fwkdl.Endpoint)
-	if ep.GetMetadata().Equal(meta) {
-		return false, nil
-	}
-	ep.UpdateMetadata(meta)
-	ds.epf.UpdateEndpoint(ctx, ep)
-	return false, nil
 }
 
 func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) error {
@@ -453,21 +466,13 @@ func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) err
 		if !podutil.IsPodReady(&pod) {
 			continue
 		}
-		namespacedName := types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}
 		// Calculate expected endpoint names based on current targetPorts.
 		for idx := range ds.pool.TargetPorts {
 			activeEndpoints.Insert(createEndpointNamespacedName(&pod, idx))
 		}
-		added, err := ds.podUpdateOrAddIfNotExist(ctx, &pod, ds.pool)
-		if err != nil {
-			// Propagate so PoolSet fails and the pool reconciler requeues the resync.
+		if err := ds.podUpdateOrAddIfNotExist(ctx, &pod, ds.pool); err != nil {
+			// Propagate so PoolSet fails; needsResync makes the retried PoolSet resync again.
 			errs = append(errs, err)
-			continue
-		}
-		if added {
-			logger.V(logutil.DEFAULT).Info("Pod added", "name", namespacedName)
-		} else {
-			logger.V(logutil.DEFAULT).Info("Pod already exists", "name", namespacedName)
 		}
 	}
 
