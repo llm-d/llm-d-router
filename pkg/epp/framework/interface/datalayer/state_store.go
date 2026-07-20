@@ -28,13 +28,11 @@ type StateKey string
 // CrossReplicaStore is a cross-EPP state store for sharing state across replicas.
 // Implementations own the sync mechanism (e.g., Redis pub/sub, gossip) and the
 // aggregation strategy (e.g., sum for in-flight load, union for cache state).
-// The store can dispatch per StateKey for different aggregation strategies.
 type CrossReplicaStore interface {
 	fwkplugin.Plugin
 
 	// Set writes a value for the given key and endpoint. The runtime calls
-	// this after each Produce cycle with a fresh snapshot from the plugin's
-	// Supply closure.
+	// this after each Produce cycle with a fresh snapshot.
 	Set(ctx context.Context, key StateKey, endpointID string, value any) error
 
 	// Get returns the aggregated value for the given key and endpoint across

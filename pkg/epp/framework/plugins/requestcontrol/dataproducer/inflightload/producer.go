@@ -321,8 +321,8 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		event.Endpoint.GetAttributes().Put(p.dk.String(), &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{
-					Requests: p.requestTracker.get(id),
-					Tokens:   p.tokenTracker.get(id),
+					Tokens:   p.GetTokens(id),
+					Requests: p.GetRequests(id),
 				}
 			},
 		})

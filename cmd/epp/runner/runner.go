@@ -64,7 +64,6 @@ import (
 	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
-	statestore "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
@@ -585,9 +584,6 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(preciseproducer.PluginType, preciseproducer.PluginFactory)
 	fwkplugin.Register(p2psource.PluginType, p2psource.PluginFactory)
 
-	// State store plugins
-	fwkplugin.Register(statestore.LocalStateStoreType, statestore.LocalStateStoreFactory)
-
 	// Flow Control plugins
 	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, globalstrict.GlobalStrictFairnessPolicyFactory)
 	fwkplugin.Register(roundrobin.RoundRobinFairnessPolicyType, roundrobin.RoundRobinFairnessPolicyFactory)
@@ -704,11 +700,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	applyDeprecatedEnvFeatureGate(enableExperimentalFlowControlLayer, "Flow Control layer", flowcontrol.FeatureGate, rawConfig)
 
-	handle := fwkplugin.NewEppHandle(
-		ctx,
-		makePodListFunc(ds),
-		fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry),
-	)
+	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 
