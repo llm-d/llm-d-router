@@ -154,7 +154,7 @@ func sendSessionRequest(t *testing.T, h *TestHarness, sessionToken string) (endp
 	)...)
 
 	// Each request is a distinct HTTP transaction, so open a fresh ext_proc stream.
-	client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(t.Context())
+	client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(t.Context())
 	require.NoError(t, err)
 
 	// RequestHeaders + RequestBody + ResponseHeaders + ResponseBody -> 4 responses.
@@ -244,7 +244,7 @@ func setupPDHarness(t *testing.T, configText string) *TestHarness {
 			Namespace(h.Namespace).
 			ReadyCondition().
 			Labels(map[string]string{
-				"app":             testPoolName,
+				"app":             TestPoolName,
 				bylabel.RoleLabel: p.role,
 			}).
 			IP(fmt.Sprintf("192.168.1.%d", p.index+1)).
@@ -252,11 +252,11 @@ func setupPDHarness(t *testing.T, configText string) *TestHarness {
 			ObjRef()
 
 		intendedStatus := pod.Status
-		require.NoError(t, k8sClient.Create(ctx, pod))
+		require.NoError(t, K8sClient().Create(ctx, pod))
 		pod.Status = intendedStatus
-		require.NoError(t, k8sClient.Status().Update(ctx, pod))
+		require.NoError(t, K8sClient().Status().Update(ctx, pod))
 	}
-	h.metricsBackend.SetPodMetrics(metricsMap)
+	h.SetPodMetrics(metricsMap)
 	h.WaitForSync(len(pods), modelMyModel)
 	h.WaitForReadyPodsMetric(len(pods))
 	return h
@@ -333,7 +333,7 @@ func sendSessionRequestGetHeader(t *testing.T, h *TestHarness, decodeToken, pref
 		`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"assistant"}}],"model":"`+modelMyModelTarget+`","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":5}}`,
 	)...)
 
-	client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(t.Context())
+	client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(t.Context())
 	require.NoError(t, err)
 
 	responses, err := fwkepp.StreamedRequest(t, client, requests, 4)
@@ -518,7 +518,7 @@ func newRoutedRequest(extraHeaders map[string]string) []*extProcPb.ProcessingReq
 func streamRequests(t *testing.T, h *TestHarness, requests []*extProcPb.ProcessingRequest, expected int) []*extProcPb.ProcessingResponse {
 	t.Helper()
 
-	client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(t.Context())
+	client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(t.Context())
 	require.NoError(t, err)
 
 	responses, err := fwkepp.StreamedRequest(t, client, requests, expected)
