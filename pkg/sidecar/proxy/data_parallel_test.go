@@ -12,8 +12,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	sidecarmock "github.com/llm-d/llm-d-router/test/sidecar/mock"
-	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 const (
@@ -30,7 +30,7 @@ var _ = Describe("Data Parallel support", func() {
 			// proxy.startDataParallel starts listeners on the ports following
 			// the proxy's main port. To avoid problems, get a free port and
 			// tell the proxy that it is listening on that port minus one.
-			freePort, err := testutils.GetFreePort()
+			freePort, err := fwknet.GetFreePort()
 			Expect(err).ToNot(HaveOccurred())
 			fakeProxyPort := freePort - 1
 

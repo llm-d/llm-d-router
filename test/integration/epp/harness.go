@@ -55,8 +55,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	integration "github.com/llm-d/llm-d-router/test/integration"
-	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 // Global State (Initialized in TestMain)
@@ -300,15 +300,15 @@ func defaultEppServerOptions(t *testing.T, namespace, configText string) *eppSer
 	eppOptions.PoolNamespace = namespace
 	eppOptions.ConfigText = configText
 
-	metricsPort, err := testutils.GetFreePort()
+	metricsPort, err := fwknet.GetFreePort()
 	require.NoError(t, err)
 	eppOptions.MetricsPort = metricsPort
 
-	grpcPort, err := testutils.GetFreePort()
+	grpcPort, err := fwknet.GetFreePort()
 	require.NoError(t, err)
 	eppOptions.GRPCPort = grpcPort
 
-	healthPort, err := testutils.GetFreePort()
+	healthPort, err := fwknet.GetFreePort()
 	require.NoError(t, err)
 	eppOptions.GRPCHealthPort = healthPort
 	eppOptions.EndpointTargetPorts = []int{8000}
