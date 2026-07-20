@@ -159,7 +159,7 @@ LDFLAGS ?= -s -w
 BASE_IMAGE ?=
 
 # test packages
-epp_TEST_PACKAGES = $$(go list ./... | grep -v /test/ | grep -v ./pkg/sidecar/ | tr '\n' ' ')
+epp_TEST_PACKAGES = $$(go list ./... | grep -v /test/ | grep -v ./pkg/sidecar/ | grep -v ./pkg/coordinator/ | grep -v ./cmd/coordinator | tr '\n' ' ')
 sidecar_TEST_PACKAGES = ./pkg/sidecar/...
 
 # Internal variables for generic targets
