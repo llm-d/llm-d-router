@@ -29,7 +29,10 @@ import (
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
-const gpuUtilMetricName = "DCGM_FI_DEV_GPU_UTIL"
+const (
+	gpuUtilMetricName = "DCGM_FI_DEV_GPU_UTIL"
+	podLabelName      = "pod"
+)
 
 var _ fwkplugin.ProducerPlugin = &Extractor{}
 
@@ -65,17 +68,26 @@ func DCGMExtractorFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwk
 }
 
 // Extract parses DCGM_FI_DEV_GPU_UTIL from the Prometheus families,
-// aggregates across GPUs (max), normalizes to [0.0, 1.0], and stores
-// the result in the endpoint's AttributeMap.
+// keeps samples for this endpoint's pod (when the pod label is present),
+// aggregates across matching GPUs (max), normalizes to [0.0, 1.0], and
+// stores the result in the endpoint's AttributeMap.
 func (e *Extractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]) error {
 	family, ok := in.Payload[gpuUtilMetricName]
 	if !ok {
 		return fmt.Errorf("metric %q not found in DCGM response", gpuUtilMetricName)
 	}
 
+	podName := ""
+	if meta := in.Endpoint.GetMetadata(); meta != nil {
+		podName = meta.PodName
+	}
+
 	maxUtil := 0.0
 	found := false
 	for _, m := range family.GetMetric() {
+		if !sampleBelongsToPod(m, podName) {
+			continue
+		}
 		val := gaugeValue(m)
 		if val > maxUtil {
 			maxUtil = val
@@ -83,7 +95,7 @@ func (e *Extractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.
 		found = true
 	}
 	if !found {
-		return fmt.Errorf("metric %q present but has no samples", gpuUtilMetricName)
+		return fmt.Errorf("metric %q present but has no samples for pod %q", gpuUtilMetricName, podName)
 	}
 
 	normalized := attrgpu.GPUUtilization(maxUtil / 100.0)
@@ -94,6 +106,30 @@ func (e *Extractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.
 // Produces declares the data key this extractor publishes.
 func (e *Extractor) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{e.dk: attrgpu.GPUUtilization(0)}
+}
+
+// sampleBelongsToPod reports whether m should contribute to this endpoint's
+// utilization. When podName is empty, or the sample has no pod label, the
+// sample is kept (sidecar / single-tenant payloads). When both are set, only
+// matching samples are kept (DaemonSet multi-pod payloads).
+func sampleBelongsToPod(m *dto.Metric, podName string) bool {
+	if podName == "" {
+		return true
+	}
+	samplePod, ok := labelValue(m, podLabelName)
+	if !ok {
+		return true
+	}
+	return samplePod == podName
+}
+
+func labelValue(m *dto.Metric, name string) (string, bool) {
+	for _, l := range m.GetLabel() {
+		if l.GetName() == name {
+			return l.GetValue(), true
+		}
+	}
+	return "", false
 }
 
 func gaugeValue(m *dto.Metric) float64 {

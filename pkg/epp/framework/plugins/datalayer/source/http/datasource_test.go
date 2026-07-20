@@ -217,6 +217,7 @@ func TestGetEndpoint_PortOverride(t *testing.T) {
 	parser := func(r io.Reader) (int, error) { return 0, nil }
 	ep := &fwkdl.EndpointMetadata{
 		Address:     "10.0.0.1",
+		NodeAddress: "192.168.1.10",
 		MetricsHost: "10.0.0.1:8000",
 	}
 
@@ -235,6 +236,16 @@ func TestGetEndpoint_PortOverride(t *testing.T) {
 			opts:     []Option{WithPortOverride(9400)},
 			wantHost: "10.0.0.1:9400",
 		},
+		{
+			name:     "WithUseNodeAddress scrapes node IP with port override",
+			opts:     []Option{WithPortOverride(9400), WithUseNodeAddress()},
+			wantHost: "192.168.1.10:9400",
+		},
+		{
+			name:     "WithUseNodeAddress without portOverride is a no-op",
+			opts:     []Option{WithUseNodeAddress()},
+			wantHost: "10.0.0.1:8000",
+		},
 	}
 
 	for _, tc := range cases {
@@ -247,6 +258,21 @@ func TestGetEndpoint_PortOverride(t *testing.T) {
 			assert.Equal(t, "/metrics", got.Path)
 		})
 	}
+}
+
+func TestGetEndpoint_UseNodeAddress_FallsBackToPodIP(t *testing.T) {
+	parser := func(r io.Reader) (int, error) { return 0, nil }
+	ep := &fwkdl.EndpointMetadata{
+		Address:     "10.0.0.1",
+		NodeAddress: "",
+		MetricsHost: "10.0.0.1:8000",
+	}
+	s, err := NewHTTPDataSource("http", "/metrics", TLSOptions{SkipVerify: true}, "test", "test", parser,
+		WithPortOverride(9400), WithUseNodeAddress())
+	require.NoError(t, err)
+	got := s.getEndpoint(ep)
+	assert.Equal(t, "10.0.0.1:9400", got.Host,
+		"empty NodeAddress must fall back to pod IP")
 }
 
 func TestAppendExtractor(t *testing.T) {

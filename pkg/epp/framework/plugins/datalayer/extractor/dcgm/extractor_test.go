@@ -45,6 +45,32 @@ func makeGauge(values ...float64) *dto.MetricFamily {
 	return fam
 }
 
+type labeledSample struct {
+	pod   string
+	value float64
+}
+
+func makeLabeledGauge(samples ...labeledSample) *dto.MetricFamily {
+	gaugeType := dto.MetricType_GAUGE
+	fam := &dto.MetricFamily{
+		Name: proto.String(gpuUtilMetricName),
+		Type: &gaugeType,
+	}
+	for _, s := range samples {
+		m := &dto.Metric{
+			Gauge: &dto.Gauge{Value: &s.value},
+		}
+		if s.pod != "" {
+			m.Label = []*dto.LabelPair{{
+				Name:  proto.String(podLabelName),
+				Value: proto.String(s.pod),
+			}}
+		}
+		fam.Metric = append(fam.Metric, m)
+	}
+	return fam
+}
+
 func TestExtractorExtract(t *testing.T) {
 	ctx := context.Background()
 
@@ -66,6 +92,7 @@ func TestExtractorExtract(t *testing.T) {
 
 	tests := []struct {
 		name        string
+		podName     string
 		data        sourcemetrics.PrometheusMetricMap
 		wantErr     bool
 		errContains string
@@ -106,6 +133,52 @@ func TestExtractorExtract(t *testing.T) {
 			updated:  true,
 			wantUtil: 0.81,
 		},
+		{
+			name:    "DaemonSet payload filters by pod label",
+			podName: "vllm-pod-2",
+			data: sourcemetrics.PrometheusMetricMap{
+				gpuUtilMetricName: makeLabeledGauge(
+					labeledSample{"vllm-pod-1", 25},
+					labeledSample{"vllm-pod-2", 80},
+					labeledSample{"vllm-pod-3", 10},
+				),
+			},
+			updated:  true,
+			wantUtil: 0.80,
+		},
+		{
+			name:    "DaemonSet multi-GPU for same pod takes max",
+			podName: "vllm-pod-1",
+			data: sourcemetrics.PrometheusMetricMap{
+				gpuUtilMetricName: makeLabeledGauge(
+					labeledSample{"vllm-pod-1", 40},
+					labeledSample{"vllm-pod-1", 70},
+					labeledSample{"vllm-pod-2", 99},
+				),
+			},
+			updated:  true,
+			wantUtil: 0.70,
+		},
+		{
+			name:    "no matching pod label returns error",
+			podName: "missing-pod",
+			data: sourcemetrics.PrometheusMetricMap{
+				gpuUtilMetricName: makeLabeledGauge(
+					labeledSample{"vllm-pod-1", 50},
+				),
+			},
+			wantErr:     true,
+			errContains: "missing-pod",
+		},
+		{
+			name:    "unlabeled samples kept when podName set (sidecar compat)",
+			podName: "vllm-pod-1",
+			data: sourcemetrics.PrometheusMetricMap{
+				gpuUtilMetricName: makeGauge(55),
+			},
+			updated:  true,
+			wantUtil: 0.55,
+		},
 	}
 
 	for _, tt := range tests {
@@ -116,7 +189,8 @@ func TestExtractorExtract(t *testing.T) {
 				}
 			}()
 
-			ep := fwkdl.NewEndpoint(nil, nil)
+			meta := &fwkdl.EndpointMetadata{PodName: tt.podName}
+			ep := fwkdl.NewEndpoint(meta, nil)
 			attr := ep.GetAttributes()
 			before, _ := attr.Get(key)
 

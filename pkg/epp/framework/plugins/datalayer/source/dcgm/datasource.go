@@ -43,14 +43,16 @@ type dcgmDatasourceParams struct {
 	Path               string `json:"path"`
 	Port               int    `json:"port"`
 	InsecureSkipVerify bool   `json:"insecureSkipVerify"`
+	// UseNodeAddress scrapes the node IP (DaemonSet) instead of the pod IP (sidecar).
+	UseNodeAddress bool `json:"useNodeAddress"`
 }
 
 // NewHTTPDCGMDataSource constructs a DCGMDataSource with the given parameters.
 // Use this function directly in tests to bypass JSON parameter marshaling.
-func NewHTTPDCGMDataSource(scheme, path string, port int, name string) (*http.HTTPDataSource[metrics.PrometheusMetricMap], error) {
+func NewHTTPDCGMDataSource(scheme, path string, port int, name string, opts ...http.Option) (*http.HTTPDataSource[metrics.PrometheusMetricMap], error) {
+	opts = append([]http.Option{http.WithPortOverride(port)}, opts...)
 	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultDCGMInsecureSkipVerify},
-		DCGMDataSourceType, name, parsePrometheus,
-		http.WithPortOverride(port))
+		DCGMDataSourceType, name, parsePrometheus, opts...)
 }
 
 // DCGMDataSourceFactory instantiates a dcgm-data-source plugin from configuration.
@@ -65,9 +67,13 @@ func DCGMDataSourceFactory(name string, parameters *json.Decoder, _ plugin.Handl
 		return nil, fmt.Errorf("unsupported scheme: %s", cfg.Scheme)
 	}
 
+	opts := []http.Option{http.WithPortOverride(cfg.Port)}
+	if cfg.UseNodeAddress {
+		opts = append(opts, http.WithUseNodeAddress())
+	}
+
 	ds, err := http.NewHTTPDataSource(cfg.Scheme, cfg.Path, http.TLSOptions{SkipVerify: cfg.InsecureSkipVerify},
-		DCGMDataSourceType, name, parsePrometheus,
-		http.WithPortOverride(cfg.Port))
+		DCGMDataSourceType, name, parsePrometheus, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DCGM data source: %w", err)
 	}

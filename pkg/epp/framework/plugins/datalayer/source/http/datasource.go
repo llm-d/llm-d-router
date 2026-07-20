@@ -59,6 +59,9 @@ type HTTPDataSource[T any] struct {
 	// different port on the same pod (e.g. DCGM Exporter on :9400)
 	// without changing the endpoint metadata set by the discovery layer.
 	portOverride int
+	// useNodeAddress, when true, scrapes NodeAddress:portOverride instead
+	// of the pod IP. Used for node-level exporters (e.g. DCGM DaemonSet).
+	useNodeAddress bool
 
 	client Client
 	// parser converts the response body to T. MUST NOT return (zero, nil) for nilable T;
@@ -87,7 +90,8 @@ type TLSOptions struct {
 type Option func(*options)
 
 type options struct {
-	portOverride int
+	portOverride   int
+	useNodeAddress bool
 }
 
 // WithPortOverride makes the source scrape podIP:port instead of the
@@ -95,6 +99,13 @@ type options struct {
 // listens on a different port than the inference server.
 func WithPortOverride(port int) Option {
 	return func(o *options) { o.portOverride = port }
+}
+
+// WithUseNodeAddress makes the source scrape nodeIP:portOverride instead
+// of podIP:portOverride. Requires a non-zero portOverride and a non-empty
+// NodeAddress on the endpoint metadata.
+func WithUseNodeAddress() Option {
+	return func(o *options) { o.useNodeAddress = true }
 }
 
 // NewHTTPDataSource constructs a typed polling dispatcher. For https, tlsOpts configures
@@ -127,12 +138,13 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		cl.Transport = httpsTransport
 	}
 	return &HTTPDataSource[T]{
-		typedName:    fwkplugin.TypedName{Type: pluginType, Name: pluginName},
-		scheme:       scheme,
-		path:         path,
-		portOverride: cfg.portOverride,
-		client:       cl,
-		parser:       parser,
+		typedName:      fwkplugin.TypedName{Type: pluginType, Name: pluginName},
+		scheme:         scheme,
+		path:           path,
+		portOverride:   cfg.portOverride,
+		useNodeAddress: cfg.useNodeAddress,
+		client:         cl,
+		parser:         parser,
 	}, nil
 }
 
@@ -262,7 +274,13 @@ func (s *HTTPDataSource[T]) AppendExtractor(ext fwkplugin.Plugin) error {
 func (s *HTTPDataSource[T]) getEndpoint(ep Addressable) *url.URL {
 	host := ep.GetMetricsHost()
 	if s.portOverride > 0 {
-		host = net.JoinHostPort(ep.GetIPAddress(), strconv.Itoa(s.portOverride))
+		ip := ep.GetIPAddress()
+		if s.useNodeAddress {
+			if nodeIP := ep.GetNodeAddress(); nodeIP != "" {
+				ip = nodeIP
+			}
+		}
+		host = net.JoinHostPort(ip, strconv.Itoa(s.portOverride))
 	}
 	return &url.URL{Scheme: s.scheme, Host: host, Path: s.path}
 }
