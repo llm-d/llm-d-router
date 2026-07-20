@@ -438,8 +438,8 @@ func TestMockMetricsSourceConfigsOptOut(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read %s: %v", path, err)
 		}
-		if strings.Contains(string(data), mockDataSourceType) && !strings.Contains(string(data), "injectDefaults: false") {
-			t.Errorf("%s configures %s without dataLayer.injectDefaults: false", path, mockDataSourceType)
+		if strings.Contains(string(data), MockDataSourceType) && !strings.Contains(string(data), "injectDefaults: false") {
+			t.Errorf("%s configures %s without dataLayer.injectDefaults: false", path, MockDataSourceType)
 		}
 	}
 }
