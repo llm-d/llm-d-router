@@ -401,6 +401,14 @@ type FlowControlConfig struct {
 	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
 	// Flow Control. If omitted, "utilization-detector" is used by default.
 	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
+
+	// +optional
+	// EnableEviction enables demand-driven in-flight eviction. When higher-priority requests are
+	// blocked by pool saturation, lower-priority in-flight requests (priority < 0) may be
+	// terminated to reclaim capacity. Pacing and sizing self-configure from the selected
+	// saturation detector. See docs/flow-control-eviction.md.
+	// Defaults to false.
+	EnableEviction bool `json:"enableEviction,omitempty"`
 }
 
 func (fcc *FlowControlConfig) String() string {
@@ -443,6 +451,10 @@ func (fcc *FlowControlConfig) String() string {
 
 	if fcc.SaturationDetector != nil {
 		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", fcc.SaturationDetector))
+	}
+
+	if fcc.EnableEviction {
+		parts = append(parts, "EnableEviction: true")
 	}
 
 	return "{" + strings.Join(parts, ", ") + "}"

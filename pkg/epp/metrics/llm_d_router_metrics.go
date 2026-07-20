@@ -364,6 +364,52 @@ var (
 		},
 		[]string{"outcome", "priority", "inference_pool"},
 	)
+
+	llmdFlowControlRevocationsIssuedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_revocations_issued_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of in-flight eviction revocations issued.", compbasemetrics.ALPHA),
+		},
+		[]string{"inference_pool"},
+	)
+
+	llmdFlowControlRevocationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_revocations_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of in-flight eviction revocations by terminal outcome (confirmed, timed_out). Every issued revocation eventually increments exactly one outcome.", compbasemetrics.ALPHA),
+		},
+		[]string{"outcome", "inference_pool"},
+	)
+
+	llmdFlowControlReclaimTarget = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_reclaim_target",
+			Help:      metricsutil.HelpMsgWithStability("Last computed reclamation deficit, in saturation-gauge units.", compbasemetrics.ALPHA),
+		},
+		[]string{"inference_pool"},
+	)
+
+	llmdFlowControlPendingReclaim = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_pending_reclaim",
+			Help:      metricsutil.HelpMsgWithStability("Sum of outstanding and cooling pending-reclaim debits, in saturation-gauge units.", compbasemetrics.ALPHA),
+		},
+		[]string{"inference_pool"},
+	)
+
+	llmdFlowControlRevocationConfirmationDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_revocation_confirmation_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Time from revocation issue to confirmed stream termination.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		},
+		[]string{"inference_pool"},
+	)
 )
 
 // --- llm-d Inference Model Rewrite Metrics ---
