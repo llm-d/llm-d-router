@@ -34,6 +34,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 )
 
 const (
@@ -63,12 +64,14 @@ func UtilizationDetectorFactory(
 var (
 	_ fwksched.Filter                = &Detector{}
 	_ flowcontrol.SaturationDetector = &Detector{}
+	_ fwkplugin.ConsumerPlugin       = &Detector{}
 )
 
 // Detector determines system saturation based on metrics of the given candidate pods.
 type Detector struct {
-	config    Config
-	typedName fwkplugin.TypedName
+	config              Config
+	typedName           fwkplugin.TypedName
+	inFlightLoadDataKey fwkplugin.DataKey
 }
 
 // NewDetector creates a new instance of the Utilization Detector.
@@ -93,9 +96,33 @@ func NewDetector(name string, cfg Config, logger logr.Logger) *Detector {
 	}
 
 	return &Detector{
-		config:    cfg,
-		typedName: typedName,
+		config:              cfg,
+		typedName:           typedName,
+		inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
 	}
+}
+
+// Consumes declares InFlightLoad as an optional dependency: it supplies the
+// scrape-lag compensation in Saturation, but the detector still functions on
+// scraped metrics alone when no inflight-load-producer is configured.
+func (d *Detector) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Optional: map[fwkplugin.DataKey]any{d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
+	}
+}
+
+// inFlightRequests returns the endpoint's live in-flight request count as tracked
+// by the InFlightLoadProducer, or 0 when the attribute is absent.
+func (d *Detector) inFlightRequests(m datalayer.AttributeMap) int64 {
+	if m == nil {
+		return 0
+	}
+	if val, ok := m.Get(d.inFlightLoadDataKey.String()); ok {
+		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
+			return load.Requests
+		}
+	}
+	return 0
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -115,42 +142,27 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //
 // Aggregation is the MAX across endpoints (roofline at the pool level): the pool
 // is saturated as soon as its hottest endpoint is, so a single overloaded
-// endpoint is not diluted by idle ones. (Previously an unweighted average, which
-// let one hot endpoint be averaged away by idle/prefill pods.)
-func (d *Detector) Saturation(ctx context.Context, candidates []datalayer.Endpoint) float64 {
-	return d.SaturationWithInFlight(ctx, candidates, 0)
-}
-
-// SaturationWithInFlight is Saturation, but with `inFlight` extra requests
-// attributed to the pool's waiting queues. `inFlight` is the number of
-// gate-passing dispatches the flow controller has issued that are not yet
-// reflected in the scraped WaitingQueueSize (the metrics are refreshed on a
-// poller, default 50ms, while the dispatch loop runs at ~1ms). Without this
-// credit the controller bursts many dispatches against a stale-low waiting
-// count before the next scrape catches up, overshooting the gate; crediting the
-// in-flight count into the queue term makes the gate hold within one scrape
-// window. The credit is spread evenly across the non-stale endpoints and only
-// affects the queue-depth term (the fast, controllable signal); the KV-cache
-// term is left as measured (it lags physically and is already conservative).
+// endpoint is not diluted by idle ones.
 //
-// Saturation(ctx, c) == SaturationWithInFlight(ctx, c, 0).
-func (d *Detector) SaturationWithInFlight(_ context.Context, candidates []datalayer.Endpoint, inFlight int) float64 {
+// # Scrape-lag compensation
+//
+// WaitingQueueSize is scraped on a poller (default 50ms) while the flow
+// controller's dispatch loop runs at ~1ms, so between two scrapes the queue term
+// is stale-low and the gate would let the controller over-dispatch. When an
+// inflight-load-producer is configured, the detector corrects for this using the
+// producer's per-endpoint in-flight request count, which is incremented at
+// dispatch and decremented on request completion (so it already accounts for
+// requests that returned since the last scrape). The lag is the tracked
+// in-flight requests the scrape does not yet reflect:
+//
+//	credit = max(0, InFlightRequests - (WaitingQueueSize + RunningRequestsSize))
+//
+// This credit is added only to the queue-depth term (the fast, controllable
+// signal); the KV-cache term is left as measured. Endpoints without the
+// attribute contribute zero credit and fall back to the scraped queue depth.
+func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint) float64 {
 	if len(candidates) == 0 {
 		return 1.0
-	}
-
-	// Count non-stale endpoints so the in-flight credit is spread only across
-	// endpoints that actually contribute a measured score.
-	nonStale := 0
-	for _, e := range candidates {
-		m := e.GetMetrics()
-		if m != nil && time.Since(m.UpdateTime) <= d.config.MetricsStalenessThreshold {
-			nonStale++
-		}
-	}
-	var perEndpointCredit float64
-	if inFlight > 0 && nonStale > 0 {
-		perEndpointCredit = float64(inFlight) / float64(nonStale)
 	}
 
 	var maxScore float64
@@ -163,7 +175,14 @@ func (d *Detector) SaturationWithInFlight(_ context.Context, candidates []datala
 			continue
 		}
 
-		qRatio := (float64(metrics.WaitingQueueSize) + perEndpointCredit) / float64(d.config.QueueDepthThreshold)
+		// In-flight requests the scrape has not yet observed (see doc comment).
+		credit := d.inFlightRequests(e.GetAttributes()) -
+			int64(metrics.WaitingQueueSize) - int64(metrics.RunningRequestsSize)
+		if credit < 0 {
+			credit = 0
+		}
+
+		qRatio := float64(int64(metrics.WaitingQueueSize)+credit) / float64(d.config.QueueDepthThreshold)
 		kvRatio := metrics.KVCacheUsagePercent / d.config.KVCacheUtilThreshold
 
 		// Roofline Analysis: The pod is saturated if either resource is exhausted.

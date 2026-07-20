@@ -124,19 +124,11 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 // It returns an aggregate saturation signal where:
 //
 //	Saturation = Total Inflight Requests / Total MaxConcurrency Capacity.
-func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
-	return d.SaturationWithInFlight(ctx, endpoints, 0)
-}
-
-// SaturationWithInFlight is Saturation with `inFlight` extra requests attributed
-// to the pool. The flow controller passes dispatches it has issued that are not
-// yet reflected in the scraped endpoint load, so the gate accounts for them
-// during the metrics-staleness window. In requests mode the credit is added to
-// the inflight request count directly. Saturation(ctx, e) ==
-// SaturationWithInFlight(ctx, e, 0).
-func (d *detector) SaturationWithInFlight(
-	_ context.Context, endpoints []datalayer.Endpoint, inFlight int,
-) float64 {
+//
+// The inflight counts are read from the InFlightLoad attribute, which the
+// InFlightLoadProducer increments at dispatch and decrements on request
+// completion, so the signal already reflects completions with no scrape lag.
+func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
 	if len(endpoints) == 0 {
 		return 1.0
 	}
@@ -164,13 +156,6 @@ func (d *detector) SaturationWithInFlight(
 		} else {
 			totalInflight += load.Requests
 		}
-	}
-
-	// Attribute in-flight-but-not-yet-observed dispatches to the pool. In tokens
-	// mode we have no per-request token estimate here, so the credit is applied
-	// only in requests mode; tokens mode falls back to the scraped load.
-	if inFlight > 0 && d.config.mode != modeTokens {
-		totalInflight += int64(inFlight)
 	}
 
 	if totalCapacity == 0 {

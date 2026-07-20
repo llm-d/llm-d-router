@@ -61,10 +61,6 @@ func TestMain(m *testing.M) {
 type mockSaturationDetector struct {
 	flowcontrol.SaturationDetector
 	SaturationFunc func(ctx context.Context, candidatePods []fwkdl.Endpoint) float64
-	// SaturationWithInFlightFunc, when set, backs SaturationWithInFlight so tests
-	// can assert on the in-flight credit the processor passes. When nil,
-	// SaturationWithInFlight falls back to SaturationFunc (ignoring inFlight).
-	SaturationWithInFlightFunc func(ctx context.Context, candidatePods []fwkdl.Endpoint, inFlight int) float64
 }
 
 func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods []fwkdl.Endpoint) float64 {
@@ -72,15 +68,6 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods [
 		return m.SaturationFunc(ctx, candidatePods)
 	}
 	return 0.0
-}
-
-func (m *mockSaturationDetector) SaturationWithInFlight(
-	ctx context.Context, candidatePods []fwkdl.Endpoint, inFlight int,
-) float64 {
-	if m.SaturationWithInFlightFunc != nil {
-		return m.SaturationWithInFlightFunc(ctx, candidatePods, inFlight)
-	}
-	return m.Saturation(ctx, candidatePods)
 }
 
 // testHarness provides a unified, mock-based testing environment for the Processor. It centralizes all mock state

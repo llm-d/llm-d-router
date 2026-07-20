@@ -257,11 +257,6 @@ func (m *MockSaturationDetector) IsSaturated() bool           { return m.IsSatur
 func (m *MockSaturationDetector) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
 	return m.SaturationV
 }
-func (m *MockSaturationDetector) SaturationWithInFlight(
-	ctx context.Context, endpoints []datalayer.Endpoint, inFlight int,
-) float64 {
-	return m.SaturationV
-}
 
 func (m *MockSaturationDetector) LastCheckTime() time.Time { return time.Time{} }
 

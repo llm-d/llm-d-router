@@ -154,15 +154,6 @@ func (d *benchDetector) Saturation(ctx context.Context, candidates []fwkdl.Endpo
 	return 1.0 // Saturated - forces the Flow Control layer to hold the item.
 }
 
-// SaturationWithInFlight delegates to Saturation; this mock reserves slots via
-// its own atomic counter, so the controller-supplied in-flight credit is not
-// needed here.
-func (d *benchDetector) SaturationWithInFlight(
-	ctx context.Context, candidates []fwkdl.Endpoint, _ int,
-) float64 {
-	return d.Saturation(ctx, candidates)
-}
-
 // alwaysSaturatedDetector simulates a permanently saturated downstream pool.
 type alwaysSaturatedDetector struct {
 	flowcontrol.SaturationDetector
@@ -173,13 +164,6 @@ func (d *alwaysSaturatedDetector) Release() {}
 
 // Saturation permanently returns 1.0 (100% saturated) to ensure requests queue.
 func (d *alwaysSaturatedDetector) Saturation(ctx context.Context, candidates []fwkdl.Endpoint) float64 {
-	return 1.0
-}
-
-// SaturationWithInFlight permanently returns 1.0, matching Saturation.
-func (d *alwaysSaturatedDetector) SaturationWithInFlight(
-	ctx context.Context, candidates []fwkdl.Endpoint, _ int,
-) float64 {
 	return 1.0
 }
 

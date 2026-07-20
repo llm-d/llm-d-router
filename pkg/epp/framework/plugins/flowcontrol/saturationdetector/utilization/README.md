@@ -18,12 +18,19 @@ It relies on a "roofline model", evaluating both the queue depth and the KV cach
 
     EndpointScore = max(QueueDepth / QueueThreshold, KVCacheUsage / KVCacheThreshold)
 
-The global pool saturation is then evaluated across all candidate endpoints as a gradient:
+The global pool saturation is the roofline across all candidate endpoints:
 
-    PoolSaturation = Average(EndpointScore)
+    PoolSaturation = Max(EndpointScore)
 
-**Heterogeneous Deployments:** Because this detector calculates saturation as an unweighted average of individual endpoint scores, it treats all endpoints equally regardless of their physical capacity. In deployments with heterogeneous compute (e.g., mixing H100 and L4 nodes), a small, saturated endpoint has the exact same impact on global backpressure as a massive, saturated endpoint. Contrast this with the Concurrency Detector, which evaluates saturation as a single aggregate fraction, biasing toward larger endpoints.
+The pool is saturated as soon as its hottest endpoint is, so a single overloaded endpoint is not diluted by idle ones.
 *Note: Endpoints with missing or stale metrics are aggressively scored as 100% saturated.*
+
+**Scrape-lag compensation:** `WaitingQueueSize` is scraped on a poller while the Flow Controller's dispatch loop runs far faster, so between two scrapes the queue term is stale-low and the gate would let the controller over-dispatch. When an `inflight-load-producer` is configured, the queue term is corrected by the in-flight requests the scrape does not yet reflect:
+
+    Credit = max(0, InFlightRequests - (WaitingQueueSize + RunningRequestsSize))
+    QueueScore = (WaitingQueueSize + Credit) / QueueThreshold
+
+`InFlightRequests` is the producer's per-endpoint counter, incremented at dispatch and decremented on request completion, so the correction already accounts for requests that returned since the last scrape. Endpoints without the attribute contribute zero credit.
 
 ### Role in Scheduling (The Traffic Shaper)
 The detector implements the `Filter` interface to protect individual endpoints. It removes endpoints from candidate lists if their telemetry is stale, or if they exceed specific safety limits:

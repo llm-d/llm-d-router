@@ -87,22 +87,6 @@ type Processor struct {
 	// it needs no synchronization.
 	poolEmpty bool
 
-	// inFlightCredit counts dispatches issued since the endpoint metrics the gate
-	// is reading were last refreshed. Endpoint metrics are scraped on a poller
-	// (default 50ms) while dispatchCycle runs at ~1ms, so without accounting the
-	// controller would dispatch many requests against a stale-low WaitingQueueSize
-	// before the scrape catches up, overshooting the saturation gate. This credit
-	// is fed to SaturationWithInFlight so the gate holds within one scrape window,
-	// and reset to 0 when a fresher metrics sample lands (see lastMetricsStamp).
-	// Only touched by the Run goroutine -> no synchronization.
-	inFlightCredit int
-
-	// lastMetricsStamp is the freshest endpoint metrics UpdateTime observed on the
-	// previous dispatchCycle. When the newest stamp advances past it, a new scrape
-	// has landed and inFlightCredit is reset (the real WaitingQueueSize now
-	// reflects the dispatches we credited).
-	lastMetricsStamp time.Time
-
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
 	isShuttingDown atomic.Bool
@@ -379,30 +363,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	pool := p.endpointCandidates.Locate(ctx, nil)
 	p.poolEmpty = len(pool) == 0
 
-	// In-flight credit accounting (lag compensation). Endpoint metrics are
-	// scraped on a poller slower than this dispatch loop, so WaitingQueueSize can
-	// be stale-low; without accounting we would over-dispatch within one scrape
-	// window and overshoot the saturation gate. We track dispatches since the
-	// metrics were last refreshed and feed that as extra in-flight load to the
-	// detector. When a fresher metrics sample lands (newest UpdateTime advances),
-	// the real waiting count now reflects those dispatches, so we reset the
-	// credit. An empty pool also resets it (nothing in flight to account for).
-	if p.poolEmpty {
-		p.inFlightCredit = 0
-	} else {
-		var newest time.Time
-		for _, e := range pool {
-			if m := e.GetMetrics(); m != nil && m.UpdateTime.After(newest) {
-				newest = m.UpdateTime
-			}
-		}
-		if newest.After(p.lastMetricsStamp) {
-			p.lastMetricsStamp = newest
-			p.inFlightCredit = 0
-		}
-	}
-
-	saturation := p.saturationDetector.SaturationWithInFlight(ctx, pool, p.inFlightCredit)
+	saturation := p.saturationDetector.Saturation(ctx, pool)
 
 	// Record pool saturation metric
 	metrics.RecordFlowControlPoolSaturation(p.poolName, saturation)
@@ -445,9 +406,6 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 				"flowKey", req.FlowKey(), "requestID", req.ID())
 			continue // Continue to the next band to maximize work conservation.
 		}
-		// Count this gate-passing dispatch as in-flight until the next metrics
-		// scrape reflects it (reset in the accounting block above).
-		p.inFlightCredit++
 		return true
 	}
 	return false

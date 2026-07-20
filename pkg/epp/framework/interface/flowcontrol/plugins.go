@@ -124,17 +124,6 @@ type SaturationDetector interface {
 	//   - If Saturation() >= 1.0: Stop dispatching and apply backpressure (buffer requests).
 	//   - If Saturation() < 1.0: Continue dispatching traffic to the pool.
 	Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64
-
-	// SaturationWithInFlight is Saturation with `inFlight` extra requests
-	// attributed to the pool. The FlowController passes the number of
-	// gate-passing dispatches it has issued that are not yet reflected in the
-	// scraped endpoint metrics (endpoint metrics refresh on a poller, typically
-	// slower than the dispatch loop). This lets the detector account for
-	// in-flight-but-not-yet-observed load so the controller does not overshoot
-	// the gate during the metrics-staleness window.
-	//
-	// Implementations MUST satisfy: Saturation(ctx, e) == SaturationWithInFlight(ctx, e, 0).
-	SaturationWithInFlight(ctx context.Context, endpoints []datalayer.Endpoint, inFlight int) float64
 }
 
 // UsageLimitPolicy computes the usage limit of a priority band dynamically.
