@@ -133,6 +133,33 @@ func TestInFlightLoadProducer_Produce(t *testing.T) {
 	require.False(t, ok, "InFlightLoad should not be populated by Produce")
 }
 
+func TestInFlightLoadProducer_ProduceUsesLiteralCachedBlocks(t *testing.T) {
+	t.Parallel()
+
+	// Initialize our load producer.
+	producer := newTestProducer(t)
+	// Disable output token estimation so we can test input tokens cleanly (output = 0).
+	producer.addEstimatedOutputTokens = false
+
+	// Create a stub endpoint representing our model-serving pod.
+	endpoint := newStubSchedulingEndpoint("precise-cache-endpoint")
+	// Inject mock prefix cache information onto this endpoint.
+	// matchBlocks = 1 (weighted), cachedBlockCount = 2 (literal), totalBlocks = 2, blockSizeTokens = 4.
+	endpoint.Put(
+		attrprefix.PrefixCacheMatchInfoDataKey.String(),
+		attrprefix.NewPrefixCacheMatchInfo(1, 2, 4).WithCachedBlockCount(2),
+	)
+
+	// Trigger the Produce logic with an 8-token request.
+	err := producer.Produce(context.Background(), makeTokenRequest("req-precise", 8), []fwksched.Endpoint{endpoint})
+	require.NoError(t, err)
+
+	// Assert the produced output is exactly 0 uncached tokens.
+	value, ok := endpoint.Get(producer.uncachedRequestTokensDk.String())
+	require.True(t, ok)
+	require.Equal(t, int64(0), value.(*attrconcurrency.UncachedRequestTokens).Tokens)
+}
+
 func TestInFlightLoadProducer_Extract(t *testing.T) {
 	t.Parallel()
 
@@ -648,23 +675,27 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_SingleChunk(t *testing.T) {
 }
 
 // TestInFlightLoadProducer_PrefixCacheDiscount verifies that when PrefixCacheMatchInfo
-// is published on the endpoint, the matched prefix is excluded from the tracked input
-// tokens, and that release subtracts the same (discounted) amount.
+// is published on the endpoint, the literal cached prefix is excluded from the tracked
+// input tokens, and that release subtracts the same (discounted) amount.
 func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
 	t.Parallel()
 
+	// Setup the tracker database and context.
 	producer := newTestProducer(t)
 	ctx := context.Background()
 	endpointName := "prefix-cache-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
 	// 8 input tokens. Output = 8 * 1.5 = 12.
-	// With block_size=4, total=2 blocks, matched=1 block (4 tokens cached):
-	//   uncached_input = (2-1)*4 + max(0, 8-2*4) = 4
-	//   total tokens = 4 + 12 = 16
+	// With block_size=4 and total=2 blocks, the tier-weighted match is 1 block,
+	// but both blocks are cached. The tracked total therefore contains only output.
 	endpoint := newStubSchedulingEndpoint(endpointName)
-	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	endpoint.Put(
+		attrprefix.PrefixCacheMatchInfoDataKey.String(),
+		attrprefix.NewPrefixCacheMatchInfo(1, 2, 4).WithCachedBlockCount(2),
+	)
 
+	// Create an 8-token input request (with 12 estimated output tokens).
 	req := makeTokenRequest("req-prefix", 8)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
@@ -673,10 +704,11 @@ func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
 		},
 	}
 
+	// Simulate dispatch (PreRequest Phase) adding request weight to trackers.
 	producer.PreRequest(ctx, req, res)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(16), producer.tokenTracker.get(endpointID),
-		"only uncached input (4) plus output (12) should be tracked")
+	require.Equal(t, int64(12), producer.tokenTracker.get(endpointID),
+		"only output tokens should be tracked for a fully cached input")
 
 	// Release uses the exact stored value, returning to zero.
 	req.SchedulingResult = res
@@ -915,23 +947,95 @@ func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
 	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
 }
 
-func TestUncachedInputTokens_Overestimate(t *testing.T) {
-	// Setup:
-	// inputTokens (estimated) = 5
-	// PrefixCacheMatchInfo: matchBlocks=1, totalBlocks=2, blockSizeTokens=4
-	//   indexedTokens = 2 * 4 = 8
-	//   matchedTokens = 1 * 4 = 4
+func TestUncachedInputTokens(t *testing.T) {
+	t.Parallel()
 
-	endpoint := newStubSchedulingEndpoint("test-ep")
-	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	const key = "prefix-match-info"
+	tests := []struct {
+		name        string
+		inputTokens int64
+		info        datalayer.Cloneable
+		noEndpoint  bool
+		want        int64
+	}{
+		// Case: Missing/nil components should default back to treating the entire prompt as uncached.
+		{name: "nil endpoint", inputTokens: 8, noEndpoint: true, want: 8},
+		{name: "negative input without endpoint", inputTokens: -1, noEndpoint: true, want: 0},
+		{name: "missing prefix information", inputTokens: 8, want: 8},
+		{name: "wrong prefix information type", inputTokens: 8, info: &attrconcurrency.InFlightLoad{}, want: 8},
+		// Case: Literal count differs from weighted match (our big fix for offloaded caches).
+		{
+			name:        "literal count differs from weighted match",
+			inputTokens: 4096,
+			info: attrprefix.NewPrefixCacheMatchInfo(204, 256, 16).
+				WithCachedBlockCount(256),
+			want: 0,
+		},
+		// Case: Partially cached precise prefix.
+		{
+			name:        "partially cached precise prefix",
+			inputTokens: 4096,
+			info: attrprefix.NewPrefixCacheMatchInfo(128, 256, 16).
+				WithCachedBlockCount(192),
+			want: 1024,
+		},
+		// Case: Unindexed tail (prompt length exceeds maximum indexed range).
+		{
+			name:        "unindexed tail",
+			inputTokens: 4096,
+			info: attrprefix.NewPrefixCacheMatchInfo(128, 128, 16).
+				WithCachedBlockCount(128),
+			want: 2048,
+		},
+		{
+			name:        "partial final block",
+			inputTokens: 10,
+			info:        attrprefix.NewPrefixCacheMatchInfo(1, 2, 4),
+			want:        6,
+		},
+		// Case: Backward compatibility test (defaults cached count to match blocks).
+		{
+			name:        "approximate producer compatibility",
+			inputTokens: 4096,
+			info:        attrprefix.NewPrefixCacheMatchInfo(128, 256, 16),
+			want:        2048,
+		},
+		{
+			name:        "invalid block size",
+			inputTokens: 8,
+			info:        attrprefix.NewPrefixCacheMatchInfo(1, 2, 0),
+			want:        8,
+		},
+		// Case: Clamped bounds safety check.
+		{
+			name:        "cached count above total blocks",
+			inputTokens: 8,
+			info: attrprefix.NewPrefixCacheMatchInfo(2, 2, 4).
+				WithCachedBlockCount(3),
+			want: 0,
+		},
+		{
+			name:        "prefix count trusted over smaller estimate",
+			inputTokens: 5,
+			info:        attrprefix.NewPrefixCacheMatchInfo(1, 2, 4),
+			want:        4,
+		},
+	}
 
-	inputTokens := int64(5)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var endpoint fwksched.Endpoint
+			if !tt.noEndpoint {
+				stub := newStubSchedulingEndpoint("test-endpoint")
+				if tt.info != nil {
+					stub.Put(key, tt.info)
+				}
+				endpoint = stub
+			}
 
-	uncached := uncachedInputTokens(endpoint, inputTokens, attrprefix.PrefixCacheMatchInfoDataKey.String())
-
-	// When the prefix cache says 4 tokens are definitely uncached in the indexed portion (8-4),
-	// we trust that over the smaller (approximate) estimate of 5.
-	require.Equal(t, int64(4), uncached, "should trust the prefix cache's uncached count (indexed-matched) over the smaller estimate")
+			require.Equal(t, tt.want, uncachedInputTokens(endpoint, tt.inputTokens, key))
+		})
+	}
 }
 
 func TestInFlightLoadProducer_PanicSafety(t *testing.T) {
