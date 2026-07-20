@@ -1223,7 +1223,7 @@ func (env *moriProxyEnv) send() {
 	env.sendBody(chatCompletionsRequestBody)
 }
 
-// sendBody is send with a caller-supplied request body.
+// sendBody sends a caller-supplied request body.
 func (env *moriProxyEnv) sendBody(body string) {
 	req, err := http.NewRequest(http.MethodPost, env.baseAddr+ChatCompletionsPath, strings.NewReader(body))
 	Expect(err).ToNot(HaveOccurred())
