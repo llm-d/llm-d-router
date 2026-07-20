@@ -37,6 +37,7 @@ func expectedPools() []string {
 // expectAllPoolsExist asserts that the encode, prefill, and decode
 // InferencePools exist in the test namespace.
 func expectAllPoolsExist() {
+	nsName := getNamespace()
 	for _, name := range expectedPools() {
 		pool := &inferenceapi.InferencePool{}
 		key := types.NamespacedName{Namespace: nsName, Name: name}

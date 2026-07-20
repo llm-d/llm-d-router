@@ -45,6 +45,11 @@ jobs:
               - .github/actions/docker-build-and-push/action.yml
               - .github/actions/e2e-runner-setup/action.yml
               - .github/workflows/ci-pr-checks.yaml
+              - '!Dockerfile.coordinator'
+              - '!Makefile.coord.mk'
+              - '!cmd/coordinator/**'
+              - '!pkg/coordinator/**'
+              - '!test/coordinator/**'
             helm:
               - 'config/charts/**'
               - 'hack/verify-helm.sh'

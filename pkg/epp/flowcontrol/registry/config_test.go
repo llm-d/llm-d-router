@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
@@ -88,7 +87,6 @@ func TestNewConfig(t *testing.T) {
 				assert.Equal(t, DefaultOrderingPolicyRef, band.OrderingPolicy.TypedName().Name)
 				require.NotNil(t, band.FairnessPolicy)
 				assert.Equal(t, DefaultFairnessPolicyRef, band.FairnessPolicy.TypedName().Name)
-				assert.Equal(t, defaultQueue, band.Queue)
 				assert.Equal(t, defaultPriorityBandMaxBytes, band.MaxBytes)
 			},
 		},
@@ -116,7 +114,6 @@ func TestNewConfig(t *testing.T) {
 			assertion: func(t *testing.T, cfg *Config) {
 				require.Contains(t, cfg.PriorityBands, 1)
 				band := cfg.PriorityBands[1]
-				assert.Equal(t, defaultQueue, band.Queue, "Queue should be defaulted even for raw struct inputs")
 				assert.NotNil(t, band.FairnessPolicy)
 				assert.Equal(t, DefaultFairnessPolicyRef, band.FairnessPolicy.TypedName().Name)
 				assert.Equal(t, DefaultOrderingPolicyRef, band.OrderingPolicy.TypedName().Name)
@@ -133,7 +130,6 @@ func TestNewConfig(t *testing.T) {
 				assert.Len(t, cfg.PriorityBands, 1, "PriorityBands should contain only the always-injected priority 0")
 				assert.Contains(t, cfg.PriorityBands, 0, "PriorityBands should contain priority 0")
 				require.NotNil(t, cfg.DefaultPriorityBand, "DefaultPriorityBand template must be initialized")
-				assert.Equal(t, defaultQueue, cfg.DefaultPriorityBand.Queue)
 				assert.NotNil(t, cfg.DefaultPriorityBand.FairnessPolicy)
 				assert.Equal(t, DefaultFairnessPolicyRef, cfg.DefaultPriorityBand.FairnessPolicy.TypedName().Name)
 			},
@@ -142,13 +138,13 @@ func TestNewConfig(t *testing.T) {
 			name: "ShouldRespectCustomDefaultPriorityBand",
 			opts: []ConfigOption{
 				WithDefaultPriorityBand(&PriorityBandConfig{
-					Queue: "CustomQueue",
+					MaxBytes: 4242,
 				}),
 			},
 			defaults: newTestPriorityBandPolicyDefaults(),
 			assertion: func(t *testing.T, cfg *Config) {
 				require.NotNil(t, cfg.DefaultPriorityBand)
-				assert.Equal(t, queue.RegisteredQueueName("CustomQueue"), cfg.DefaultPriorityBand.Queue)
+				assert.Equal(t, uint64(4242), cfg.DefaultPriorityBand.MaxBytes)
 				assert.NotNil(t, cfg.DefaultPriorityBand.FairnessPolicy)
 				assert.Equal(t, DefaultFairnessPolicyRef, cfg.DefaultPriorityBand.FairnessPolicy.TypedName().Name)
 				assert.Equal(t, DefaultOrderingPolicyRef, cfg.DefaultPriorityBand.OrderingPolicy.TypedName().Name)
@@ -265,36 +261,16 @@ func TestNewPriorityBandConfig(t *testing.T) {
 			Name: roundrobin.RoundRobinFairnessPolicyType,
 		},
 	}
-	mockFCFSOrdering := &fwkfcmocks.MockOrderingPolicy{
-		TypedNameV: plugin.TypedName{
-			Type: fcfs.FCFSOrderingPolicyType,
-			Name: fcfs.FCFSOrderingPolicyType,
-		},
-	}
-	mockGSFairness := &fwkfcmocks.MockFairnessPolicy{
-		TypedNameV: plugin.TypedName{
-			Type: globalstrict.GlobalStrictFairnessPolicyType,
-			Name: globalstrict.GlobalStrictFairnessPolicyType,
-		},
-	}
 
 	t.Run("ShouldApplyUserOverrides", func(t *testing.T) {
 		t.Parallel()
-		pb, err := NewPriorityBandConfig(1, defaults, WithQueue(queue.RegisteredQueueName("CustomQueue")), WithBandMaxBytes(999), WithOrderingPolicy(mockEDFOrdering), WithFairnessPolicy(mockRRFairness))
+		pb, err := NewPriorityBandConfig(1, defaults, WithBandMaxBytes(999), WithOrderingPolicy(mockEDFOrdering), WithFairnessPolicy(mockRRFairness))
 		require.NoError(t, err)
-		assert.Equal(t, queue.RegisteredQueueName("CustomQueue"), pb.Queue)
 		assert.Equal(t, uint64(999), pb.MaxBytes)
 		require.NotNil(t, pb.OrderingPolicy)
 		assert.Equal(t, edf.EDFOrderingPolicyType, pb.OrderingPolicy.TypedName().Name)
 		require.NotNil(t, pb.FairnessPolicy)
 		assert.Equal(t, roundrobin.RoundRobinFairnessPolicyType, pb.FairnessPolicy.TypedName().Name)
-	})
-
-	t.Run("ShouldError_OnInvalidOptions", func(t *testing.T) {
-		t.Parallel()
-		pb, err := NewPriorityBandConfig(1, defaults, WithQueue(""))
-		assert.Error(t, err, "Should error when setting empty queue")
-		assert.Nil(t, pb)
 	})
 
 	t.Run("ShouldError_WhenNilPolicyProvided", func(t *testing.T) {
@@ -303,18 +279,6 @@ func TestNewPriorityBandConfig(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "fairness policy cannot be nil")
 		assert.Nil(t, pb)
-	})
-
-	t.Run("ShouldDefaultToPriorityQueue_RegardlessOfPolicy", func(t *testing.T) {
-		t.Parallel()
-		// Every flow now uses the single priority queue, regardless of ordering policy.
-		edfBand, err := NewPriorityBandConfig(10, defaults, WithOrderingPolicy(mockEDFOrdering), WithFairnessPolicy(mockGSFairness))
-		require.NoError(t, err)
-		assert.Equal(t, queue.RegisteredQueueName(queue.PriorityQueueName), edfBand.Queue)
-
-		fcfsBand, err := NewPriorityBandConfig(20, defaults, WithOrderingPolicy(mockFCFSOrdering), WithFairnessPolicy(mockGSFairness))
-		require.NoError(t, err)
-		assert.Equal(t, queue.RegisteredQueueName(queue.PriorityQueueName), fcfsBand.Queue)
 	})
 }
 

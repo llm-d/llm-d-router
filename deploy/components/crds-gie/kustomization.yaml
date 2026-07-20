@@ -3,6 +3,7 @@
 #
 # **Warning**: CRDs are cluster-level, so in a shared development environment
 # this needs to be done in a controlled and communicated manner.
+# Also used by the coordinator (deploy/coordinator/environments/dev/epd-pools).
 # ------------------------------------------------------------------------------
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

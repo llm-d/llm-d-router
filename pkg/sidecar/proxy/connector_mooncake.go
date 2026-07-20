@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the other timeout on vllm
@@ -88,13 +89,8 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		requestFieldDoRemoteDecode:  true,
 		requestFieldTransferID:      transferID,
 	}
-	// update fields from original body
-	prefillData[requestFieldStream] = false // return asap.
-	delete(prefillData, requestFieldStreamOptions)
-	prefillData[requestFieldMaxTokens] = 1
-	if _, ok := prefillData[requestFieldMaxCompletionTokens]; ok {
-		prefillData[requestFieldMaxCompletionTokens] = 1
-	}
+	// update fields from original body; return asap.
+	reqcommon.PrimeSingleTokenRequest(prefillData, requestData)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
