@@ -31,8 +31,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
-	"github.com/llm-d/llm-d-router/test/integration"
 )
 
 // TestSessionAffinityFilter_RequestFlow validates the end-to-end session
@@ -147,7 +147,7 @@ func sendSessionRequest(t *testing.T, h *TestHarness, sessionToken string) (endp
 		reqHeaders[sessionutil.DefaultHeader] = sessionToken
 	}
 
-	requests := integration.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
+	requests := fwkepp.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
 	requests = append(requests, ReqResponseOnly(
 		map[string]string{"content-type": "application/json", "status": "200"},
 		`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"assistant"}}],"model":"`+modelMyModelTarget+`","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":5}}`,
@@ -158,7 +158,7 @@ func sendSessionRequest(t *testing.T, h *TestHarness, sessionToken string) (endp
 	require.NoError(t, err)
 
 	// RequestHeaders + RequestBody + ResponseHeaders + ResponseBody -> 4 responses.
-	responses, err := integration.StreamedRequest(t, client, requests, 4)
+	responses, err := fwkepp.StreamedRequest(t, client, requests, 4)
 	require.NoError(t, err)
 	require.Len(t, responses, 4)
 
@@ -327,7 +327,7 @@ func sendSessionRequestGetHeader(t *testing.T, h *TestHarness, decodeToken, pref
 		reqHeaders["x-session-token-prefill"] = prefillToken
 	}
 
-	requests := integration.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
+	requests := fwkepp.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
 	requests = append(requests, ReqResponseOnly(
 		map[string]string{"content-type": "application/json", "status": "200"},
 		`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"assistant"}}],"model":"`+modelMyModelTarget+`","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":5}}`,
@@ -336,7 +336,7 @@ func sendSessionRequestGetHeader(t *testing.T, h *TestHarness, decodeToken, pref
 	client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(t.Context())
 	require.NoError(t, err)
 
-	responses, err := integration.StreamedRequest(t, client, requests, 4)
+	responses, err := fwkepp.StreamedRequest(t, client, requests, 4)
 	require.NoError(t, err)
 	require.Len(t, responses, 4)
 
@@ -512,7 +512,7 @@ func newRoutedRequest(extraHeaders map[string]string) []*extProcPb.ProcessingReq
 	for k, v := range extraHeaders {
 		reqHeaders[k] = v
 	}
-	return integration.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
+	return fwkepp.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
 }
 
 func streamRequests(t *testing.T, h *TestHarness, requests []*extProcPb.ProcessingRequest, expected int) []*extProcPb.ProcessingResponse {
@@ -521,7 +521,7 @@ func streamRequests(t *testing.T, h *TestHarness, requests []*extProcPb.Processi
 	client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(t.Context())
 	require.NoError(t, err)
 
-	responses, err := integration.StreamedRequest(t, client, requests, expected)
+	responses, err := fwkepp.StreamedRequest(t, client, requests, expected)
 	require.NoError(t, err)
 	require.Len(t, responses, expected)
 	return responses
