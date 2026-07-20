@@ -140,7 +140,6 @@ func NewMockQueueItemAccessor(
 // It is used for tests that require static, predictable return values from a queue accessor.
 // For complex, stateful queue behavior, use the mock in ../../contracts/mocks.MockManagedQueue.
 type MockFlowQueueAccessor struct {
-	NameV           string
 	LenV            int
 	ByteSizeV       uint64
 	PeekV           flowcontrol.QueueItemAccessor
@@ -148,7 +147,6 @@ type MockFlowQueueAccessor struct {
 	OrderingPolicyV flowcontrol.OrderingPolicy
 }
 
-func (m *MockFlowQueueAccessor) Name() string                               { return m.NameV }
 func (m *MockFlowQueueAccessor) Len() int                                   { return m.LenV }
 func (m *MockFlowQueueAccessor) ByteSize() uint64                           { return m.ByteSizeV }
 func (m *MockFlowQueueAccessor) OrderingPolicy() flowcontrol.OrderingPolicy { return m.OrderingPolicyV }
