@@ -169,7 +169,12 @@ strictly greater than the victim head's priority. Notes:
   configured policy taking effect, bounded per epoch by the cap and re-checked against live
   demand at each decision.
 - Strict priority dominance (`demand priority > victim priority`) prevents same-band churn: the
-  gate must never re-grant at priority *p* what the controller just revoked at priority *p*.
+  gate must never re-grant at priority *p* what the controller just revoked at priority *p*. The
+  check against the victim head does not cover multi-revocation decisions on its own: later
+  victims come off the heap at priorities at or above the head's, so with multiple sheddable
+  bands a second victim can sit at the demand band's own priority. The demand band's priority is
+  therefore also passed to the actuator as a strict upper bound on victim priority for the
+  decision.
 - There is no deadline, SLO, or wait-time heuristic. Blocked demand is necessary and sufficient.
   Urgency modeling is future policy work, not runtime work.
 
@@ -221,10 +226,14 @@ Design notes:
 - `deficit` aims just below the blocked band's ceiling: enough that the dispatch gate resumes for
   the band whose demand justified the destruction, and no deeper. The gate and the controller
   form a hysteresis pair around the same gauge; this coupling rule keeps them from fighting.
-- `credit` is a crude mean-footprint estimate. It is, however, self-consistent in the gauge's
-  units, and estimation error is bounded by the per-decision cap. The future capacity ledger
-  replaces `credit` with exact per-lease footprints; nothing else in this loop changes (see
-  Future Work).
+- `credit` is a crude mean-footprint estimate, and a biased one: the mean is over the whole
+  tracked population, while victims are drawn newest-first from the sheddable subpopulation,
+  which frees the least capacity per revocation (see Victim selection). The capacity actually
+  freed per revocation therefore runs below `credit`, and sizing errs toward under-eviction,
+  the recoverable direction: the next decision recomputes the deficit against live state.
+  Estimation error in either direction is bounded by the per-decision cap. The future capacity
+  ledger replaces `credit` with exact per-lease footprints; nothing else in this loop changes
+  (see Future Work).
 - Sizing is never denominated in request counts (e.g. "evict one per queued request"). Queued and
   in-flight requests have unrelated footprints; count-based sizing evicts proportionally to demand
   burst size rather than to the capacity actually needed.
@@ -359,8 +368,8 @@ units, occupied by sheddable leases, with a configurable lag between a lease's c
 termination and the freed capacity appearing in the saturation gauge. The reclamation loop under
 test is the real one; only the pool and sensor are synthetic, which means the actuator chain of
 validity condition 3 is out of scope here and is covered by the end-to-end
-acceptance criteria stated there. The simulation harness is part of the implementation work
-that follows this proposal and makes these results reproducible when it lands. Evaluated across
+acceptance criteria stated there. The simulation harness is published as a companion draft PR
+to this proposal and makes these results reproducible. Evaluated across
 sensor-lag profiles, grace values, per-decision caps, and burst shapes (single urgent request,
 sticky batch, sustained arrivals), with eviction-disabled baselines:
 
