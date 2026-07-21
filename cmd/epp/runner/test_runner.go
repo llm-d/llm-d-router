@@ -19,6 +19,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"net"
 
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -33,8 +34,9 @@ import (
 // NewTestRunnerSetup creates a setup runner dedicated for integration tests. When mockDataSource is
 // non-nil, its plugin type is registered as a factory that returns the provided instance, so the
 // YAML config can reference it by type name and the runner wires it into the endpoint factory
-// automatically.
-func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, mockDataSource fwkdl.DataSource) (*Runner, ctrl.Manager, datastore.Datastore, error) {
+// automatically. When grpcListener is non-nil the ext_proc server serves on it and
+// opts.GRPCPort is ignored.
+func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, mockDataSource fwkdl.DataSource, grpcListener net.Listener) (*Runner, ctrl.Manager, datastore.Datastore, error) {
 	runner := NewRunner()
 
 	if mockDataSource != nil {
@@ -61,6 +63,7 @@ func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.O
 	if err != nil {
 		return runner, manager, ds, err
 	}
+	runner.serverRunner.GrpcListener = grpcListener
 
 	// Production runs the ext_proc and health servers on a context that outlives
 	// the manager (see Runner.runWithGracefulShutdown). Integration tests drive

@@ -20,6 +20,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -221,11 +222,16 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 		otel.SetTracerProvider(tp)
 	}
 
-	// defaultEppServerOptions picks free ports (GetFreePort) that the manager binds a
-	// moment later. The OS can hand a freed port to another process in that window, so
-	// the bind intermittently fails with "address already in use" (issue #1066). Re-roll
-	// the ports and restart the manager on that specific failure, bounded so a genuine
-	// bind bug still fails loud.
+	// Reserve the ext_proc port once, up front, and keep the listener bound for the
+	// lifetime of the test: the server serves on this listener instead of binding a
+	// port number chosen earlier, so no other process can take it in between (issue
+	// #1066). The reservation is outside the retry closure because a held port cannot
+	// be stolen and so never needs re-rolling.
+	lis, err := testutils.ReserveListener()
+	require.NoError(t, err, "failed to reserve ext_proc port")
+	t.Cleanup(func() { _ = lis.Close() })
+	grpcPort := lis.Addr().(*net.TCPAddr).Port
+
 	var (
 		eppOptions *eppServer.Options
 		runner     *eppRunner.Runner
@@ -250,7 +256,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 			Type: mockDataSourceType,
 			Name: mockDataSourceType,
 		})
-		r, mgr, ds, err := eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, mockDataSource)
+		r, mgr, ds, err := eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, mockDataSource, lis)
 		if err != nil {
 			// Not a port-bind race; surfaced as-is (RetryOnAddrInUse will not retry it).
 			return fmt.Errorf("failed to create manager: %w", err)
@@ -274,10 +280,10 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 			}
 		}()
 
-		// Wait until the ext-proc server binds, or the manager reports an early bind
-		// failure. On failure, stop this attempt's manager and wait for its listeners to
-		// release before the next GetFreePort round.
-		if err := integration.WaitExtProcReady(eppOptions.GRPCPort, mgrErr); err != nil {
+		// Wait until the ext-proc server starts serving, or the manager reports an early
+		// failure. On failure, stop this attempt's manager and wait for it to release
+		// its listeners before retrying.
+		if err := integration.WaitExtProcReady(grpcPort, mgrErr); err != nil {
 			mgrCancel()
 			<-mgrDone
 			return err
@@ -292,7 +298,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 	extProcClient, conn := integration.ExtProcServerClient(
 		mgrCtx,
 		t,
-		eppOptions.GRPCPort,
+		grpcPort,
 		logger,
 	)
 
@@ -343,9 +349,8 @@ func defaultEppServerOptions(t *testing.T, namespace, configText string) *eppSer
 	eppOptions.PoolNamespace = namespace
 	eppOptions.ConfigText = configText
 
-	grpcPort, err := testutils.GetFreePort()
-	require.NoError(t, err)
-	eppOptions.GRPCPort = grpcPort
+	// GRPCPort is left at its default: the harness hands the ext_proc server a
+	// pre-bound listener, which takes precedence over the port.
 
 	// No test dials the health server, so let the kernel assign the port: a
 	// port 0 bind cannot lose a race to another listener.
