@@ -122,7 +122,7 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		o(&cfg)
 	}
 	if cfg.useNodeAddress && cfg.portOverride == 0 {
-		return nil, fmt.Errorf("WithUseNodeAddress requires a non-zero WithPortOverride")
+		return nil, errors.New("WithUseNodeAddress requires a non-zero WithPortOverride")
 	}
 
 	cl := &client{
