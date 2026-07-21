@@ -218,15 +218,9 @@ func setupRegistry(
 	return reg
 }
 
-// setupBenchmarkHarness creates the standard SUT environment.
-func setupBenchmarkHarness(
-	ctx context.Context,
-	b *testing.B,
-	p priorityLevels,
-	limit egressConcurrencyLimit,
-	customDetector testDetector,
-	customCfg *controller.Config,
-) (*controller.FlowController, testDetector) {
+// buildPolicyDefaults constructs the standard fairness (global-strict) and ordering (FCFS) policy
+// defaults used by all benchmark registries.
+func buildPolicyDefaults(ctx context.Context, b *testing.B) registry.PriorityBandPolicyDefaults {
 	b.Helper()
 	handle := testutils.NewTestHandle(ctx)
 
@@ -242,11 +236,24 @@ func setupBenchmarkHarness(
 	}
 	handle.AddPlugin(registry.DefaultOrderingPolicyRef, oPolicy)
 
-	defaults := registry.PriorityBandPolicyDefaults{
+	return registry.PriorityBandPolicyDefaults{
 		OrderingPolicy: oPolicy.(flowcontrol.OrderingPolicy),
 		FairnessPolicy: fPolicy.(flowcontrol.FairnessPolicy),
 	}
+}
 
+// setupBenchmarkHarness creates the standard SUT environment.
+func setupBenchmarkHarness(
+	ctx context.Context,
+	b *testing.B,
+	p priorityLevels,
+	limit egressConcurrencyLimit,
+	customDetector testDetector,
+	customCfg *controller.Config,
+) (*controller.FlowController, testDetector) {
+	b.Helper()
+
+	defaults := buildPolicyDefaults(ctx, b)
 	reg := setupRegistry(b, defaults, p)
 
 	detector := customDetector
