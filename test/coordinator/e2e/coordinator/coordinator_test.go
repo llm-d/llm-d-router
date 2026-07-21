@@ -93,38 +93,6 @@ const inlineImageDataURI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAA
 // that the coordinator logs show all expected pipeline steps completed, then
 // tears the workload down. expectedImages is the number of images in the
 // request; when > 0 the encoder log assertions are also verified.
-// dumpDeploymentLogs writes a deployment's container logs to the Ginkgo output
-// for post-mortem diagnosis. A failure to fetch is reported inline, not fatal.
-func dumpDeploymentLogs(nsName, deployment, container string) {
-	args := []string{"logs", "deployment/" + deployment, "-c", container, "--namespace=" + nsName}
-	if k8sContext != "" {
-		args = append(args, "--context="+k8sContext)
-	}
-	out, err := exec.Command("kubectl", args...).CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- %s logs (kubectl error: %v) ---\n%s\n---\n", deployment, err, string(out))
-		return
-	}
-	fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- %s logs ---\n%s\n---\n", deployment, string(out))
-}
-
-// dumpEnvoyClusters writes Envoy's admin /clusters (resolved endpoints and health
-// per cluster) to the Ginkgo output. Best-effort: any error is reported inline,
-// and it yields nothing if the envoy image lacks a usable HTTP client.
-func dumpEnvoyClusters(nsName string) {
-	args := []string{"exec", "deployment/envoy", "-c", "envoy", "--namespace=" + nsName}
-	if k8sContext != "" {
-		args = append(args, "--context="+k8sContext)
-	}
-	args = append(args, "--", "curl", "-s", "http://localhost:19000/clusters")
-	out, err := exec.Command("kubectl", args...).CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- envoy /clusters (kubectl error: %v) ---\n%s\n---\n", err, string(out))
-		return
-	}
-	fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- envoy /clusters ---\n%s\n---\n", string(out))
-}
-
 func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages int) {
 	nsName := getNamespace()
 	var (
@@ -153,19 +121,23 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 		testutils.DeleteObjects(testConfig, encodePool, nsName)
 	})
 
-	// Dump coordinator and EPP logs on failure, or always when
-	// E2E_PRINT_COORDINATOR_LOGS is set. Registered second → runs first (LIFO),
-	// so the deployments still exist.
+	// Dump coordinator logs on failure, or always when E2E_PRINT_COORDINATOR_LOGS is
+	// set. Registered second → runs first (LIFO), so the deployment still exists.
 	ginkgo.DeferCleanup(func() {
 		if !ginkgo.CurrentSpecReport().Failed() && !printCoordinatorLogs {
 			return
 		}
-		dumpDeploymentLogs(nsName, "llm-d-coordinator", "coordinator")
-		dumpDeploymentLogs(nsName, eppName+"-encode", "epp")
-		dumpDeploymentLogs(nsName, eppName+"-prefill", "epp")
-		dumpDeploymentLogs(nsName, eppName+"-decode", "epp")
-		dumpDeploymentLogs(nsName, "envoy", "envoy")
-		dumpEnvoyClusters(nsName)
+		args := []string{"logs", "deployment/llm-d-coordinator",
+			"-c", "coordinator", "--namespace=" + nsName}
+		if k8sContext != "" {
+			args = append(args, "--context="+k8sContext)
+		}
+		out, err := exec.Command("kubectl", args...).CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- coordinator logs (kubectl error: %v) ---\n%s\n---\n", err, string(out))
+		} else {
+			fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- coordinator logs ---\n%s\n---\n", string(out))
+		}
 	})
 
 	// Pools first so each EPP can resolve its --pool-name.

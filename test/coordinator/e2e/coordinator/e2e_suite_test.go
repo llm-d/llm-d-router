@@ -97,9 +97,10 @@ var (
 
 	readyTimeout = env.GetEnvDuration("READY_TIMEOUT", defaultReadyTimeout, ginkgo.GinkgoLogr)
 
-	portForwardSessions []*gexec.Session
-	rendererObjects     []string
-	createdNameSpace    bool
+	portForwardSessions  []*gexec.Session
+	rendererObjects      []string
+	stableServiceObjects []string
+	createdNameSpace     bool
 )
 
 func TestCoordinatorE2E(t *testing.T) {
@@ -131,6 +132,10 @@ var _ = ginkgo.BeforeSuite(func() {
 	}
 
 	rendererObjects = createRenderer()
+
+	// Coordinator and EPP Services are created once and kept stable across specs
+	// so Envoy's STRICT_DNS clusters never have to re-resolve a rotated ClusterIP.
+	stableServiceObjects = createStableServices()
 })
 
 var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
@@ -147,6 +152,9 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 	nsName := getNamespace()
 	if len(rendererObjects) > 0 {
 		testutils.DeleteObjects(testConfig, rendererObjects, nsName)
+	}
+	if len(stableServiceObjects) > 0 {
+		testutils.DeleteObjects(testConfig, stableServiceObjects, nsName)
 	}
 	for _, session := range portForwardSessions {
 		session.Terminate()
