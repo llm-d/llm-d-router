@@ -60,6 +60,7 @@ type processorFactory func(
 	cleanupSweepInterval time.Duration,
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
+	reclamation *internal.ReclamationController,
 ) processor
 
 var _ processor = &internal.Processor{}
@@ -105,6 +106,11 @@ type Deps struct {
 	UsageLimitPolicy   flowcontrol.UsageLimitPolicy
 	Clock              clock.WithTicker
 	ProcessorFactory   processorFactory
+
+	// InFlightEvictor enables demand-driven in-flight eviction when Config.EnableEviction is set.
+	// Satisfied by *eviction.RequestEvictor. The FlowController registers the reclamation
+	// controller's Confirm as the evictor's eviction-terminated listener.
+	InFlightEvictor internal.InFlightEvictor
 }
 
 // NewFlowController creates and starts a new FlowController instance.
@@ -147,6 +153,7 @@ func NewFlowController(
 			cleanupSweepInterval time.Duration,
 			enqueueChannelBufferSize int,
 			logger logr.Logger,
+			reclamation *internal.ReclamationController,
 		) processor {
 			return internal.NewProcessor(
 				ctx,
@@ -160,10 +167,34 @@ func NewFlowController(
 				cleanupSweepInterval,
 				enqueueChannelBufferSize,
 				logger,
+				reclamation,
 			)
 		}
 	} else {
 		fc.processorFactory = deps.ProcessorFactory
+	}
+
+	// Demand-driven in-flight eviction is active only when both the config enables it and the
+	// eviction plumbing was wired in. The reclamation controller's Confirm becomes the evictor's
+	// eviction-terminated listener, closing the confirmation loop.
+	var reclamation *internal.ReclamationController
+	if config.EnableEviction && deps.InFlightEvictor != nil {
+		reclamation = internal.NewReclamationController(
+			internal.ReclamationConfig{
+				MaxRevocationsPerDecision: config.MaxRevocationsPerDecision,
+				ConfirmationGrace:         config.EvictionConfirmationGrace,
+				ConfirmationTimeout:       config.EvictionConfirmationTimeout,
+			},
+			deps.InFlightEvictor,
+			deps.Clock,
+			fc.logger,
+			poolName,
+		)
+		deps.InFlightEvictor.SetEvictionTerminatedListener(reclamation.Confirm)
+		fc.logger.V(logutil.DEFAULT).Info("Demand-driven in-flight eviction enabled.",
+			"maxRevocationsPerDecision", config.MaxRevocationsPerDecision,
+			"confirmationGrace", config.EvictionConfirmationGrace,
+			"confirmationTimeout", config.EvictionConfirmationTimeout)
 	}
 
 	// Construct a new worker, but do not start its goroutine yet.
@@ -178,6 +209,7 @@ func NewFlowController(
 		fc.config.ExpiryCleanupInterval,
 		fc.config.EnqueueChannelBufferSize,
 		fc.logger,
+		reclamation,
 	)
 
 	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor.")

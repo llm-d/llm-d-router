@@ -75,6 +75,10 @@ type Processor struct {
 	cleanupSweepInterval time.Duration
 	logger               logr.Logger
 
+	// reclamation, when non-nil, enables demand-driven in-flight eviction on HoL blocking.
+	// See docs/flow-control-eviction.md.
+	reclamation *ReclamationController
+
 	// lifecycleCtx controls the processor's lifetime. Monitored by Submit* methods for safe shutdown.
 	lifecycleCtx context.Context
 
@@ -106,6 +110,7 @@ func NewProcessor(
 	cleanupSweepInterval time.Duration,
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
+	reclamation *ReclamationController,
 ) *Processor {
 	return &Processor{
 		registry:             registry,
@@ -119,6 +124,7 @@ func NewProcessor(
 		logger:               logger,
 		lifecycleCtx:         ctx,
 		enqueueChan:          make(chan *FlowItem, enqueueChannelBufferSize),
+		reclamation:          reclamation,
 	}
 }
 
@@ -377,6 +383,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		if saturation >= usageLimit {
 			p.logger.V(logutil.DEBUG).Info("Priority band is saturated; enforcing HoL blocking.",
 				"priority", priority, "saturation", saturation, "usageLimit", usageLimit)
+			if p.reclamation != nil {
+				p.maybeReclaim(ctx, saturation, priorities, ceilings, i)
+			}
 			// Stop the dispatch cycle entirely to respect strict policy decision and prevent priority inversion where
 			// lower-priority work might exacerbate the saturation affecting high-priority work.
 			return false

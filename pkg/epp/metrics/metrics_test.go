@@ -1460,3 +1460,33 @@ func TestInferenceModelRewriteDecisionsTotalMetric(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1.0, valNew)
 }
+
+func TestFlowControlEvictionMetrics(t *testing.T) {
+	RecordFlowControlRevocationsIssued("pool-evict", "10", 2)
+	RecordFlowControlRevocations("pool-evict", RevocationOutcomeConfirmed, 1)
+	RecordFlowControlRevocations("pool-evict", RevocationOutcomeTimedOut, 1)
+	RecordFlowControlReclaimTarget("pool-evict", 0.1)
+	RecordFlowControlPendingReclaim("pool-evict", 0.05)
+	RecordFlowControlRevocationConfirmationDuration("pool-evict", 5*time.Millisecond)
+
+	for name, testdata := range map[string]string{
+		"llm_d_epp_flow_control_revocations_issued_total": "testdata/llm_d_flow_control_revocations_issued_metric",
+		"llm_d_epp_flow_control_revocations_total":        "testdata/llm_d_flow_control_revocations_metric",
+		"llm_d_epp_flow_control_reclaim_target":           "testdata/llm_d_flow_control_reclaim_target_metric",
+		"llm_d_epp_flow_control_pending_reclaim":          "testdata/llm_d_flow_control_pending_reclaim_metric",
+	} {
+		want, err := os.Open(testdata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer want.Close()
+		if err := promtestutil.GatherAndCompare(metrics.Registry, want, name); err != nil {
+			t.Error(err)
+		}
+	}
+
+	if got := promtestutil.CollectAndCount(llmdFlowControlRevocationConfirmationDuration,
+		"llm_d_epp_flow_control_revocation_confirmation_seconds"); got != 1 {
+		t.Errorf("confirmation duration histogram series = %d, want 1", got)
+	}
+}

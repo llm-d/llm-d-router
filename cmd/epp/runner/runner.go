@@ -56,8 +56,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fccontroller "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
+	fceviction "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
 	fcregistry "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
@@ -73,6 +75,8 @@ import (
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	evictfiltering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/filtering"
+	evictordering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/ordering"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	programaware "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/program-aware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
@@ -451,9 +455,12 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
-	endpointCandidates, admissionController, priorityBandControlPlane := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+	endpointCandidates, admissionController, priorityBandControlPlane, requestEvictor := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	if requestEvictor != nil {
+		director.SetRequestEvictor(requestEvictor)
+	}
 
 	serverRunner := &runserver.ExtProcServerRunner{
 		GrpcPort:                         opts.GRPCPort,
@@ -473,6 +480,9 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
+	}
+	if requestEvictor != nil {
+		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
 
 	if err := serverRunner.SetupWithManager(mgr); err != nil {
@@ -883,28 +893,87 @@ func (r *Runner) initAdmissionControl(
 	opts *runserver.Options,
 	eppConfig *config.Config,
 	endpointCandidates contracts.EndpointCandidates,
-) (contracts.EndpointCandidates, requestcontrol.AdmissionController, contracts.PriorityBandControlPlane) {
+) (contracts.EndpointCandidates, requestcontrol.AdmissionController, contracts.PriorityBandControlPlane, *fceviction.RequestEvictor) {
 	if !r.featureGates[flowcontrol.FeatureGate] {
 		setupLog.Info("Experimental Flow Control layer is disabled, using legacy admission control")
 		return endpointCandidates,
 			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates),
+			nil,
 			nil
 	}
 	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
 	setupLog.Info("Initializing experimental Flow Control layer")
 	registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
-	fc := fccontroller.NewFlowController(
-		ctx,
-		opts.PoolName,
-		eppConfig.FlowControlConfig.Controller,
-		fccontroller.Deps{
-			Registry:           registry,
-			SaturationDetector: eppConfig.SaturationDetector,
-			EndpointCandidates: endpointCandidates,
-			UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
-		},
-	)
-	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName), registry
+
+	deps := fccontroller.Deps{
+		Registry:           registry,
+		SaturationDetector: eppConfig.SaturationDetector,
+		EndpointCandidates: endpointCandidates,
+		UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
+	}
+
+	var requestEvictor *fceviction.RequestEvictor
+	if eppConfig.FlowControlConfig.Controller.EnableEviction {
+		var err error
+		requestEvictor, err = buildRequestEvictor()
+		if err != nil {
+			setupLog.Error(err, "Failed to build eviction plumbing; in-flight eviction disabled")
+		} else {
+			deps.InFlightEvictor = requestEvictor
+			grace := deriveEvictionConfirmationGrace(eppConfig.SaturationDetector, opts)
+			eppConfig.FlowControlConfig.Controller.EvictionConfirmationGrace = grace
+			setupLog.Info("In-flight eviction plumbing initialized",
+				"filter", evictfiltering.SheddableFilterType,
+				"ordering", evictordering.PriorityThenTimeOrderingType,
+				"confirmationGrace", grace)
+		}
+	}
+
+	fc := fccontroller.NewFlowController(ctx, opts.PoolName, eppConfig.FlowControlConfig.Controller, deps)
+	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName), registry, requestEvictor
+}
+
+const (
+	// evictionEngineReclaimBudget covers the engine-side abort and KV garbage-collection time
+	// between a revoked request's stream termination and the freed capacity appearing in scraped
+	// metrics.
+	evictionEngineReclaimBudget = 250 * time.Millisecond
+	// evictionLeadingSensorGrace covers scheduling jitter for sensors whose gauge updates in the
+	// same event chain as the confirmation (a few dispatch ticks).
+	evictionLeadingSensorGrace = 10 * time.Millisecond
+)
+
+// deriveEvictionConfirmationGrace computes the reclamation pacing grace from the paired saturation
+// detector's confirmation-to-visibility lag. The grace is a property of the sensor, not a
+// preference, so it is derived rather than configured (see docs/flow-control-eviction.md).
+func deriveEvictionConfirmationGrace(detector fwkfc.SaturationDetector, opts *runserver.Options) time.Duration {
+	if detector != nil && detector.TypedName().Type == concurrency.ConcurrencyDetectorType {
+		// The concurrency detector's counters decrement when the stream terminates: the gauge leads
+		// physical reclamation, and only dispatch-loop jitter separates confirmation from visibility.
+		return evictionLeadingSensorGrace
+	}
+	// Scraped sensors (utilization detector, or any custom detector, conservatively): the freed
+	// capacity is visible only after the engine reclaims it and the next non-stale scrape lands.
+	return opts.RefreshMetricsInterval + opts.MetricsStalenessThreshold + evictionEngineReclaimBudget
+}
+
+// buildRequestEvictor assembles the in-flight eviction plumbing: the victim filter and ordering
+// policies, the ImmediateResponse eviction mechanism, and the tracking queue that ties them
+// together. See docs/flow-control-eviction.md.
+func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
+	orderingPlugin, err := evictordering.PriorityThenTimeOrderingFactory(evictordering.PriorityThenTimeOrderingType, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create eviction ordering policy: %w", err)
+	}
+	filterPlugin, err := evictfiltering.SheddableFilterFactory(evictfiltering.SheddableFilterType, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create eviction filter policy: %w", err)
+	}
+	return fceviction.NewRequestEvictor(
+		orderingPlugin.(fwkfc.EvictionOrderingPolicy),
+		filterPlugin.(fwkfc.EvictionFilterPolicy),
+		fceviction.NewImmediateResponseEvictor(),
+	), nil
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
@@ -981,8 +1050,11 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
 	// File-discovery mode has no InferenceObjective reconciler to drive the
 	// control plane; static bands from config apply at registry construction.
-	endpointCandidates, admissionController, _ := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+	endpointCandidates, admissionController, _, requestEvictor := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	if requestEvictor != nil {
+		director.SetRequestEvictor(requestEvictor)
+	}
 
 	gknn := common.GKNN{
 		NamespacedName: types.NamespacedName{Name: poolName, Namespace: namespace},
@@ -1004,6 +1076,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
+	}
+	if requestEvictor != nil {
+		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
