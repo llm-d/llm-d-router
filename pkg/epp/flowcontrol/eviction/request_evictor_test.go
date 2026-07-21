@@ -102,7 +102,7 @@ func TestRequestEvictor_EvictN_ClosesEvictChannel(t *testing.T) {
 	evictCh := re.EvictionRegistry().Get("req-1")
 	require.NotNil(t, evictCh)
 
-	evicted, err := re.EvictN(ctx, 1)
+	evicted, err := re.EvictN(ctx, 1, 0)
 	require.NoError(t, err)
 	require.Equal(t, []string{"req-1"}, evicted)
 
@@ -123,7 +123,7 @@ func TestRequestEvictor_EvictN_ReTracksOnFailure(t *testing.T) {
 	ctx := context.Background()
 	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
 
-	evicted, err := re.EvictN(ctx, 1)
+	evicted, err := re.EvictN(ctx, 1, 0)
 	require.NoError(t, err)
 	assert.Empty(t, evicted)
 
@@ -149,7 +149,7 @@ func TestRequestEvictor_RaceBetweenEvictAndCompletion(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 5 {
-			_, _ = re.EvictN(ctx, 1)
+			_, _ = re.EvictN(ctx, 1, 0)
 			time.Sleep(time.Millisecond)
 		}
 	}()
@@ -204,7 +204,7 @@ func TestRequestEvictor_CleanupCallsEvictorCleanup(t *testing.T) {
 	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
 
 	// Evict to create a sync.Once entry in the evictor.
-	_, _ = re.EvictN(ctx, 1)
+	_, _ = re.EvictN(ctx, 1, 0)
 
 	// Complete the request — this should call cleanupRequest which calls evictor.Cleanup.
 	// After cleanup, the sync.Once entry for "req-1" should be removed.
@@ -222,7 +222,7 @@ func TestRequestEvictor_CleanupCallsEvictorCleanup(t *testing.T) {
 	evictCh := re.EvictionRegistry().Get("req-1")
 	require.NotNil(t, evictCh)
 
-	evicted, err := re.EvictN(ctx, 1)
+	evicted, err := re.EvictN(ctx, 1, 0)
 	require.NoError(t, err)
 	require.Len(t, evicted, 1)
 
@@ -251,4 +251,103 @@ type failingEvictor struct{}
 
 func (e *failingEvictor) Evict(_ context.Context, _ *flowcontrol.EvictionItem) error {
 	return assert.AnError
+}
+
+func TestRequestEvictor_EvictionTerminatedListener_NotifiedOncePerEvictedRequest(t *testing.T) {
+	t.Parallel()
+	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, NewImmediateResponseEvictor())
+
+	var mu sync.Mutex
+	notified := make(map[string]int)
+	re.SetEvictionTerminatedListener(func(requestID string) {
+		mu.Lock()
+		defer mu.Unlock()
+		notified[requestID]++
+	})
+
+	ctx := context.Background()
+	re.PreRequest(ctx, makeInferenceRequest("req-evicted", -1), makeSchedulingResult())
+	re.PreRequest(ctx, makeInferenceRequest("req-natural", -1), makeSchedulingResult())
+
+	evicted, err := re.EvictN(ctx, 1, 0)
+	require.NoError(t, err)
+	require.Len(t, evicted, 1)
+	evictedID := evicted[0]
+
+	// Stream termination for the evicted request notifies; the idempotent second cleanup does not.
+	re.ResponseBody(ctx, makeInferenceRequest(evictedID, -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest(evictedID, -1), &requestcontrol.Response{EndOfStream: true}, nil)
+
+	// A naturally completing request must not notify.
+	naturalID := "req-natural"
+	if evictedID == naturalID {
+		naturalID = "req-evicted"
+	}
+	re.ResponseBody(ctx, makeInferenceRequest(naturalID, -1), &requestcontrol.Response{EndOfStream: true}, nil)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, map[string]int{evictedID: 1}, notified,
+		"listener should fire exactly once, only for the evicted request")
+}
+
+func TestRequestEvictor_FailedEviction_DoesNotNotifyListener(t *testing.T) {
+	t.Parallel()
+	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, &failingEvictor{})
+
+	var mu sync.Mutex
+	var notifications []string
+	re.SetEvictionTerminatedListener(func(requestID string) {
+		mu.Lock()
+		defer mu.Unlock()
+		notifications = append(notifications, requestID)
+	})
+
+	ctx := context.Background()
+	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
+
+	evicted, err := re.EvictN(ctx, 1, 0)
+	require.NoError(t, err)
+	assert.Empty(t, evicted, "failed eviction should evict nothing")
+
+	// The request later completes naturally: still no notification.
+	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Empty(t, notifications, "a failed eviction must not mark the request as evicted")
+}
+
+func TestRequestEvictor_PeekVictimPriority(t *testing.T) {
+	t.Parallel()
+	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, &NoOpEvictor{})
+
+	_, ok := re.PeekVictimPriority()
+	assert.False(t, ok, "no victims when nothing is tracked")
+
+	ctx := context.Background()
+	re.PreRequest(ctx, makeInferenceRequest("req-1", -2), makeSchedulingResult())
+
+	priority, ok := re.PeekVictimPriority()
+	require.True(t, ok)
+	assert.Equal(t, -2, priority)
+}
+
+func TestRequestEvictor_EvictN_PriorityBound(t *testing.T) {
+	t.Parallel()
+	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, NewImmediateResponseEvictor())
+
+	ctx := context.Background()
+	re.PreRequest(ctx, makeInferenceRequest("req-low", -5), makeSchedulingResult())
+	re.PreRequest(ctx, makeInferenceRequest("req-high", -1), makeSchedulingResult())
+
+	// Demand at priority -1: only victims strictly below -1 may be evicted, even though n allows
+	// two. The -1 victim would be same-band churn against the demand.
+	evicted, err := re.EvictN(ctx, 2, -1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"req-low"}, evicted, "only victims strictly below the bound may be evicted")
+
+	inFlight, evictable := re.Stats()
+	assert.Equal(t, 1, inFlight, "the at-bound victim must remain tracked")
+	assert.Equal(t, 1, evictable, "the at-bound victim must remain evictable for future decisions")
 }

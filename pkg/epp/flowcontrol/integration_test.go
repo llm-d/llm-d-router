@@ -695,7 +695,7 @@ func TestEvictionPipeline(t *testing.T) {
 	sheddableCh := reg.Get("shed-1")
 	require.NotNil(t, sheddableCh, "sheddable request should have an eviction channel")
 
-	evictedIDs, err := requestEvictor.EvictN(ctx, 1)
+	evictedIDs, err := requestEvictor.EvictN(ctx, 1, 0)
 	require.NoError(t, err)
 	require.Equal(t, []string{"shed-1"}, evictedIDs)
 
