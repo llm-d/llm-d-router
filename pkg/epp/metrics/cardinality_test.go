@@ -152,3 +152,59 @@ func TestDeleteFlowControlFlowSeries(t *testing.T) {
 	require.Equal(t, 1, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration),
 		"the llm_d_epp family must be pruned identically")
 }
+
+// The bound is applied mechanically in every record function that takes a fairness ID; this guards
+// the request-metric family (distinct label ordering from the flow control family) against the
+// pattern regressing there.
+func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
+	const testCap = 3
+	oldFairness := fairnessLabelLimiter
+	fairnessLabelLimiter = newBoundedLabel(testCap)
+	oldModels := modelLabelLimiter
+	modelLabelLimiter = newBoundedLabel(10)
+	requestCounter.Reset()
+	llmdRequestCounter.Reset()
+	t.Cleanup(func() {
+		fairnessLabelLimiter = oldFairness
+		modelLabelLimiter = oldModels
+		requestCounter.Reset()
+		llmdRequestCounter.Reset()
+	})
+
+	for i := 0; i < 100; i++ {
+		RecordRequestCounter("model-a", "model-a", fmt.Sprintf("tenant-%d", i), 0)
+	}
+
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdRequestCounter),
+		"100 distinct fairness IDs must collapse to cap+overflow series on the request family")
+	require.Equal(t, 1, promtestutil.CollectAndCount(requestCounter),
+		"the deprecated family has no fairness_id label and must stay a single series")
+}
+
+// RecordFlowControlRequestQueueDuration takes request-body model names; they must flow through the
+// model limiter like every sibling record function.
+func TestQueueDurationBoundsModelLabels(t *testing.T) {
+	const testCap = 3
+	oldModels := modelLabelLimiter
+	modelLabelLimiter = newBoundedLabel(testCap)
+	oldFairness := fairnessLabelLimiter
+	fairnessLabelLimiter = newBoundedLabel(10)
+	flowControlRequestQueueDuration.Reset()
+	llmdFlowControlRequestQueueDuration.Reset()
+	t.Cleanup(func() {
+		modelLabelLimiter = oldModels
+		fairnessLabelLimiter = oldFairness
+		flowControlRequestQueueDuration.Reset()
+		llmdFlowControlRequestQueueDuration.Reset()
+	})
+
+	for i := 0; i < 100; i++ {
+		m := fmt.Sprintf("model-%d", i)
+		RecordFlowControlRequestQueueDuration("tenant", "0", "Dispatched", "pool", m, m, time.Millisecond)
+	}
+
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(flowControlRequestQueueDuration),
+		"100 distinct model names must collapse to cap+overflow series, not one series each")
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdFlowControlRequestQueueDuration),
+		"the llm_d_epp family must be bounded identically")
+}
