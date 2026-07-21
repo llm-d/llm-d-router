@@ -208,3 +208,30 @@ func TestQueueDurationBoundsModelLabels(t *testing.T) {
 	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdFlowControlRequestQueueDuration),
 		"the llm_d_epp family must be bounded identically")
 }
+
+// A client can choose the overflow value itself as its fairness ID; GC of that flow must not
+// delete the shared overflow series that aggregates every capped-out tenant.
+func TestDeleteFlowControlFlowSeriesPreservesOverflowSeries(t *testing.T) {
+	old := fairnessLabelLimiter
+	fairnessLabelLimiter = newBoundedLabel(1)
+	flowControlRequestEnqueueDuration.Reset()
+	llmdFlowControlRequestEnqueueDuration.Reset()
+	t.Cleanup(func() {
+		fairnessLabelLimiter = old
+		flowControlRequestEnqueueDuration.Reset()
+		llmdFlowControlRequestEnqueueDuration.Reset()
+	})
+
+	// tenant-a fills the single cap slot; tenant-b folds to the overflow series.
+	RecordFlowControlRequestEnqueueDuration("tenant-a", "0", "Dispatched", time.Millisecond)
+	RecordFlowControlRequestEnqueueDuration("tenant-b", "0", "Dispatched", time.Millisecond)
+	require.Equal(t, 2, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
+		"setup: expected the admitted series plus the overflow series")
+
+	DeleteFlowControlFlowSeries(overflowValue, "0")
+
+	require.Equal(t, 2, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
+		"deleting the overflow value must be a no-op; the shared overflow series must survive")
+	require.Equal(t, 2, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration),
+		"the llm_d_epp family must be preserved identically")
+}

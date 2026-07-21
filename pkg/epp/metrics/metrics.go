@@ -900,7 +900,16 @@ func IncFlowControlRequestsTotal(outcome, priority, inferencePool string) {
 // derived from client input, so its cardinality is unbounded; the flow registry calls this when it
 // garbage-collects an idle flow so that the metric vectors track live flows instead of growing
 // monotonically with every fairness ID ever observed.
+//
+// Pruning is not synchronized with recording: a request reviving the flow concurrently with GC can
+// have a queue gauge increment deleted here while its paired decrement lands afterwards, leaving
+// the queue size/bytes gauges negative until the flow's next collection deletes the series again.
 func DeleteFlowControlFlowSeries(fairnessID, priority string) {
+	// The overflow value aggregates every capped-out fairness ID, so a flow whose client-chosen ID
+	// equals it must not delete the shared series.
+	if fairnessID == overflowValue {
+		return
+	}
 	labels := prometheus.Labels{"fairness_id": fairnessID, "priority": priority}
 	flowControlRequestQueueDuration.DeletePartialMatch(labels)
 	flowControlRequestEnqueueDuration.DeletePartialMatch(labels)
