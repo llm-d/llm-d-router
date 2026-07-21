@@ -88,6 +88,7 @@ func TestNewConfig(t *testing.T) {
 				require.NotNil(t, band.FairnessPolicy)
 				assert.Equal(t, DefaultFairnessPolicyRef, band.FairnessPolicy.TypedName().Name)
 				assert.Equal(t, defaultPriorityBandMaxBytes, band.MaxBytes)
+				assert.Equal(t, defaultPriorityBandMaxRequests, band.MaxRequests)
 			},
 		},
 		{
@@ -129,9 +130,17 @@ func TestNewConfig(t *testing.T) {
 			assertion: func(t *testing.T, cfg *Config) {
 				assert.Len(t, cfg.PriorityBands, 1, "PriorityBands should contain only the always-injected priority 0")
 				assert.Contains(t, cfg.PriorityBands, 0, "PriorityBands should contain priority 0")
+				assert.Equal(t, defaultPriorityBandMaxBytes, cfg.PriorityBands[0].MaxBytes,
+					"Auto-provisioned priority 0 band should receive the byte-size default")
+				assert.Equal(t, defaultPriorityBandMaxRequests, cfg.PriorityBands[0].MaxRequests,
+					"Auto-provisioned priority 0 band should receive the request-count default")
 				require.NotNil(t, cfg.DefaultPriorityBand, "DefaultPriorityBand template must be initialized")
 				assert.NotNil(t, cfg.DefaultPriorityBand.FairnessPolicy)
 				assert.Equal(t, DefaultFairnessPolicyRef, cfg.DefaultPriorityBand.FairnessPolicy.TypedName().Name)
+				assert.Equal(t, defaultPriorityBandMaxBytes, cfg.DefaultPriorityBand.MaxBytes,
+					"Dynamic provisioning template should receive the byte-size default")
+				assert.Equal(t, defaultPriorityBandMaxRequests, cfg.DefaultPriorityBand.MaxRequests,
+					"Dynamic provisioning template should receive the request-count default")
 			},
 		},
 		{
@@ -372,15 +381,16 @@ func TestNewConfig_DefaultNegativePriorityBand(t *testing.T) {
 			"Defaults should be applied to DefaultNegativePriorityBand")
 	})
 
-	t.Run("ShouldAllowZeroMaxBytes_ForSheddableTraffic", func(t *testing.T) {
+	t.Run("ShouldApplyCapacityDefaults_ToEmptyNegativeBandTemplate", func(t *testing.T) {
 		t.Parallel()
 		cfg, err := NewConfig(defaults,
 			WithDefaultNegativePriorityBand(&PriorityBandConfig{}),
 		)
 		require.NoError(t, err)
 		require.NotNil(t, cfg.DefaultNegativePriorityBand)
-		// MaxBytes=0 gets defaulted to 1GB via applyDefaults
+		// Zero capacity values are treated as unset: bands are always bounded, never zero-capacity.
 		assert.Equal(t, defaultPriorityBandMaxBytes, cfg.DefaultNegativePriorityBand.MaxBytes)
+		assert.Equal(t, defaultPriorityBandMaxRequests, cfg.DefaultNegativePriorityBand.MaxRequests)
 	})
 
 	t.Run("ShouldCloneNegativeBandTemplate", func(t *testing.T) {
