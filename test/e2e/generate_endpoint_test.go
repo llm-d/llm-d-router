@@ -43,7 +43,7 @@ var twoImages = []imageSpec{
 	{Hash: "e2e-image-hash-1", Offset: 4, Length: 5},
 }
 
-var _ = ginkgo.Describe("Direct gateway /inference/v1/generate encode against encode-only", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
+var _ = ginkgo.Describe("Direct gateway /inference/v1/generate encode against encode-only", ginkgo.Ordered, testWrapper(func() {
 	// Uses single-profile-handler (generateEncodeConfig) so the EPP routes
 	// directly to encode pods without requiring a decode stage first.
 	ginkgo.It("returns ec_transfer_params for encode bodies", func() {
@@ -77,7 +77,7 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate encode against en
 	})
 }))
 
-var _ = ginkgo.Describe("Direct gateway /inference/v1/generate prefill against prefill-only", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
+var _ = ginkgo.Describe("Direct gateway /inference/v1/generate prefill against prefill-only", ginkgo.Ordered, testWrapper(func() {
 	// Uses single-profile-handler (generatePrefillConfig) so the EPP routes
 	// directly to prefill pods without requiring a decode stage first.
 	ginkgo.It("returns kv_transfer_params for prefill bodies", func() {
@@ -237,7 +237,7 @@ func expectKVTransferParams(parsed map[string]any, raw []byte) {
 		"kv_transfer_params is empty: %s", string(raw))
 }
 
-var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via sidecar", ginkgo.Label(sharedStorageTestLabel, disaggTestLabel), ginkgo.Ordered, testWrapper(func() {
+var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via sidecar", ginkgo.Ordered, testWrapper(func() {
 	// Regression test for https://github.com/llm-d/llm-d-router/issues/1461:
 	// the pd-sidecar previously had no route for /inference/v1/generate, so
 	// token-in P/D requests silently fell through to decode-only. This test
