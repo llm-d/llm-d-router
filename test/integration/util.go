@@ -29,10 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"strconv"
-	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -42,6 +39,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -572,7 +570,8 @@ func StartExtProcServer(
 ) (extProcPb.ExternalProcessor_ProcessClient, *grpc.ClientConn) {
 	t.Helper()
 
-	// Force IPv4 to match GetFreePort's binding and avoid IPv6 race conditions in CI.
+	// Force IPv4: the server binds on IPv4 localhost, and a dual-stack target would let
+	// the client reach for an IPv6 address nothing is listening on.
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	// Start server in background.
@@ -583,37 +582,32 @@ func StartExtProcServer(
 		}
 	}()
 
-	return ExtProcServerClient(ctx, t, port, logger)
+	return ExtProcServerClient(ctx, t, port, logger, nil)
 }
 
 // ExtProcServerClient returns a ExternalProcessor_ProcessClient listen to localhost on given port.
+// mgrErr, when non-nil, carries the early exit of the manager hosting the server so a start
+// failure fails the test immediately instead of waiting out extprocConnSetupTimeout.
 func ExtProcServerClient(
 	ctx context.Context,
 	t *testing.T,
 	port int,
 	logger logr.Logger,
+	mgrErr <-chan error,
 ) (extProcPb.ExternalProcessor_ProcessClient, *grpc.ClientConn) {
 	t.Helper()
 
-	// Force IPv4 to match GetFreePort's binding and avoid IPv6 race conditions in CI.
+	// Force IPv4: the server binds on IPv4 localhost, and a dual-stack target would let
+	// the client reach for an IPv6 address nothing is listening on.
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
 
-	// Wait for TCP readiness.
-	// We must poll the port until the server successfully binds and listens.
-	require.Eventually(t, func() bool {
-		// Check if the port is open.
-		conn, err := net.DialTimeout("tcp", serverAddr, 50*time.Millisecond)
-		if err != nil {
-			return false
-		}
-		conn.Close()
-		return true
-	}, extprocConnSetupTimeout, extPorcConnSetupPollInterval, "Server failed to bind port %s", serverAddr)
-
-	// Connect client.
-	// Blocking dial is safe because we know the port is open.
 	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err, "failed to create grpc connection")
+	// Registered before any require below can call FailNow, so the conn and its
+	// goroutines do not leak on the failure path.
+	t.Cleanup(func() { _ = conn.Close() })
+
+	require.NoError(t, WaitExtProcReady(ctx, conn, mgrErr), "ext-proc server did not become ready")
 
 	extProcClient, err := extProcPb.NewExternalProcessorClient(conn).Process(ctx)
 	require.NoError(t, err, "failed to initialize ext_proc stream client")
@@ -621,87 +615,46 @@ func ExtProcServerClient(
 	return extProcClient, conn
 }
 
-// isAddrInUse reports whether err is (or wraps) a "port already in use" bind failure.
-// GetFreePort returns a vacated port, and the server binds it later; if the OS handed
-// the port to something else in that window the bind fails with EADDRINUSE, which is
-// what this detects so the caller can re-roll the port and retry (issue #1066).
-func isAddrInUse(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, syscall.EADDRINUSE) {
-		return true
-	}
-	// Fall back to the message for errors that were stringified across a boundary
-	// and no longer unwrap to syscall.EADDRINUSE.
-	return strings.Contains(strings.ToLower(err.Error()), "address already in use")
-}
-
-// RetryOnAddrInUse runs attempt up to maxAttempts times, retrying only when attempt
-// returns an address-in-use bind failure. Any other error (or success) returns
-// immediately. reset, when non-nil, runs between attempts (after a failed attempt has
-// released its resources, before the next one) to clear per-attempt state. A genuine
-// bind failure that never clears surfaces as a wrapped error after the budget, so it
-// still fails loud rather than being masked.
-func RetryOnAddrInUse(maxAttempts int, delay time.Duration, attempt func() error, reset func()) error {
-	var err error
-	for i := 0; i < maxAttempts; i++ {
-		if i > 0 {
-			if reset != nil {
-				reset()
-			}
-			time.Sleep(delay)
-		}
-		if err = attempt(); err == nil {
+// WaitExtProcReady blocks until conn reaches connectivity.Ready (nil), the manager
+// reports an early exit via mgrErr, ctx is done, or extprocConnSetupTimeout elapses.
+//
+// The server serves on a listener bound before it starts, so the kernel completes the
+// TCP handshake out of the listen backlog and a dial succeeds even while grpc.Serve has
+// not run yet. Only Ready, which requires the HTTP/2 handshake, proves it is serving.
+// The state wait is bounded by the poll interval so an early mgrErr is still observed
+// promptly rather than after the full timeout.
+func WaitExtProcReady(ctx context.Context, conn *grpc.ClientConn, mgrErr <-chan error) error {
+	deadline := time.Now().Add(extprocConnSetupTimeout)
+	for {
+		state := conn.GetState()
+		if state == connectivity.Ready {
 			return nil
 		}
-		if !isAddrInUse(err) {
-			return err
+		if state == connectivity.Idle {
+			// A ClientConn only leaves Idle on Connect or a started RPC, so a
+			// Ready to Idle flap would otherwise stall until the deadline.
+			conn.Connect()
 		}
-	}
-	return fmt.Errorf("port bind failed after %d attempts: %w", maxAttempts, err)
-}
 
-// WaitExtProcReady blocks until the ext-proc gRPC server on port accepts a TCP
-// connection (ready, returns nil), the manager reports an early error via mgrErr
-// (returned so the caller can decide whether to retry), or extprocConnSetupTimeout
-// elapses (a non-EADDRINUSE error so a server that never binds fails loud instead of
-// looping). Unlike ExtProcServerClient it does not fail the test, so a caller can
-// retry a port-bind race.
-func WaitExtProcReady(port int, mgrErr <-chan error) error {
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
-	timeout := time.After(extprocConnSetupTimeout)
-	for {
-		// Prefer an early manager error (e.g. a stolen port) over polling.
 		select {
 		case err := <-mgrErr:
 			if err == nil {
 				return errors.New("manager exited before ext-proc server became ready")
 			}
 			return err
-		case <-timeout:
-			return fmt.Errorf("server failed to bind port %s within %s", serverAddr, extprocConnSetupTimeout)
+		case <-ctx.Done():
+			return ctx.Err()
 		default:
 		}
 
-		if conn, err := net.DialTimeout("tcp", serverAddr, extPorcConnSetupPollInterval); err == nil {
-			_ = conn.Close()
-			// The gRPC port is up; make sure another runnable (metrics/health) did not
-			// fail its bind concurrently before declaring the manager ready.
-			select {
-			case err := <-mgrErr:
-				if err != nil {
-					return err
-				}
-				// A nil here means the manager returned (context cancelled): it is
-				// shutting down, not ready. Mirror the pre-dial block rather than
-				// handing the caller a dying server.
-				return errors.New("manager exited before ext-proc server became ready")
-			default:
-			}
-			return nil
+		if time.Now().After(deadline) {
+			return fmt.Errorf("ext-proc server at %s not ready within %s (state %s)",
+				conn.Target(), extprocConnSetupTimeout, state)
 		}
-		time.Sleep(extPorcConnSetupPollInterval)
+
+		waitCtx, cancel := context.WithTimeout(ctx, extPorcConnSetupPollInterval)
+		conn.WaitForStateChange(waitCtx, state)
+		cancel()
 	}
 }
 

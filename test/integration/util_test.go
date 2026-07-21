@@ -17,146 +17,158 @@ limitations under the License.
 package integration
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"syscall"
 	"testing"
+	"time"
 
+	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
-func TestIsAddrInUse(t *testing.T) {
-	// A realistic wrap chain: the runnable does net.Listen and wraps the *net.OpError,
-	// which itself wraps *os.SyscallError -> syscall.EADDRINUSE.
-	wrapped := fmt.Errorf("gRPC server failed to listen - %w",
-		&net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", syscall.EADDRINUSE)})
+// stubExtProc answers a single Process message, which is enough to prove the server is
+// serving rather than merely bound.
+type stubExtProc struct {
+	extProcPb.UnimplementedExternalProcessorServer
+}
 
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{name: "nil", err: nil, want: false},
-		{name: "raw EADDRINUSE", err: syscall.EADDRINUSE, want: true},
-		{name: "wrapped OpError chain", err: wrapped, want: true},
-		{name: "stringified message", err: errors.New("listen tcp :8080: bind: address already in use"), want: true},
-		{name: "stringified message mixed case", err: errors.New("bind: Address already in use"), want: true},
-		{name: "unrelated error", err: errors.New("connection refused"), want: false},
+func (stubExtProc) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
+	if _, err := srv.Recv(); err != nil {
+		return err
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, isAddrInUse(tc.err))
-		})
+	return srv.Send(&extProcPb.ProcessingResponse{})
+}
+
+// serveStub starts a stub ext-proc server on lis and stops it at test end.
+func serveStub(t *testing.T, lis net.Listener) {
+	t.Helper()
+	srv := grpc.NewServer()
+	extProcPb.RegisterExternalProcessorServer(srv, stubExtProc{})
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+}
+
+func dialLocal(t *testing.T, port int) *grpc.ClientConn {
+	t.Helper()
+	conn, err := grpc.NewClient(fmt.Sprintf("127.0.0.1:%d", port),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// ephemeralDraws is the number of ephemeral ports drawn while a reservation is held.
+// Large enough to sample a meaningful slice of the ephemeral range, small enough to
+// stay well under a second.
+const ephemeralDraws = 2000
+
+// TestReserveListenerDefendsPort asserts that a reserved listener's port cannot be
+// reassigned while it is held: an explicit bind of it fails with EADDRINUSE, and the
+// kernel never hands it back as an ephemeral allocation. This is the property the
+// harness relies on to start a server on a known port without a bind race.
+func TestReserveListenerDefendsPort(t *testing.T) {
+	lis, err := testutils.ReserveListener()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lis.Close() })
+	reserved := lis.Addr().(*net.TCPAddr).Port
+
+	_, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", reserved))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, syscall.EADDRINUSE)
+
+	for i := range ephemeralDraws {
+		drawn, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		port := drawn.Addr().(*net.TCPAddr).Port
+		require.NoError(t, drawn.Close())
+		if port == reserved {
+			t.Fatalf("ephemeral draw %d returned reserved port %d", i, reserved)
+		}
 	}
 }
 
-func TestRetryOnAddrInUse(t *testing.T) {
-	inUse := syscall.EADDRINUSE
-	other := errors.New("boom")
+// TestPreBoundListenerQueuesDials asserts that a TCP dial to a bound but unserved
+// listener succeeds, because the kernel accepts into the listen backlog. Only Ready
+// proves the server is serving.
+func TestPreBoundListenerQueuesDials(t *testing.T) {
+	lis, err := testutils.ReserveListener()
+	require.NoError(t, err)
+	port := lis.Addr().(*net.TCPAddr).Port
 
-	tests := []struct {
-		name         string
-		maxAttempts  int
-		attemptErrs  []error // returned by attempt on successive calls
-		wantAttempts int
-		wantResets   int
-		wantErr      bool
-		wantErrIs    error // if set, the returned error must match this via errors.Is
-	}{
-		{
-			name:         "success first try",
-			maxAttempts:  5,
-			attemptErrs:  []error{nil},
-			wantAttempts: 1,
-			wantResets:   0,
-		},
-		{
-			name:         "one in-use then success",
-			maxAttempts:  5,
-			attemptErrs:  []error{inUse, nil},
-			wantAttempts: 2,
-			wantResets:   1,
-		},
-		{
-			name:         "two in-use then success",
-			maxAttempts:  5,
-			attemptErrs:  []error{inUse, inUse, nil},
-			wantAttempts: 3,
-			wantResets:   2,
-		},
-		{
-			name:         "budget exhausted",
-			maxAttempts:  3,
-			attemptErrs:  []error{inUse, inUse, inUse},
-			wantAttempts: 3,
-			wantResets:   2,
-			wantErr:      true,
-			wantErrIs:    inUse,
-		},
-		{
-			name:         "non-retryable error returned immediately",
-			maxAttempts:  5,
-			attemptErrs:  []error{other},
-			wantAttempts: 1,
-			wantResets:   0,
-			wantErr:      true,
-			wantErrIs:    other,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			attempts, resets := 0, 0
-			attempt := func() error {
-				err := tc.attemptErrs[attempts]
-				attempts++
-				return err
-			}
-			reset := func() { resets++ }
+	raw, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	require.NoError(t, err, "TCP dial must succeed before Serve runs")
+	require.NoError(t, raw.Close())
 
-			err := RetryOnAddrInUse(tc.maxAttempts, 0, attempt, reset)
+	serveStub(t, lis)
 
-			assert.Equal(t, tc.wantAttempts, attempts, "attempt count")
-			assert.Equal(t, tc.wantResets, resets, "reset count")
-			if tc.wantErr {
-				require.Error(t, err)
-				if tc.wantErrIs != nil {
-					assert.ErrorIs(t, err, tc.wantErrIs)
-				}
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
+	conn := dialLocal(t, port)
+	require.NoError(t, WaitExtProcReady(t.Context(), conn, nil))
+
+	client, err := extProcPb.NewExternalProcessorClient(conn).Process(t.Context())
+	require.NoError(t, err)
+	res, err := SendRequest(t, client, ReqHeaderOnly(map[string]string{"hi": "mom"})[0])
+	require.NoError(t, err)
+	assert.NotNil(t, res)
 }
 
 func TestWaitExtProcReady(t *testing.T) {
-	t.Run("ready when port is open", func(t *testing.T) {
-		lis, err := net.Listen("tcp", "127.0.0.1:0")
+	t.Run("ready once the server serves", func(t *testing.T) {
+		lis, err := testutils.ReserveListener()
 		require.NoError(t, err)
-		defer lis.Close()
-		port := lis.Addr().(*net.TCPAddr).Port
+		serveStub(t, lis)
 
-		mgrErr := make(chan error, 1) // nothing sent: manager still running
-		assert.NoError(t, WaitExtProcReady(port, mgrErr))
+		conn := dialLocal(t, lis.Addr().(*net.TCPAddr).Port)
+		assert.NoError(t, WaitExtProcReady(t.Context(), conn, nil))
 	})
 
-	t.Run("returns manager bind error when port never comes up", func(t *testing.T) {
-		// A closed port: acquire one then release it so nothing is listening.
-		p, err := testutils.GetFreePort()
+	t.Run("manager error returns before the timeout", func(t *testing.T) {
+		// Bound but never served: a dial would succeed, so only the manager error can
+		// end this wait early.
+		lis, err := testutils.ReserveListener()
 		require.NoError(t, err)
+		t.Cleanup(func() { _ = lis.Close() })
 
 		bindErr := fmt.Errorf("gRPC server failed to listen - %w",
 			&net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", syscall.EADDRINUSE)})
 		mgrErr := make(chan error, 1)
 		mgrErr <- bindErr
 
-		got := WaitExtProcReady(p, mgrErr)
-		require.Error(t, got)
-		assert.True(t, isAddrInUse(got), "bind error should be classified as address-in-use")
+		conn := dialLocal(t, lis.Addr().(*net.TCPAddr).Port)
+		start := time.Now()
+		got := WaitExtProcReady(t.Context(), conn, mgrErr)
+		require.ErrorIs(t, got, syscall.EADDRINUSE)
+		assert.Less(t, time.Since(start), extprocConnSetupTimeout)
+	})
+
+	t.Run("manager exit without error is not readiness", func(t *testing.T) {
+		lis, err := testutils.ReserveListener()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = lis.Close() })
+
+		mgrErr := make(chan error, 1)
+		mgrErr <- nil
+
+		conn := dialLocal(t, lis.Addr().(*net.TCPAddr).Port)
+		require.ErrorContains(t, WaitExtProcReady(t.Context(), conn, mgrErr), "manager exited")
+	})
+
+	t.Run("cancelled context returns immediately", func(t *testing.T) {
+		lis, err := testutils.ReserveListener()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = lis.Close() })
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		conn := dialLocal(t, lis.Addr().(*net.TCPAddr).Port)
+		assert.ErrorIs(t, WaitExtProcReady(ctx, conn, nil), context.Canceled)
 	})
 }

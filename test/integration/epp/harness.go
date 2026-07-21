@@ -74,12 +74,6 @@ const (
 
 	// mockDataSourceType is the plugin type name used for the mock data source in integration tests.
 	mockDataSourceType = "mock-metrics-source"
-
-	// portBindMaxAttempts bounds how many times the harness re-rolls free ports and
-	// restarts the manager when a port is stolen before the server binds it (issue
-	// #1066). portBindRetryDelay paces the retries so a transient port grab can clear.
-	portBindMaxAttempts = 5
-	portBindRetryDelay  = 500 * time.Millisecond
 )
 
 //go:embed testdata/datalayer-config.yaml
@@ -210,8 +204,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespaceName}}
 	require.NoError(t, k8sClient.Create(ctx, ns), "failed to create test namespace")
 
-	// Tracing Setup (InMemory). Global and port-independent, so it is configured once
-	// rather than per port-bind attempt below.
+	// Tracing Setup (InMemory).
 	var exporter *tracetest.InMemoryExporter
 	var tp *sdktrace.TracerProvider
 	if config.Tracing {
@@ -222,84 +215,71 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 		otel.SetTracerProvider(tp)
 	}
 
-	// Reserve the ext_proc port once, up front, and keep the listener bound for the
-	// lifetime of the test: the server serves on this listener instead of binding a
-	// port number chosen earlier, so no other process can take it in between (issue
-	// #1066). The reservation is outside the retry closure because a held port cannot
-	// be stolen and so never needs re-rolling.
+	// Reserve the ext_proc port once, up front: the server serves on this listener, so
+	// the port stays bound for the lifetime of the test and no other process can take
+	// it (issue #1066).
 	lis, err := testutils.ReserveListener()
 	require.NoError(t, err, "failed to reserve ext_proc port")
 	t.Cleanup(func() { _ = lis.Close() })
 	grpcPort := lis.Addr().(*net.TCPAddr).Port
 
-	var (
-		eppOptions *eppServer.Options
-		runner     *eppRunner.Runner
-		dataStore  datastore.Datastore
-		backend    metricsBackend
-		mgrCtx     context.Context
-		mgrCancel  context.CancelFunc
-		mgrDone    chan struct{}
-	)
-	attempt := func() error {
-		eppOptions = defaultEppServerOptions(t, testNamespaceName, configText)
-		if config.runMode == modeStandalone && config.standaloneStrategy == strategyNoCRD {
-			// Only standalone EPP without crd need to set the EndpointSelector.
-			eppOptions.EndpointSelector = labels.SelectorFromSet(labels.Set{"app": testPoolName})
-		}
-
-		// Shorten the Prometheus refresh interval so WaitForReadyPodsMetric (10s timeout)
-		// has many opportunities to observe the metric update instead of only ~2.
-		eppOptions.RefreshPrometheusMetricsInterval = 500 * time.Millisecond
-
-		mockDataSource := dlmocks.NewDataSource(plugin.TypedName{
-			Type: mockDataSourceType,
-			Name: mockDataSourceType,
-		})
-		r, mgr, ds, err := eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, mockDataSource, lis)
-		if err != nil {
-			// Not a port-bind race; surfaced as-is (RetryOnAddrInUse will not retry it).
-			return fmt.Errorf("failed to create manager: %w", err)
-		}
-		runner, dataStore = r, ds
-		backend = metricsBackend(&mockDataSourceBackend{mockDataSource: mockDataSource})
-
-		// Fresh cancellable context per attempt, derived from the stable parent ctx; the
-		// previous attempt's context is cancelled before retrying, so it does not nest
-		// (fatcontext flags the reassignment of the outer mgrCtx, which is intentional here).
-		mgrCtx, mgrCancel = context.WithCancel(ctx) //nolint:fatcontext
-		mgrDone = make(chan struct{})
-		mgrErr := make(chan error, 1)
-		go func() {
-			defer close(mgrDone)
-			err := mgr.Start(mgrCtx)
-			mgrErr <- err
-			// Context cancellation is expected during teardown.
-			if err != nil && !strings.Contains(err.Error(), "context canceled") {
-				logger.Error(err, "manager stopped unexpectedly")
-			}
-		}()
-
-		// Wait until the ext-proc server starts serving, or the manager reports an early
-		// failure. On failure, stop this attempt's manager and wait for it to release
-		// its listeners before retrying.
-		if err := integration.WaitExtProcReady(grpcPort, mgrErr); err != nil {
-			mgrCancel()
-			<-mgrDone
-			return err
-		}
-		return nil
+	eppOptions := defaultEppServerOptions(t, testNamespaceName, configText)
+	if config.runMode == modeStandalone && config.standaloneStrategy == strategyNoCRD {
+		// Only standalone EPP without crd need to set the EndpointSelector.
+		eppOptions.EndpointSelector = labels.SelectorFromSet(labels.Set{"app": testPoolName})
 	}
-	require.NoError(t,
-		integration.RetryOnAddrInUse(portBindMaxAttempts, portBindRetryDelay, attempt, metrics.Reset),
-		"EPP manager failed to bind its ports",
-	)
+
+	// Shorten the Prometheus refresh interval so WaitForReadyPodsMetric (10s timeout)
+	// has many opportunities to observe the metric update instead of only ~2.
+	eppOptions.RefreshPrometheusMetricsInterval = 500 * time.Millisecond
+
+	mockDataSource := dlmocks.NewDataSource(plugin.TypedName{
+		Type: mockDataSourceType,
+		Name: mockDataSourceType,
+	})
+	runner, mgr, dataStore, err := eppRunner.NewTestRunnerSetup(ctx, testEnv.Config, eppOptions, mockDataSource, lis)
+	require.NoError(t, err, "failed to create manager")
+	backend := metricsBackend(&mockDataSourceBackend{mockDataSource: mockDataSource})
+
+	mgrCtx, mgrCancel := context.WithCancel(ctx)
+	mgrDone := make(chan struct{})
+	mgrErr := make(chan error, 1)
+	go func() {
+		defer close(mgrDone)
+		err := mgr.Start(mgrCtx)
+		mgrErr <- err
+		// Context cancellation is expected during teardown.
+		if err != nil && !strings.Contains(err.Error(), "context canceled") {
+			logger.Error(err, "manager stopped unexpectedly")
+		}
+	}()
+
+	// Cleanups run LIFO, so this teardown runs after the manager-stop cleanup below.
+	t.Cleanup(func() {
+		if config.Tracing {
+			_ = tp.Shutdown(ctx)
+			// Reset to no-op to avoid pollution between tests.
+			otel.SetTracerProvider(noop.NewTracerProvider())
+		}
+		// Deleting the Namespace cascades to all contained resources.
+		_ = k8sClient.Delete(context.Background(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: eppOptions.PoolNamespace}})
+		// Crucial: Reset global metrics registry to prevent pollution between serial tests.
+		metrics.Reset()
+	})
+	// Registered before the readiness wait below can fail the test, so the manager
+	// goroutine cannot outlive it. Waiting on mgrDone keeps the manager fully stopped
+	// before the global metrics registry is reset and the namespace is deleted.
+	t.Cleanup(func() {
+		mgrCancel()
+		<-mgrDone
+	})
 
 	extProcClient, conn := integration.ExtProcServerClient(
 		mgrCtx,
 		t,
 		grpcPort,
 		logger,
+		mgrErr,
 	)
 
 	h := &TestHarness{
@@ -318,26 +298,6 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 		Runner:             runner,
 	}
 
-	// 8. Register Cleanup
-
-	t.Cleanup(func() {
-		mgrCancel()
-		// Wait for the manager (and its gRPC server) to fully stop before returning.
-		// Without this, the gRPC server may still hold its port when the next test
-		// calls GetFreePort(), causing a bind: address already in use race.
-		<-mgrDone
-		if config.Tracing {
-			_ = tp.Shutdown(ctx)
-			// Reset to no-op to avoid pollution between tests.
-			otel.SetTracerProvider(noop.NewTracerProvider())
-		}
-		_ = h.grpcConn.Close()
-		// Deleting the Namespace cascades to all contained resources.
-		_ = k8sClient.Delete(context.Background(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: eppOptions.PoolNamespace}})
-		// Crucial: Reset global metrics registry to prevent pollution between serial tests.
-		metrics.Reset()
-	})
-
 	return h
 }
 
@@ -348,9 +308,6 @@ func defaultEppServerOptions(t *testing.T, namespace, configText string) *eppSer
 	eppOptions.PoolName = testPoolName
 	eppOptions.PoolNamespace = namespace
 	eppOptions.ConfigText = configText
-
-	// GRPCPort is left at its default: the harness hands the ext_proc server a
-	// pre-bound listener, which takes precedence over the port.
 
 	// No test dials the health server, so let the kernel assign the port: a
 	// port 0 bind cannot lose a race to another listener.
