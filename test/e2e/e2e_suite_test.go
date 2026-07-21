@@ -60,14 +60,6 @@ const (
 	// defaultPort is the envoy gateway's NodePort.
 	defaultPort        = 30080
 	defaultMetricsPort = 32090
-
-	// CI shards scheduler e2e specs with label filters.
-	extendedTestLabel      = "Extended"
-	disruptiveTestLabel    = "Disruptive"
-	sharedStorageTestLabel = "SharedStorage"
-	metricsTestLabel       = "Metrics"
-	deprecatedPDTestLabel  = "DeprecatedPD"
-	disaggTestLabel        = "Disagg"
 )
 
 var (
