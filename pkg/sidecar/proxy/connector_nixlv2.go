@@ -303,12 +303,23 @@ retryLoop:
 
 	dreq.Header.Add(requestHeaderRequestID, uuidStr)
 
-	// Stamp the same DP-rank pin on the decode leg.
+	// Decode's DP rank is PROPAGATED from the prefill leg's returned
+	// kv_transfer_params (remote_dp_rank = the rank prefill actually ran on),
+	// not independently re-derived here. This is the router-applies-the-
+	// connector-returned-rank model (PR #45043 review, njhill): the prefill
+	// connector returns the rank, the router pins the decode leg to it, so both
+	// legs agree without each hashing the request id. Fall back to the hash only
+	// if the prefill response omitted it (older vLLM without the returnable rank).
+	decodeDPRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
+	if pkv, ok := pKVTransferParams.(map[string]any); ok {
+		if rv, present := pkv[requestFieldRemoteDPRank]; present {
+			if ri, ok := toInt(rv); ok {
+				decodeDPRank = ri
+			}
+		}
+	}
 	if s.config.MoRIIODPSize > 1 {
-		dreq.Header.Set(
-			requestHeaderDataParallelRank,
-			strconv.Itoa(pickDPRank(uuidStr, s.config.MoRIIODPSize)),
-		)
+		dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(decodeDPRank))
 	}
 
 	delete(completionRequest, requestFieldStream)
