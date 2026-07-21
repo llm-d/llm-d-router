@@ -65,8 +65,8 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           # Use the last /milestone directive in the PR body
-          milestone=$(printf '%s' "$PR_BODY" | tr -d '\r' | grep '^/milestone ' | \
-            sed 's|^/milestone ||' | tail -n 1)
+          milestone=$(printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/milestone ||p' | \
+            tail -n 1)
           [ -z "$milestone" ] && exit 0
           gh pr edit "$PR_NUMBER" --repo "$REPO" --milestone "$milestone" || \
             echo "::warning::Milestone '$milestone' not found in repository"
