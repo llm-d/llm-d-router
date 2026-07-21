@@ -248,7 +248,7 @@ func testWrapper(test func()) func() {
 
 			infraSubs := map[string]string{
 				"${EPP_NAME}":          "e2e-epp",
-				"${METRICS_NODE_PORT}": strconv.Itoa(32090 + 100*(ginkgo.GinkgoParallelProcess()-1)),
+				"${METRICS_NODE_PORT}": strconv.Itoa(getMetricsPort()),
 			}
 			rbacYamls := substituteMany(testutils.ReadYaml(rbacManifest), infraSubs)
 			rbacObjects = testutils.CreateObjsFromYaml(testConfig, rbacYamls, nsName)

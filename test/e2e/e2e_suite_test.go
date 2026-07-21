@@ -309,7 +309,7 @@ func createCRDs() {
 func createEnvoy(nsName string) ([]string, *gexec.Session) {
 	infraSubs := map[string]string{
 		"${NAMESPACE}":       nsName,
-		"${ENVOY_NODE_PORT}": strconv.Itoa(30080 + 100*(ginkgo.GinkgoParallelProcess()-1)),
+		"${ENVOY_NODE_PORT}": strconv.Itoa(getPort()),
 	}
 	manifests := testutils.ReadYaml(envoyManifest)
 	manifests = substituteMany(manifests, infraSubs)
