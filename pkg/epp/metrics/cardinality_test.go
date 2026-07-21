@@ -19,6 +19,7 @@ package metrics
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -97,4 +98,57 @@ func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 	count := promtestutil.CollectAndCount(requestCounter)
 	require.LessOrEqualf(t, count, testCap+1,
 		"model_name cardinality must stay bounded by the cap, got %d series", count)
+}
+
+// The fairness_id label is populated from a client request header, so the package-level limiter
+// must collapse an unbounded flood of distinct IDs into the overflow bucket instead of minting a
+// series per ID.
+func TestFairnessLabelFloodCollapsesToOverflow(t *testing.T) {
+	const testCap = 5
+	old := fairnessLabelLimiter
+	fairnessLabelLimiter = newBoundedLabel(testCap)
+	flowControlRequestEnqueueDuration.Reset()
+	llmdFlowControlRequestEnqueueDuration.Reset()
+	t.Cleanup(func() {
+		fairnessLabelLimiter = old
+		flowControlRequestEnqueueDuration.Reset()
+		llmdFlowControlRequestEnqueueDuration.Reset()
+	})
+
+	for i := 0; i < 1000; i++ {
+		RecordFlowControlRequestEnqueueDuration(fmt.Sprintf("tenant-%d", i), "0", "Dispatched", time.Millisecond)
+	}
+
+	// testCap admitted IDs + 1 overflow series, per family.
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
+		"1000 distinct fairness IDs must collapse to cap+overflow series, not one series each")
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration),
+		"the llm_d_epp family must be bounded identically")
+}
+
+// DeleteFlowControlFlowSeries backs the flow registry's GC hook: once a flow is collected, its
+// series must not linger for the lifetime of the process.
+func TestDeleteFlowControlFlowSeries(t *testing.T) {
+	old := fairnessLabelLimiter
+	fairnessLabelLimiter = newBoundedLabel(10)
+	flowControlRequestEnqueueDuration.Reset()
+	llmdFlowControlRequestEnqueueDuration.Reset()
+	t.Cleanup(func() {
+		fairnessLabelLimiter = old
+		flowControlRequestEnqueueDuration.Reset()
+		llmdFlowControlRequestEnqueueDuration.Reset()
+	})
+
+	RecordFlowControlRequestEnqueueDuration("tenant-a", "0", "Dispatched", time.Millisecond)
+	RecordFlowControlRequestEnqueueDuration("tenant-a", "0", "Rejected", time.Millisecond)
+	RecordFlowControlRequestEnqueueDuration("tenant-b", "0", "Dispatched", time.Millisecond)
+	require.Equal(t, 3, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
+		"setup: expected one series per (fairness_id, outcome) pair")
+
+	DeleteFlowControlFlowSeries("tenant-a", "0")
+
+	require.Equal(t, 1, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
+		"all of tenant-a's series (every outcome) must be pruned; tenant-b's must survive")
+	require.Equal(t, 1, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration),
+		"the llm_d_epp family must be pruned identically")
 }
