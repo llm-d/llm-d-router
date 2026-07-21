@@ -355,7 +355,13 @@ func (fc *FlowController) tryDistribution(
 		fc.logger.Error(err,
 			"Invariant violation. Failed to get ManagedQueue for a leased flow.",
 			"flowKey", conn.FlowKey())
-		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, types.ErrRejected)
+		// An internal invariant violation, not a capacity condition: finalize as RejectedOther so it
+		// surfaces as an internal error rather than as saturation backpressure. The registry error is
+		// flattened with %v because this finalized error is returned through the connection closure in
+		// EnqueueAndWait: a %w-preserved ErrPriorityBandNotFound would be misread by
+		// withConnectionWithFallback as a lease-acquisition failure and silently retried at priority 0.
+		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther,
+			fmt.Errorf("%w: failed to get ManagedQueue for leased flow: %v", types.ErrRejected, err))
 		return item, err
 	}
 
