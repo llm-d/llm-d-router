@@ -70,8 +70,8 @@ var qwen3vlVideoCase = videoModelCase{
 	name:  "qwen3vl",
 	model: "Qwen/Qwen3-VL-30B-A3B-Instruct",
 	cfg: &estimateConfig{Video: &videoEstimateConfig{
-		Frames:         &framesConfig{Mode: videoFramesModeSampled, SampleFPS: 2, MinFrames: 4, TemporalPatchSize: 2},
-		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeDynamic, Factor: 32 * 32},
+		Frames:         &framesConfig{Mode: videoFramesModeSampled, MinFrames: 4, Sampled: &framesSampledMode{SampleFPS: 2, TemporalPatchSize: 2}},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeDynamic, Dynamic: &tokensPerFrameDynamicMode{Factor: 32 * 32}},
 		MaxVideoTokens: 12288,
 	}},
 }
@@ -86,8 +86,8 @@ var gemma4VideoCase = videoModelCase{
 	name:  "gemma4",
 	model: "google/gemma-4-31B-it",
 	cfg: &estimateConfig{Video: &videoEstimateConfig{
-		Frames:         &framesConfig{Mode: videoFramesModeStrided, FrameStride: 4, MaxFrames: 8},
-		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, StaticToken: 296},
+		Frames:         &framesConfig{Mode: videoFramesModeStrided, MaxFrames: 8, Strided: &framesStridedMode{FrameStride: 4}},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{StaticToken: 296}},
 	}},
 }
 

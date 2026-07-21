@@ -231,17 +231,25 @@ func newVideoEstimator(cfg *estimateConfig) videoEstimator {
 	}
 	if vid.TokensPerFrame != nil {
 		est.tpfMode = vid.TokensPerFrame.Mode
-		est.factor = vid.TokensPerFrame.Factor
-		est.staticToken = vid.TokensPerFrame.StaticToken
+		if vid.TokensPerFrame.Dynamic != nil {
+			est.factor = vid.TokensPerFrame.Dynamic.Factor
+		}
+		if vid.TokensPerFrame.Static != nil {
+			est.staticToken = vid.TokensPerFrame.Static.StaticToken
+		}
 	}
 	if vid.Frames != nil {
 		est.framesMode = vid.Frames.Mode
-		est.sampleFPS = vid.Frames.SampleFPS
-		est.sourceFPS = vid.Frames.DefaultSourceFPS
-		est.frameStride = vid.Frames.FrameStride
-		est.maxFrames = vid.Frames.MaxFrames
 		est.minFrames = vid.Frames.MinFrames
-		est.temporalPatchSize = vid.Frames.TemporalPatchSize
+		est.maxFrames = vid.Frames.MaxFrames
+		if vid.Frames.Sampled != nil {
+			est.sampleFPS = vid.Frames.Sampled.SampleFPS
+			est.temporalPatchSize = vid.Frames.Sampled.TemporalPatchSize
+		}
+		if vid.Frames.Strided != nil {
+			est.sourceFPS = vid.Frames.Strided.DefaultSourceFPS
+			est.frameStride = vid.Frames.Strided.FrameStride
+		}
 	}
 	return est
 }
@@ -266,13 +274,13 @@ func (e videoEstimator) placeholderCount(ctx context.Context, meta videoMetadata
 	return tokens
 }
 
-// frameCount returns the number of frame token-groups. Sampled mode samples
-// duration*sampleFPS frames, clamps to [minFrames, maxFrames], then merges every
-// temporalPatchSize frames into one group (models e.g. qwen3-vl, which samples
-// ~2fps and merges frame pairs). Strided mode takes
-// min(duration*sourceFPS/frameStride, maxFrames). A header-provided duration and
-// source FPS take precedence over configuration. sampleFPS is a model sampling
-// rate, not a source property, so it is never overridden.
+// frameCount returns the number of frame token-groups. Both modes clamp the raw
+// count to [minFrames, maxFrames]. Sampled mode samples duration*sampleFPS
+// frames, then merges every temporalPatchSize frames into one group (models e.g.
+// qwen3-vl, which samples ~2fps and merges frame pairs). Strided mode takes
+// duration*sourceFPS/frameStride. A header-provided duration and source FPS take
+// precedence over configuration. sampleFPS is a model sampling rate, not a source
+// property, so it is never overridden.
 func (e videoEstimator) frameCount(meta videoMetadata) int {
 	duration := meta.duration
 	if duration <= 0 {
@@ -294,6 +302,9 @@ func (e videoEstimator) frameCount(meta videoMetadata) int {
 			stride = 1
 		}
 		n := int(duration*fps) / stride
+		if e.minFrames > 0 && n < e.minFrames {
+			n = e.minFrames
+		}
 		if e.maxFrames > 0 && n > e.maxFrames {
 			n = e.maxFrames
 		}

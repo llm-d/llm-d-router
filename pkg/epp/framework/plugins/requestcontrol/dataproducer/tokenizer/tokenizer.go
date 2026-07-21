@@ -144,32 +144,58 @@ type videoEstimateConfig struct {
 type tokensPerFrameConfig struct {
 	// Mode selects "dynamic" (width*height/factor) or "static" (a constant count).
 	Mode string `json:"mode,omitempty"`
-	// Factor maps a frame's pixels to placeholder tokens (width*height/factor).
-	Factor int `json:"factor,omitempty"`
-	// StaticToken is the per-frame placeholder count in static mode.
+	// Static configures the static (constant per-frame) mode.
+	Static *tokensPerFrameStaticMode `json:"static,omitempty"`
+	// Dynamic configures the dynamic (pixels/factor) mode.
+	Dynamic *tokensPerFrameDynamicMode `json:"dynamic,omitempty"`
+}
+
+// tokensPerFrameStaticMode is the static-mode parameter.
+type tokensPerFrameStaticMode struct {
+	// StaticToken is the per-frame placeholder count.
 	StaticToken int `json:"staticToken,omitempty"`
 }
 
-// framesConfig configures how many frames are counted from a video.
+// tokensPerFrameDynamicMode is the dynamic-mode parameter.
+type tokensPerFrameDynamicMode struct {
+	// Factor maps a frame's pixels to placeholder tokens (width*height/factor).
+	Factor int `json:"factor,omitempty"`
+}
+
+// framesConfig configures how many frames are counted from a video. MinFrames
+// and MaxFrames clamp the count in both modes; the mode sub-structs hold the
+// mode-specific knobs.
 type framesConfig struct {
 	// Mode selects "sampled" (duration*sampleFPS) or "strided"
-	// (min(duration*sourceFPS/frameStride, maxFrames)).
+	// (duration*sourceFPS/frameStride).
 	Mode string `json:"mode,omitempty"`
-	// SampleFPS is the sampling rate in sampled mode.
-	SampleFPS float64 `json:"sampleFPS,omitempty"`
-	// DefaultSourceFPS is the fallback source frame rate in strided mode, used
-	// when the x-llm-d-video-fps header is absent.
-	DefaultSourceFPS float64 `json:"defaultSourceFPS,omitempty"`
-	// FrameStride keeps every Nth source frame in strided mode.
-	FrameStride int `json:"frameStride,omitempty"`
-	// MaxFrames caps the sampled/strided frame count. Zero means uncapped.
-	MaxFrames int `json:"maxFrames,omitempty"`
-	// MinFrames floors the sampled frame count (sampled mode). Zero means no floor.
+	// MinFrames floors the frame count. Zero means no floor.
 	MinFrames int `json:"minFrames,omitempty"`
-	// TemporalPatchSize merges every N sampled frames into one token group
-	// (sampled mode), modeling temporal patch merging (e.g. qwen3-vl uses 2).
-	// Values < 2 apply no merging.
+	// MaxFrames caps the frame count. Zero means uncapped.
+	MaxFrames int `json:"maxFrames,omitempty"`
+	// Sampled configures the sampled (duration*sampleFPS) mode.
+	Sampled *framesSampledMode `json:"sampled,omitempty"`
+	// Strided configures the strided (duration*sourceFPS/frameStride) mode.
+	Strided *framesStridedMode `json:"strided,omitempty"`
+}
+
+// framesSampledMode configures the sampled frame-count mode.
+type framesSampledMode struct {
+	// SampleFPS is the sampling rate.
+	SampleFPS float64 `json:"sampleFPS,omitempty"`
+	// TemporalPatchSize merges every N sampled frames into one token group,
+	// modeling temporal patch merging (e.g. qwen3-vl uses 2). Values < 2 apply
+	// no merging.
 	TemporalPatchSize int `json:"temporalPatchSize,omitempty"`
+}
+
+// framesStridedMode configures the strided frame-count mode.
+type framesStridedMode struct {
+	// DefaultSourceFPS is the fallback source frame rate, used when the
+	// x-llm-d-video-fps header is absent.
+	DefaultSourceFPS float64 `json:"defaultSourceFPS,omitempty"`
+	// FrameStride keeps every Nth source frame.
+	FrameStride int `json:"frameStride,omitempty"`
 }
 
 // PluginFactory is the factory function for the tokenizer plugin.
