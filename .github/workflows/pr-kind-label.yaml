@@ -50,8 +50,7 @@ jobs:
             done
 
           # Extract /area values from PR body and apply labels
-          printf '%s' "$PR_BODY" | tr -d '\r' | grep '^/area ' | \
-            sed 's|^/area ||' | sort -u | \
+          printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/area ||p' | sort -u | \
             while IFS= read -r area; do
               [ -z "$area" ] && continue
               gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "area/$area" || \
