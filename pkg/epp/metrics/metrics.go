@@ -368,7 +368,13 @@ var (
 		prometheus.GaugeOpts{
 			Subsystem: inferenceExtension,
 			Name:      "flow_control_pool_saturation",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_flow_control_pool_saturation] Current saturation level of the inference pool (0.0 = empty, 1.0 = fully saturated).", compbasemetrics.ALPHA),
+			Help: metricsutil.HelpMsgWithStability(
+				"[Deprecated: Use llm_d_epp_flow_control_pool_saturation] Pool saturation signal gating Flow Control "+
+					"dispatch. 1.0 is the gating set point; values above 1.0 indicate the magnitude of oversubscription "+
+					"past it. An empty pool reads as 1.0. With the default utilization detector, endpoints with missing "+
+					"or stale metrics score as fully saturated (fail-closed; see "+
+					"llm_d_epp_flow_control_stale_endpoints).",
+				compbasemetrics.ALPHA),
 		},
 		[]string{"inference_pool"},
 	)
@@ -470,6 +476,9 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdFlowControlQueueBytes)
 		metrics.Registry.MustRegister(flowControlPoolSaturation)
 		metrics.Registry.MustRegister(llmdFlowControlPoolSaturation)
+		// No deprecated inference_extension twin: new flow control metrics are emitted under the
+		// llm_d_epp prefix only.
+		metrics.Registry.MustRegister(llmdFlowControlStaleEndpoints)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestsTotal)
@@ -538,6 +547,7 @@ func Reset() {
 	llmdFlowControlQueueBytes.Reset()
 	flowControlPoolSaturation.Reset()
 	llmdFlowControlPoolSaturation.Reset()
+	llmdFlowControlStaleEndpoints.Reset()
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	flowControlDispatchCycleDuration.Reset()
@@ -888,6 +898,12 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 	flowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
 	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
+}
+
+// RecordFlowControlStaleEndpoints records how many candidate endpoints the given saturation
+// detector scored as fully saturated because their metrics were missing or stale.
+func RecordFlowControlStaleEndpoints(detector string, count int) {
+	llmdFlowControlStaleEndpoints.WithLabelValues(detector).Set(float64(count))
 }
 
 // IncFlowControlRequestsTotal increments the total request counter for a given outcome.

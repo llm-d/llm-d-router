@@ -351,9 +351,28 @@ var (
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "flow_control_pool_saturation",
-			Help:      metricsutil.HelpMsgWithStability("Current saturation level of the inference pool (0.0 = empty, 1.0 = fully saturated).", compbasemetrics.ALPHA),
+			Help: metricsutil.HelpMsgWithStability(
+				"Pool saturation signal gating Flow Control dispatch. 1.0 is the gating set point; values above 1.0 "+
+					"indicate the magnitude of oversubscription past it. An empty pool reads as 1.0. With the default "+
+					"utilization detector, endpoints with missing or stale metrics score as fully saturated "+
+					"(fail-closed; see flow_control_stale_endpoints).",
+				compbasemetrics.ALPHA),
 		},
 		[]string{"inference_pool"},
+	)
+
+	llmdFlowControlStaleEndpoints = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_stale_endpoints",
+			Help: metricsutil.HelpMsgWithStability(
+				"Number of candidate endpoints whose metrics are missing or older than the staleness threshold, as of "+
+					"the most recent saturation evaluation. Recorded by the utilization saturation detector, which scores "+
+					"these endpoints as fully saturated in flow_control_pool_saturation (fail-closed): a nonzero value "+
+					"during a dispatch stall indicates a metrics collection problem rather than genuine overload.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"detector"},
 	)
 
 	llmdFlowControlRequestsTotal = prometheus.NewCounterVec(

@@ -242,10 +242,25 @@ Exposed when the `flowControl` feature gate is enabled.
 
 *   **Type:** Gauge
 *   **Labels:** `inference_pool`
-*   **Description:** Current saturation level of the inference pool (0.0 = empty, 1.0 = fully
-    saturated).
+*   **Description:** Pool saturation signal gating dispatch. 1.0 is the gating set point; values
+    above 1.0 indicate the magnitude of oversubscription past it (deliberately not clamped). An
+    empty pool reads as 1.0, and with the default utilization detector, endpoints with missing or
+    stale metrics score as fully saturated (fail-closed).
 *   **Usage:** When saturation reaches the usage limit threshold, the dispatch cycle skips
-    dispatching and requests remain queued. Sustained 1.0 indicates all backends are at capacity.
+    dispatching and requests remain queued. A reading pinned at exactly 1.0 can be fail-closed
+    stale-metrics or an empty pool rather than genuine overload (which typically reads above 1.0);
+    check `flow_control_stale_endpoints` to disambiguate.
+
+#### `flow_control_stale_endpoints`
+
+*   **Type:** Gauge
+*   **Labels:** `detector`
+*   **Description:** Number of candidate endpoints whose metrics are missing or older than the
+    staleness threshold, as of the most recent saturation evaluation. Recorded by the utilization
+    saturation detector; emitted under the `llm_d_epp` prefix only (no deprecated
+    `inference_extension_*` twin).
+*   **Usage:** A nonzero value during a dispatch stall indicates a model-server metrics collection
+    problem (scrape path, port, TLS, auth) rather than genuine overload.
 
 #### `flow_control_requests_total`
 
