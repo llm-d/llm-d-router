@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
 func TestDCGMDataSourceFactory_Defaults(t *testing.T) {
@@ -73,5 +74,28 @@ func TestDCGMDataSourceFactory_UnknownField(t *testing.T) {
 	_, err := DCGMDataSourceFactory("test", fwkplugin.StrictDecoder(raw), nil)
 	if err == nil {
 		t.Fatal("expected error for unknown field (strict decoding)")
+	}
+}
+
+func TestNewHTTPDCGMDataSource(t *testing.T) {
+	ds, err := NewHTTPDCGMDataSource("http", "/metrics", 9400, "direct")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := ds.TypedName().Type; got != DCGMDataSourceType {
+		t.Errorf("Type = %q, want %q", got, DCGMDataSourceType)
+	}
+	if got := ds.TypedName().Name; got != "direct" {
+		t.Errorf("Name = %q, want %q", got, "direct")
+	}
+}
+
+func TestNewHTTPDCGMDataSource_WithUseNodeAddress(t *testing.T) {
+	ds, err := NewHTTPDCGMDataSource("http", "/metrics", 9400, "node", http.WithUseNodeAddress())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ds == nil {
+		t.Fatal("expected non-nil data source")
 	}
 }

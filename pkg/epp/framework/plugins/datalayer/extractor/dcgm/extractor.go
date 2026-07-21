@@ -88,7 +88,10 @@ func (e *Extractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.
 		if !sampleBelongsToPod(m, podName) {
 			continue
 		}
-		val := gaugeValue(m)
+		val, err := gaugeValue(m)
+		if err != nil {
+			return err
+		}
 		if val > maxUtil {
 			maxUtil = val
 		}
@@ -132,9 +135,9 @@ func labelValue(m *dto.Metric, name string) (string, bool) {
 	return "", false
 }
 
-func gaugeValue(m *dto.Metric) float64 {
+func gaugeValue(m *dto.Metric) (float64, error) {
 	if g := m.GetGauge(); g != nil {
-		return g.GetValue()
+		return g.GetValue(), nil
 	}
-	return 0
+	return 0, fmt.Errorf("expected gauge metric for %s", gpuUtilMetricName)
 }

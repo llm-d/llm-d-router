@@ -241,11 +241,6 @@ func TestGetEndpoint_PortOverride(t *testing.T) {
 			opts:     []Option{WithPortOverride(9400), WithUseNodeAddress()},
 			wantHost: "192.168.1.10:9400",
 		},
-		{
-			name:     "WithUseNodeAddress without portOverride is a no-op",
-			opts:     []Option{WithUseNodeAddress()},
-			wantHost: "10.0.0.1:8000",
-		},
 	}
 
 	for _, tc := range cases {
@@ -258,6 +253,14 @@ func TestGetEndpoint_PortOverride(t *testing.T) {
 			assert.Equal(t, "/metrics", got.Path)
 		})
 	}
+}
+
+func TestNewHTTPDataSource_UseNodeAddressWithoutPortOverride(t *testing.T) {
+	parser := func(r io.Reader) (int, error) { return 0, nil }
+	_, err := NewHTTPDataSource("http", "/metrics", TLSOptions{SkipVerify: true}, "test", "test", parser,
+		WithUseNodeAddress())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WithUseNodeAddress requires a non-zero WithPortOverride")
 }
 
 func TestGetEndpoint_UseNodeAddress_FallsBackToPodIP(t *testing.T) {
