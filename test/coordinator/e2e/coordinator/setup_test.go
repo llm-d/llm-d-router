@@ -247,7 +247,7 @@ func applyManifest(path string, subs map[string]string, excludeKinds ...string) 
 // non-coordinator e2e, which creates the EPP Services once in its per-container
 // setup and recreates only the Deployment per test.
 func createStableServices() []string {
-	var objects []string
+	objects := make([]string, 0, 4)
 
 	docs := e2eutil.RunKustomize(coordinatorComponentDir)
 	docs = e2eutil.FilterKinds(docs, "ConfigMap", "Deployment", "ServiceAccount")
