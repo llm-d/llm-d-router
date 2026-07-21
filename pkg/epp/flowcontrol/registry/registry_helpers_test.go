@@ -403,6 +403,45 @@ func TestRegistry_PriorityBandAccessor(t *testing.T) {
 	})
 }
 
+// TestRegistry_IterateQueues_StaleDrainDoesNotHideReincarnatedQueue exercises the interleaving
+// where a cleanup-sweep worker drains a queue through a handle resolved before deleteFlow removed
+// that queue, after a successor queue was registered under the same flow ID and became active. The
+// stale drain's empty transition must not remove the successor's active-queue index entry: a
+// non-empty registered queue that IterateQueues skips is invisible to both dispatch and future
+// sweeps, so its requests would hang until flow GC.
+func TestRegistry_IterateQueues_StaleDrainDoesNotHideReincarnatedQueue(t *testing.T) {
+	t.Parallel()
+	h := newTestHarness(t)
+	key := h.highPriorityKey1
+
+	// A sweep worker resolves a handle to a queue holding finalized-but-unswept items.
+	h.addItem(key, 100)
+	staleMQ, err := h.registry.ManagedQueue(key)
+	require.NoError(t, err, "Setup: resolving the pre-deletion queue handle must succeed")
+
+	// GC collects the idle flow (deleteFlow tolerates non-empty queues by design).
+	h.registry.mu.Lock()
+	h.registry.deleteFlow(key)
+	h.registry.mu.Unlock()
+
+	// The flow is re-registered under the same ID and receives a new request.
+	h.synchronizeFlow(key)
+	h.addItem(key, 100)
+
+	// The stale sweep drain must not delete the reincarnated queue's index entry.
+	staleMQ.Cleanup(func(flowcontrol.QueueItemAccessor) bool { return true })
+
+	accessor, err := h.registry.PriorityBandAccessor(highPriority)
+	require.NoError(t, err, "Setup: getting the band accessor must succeed")
+	var visited []string
+	accessor.IterateQueues(func(q flowcontrol.FlowQueueAccessor) bool {
+		visited = append(visited, q.FlowKey().ID)
+		return true
+	})
+	assert.Contains(t, visited, key.ID,
+		"a non-empty registered queue must remain visible to IterateQueues after a stale drain of its predecessor")
+}
+
 // --- Lifecycle and State Management Tests ---
 
 func TestRegistry_SynchronizeFlow(t *testing.T) {

@@ -68,7 +68,11 @@ func (b *priorityBand) setQueueActivity(mq *managedQueue, active bool) {
 	if active {
 		b.activeQueues.Store(mq.key.ID, mq)
 	} else {
-		b.activeQueues.Delete(mq.key.ID)
+		// Deactivation must be conditional on the entry still belonging to this queue. A cleanup-sweep
+		// worker can drain a queue through a handle resolved before deleteFlow removed it, and a
+		// successor queue may have been registered under the same ID in the interim; an unconditional
+		// delete would hide that live, non-empty successor from IterateQueues.
+		b.activeQueues.CompareAndDelete(mq.key.ID, mq)
 	}
 }
 
