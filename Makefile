@@ -119,12 +119,14 @@ BUILDER_SOCK_FLAGS = $(DOCKER_GROUP_PARAM) \
 	-e CONTAINER_RUNTIME=docker
 endif
 
+E2E_NUM_PROCS ?= 5
+
 # Env vars forwarded into the e2e test container.
 # Add new image vars here so they are automatically passed through.
 # Should we pass ALL env vars here?
 E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE VLLM_RENDER_IMAGE \
                E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT \
-               E2E_LABEL_FILTER LOAD_VLLM_RENDER_IMAGE HF_TOKEN
+               E2E_NUM_PROCS LOAD_VLLM_RENDER_IMAGE HF_TOKEN
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)

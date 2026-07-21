@@ -35,6 +35,7 @@ type Client interface {
 // Addressable supports getting an IP address and a namespaced name.
 type Addressable interface {
 	GetIPAddress() string
+	GetNodeAddress() string
 	GetPort() string
 	GetMetricsHost() string
 	GetNamespacedName() types.NamespacedName

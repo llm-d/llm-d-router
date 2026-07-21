@@ -305,6 +305,10 @@ var (
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "pod1",
 		},
+		Status: corev1.PodStatus{
+			PodIP:  "10.0.0.1",
+			HostIP: "192.168.1.10",
+		},
 	}
 	pod1Metrics = &fwkdl.Metrics{
 		WaitingQueueSize:    0,
@@ -319,6 +323,10 @@ var (
 	pod2 = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "pod2",
+		},
+		Status: corev1.PodStatus{
+			PodIP:  "10.0.0.2",
+			HostIP: "192.168.1.10",
 		},
 	}
 	pod2Metrics = &fwkdl.Metrics{
@@ -506,7 +514,10 @@ func TestPods(t *testing.T) {
 				for idx, pm := range podList {
 					gotPods[idx] = &corev1.Pod{
 						ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().PodName, Namespace: pm.GetMetadata().NamespacedName.Namespace},
-						Status:     corev1.PodStatus{PodIP: pm.GetMetadata().GetIPAddress()},
+						Status: corev1.PodStatus{
+							PodIP:  pm.GetMetadata().GetIPAddress(),
+							HostIP: pm.GetMetadata().GetNodeAddress(),
+						},
 					}
 				}
 				if !cmp.Equal(gotPods, test.wantPods, cmpopts.SortSlices(func(a, b *corev1.Pod) bool { return a.Name < b.Name })) {
@@ -649,6 +660,7 @@ func TestEndpointMetadata(t *testing.T) {
 
 					PodName:     pod1.Name,
 					Address:     pod1.Status.PodIP,
+					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolTargetPort,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolTargetPort),
 					Labels:      map[string]string{},
@@ -671,6 +683,7 @@ func TestEndpointMetadata(t *testing.T) {
 
 					PodName:     pod1.Name,
 					Address:     pod1.Status.PodIP,
+					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort0),
 					Labels:      map[string]string{},
@@ -683,6 +696,7 @@ func TestEndpointMetadata(t *testing.T) {
 
 					PodName:     pod1.Name,
 					Address:     pod1.Status.PodIP,
+					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
@@ -706,6 +720,7 @@ func TestEndpointMetadata(t *testing.T) {
 
 					PodName:     pod1.Name,
 					Address:     pod1.Status.PodIP,
+					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort0),
 					Labels:      map[string]string{},
@@ -718,6 +733,7 @@ func TestEndpointMetadata(t *testing.T) {
 
 					PodName:     pod1.Name,
 					Address:     pod1.Status.PodIP,
+					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
@@ -731,8 +747,9 @@ func TestEndpointMetadata(t *testing.T) {
 
 					PodName:     pod2.Name,
 					Address:     pod2.Status.PodIP,
+					NodeAddress: pod2.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
-					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort0),
+					MetricsHost: net.JoinHostPort(pod2.Status.PodIP, inferencePoolMultiTargetPort0),
 					Labels:      map[string]string{},
 				},
 				{
@@ -743,8 +760,9 @@ func TestEndpointMetadata(t *testing.T) {
 
 					PodName:     pod2.Name,
 					Address:     pod2.Status.PodIP,
+					NodeAddress: pod2.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
-					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
+					MetricsHost: net.JoinHostPort(pod2.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
 					RankIndex:   1,
 				},
@@ -766,6 +784,7 @@ func TestEndpointMetadata(t *testing.T) {
 
 					PodName:     pod1.Name,
 					Address:     pod1.Status.PodIP,
+					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort0),
 					Labels:      map[string]string{},
@@ -778,6 +797,7 @@ func TestEndpointMetadata(t *testing.T) {
 
 					PodName:     pod1.Name,
 					Address:     pod1.Status.PodIP,
+					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
