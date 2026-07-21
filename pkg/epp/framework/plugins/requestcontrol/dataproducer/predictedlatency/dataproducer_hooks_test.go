@@ -78,6 +78,30 @@ func TestProduce_CapturesEncoderCacheSizes(t *testing.T) {
 	assert.Equal(t, 0, plCtx.encoderMatchedSizeForEndpoints["pod-unmatched"])
 }
 
+// TestProduce_ClampsInconsistentEncoderMatchData verifies that match data
+// whose matched size exceeds the input size is clamped so downstream
+// predictor validation (matched <= input) cannot reject the request.
+func TestProduce_ClampsInconsistentEncoderMatchData(t *testing.T) {
+	cfg := DefaultConfig
+	cfg.PredictInProduce = false
+	cfg.UseEncoderCacheFeatures = true
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, cfg, nil)
+
+	request := createTestInferenceRequest("encoder-clamp-test", 0, 0)
+	endpoint := createTestEndpoint("pod-a", 0.1, 0, 0)
+
+	matched := []attrmm.MatchItem{{Hash: "img-a", Size: 3}}
+	requestItems := []attrmm.MatchItem{{Hash: "img-b", Size: 1}}
+	endpoint.Put(pl.encoderCacheDataKey.String(), attrmm.NewEncoderCacheMatchInfo(matched, requestItems))
+
+	require.NoError(t, pl.Produce(context.Background(), request, []fwksched.Endpoint{endpoint}))
+
+	plCtx, err := pl.getPredictedLatencyContextForRequest(request)
+	require.NoError(t, err)
+	assert.Equal(t, 1, plCtx.encoderInputSize)
+	assert.Equal(t, 1, plCtx.encoderMatchedSizeForEndpoints["pod-a"])
+}
+
 // TestProduce_EncoderCacheFeatureDisabledIgnoresMatchData is the negative
 // control: with the feature off, attached match data is not read.
 func TestProduce_EncoderCacheFeatureDisabledIgnoresMatchData(t *testing.T) {

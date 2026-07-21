@@ -136,6 +136,15 @@ func (pl *PredictedLatency) captureEncoderCacheSizes(ctx context.Context, predic
 	}
 	inputSize := sumItemSizes(matchInfo.RequestItems())
 	matchedSize := sumItemSizes(matchInfo.MatchedItems())
+	// The predictor rejects matched > input, so clamp inconsistent match data
+	// rather than dropping the whole prediction or training entry.
+	if matchedSize > inputSize {
+		logger.V(logutil.DEBUG).Info("Encoder cache matched size exceeds input size, clamping",
+			"pod", endpoint.GetMetadata().String(),
+			"encoderInputSize", inputSize,
+			"encoderMatchedSize", matchedSize)
+		matchedSize = inputSize
+	}
 	predictedLatencyCtx.encoderInputSize = inputSize
 	predictedLatencyCtx.encoderMatchedSizeForEndpoints[endpoint.GetMetadata().NamespacedName.Name] = matchedSize
 	logger.V(logutil.DEBUG).Info("Encoder cache sizes for pod",

@@ -227,7 +227,9 @@ func bulkPredictWithMetrics(
 			bulkRequests[i].EncoderInputSize = encoderInputSizes[i]
 		}
 		if i < len(encoderMatchedSizes) {
-			bulkRequests[i].EncoderMatchedSize = encoderMatchedSizes[i]
+			// The predictor rejects matched > input, so clamp instead of
+			// failing the whole bulk request when the slices are inconsistent.
+			bulkRequests[i].EncoderMatchedSize = min(encoderMatchedSizes[i], bulkRequests[i].EncoderInputSize)
 		}
 	}
 

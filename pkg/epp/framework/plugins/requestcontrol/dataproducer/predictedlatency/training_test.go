@@ -142,6 +142,31 @@ func TestBulkPredictWithMetrics_PropagatesEncoderSizes(t *testing.T) {
 	assert.Equal(t, 0, mockPredictor.capturedBulkStrictRequests[1].EncoderMatchedSize)
 }
 
+// TestBulkPredictWithMetrics_ClampsMatchedWithoutInputSizes verifies that a
+// matched-size slice without a corresponding input-size slice is clamped to
+// the input size (0) instead of producing requests that fail validation.
+func TestBulkPredictWithMetrics_ClampsMatchedWithoutInputSizes(t *testing.T) {
+	mockPredictor := &mockPredictor{
+		predictions: map[string]*latencypredictor.PredictionResponse{
+			"0.5": {TTFT: 0.5, TPOT: 0.03},
+		},
+	}
+
+	metricsStates := []*fwkdl.Metrics{{KVCacheUsagePercent: 0.5}}
+	pods := []*fwkdl.EndpointMetadata{
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"}},
+	}
+
+	_, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor,
+		metricsStates, "", pods, []int{1}, []int{1}, []float64{0.0},
+		nil, nil, nil, []int{5})
+	require.NoError(t, err)
+
+	require.Len(t, mockPredictor.capturedBulkStrictRequests, 1)
+	assert.Equal(t, 0, mockPredictor.capturedBulkStrictRequests[0].EncoderInputSize)
+	assert.Equal(t, 0, mockPredictor.capturedBulkStrictRequests[0].EncoderMatchedSize)
+}
+
 func TestBuildPredictionRequestAndTrainingEntry_EncoderSizes(t *testing.T) {
 	m := &fwkdl.Metrics{KVCacheUsagePercent: 0.5}
 	pod := &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"}}
