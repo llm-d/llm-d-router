@@ -31,11 +31,7 @@ import (
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
-// requestTimeout is intentionally long (applies to all specs, text-only and
-// multimodal) so the request completes even on the intermittent slow/black-holed
-// path, letting the end-of-spec coordinator log dump show whether and when the
-// request actually reached the coordinator.
-const requestTimeout = 600 * time.Second
+const requestTimeout = 60 * time.Second
 
 // testImageURL and testImageURL2 are publicly accessible images used to
 // exercise multimodal requests that trigger the encode stage.
