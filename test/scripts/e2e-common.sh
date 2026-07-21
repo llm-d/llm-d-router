@@ -38,6 +38,6 @@ run_ginkgo_suite() {
     # Tests not being run in parallel using Ginkgo
     E2E_NUM_PROCS=1 go test -v -timeout 45m "${pkg}" -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
   else
-    ginkgo run --procs=${E2E_NUM_PROCS} --timeout 45m -v --fail-fast "${pkg}"
+    ginkgo run --procs="${E2E_NUM_PROCS}" --timeout 45m -v --fail-fast "${pkg}"
   fi
 }
