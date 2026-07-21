@@ -284,9 +284,9 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_processing_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("EPP request orchestration latency distribution in seconds, from request receipt through endpoint selection and request preparation, excluding admission-control time.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("EPP request processing latency distribution in seconds, from request receipt until the request body has been handled, including admission control.", compbasemetrics.ALPHA),
 			Buckets: []float64{
-				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+				0.0005, 0.001, 0.002, 0.005, 0.01, 0.015, 0.025, 0.04, 0.06, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
 			},
 		},
 		[]string{},
@@ -296,9 +296,9 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "response_processing_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("EPP response processing latency distribution in seconds, accumulated across response handlers and excluding model server generation time.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("EPP response processing latency distribution in seconds: the sum of per-chunk handler time for a streamed response, or the interval from response headers to completion for a non-streaming response.", compbasemetrics.ALPHA),
 			Buckets: []float64{
-				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+				0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
 			},
 		},
 		[]string{},

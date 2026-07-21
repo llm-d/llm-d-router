@@ -112,12 +112,12 @@ Label `{name}` (the pool name).
 
 ### EPP processing overhead
 
-Unlabelled. Together these cover the EPP's own cost on the request and response paths.
+Unlabelled.
 
 | Name | Type | Notes |
 |---|---|---|
-| `request_processing_duration_seconds` | Histogram | Request orchestration latency, from receipt through endpoint selection and request preparation; excludes admission control. |
-| `response_processing_duration_seconds` | Histogram | Response handling latency, accumulated across the response handlers; excludes model-server generation time. |
+| `request_processing_duration_seconds` | Histogram | Time from request receipt until the request body has been handled. Includes admission control, so under the flow control feature gate this covers queue wait; `flow_control_request_queue_duration_seconds` separates it out. |
+| `response_processing_duration_seconds` | Histogram | Sum of the per-chunk handler slices for a streamed response, so model-server generation time between chunks is excluded. For a non-streaming response, the interval from response headers to completion. |
 
 ### Plugin, info, and model rewrite
 

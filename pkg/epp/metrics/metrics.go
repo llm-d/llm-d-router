@@ -770,14 +770,13 @@ func RecordSchedulerE2ELatency(duration time.Duration) {
 }
 
 // RecordRequestProcessingLatency records the EPP request processing latency,
-// measured from request receipt through endpoint selection and request
-// preparation, excluding admission-control time.
+// measured from request receipt until the request body has been handled.
 func RecordRequestProcessingLatency(duration time.Duration) {
 	llmdRequestProcessingLatency.WithLabelValues().Observe(duration.Seconds())
 }
 
-// RecordResponseProcessingLatency records the EPP response processing latency,
-// accumulated across response handlers for a single request.
+// RecordResponseProcessingLatency records the EPP response processing latency
+// for a single request.
 func RecordResponseProcessingLatency(duration time.Duration) {
 	llmdResponseProcessingLatency.WithLabelValues().Observe(duration.Seconds())
 }
