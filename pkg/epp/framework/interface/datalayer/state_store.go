@@ -26,8 +26,7 @@ import (
 type StateKey string
 
 // CrossReplicaStore is a cross-EPP state store for sharing state across replicas.
-// Implementations own the sync mechanism (e.g., Redis pub/sub, gossip) and the
-// aggregation strategy (e.g., sum for in-flight load, union for cache state).
+// Implementations own the sync mechanism (e.g., Redis pub/sub, gossip).
 type CrossReplicaStore interface {
 	fwkplugin.Plugin
 
@@ -65,4 +64,8 @@ type CrossReplicaSpec struct {
 	// endpoint. The runtime calls this closure after Produce to snapshot
 	// the current local state and Set it into the store.
 	Supply func(endpointID string) func() Cloneable
+
+	// Aggregate combines per-replica values into a single aggregate.
+	// Called by the store's Get to fold values from all replicas.
+	Aggregate func(values []any) any
 }

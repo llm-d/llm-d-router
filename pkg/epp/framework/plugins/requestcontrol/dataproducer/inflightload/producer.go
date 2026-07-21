@@ -292,6 +292,16 @@ func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 				}
 			}
 		},
+		Aggregate: func(values []any) any {
+			total := &attrconcurrency.InFlightLoad{}
+			for _, v := range values {
+				if ifl, ok := v.(*attrconcurrency.InFlightLoad); ok {
+					total.Requests += ifl.Requests
+					total.Tokens += ifl.Tokens
+				}
+			}
+			return total
+		},
 	}
 }
 
