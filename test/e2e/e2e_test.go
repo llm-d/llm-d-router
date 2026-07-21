@@ -233,13 +233,11 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 	for _, tc := range []struct {
 		name   string
 		config string
-		label  string
 	}{
-		{"deprecated pd-profile-handler", deprecatedPdConfig, deprecatedPDTestLabel},
-		{"disagg-profile-handler", pdConfig, disaggTestLabel},
+		{"deprecated pd-profile-handler", deprecatedPdConfig},
+		{"disagg-profile-handler", pdConfig},
 	} {
 		config := tc.config // capture for closure
-		label := tc.label
 		ginkgo.When("Running a PD configuration with shared-storage connector using "+tc.name, ginkgo.Ordered, testWrapper(func() {
 			ginkgo.It("should run regular (non-streaming) requests successfully", func() {
 				infPoolObjects := createInferencePool(1)
