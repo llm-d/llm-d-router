@@ -72,15 +72,17 @@ func BenchmarkFlowController_PerformanceMatrix(b *testing.B) {
 // runMatrixCoordinate executes a single coordinate of the performance hypercube.
 func runMatrixCoordinate(b *testing.B, m benchMatrix) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Ensure SUT goroutines are torn down even when the coordinate fails fatally.
 
 	fc, detector := setupBenchmarkHarness(ctx, b, m.priorities, m.limit, nil, nil)
 
 	// Warm up: block on one request until it's dispatched, proving the dispatch loop is live before
-	// timing. Release the slot per the loop's immediate-drain protocol.
+	// timing. Release the slot per the loop's immediate-drain protocol (a no-op under free-flow).
 	warmup := &benchRequest{key: flowcontrol.FlowKey{ID: "warmup", Priority: 0}, byteSize: 1024}
-	if outcome, _ := fc.EnqueueAndWait(ctx, warmup); outcome == types.QueueOutcomeDispatched && m.limit > 0 {
-		detector.Release()
+	if outcome, err := fc.EnqueueAndWait(ctx, warmup); outcome != types.QueueOutcomeDispatched {
+		b.Fatalf("warmup request was not dispatched: outcome=%v, err=%v", outcome, err)
 	}
+	detector.Release()
 
 	reqs := make([]*benchRequest, m.flows)
 	for i := 0; i < int(m.flows); i++ {
@@ -165,6 +167,13 @@ func runMatrixCoordinate(b *testing.B, m benchMatrix) {
 	b.StopTimer()
 	elapsed := b.Elapsed().Seconds()
 	telemetry.report(b, elapsed)
+
+	// Every coordinate expects flow (W>L or free-flow), so zero dispatches means the dispatch path
+	// wedged mid-run: fail loudly instead of publishing plausible-looking zero rows. Assert on the
+	// benchmark goroutine (never inside RunParallel, where FailNow is invalid).
+	if telemetry.dispatchCount.Load() == 0 {
+		b.Fatalf("coordinate %s dispatched zero requests; the dispatch path is wedged", m.name())
+	}
 
 	cancel()                          // Graceful teardown to prevent async skewing of subsequent coordinates.
 	time.Sleep(50 * time.Millisecond) // Wait for SUT background goroutines to terminate.

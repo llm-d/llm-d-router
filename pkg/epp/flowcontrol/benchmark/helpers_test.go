@@ -119,6 +119,12 @@ type benchDetector struct {
 // stuckReadThreshold is the number of consecutive saturated reads with zero intervening releases
 // after which the detector treats the outstanding grants as leaked idle permits and reclaims one.
 // >1 so that a single slow Release under load does not cause a spurious reclaim.
+//
+// The heuristic is deliberately biased toward liveness: if a genuine holder's Release stalls past
+// the threshold (e.g. its worker goroutine is descheduled), the reclaim transiently over-admits
+// beyond L rather than risking a latched-saturated deadlock. For a CPU-cost benchmark that is the
+// right trade: true queueing still reports saturated (1.0) while releases flow, and a slightly
+// loose L only shifts the coordinate's operating point, whereas a latch would hang the run.
 const stuckReadThreshold = 2
 
 // Release frees the permit held by the dispatch that just completed.
@@ -284,7 +290,10 @@ func setupBenchmarkHarness(
 	cfg := customCfg
 	if cfg == nil {
 		cfg = &controller.Config{
-			DefaultRequestTTL:        5 * time.Minute,
+			// Nothing in a throughput benchmark legitimately waits minutes: the worst observed
+			// steady-state queue wait is ~10s (L=1, W=5000). A tight TTL bounds the cost of a wedged
+			// coordinate to seconds of CI time instead of minutes per cell.
+			DefaultRequestTTL:        30 * time.Second,
 			ExpiryCleanupInterval:    1 * time.Hour, // Effectively disabled
 			EnqueueChannelBufferSize: 2000,
 		}
