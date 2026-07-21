@@ -67,21 +67,21 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - name: Checkout llm-d/llm-d-router
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Checkout kubernetes-sigs/inference-perf
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: kubernetes-sigs/inference-perf
           path: inference-perf
 
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
           credentials_json: ${{ secrets.GKE_SA_KEY }}
 
       - name: Set up gcloud CLI and kubectl
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@v3
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
           install_components: 'kubectl,gke-gcloud-auth-plugin'
@@ -97,7 +97,7 @@ jobs:
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.10"
 
@@ -125,7 +125,7 @@ jobs:
             --gcs-bucket ${{ env.GCS_BUCKET }}
 
       - name: Upload Performance Results Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: epp-perf-results
