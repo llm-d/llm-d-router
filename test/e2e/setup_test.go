@@ -225,7 +225,7 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 
 // testWrapper wraps tests with the setup and teardown code needed.
 // It is used as a wrapper of the function passed to ginkgo.When calls that
-// setup the tests. It is important that the gink.Ordered decorator is used
+// setup the tests. It is important that the ginkgo.Ordered decorator is used
 // to enable the use of the ginkgo.BeforeAll and ginkgo.AfterAll functions
 // to inject the setup and teardown code.
 func testWrapper(test func()) func() {
@@ -267,8 +267,11 @@ func testWrapper(test func()) func() {
 		})
 
 		ginkgo.AfterAll(func() {
-			// Only cleanup if the test succeeded
-			if !(ginkgo.CurrentSpecReport().Failed() && keepClusterOnFailure) {
+			if ginkgo.CurrentSpecReport().Failed() && keepClusterOnFailure {
+				// The test failed
+				testutils.DumpPodsAndLogs(testConfig, nsName)
+			} else {
+				// Only cleanup if the test succeeded
 				testutils.DeleteObjects(testConfig, rbacObjects, nsName)
 				testutils.DeleteObjects(testConfig, serviceObjects, nsName)
 				testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
@@ -281,9 +284,6 @@ func testWrapper(test func()) func() {
 				if createdNameSpace {
 					deleteNameSpace(nsName)
 				}
-			} else {
-				// The test failed
-				testutils.DumpPodsAndLogs(testConfig, nsName)
 			}
 		})
 
