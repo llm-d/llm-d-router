@@ -8,7 +8,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
   parameters:
-    maxPrefixTokensToMatch: 4096
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: decode-filter
@@ -32,7 +32,7 @@ plugins:
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
-    maxPrefixTokensToMatch: 4096
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: prefill-filter
@@ -92,7 +92,7 @@ plugins:
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
-    maxPrefixTokensToMatch: 4096
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: max-score-picker
@@ -130,7 +130,7 @@ plugins:
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
-    maxPrefixTokensToMatch: 4096
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: prefill-filter
@@ -164,7 +164,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
   parameters:
-    maxPrefixTokensToMatch: 4096
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: encode-filter
