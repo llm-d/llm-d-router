@@ -38,6 +38,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	podutil "github.com/llm-d/llm-d-router/pkg/epp/util/pod"
 )
 
@@ -103,18 +104,16 @@ type Datastore interface {
 var _ Datastore = &datastore{}
 
 // NewDatastore creates a new data store.
-// TODO: modelServerMetricsPort is being deprecated
-func NewDatastore(parentCtx context.Context, epFactory datalayer.EndpointFactory, modelServerMetricsPort int32) Datastore {
+func NewDatastore(parentCtx context.Context, epFactory datalayer.EndpointFactory) Datastore {
 	// Initialize with defaults
 	return &datastore{
-		parentCtx:              parentCtx,
-		pool:                   nil,
-		mu:                     sync.RWMutex{},
-		objectives:             make(map[string]*v1alpha2.InferenceObjective),
-		modelRewrites:          newModelRewriteStore(),
-		pods:                   &sync.Map{},
-		modelServerMetricsPort: modelServerMetricsPort,
-		epf:                    epFactory,
+		parentCtx:     parentCtx,
+		pool:          nil,
+		mu:            sync.RWMutex{},
+		objectives:    make(map[string]*v1alpha2.InferenceObjective),
+		modelRewrites: newModelRewriteStore(),
+		pods:          &sync.Map{},
+		epf:           epFactory,
 	}
 }
 
@@ -130,10 +129,7 @@ type datastore struct {
 	modelRewrites *modelRewriteStore
 	// key: types.NamespacedName, value: fwkdl.Endpoint
 	pods *sync.Map
-	// modelServerMetricsPort metrics port from EPP command line argument
-	// used only if there is only one inference engine per pod
-	modelServerMetricsPort int32 // TODO: deprecating
-	epf                    datalayer.EndpointFactory
+	epf  datalayer.EndpointFactory
 }
 
 func (ds *datastore) WithEndpointPool(pool *datalayer.EndpointPool) Datastore {
@@ -168,7 +164,7 @@ func (ds *datastore) PoolSet(ctx context.Context, reader client.Reader, endpoint
 	oldEndpointPool := ds.pool
 	ds.pool = endpointPool
 
-	selectorChanged := oldEndpointPool == nil || !labels.Equals(oldEndpointPool.Selector, endpointPool.Selector)
+	selectorChanged := oldEndpointPool == nil || !selectorEqual(oldEndpointPool.Selector, endpointPool.Selector)
 	targetPortsChanged := oldEndpointPool != nil && !slices.Equal(oldEndpointPool.TargetPorts, endpointPool.TargetPorts)
 
 	if selectorChanged || targetPortsChanged {
@@ -207,12 +203,10 @@ func (ds *datastore) PoolHasSynced() bool {
 func (ds *datastore) PoolLabelsMatch(podLabels map[string]string) bool {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
-	if ds.pool == nil {
+	if ds.pool == nil || ds.pool.Selector == nil {
 		return false
 	}
-	poolSelector := labels.SelectorFromSet(ds.pool.Selector)
-	podSet := labels.Set(podLabels)
-	return poolSelector.Matches(podSet)
+	return ds.pool.Selector.Matches(labels.Set(podLabels))
 }
 
 // /// InferenceObjective APIs ///
@@ -245,6 +239,9 @@ func (ds *datastore) ObjectiveGetAll() []*v1alpha2.InferenceObjective {
 }
 
 func (ds *datastore) ModelRewriteSet(infModelRewrite *v1alpha2.InferenceModelRewrite) {
+	// Configured model names always emit their real metric label; only
+	// unconfigured request-supplied names are subject to the cardinality cap.
+	metrics.PreAdmitModelLabels(configuredModelNames(infModelRewrite)...)
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.modelRewrites.set(infModelRewrite)
@@ -307,27 +304,20 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 	labels := make(map[string]string, len(pod.GetLabels()))
 	maps.Copy(labels, pod.GetLabels())
 
-	modelServerMetricsPort := 0
-	if len(pool.TargetPorts) == 1 {
-		modelServerMetricsPort = int(ds.modelServerMetricsPort)
-	}
 	pods := []*fwkdl.EndpointMetadata{}
 	activePorts := extractActivePorts(pod, pool.TargetPorts)
 	for idx, port := range pool.TargetPorts {
 		if !activePorts.Has(port) {
 			continue
 		}
-		metricsPort := modelServerMetricsPort
-		if metricsPort == 0 {
-			metricsPort = port
-		}
 		pods = append(pods,
 			&fwkdl.EndpointMetadata{
 				NamespacedName: createEndpointNamespacedName(pod, idx),
 				PodName:        pod.Name,
 				Address:        pod.Status.PodIP,
+				NodeAddress:    pod.Status.HostIP,
 				Port:           strconv.Itoa(port),
-				MetricsHost:    net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(metricsPort)),
+				MetricsHost:    net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(port)),
 				Labels:         labels,
 				RankIndex:      idx,
 			})
@@ -415,7 +405,7 @@ func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) err
 	logger := log.FromContext(ctx)
 	podList := &corev1.PodList{}
 	if err := reader.List(ctx, podList, &client.ListOptions{
-		LabelSelector: labels.SelectorFromSet(ds.pool.Selector),
+		LabelSelector: ds.pool.Selector,
 		Namespace:     ds.pool.Namespace,
 	}); err != nil {
 		return fmt.Errorf("failed to list pods - %w", err)
@@ -486,4 +476,14 @@ func createEndpointNamespacedName(pod *corev1.Pod, idx int) types.NamespacedName
 		Name:      pod.Name + "-rank-" + strconv.Itoa(idx),
 		Namespace: pod.Namespace,
 	}
+}
+
+func selectorEqual(a, b labels.Selector) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.String() == b.String()
 }

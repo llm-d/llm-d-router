@@ -1,12 +1,9 @@
 package e2e
 
 import (
-	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -15,6 +12,8 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
+	"sigs.k8s.io/yaml"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,14 +21,14 @@ import (
 	apilabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 )
 
 const (
-	deploymentKind = "deployment"
+	deploymentKind           = "deployment"
+	kubernetesDeploymentKind = "Deployment"
 )
 
-func scaleDeployment(objects []string, increment int) {
+func scaleDeployment(nsName string, objects []string, increment int) {
 	direction := "up"
 	absIncrement := increment
 	if increment < 0 {
@@ -49,14 +48,14 @@ func scaleDeployment(objects []string, increment int) {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 	}
-	podsInDeploymentsReady(objects)
+	podsInDeploymentsReady(nsName, objects)
 }
 
 // getModelServerPods Returns the list of Prefill and Decode vLLM pods separately
-func getModelServerPods(podLabels, prefillLabels, decodeLabels map[string]string) ([]string, []string) {
+func getModelServerPods(podLabels, prefillLabels, decodeLabels map[string]string, nsName string) ([]string, []string) {
 	ginkgo.By("Getting Model server pods")
 
-	pods := getPods(podLabels)
+	pods := getPods(podLabels, nsName)
 
 	prefillValidator, err := apilabels.ValidatedSelectorFromSet(prefillLabels)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -91,10 +90,11 @@ func getModelServerPods(podLabels, prefillLabels, decodeLabels map[string]string
 	return prefillPods, decodePods
 }
 
-func getPods(labels map[string]string) []corev1.Pod {
+func getPods(labels map[string]string, nsName string) []corev1.Pod {
 	podList := corev1.PodList{}
 	selector := apilabels.SelectorFromSet(labels)
-	err := testConfig.K8sClient.List(testConfig.Context, &podList, &client.ListOptions{LabelSelector: selector})
+	err := testConfig.K8sClient.List(testConfig.Context, &podList,
+		&client.ListOptions{LabelSelector: selector, Namespace: nsName})
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
 	pods := []corev1.Pod{}
@@ -108,8 +108,8 @@ func getPods(labels map[string]string) []corev1.Pod {
 }
 
 // getPodNames returns the names of all running pods matching the given label selector.
-func getPodNames(labels map[string]string) []string {
-	pods := getPods(labels)
+func getPodNames(labels map[string]string, nsName string) []string {
+	pods := getPods(labels, nsName)
 	names := make([]string, 0, len(pods))
 	for _, pod := range pods {
 		names = append(names, pod.Name)
@@ -117,7 +117,25 @@ func getPodNames(labels map[string]string) []string {
 	return names
 }
 
-func podsInDeploymentsReady(objects []string) {
+// waitForEPPToDiscoverPods blocks until the EPP's inference_pool_ready_pods
+// gauge for poolName reports at least one pod, indicating the InferencePool
+// controller has finished its initial pod discovery. The EPP reports gRPC
+// health as SERVING as soon as the pool is set, even if pod discovery found
+// zero endpoints, so readiness alone does not guarantee the datastore is
+// populated. Polling the gauge avoids routing a real request through the
+// EPP, which would otherwise be recorded as a routing decision and skew
+// tests that assert exact decision-type counts.
+func waitForEPPToDiscoverPods(poolName string) {
+	ginkgo.By("Waiting for EPP to discover pool members")
+	metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
+	startEPPMetricsPortForward()
+	labelMatch := fmt.Sprintf(`name="%s"`, poolName)
+	gomega.Eventually(func() int {
+		return getCounterMetric(metricsURL, "inference_pool_ready_pods", labelMatch)
+	}, readyTimeout, time.Second).Should(gomega.BeNumerically(">", 0), "EPP should discover pool members within the ready timeout")
+}
+
+func podsInDeploymentsReady(nsName string, objects []string) {
 	isDeploymentReady := func(deploymentName string) bool {
 		var deployment appsv1.Deployment
 		err := testConfig.K8sClient.Get(testConfig.Context, types.NamespacedName{Namespace: nsName, Name: deploymentName}, &deployment)
@@ -193,28 +211,23 @@ func removeEmptyLabels(inputs []string) []string {
 	return outputs
 }
 
-func isModelReal(modelName string) bool {
-	req, err := http.NewRequest("GET", "https://huggingface.co/api/models/"+modelName, nil)
-	if err != nil {
-		return false
-	}
-	if token := os.Getenv("HF_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+// eppExtraArgs are appended to the "epp" container's args in the Deployment
+// created by createEndPointPickerHelper.
+//
+// Graceful drain is disabled (--drain-timeout=0) for all e2e EPPs. The suites
+// create and delete the shared "e2e-epp" Deployment in sequence behind a single
+// Envoy; with a drain window a deleted EPP keeps serving ext_proc on its
+// existing connection, so Envoy lingers on the terminating pod (stale datastore)
+// and the next spec's requests fail. The graceful-drain behavior itself is
+// covered by unit tests.
+var eppExtraArgs = []string{"--drain-timeout=0"}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
+// appendEppArgs returns the input YAML docs with args appended to the "epp"
+// container of any Deployment. It is a no-op when args is empty.
+func appendEppArgs(inputs []string, args []string) []string {
+	if len(args) == 0 {
+		return inputs
 	}
-	defer resp.Body.Close()
-
-	return resp.StatusCode == http.StatusOK
-}
-
-// removeRenderSidecar takes a slice of YAML strings (each may contain multiple
-// objects separated by "---") and returns the same slice with the vllm-render
-// container and the model-cache volume stripped from any Deployment.
-func removeRenderSidecar(inputs []string) []string {
 	outputs := make([]string, len(inputs))
 	for idx, input := range inputs {
 		docs := strings.Split(input, "\n---")
@@ -223,49 +236,49 @@ func removeRenderSidecar(inputs []string) []string {
 			if strings.TrimSpace(doc) == "" {
 				continue
 			}
-			rendered = append(rendered, filterDocument(doc))
+			rendered = append(rendered, appendArgsToEppContainer(doc, args))
 		}
 		outputs[idx] = strings.Join(rendered, "\n---\n")
 	}
 	return outputs
 }
 
-func filterDocument(doc string) string {
+func appendArgsToEppContainer(doc string, args []string) string {
 	obj := &unstructured.Unstructured{}
 	err := yaml.Unmarshal([]byte(doc), &obj.Object)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	if len(obj.Object) == 0 {
+	if len(obj.Object) == 0 || obj.GetKind() != kubernetesDeploymentKind {
 		return doc
 	}
-	if obj.GetKind() == "Deployment" {
-		removePodSpecListItem(obj, "containers", "vllm-render")
-		removePodSpecListItem(obj, "initContainers", "vllm-render")
-		removePodSpecListItem(obj, "volumes", "model-cache")
+	path := []string{"spec", "template", "spec", "containers"}
+	containers, found, err := unstructured.NestedSlice(obj.Object, path...)
+
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	if !found {
+		return doc
 	}
+	for i, c := range containers {
+		m, ok := c.(map[string]any)
+		if !ok || m["name"] != "epp" {
+			continue
+		}
+		existing, _, err := unstructured.NestedStringSlice(m, "args")
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		merged := make([]any, 0, len(existing)+len(args))
+		for _, a := range existing {
+			merged = append(merged, a)
+		}
+		for _, a := range args {
+			merged = append(merged, a)
+		}
+		m["args"] = merged
+		containers[i] = m
+	}
+	err = unstructured.SetNestedSlice(obj.Object, containers, path...)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	out, err := yaml.Marshal(obj.Object)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	return strings.TrimRight(string(out), "\n")
-}
-
-func removePodSpecListItem(obj *unstructured.Unstructured, fieldName, itemName string) {
-	path := []string{"spec", "template", "spec", fieldName}
-	items, found, err := unstructured.NestedSlice(obj.Object, path...)
-	if err != nil || !found {
-		return
-	}
-	filtered := make([]any, 0, len(items))
-	for _, item := range items {
-		if m, ok := item.(map[string]any); ok && m["name"] == itemName {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	if len(filtered) == 0 {
-		unstructured.RemoveNestedField(obj.Object, path...)
-		return
-	}
-	err = unstructured.SetNestedSlice(obj.Object, filtered, path...)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 }
 
 func substituteMany(inputs []string, substitutions map[string]string) []string {
@@ -280,11 +293,9 @@ func substituteMany(inputs []string, substitutions map[string]string) []string {
 	return outputs
 }
 
-// getCounterMetric fetches the current value of a Prometheus counter metric from the given metrics URL.
+// getMetrics fetches the current Prometheus metrics from the given metrics URL.
 // Retries on transient connection errors (e.g. the previous EPP pod is still terminating).
-//
-//nolint:unparam // metricName may vary in future test cases
-func getCounterMetric(metricsURL, metricName, labelMatch string) int {
+func getMetrics(metricsURL string) []string {
 	var body []byte
 	gomega.Eventually(func() error {
 		resp, err := http.Get(metricsURL)
@@ -299,8 +310,15 @@ func getCounterMetric(metricsURL, metricName, labelMatch string) int {
 		return err
 	}, 10*time.Second, 1*time.Second).Should(gomega.Succeed())
 
-	metricsText := string(body)
-	for _, line := range strings.Split(metricsText, "\n") {
+	return strings.Split(string(body), "\n")
+}
+
+// getCounterMetric fetches the current value of a Prometheus counter metric from the given metrics URL.
+// Retries on transient connection errors (e.g. the previous EPP pod is still terminating).
+//
+//nolint:unparam // metricName may vary in future test cases
+func getCounterMetric(metricsURL, metricName, labelMatch string) int {
+	for _, line := range getMetrics(metricsURL) {
 		if strings.HasPrefix(line, metricName) && strings.Contains(line, labelMatch) {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
@@ -349,7 +367,7 @@ func extractFinishReasonFromStreaming(sseData string) string {
 }
 
 // getPodRequestCount gets the total vLLM request count from a pod's metrics endpoint.
-func getPodRequestCount(podName string) int {
+func getPodRequestCount(nsName, podName string) int {
 	ginkgo.By("Getting request count from pod: " + podName)
 
 	// Use Kubernetes API proxy to access the metrics endpoint
@@ -387,135 +405,4 @@ func parseRequestCountFromMetrics(metricsOutput string) int {
 		}
 	}
 	return 0
-}
-
-// dumpPodsAndLogs dumps all pod statuses and their logs to the Ginkgo writer.
-// Call this before cleanup to insure the information is available when CI tests fail.
-func dumpPodsAndLogs() {
-	if testConfig == nil || testConfig.KubeCli == nil {
-		ginkgo.GinkgoWriter.Println("Skipping pod dump: cluster not initialized")
-		return
-	}
-
-	ginkgo.GinkgoWriter.Printf("\n=== Dumping pod states and logs (namespace: %s) ===\n", nsName)
-
-	ctx, cancel := context.WithTimeout(testConfig.Context, 30*time.Second)
-	defer cancel()
-
-	pods, err := testConfig.KubeCli.CoreV1().Pods(nsName).List(ctx, v1.ListOptions{})
-	if err != nil {
-		ginkgo.GinkgoWriter.Printf("Failed to list pods: %v\n", err)
-		return
-	}
-
-	ginkgo.GinkgoWriter.Printf("Total pods found: %d\n\n", len(pods.Items))
-
-	// Print summary table (like kubectl get pods)
-	ginkgo.GinkgoWriter.Printf("%-55s %-8s %-22s %-8s %-6s\n", "NAME", "READY", "STATUS", "RESTARTS", "AGE")
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		ready, total := 0, len(pod.Spec.Containers)
-		restarts := int32(0)
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.Ready {
-				ready++
-			}
-			restarts += cs.RestartCount
-		}
-		status := string(pod.Status.Phase)
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.State.Waiting != nil {
-				status = cs.State.Waiting.Reason
-				break
-			}
-		}
-		age := ""
-		if !pod.CreationTimestamp.IsZero() {
-			d := time.Since(pod.CreationTimestamp.Time).Round(time.Second)
-			age = d.String()
-		}
-		ginkgo.GinkgoWriter.Printf("%-55s %-8s %-22s %-8d %-6s\n",
-			pod.Name, fmt.Sprintf("%d/%d", ready, total), status, restarts, age)
-	}
-	ginkgo.GinkgoWriter.Println()
-
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		ginkgo.GinkgoWriter.Printf("--- Pod: %s | Phase: %s | Node: %s ---\n",
-			pod.Name, pod.Status.Phase, pod.Spec.NodeName)
-
-		for _, cs := range pod.Status.InitContainerStatuses {
-			printContainerStatus("init", cs)
-		}
-		for _, cs := range pod.Status.ContainerStatuses {
-			printContainerStatus("container", cs)
-		}
-
-		restarted := map[string]bool{}
-		for _, cs := range pod.Status.InitContainerStatuses {
-			if cs.RestartCount > 0 {
-				restarted[cs.Name] = true
-			}
-		}
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.RestartCount > 0 {
-				restarted[cs.Name] = true
-			}
-		}
-
-		for _, c := range pod.Spec.InitContainers {
-			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Name, c.Name, true)
-			}
-			dumpContainerLogs(ctx, pod.Name, c.Name, false)
-		}
-		for _, c := range pod.Spec.Containers {
-			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Name, c.Name, true)
-			}
-			dumpContainerLogs(ctx, pod.Name, c.Name, false)
-		}
-	}
-	ginkgo.GinkgoWriter.Println("=== End of pod dump ===")
-}
-
-func printContainerStatus(kind string, cs corev1.ContainerStatus) {
-	status := fmt.Sprintf("  [%s] %s | ready=%v restarts=%d", kind, cs.Name, cs.Ready, cs.RestartCount)
-	if cs.State.Waiting != nil {
-		status += " | Waiting: " + cs.State.Waiting.Reason
-	}
-	if cs.State.Terminated != nil {
-		status += fmt.Sprintf(" | Terminated: %s (exit %d)", cs.State.Terminated.Reason, cs.State.Terminated.ExitCode)
-	}
-	ginkgo.GinkgoWriter.Println(status)
-}
-
-func dumpContainerLogs(ctx context.Context, podName, containerName string, previous bool) {
-	tailLines := int64(100)
-	req := testConfig.KubeCli.CoreV1().Pods(nsName).GetLogs(podName, &corev1.PodLogOptions{
-		Container: containerName,
-		TailLines: &tailLines,
-		Previous:  previous,
-	})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to stream logs: %v\n", podName, containerName, err)
-		return
-	}
-	defer func() {
-		if err := stream.Close(); err != nil {
-			ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to close log stream: %v\n", podName, containerName, err)
-		}
-	}()
-
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, stream); err != nil {
-		ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to read logs: %v\n", podName, containerName, err)
-		return
-	}
-	label := "last 100 lines"
-	if previous {
-		label = "previous instance, last 100 lines"
-	}
-	ginkgo.GinkgoWriter.Printf("  [logs] %s/%s (%s):\n%s\n", podName, containerName, label, buf.String())
 }

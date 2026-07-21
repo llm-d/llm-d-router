@@ -57,9 +57,6 @@ func TestOrderingPolicyConformance(t *testing.T) {
 			t.Run("Initialization", func(t *testing.T) {
 				t.Parallel()
 				assert.Equal(t, name, policy.TypedName().Name, "TypedName().Name should match registered name")
-
-				caps := policy.RequiredQueueCapabilities()
-				assert.NotNil(t, caps, "RequiredQueueCapabilities() should not return nil slice")
 			})
 
 			t.Run("Less_Sanity", func(t *testing.T) {

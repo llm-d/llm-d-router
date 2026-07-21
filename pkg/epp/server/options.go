@@ -17,15 +17,21 @@ limitations under the License.
 package server
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -33,7 +39,8 @@ import (
 
 const (
 	DefaultGrpcPort      = 9002
-	DefaultPoolNamespace = "default" // default when pool namespace is empty (CLI flag default is empty)
+	DefaultPoolNamespace = "default"        // default when pool namespace is empty (CLI flag default is empty)
+	DefaultDrainTimeout  = 30 * time.Second // graceful shutdown drain window
 )
 
 // deprecatedMetricFlags lists metric flags that are superseded by engineConfigs
@@ -57,12 +64,13 @@ type Options struct {
 	//
 	// ext_proc configuration.
 	//
-	GRPCPort              int    // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
-	EnableLeaderElection  bool   // Enables leader election for high availability
-	GRPCMaxRecvMsgSize    int    // Maximum size of a gRPC message to receive (parsed bytes).
-	GRPCMaxSendMsgSize    int    // Maximum size of a gRPC message to send (parsed bytes).
-	GRPCMaxRecvMsgSizeStr string // Raw string value from CLI flag for receive limit.
-	GRPCMaxSendMsgSizeStr string // Raw string value from CLI flag for send limit.
+	GRPCPort              int           // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
+	EnableLeaderElection  bool          // Enables leader election for high availability
+	DrainTimeout          time.Duration // Graceful shutdown drain window; ext_proc keeps serving this long after SIGTERM.
+	GRPCMaxRecvMsgSize    int           // Maximum size of a gRPC message to receive (parsed bytes).
+	GRPCMaxSendMsgSize    int           // Maximum size of a gRPC message to send (parsed bytes).
+	GRPCMaxRecvMsgSizeStr string        // Raw string value from CLI flag for receive limit.
+	GRPCMaxSendMsgSizeStr string        // Raw string value from CLI flag for send limit.
 	//
 	// InferencePool.
 	//
@@ -72,16 +80,12 @@ type Options struct {
 	//
 	// Endpoints (in lieu of using an InferencePool for service discovery).
 	//
-	EndpointSelector            string // Selector to filter model server pods on, only 'key=value' pairs are supported. (TODO: k8s.Selector, pflag.StringSlice?)
-	EndpointTargetPorts         []int  // Target ports of model server pods.
-	DisableEndpointSubsetFilter bool   // Disables respecting destination endpoint subset metadata in EPP.
+	EndpointSelector            labels.Selector // Parsed selector to filter model server pods on. Set via --endpoint-selector flag and parsed in Complete().
+	EndpointTargetPorts         []int           // Target ports of model server pods.
+	DisableEndpointSubsetFilter bool            // Disables respecting destination endpoint subset metadata in EPP.
 	//
 	// MSP metrics scraping.
 	//
-	ModelServerMetricsScheme         string        // Protocol scheme used in scraping metrics from endpoints.
-	ModelServerMetricsPath           string        // URL path used in scraping metrics from endpoints.
-	ModelServerMetricsPort           int           // Port to scrape metrics from endpoints. (TODO: Deprecated, uint16)
-	ModelServerMetricsHTTPSInsecure  bool          // Disable certificate verification when using 'https' scheme for 'model-server-metrics-scheme'.
 	RefreshMetricsInterval           time.Duration // Interval to refresh metrics.
 	RefreshPrometheusMetricsInterval time.Duration // Interval to flush Prometheus metrics.
 	MetricsStalenessThreshold        time.Duration // Duration after which metrics are considered stale.
@@ -103,6 +107,8 @@ type Options struct {
 	EnableCertReload        bool   // Enables certificate reloading of the certificates specified in --cert-path.
 	SecureServing           bool   // Enables secure serving.
 	MetricsEndpointAuth     bool   // Enables authentication and authorization of the metrics endpoint.
+	MetricsClientCAFile     string // PEM CA that requires a verified client cert on the metrics endpoint.
+	MetricsCertDir          string // Directory with the metrics server certificates that enables metrics TLS.
 	EnableGRPCStreamMetrics bool   // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
 	//
 	// Configuration.
@@ -111,19 +117,18 @@ type Options struct {
 	ConfigText string // The configuration specified as text, in lieu of a file.
 
 	// internal
-	fs *pflag.FlagSet // FlagSet used in AddFlags() and consulted in Validate()
+	fs                  *pflag.FlagSet // FlagSet used in AddFlags() and consulted in Validate()
+	endpointSelectorStr string         // Raw string from --endpoint-selector flag, parsed to EndpointSelector in Complete()
 }
 
 // NewOptions returns a new Options struct initialized with the default values.
 func NewOptions() *Options {
 	return &Options{ // "zero" values are no explicitly set
 		GRPCPort:                         DefaultGrpcPort,
+		DrainTimeout:                     DefaultDrainTimeout,
 		PoolGroup:                        routing.InferencePoolAPIGroup,
 		EndpointTargetPorts:              []int{},
 		DisableEndpointSubsetFilter:      false,
-		ModelServerMetricsScheme:         "http",
-		ModelServerMetricsPath:           "/metrics",
-		ModelServerMetricsHTTPSInsecure:  true,
 		RefreshMetricsInterval:           50 * time.Millisecond,
 		RefreshPrometheusMetricsInterval: 5 * time.Second,
 		MetricsStalenessThreshold:        2 * time.Second,
@@ -151,6 +156,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.GRPCPort, "grpc-port", opts.GRPCPort, "gRPC port used for communicating with Envoy proxy.")
 	fs.BoolVar(&opts.EnableLeaderElection, "ha-enable-leader-election", opts.EnableLeaderElection,
 		"Enables leader election for high availability. When enabled, readiness probes will only pass on the leader.")
+	fs.DurationVar(&opts.DrainTimeout, "drain-timeout", opts.DrainTimeout,
+		"Graceful shutdown drain window. On SIGTERM the EPP goes NotServing and releases its leader lease "+
+			"immediately, then keeps serving ext_proc for this duration so in-flight and pre-DNS-refresh requests "+
+			"are not rejected.")
 	fs.StringVar(&opts.GRPCMaxRecvMsgSizeStr, "grpc-max-recv-msg-size", opts.GRPCMaxRecvMsgSizeStr, "Maximum size of a gRPC message to receive (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.GRPCMaxSendMsgSizeStr, "grpc-max-send-msg-size", opts.GRPCMaxSendMsgSizeStr, "Maximum size of a gRPC message to send (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.PoolGroup, "pool-group", opts.PoolGroup,
@@ -158,25 +167,14 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.PoolNamespace, "pool-namespace", opts.PoolNamespace,
 		"Namespace of the InferencePool this Endpoint Picker is associated with.")
 	fs.StringVar(&opts.PoolName, "pool-name", opts.PoolName, "Name of the InferencePool this Endpoint Picker is associated with.")
-	fs.StringVar(&opts.EndpointSelector, "endpoint-selector", opts.EndpointSelector,
-		"Selector to filter model server pods on, only 'key=value' pairs are supported. "+
-			"Format: a comma-separated list of key=value pairs without whitespace (e.g., 'app=vllm-qwen3-32b,env=prod').")
+	fs.StringVar(&opts.endpointSelectorStr, "endpoint-selector", opts.endpointSelectorStr,
+		"Selector to filter model server pods on. "+
+			"Supports Kubernetes label selector syntax: equality-based (e.g., 'app=vllm,env=prod'), "+
+			"set-based (e.g., 'env in (prod,staging),tier!=frontend'), and existence (e.g., 'key,!deprecated').")
 	fs.IntSliceVar(&opts.EndpointTargetPorts, "endpoint-target-ports", opts.EndpointTargetPorts, "Target ports of model server pods. "+
 		"Format: a comma-separated list of numbers without whitespace (e.g., '3000,3001,3002').")
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
 		"Disables respecting the destination endpoint subset metadata for dispatching requests in EPP.")
-	fs.StringVar(&opts.ModelServerMetricsScheme, "model-server-metrics-scheme", opts.ModelServerMetricsScheme,
-		"Protocol scheme used in scraping metrics from endpoints.")
-	_ = fs.MarkDeprecated("model-server-metrics-scheme", "This flag is deprecated. Configure via EndpointPickerConfig data layer plugin parameters instead.")
-	fs.StringVar(&opts.ModelServerMetricsPath, "model-server-metrics-path", opts.ModelServerMetricsPath,
-		"URL path used in scraping metrics from endpoints.")
-	_ = fs.MarkDeprecated("model-server-metrics-path", "This flag is deprecated. Configure via EndpointPickerConfig data layer plugin parameters instead.")
-	fs.IntVar(&opts.ModelServerMetricsPort, "model-server-metrics-port", opts.ModelServerMetricsPort,
-		"Port to scrape metrics from endpoints. Set to the InferencePool.Spec.TargetPorts[0].Number if not defined.")
-	_ = fs.MarkDeprecated("model-server-metrics-port", "This flag is deprecated and will be removed in a future release.")
-	fs.BoolVar(&opts.ModelServerMetricsHTTPSInsecure, "model-server-metrics-https-insecure-skip-verify", opts.ModelServerMetricsHTTPSInsecure,
-		"Disable certificate verification when using 'https' scheme for 'model-server-metrics-scheme'.")
-	_ = fs.MarkDeprecated("model-server-metrics-https-insecure-skip-verify", "This flag is deprecated. Configure via EndpointPickerConfig data layer plugin parameters instead.")
 	fs.DurationVar(&opts.RefreshMetricsInterval, "refresh-metrics-interval", opts.RefreshMetricsInterval, "Interval to refresh metrics.")
 	fs.DurationVar(&opts.RefreshPrometheusMetricsInterval, "refresh-prometheus-metrics-interval", opts.RefreshPrometheusMetricsInterval,
 		"Interval to flush Prometheus metrics.")
@@ -217,13 +215,22 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&opts.SecureServing, "secure-serving", opts.SecureServing, "Enables secure serving.")
 	fs.BoolVar(&opts.MetricsEndpointAuth, "metrics-endpoint-auth", opts.MetricsEndpointAuth,
 		"Enables authentication and authorization of the metrics endpoint.")
+	fs.StringVar(&opts.MetricsClientCAFile, "metrics-client-ca-file", opts.MetricsClientCAFile,
+		"PEM CA for metrics mTLS: require verified client certs.")
+	fs.StringVar(&opts.MetricsCertDir, "metrics-cert-dir", opts.MetricsCertDir,
+		"Directory with the metrics server certificates. Enables TLS on the metrics endpoint.")
 	fs.StringVar(&opts.ConfigFile, "config-file", opts.ConfigFile, "The path to the configuration file.")
 	fs.StringVar(&opts.ConfigText, "config-text", opts.ConfigText, "The configuration specified as text, in lieu of a file.")
 }
 
 func (opts *Options) Complete() error {
-	// TODO: postprocessing or command line arguments. For example, convert EndpointSelector
-	// from raw string to k8s.LabelSelector, load ConfigFile into ConfigText, etc.
+	if opts.endpointSelectorStr != "" {
+		selector, err := labels.Parse(opts.endpointSelectorStr)
+		if err != nil {
+			return fmt.Errorf("invalid endpoint-selector %q: %w", opts.endpointSelectorStr, err)
+		}
+		opts.EndpointSelector = selector
+	}
 
 	opts.EndpointTargetPorts = removeDuplicatePorts(opts.EndpointTargetPorts)
 
@@ -264,15 +271,67 @@ func (opts *Options) Complete() error {
 		opts.GRPCMaxSendMsgSize = int(val)
 	}
 
+	if opts.MetricsClientCAFile != "" {
+		if _, err := os.Stat(opts.MetricsClientCAFile); err != nil {
+			return fmt.Errorf("%w: %s: %v", errMetricsCertUnreadable, opts.MetricsClientCAFile, err)
+		}
+	}
+	if opts.MetricsCertDir != "" {
+		for _, name := range []string{"tls.crt", "tls.key"} {
+			p := filepath.Join(opts.MetricsCertDir, name)
+			if _, err := os.Stat(p); err != nil {
+				return fmt.Errorf("%w: %s: %v", errMetricsCertUnreadable, p, err)
+			}
+		}
+	}
+
 	// Complete logging options.
 	return opts.LoggingOptions.Complete()
 }
 
+var (
+	errMetricsClientCARequiresCertDir = errors.New(`"metrics-client-ca-file" requires "metrics-cert-dir"`)
+	errMetricsTLSWithoutAuth          = errors.New(`"metrics-cert-dir" enables metrics TLS without authentication; set "metrics-client-ca-file" or "metrics-endpoint-auth"`)
+	errMetricsCertUnreadable          = errors.New("metrics TLS cert file unreadable")
+	errReadMetricsClientCA            = errors.New("reading metrics client CA")
+	errNoValidMetricsCA               = errors.New("no valid CA certs in metrics client CA file")
+)
+
+// ConfigureMetricsTLS enables TLS, and optional client mTLS, on the metrics server.
+func ConfigureMetricsTLS(opts *Options, mo *metricsserver.Options) error {
+	if opts.MetricsCertDir == "" && opts.MetricsClientCAFile == "" {
+		return nil
+	}
+	mo.SecureServing = true
+	if opts.MetricsCertDir != "" {
+		mo.CertDir = opts.MetricsCertDir
+	}
+	var clientCAs *x509.CertPool
+	if opts.MetricsClientCAFile != "" {
+		caPEM, err := os.ReadFile(opts.MetricsClientCAFile)
+		if err != nil {
+			return fmt.Errorf("%w %s: %v", errReadMetricsClientCA, opts.MetricsClientCAFile, err)
+		}
+		clientCAs = x509.NewCertPool()
+		if !clientCAs.AppendCertsFromPEM(caPEM) {
+			return fmt.Errorf("%w: %s", errNoValidMetricsCA, opts.MetricsClientCAFile)
+		}
+	}
+	mo.TLSOpts = append(mo.TLSOpts, func(c *tls.Config) {
+		c.MinVersion = tls.VersionTLS12
+		if clientCAs != nil {
+			c.ClientCAs = clientCAs
+			c.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+	})
+	return nil
+}
+
 func (opts *Options) Validate() error {
-	if (opts.PoolName != "" && opts.EndpointSelector != "") || (opts.PoolName == "" && opts.EndpointSelector == "") {
+	if (opts.PoolName != "" && opts.EndpointSelector != nil) || (opts.PoolName == "" && opts.EndpointSelector == nil) {
 		return errors.New("either pool-name or endpoint-selector must be set")
 	}
-	if opts.EndpointSelector != "" {
+	if opts.EndpointSelector != nil {
 		if len(opts.EndpointTargetPorts) == 0 || len(opts.EndpointTargetPorts) > 8 {
 			return fmt.Errorf("flag %q should have length from 1 to 8", "endpoint-target-ports")
 		}
@@ -284,11 +343,14 @@ func (opts *Options) Validate() error {
 	}
 
 	if opts.ConfigText != "" && opts.ConfigFile != "" {
-		return fmt.Errorf("both the %q and %q flags can not be set at the same time", "configText", "configFile")
+		return fmt.Errorf("both the %q and %q flags cannot be set at the same time", "config-file", "config-text")
 	}
-	if opts.ModelServerMetricsScheme != "http" && opts.ModelServerMetricsScheme != "https" {
-		return fmt.Errorf("unexpected %q value for %q flag, it can only be set to 'http' or 'https'",
-			opts.ModelServerMetricsScheme, "model-server-metrics-scheme")
+
+	if opts.MetricsClientCAFile != "" && opts.MetricsCertDir == "" {
+		return errMetricsClientCARequiresCertDir
+	}
+	if opts.MetricsCertDir != "" && opts.MetricsClientCAFile == "" && !opts.MetricsEndpointAuth {
+		return errMetricsTLSWithoutAuth
 	}
 
 	if opts.GRPCMaxRecvMsgSize < 0 {

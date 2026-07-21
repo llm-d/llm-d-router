@@ -10,21 +10,21 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"github.com/onsi/gomega/gexec"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	configloader "github.com/llm-d/llm-d-router/pkg/epp/config/loader"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 func createModelServersFromKustomize(kustomizeDir string, extra map[string]string) []string {
+	nsName := getNamespace()
 	subs := map[string]string{
 		"${MODEL_NAME}":              simModelName,
 		"${POOL_NAME}":               poolName,
 		"${VLLM_IMAGE}":              vllmSimImage,
-		"${VLLM_RENDER_IMAGE}":       vllmRenderImage,
 		"${SIDECAR_IMAGE}":           sideCarImage,
 		"${VLLM_DATA_PARALLEL_SIZE}": "1",
 		"${VLLM_SIM_MODE}":           "echo",
@@ -33,9 +33,11 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${EPP_NAME}":                "e2e-epp",
 		"${NAMESPACE}":               nsName,
 		"${HF_TOKEN}":                os.Getenv("HF_TOKEN"),
-		"${VLLM_EXTRA_ARGS_E}":       "",
-		"${VLLM_EXTRA_ARGS_P}":       "",
-		"${VLLM_EXTRA_ARGS_D}":       "",
+		"${VLLM_EXTRA_ARGS_E}":       "--force-dummy-tokenizer",
+		"${VLLM_EXTRA_ARGS_P}":       "--force-dummy-tokenizer",
+		"${VLLM_EXTRA_ARGS_D}":       "--force-dummy-tokenizer",
+		"${VLLM_RENDER_URL}":         fmt.Sprintf("http://vllm-render.%s.svc.cluster.local:%s", baseNsName, vllmRenderPort),
+		"${VLLM_RENDER_PORT}":        vllmRenderPort,
 	}
 	for k, v := range extra {
 		subs[k] = v
@@ -46,12 +48,8 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 	// Remove labels with empty values (produced when ${DECODE_ROLE} is empty)
 	manifests = removeEmptyLabels(manifests)
 	manifests = removeEmptyArgs(manifests)
-	// remove render sidecar if model is simulated
-	if !isModelReal(subs["${MODEL_NAME}"]) {
-		manifests = removeRenderSidecar(manifests)
-	}
-	objects := testutils.CreateObjsFromYaml(testConfig, manifests)
-	podsInDeploymentsReady(objects)
+	objects := testutils.CreateObjsFromYaml(testConfig, manifests, nsName)
+	podsInDeploymentsReady(nsName, objects)
 	return objects
 }
 
@@ -120,6 +118,22 @@ func createModelServersEPDDisagg(encodeReplicas, prefillReplicas, decodeReplicas
 	})
 }
 
+// createModelServersEncodeOnly creates encode-only pods (no prefill, no decode).
+func createModelServersEncodeOnly(replicas int) []string {
+	return createModelServersFromKustomize(encodeOnlyDir, map[string]string{
+		"${EC_CONNECTOR_TYPE}":    "",
+		"${VLLM_REPLICA_COUNT_E}": strconv.Itoa(replicas),
+	})
+}
+
+// createModelServersPrefillOnly creates prefill-only pods (no encode, no decode).
+func createModelServersPrefillOnly(replicas int) []string {
+	return createModelServersFromKustomize(prefillOnlyDir, map[string]string{
+		"${KV_CONNECTOR_TYPE}":    "",
+		"${VLLM_REPLICA_COUNT_P}": strconv.Itoa(replicas),
+	})
+}
+
 // createModelServersEPDUnified creates model server resources for EPD (one deployment for encode/prefill/decode) testing.
 func createModelServersEPDUnified(replicas int) []string {
 	return createModelServersFromKustomize(epdDeploymentDir, map[string]string{
@@ -128,7 +142,43 @@ func createModelServersEPDUnified(replicas int) []string {
 	})
 }
 
+func createRender(nsName string) []string {
+	renderYamls := substituteMany(testutils.ReadYaml(renderManifest),
+		map[string]string{
+			"${MODEL_NAME}":        kvModelName,
+			"${VLLM_RENDER_IMAGE}": vllmRenderImage,
+			"${VLLM_RENDER_PORT}":  vllmRenderPort,
+		})
+	objects := testutils.CreateObjsFromYaml(testConfig, renderYamls, nsName)
+	podsInDeploymentsReady(nsName, objects)
+	return objects
+}
+
 func createEndPointPicker(eppConfig string) []string {
+	objects := createEndPointPickerHelper(eppConfig, 1, false, true)
+	podsInDeploymentsReady(getNamespace(), objects)
+
+	// Envoy registers the EPP as a healthy ext_proc upstream asynchronously.
+	// "no healthy upstream" returns HTTP 500 with empty body; any non-empty
+	// response (200 or 500-with-body) means EPP is reachable from Envoy.
+	ginkgo.By("Waiting for gateway to be ready")
+	gomega.Eventually(func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/v1/models", getPort()))
+		if err != nil {
+			return false
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode == http.StatusOK || len(body) > 0
+	}, readyTimeout, 2*time.Second).Should(gomega.BeTrue(), "gateway should be ready within the ready timeout")
+
+	waitForEPPToDiscoverPods(poolName)
+
+	return objects
+}
+
+func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElectionEnabled bool, waitForReady bool) []string {
+	nsName := getNamespace()
 	configMap := &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
@@ -136,7 +186,7 @@ func createEndPointPicker(eppConfig string) []string {
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "epp-config",
-			Namespace: nsName,
+			Namespace: getNamespace(),
 		},
 		Data: map[string]string{"epp-config.yaml": eppConfig},
 	}
@@ -149,47 +199,94 @@ func createEndPointPicker(eppConfig string) []string {
 	eppYamls := testutils.ReadYaml(eppManifest)
 	eppYamls = substituteMany(eppYamls,
 		map[string]string{
-			"${EPP_NAME}":          "e2e-epp",
-			"${EPP_IMAGE}":         eppImage,
-			"${VLLM_RENDER_IMAGE}": vllmRenderImage,
-			// The render sidecar needs a real, fetchable model. Sim tests
-			// don't query it; the cost is paying weights-load on every EPP.
-			"${MODEL_NAME}":            kvModelName,
-			"${NAMESPACE}":             nsName,
-			"${POOL_NAME}":             simModelName + "-inference-pool",
-			"${METRICS_ENDPOINT_AUTH}": "false",
+			"${EPP_NAME}":               eppName,
+			"${EPP_IMAGE}":              eppImage,
+			"${NAMESPACE}":              nsName,
+			"${POOL_NAME}":              simModelName + "-inference-pool",
+			"${METRICS_ENDPOINT_AUTH}":  "false",
+			"${EPP_REPLICA_COUNT}":      strconv.Itoa(replicas),
+			"${ENABLE_LEADER_ELECTION}": strconv.FormatBool(isLeaderElectionEnabled),
 		})
-	if !usesTokenProducer(eppConfig) {
-		eppYamls = removeRenderSidecar(eppYamls)
+	eppYamls = appendEppArgs(eppYamls, eppExtraArgs)
+
+	if waitForReady {
+		return append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls, nsName)...)
 	}
+	objs := testutils.CreateUnstructuredObjs(testConfig, eppYamls)
+	objects = append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {})...)
 
-	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls)...)
-	podsInDeploymentsReady(objects)
-
-	// Envoy registers the EPP as a healthy ext_proc upstream asynchronously.
-	// "no healthy upstream" returns HTTP 500 with empty body; any non-empty
-	// response (200 or 500-with-body) means EPP is reachable from Envoy.
-	ginkgo.By("Waiting for gateway to be ready")
-	gomega.Eventually(func() bool {
-		resp, err := http.Get(fmt.Sprintf("http://localhost:%s/v1/models", port))
-		if err != nil {
-			return false
-		}
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		return resp.StatusCode == http.StatusOK || len(body) > 0
-	}, readyTimeout, 2*time.Second).Should(gomega.BeTrue(), "gateway should be ready within the ready timeout")
+	gomega.Eventually(func() error {
+		_, _, err := tryCompletion(simplePrompt, simModelName)
+		return err
+	}, readyTimeout, 1*time.Second).Should(gomega.Succeed())
 
 	return objects
 }
 
-func usesTokenProducer(eppConfig string) bool {
-	cfg, _, err := configloader.LoadRawConfig([]byte(eppConfig), ginkgo.GinkgoLogr)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	for _, plugin := range cfg.Plugins {
-		if plugin.Type == tokenizer.PluginType {
-			return true
-		}
+// testWrapper wraps tests with the setup and teardown code needed.
+// It is used as a wrapper of the function passed to ginkgo.When calls that
+// setup the tests. It is important that the ginkgo.Ordered decorator is used
+// to enable the use of the ginkgo.BeforeAll and ginkgo.AfterAll functions
+// to inject the setup and teardown code.
+func testWrapper(test func()) func() {
+	var (
+		nsName           string
+		createdNameSpace bool
+
+		rbacObjects           []string
+		serviceAccountObjects []string
+		serviceObjects        []string
+		envoyObjects          []string
+		portForwardSession    *gexec.Session
+	)
+	return func() {
+		ginkgo.BeforeAll(func() {
+			nsName = getNamespace()
+			createdNameSpace = setupNameSpace()
+
+			envoyObjects, portForwardSession = createEnvoy(nsName)
+
+			infraSubs := map[string]string{
+				"${EPP_NAME}":          "e2e-epp",
+				"${METRICS_NODE_PORT}": strconv.Itoa(getMetricsPort()),
+			}
+			rbacYamls := substituteMany(testutils.ReadYaml(rbacManifest), infraSubs)
+			rbacObjects = testutils.CreateObjsFromYaml(testConfig, rbacYamls, nsName)
+			saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
+			serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls, nsName)
+			svcYamls := substituteMany(testutils.ReadYaml(servicesManifest), infraSubs)
+			serviceObjects = testutils.CreateObjsFromYaml(testConfig, svcYamls, nsName)
+		})
+
+		ginkgo.AfterEach(func() {
+			// The starting of the EPP can launch a port-forwarder to access the metrics port.
+			if eppPortForwardSession != nil {
+				eppPortForwardSession.Terminate()
+				eppPortForwardSession = nil
+			}
+		})
+
+		ginkgo.AfterAll(func() {
+			if ginkgo.CurrentSpecReport().Failed() && keepClusterOnFailure {
+				// The test failed
+				testutils.DumpPodsAndLogs(testConfig, nsName)
+			} else {
+				// Only cleanup if the test succeeded
+				testutils.DeleteObjects(testConfig, rbacObjects, nsName)
+				testutils.DeleteObjects(testConfig, serviceObjects, nsName)
+				testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
+				if portForwardSession != nil {
+					portForwardSession.Terminate()
+					portForwardSession = nil
+				}
+				testutils.DeleteObjects(testConfig, envoyObjects, nsName)
+
+				if createdNameSpace {
+					deleteNameSpace(nsName)
+				}
+			}
+		})
+
+		test()
 	}
-	return false
 }

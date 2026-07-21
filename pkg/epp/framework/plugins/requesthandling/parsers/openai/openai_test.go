@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -949,6 +950,90 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:    "images generations request body",
+			headers: map[string]string{":path": "/v1/images/generations"},
+			body: map[string]any{
+				"model":               "test-image-model",
+				"prompt":              "a cat wearing a spacesuit",
+				"negative_prompt":     "blurry",
+				"n":                   2,
+				"size":                "1024x1024",
+				"response_format":     "b64_json",
+				"num_inference_steps": 30,
+				"guidance_scale":      7.5,
+				"seed":                42,
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Images: &fwkrh.ImagesGenerationsRequest{
+					Prompt:            "a cat wearing a spacesuit",
+					N:                 ptr.To[int64](2),
+					Size:              "1024x1024",
+					NumInferenceSteps: ptr.To[int64](30),
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":               "test-image-model",
+					"prompt":              "a cat wearing a spacesuit",
+					"negative_prompt":     "blurry",
+					"n":                   float64(2),
+					"size":                "1024x1024",
+					"response_format":     "b64_json",
+					"num_inference_steps": float64(30),
+					"guidance_scale":      7.5,
+					"seed":                float64(42),
+				},
+			},
+		},
+		{
+			name:    "images generations request without model",
+			headers: map[string]string{":path": "/v1/images/generations"},
+			body: map[string]any{
+				"prompt": "a dog",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Images: &fwkrh.ImagesGenerationsRequest{
+					Prompt: "a dog",
+				},
+				Payload: fwkrh.PayloadMap{
+					"prompt": "a dog",
+				},
+			},
+		},
+		{
+			name:    "images generations request via prefix-mounted path",
+			headers: map[string]string{":path": "/openai/v1/images/generations"},
+			body: map[string]any{
+				"model":  "test-image-model",
+				"prompt": "a dragon",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Images: &fwkrh.ImagesGenerationsRequest{
+					Prompt: "a dragon",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":  "test-image-model",
+					"prompt": "a dragon",
+				},
+			},
+		},
+		{
+			name:    "images generations request missing prompt",
+			headers: map[string]string{":path": "/v1/images/generations"},
+			body: map[string]any{
+				"model": "test-image-model",
+				"size":  "512x512",
+			},
+			wantErr: true,
+		},
+		{
+			name:    "images generations request with empty prompt",
+			headers: map[string]string{":path": "/v1/images/generations"},
+			body: map[string]any{
+				"model":  "test-image-model",
+				"prompt": "",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -969,6 +1054,9 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			if got.SkipResponseProcessing != false {
 				t.Errorf("ParseRequest() got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
 			}
+
+			// Model is extracted from the request body's "model" field.
+			tt.want.Model, _ = tt.body["model"].(string)
 
 			if diff := cmp.Diff(tt.want, got.Body); diff != "" {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
@@ -1226,6 +1314,7 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			conversationsAPI,
 			chatCompletionsAPI + "/render",
 			completionsAPI + "/render",
+			imagesGenerationsAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -1294,7 +1383,7 @@ func BenchmarkExtractRequestData_ChatCompletionsWithOptionals(b *testing.B) {
 		"add_generation_prompt":        true,
 		"chat_template_kwargs":         map[string]any{"key": "value"},
 	}
-	headers := map[string]string{":path": "/v1/chat/completions"}
+	apiType := determineAPITypeFromPath("/v1/chat/completions")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1302,7 +1391,7 @@ func BenchmarkExtractRequestData_ChatCompletionsWithOptionals(b *testing.B) {
 		if err != nil {
 			b.Errorf("body cannot be marshalled to JSON bytes")
 		}
-		_, err = extractRequestBody(jsonBytes, headers)
+		_, err = extractRequestBody(apiType, jsonBytes)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -1372,5 +1461,84 @@ func BenchmarkExtractRequestData_Embeddings(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
+	parser := NewOpenAIParser()
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		body    map[string]any
+		want    *int64
+	}{
+		{
+			name:    "completions max_tokens",
+			headers: map[string]string{":path": "/v1/completions"},
+			body:    map[string]any{"model": "m", "prompt": "p", "max_tokens": float64(64)},
+			want:    ptr.To(int64(64)),
+		},
+		{
+			name:    "completions absent",
+			headers: map[string]string{":path": "/v1/completions"},
+			body:    map[string]any{"model": "m", "prompt": "p"},
+			want:    nil,
+		},
+		{
+			name:    "chat max_completion_tokens preferred over legacy max_tokens",
+			headers: map[string]string{":path": "/v1/chat/completions"},
+			body: map[string]any{
+				"model":                 "m",
+				"messages":              []any{map[string]any{"role": "user", "content": "hi"}},
+				"max_completion_tokens": float64(100),
+				"max_tokens":            float64(50),
+			},
+			want: ptr.To(int64(100)),
+		},
+		{
+			name:    "chat legacy max_tokens fallback",
+			headers: map[string]string{":path": "/v1/chat/completions"},
+			body: map[string]any{
+				"model":      "m",
+				"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+				"max_tokens": float64(50),
+			},
+			want: ptr.To(int64(50)),
+		},
+		{
+			name:    "responses max_output_tokens",
+			headers: map[string]string{":path": "/v1/responses"},
+			body:    map[string]any{"input": "hi", "max_output_tokens": float64(32)},
+			want:    ptr.To(int64(32)),
+		},
+		{
+			name:    "explicit zero binds",
+			headers: map[string]string{":path": "/v1/completions"},
+			body:    map[string]any{"model": "m", "prompt": "p", "max_tokens": float64(0)},
+			want:    ptr.To(int64(0)),
+		},
+		{
+			name:    "negative ignored",
+			headers: map[string]string{":path": "/v1/completions"},
+			body:    map[string]any{"model": "m", "prompt": "p", "max_tokens": float64(-5)},
+			want:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bodyBytes, err := json.Marshal(tt.body)
+			if err != nil {
+				t.Fatalf("marshal body: %v", err)
+			}
+			got, err := parser.ParseRequest(context.Background(), bodyBytes, tt.headers)
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got.Body.MaxOutputTokens); diff != "" {
+				t.Errorf("MaxOutputTokens mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -62,6 +63,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello, Claude"}},
@@ -92,6 +94,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{
@@ -127,6 +130,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					System: fwkrh.AnthropicContent{Raw: "You are a helpful assistant."},
 					Messages: []fwkrh.AnthropicMessage{
@@ -157,6 +161,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					System: fwkrh.AnthropicContent{
 						Structured: []fwkrh.AnthropicContentBlock{
@@ -203,6 +208,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{
@@ -259,6 +265,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Tools: []any{
 						map[string]any{
@@ -297,6 +304,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}},
@@ -325,6 +333,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}},
@@ -352,6 +361,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
 					Messages: []fwkrh.AnthropicMessage{
 						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}},
@@ -435,6 +445,9 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 			if got.SkipResponseProcessing != false {
 				t.Errorf("ParseRequest() got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
 			}
+
+			// Model is extracted from the request body's "model" field.
+			tt.want.Model, _ = tt.body["model"].(string)
 
 			if diff := cmp.Diff(tt.want, got.Body); diff != "" {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
@@ -668,6 +681,45 @@ func TestAnthropicParser_ParseRequest_CountTokens(t *testing.T) {
 			want := &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(tt.body)}
 			if diff := cmp.Diff(want, got.Body); diff != "" {
 				t.Errorf("ParseRequest() body mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestAnthropicParser_ParseRequest_MaxOutputTokens(t *testing.T) {
+	parser := NewAnthropicParser()
+	headers := map[string]string{":path": "/v1/messages"}
+	msgs := []any{map[string]any{"role": "user", "content": "Hello"}}
+
+	tests := []struct {
+		name string
+		body map[string]any
+		want *int64
+	}{
+		{
+			name: "max_tokens present",
+			body: map[string]any{"model": "claude-sonnet-4-6", "max_tokens": float64(1024), "messages": msgs},
+			want: ptr.To(int64(1024)),
+		},
+		{
+			name: "max_tokens absent",
+			body: map[string]any{"model": "claude-sonnet-4-6", "messages": msgs},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bodyBytes, err := json.Marshal(tt.body)
+			if err != nil {
+				t.Fatalf("marshal body: %v", err)
+			}
+			got, err := parser.ParseRequest(context.Background(), bodyBytes, headers)
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got.Body.MaxOutputTokens); diff != "" {
+				t.Errorf("MaxOutputTokens mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

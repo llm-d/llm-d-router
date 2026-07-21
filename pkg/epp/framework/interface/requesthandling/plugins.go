@@ -52,6 +52,13 @@ type Parser interface {
 	Claims() Claims
 }
 
+// ModelNameRewriter is implemented by parsers whose forwarded body can carry a model name.
+type ModelNameRewriter interface {
+	// RewriteModelName writes model into the payload and returns it. Taking and
+	// returning a MarshalablePayload guarantees the result is repackageable.
+	RewriteModelName(payload MarshalablePayload, model string) (MarshalablePayload, error)
+}
+
 // Claims defines the matching criteria for a parser.
 type Claims struct {
 	Paths     []string         // path patterns this parser claims (e.g., "chat/completions")

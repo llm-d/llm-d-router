@@ -255,3 +255,44 @@ func TestGetOrCreateMetrics_Idempotent(t *testing.T) {
 	b := p.getOrCreateMetrics("alpha")
 	assert.Same(t, a, b)
 }
+
+func TestDumpState(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+	p.getOrCreateMetrics("prog-a").RecordDispatched(time.Now().Add(-10 * time.Millisecond))
+	p.getOrCreateMetrics("prog-b").RecordDispatched(time.Now().Add(-20 * time.Millisecond))
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+
+	var state fairnessDumpState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Equal(t, 2, state.TotalPrograms)
+	assert.Equal(t, int64(2), state.TotalInFlight)
+	assert.GreaterOrEqual(t, state.FairnessIndex, 0.0)
+	assert.LessOrEqual(t, state.FairnessIndex, 1.0)
+}
+
+func TestDumpStateOmitsProgramIDs(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+	// Program IDs come from a user-controlled header and must never be dumped.
+	p.getOrCreateMetrics("secret-tenant-xyz").RecordDispatched(time.Now().Add(-5 * time.Millisecond))
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+	assert.NotContains(t, string(payload), "secret-tenant-xyz")
+}
+
+func TestDumpStateEmpty(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+	assert.True(t, json.Valid(payload))
+
+	var state fairnessDumpState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Equal(t, 0, state.TotalPrograms)
+	assert.Equal(t, int64(0), state.TotalInFlight)
+	// With no programs the policy is trivially fair.
+	assert.Equal(t, 1.0, state.FairnessIndex)
+}

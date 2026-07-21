@@ -39,6 +39,8 @@ const (
 	chatCompletionsAPI = "chat/completions"
 	completionsAPI     = "completions"
 	embeddingsAPI      = "embeddings"
+	// imagesGenerationsAPI is the OpenAI-compatible image generation endpoint/
+	imagesGenerationsAPI = "images/generations"
 
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
@@ -59,7 +61,10 @@ const (
 )
 
 // compile-time type validation
-var _ fwkrh.Parser = &OpenAIParser{}
+var (
+	_ fwkrh.Parser            = &OpenAIParser{}
+	_ fwkrh.ModelNameRewriter = &OpenAIParser{}
+)
 
 // OpenAIParser implements the fwkrh.Parser interface for OpenAI API
 // https://developers.openai.com/api/reference/overview
@@ -92,6 +97,7 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			conversationsAPI,
 			chatCompletionsAPI + "/render",
 			completionsAPI + "/render",
+			imagesGenerationsAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -112,15 +118,46 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if err := json.Unmarshal(body, &bodyMap); err != nil {
 		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
 	}
-	extractedBody, err := extractRequestBody(body, headers)
+	apiType := determineAPITypeFromPath(request.GetRequestPath(headers))
+	extractedBody, err := extractRequestBody(apiType, body)
 	if err != nil {
 		return nil, err
 	}
 	extractedBody.Payload = fwkrh.PayloadMap(bodyMap)
+	if model, ok := bodyMap["model"].(string); ok {
+		extractedBody.Model = model
+	}
+	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(apiType, bodyMap)
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		extractedBody.Stream = true
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// RewriteModelName writes the resolved model into the request payload map.
+func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
+	m, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
+		return payload, nil
+	}
+	m["model"] = model
+	return m, nil
+}
+
+// maxOutputTokensForAPI normalizes the per-API output-token cap field into a
+// single value, applying each API's field name and precedence. Endpoints with no
+// output-token concept (conversations, embeddings) return nil.
+func maxOutputTokensForAPI(apiType string, bodyMap map[string]any) *int64 {
+	switch apiType {
+	case chatCompletionsAPI:
+		return fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_completion_tokens", "max_tokens")
+	case completionsAPI:
+		return fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens")
+	case responsesAPI:
+		return fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_output_tokens")
+	default:
+		return nil
+	}
 }
 
 // ParseResponse extracts usage metadata from the provider's response.
@@ -179,17 +216,17 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/embeddings") {
 		return embeddingsAPI
 	}
+	if request.MatchPathSuffix(path, "/images/generations") {
+		return imagesGenerationsAPI
+	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
 	return completionsAPI
 }
 
-// extractRequestBody extracts the InferenceRequestBody from the given request body map using path-based detection.
-func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.InferenceRequestBody, error) {
-	// Determine API type from request path
-	path := request.GetRequestPath(headers)
-	apiType := determineAPITypeFromPath(path)
-
+// extractRequestBody extracts the InferenceRequestBody from the given raw body
+// for the already-resolved API type.
+func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequestBody, error) {
 	switch apiType {
 	case conversationsAPI:
 		var conversations fwkrh.ConversationsRequest
@@ -227,6 +264,13 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 			return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
 		}
 		return nil, errors.New("invalid embeddings request: must have input field")
+
+	case imagesGenerationsAPI:
+		var images fwkrh.ImagesGenerationsRequest
+		if err := json.Unmarshal(rawBody, &images); err == nil && images.Prompt != "" {
+			return &fwkrh.InferenceRequestBody{Images: &images}, nil
+		}
+		return nil, errors.New("invalid images generations request: must have prompt field")
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}

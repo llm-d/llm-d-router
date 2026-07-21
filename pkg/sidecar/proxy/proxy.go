@@ -35,6 +35,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
@@ -43,26 +44,26 @@ const (
 
 	defaultMaxIdleConnsPerHost = 1024
 
-	requestHeaderRequestID = "x-request-id"
+	requestHeaderRequestID = reqcommon.RequestIDHeaderKey
 
-	requestFieldKVTransferParams     = "kv_transfer_params"
-	requestFieldECTransferParams     = "ec_transfer_params"
-	requestFieldMaxTokens            = "max_tokens"
-	requestFieldMaxCompletionTokens  = "max_completion_tokens"
-	requestFieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
-	requestFieldMinTokens            = "min_tokens"
-	requestFieldSamplingParams       = "sampling_params"
-	requestFieldDoRemotePrefill      = "do_remote_prefill"
-	requestFieldDoRemoteDecode       = "do_remote_decode"
-	requestFieldRemoteBlockIDs       = "remote_block_ids"
-	requestFieldRemoteEngineID       = "remote_engine_id"
-	requestFieldRemoteHost           = "remote_host"
-	requestFieldRemotePort           = "remote_port"
-	requestFieldStream               = "stream"
-	requestFieldStreamOptions        = "stream_options"
-	requestFieldCacheHitThreshold    = "cache_hit_threshold"
-	requestFieldContinueFinalMessage = "continue_final_message"
-	requestFieldAddGenerationPrompt  = "add_generation_prompt"
+	requestFieldKVTransferParams     = reqcommon.FieldKVTransferParams
+	requestFieldECTransferParams     = reqcommon.FieldECTransferParams
+	requestFieldMaxTokens            = reqcommon.FieldMaxTokens
+	requestFieldMaxCompletionTokens  = reqcommon.FieldMaxCompletionTokens
+	requestFieldMaxOutputTokens      = reqcommon.FieldMaxOutputTokens
+	requestFieldMinTokens            = reqcommon.FieldMinTokens
+	requestFieldSamplingParams       = reqcommon.FieldSamplingParams
+	requestFieldDoRemotePrefill      = reqcommon.FieldDoRemotePrefill
+	requestFieldDoRemoteDecode       = reqcommon.FieldDoRemoteDecode
+	requestFieldRemoteBlockIDs       = reqcommon.FieldRemoteBlockIDs
+	requestFieldRemoteEngineID       = reqcommon.FieldRemoteEngineID
+	requestFieldRemoteHost           = reqcommon.FieldRemoteHost
+	requestFieldRemotePort           = reqcommon.FieldRemotePort
+	requestFieldStream               = reqcommon.FieldStream
+	requestFieldStreamOptions        = reqcommon.FieldStreamOptions
+	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
+	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
+	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
 	// data-parallel rank, set on both legs of a disagg pair (see pickDPRank).
@@ -90,10 +91,18 @@ const (
 	// Mooncake transfer fields
 	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 
+	// OffloadingConnector kv_transfer_params fields. The role is encoded by the
+	// nesting key: "decode" on the prefiller leg, "prefill" on the decoder leg.
+	requestFieldP2PDecodeParams  = "decode"
+	requestFieldP2PPrefillParams = "prefill"
+	requestFieldP2PParams        = "p2p"
+	requestFieldKVRequestID      = "kv_request_id"
+
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
 	KVConnectorSGLang        = constants.KVConnectorSGLang
 	KVConnectorMooncake      = constants.KVConnectorMooncake
+	KVConnectorOffloading    = constants.KVConnectorOffloading
 	ECExampleConnector       = constants.ECExampleConnector
 	ECConnectorNIXL          = constants.ECConnectorNIXL
 )
@@ -127,7 +136,7 @@ func (a APIType) String() string {
 // JSON request field names used for token limits in prefill/decode staging.
 // Do not mutate these slices.
 var (
-	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens}
+	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens, requestFieldMinTokens}
 	responsesStyleTokenLimitFields = []string{requestFieldMaxOutputTokens}
 	generateStyleTokenLimitFields  = []string{requestFieldMaxTokens, requestFieldMinTokens}
 )
@@ -196,6 +205,17 @@ type Config struct {
 
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
 	MooncakeBootstrapPort int
+
+	// P2PConnectorPort is the prefiller's OffloadingConnector P2P tier listening port,
+	// injected as remote_port on the decode leg so the decoder can pull KV from it.
+	// Meaningful with --kv-connector=offloading or --enable-p2p-pull.
+	P2PConnectorPort int
+
+	// EnableP2PPull declares that the OffloadingConnector P2P tier is available
+	// for cached-prefix pulls even when the PD connector is not offloading, i.e.
+	// the engines run MultiConnector(NixlConnector + OffloadingConnector). It has
+	// no effect with --kv-connector=offloading, where the tier is always present.
+	EnableP2PPull bool
 
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
@@ -281,9 +301,11 @@ func (c Config) String() string {
 	return string(b)
 }
 
-// pdConnectorHandler handles a P/D KV connector request. The APIType lets each
-// connector decide internally which JSON fields (if any) need special handling.
-type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, APIType)
+// pdConnectorHandler handles a P/D KV connector request. kvCacheSource is the
+// validated x-kv-cache-source-host-port peer to pull cached prefix from ("" when
+// absent); the APIType lets each connector decide internally which JSON fields
+// (if any) need special handling.
+type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, APIType)
 
 type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)
 
@@ -437,21 +459,27 @@ func (s *Server) setKVConnector() {
 
 	switch s.config.KVConnector {
 	case KVConnectorSharedStorage:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
 			s.handleSharedStorage(w, r, host)
 		}
 	case KVConnectorSGLang:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
 			s.handleSGLang(w, r, host)
 		}
 	case KVConnectorMooncake:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
 			s.handleMooncake(w, r, host)
+		}
+	case KVConnectorOffloading:
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, _ APIType) {
+			s.handleP2P(w, r, host, kvCacheSource)
 		}
 	case KVConnectorNIXLV2:
 		fallthrough
 	default:
-		s.handlePDConnector = s.handleNIXLV2
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType APIType) {
+			s.handleNIXLV2(w, r, host, kvCacheSource, apiType)
+		}
 	}
 }
 

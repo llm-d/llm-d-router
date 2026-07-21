@@ -31,7 +31,7 @@ import (
 type FlowControlRequest interface {
 	// FlowKey returns the composite key that uniquely identifies the flow instance this request belongs to.
 	// The `controller.FlowController` uses this key as the primary identifier to look up the correct
-	// `contracts.ManagedQueue` and configured OrderingPolicy from a `contracts.RegistryShard`.
+	// `contracts.ManagedQueue` and configured OrderingPolicy from the `contracts.FlowRegistry`.
 	// The returned key is treated as an immutable value.
 	FlowKey() FlowKey
 

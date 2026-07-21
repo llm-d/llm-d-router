@@ -43,7 +43,10 @@ const (
 )
 
 // compile-time type validation
-var _ fwkrh.Parser = &AnthropicParser{}
+var (
+	_ fwkrh.Parser            = &AnthropicParser{}
+	_ fwkrh.ModelNameRewriter = &AnthropicParser{}
+)
 
 type AnthropicParser struct {
 	typedName fwkplugin.TypedName
@@ -108,14 +111,28 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	}
 
 	result := &fwkrh.InferenceRequestBody{
-		Messages: &messagesReq,
-		Payload:  fwkrh.PayloadMap(bodyMap),
+		Messages:        &messagesReq,
+		Payload:         fwkrh.PayloadMap(bodyMap),
+		MaxOutputTokens: fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
+	}
+	if model, ok := bodyMap["model"].(string); ok {
+		result.Model = model
 	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		result.Stream = true
 	}
 
 	return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: false}, nil
+}
+
+// RewriteModelName writes the resolved model into the request payload map.
+func (p *AnthropicParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
+	m, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
+		return payload, nil
+	}
+	m["model"] = model
+	return m, nil
 }
 
 func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {

@@ -70,7 +70,7 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods [
 	return 0.0
 }
 
-// testHarness provides a unified, mock-based testing environment for the ShardProcessor. It centralizes all mock state
+// testHarness provides a unified, mock-based testing environment for the Processor. It centralizes all mock state
 // and provides helper methods for setting up tests and managing the processor's lifecycle.
 type testHarness struct {
 	t *testing.T
@@ -115,7 +115,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
 
-	// Wire up the harness to provide the mock implementations for the shard's dependencies.
+	// Wire up the harness to provide the mock implementations for the processor's dependencies.
 	h.ManagedQueueFunc = h.managedQueue
 	h.AllOrderedPriorityLevelsFunc = h.allOrderedPriorityLevels
 	h.PriorityBandAccessorFunc = h.priorityBandAccessor
@@ -143,7 +143,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		expiryCleanupInterval,
 		100,
 		h.logger)
-	require.NotNil(t, h.processor, "NewShardProcessor should not return nil")
+	require.NotNil(t, h.processor, "NewProcessor should not return nil")
 
 	t.Cleanup(func() { h.Stop() })
 
@@ -209,7 +209,7 @@ func (h *testHarness) addQueue(key flowcontrol.FlowKey) *mocks.MockManagedQueue 
 
 // --- Mock Interface Implementations ---
 
-// managedQueue provides the mock implementation for the `RegistryShard` interface.
+// managedQueue provides the mock implementation for the `registry data-plane` interface.
 func (h *testHarness) managedQueue(key flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -219,7 +219,7 @@ func (h *testHarness) managedQueue(key flowcontrol.FlowKey) (contracts.ManagedQu
 	return nil, fmt.Errorf("test setup error: no queue for %q", key)
 }
 
-// allOrderedPriorityLevels provides the mock implementation for the `RegistryShard` interface.
+// allOrderedPriorityLevels provides the mock implementation for the `registry data-plane` interface.
 func (h *testHarness) allOrderedPriorityLevels() []int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -234,7 +234,7 @@ func (h *testHarness) allOrderedPriorityLevels() []int {
 	return prios
 }
 
-// priorityBandAccessor provides the mock implementation for the `RegistryShard` interface. It acts as a factory for a
+// priorityBandAccessor provides the mock implementation for the `registry data-plane` interface. It acts as a factory for a
 // fully-configured, stateless mock that is safe for concurrent use.
 func (h *testHarness) priorityBandAccessor(p int) (flowcontrol.PriorityBandAccessor, error) {
 	band := &fwkfcmocks.MockPriorityBandAccessor{PriorityV: p}
@@ -261,7 +261,7 @@ func (h *testHarness) priorityBandAccessor(p int) (flowcontrol.PriorityBandAcces
 	return band, nil
 }
 
-// fairnessPolicy provides the mock implementation for the RegistryShard interface.
+// fairnessPolicy provides the mock implementation for the registry data-plane interface.
 func (h *testHarness) fairnessPolicy(p int) (flowcontrol.FairnessPolicy, error) {
 	policy := &fwkfcmocks.MockFairnessPolicy{}
 	// If the test provided a custom implementation, use it.
@@ -288,8 +288,8 @@ func (h *testHarness) fairnessPolicy(p int) (flowcontrol.FairnessPolicy, error) 
 	return policy, nil
 }
 
-// TestShardProcessor contains all tests for the `ShardProcessor`.
-func TestShardProcessor(t *testing.T) {
+// TestProcessor contains all tests for the `Processor`.
+func TestProcessor(t *testing.T) {
 	t.Parallel()
 
 	// Integration tests use the processor's main `Run` loop to verify the complete end-to-end lifecycle of a request, from
@@ -615,6 +615,48 @@ func TestShardProcessor(t *testing.T) {
 					},
 				},
 				{
+					name: "should reject item as no-endpoints when at capacity with an empty pool",
+					setupHarness: func(h *testHarness) {
+						h.addQueue(testFlow)
+						// Pool scaled to zero: the queue acts as a scale-from-zero waiting room.
+						h.endpointCandidates.Candidates = nil
+						// Prime poolEmpty via a dispatch cycle, mirroring the Run loop's periodic dispatch.
+						h.processor.dispatchCycle(context.Background())
+						h.StatsFunc = func() contracts.AggregateStats {
+							return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+								testFlow.Priority: {CapacityBytes: 50}, // 50 is less than item size of 100
+							}}
+						}
+					},
+					assert: func(t *testing.T, h *testHarness, item *FlowItem) {
+						assert.Equal(t, types.QueueOutcomeRejectedNoEndpoints, item.FinalState().Outcome,
+							"Outcome should be RejectedNoEndpoints when the pool is empty")
+						require.Error(t, item.FinalState().Err, "A no-endpoints rejection should produce an error")
+						assert.ErrorIs(t, item.FinalState().Err, types.ErrNoEndpoints, "The error should wrap ErrNoEndpoints")
+						assert.ErrorIs(t, item.FinalState().Err, types.ErrRejected, "The error should wrap ErrRejected")
+					},
+				},
+				{
+					name: "should reject item as capacity when at capacity with a non-empty pool",
+					setupHarness: func(h *testHarness) {
+						h.addQueue(testFlow)
+						// Non-empty pool (harness default): a capacity rejection is backpressure, not unavailability.
+						h.processor.dispatchCycle(context.Background())
+						h.StatsFunc = func() contracts.AggregateStats {
+							return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+								testFlow.Priority: {CapacityBytes: 50}, // 50 is less than item size of 100
+							}}
+						}
+					},
+					assert: func(t *testing.T, h *testHarness, item *FlowItem) {
+						assert.Equal(t, types.QueueOutcomeRejectedCapacity, item.FinalState().Outcome,
+							"Outcome should be RejectedCapacity when the pool is non-empty")
+						require.Error(t, item.FinalState().Err, "A capacity rejection should produce an error")
+						assert.ErrorIs(t, item.FinalState().Err, types.ErrQueueAtCapacity,
+							"The error should wrap ErrQueueAtCapacity")
+					},
+				},
+				{
 					name: "should ignore an already-finalized item",
 					setupHarness: func(h *testHarness) {
 						mockQueue := h.addQueue(testFlow)
@@ -666,13 +708,13 @@ func TestShardProcessor(t *testing.T) {
 				expectHasCap bool
 			}{
 				{
-					name:         "should deny item if shard byte capacity exceeded",
+					name:         "should deny item if global byte capacity exceeded",
 					itemByteSize: 1,
 					stats:        contracts.AggregateStats{TotalByteSize: 100, TotalCapacityBytes: 100},
 					expectHasCap: false,
 				},
 				{
-					name:         "should deny item if shard request capacity exceeded",
+					name:         "should deny item if global request capacity exceeded",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 10,
@@ -713,7 +755,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: false,
 				},
 				{
-					name:         "should allow item if both shard and band have byte capacity",
+					name:         "should allow item if both global and band have byte capacity",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 200, TotalByteSize: 100,
@@ -724,7 +766,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: true,
 				},
 				{
-					name:         "should allow item if both shard and band have request capacity",
+					name:         "should allow item if both global and band have request capacity",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 5,
@@ -748,7 +790,7 @@ func TestShardProcessor(t *testing.T) {
 				},
 				// --- Mixed dimension tests ---
 				{
-					name:         "should deny if shard bytes ok but band requests exceeded",
+					name:         "should deny if global bytes ok but band requests exceeded",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 200, TotalByteSize: 50,
@@ -760,7 +802,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: false,
 				},
 				{
-					name:         "should deny if shard requests ok but band bytes exceeded",
+					name:         "should deny if global requests ok but band bytes exceeded",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 200, TotalByteSize: 50,
@@ -785,7 +827,7 @@ func TestShardProcessor(t *testing.T) {
 				},
 				// --- Boundary value tests ---
 				{
-					name:         "should allow when shard bytes exactly at capacity after add",
+					name:         "should allow when global bytes exactly at capacity after add",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 110, TotalByteSize: 100,
@@ -796,7 +838,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: true,
 				},
 				{
-					name:         "should deny when shard bytes one over capacity after add",
+					name:         "should deny when global bytes one over capacity after add",
 					itemByteSize: 11,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 110, TotalByteSize: 100,
@@ -807,7 +849,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: false,
 				},
 				{
-					name:         "should allow when shard requests exactly at capacity after add",
+					name:         "should allow when global requests exactly at capacity after add",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 9,
@@ -818,7 +860,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: true,
 				},
 				{
-					name:         "should deny when shard requests one over capacity after add",
+					name:         "should deny when global requests one over capacity after add",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 10,
@@ -1229,6 +1271,62 @@ func TestShardProcessor(t *testing.T) {
 				// --- ASSERT ---
 				assert.Equal(t, int32(numQueues), processedCount.Load(),
 					"The number of processed queues should match the number created")
+			})
+
+			t.Run("should resolve ManagedQueue eagerly so late GC does not skip work", func(t *testing.T) {
+				t.Parallel()
+				// --- ARRANGE ---
+				// Regression test: ManagedQueue must be resolved during IterateQueues
+				// (Phase 1), not deferred to Phase 3 workers. A deferred lookup
+				// races with flow GC which can delete the flow after collection.
+				//
+				// ManagedQueueFunc succeeds while IterateQueues is running and fails
+				// after it returns, simulating GC firing between phases. With eager
+				// resolution processFn is called; with deferred resolution it is not.
+				h := newTestHarness(t, testCleanupTick)
+				h.addQueue(testFlow)
+
+				var iteratingDone atomic.Bool
+				h.PriorityBandAccessorFunc = func(p int) (flowcontrol.PriorityBandAccessor, error) {
+					h.mu.Lock()
+					flowKeys := h.priorityFlows[p]
+					h.mu.Unlock()
+
+					band := &fwkfcmocks.MockPriorityBandAccessor{PriorityV: p}
+					band.IterateQueuesFunc = func(cb func(fqa flowcontrol.FlowQueueAccessor) bool) {
+						for _, key := range flowKeys {
+							q, err := h.managedQueue(key)
+							if err == nil && q != nil {
+								mq := q.(*mocks.MockManagedQueue)
+								if !cb(mq.FlowQueueAccessor()) {
+									break
+								}
+							}
+						}
+						iteratingDone.Store(true)
+					}
+					return band, nil
+				}
+
+				h.ManagedQueueFunc = func(key flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
+					if iteratingDone.Load() {
+						return nil, fmt.Errorf("failed to get managed queue for flow %q: %w",
+							key, contracts.ErrFlowInstanceNotFound)
+					}
+					return h.managedQueue(key)
+				}
+
+				var processedCount atomic.Int32
+				processFn := func(mq contracts.ManagedQueue, logger logr.Logger) {
+					processedCount.Add(1)
+				}
+
+				// --- ACT ---
+				h.processor.processAllQueuesConcurrently("test-eager-resolve", processFn)
+
+				// --- ASSERT ---
+				assert.Equal(t, int32(1), processedCount.Load(),
+					"processFn must be called: ManagedQueue was resolved eagerly in Phase 1")
 			})
 		})
 	})

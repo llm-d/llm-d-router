@@ -28,9 +28,6 @@ var (
 	// ErrPriorityBandNotFound indicates that a requested priority band does not exist in the registry configuration.
 	ErrPriorityBandNotFound = errors.New("priority band not found")
 
-	// ErrPolicyQueueIncompatible indicates that a selected policy is not compatible with the capabilities of the queue.
-	ErrPolicyQueueIncompatible = errors.New("policy is not compatible with queue capabilities")
-
 	// ErrInvalidQueueItemHandle indicates that a QueueItemHandle provided to a SafeQueue operation (e.g.,
 	// SafeQueue.Remove()) is not valid for that queue, has been invalidated, or does not correspond to an actual item in
 	// the queue.

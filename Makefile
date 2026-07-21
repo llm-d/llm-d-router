@@ -33,13 +33,15 @@ SIDECAR_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(SIDECAR_IMAGE_NAME)
 SIDECAR_TAG ?= dev
 export SIDECAR_IMAGE ?= $(SIDECAR_IMAGE_TAG_BASE):$(SIDECAR_TAG)
 
-VLLM_SIMULATOR_TAG ?= v0.9.2
+VLLM_SIMULATOR_TAG ?= v0.10.2
 VLLM_SIMULATOR_TAG_BASE ?= $(IMAGE_REGISTRY)/$(VLLM_SIMULATOR_IMAGE_NAME)
 export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 
 # CPU-only vLLM image that exposes `vllm launch render` for the token-producer
 # plugin's HTTP backend.
 export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.21.0
+export VLLM_RENDER_PORT ?= 8082
+export VLLM_RENDER_URL ?= http://vllm-render:$(VLLM_RENDER_PORT)
 
 BUILDER_TAG ?= dev
 BUILDER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(BUILDER_IMAGE_NAME)
@@ -117,22 +119,18 @@ BUILDER_SOCK_FLAGS = $(DOCKER_GROUP_PARAM) \
 	-e CONTAINER_RUNTIME=docker
 endif
 
+E2E_NUM_PROCS ?= 5
+
 # Env vars forwarded into the e2e test container.
 # Add new image vars here so they are automatically passed through.
 # Should we pass ALL env vars here?
 E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE VLLM_RENDER_IMAGE \
                E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT \
-               E2E_LABEL_FILTER LOAD_VLLM_RENDER_IMAGE HF_TOKEN
+               E2E_NUM_PROCS LOAD_VLLM_RENDER_IMAGE HF_TOKEN
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
 endif
-
-# GAIE e2e test variables (for test-e2e-gaie target).
-# GAIE_E2E_MANIFEST_PATH: path to the model server manifest inside the builder container
-# (/app/... prefix). Defaults to the sim-deployment in testdata. Override to use a GPU manifest.
-GAIE_E2E_MANIFEST_PATH ?=
-GAIE_E2E_IMAGE         ?= $(EPP_IMAGE)
 
 # When K8S_CONTEXT is set, mount the host kubeconfig so the e2e suite can call
 # config.GetConfigWithContext(K8S_CONTEXT) against an existing cluster instead of
@@ -163,7 +161,7 @@ LDFLAGS ?= -s -w
 BASE_IMAGE ?=
 
 # test packages
-epp_TEST_PACKAGES = $$(go list ./... | grep -v /test/ | grep -v ./pkg/sidecar/ | tr '\n' ' ')
+epp_TEST_PACKAGES = $$(go list ./... | grep -v /test/ | grep -v ./pkg/sidecar/ | grep -v ./pkg/coordinator/ | grep -v ./cmd/coordinator | tr '\n' ' ')
 sidecar_TEST_PACKAGES = ./pkg/sidecar/...
 
 # Internal variables for generic targets
@@ -298,30 +296,16 @@ test-integration-hermetic: image-build-builder ## Run hermetic integration tests
 	$(BUILDER_RUN) 'CGO_ENABLED=1 KUBEBUILDER_ASSETS="$$(setup-envtest use $$ENVTEST_K8S_VERSION --bin-dir $$ENVTEST_ASSETS_DIR -p path)" go test -v -race $(if $(PATTERN),-run "$(PATTERN)",) -coverprofile=$(COVERAGE_DIR)/integration-hermetic.out -covermode=atomic ./test/integration/...'
 	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/integration-hermetic.out | tail -1'
 
-.PHONY: test-e2e-gaie-run
-test-e2e-gaie-run: image-pull ## Ensure images are present, then run GAIE e2e tests
-	@printf "\033[33;1m==== Running GAIE End to End Tests ====\033[0m\n"
-	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
-		-e EPP_IMAGE=$(GAIE_E2E_IMAGE) \
-		-e USE_KIND=true \
-		$(BUILDER_IMAGE) ./test/scripts/test-e2e-gaie.sh
 
-.PHONY: test-e2e-gaie
-test-e2e-gaie: image-build-builder image-build ## Build images and run GAIE e2e tests
-	$(MAKE) test-e2e-gaie-run
-
-.PHONY: test-e2e-router-run
-test-e2e-router-run: image-pull ## Ensure images are present, then run router e2e tests
+.PHONY: test-e2e-run
+test-e2e-run: image-pull ## Ensure images are present, then run e2e tests
 	@printf "\033[33;1m==== Running End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		$(BUILDER_IMAGE) ./test/scripts/test-e2e-router.sh
 
-.PHONY: test-e2e-router
-test-e2e-router: image-build-builder image-build ## Build images and run router e2e tests
-	$(MAKE) test-e2e-router-run
-
 .PHONY: test-e2e
-test-e2e: test-e2e-gaie test-e2e-router ## Run all end-to-end tests sequentially
+test-e2e: image-build-builder image-build ## Build images and run e2e tests
+	$(MAKE) test-e2e-run
 
 
 .PHONY: bench-tokenizer
@@ -362,8 +346,11 @@ helm-push-standalone: ## Package and push the llm-d-router-standalone Helm chart
 
 ##@ Release
 
+BUNDLE_VERSION ?= main-dev
+export BUNDLE_VERSION
+
 .PHONY: artifacts
-artifacts: yq check-kustomize ## Generate release artifacts (CRD manifests)
+artifacts: generate yq check-kustomize ## Generate release artifacts (CRD manifests).
 	if [ -d artifacts ]; then rm -rf artifacts; fi
 	mkdir -p artifacts
 	kubectl kustomize config/crd > artifacts/manifests_all.yaml

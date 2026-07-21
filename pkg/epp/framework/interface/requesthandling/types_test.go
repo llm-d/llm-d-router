@@ -17,10 +17,12 @@ limitations under the License.
 package requesthandling
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 )
 
 func TestPrompt_UnmarshalJSON(t *testing.T) {
@@ -243,6 +245,53 @@ func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, g.TokenIDs)
+		})
+	}
+}
+
+func TestMaxOutputTokensFromPayload(t *testing.T) {
+	tests := []struct {
+		name string
+		m    PayloadMap
+		keys []string
+		want *int64
+	}{
+		{name: "absent", m: PayloadMap{"other": float64(1)}, keys: []string{"max_tokens"}, want: nil},
+		{name: "float64 value", m: PayloadMap{"max_tokens": float64(64)}, keys: []string{"max_tokens"}, want: ptr.To(int64(64))},
+		{name: "json.Number value", m: PayloadMap{"max_tokens": json.Number("128")}, keys: []string{"max_tokens"}, want: ptr.To(int64(128))},
+		{name: "explicit zero binds", m: PayloadMap{"max_tokens": float64(0)}, keys: []string{"max_tokens"}, want: ptr.To(int64(0))},
+		{name: "negative ignored", m: PayloadMap{"max_tokens": float64(-1)}, keys: []string{"max_tokens"}, want: nil},
+		{name: "non-integral ignored", m: PayloadMap{"max_tokens": float64(1.5)}, keys: []string{"max_tokens"}, want: nil},
+		{name: "wrong type ignored", m: PayloadMap{"max_tokens": "64"}, keys: []string{"max_tokens"}, want: nil},
+		{
+			name: "precedence: first present key wins",
+			m:    PayloadMap{"max_completion_tokens": float64(100), "max_tokens": float64(50)},
+			keys: []string{"max_completion_tokens", "max_tokens"},
+			want: ptr.To(int64(100)),
+		},
+		{
+			name: "precedence: fall back to absent second key",
+			m:    PayloadMap{"max_tokens": float64(50)},
+			keys: []string{"max_completion_tokens", "max_tokens"},
+			want: ptr.To(int64(50)),
+		},
+		{
+			name: "fall back when primary is negative",
+			m:    PayloadMap{"max_completion_tokens": float64(-1), "max_tokens": float64(50)},
+			keys: []string{"max_completion_tokens", "max_tokens"},
+			want: ptr.To(int64(50)),
+		},
+		{
+			name: "fall back when primary is wrong type",
+			m:    PayloadMap{"max_completion_tokens": "bad", "max_tokens": float64(50)},
+			keys: []string{"max_completion_tokens", "max_tokens"},
+			want: ptr.To(int64(50)),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, MaxOutputTokensFromPayload(tt.m, tt.keys...))
 		})
 	}
 }

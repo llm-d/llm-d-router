@@ -37,6 +37,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	metricsutils "k8s.io/component-base/metrics/testutil"
@@ -55,6 +56,7 @@ import (
 	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 	integration "github.com/llm-d/llm-d-router/test/integration"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 // Global State (Initialized in TestMain)
@@ -204,7 +206,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 	eppOptions := defaultEppServerOptions(t, testNamespaceName, configText)
 	if config.runMode == modeStandalone && config.standaloneStrategy == strategyNoCRD {
 		// Only standalone EPP without crd need to set the EndpointSelector.
-		eppOptions.EndpointSelector = "app=" + testPoolName
+		eppOptions.EndpointSelector = labels.SelectorFromSet(labels.Set{"app": testPoolName})
 	}
 
 	// Shorten the Prometheus refresh interval so WaitForReadyPodsMetric (10s timeout)
@@ -298,15 +300,15 @@ func defaultEppServerOptions(t *testing.T, namespace, configText string) *eppSer
 	eppOptions.PoolNamespace = namespace
 	eppOptions.ConfigText = configText
 
-	metricsPort, err := integration.GetFreePort()
+	metricsPort, err := testutils.GetFreePort()
 	require.NoError(t, err)
 	eppOptions.MetricsPort = metricsPort
 
-	grpcPort, err := integration.GetFreePort()
+	grpcPort, err := testutils.GetFreePort()
 	require.NoError(t, err)
 	eppOptions.GRPCPort = grpcPort
 
-	healthPort, err := integration.GetFreePort()
+	healthPort, err := testutils.GetFreePort()
 	require.NoError(t, err)
 	eppOptions.GRPCHealthPort = healthPort
 	eppOptions.EndpointTargetPorts = []int{8000}
