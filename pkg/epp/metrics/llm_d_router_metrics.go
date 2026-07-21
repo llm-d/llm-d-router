@@ -369,9 +369,9 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "flow_control_revocations_issued_total",
-			Help:      metricsutil.HelpMsgWithStability("Total number of in-flight eviction revocations issued.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Total number of in-flight eviction revocations issued, labeled by the demand band's priority.", compbasemetrics.ALPHA),
 		},
-		[]string{"inference_pool"},
+		[]string{"priority", "inference_pool"},
 	)
 
 	llmdFlowControlRevocationsTotal = prometheus.NewCounterVec(

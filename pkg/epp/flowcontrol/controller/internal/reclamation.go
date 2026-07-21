@@ -19,6 +19,7 @@ package internal
 import (
 	"context"
 	"math"
+	"strconv"
 	"sync"
 	"time"
 
@@ -205,7 +206,7 @@ func (c *ReclamationController) Reclaim(ctx context.Context, saturation, ceiling
 		c.outstanding[requestID] = revocation{credit: credit, issuedAt: now}
 		c.pendingReclaim += credit
 	}
-	metrics.RecordFlowControlRevocationsIssued(c.poolName, len(evicted))
+	metrics.RecordFlowControlRevocationsIssued(c.poolName, strconv.Itoa(demandPriority), len(evicted))
 	metrics.RecordFlowControlPendingReclaim(c.poolName, c.pendingReclaim)
 
 	c.logger.V(logutil.DEBUG).Info("Revocations issued",

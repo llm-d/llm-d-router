@@ -891,9 +891,10 @@ const (
 	RevocationOutcomeTimedOut  = "timed_out"
 )
 
-// RecordFlowControlRevocationsIssued counts revocations at issue time.
-func RecordFlowControlRevocationsIssued(inferencePool string, n int) {
-	llmdFlowControlRevocationsIssuedTotal.WithLabelValues(inferencePool).Add(float64(n))
+// RecordFlowControlRevocationsIssued counts revocations at issue time, labeled by the demand
+// band's priority.
+func RecordFlowControlRevocationsIssued(inferencePool, priority string, n int) {
+	llmdFlowControlRevocationsIssuedTotal.WithLabelValues(priority, inferencePool).Add(float64(n))
 }
 
 // RecordFlowControlRevocations increments the revocation counter for a terminal outcome.
