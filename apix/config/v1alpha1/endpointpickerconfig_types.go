@@ -59,6 +59,13 @@ type EndpointPickerConfig struct {
 	FlowControl *FlowControlConfig `json:"flowControl,omitempty"`
 
 	// +optional
+	// Disaggregation configures native, label-aware routing across roles of a
+	// disaggregated inference deployment (e.g. prefill / decode). Parsed by
+	// pkg/epp/disaggregation.Register at boot; opaque here to avoid coupling
+	// the schema to the implementation.
+	Disaggregation *json.RawMessage `json:"disaggregation,omitempty"`
+
+	// +optional
 	// RequestHandler specifies the handling logic used by the EPP to process incoming requests.
 	RequestHandler *RequestHandlerConfig `json:"requestHandler,omitempty"`
 

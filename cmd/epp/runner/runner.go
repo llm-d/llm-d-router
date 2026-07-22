@@ -439,6 +439,11 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
+	if err := r.registerDisaggregation(ctx, cfg, gknn.Namespace); err != nil {
+		setupLog.Error(err, "failed to register disaggregation controller")
+		return nil, nil, err
+	}
+
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
 
 	if err := r.configureAndStartDatalayer(ctx, eppConfig.DataConfig, mgr); err != nil {

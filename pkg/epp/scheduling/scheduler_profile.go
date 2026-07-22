@@ -98,6 +98,22 @@ func (p *SchedulerProfile) AddPlugins(pluginObjects ...plugin.Plugin) error {
 	return nil
 }
 
+// PrependFilter inserts a filter at the head of the profile's filter chain so
+// it runs before every filter added via AddPlugins. Native subsystems that
+// need to establish a foundational cut (e.g. dropping wrong-revision
+// candidates before any downstream filter reasons about them) can call this
+// from their wiring hook.
+func (p *SchedulerProfile) PrependFilter(filter fwksched.Filter) {
+	p.filters = append([]fwksched.Filter{filter}, p.filters...)
+}
+
+// AppendFilter is a filter-only counterpart to AddPlugins. Prefer this when
+// the caller has already unwrapped or type-narrowed to a Filter, so intent
+// is explicit at the call site.
+func (p *SchedulerProfile) AppendFilter(filter fwksched.Filter) {
+	p.filters = append(p.filters, filter)
+}
+
 func (p *SchedulerProfile) String() string {
 	filterNames := make([]string, len(p.filters))
 	for i, filter := range p.filters {
