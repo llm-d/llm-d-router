@@ -96,9 +96,9 @@ func createEndPointPicker(phase, config string) []string {
 
 	objects := make([]string, 1, 8)
 	objects[0] = "ConfigMap/" + cmName
-	// The Service is created once by createStableServices; recreate only the
-	// rest (ServiceAccount, RoleBinding, Deployment) per spec.
-	objects = append(objects, applyManifest(manifest, eppSubstitutions(), "Service")...)
+	// The Service, ServiceAccount, and RoleBinding are created once by
+	// createStableInfra; recreate only the Deployment per spec.
+	objects = append(objects, applyManifest(manifest, eppSubstitutions(), "Service", "ServiceAccount", "RoleBinding")...)
 	podsInDeploymentsReady(objects)
 	return objects
 }
@@ -179,9 +179,9 @@ func createCoordinator(config string) []string {
 	objects[0] = "ConfigMap/llm-d-coordinator-config"
 
 	docs := e2eutil.RunKustomize(coordinatorComponentDir)
-	// The Service is created once by createStableServices so its ClusterIP is
-	// stable across specs; recreate only the Deployment (and SA) per spec.
-	docs = e2eutil.FilterKinds(docs, "ConfigMap", "Service")
+	// The Service and ServiceAccount are created once by createStableInfra so the
+	// ClusterIP is stable across specs; recreate only the Deployment per spec.
+	docs = e2eutil.FilterKinds(docs, "ConfigMap", "Service", "ServiceAccount")
 	docs = e2eutil.SubstituteMany(docs, coordinatorSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, docs, nsName)...)
@@ -194,7 +194,7 @@ func createCoordinator(config string) []string {
 // waitForCoordinatorReady polls /readyz through Envoy until it returns 200,
 // confirming the freshly recreated coordinator pod is reachable through the
 // gateway before the test sends its request. The gateway Service is stable
-// across specs (see createStableServices), so this waits for the new pod to
+// across specs (see createStableInfra), so this waits for the new pod to
 // appear behind it, not for Envoy to re-resolve a rotated ClusterIP.
 // (podsInDeploymentsReady already confirms the coordinator pod itself is ready.)
 func waitForCoordinatorReady() {
@@ -239,25 +239,24 @@ func applyManifest(path string, subs map[string]string, excludeKinds ...string) 
 	return testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())
 }
 
-// createStableServices creates the coordinator and per-phase EPP Services once,
-// up front, and returns their ids for suite teardown. Envoy fronts these via
-// STRICT_DNS clusters and outlives the per-spec workload; recreating the
-// Services each spec would rotate their ClusterIPs and force Envoy to
-// re-resolve, so only the Deployments behind them churn per spec. Mirrors the
-// non-coordinator e2e, which creates the EPP Services once in its per-container
-// setup and recreates only the Deployment per test.
-func createStableServices() []string {
-	objects := make([]string, 0, 4)
+// createStableInfra creates the coordinator and per-phase EPP Services,
+// ServiceAccounts, and RoleBindings once, up front, and returns their ids for
+// suite teardown. Envoy fronts the Services via STRICT_DNS clusters and outlives
+// the per-spec workload; recreating a Service each spec would rotate its
+// ClusterIP and force Envoy to re-resolve, so only the Deployments behind them
+// churn per spec. Mirrors the non-coordinator e2e, which creates the EPP
+// Services and RBAC once in its setup and recreates only the Deployment per test.
+func createStableInfra() []string {
+	objects := make([]string, 0, 12)
 
 	docs := e2eutil.RunKustomize(coordinatorComponentDir)
-	docs = e2eutil.FilterKinds(docs, "ConfigMap", "Deployment", "ServiceAccount")
+	docs = e2eutil.FilterKinds(docs, "ConfigMap", "Deployment")
 	docs = e2eutil.SubstituteMany(docs, coordinatorSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())...)
 
 	for _, manifest := range []string{encodeEPPManifest, prefillEPPManifest, decodeEPPManifest} {
-		objects = append(objects,
-			applyManifest(manifest, eppSubstitutions(), "ServiceAccount", "RoleBinding", "Deployment")...)
+		objects = append(objects, applyManifest(manifest, eppSubstitutions(), "Deployment")...)
 	}
 	return objects
 }
