@@ -80,11 +80,13 @@ type tokenizerPluginConfig struct {
 	ModelName string `json:"modelName"`
 }
 
-// estimateConfig configures the estimation backend. Multimodal image estimation
-// is the only tunable; an empty config uses built-in defaults.
+// estimateConfig configures the estimation backend. Multimodal image and video
+// estimation are the only tunables; an empty config uses built-in defaults.
 type estimateConfig struct {
 	// Image tunes multimodal image placeholder-token estimation.
 	Image *imageEstimateConfig `json:"image,omitempty"`
+	// Video tunes multimodal video placeholder-token estimation.
+	Video *videoEstimateConfig `json:"video,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.
@@ -113,10 +115,87 @@ type dynamicImageConfig struct {
 	Factor int `json:"factor,omitempty"`
 }
 
-// resolution is an image width/height in pixels.
+// resolution is an image or video-frame width/height in pixels.
 type resolution struct {
 	Width  int `json:"width"`
 	Height int `json:"height"`
+}
+
+// videoEstimateConfig tunes how a video's placeholder-token count is estimated:
+// min(frames * tokensPerFrame, maxVideoTokens). Empty fields fall back to
+// built-in defaults. qwen3 is dynamic tokens-per-frame + sampled frames; gemma4
+// is static tokens-per-frame + strided frames. Duration and resolution are not
+// decoded from the video; they come from these fields.
+type videoEstimateConfig struct {
+	// DefaultResolution is the per-frame resolution used for dynamic
+	// tokens-per-frame.
+	DefaultResolution *resolution `json:"defaultResolution,omitempty"`
+	// DefaultDuration is the video length in seconds used for frame counting.
+	DefaultDuration float64 `json:"defaultDuration,omitempty"`
+	// TokensPerFrame configures the per-frame placeholder count.
+	TokensPerFrame *tokensPerFrameConfig `json:"tokensPerFrame,omitempty"`
+	// Frames configures how many frames are sampled from the video.
+	Frames *framesConfig `json:"frames,omitempty"`
+	// MaxVideoTokens caps the total placeholder count. Zero means uncapped.
+	MaxVideoTokens int `json:"maxVideoTokens,omitempty"`
+}
+
+// tokensPerFrameConfig configures the per-frame placeholder count.
+type tokensPerFrameConfig struct {
+	// Mode selects "dynamic" (width*height/factor) or "static" (a constant count).
+	Mode string `json:"mode,omitempty"`
+	// Static configures the static (constant per-frame) mode.
+	Static *tokensPerFrameStaticMode `json:"static,omitempty"`
+	// Dynamic configures the dynamic (pixels/factor) mode.
+	Dynamic *tokensPerFrameDynamicMode `json:"dynamic,omitempty"`
+}
+
+// tokensPerFrameStaticMode is the static-mode parameter.
+type tokensPerFrameStaticMode struct {
+	// NumTokensPerFrame is the per-frame placeholder count.
+	NumTokensPerFrame int `json:"numTokensPerFrame,omitempty"`
+}
+
+// tokensPerFrameDynamicMode is the dynamic-mode parameter.
+type tokensPerFrameDynamicMode struct {
+	// Factor maps a frame's pixels to placeholder tokens (width*height/factor).
+	Factor int `json:"factor,omitempty"`
+}
+
+// framesConfig configures how many frames are counted from a video. MinFrames
+// and MaxFrames clamp the count in both modes; the mode sub-structs hold the
+// mode-specific knobs.
+type framesConfig struct {
+	// Mode selects "sampled" (duration*sampleFPS) or "strided"
+	// (duration*sourceFPS/frameStride).
+	Mode string `json:"mode,omitempty"`
+	// MinFrames floors the frame count. Zero means no floor.
+	MinFrames int `json:"minFrames,omitempty"`
+	// MaxFrames caps the frame count. Zero means uncapped.
+	MaxFrames int `json:"maxFrames,omitempty"`
+	// Sampled configures the sampled (duration*sampleFPS) mode.
+	Sampled *framesSampledMode `json:"sampled,omitempty"`
+	// Strided configures the strided (duration*sourceFPS/frameStride) mode.
+	Strided *framesStridedMode `json:"strided,omitempty"`
+}
+
+// framesSampledMode configures the sampled frame-count mode.
+type framesSampledMode struct {
+	// SampleFPS is the sampling rate.
+	SampleFPS float64 `json:"sampleFPS,omitempty"`
+	// TemporalPatchSize merges every N sampled frames into one token group,
+	// modeling temporal patch merging (e.g. qwen3-vl uses 2). Values < 2 apply
+	// no merging.
+	TemporalPatchSize int `json:"temporalPatchSize,omitempty"`
+}
+
+// framesStridedMode configures the strided frame-count mode.
+type framesStridedMode struct {
+	// DefaultSourceFPS is the fallback source frame rate, used when the
+	// x-llm-d-video-fps header is absent.
+	DefaultSourceFPS float64 `json:"defaultSourceFPS,omitempty"`
+	// FrameStride keeps every Nth source frame.
+	FrameStride int `json:"frameStride,omitempty"`
 }
 
 // PluginFactory is the factory function for the tokenizer plugin.
@@ -143,6 +222,19 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	if config.Estimate != nil && config.Estimate.Image != nil {
 		if m := config.Estimate.Image.Mode; m != "" && m != imageModeDynamic && m != imageModeStatic {
 			return nil, fmt.Errorf("invalid configuration for '%s' plugin: estimate.image.mode must be %q or %q", PluginType, imageModeDynamic, imageModeStatic)
+		}
+	}
+	if config.Estimate != nil && config.Estimate.Video != nil {
+		vid := config.Estimate.Video
+		if vid.TokensPerFrame != nil {
+			if m := vid.TokensPerFrame.Mode; m != "" && m != videoTPFModeDynamic && m != videoTPFModeStatic {
+				return nil, fmt.Errorf("invalid configuration for '%s' plugin: estimate.video.tokensPerFrame.mode must be %q or %q", PluginType, videoTPFModeDynamic, videoTPFModeStatic)
+			}
+		}
+		if vid.Frames != nil {
+			if m := vid.Frames.Mode; m != "" && m != videoFramesModeSampled && m != videoFramesModeStrided {
+				return nil, fmt.Errorf("invalid configuration for '%s' plugin: estimate.video.frames.mode must be %q or %q", PluginType, videoFramesModeSampled, videoFramesModeStrided)
+			}
 		}
 	}
 
@@ -194,7 +286,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		backend = renderBackend{tk: renderer}
 	default:
-		backend = estimateBackend{img: newImageEstimator(config.Estimate)}
+		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
 	}
 
 	p := &Plugin{
@@ -258,6 +350,7 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		return nil
 	}
 
+	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
 	tp, err := p.backend.produce(ctx, request.Body)
 	if err != nil {
 		return err
