@@ -17,16 +17,40 @@ limitations under the License.
 package datalayer
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// EndpointMetadata represents the relevant Kubernetes Pod state of an inference server.
+type EndpointType string
+
+const (
+	EndpointTypeEngine EndpointType = "engine" // an inference server
+	EndpointTypeEPP    EndpointType = "epp"    // an endpoint picker over its own servers
+)
+
+// ErrUnknownEndpointType is returned by ParseEndpointType for an unrecognized type.
+var ErrUnknownEndpointType = errors.New("unknown endpoint type")
+
+// ParseEndpointType returns the endpoint type named by s, defaulting to engine when
+// unset, or ErrUnknownEndpointType for any other value.
+func ParseEndpointType(s string) (EndpointType, error) {
+	switch t := EndpointType(s); t {
+	case "":
+		return EndpointTypeEngine, nil
+	case EndpointTypeEngine, EndpointTypeEPP:
+		return t, nil
+	default:
+		return "", fmt.Errorf("%w %q", ErrUnknownEndpointType, s)
+	}
+}
+
+// EndpointMetadata describes an inference endpoint.
 type EndpointMetadata struct {
 	NamespacedName types.NamespacedName
-	PodName        string
+	Name           string
 	Address        string
 	// NodeAddress is the node IP hosting this pod (pod.Status.HostIP).
 	// Empty for non-Kubernetes discovery sources (e.g. file discovery).
@@ -34,6 +58,7 @@ type EndpointMetadata struct {
 	Port        string
 	MetricsHost string
 	Labels      map[string]string
+	Type        EndpointType
 	// RankIndex is this endpoint's position in the pool's TargetPorts,
 	// identifying the pod-local rank in multi-port deployments.
 	RankIndex int
@@ -60,12 +85,13 @@ func (epm *EndpointMetadata) Clone() *EndpointMetadata {
 			Name:      epm.NamespacedName.Name,
 			Namespace: epm.NamespacedName.Namespace,
 		},
-		PodName:     epm.PodName,
+		Name:        epm.Name,
 		Address:     epm.Address,
 		NodeAddress: epm.NodeAddress,
 		Port:        epm.Port,
 		MetricsHost: epm.MetricsHost,
 		Labels:      clonedLabels,
+		Type:        epm.Type,
 		RankIndex:   epm.RankIndex,
 	}
 }
@@ -77,11 +103,12 @@ func (epm *EndpointMetadata) Equal(other *EndpointMetadata) bool {
 		return epm == other
 	}
 	return epm.NamespacedName == other.NamespacedName &&
-		epm.PodName == other.PodName &&
+		epm.Name == other.Name &&
 		epm.Address == other.Address &&
 		epm.NodeAddress == other.NodeAddress &&
 		epm.Port == other.Port &&
 		epm.MetricsHost == other.MetricsHost &&
+		epm.Type == other.Type &&
 		epm.RankIndex == other.RankIndex &&
 		maps.Equal(epm.Labels, other.Labels)
 }

@@ -48,6 +48,7 @@ type EndpointEntry struct {
 	Address   string            `json:"address"             yaml:"address"`
 	Port      string            `json:"port"                yaml:"port"`
 	Labels    map[string]string `json:"labels,omitempty"    yaml:"labels,omitempty"`
+	Type      string            `json:"type,omitempty"      yaml:"type,omitempty"`
 }
 
 // EndpointsFile is the top-level structure of the endpoints YAML/JSON file.
@@ -246,17 +247,23 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			errs = append(errs, fmt.Errorf("endpoint %q: invalid port %q", e.Name, e.Port))
 			continue
 		}
+		epType, err := fwkdl.ParseEndpointType(e.Type)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("endpoint %q: %w", e.Name, err))
+			continue
+		}
 		ns := e.Namespace
 		if ns == "" {
 			ns = "default"
 		}
 		meta := &fwkdl.EndpointMetadata{
 			NamespacedName: types.NamespacedName{Name: e.Name, Namespace: ns},
-			PodName:        e.Name,
+			Name:           e.Name,
 			Address:        e.Address,
 			Port:           e.Port,
 			MetricsHost:    net.JoinHostPort(e.Address, e.Port),
 			Labels:         e.Labels,
+			Type:           epType,
 		}
 		incoming[meta.NamespacedName] = struct{}{}
 		notifier.Upsert(meta)

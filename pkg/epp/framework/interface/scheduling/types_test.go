@@ -33,7 +33,7 @@ func (s cloneableString) Clone() fwkdl.Cloneable { return s }
 func newTestMetadata(name string) *fwkdl.EndpointMetadata {
 	return &fwkdl.EndpointMetadata{
 		NamespacedName: types.NamespacedName{Namespace: "ns", Name: name},
-		PodName:        name,
+		Name:           name,
 		Address:        "10.0.0.1",
 		Port:           "8000",
 		MetricsHost:    "10.0.0.1:9100",

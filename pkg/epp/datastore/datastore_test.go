@@ -514,7 +514,7 @@ func TestPods(t *testing.T) {
 				gotPods := make([]*corev1.Pod, len(podList))
 				for idx, pm := range podList {
 					gotPods[idx] = &corev1.Pod{
-						ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().PodName, Namespace: pm.GetMetadata().NamespacedName.Namespace},
+						ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().Name, Namespace: pm.GetMetadata().NamespacedName.Namespace},
 						Status: corev1.PodStatus{
 							PodIP:  pm.GetMetadata().GetIPAddress(),
 							HostIP: pm.GetMetadata().GetNodeAddress(),
@@ -659,12 +659,13 @@ func TestEndpointMetadata(t *testing.T) {
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolTargetPort,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolTargetPort),
 					Labels:      map[string]string{},
+					Type:        fwkdl.EndpointTypeEngine,
 				},
 			},
 			op: func(ctx context.Context, ds Datastore) {
@@ -682,12 +683,13 @@ func TestEndpointMetadata(t *testing.T) {
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort0),
 					Labels:      map[string]string{},
+					Type:        fwkdl.EndpointTypeEngine,
 				},
 				{
 					NamespacedName: types.NamespacedName{
@@ -695,12 +697,13 @@ func TestEndpointMetadata(t *testing.T) {
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
+					Type:        fwkdl.EndpointTypeEngine,
 					RankIndex:   1,
 				},
 			},
@@ -719,12 +722,13 @@ func TestEndpointMetadata(t *testing.T) {
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort0),
 					Labels:      map[string]string{},
+					Type:        fwkdl.EndpointTypeEngine,
 				},
 				{
 					NamespacedName: types.NamespacedName{
@@ -732,12 +736,13 @@ func TestEndpointMetadata(t *testing.T) {
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
+					Type:        fwkdl.EndpointTypeEngine,
 					RankIndex:   1,
 				},
 				{
@@ -746,12 +751,13 @@ func TestEndpointMetadata(t *testing.T) {
 						Namespace: pod2.Namespace,
 					},
 
-					PodName:     pod2.Name,
+					Name:        pod2.Name,
 					Address:     pod2.Status.PodIP,
 					NodeAddress: pod2.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
 					MetricsHost: net.JoinHostPort(pod2.Status.PodIP, inferencePoolMultiTargetPort0),
 					Labels:      map[string]string{},
+					Type:        fwkdl.EndpointTypeEngine,
 				},
 				{
 					NamespacedName: types.NamespacedName{
@@ -759,12 +765,13 @@ func TestEndpointMetadata(t *testing.T) {
 						Namespace: pod2.Namespace,
 					},
 
-					PodName:     pod2.Name,
+					Name:        pod2.Name,
 					Address:     pod2.Status.PodIP,
 					NodeAddress: pod2.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod2.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
+					Type:        fwkdl.EndpointTypeEngine,
 					RankIndex:   1,
 				},
 			},
@@ -783,12 +790,13 @@ func TestEndpointMetadata(t *testing.T) {
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort0),
 					Labels:      map[string]string{},
+					Type:        fwkdl.EndpointTypeEngine,
 				},
 				{
 					NamespacedName: types.NamespacedName{
@@ -796,12 +804,13 @@ func TestEndpointMetadata(t *testing.T) {
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
 					MetricsHost: net.JoinHostPort(pod1.Status.PodIP, inferencePoolMultiTargetPort1),
 					Labels:      map[string]string{},
+					Type:        fwkdl.EndpointTypeEngine,
 					RankIndex:   1,
 				},
 			},

@@ -85,7 +85,7 @@ func newRankEndpoint(podName string, rank int, labels map[string]string) fwkdl.E
 	epName := fmt.Sprintf("%s-rank-%d", podName, rank)
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 		NamespacedName: types.NamespacedName{Name: epName, Namespace: testNamespace},
-		PodName:        podName,
+		Name:           podName,
 		Labels:         labels,
 	}, nil)
 }

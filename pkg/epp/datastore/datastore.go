@@ -336,12 +336,13 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 		pods = append(pods,
 			&fwkdl.EndpointMetadata{
 				NamespacedName: createEndpointNamespacedName(pod, idx),
-				PodName:        pod.Name,
+				Name:           pod.Name,
 				Address:        pod.Status.PodIP,
 				NodeAddress:    pod.Status.HostIP,
 				Port:           strconv.Itoa(port),
 				MetricsHost:    net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(port)),
 				Labels:         labels,
+				Type:           fwkdl.EndpointTypeEngine,
 				RankIndex:      idx,
 			})
 	}
@@ -394,7 +395,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 func (ds *datastore) PodDelete(podName string) {
 	ds.pods.Range(func(k, v any) bool {
 		ep := v.(fwkdl.Endpoint)
-		if ep.GetMetadata().PodName == podName {
+		if ep.GetMetadata().Name == podName {
 			ds.pods.Delete(k)
 			ds.epf.ReleaseEndpoint(ep)
 		}

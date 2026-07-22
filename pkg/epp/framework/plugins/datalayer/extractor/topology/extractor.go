@@ -90,7 +90,7 @@ type TopologyExtractor struct {
 	// mu guards endpoints and hostnames.
 	mu sync.Mutex
 	// endpoints maps pod identity to all live Endpoints for that pod.
-	// Outer key: {PodName, Namespace}; inner key: endpoint NamespacedName.
+	// Outer key: {Name, Namespace}; inner key: endpoint NamespacedName.
 	// One pod may have N rank endpoints, each with a distinct inner key.
 	// Only endpoints whose hostname label was absent are tracked here.
 	endpoints map[types.NamespacedName]map[types.NamespacedName]fwkdl.Endpoint
@@ -168,7 +168,7 @@ func (e *TopologyExtractor) RegisterDependencies(r fwkdl.Registrar) error {
 // podKey returns the pod identity key from endpoint metadata.
 // One pod may produce multiple endpoints (one per rank), all sharing the same key.
 func podKey(meta *fwkdl.EndpointMetadata) types.NamespacedName {
-	return types.NamespacedName{Name: meta.PodName, Namespace: meta.NamespacedName.Namespace}
+	return types.NamespacedName{Name: meta.Name, Namespace: meta.NamespacedName.Namespace}
 }
 
 // endpointHandler handles endpoint lifecycle events.
