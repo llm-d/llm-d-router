@@ -243,7 +243,7 @@ func TestVideoEstimator_Default(t *testing.T) {
 // per-frame count.
 func TestVideoEstimator_StaticTokensPerFrame(t *testing.T) {
 	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
-		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{StaticToken: 100}},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 100}},
 	}})}
 	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
@@ -270,7 +270,7 @@ func TestVideoEstimator_SampledFrames(t *testing.T) {
 	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
 		DefaultDuration: 8,
 		Frames:          &framesConfig{Mode: videoFramesModeSampled, Sampled: &framesSampledMode{SampleFPS: 2}},
-		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{StaticToken: 10}},
+		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 10}},
 	}})}
 	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
@@ -283,7 +283,7 @@ func TestVideoEstimator_StridedFramesCapped(t *testing.T) {
 	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
 		DefaultDuration: 10,
 		Frames:          &framesConfig{Mode: videoFramesModeStrided, MaxFrames: 16, Strided: &framesStridedMode{DefaultSourceFPS: 24, FrameStride: 4}},
-		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{StaticToken: 100}},
+		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 100}},
 	}})}
 	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
@@ -297,7 +297,7 @@ func TestVideoEstimator_StridedFramesFloored(t *testing.T) {
 	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
 		DefaultDuration: 1,
 		Frames:          &framesConfig{Mode: videoFramesModeStrided, MinFrames: 8, Strided: &framesStridedMode{DefaultSourceFPS: 24, FrameStride: 4}},
-		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{StaticToken: 100}},
+		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 100}},
 	}})}
 	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
@@ -334,7 +334,7 @@ func TestVideoEstimator_Qwen3AndGemma4(t *testing.T) {
 
 	gemma4 := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
 		DefaultDuration: 10,
-		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{StaticToken: 256}},
+		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 256}},
 		Frames:          &framesConfig{Mode: videoFramesModeStrided, MaxFrames: 16, Strided: &framesStridedMode{DefaultSourceFPS: 24, FrameStride: 4}},
 	}})}
 	tp, err = gemma4.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
@@ -443,7 +443,7 @@ func TestVideoEstimator_HeaderMetadataOverridesDefaults(t *testing.T) {
 func TestVideoEstimator_HeaderFPSStridedMode(t *testing.T) {
 	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
 		Frames:         &framesConfig{Mode: videoFramesModeStrided, Strided: &framesStridedMode{FrameStride: 2}},
-		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{StaticToken: 1}},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 1}},
 	}})}
 	// strided frames = int(duration(3)*fps(30))/2 = 45.
 	tp, err := b.produce(videoCtx(videoMetadata{duration: 3, fps: 30}), chatVideoBody("https://cdn.example.com/movie.mp4"))
@@ -456,7 +456,7 @@ func TestVideoEstimator_HeaderFPSStridedMode(t *testing.T) {
 func TestVideoEstimator_SampledIgnoresHeaderFPS(t *testing.T) {
 	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
 		Frames:         &framesConfig{Mode: videoFramesModeSampled, Sampled: &framesSampledMode{SampleFPS: 2}},
-		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{StaticToken: 1}},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 1}},
 	}})}
 	// Same 3s duration, different source fps: both must yield 3*2 = 6.
 	fps30, err := b.produce(videoCtx(videoMetadata{duration: 3, fps: 30}), chatVideoBody("https://example.com/clip.mp4"))
@@ -483,7 +483,7 @@ func TestVideoEstimator_NoHeadersUseDefaults(t *testing.T) {
 func TestVideoEstimator_TemporalMergeAndMinFrames(t *testing.T) {
 	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
 		Frames:         &framesConfig{Mode: videoFramesModeSampled, MinFrames: 4, Sampled: &framesSampledMode{SampleFPS: 2, TemporalPatchSize: 2}},
-		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{StaticToken: 1}},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 1}},
 	}})}
 	// 10s: 10*2 = 20 sampled frames, /2 temporal merge = 10 groups.
 	long, err := b.produce(videoCtx(videoMetadata{duration: 10}), chatVideoBody("https://example.com/clip.mp4"))

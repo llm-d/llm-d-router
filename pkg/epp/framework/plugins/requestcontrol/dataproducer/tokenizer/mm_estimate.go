@@ -235,7 +235,7 @@ func newVideoEstimator(cfg *estimateConfig) videoEstimator {
 			est.factor = vid.TokensPerFrame.Dynamic.Factor
 		}
 		if vid.TokensPerFrame.Static != nil {
-			est.staticToken = vid.TokensPerFrame.Static.StaticToken
+			est.staticToken = vid.TokensPerFrame.Static.NumTokensPerFrame
 		}
 	}
 	if vid.Frames != nil {

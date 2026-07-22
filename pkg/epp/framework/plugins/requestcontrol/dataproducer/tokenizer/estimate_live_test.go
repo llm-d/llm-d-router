@@ -87,7 +87,7 @@ var gemma4VideoCase = videoModelCase{
 	model: "google/gemma-4-31B-it",
 	cfg: &estimateConfig{Video: &videoEstimateConfig{
 		Frames:         &framesConfig{Mode: videoFramesModeStrided, MaxFrames: 8, Strided: &framesStridedMode{FrameStride: 4}},
-		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{StaticToken: 296}},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 296}},
 	}},
 }
 

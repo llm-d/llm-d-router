@@ -82,7 +82,7 @@ apply to every video in the request.
 | ------------------------------------- | --------- | ------------------------------------------------------------------------------- |
 | `estimate.video.tokensPerFrame.mode`  | `dynamic` | `dynamic` (width×height/factor) or `static` (a constant per-frame count).       |
 | `estimate.video.tokensPerFrame.dynamic.factor`| `1024` | Dynamic-mode pixels-per-placeholder-token divisor.                            |
-| `estimate.video.tokensPerFrame.static.staticToken` | –  | Static-mode per-frame placeholder count.                                   |
+| `estimate.video.tokensPerFrame.static.numTokensPerFrame` | – | Static-mode per-frame placeholder count.                              |
 | `estimate.video.frames.mode`          | `sampled` | `sampled` (clamp(duration×sampleFPS, minFrames, maxFrames) / temporalPatchSize) or `strided` (clamp(duration×defaultSourceFPS/frameStride, minFrames, maxFrames)). |
 | `estimate.video.frames.minFrames`     | –         | Sampled/strided frame floor (0 = none). Models a processor's minimum frames.     |
 | `estimate.video.frames.maxFrames`     | –         | Sampled/strided frame cap (0 = uncapped).                                        |

@@ -152,8 +152,8 @@ type tokensPerFrameConfig struct {
 
 // tokensPerFrameStaticMode is the static-mode parameter.
 type tokensPerFrameStaticMode struct {
-	// StaticToken is the per-frame placeholder count.
-	StaticToken int `json:"staticToken,omitempty"`
+	// NumTokensPerFrame is the per-frame placeholder count.
+	NumTokensPerFrame int `json:"numTokensPerFrame,omitempty"`
 }
 
 // tokensPerFrameDynamicMode is the dynamic-mode parameter.
