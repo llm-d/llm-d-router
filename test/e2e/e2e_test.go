@@ -161,7 +161,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		})
 	}))
 
-	ginkgo.When("Running a PD configuration with nixlv2 connector(deprecated pd-profile-handler)", ginkgo.Label(metricsTestLabel, deprecatedPDTestLabel), ginkgo.Ordered, testWrapper(func() {
+	ginkgo.When("Running a PD configuration with nixlv2 connector(deprecated pd-profile-handler)", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects := createInferencePool(1)
 
@@ -233,14 +233,12 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 	for _, tc := range []struct {
 		name   string
 		config string
-		label  string
 	}{
-		{"deprecated pd-profile-handler", deprecatedPdConfig, deprecatedPDTestLabel},
-		{"disagg-profile-handler", pdConfig, disaggTestLabel},
+		{"deprecated pd-profile-handler", deprecatedPdConfig},
+		{"disagg-profile-handler", pdConfig},
 	} {
 		config := tc.config // capture for closure
-		label := tc.label
-		ginkgo.When("Running a PD configuration with shared-storage connector using "+tc.name, ginkgo.Label(sharedStorageTestLabel, label), ginkgo.Ordered, testWrapper(func() {
+		ginkgo.When("Running a PD configuration with shared-storage connector using "+tc.name, ginkgo.Ordered, testWrapper(func() {
 			ginkgo.It("should run regular (non-streaming) requests successfully", func() {
 				infPoolObjects := createInferencePool(1)
 
@@ -475,7 +473,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		})
 	}))
 
-	ginkgo.When("Running a PD configuration with disagg-profile-handler and metrics validation", ginkgo.Label(metricsTestLabel, disaggTestLabel), ginkgo.Ordered, testWrapper(func() {
+	ginkgo.When("Running a PD configuration with disagg-profile-handler and metrics validation", ginkgo.Ordered, testWrapper(func() {
 
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects := createInferencePool(1)
@@ -572,7 +570,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		})
 	}))
 
-	ginkgo.When("Running an E/PD (Encode/Prefill-Decode) configuration", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
+	ginkgo.When("Running an E/PD (Encode/Prefill-Decode) configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should route multimodal requests through encode and decode pods", func() {
 			infPoolObjects := createInferencePool(1)
 
@@ -647,7 +645,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		})
 	}))
 
-	ginkgo.When("Running an E/P/D (encode/prefill/decode) configuration", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
+	ginkgo.When("Running an E/P/D (encode/prefill/decode) configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should route multimodal requests through encode, prefill, and decode pods", func() {
 			infPoolObjects := createInferencePool(1)
 
@@ -732,7 +730,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		})
 	}))
 
-	ginkgo.When("Running an EPD (no disaggregation) configuration", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
+	ginkgo.When("Running an EPD (no disaggregation) configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should route text and multimodal requests to the single deployment", func() {
 			infPoolObjects := createInferencePool(1)
 
@@ -800,7 +798,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		})
 	}))
 
-	ginkgo.When("Running simple non-PD KV enabled configuration", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
+	ginkgo.When("Running simple non-PD KV enabled configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects := createInferencePool(1)
 
@@ -824,7 +822,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		})
 	}))
 
-	ginkgo.When("Running KV configuration with external tokenizer DataProducer plugin", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
+	ginkgo.When("Running KV configuration with external tokenizer DataProducer plugin", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects := createInferencePool(1)
 
@@ -859,7 +857,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		})
 	}))
 
-	ginkgo.When("Scaling up and down the model servers", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
+	ginkgo.When("Scaling up and down the model servers", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should distribute inference requests across all model servers", func() {
 			infPoolObjects := createInferencePool(1)
 
@@ -917,7 +915,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		})
 	}))
 
-	ginkgo.When("Running a vLLM Data Parallel configuration", ginkgo.Label(extendedTestLabel), ginkgo.Ordered, testWrapper(func() {
+	ginkgo.When("Running a vLLM Data Parallel configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should schedule inference on all ranks", func() {
 			infPoolObjects := createInferencePool(2)
 

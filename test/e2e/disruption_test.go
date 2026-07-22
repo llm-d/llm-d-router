@@ -96,7 +96,7 @@ func completionRoutedToNamespace(nsName string) error {
 	return nil
 }
 
-var _ = ginkgo.Describe("Disruption tests", ginkgo.Label(disruptiveTestLabel), func() {
+var _ = ginkgo.Describe("Disruption tests", func() {
 	ginkgo.When("A decode pod is killed mid-request", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should recover and route to surviving pods", func() {
 			nsName := getNamespace()
