@@ -97,6 +97,20 @@ func (b *boundedLabel) pin(v string) {
 
 var modelLabelLimiter = newBoundedLabel(maxModelLabelValues)
 
+// Fairness IDs are populated from a client request header (or an agent-identity attribute), so
+// like model names their cardinality is not operator-bounded. They label per-request and
+// flow-control metrics; without a cap, every distinct fairness ID ever observed permanently
+// grows the time series set. maxFairnessLabelValues bounds the distinct fairness_id label
+// values; values beyond the cap collapse to overflowValue.
+const maxFairnessLabelValues = 1000
+
+var fairnessLabelLimiter = newBoundedLabel(maxFairnessLabelValues)
+
+// boundFairnessID caps the request-derived fairness_id label.
+func boundFairnessID(fairnessID string) string {
+	return fairnessLabelLimiter.bound(fairnessID)
+}
+
 // PreAdmitModelLabels pins the given model names so they always emit their real
 // label value on model-labeled metrics, regardless of how many unconfigured
 // names have been admitted. The datastore calls this when InferenceModelRewrite
