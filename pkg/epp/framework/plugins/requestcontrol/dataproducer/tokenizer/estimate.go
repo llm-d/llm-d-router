@@ -202,14 +202,14 @@ func (b estimateBackend) chatCompletionsBytes(ctx context.Context, chat *fwkrh.C
 		}
 	}
 	for _, msg := range chat.Messages {
-		out, features = b.appendChatMessage(ctx, out, features, msg, meta)
+		out, features = b.appendChatMessage(out, features, msg, meta)
 	}
 	return out, features
 }
 
 // appendChatMessage flattens a single chat-completions message into the byte
 // stream, recording multimodal placeholders on aligned boundaries.
-func (b estimateBackend) appendChatMessage(ctx context.Context, out []byte, features []fwkrh.MultiModalFeature, msg fwkrh.Message, meta mmMetadata) ([]byte, []fwkrh.MultiModalFeature) {
+func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiModalFeature, msg fwkrh.Message, meta mmMetadata) ([]byte, []fwkrh.MultiModalFeature) {
 	if msg.Role != "" {
 		out = append(out, []byte(msg.Role)...)
 	}
