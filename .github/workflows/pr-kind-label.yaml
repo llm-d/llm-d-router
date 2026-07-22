@@ -51,7 +51,7 @@ jobs:
           gh pr view "$PR_NUMBER" --repo "$REPO" --json labels \
             -q '.labels[].name | select(startswith("area/"))' | \
             while IFS= read -r label; do
-              gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label"
+              gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$label'"
             done
 
           printf '%s\n' "$areas" | \
