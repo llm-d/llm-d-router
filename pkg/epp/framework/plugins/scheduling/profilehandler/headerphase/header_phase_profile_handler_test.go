@@ -106,6 +106,39 @@ func TestHeaderPhaseProfileHandlerFactory(t *testing.T) {
 	}
 }
 
+func TestHeaderPhaseNoMatchError(t *testing.T) {
+	handler := NewHeaderPhaseProfileHandler(defaultHeaderName)
+
+	tests := []struct {
+		name           string
+		phase          string
+		wantErrContain string
+	}{
+		{
+			name:           "empty phase reports missing header",
+			phase:          "",
+			wantErrContain: `missing "epp-phase" header`,
+		},
+		{
+			name:           "non-empty phase reports the unconfigured value",
+			phase:          "prefill",
+			wantErrContain: `no scheduling profile configured for "epp-phase" header value "prefill"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := handler.noMatchError(tt.phase)
+			if err == nil {
+				t.Fatalf("noMatchError() returned nil, want an error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrContain) {
+				t.Errorf("noMatchError() = %q, want it to contain %q", err.Error(), tt.wantErrContain)
+			}
+		})
+	}
+}
+
 func TestHeaderPhaseWithName(t *testing.T) {
 	handler := NewHeaderPhaseProfileHandler(defaultHeaderName).WithName("renamed")
 

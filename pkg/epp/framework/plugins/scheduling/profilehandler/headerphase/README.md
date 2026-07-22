@@ -13,8 +13,9 @@ Reads the configured header from the incoming request and looks up the
 `schedulingProfiles` entry with that exact name:
 
 - If a matching profile hasn't run yet, it runs that profile alone.
-- If the header is missing or names a profile that isn't configured, no profile runs and
-  the request fails with an error identifying the header.
+- If the header is missing or names a profile that isn't configured, no profile runs; the
+  request fails with the scheduler's generic "failed to run any scheduler profile" error,
+  and the EPP logs the specific reason (missing header vs. unconfigured value).
 
 This differs from the [disagg profile handler](../disagg/README.md), which decides which
 profiles to run via decider plugins rather than a header.

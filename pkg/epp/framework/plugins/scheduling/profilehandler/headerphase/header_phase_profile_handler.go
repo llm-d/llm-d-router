@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"strings"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -103,10 +105,22 @@ func (h *HeaderPhaseProfileHandler) phaseHeader(request *fwksched.InferenceReque
 	return strings.TrimSpace(request.Headers[h.headerName])
 }
 
+// noMatchError explains why no configured scheduling profile matches phase, the
+// already-trimmed value of the phase header.
+func (h *HeaderPhaseProfileHandler) noMatchError(phase string) error {
+	if phase == "" {
+		return fmt.Errorf("header-phase profile handler: missing %q header", h.headerName)
+	}
+	return fmt.Errorf("header-phase profile handler: no scheduling profile configured for %q header value %q", h.headerName, phase)
+}
+
 // Pick selects the single SchedulingProfile named by the request's phase header. It
 // returns an empty map once that profile has run, or when the header is missing or
-// names a profile that isn't configured (ProcessResults then reports the error).
-func (h *HeaderPhaseProfileHandler) Pick(_ context.Context, request *fwksched.InferenceRequest, profiles map[string]fwksched.SchedulerProfile,
+// names a profile that isn't configured. In the latter case the scheduler's run loop
+// (pkg/epp/scheduling.Scheduler.Schedule) stops without ever calling ProcessResults,
+// since no profile ever ran, so the specific reason is logged here rather than
+// returned from ProcessResults, where it would be unreachable in practice.
+func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.InferenceRequest, profiles map[string]fwksched.SchedulerProfile,
 	profileResults map[string]*fwksched.ProfileRunResult) map[string]fwksched.SchedulerProfile {
 	// TODO(#2135): single profile per request; extend to loop over an ordered phase
 	// list parsed from the header for non-deferred multi-profile scheduling.
@@ -117,6 +131,7 @@ func (h *HeaderPhaseProfileHandler) Pick(_ context.Context, request *fwksched.In
 	phase := h.phaseHeader(request)
 	profile, ok := profiles[phase]
 	if !ok {
+		log.FromContext(ctx).Error(h.noMatchError(phase), "no scheduling profile selected for request")
 		return map[string]fwksched.SchedulerProfile{}
 	}
 
@@ -133,11 +148,7 @@ func (h *HeaderPhaseProfileHandler) ProcessResults(_ context.Context, request *f
 	// multi-profile scheduling.
 	switch len(profileResults) {
 	case 0:
-		phase := h.phaseHeader(request)
-		if phase == "" {
-			return nil, fmt.Errorf("header-phase profile handler: missing %q header", h.headerName)
-		}
-		return nil, fmt.Errorf("header-phase profile handler: no scheduling profile configured for %q header value %q", h.headerName, phase)
+		return nil, h.noMatchError(h.phaseHeader(request))
 	case 1:
 		// exactly one profile ran, handled below
 	default:
