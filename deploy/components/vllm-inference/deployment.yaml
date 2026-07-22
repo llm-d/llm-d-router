@@ -29,6 +29,10 @@ spec:
             - "--skip-tokenizer-init"
             - "--enforce-eager"
             - "--enable-mm-embeds"
+            - "--renderer-num-workers"
+            - ${RENDERER_NUM_WORKERS_STR}
+            - --mm-processor-cache-gb
+            - "0"
             - "--port"
             - ${TARGET_PORT_STR}
           ports:

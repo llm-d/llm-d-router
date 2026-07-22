@@ -29,11 +29,18 @@ spec:
             - "--port=${TARGET_PORT}"
             - "--vllm-port=${POST_TARGET_PORT}"
             - "--secure-proxy=false"
+            - "--tracing=${TRACING}"
           ports:
             - name: sidecar-http
               containerPort: ${TARGET_PORT}
               protocol: TCP
           env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: ${OTEL_TRACES_SAMPLER_ARG_STR}
             - name: POD_IP
               valueFrom:
                 fieldRef:

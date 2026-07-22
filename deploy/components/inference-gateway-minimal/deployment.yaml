@@ -93,6 +93,7 @@ spec:
             - "/etc/epp/epp-config.yaml"
             - --metrics-endpoint-auth=false
             - --ha-enable-leader-election=false
+            - "--tracing=${TRACING}"
           ports:
             - containerPort: 5557
             - containerPort: 9002
@@ -112,6 +113,12 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: ${OTEL_TRACES_SAMPLER_ARG_STR}
             - name: POD_NAME
               valueFrom:
                 fieldRef:
