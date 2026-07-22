@@ -888,7 +888,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
 				},
 			}
-			ds.PodUpdateOrAddIfNotExist(ctx, testPod)
+			_ = ds.PodUpdateOrAddIfNotExist(ctx, testPod)
 		}
 
 		for _, test := range tests {
@@ -1055,7 +1055,7 @@ func TestGetRandomEndpoint(t *testing.T) {
 					t.Errorf("unexpected error setting pool: %s", err)
 				}
 				for _, pod := range test.storePods {
-					ds.PodUpdateOrAddIfNotExist(context.Background(), pod)
+					_ = ds.PodUpdateOrAddIfNotExist(context.Background(), pod)
 				}
 				d := &Director{datastore: ds}
 				gotEndpoint := d.GetRandomEndpoint()
@@ -1887,7 +1887,7 @@ func newConditionalDecodeDirector(t *testing.T, scheduleResult *fwksched.Schedul
 	if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(pool)); err != nil {
 		t.Fatalf("PoolSet: %v", err)
 	}
-	ds.PodUpdateOrAddIfNotExist(ctx, &corev1.Pod{
+	_ = ds.PodUpdateOrAddIfNotExist(ctx, &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "default", Labels: map[string]string{"app": "inference"}},
 		Status: corev1.PodStatus{
 			PodIP:      "192.168.1.100",
