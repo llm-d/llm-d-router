@@ -129,7 +129,6 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 			return
 		}
 		testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
-		dumpEnvoyClusters(nsName)
 	})
 
 	// Pools first so each EPP can resolve its --pool-name.
@@ -172,23 +171,6 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 		"coordinator returned non-200: body=%s", string(raw))
 	gomega.Expect(raw).NotTo(gomega.BeEmpty(), "coordinator returned empty body")
 	verifyCoordinatorSteps(nsName, expectedSteps, expectedImages, true, true)
-}
-
-// dumpEnvoyClusters writes Envoy's admin /clusters (resolved endpoints and health
-// per cluster) to the Ginkgo output. Best-effort; yields nothing if the envoy
-// image lacks a usable HTTP client.
-func dumpEnvoyClusters(nsName string) {
-	args := []string{"exec", "deployment/envoy", "-c", "envoy", "--namespace=" + nsName}
-	if k8sContext != "" {
-		args = append(args, "--context="+k8sContext)
-	}
-	args = append(args, "--", "curl", "-sS", "--connect-timeout", "1", "--max-time", "5", "http://localhost:19000/clusters")
-	out, err := exec.Command("kubectl", args...).CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- envoy /clusters (kubectl error: %v) ---\n%s\n---\n", err, string(out))
-		return
-	}
-	fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- envoy /clusters ---\n%s\n---\n", string(out))
 }
 
 // verifyCoordinatorSteps fetches the coordinator pod logs and asserts that
