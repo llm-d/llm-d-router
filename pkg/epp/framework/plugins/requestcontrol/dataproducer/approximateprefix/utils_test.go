@@ -55,7 +55,7 @@ func TestCalculateHitRatioStats(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			max, avg, stddev := calculateHitRatioStats(tt.matchLens)
+			max, avg, stddev := CalculateHitRatioStats(tt.matchLens)
 			assert.InDelta(t, tt.wantMax, max, 1e-9)
 			assert.InDelta(t, tt.wantAvg, avg, 1e-9)
 			assert.InDelta(t, tt.wantStdDev, stddev, 1e-9)

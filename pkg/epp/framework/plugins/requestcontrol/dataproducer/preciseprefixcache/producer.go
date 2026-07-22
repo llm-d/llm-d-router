@@ -397,7 +397,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 				WithCachedBlocksByTier(cachedBlocksByTier))
 	}
 
-	max, avg, std := calculateHitRatioStats(endpointHitRatios)
+	max, avg, std := approximateprefix.CalculateHitRatioStats(endpointHitRatios)
 	recordPrefixCacheHitRatioStats(p.typedName.Name, p.typedName.Type, max, avg, std)
 
 	if p.speculativeEnabled {

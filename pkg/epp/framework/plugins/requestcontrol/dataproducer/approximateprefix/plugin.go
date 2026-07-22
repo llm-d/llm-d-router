@@ -247,7 +247,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		}
 	}
 
-	max, avg, std := calculateHitRatioStats(endpointHitRatios)
+	max, avg, std := CalculateHitRatioStats(endpointHitRatios)
 	recordPrefixCacheHitRatioStats(p.typedName.Name, p.typedName.Type, max, avg, std)
 
 	state := &SchedulingContextState{

@@ -20,7 +20,7 @@ import (
 	"math"
 )
 
-func calculateHitRatioStats(hitRatios []float64) (maxRatio float64, avgRatio float64, stdDevRatio float64) {
+func CalculateHitRatioStats(hitRatios []float64) (maxRatio float64, avgRatio float64, stdDevRatio float64) {
 	if len(hitRatios) == 0 {
 		return 0, 0, 0
 	}
