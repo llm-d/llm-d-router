@@ -28,7 +28,7 @@ func extractInferenceHeaders(httpResp *http.Response) (string, string, string) {
 func generateAndCheckLoad(count int) {
 	nsName := getNamespace()
 	for range count {
-		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 		gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -310,7 +310,7 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 	gomega.Expect(theMetrics).ShouldNot(gomega.BeEmpty())
 	metricsAsString := strings.Join(theMetrics, "\n")
 
-	_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+	_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, getNamespace())
 
 	// Define the metrics we expect to see
 	preset := []string{ //nolint:prealloc

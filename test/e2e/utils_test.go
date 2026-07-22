@@ -52,10 +52,10 @@ func scaleDeployment(nsName string, objects []string, increment int) {
 }
 
 // getModelServerPods Returns the list of Prefill and Decode vLLM pods separately
-func getModelServerPods(podLabels, prefillLabels, decodeLabels map[string]string) ([]string, []string) {
+func getModelServerPods(podLabels, prefillLabels, decodeLabels map[string]string, nsName string) ([]string, []string) {
 	ginkgo.By("Getting Model server pods")
 
-	pods := getPods(podLabels)
+	pods := getPods(podLabels, nsName)
 
 	prefillValidator, err := apilabels.ValidatedSelectorFromSet(prefillLabels)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -90,10 +90,11 @@ func getModelServerPods(podLabels, prefillLabels, decodeLabels map[string]string
 	return prefillPods, decodePods
 }
 
-func getPods(labels map[string]string) []corev1.Pod {
+func getPods(labels map[string]string, nsName string) []corev1.Pod {
 	podList := corev1.PodList{}
 	selector := apilabels.SelectorFromSet(labels)
-	err := testConfig.K8sClient.List(testConfig.Context, &podList, &client.ListOptions{LabelSelector: selector})
+	err := testConfig.K8sClient.List(testConfig.Context, &podList,
+		&client.ListOptions{LabelSelector: selector, Namespace: nsName})
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
 	pods := []corev1.Pod{}
@@ -107,8 +108,8 @@ func getPods(labels map[string]string) []corev1.Pod {
 }
 
 // getPodNames returns the names of all running pods matching the given label selector.
-func getPodNames(labels map[string]string) []string {
-	pods := getPods(labels)
+func getPodNames(labels map[string]string, nsName string) []string {
+	pods := getPods(labels, nsName)
 	names := make([]string, 0, len(pods))
 	for _, pod := range pods {
 		names = append(names, pod.Name)
