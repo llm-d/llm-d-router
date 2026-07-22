@@ -71,6 +71,11 @@ const (
 	// The specific underlying cause can be determined from the associated error (e.g., controller shutdown while the item
 	// was queued), which will be wrapped by `ErrEvicted`.
 	QueueOutcomeEvictedOther
+
+	// NumQueueOutcomes is a sentinel that equals the total number of QueueOutcome values.
+	// It is not a valid outcome; it exists to size arrays indexed by QueueOutcome and to allow tests to detect
+	// when new values are added without a corresponding update to dependent code.
+	NumQueueOutcomes
 )
 
 // String returns a human-readable string representation of the QueueOutcome.
