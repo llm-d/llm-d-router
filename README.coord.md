@@ -341,7 +341,7 @@ kubectl --context kind-e2e-coordinator-tests get pods
 |---|---|---|
 | `E2E_KEEP_CLUSTER_ON_FAILURE` | `false` | Preserve the Kind cluster when the suite fails |
 | `E2E_GATEWAY_PORT` | `30080` | Host port mapped to the gateway NodePort |
-| `E2E_PRINT_COORDINATOR_LOGS` | `false` | Print coordinator pod logs during the run |
+| `E2E_PRINT_LOGS` | `false` | Print all pod logs (coordinator, EPPs, Envoy, workers) for every spec, not just on failure |
 | `CONTAINER_RUNTIME` | `docker` | Container runtime used to load images into Kind (`docker` or `podman`) |
 | `EPP_IMAGE` | `ghcr.io/llm-d/llm-d-router-endpoint-picker:dev` | EPP image loaded into the Kind cluster |
 | `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` | vLLM image loaded into the Kind cluster |

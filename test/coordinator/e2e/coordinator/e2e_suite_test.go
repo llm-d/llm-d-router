@@ -79,7 +79,7 @@ var (
 	testConfig *testutils.TestConfig
 
 	keepClusterOnFailure = env.GetEnvBool("E2E_KEEP_CLUSTER_ON_FAILURE", false, ginkgo.GinkgoLogr)
-	printCoordinatorLogs = env.GetEnvBool("E2E_PRINT_COORDINATOR_LOGS", false, ginkgo.GinkgoLogr)
+	printLogs            = env.GetEnvBool("E2E_PRINT_LOGS", false, ginkgo.GinkgoLogr)
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)

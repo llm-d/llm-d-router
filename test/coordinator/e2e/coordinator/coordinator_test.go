@@ -121,10 +121,11 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 		testutils.DeleteObjects(testConfig, encodePool, nsName)
 	})
 
-	// Dump coordinator logs on failure, or always when E2E_PRINT_COORDINATOR_LOGS is
-	// set. Registered second → runs first (LIFO), so the deployment still exists.
+	// Dump all pod logs (coordinator, EPPs, Envoy, workers) on failure, or always
+	// when E2E_PRINT_LOGS is set. Registered second → runs first (LIFO), so the
+	// pods still exist.
 	ginkgo.DeferCleanup(func() {
-		if !ginkgo.CurrentSpecReport().Failed() && !printCoordinatorLogs {
+		if !ginkgo.CurrentSpecReport().Failed() && !printLogs {
 			return
 		}
 		testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
