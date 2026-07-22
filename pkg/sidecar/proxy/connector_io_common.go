@@ -199,7 +199,7 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 	ctx := r.Context()
 
 	// Step 1: Send to the Preprocessor
-	ctx, preprocessSpan := tracer.Start(ctx, "preprocess",
+	preprocessCtx, preprocessSpan := tracer.Start(ctx, "preprocess",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	preprocessSpan.SetAttributes(
@@ -219,7 +219,7 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 		return
 	}
 
-	preprocessReq, err := http.NewRequestWithContext(ctx, "POST", PreprocessPath, bytes.NewReader(rawBody))
+	preprocessReq, err := http.NewRequestWithContext(preprocessCtx, "POST", PreprocessPath, bytes.NewReader(rawBody))
 	if err != nil {
 		err = fmt.Errorf("failed to create preprocess request: %w", err)
 		s.logger.Error(err, "preprocess failed", "requestID", requestID)
@@ -267,7 +267,7 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 	preprocessSpan.End()
 
 	// Step 2: Process through Inference cluster
-	ctx, inferenceSpan := tracer.Start(ctx, "inference",
+	inferenceCtx, inferenceSpan := tracer.Start(ctx, "inference",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	inferenceSpan.SetAttributes(
@@ -278,7 +278,7 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 	inferenceStart := time.Now()
 
 	inferenceResponses, err := s.fanoutInferenceCollect(
-		ctx,
+		inferenceCtx,
 		preprocessResponse,
 		allowedInferenceInstances,
 		requestID,
@@ -300,7 +300,7 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 	inferenceSpan.End()
 
 	// Step 3: Send to the Postprocessor
-	_, postprocessSpan := tracer.Start(ctx, "postprocess",
+	postprocessCtx, postprocessSpan := tracer.Start(ctx, "postprocess",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer postprocessSpan.End()
@@ -325,7 +325,7 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", PostprocessPath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(postprocessCtx, "POST", PostprocessPath, bytes.NewReader(body))
 	if err != nil {
 		err = fmt.Errorf("failed to create postprocess request%w", err)
 		s.logger.Error(err, "post process failed", "requestID", requestID)
