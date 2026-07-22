@@ -218,7 +218,9 @@ To learn more about the available plugins, check the plugins [README.md](../pkg/
 
 The data layer follows a Source -> Extract -> Attribute lifecycle:
 
-- Data sources collect metrics (e.g., memory usage, active adapters) from pods
+- Data sources collect per-endpoint data. Some poll pods periodically, for metrics (e.g., memory
+  usage, active adapters) or served models and LoRA adapters (via `/v1/models`); others react to
+  endpoint or Kubernetes object change notifications
 - Extractors populate per-endpoint attributes in the shared datastore for scorers
 - Scoring can rely on numerical metrics or metadata (model ID, adapter tags)
 
