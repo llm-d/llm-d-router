@@ -175,10 +175,12 @@ func TestHeaderPhaseProcessResults(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		profileResults map[string]*fwksched.ProfileRunResult
-		wantResult     *fwksched.SchedulingResult
-		wantErr        bool
+		name            string
+		request         *fwksched.InferenceRequest
+		profileResults  map[string]*fwksched.ProfileRunResult
+		wantResult      *fwksched.SchedulingResult
+		wantErr         bool
+		wantErrContains string
 	}{
 		{
 			name: "single successful profile",
@@ -193,9 +195,25 @@ func TestHeaderPhaseProcessResults(t *testing.T) {
 			},
 		},
 		{
-			name:           "no profiles selected returns error",
-			profileResults: map[string]*fwksched.ProfileRunResult{},
-			wantErr:        true,
+			name:            "no profiles selected, nil request, reports missing header",
+			request:         nil,
+			profileResults:  map[string]*fwksched.ProfileRunResult{},
+			wantErr:         true,
+			wantErrContains: `missing "EPP-Phase" header`,
+		},
+		{
+			name:            "no profiles selected, empty header, reports missing header",
+			request:         &fwksched.InferenceRequest{Headers: map[string]string{}},
+			profileResults:  map[string]*fwksched.ProfileRunResult{},
+			wantErr:         true,
+			wantErrContains: `missing "EPP-Phase" header`,
+		},
+		{
+			name:            "no profiles selected, unconfigured header value, reports the value",
+			request:         &fwksched.InferenceRequest{Headers: map[string]string{defaultHeaderName: "prefill"}},
+			profileResults:  map[string]*fwksched.ProfileRunResult{},
+			wantErr:         true,
+			wantErrContains: `no scheduling profile configured for "EPP-Phase" header value "prefill"`,
 		},
 		{
 			name: "multiple profiles returns error",
@@ -217,11 +235,14 @@ func TestHeaderPhaseProcessResults(t *testing.T) {
 	handler := NewHeaderPhaseProfileHandler(defaultHeaderName)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := handler.ProcessResults(context.Background(), nil, tt.profileResults)
+			got, err := handler.ProcessResults(context.Background(), tt.request, tt.profileResults)
 
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("ProcessResults() expected error, got nil")
+				}
+				if tt.wantErrContains != "" && !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Errorf("ProcessResults() error = %q, want it to contain %q", err.Error(), tt.wantErrContains)
 				}
 				return
 			}

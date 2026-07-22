@@ -94,6 +94,8 @@ func (h *HeaderPhaseProfileHandler) WithName(name string) *HeaderPhaseProfileHan
 // names a profile that isn't configured (ProcessResults then reports the error).
 func (h *HeaderPhaseProfileHandler) Pick(_ context.Context, request *fwksched.InferenceRequest, profiles map[string]fwksched.SchedulerProfile,
 	profileResults map[string]*fwksched.ProfileRunResult) map[string]fwksched.SchedulerProfile {
+	// ponytail: single profile per request; extend to loop over an ordered phase
+	// list parsed from the header for non-deferred multi-profile scheduling (#2135).
 	if len(profileResults) > 0 { // the selected profile has already run
 		return map[string]fwksched.SchedulerProfile{}
 	}
@@ -110,11 +112,21 @@ func (h *HeaderPhaseProfileHandler) Pick(_ context.Context, request *fwksched.In
 // ProcessResults handles the outcome of the single profile run selected by Pick.
 // It specifies in the SchedulingResult the key of the primary profile that should be
 // used to get the request's selected destination.
-func (h *HeaderPhaseProfileHandler) ProcessResults(_ context.Context, _ *fwksched.InferenceRequest,
+func (h *HeaderPhaseProfileHandler) ProcessResults(_ context.Context, request *fwksched.InferenceRequest,
 	profileResults map[string]*fwksched.ProfileRunResult) (*fwksched.SchedulingResult, error) {
+	// ponytail: single profile per request; extend by re-parsing the header's
+	// ordered phase list to pick a primary among multiple results for
+	// non-deferred multi-profile scheduling (#2135).
 	switch len(profileResults) {
 	case 0:
-		return nil, fmt.Errorf("header-phase profile handler: no scheduling profile matches the %q header value", h.headerName)
+		var phase string
+		if request != nil {
+			phase = request.Headers[h.headerName]
+		}
+		if phase == "" {
+			return nil, fmt.Errorf("header-phase profile handler: missing %q header", h.headerName)
+		}
+		return nil, fmt.Errorf("header-phase profile handler: no scheduling profile configured for %q header value %q", h.headerName, phase)
 	case 1:
 		// exactly one profile ran, handled below
 	default:
