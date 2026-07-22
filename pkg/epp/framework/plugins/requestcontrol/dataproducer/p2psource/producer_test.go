@@ -374,22 +374,51 @@ func TestProduce_NearTie_NoHerding(t *testing.T) {
 	assert.Greater(t, busy, 600/6, "busy peer must not be starved: %v", picks)
 }
 
-// A strictly-better-cached peer wins regardless of load: the tie-break
-// applies to equal counts only.
-func TestProduce_HigherCachedWinsOverIdle(t *testing.T) {
+// A peer more than one block ahead wins regardless of load: the queue
+// weighting applies within the one-block band only.
+func TestProduce_BeyondBandWinsOverIdle(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-strict"}
 	eps := []scheduling.Endpoint{
-		endpointWithLoad(p, "pod-a", "10.0.0.1", 4, 20),
+		endpointWithLoad(p, "pod-a", "10.0.0.1", 5, 20),
 		endpointWithLoad(p, "pod-b", "10.0.0.2", 3, 0),
 	}
 	require.NoError(t, p.Produce(ctx, req, eps))
 	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
 	require.True(t, ok)
 	assert.Equal(t, "10.0.0.1:8080", best.hostPort)
-	assert.Equal(t, 4*testBlockSize, best.cachedTokens)
+	assert.Equal(t, 5*testBlockSize, best.cachedTokens)
+}
+
+// A peer one block short of the maximum competes on queue weight: an idle
+// one-block-short peer takes most of the traffic from a deeply-queued
+// maximum, and the stashed count is the chosen peer's own.
+func TestProduce_OneBlockShort_SharesByQueue(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	// Weights: pod-ahead 1/21, pod-short 1.
+	eps := []scheduling.Endpoint{
+		endpointWithLoad(p, "pod-ahead", "10.0.0.1", 4, 20),
+		endpointWithLoad(p, "pod-short", "10.0.0.2", 3, 0),
+	}
+	picks := map[string]int{}
+	for i := 0; i < 400; i++ {
+		req := &scheduling.InferenceRequest{RequestID: fmt.Sprintf("band-%d", i)}
+		require.NoError(t, p.Produce(ctx, req, eps))
+		best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+		require.True(t, ok)
+		picks[best.hostPort]++
+		want := 4 * testBlockSize
+		if best.hostPort == "10.0.0.2:8080" {
+			want = 3 * testBlockSize
+		}
+		assert.Equal(t, want, best.cachedTokens)
+	}
+	assert.Greater(t, picks["10.0.0.2:8080"], picks["10.0.0.1:8080"], "idle one-block-short peer must lead: %v", picks)
+	assert.Greater(t, picks["10.0.0.1:8080"], 0, "max-cached peer must keep some share: %v", picks)
 }
 
 // Peers tied on cached count and queue depth: requests spread across them by
@@ -433,7 +462,7 @@ func TestProduce_NilMetrics_NeutralLoad(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{RequestID: "req-nilmetrics"}
 	eps := []scheduling.Endpoint{
-		endpoint(p, "pod-a", "10.0.0.1", 2),
+		endpoint(p, "pod-a", "10.0.0.1", 1),
 		endpoint(p, "pod-b", "10.0.0.2", 3),
 	}
 	require.NoError(t, p.Produce(ctx, req, eps))
