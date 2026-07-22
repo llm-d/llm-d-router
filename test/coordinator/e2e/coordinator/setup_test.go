@@ -80,10 +80,10 @@ func createCRDs() {
 	_ = testutils.CreateObjsFromYaml(testConfig, gieCRDs, "")
 }
 
-// createEndPointPicker creates the scheduling ConfigMap and EPP Deployment (plus
-// its ServiceAccount, RoleBinding, and Service) for the given phase from the
-// supplied EPP config and waits for the EPP Deployment to become ready. Returns
-// the created object ids for cleanup.
+// createEndPointPicker creates the scheduling ConfigMap and EPP Deployment for
+// the given phase from the supplied EPP config and waits for the EPP Deployment
+// to become ready. Its ServiceAccount, RoleBinding, and Service are created once
+// by createStableInfra. Returns the created object ids for cleanup.
 func createEndPointPicker(phase, config string) []string {
 	manifest := map[string]string{
 		"encode":  encodeEPPManifest,
@@ -156,8 +156,8 @@ func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int) []s
 }
 
 // createCoordinator builds the coordinator ConfigMap from the given pipeline
-// config, deploys the coordinator component (Deployment + Service + SA), and
-// waits for readiness.
+// config, deploys the coordinator Deployment, and waits for readiness. Its
+// Service and ServiceAccount are created once by createStableInfra.
 func createCoordinator(config string) []string {
 	nsName := getNamespace()
 	coordinatorYAML := e2eutil.SubstituteMany([]string{config}, map[string]string{
@@ -233,9 +233,7 @@ func applyManifest(path string, subs map[string]string, excludeKinds ...string) 
 	docs := testutils.ReadYaml(path)
 	docs = e2eutil.SubstituteMany(docs, subs)
 	docs = e2eutil.RemoveEmptyArgs(docs)
-	if len(excludeKinds) > 0 {
-		docs = e2eutil.FilterKinds(docs, excludeKinds...)
-	}
+	docs = e2eutil.FilterKinds(docs, excludeKinds...)
 	return testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())
 }
 
