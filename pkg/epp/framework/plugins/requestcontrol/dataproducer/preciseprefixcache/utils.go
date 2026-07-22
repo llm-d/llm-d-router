@@ -18,7 +18,6 @@ package preciseprefixcache
 
 import (
 	"fmt"
-	"math"
 	"slices"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -57,39 +56,6 @@ func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash
 	return count
 }
 
-func calculateHitRatioStats(hitRatios []float64) (maxRatio float64, avgRatio float64, stdDevRatio float64) {
-	if len(hitRatios) == 0 {
-		return 0, 0, 0
-	}
-
-	sum := 0.0
-	maxRatio = 0.0
-	for _, hitRatio := range hitRatios {
-		sum += hitRatio
-		if hitRatio > maxRatio {
-			maxRatio = hitRatio
-		}
-	}
-	avgRatio = sum / float64(len(hitRatios))
-
-	varianceSum := 0.0
-	for _, hitRatio := range hitRatios {
-		diff := hitRatio - avgRatio
-		varianceSum += diff * diff
-	}
-	stdDevRatio = 0.0
-	if len(hitRatios) > 1 {
-		stdDevRatio = varianceSum / float64(len(hitRatios)-1)
-		stdDevRatio = math.Sqrt(stdDevRatio)
-	}
-
-	// Round to two decimal places for consistency in metrics reporting
-	avgRatio = math.Round(avgRatio*100) / 100
-	stdDevRatio = math.Round(stdDevRatio*100) / 100
-
-	return maxRatio, avgRatio, stdDevRatio
-}
-
 // matchedBlockCountByTier returns, per device tier, the number of contiguous
 // cached prefix blocks podID holds in that tier, counting from the first
 // block until the first block the pod does not hold in that tier. A block
@@ -126,37 +92,4 @@ func matchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblock.Blo
 		}
 	}
 	return counts
-}
-
-func calculateHitRatioStats(hitRatios []float64) (maxRatio float64, avgRatio float64, stdDevRatio float64) {
-	if len(hitRatios) == 0 {
-		return 0, 0, 0
-	}
-
-	sum := 0.0
-	maxRatio = 0.0
-	for _, hitRatio := range hitRatios {
-		sum += hitRatio
-		if hitRatio > maxRatio {
-			maxRatio = hitRatio
-		}
-	}
-	avgRatio = sum / float64(len(hitRatios))
-
-	varianceSum := 0.0
-	for _, hitRatio := range hitRatios {
-		diff := hitRatio - avgRatio
-		varianceSum += diff * diff
-	}
-	stdDevRatio = 0.0
-	if len(hitRatios) > 1 {
-		stdDevRatio = varianceSum / float64(len(hitRatios)-1)
-		stdDevRatio = math.Sqrt(stdDevRatio)
-	}
-
-	// Round to two decimal places for consistency in metrics reporting
-	avgRatio = math.Round(avgRatio*100) / 100
-	stdDevRatio = math.Round(stdDevRatio*100) / 100
-
-	return maxRatio, avgRatio, stdDevRatio
 }
