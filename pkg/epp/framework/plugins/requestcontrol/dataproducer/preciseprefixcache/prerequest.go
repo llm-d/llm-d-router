@@ -29,6 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	approximateprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 )
 
 const (
@@ -176,7 +177,7 @@ func (p *Producer) PreRequest(ctx context.Context,
 		totalBlocks += len(promptKeys)
 	}
 	matchLen := state.prefixCacheMatchLengths[speculativePod.PodIdentifier]
-	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen, float64(totalBlocks))
+	approximateprefix.RecordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, int(matchLen), totalBlocks)
 
 	// P/D disagg: seed the prefill endpoint too.
 	if pr, exists := schedulingResult.ProfileResults[experimentalPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {

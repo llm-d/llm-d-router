@@ -248,7 +248,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	}
 
 	max, avg, std := CalculateHitRatioStats(endpointHitRatios)
-	recordPrefixCacheHitRatioStats(p.typedName.Name, p.typedName.Type, max, avg, std)
+	RecordPrefixCacheHitRatioStats(p.typedName.Name, p.typedName.Type, max, avg, std)
 
 	state := &SchedulingContextState{
 		PerPromptHashes:    perPromptHashes,
@@ -302,7 +302,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
-	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
+	RecordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {

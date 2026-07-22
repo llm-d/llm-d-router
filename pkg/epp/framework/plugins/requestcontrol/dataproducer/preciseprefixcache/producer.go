@@ -398,7 +398,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	max, avg, std := approximateprefix.CalculateHitRatioStats(endpointHitRatios)
-	recordPrefixCacheHitRatioStats(p.typedName.Name, p.typedName.Type, max, avg, std)
+	approximateprefix.RecordPrefixCacheHitRatioStats(p.typedName.Name, p.typedName.Type, max, avg, std)
 
 	if p.speculativeEnabled {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,
