@@ -331,9 +331,12 @@ The sidecar runs vLLM's `vllm launch render <modelName>` and exposes `/v1/comple
 | `router.tokenizer.port` | Container port the sidecar listens on. | `8000` |
 | `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]`. | `[]` |
 | `router.tokenizer.args` | Override container args. Empty renders `["<modelName>", "--port=<port>"]`. | `[]` |
+| `router.tokenizer.extraArgs` | Extra args appended to the tokenizer container after the default or overridden args. | `[]` |
+| `router.tokenizer.initContainers` | Pod-level init containers rendered when the tokenizer is enabled. | `[]` |
 | `router.tokenizer.env` | Extra environment variables (e.g., HuggingFace token). | `[HF_TOKEN]` |
 | `router.tokenizer.resources` | Tokenizer container resource requests and limits. | `requests.cpu: "4"`, `requests.memory: 8Gi` |
 | `router.tokenizer.volumeMounts` | Extra volume mounts for the tokenizer container. | `[]` |
+| `router.tokenizer.volumes` | Pod-level volumes rendered alongside `model-cache` when the tokenizer is enabled. | `[]` |
 | `router.tokenizer.readinessProbe` | Readiness probe spec. | `httpGet /health on the render-http named port` |
 
 #### Complete Tokenizer Render Sidecar Example
