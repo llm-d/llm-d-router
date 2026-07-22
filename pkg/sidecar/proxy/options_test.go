@@ -814,11 +814,11 @@ func TestValidatePorts(t *testing.T) {
 	}{
 		{"valid ports", "8000", "8001", ""},
 		{"invalid port format", "abc", "8001", `--port must be a valid integer, got "abc"`},
-		{"invalid vllm port format", "8000", "xyz", `--vllm-port must be a valid integer, got "xyz"`},
+		{"invalid model server port format", "8000", "xyz", `--model-server-port must be a valid integer, got "xyz"`},
 		{"port too low", "0", "8001", "--port start port 0 is out of valid range [1, 65535]"},
 		{"port too high", "65536", "8001", "--port start port 65536 is out of valid range [1, 65535]"},
-		{"vllm port too low", "8000", "0", "--vllm-port start port 0 is out of valid range [1, 65535]"},
-		{"vllm port too high", "8000", "65536", "--vllm-port start port 65536 is out of valid range [1, 65535]"},
+		{"model server port too low", "8000", "0", "--model-server-port start port 0 is out of valid range [1, 65535]"},
+		{"model server port too high", "8000", "65536", "--model-server-port start port 65536 is out of valid range [1, 65535]"},
 	}
 
 	for _, tt := range tests {
@@ -1128,6 +1128,44 @@ func TestCompleteMoRIIOWriteModeGuards(t *testing.T) {
 		opts.MoRIIOWriteMode = false
 		require.ErrorContains(t, opts.Complete(), "--moriio-write-mode")
 	})
+}
+
+func TestModelServerPortMigration(t *testing.T) {
+	tests := []struct {
+		name               string
+		modelServerPort    string
+		vllmPort           string
+		expectedDecoderURL string
+	}{
+		{"model-server-port set", "9000", "", "http://localhost:9000"},
+		{"deprecated vllm-port migrated", "", "9001", "http://localhost:9001"},
+		{"model-server-port wins over vllm-port when both set", "9000", "9001", "http://localhost:9000"},
+		{"no model-server-port, default falls back to vllm-port default", "", defaultVLLMPort, "http://localhost:" + defaultVLLMPort},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.modelServerPort = tt.modelServerPort
+			opts.vllmPort = tt.vllmPort
+
+			require.NoError(t, opts.Complete())
+			require.NoError(t, opts.Validate())
+			require.NotNil(t, opts.DecoderURL)
+			require.Equal(t, tt.expectedDecoderURL, opts.DecoderURL.String())
+		})
+	}
+}
+
+func TestModelServerPortYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{model-server-port: 8203}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.NoError(t, opts.Validate())
+	require.Equal(t, "http://localhost:8203", opts.DecoderURL.String())
 }
 
 func TestCompleteTLSConfiguration(t *testing.T) {

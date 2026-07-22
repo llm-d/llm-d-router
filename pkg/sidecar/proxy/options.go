@@ -54,6 +54,7 @@ const (
 
 	// Flags
 	port                      = "port"
+	modelServerPort           = "model-server-port"
 	vllmPort                  = "vllm-port"
 	dataParallelSize          = "data-parallel-size"
 	kvConnector               = "kv-connector"
@@ -99,6 +100,7 @@ const (
 // yamlConfiguration represents structure of YAML configuration for sidecar proxy
 type yamlConfiguration struct {
 	Port                    int      `json:"port,omitempty"`
+	ModelServerPort         int      `json:"model-server-port,omitempty"`
 	VLLMPort                int      `json:"vllm-port,omitempty"`
 	MooncakeBootstrapPort   int      `json:"mooncake-bootstrap-port,omitempty"`
 	P2PConnectorPort        int      `json:"p2p-connector-port,omitempty"`
@@ -130,7 +132,9 @@ type Options struct {
 	// Fields with direct CLI flags are bound here via embedding; derived fields are set in Complete().
 	Config
 
-	// vllmPort is the port vLLM is listening on; used to compute Config.DecoderURL in Complete().
+	// modelServerPort is the port the model server(vLLM, SGLang etc) is listening on; used to compute Config.DecoderURL in Complete().
+	modelServerPort string
+	// vllmPort is the deprecated alias for modelServerPort; migrated in Complete().
 	vllmPort string
 	// enableTLS is the list of stages to enable TLS for; used to compute Config.UseTLSFor* in Complete().
 	enableTLS []string
@@ -243,8 +247,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	// Add Go flags to pflag (for zap options compatibility)
 	fs.AddGoFlagSet(goFlagSet)
 	fs.StringVar(&opts.Port, port, opts.Port, "the port the sidecar is listening on")
-	fs.StringVar(&opts.vllmPort, vllmPort, opts.vllmPort, "the port vLLM is listening on")
-	fs.IntVar(&opts.DataParallelSize, dataParallelSize, opts.DataParallelSize, "the vLLM DATA-PARALLEL-SIZE value")
+	fs.StringVar(&opts.modelServerPort, modelServerPort, opts.modelServerPort, "the port the model server is listening on")
+	fs.StringVar(&opts.vllmPort, vllmPort, opts.vllmPort, "the port the model server is listening on")
+	_ = fs.MarkDeprecated(vllmPort, "use --model-server-port instead; --vllm-port will be removed after the deprecation period")
+	fs.IntVar(&opts.DataParallelSize, dataParallelSize, opts.DataParallelSize, "the model server's data-parallel size")
 	fs.StringVar(&opts.KVConnector, kvConnector, opts.KVConnector,
 		"the KV protocol between prefiller and decoder. Supported: "+supportedKVConnectorNamesStr)
 	fs.StringVar(&opts.ECConnector, ecConnector, opts.ECConnector,
@@ -310,7 +316,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MaxIdleConnsPerHost, "max-idle-conns-per-host", opts.MaxIdleConnsPerHost, "max idle keep-alive connections per host for reverse proxy transports; set to at least the expected concurrency")
 	fs.IntVar(&opts.PrefillMaxRetries, prefillMaxRetries, opts.PrefillMaxRetries, "max retry attempts when a prefill request fails with a 5xx error; 0 means no retries (default)")
 	fs.DurationVar(&opts.PrefillRetryBackoff, prefillRetryBackoff, opts.PrefillRetryBackoff, "delay between prefill retry attempts")
-	fs.StringVar(&opts.inlineConfiguration, inlineConfiguration, "", "Sidecar configuration in YAML provided as inline specification. Example `--configuration={port: 8085, vllm-port: 8203}. Inline configuration and file configuration are mutually exclusive.`")
+	fs.StringVar(&opts.inlineConfiguration, inlineConfiguration, "", "Sidecar configuration in YAML provided as inline specification. Example `--configuration={port: 8085, model-server-port: 8203}. Inline configuration and file configuration are mutually exclusive.`")
 	fs.StringVar(&opts.fileConfiguration, configurationFile, "", "Path to file which contains sidecar configuration in YAML. Example `--configuration-file=/etc/config/sidecar-config.yaml`. Inline configuration and file configuration are mutually exclusive.")
 }
 
@@ -333,6 +339,13 @@ func (opts *Options) Complete() error {
 		return err
 	}
 
+	// Migrate deprecated --vllm-port to --model-server-port.
+	// defaults to empty, so an unset value means neither flag nor YAML provided a --model-server-port
+	// fall back to the --vllm-port value.
+	if opts.modelServerPort == "" {
+		opts.modelServerPort = opts.vllmPort
+	}
+
 	// Parse inferencePool field (namespace/name or just name) into Config.
 	if opts.inferencePool != "" {
 		parts := strings.SplitN(opts.inferencePool, "/", 2)
@@ -353,13 +366,13 @@ func (opts *Options) Complete() error {
 	opts.InsecureSkipVerifyForEncoder = slices.Contains(opts.tlsInsecureSkipVerify, encodeStage)
 	opts.InsecureSkipVerifyForDecoder = slices.Contains(opts.tlsInsecureSkipVerify, decodeStage)
 
-	// Compute Config.DecoderURL from vllmPort and decoder TLS setting
+	// Compute Config.DecoderURL from modelServerPort and decoder TLS setting
 	scheme := "http"
 	if opts.UseTLSForDecoder {
 		scheme = schemeHTTPS
 	}
 	var err error
-	opts.DecoderURL, err = url.Parse(scheme + "://localhost:" + opts.vllmPort)
+	opts.DecoderURL, err = url.Parse(scheme + "://localhost:" + opts.modelServerPort)
 	if err != nil {
 		return fmt.Errorf("failed to parse target URL: %w", err)
 	}
@@ -472,12 +485,16 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--port %w", err)
 	}
 
-	vllmPort, err := strconv.Atoi(opts.vllmPort)
-	if err != nil {
-		return fmt.Errorf("--vllm-port must be a valid integer, got %q", opts.vllmPort)
+	portFlagName := "--" + modelServerPort
+	if opts.isFlagSet(vllmPort) && !opts.isFlagSet(modelServerPort) {
+		portFlagName = "--" + vllmPort
 	}
-	if err := validatePortRange(vllmPort, opts.DataParallelSize); err != nil {
-		return fmt.Errorf("--vllm-port %w", err)
+	msPort, err := strconv.Atoi(opts.modelServerPort)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid integer, got %q", portFlagName, opts.modelServerPort)
+	}
+	if err := validatePortRange(msPort, opts.DataParallelSize); err != nil {
+		return fmt.Errorf("%s %w", portFlagName, err)
 	}
 
 	// Validate KV connector
@@ -649,6 +666,10 @@ func (opts *Options) extractYAMLConfiguration() error {
 func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	if cfg.Port != 0 && !opts.isFlagSet(port) {
 		opts.Port = strconv.Itoa(cfg.Port)
+	}
+	// If both keys may be present, Complete() resolves precedence: modelServerPort wins.
+	if cfg.ModelServerPort != 0 && !opts.isFlagSet(modelServerPort) {
+		opts.modelServerPort = strconv.Itoa(cfg.ModelServerPort)
 	}
 	if cfg.VLLMPort != 0 && !opts.isFlagSet(vllmPort) {
 		opts.vllmPort = strconv.Itoa(cfg.VLLMPort)
