@@ -497,7 +497,7 @@ func TestGlobalAndBandCapacityInteraction(t *testing.T) {
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
-    const count = 3
+	const count = 3
 	release := h.fillQueue(t, key, count, 100, func() bool {
 		return h.reg.Stats().TotalLen == count
 	})
