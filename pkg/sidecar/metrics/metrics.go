@@ -41,6 +41,13 @@ const (
 	StageDecode  = "decode"
 )
 
+// Disaggregation type labels: which stages of the request are split across pods.
+const (
+	DisaggTypePD  = "p/d"
+	DisaggTypeEPD = "e/p/d"
+	DisaggTypeED  = "e/d"
+)
+
 // latencyBuckets covers encode, prefill, and decode wall-clock latency in
 // seconds, from a few milliseconds to several minutes (decode can stream for a
 // long time).
@@ -60,48 +67,45 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: subsystem,
 			Name:      "disagg_requests_total",
-			Help:      metricsutil.HelpMsgWithStability("Total requests routed through disaggregation, by connector.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Total requests routed through disaggregation, by disaggregation type.", compbasemetrics.ALPHA),
 		},
-		[]string{"connector"},
+		[]string{"disagg_type"},
 	)
 
-	encodeDuration = prometheus.NewHistogramVec(
+	encodeDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Subsystem: subsystem,
 			Name:      "encode_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Encode stage latency in seconds, by connector.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Encode stage latency in seconds.", compbasemetrics.ALPHA),
 			Buckets:   latencyBuckets,
 		},
-		[]string{"connector"},
 	)
 
-	prefillDuration = prometheus.NewHistogramVec(
+	prefillDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Subsystem: subsystem,
 			Name:      "prefill_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Prefill stage latency in seconds, by connector.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Prefill stage latency in seconds.", compbasemetrics.ALPHA),
 			Buckets:   latencyBuckets,
 		},
-		[]string{"connector"},
 	)
 
-	decodeDuration = prometheus.NewHistogramVec(
+	decodeDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Subsystem: subsystem,
 			Name:      "decode_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Decode stage latency in seconds, by connector.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Decode stage latency in seconds.", compbasemetrics.ALPHA),
 			Buckets:   latencyBuckets,
 		},
-		[]string{"connector"},
 	)
 
 	errorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: subsystem,
 			Name:      "request_errors_total",
-			Help:      metricsutil.HelpMsgWithStability("Total prefill/decode stage errors, by connector and stage.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Total encode/prefill/decode stage errors, by stage.", compbasemetrics.ALPHA),
 		},
-		[]string{"connector", "stage"},
+		[]string{"stage"},
 	)
 )
 
@@ -127,27 +131,28 @@ func RecordRequest(apiType string) {
 	requestsTotal.WithLabelValues(apiType).Inc()
 }
 
-// RecordDisagg counts a request routed through disaggregation for the given connector.
-func RecordDisagg(connector string) {
-	disaggRequestsTotal.WithLabelValues(connector).Inc()
+// RecordDisagg counts a request routed through disaggregation for the given
+// disaggregation type (DisaggTypePD, DisaggTypeEPD, or DisaggTypeED).
+func RecordDisagg(disaggType string) {
+	disaggRequestsTotal.WithLabelValues(disaggType).Inc()
 }
 
-// RecordEncodeDuration records encode stage latency for the given connector.
-func RecordEncodeDuration(connector string, d time.Duration) {
-	encodeDuration.WithLabelValues(connector).Observe(d.Seconds())
+// RecordEncodeDuration records encode stage latency.
+func RecordEncodeDuration(d time.Duration) {
+	encodeDuration.Observe(d.Seconds())
 }
 
-// RecordPrefillDuration records prefill stage latency for the given connector.
-func RecordPrefillDuration(connector string, d time.Duration) {
-	prefillDuration.WithLabelValues(connector).Observe(d.Seconds())
+// RecordPrefillDuration records prefill stage latency.
+func RecordPrefillDuration(d time.Duration) {
+	prefillDuration.Observe(d.Seconds())
 }
 
-// RecordDecodeDuration records decode stage latency for the given connector.
-func RecordDecodeDuration(connector string, d time.Duration) {
-	decodeDuration.WithLabelValues(connector).Observe(d.Seconds())
+// RecordDecodeDuration records decode stage latency.
+func RecordDecodeDuration(d time.Duration) {
+	decodeDuration.Observe(d.Seconds())
 }
 
-// RecordError counts a stage error (StagePrefill or StageDecode) for the given connector.
-func RecordError(connector, stage string) {
-	errorsTotal.WithLabelValues(connector, stage).Inc()
+// RecordError counts a stage error (StageEncode, StagePrefill, or StageDecode).
+func RecordError(stage string) {
+	errorsTotal.WithLabelValues(stage).Inc()
 }

@@ -123,13 +123,13 @@ func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.R
 		pw := &bufferedResponseWriter{}
 		prefillHandler.ServeHTTP(pw, prefillReq)
 		prefillDuration := time.Since(prefillStart)
-		metrics.RecordPrefillDuration(KVConnectorSGLang, prefillDuration)
+		metrics.RecordPrefillDuration(prefillDuration)
 		prefillSpan.SetAttributes(
 			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
 			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
 		)
 		if pw.statusCode < 200 || pw.statusCode >= 300 {
-			metrics.RecordError(KVConnectorSGLang, metrics.StagePrefill)
+			metrics.RecordError(metrics.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		}
 		s.logger.V(5).Info("prefill request completed", "status", pw.statusCode)
@@ -152,7 +152,7 @@ func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.R
 	s.decoderProxy.ServeHTTP(w, decodeReq)
 
 	decodeDuration := time.Since(decodeStart)
-	metrics.RecordDecodeDuration(KVConnectorSGLang, decodeDuration)
+	metrics.RecordDecodeDuration(decodeDuration)
 	decodeSpan.SetAttributes(
 		attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())),
 		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),

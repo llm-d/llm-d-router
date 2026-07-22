@@ -189,7 +189,11 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 				attribute.Int("llm_d.ec_proxy.encoder_count", len(allowedEncoders)),
 				attribute.Int("llm_d.ec_proxy.encoder_candidates", len(encoderHostPorts)),
 			)
-			metrics.RecordDisagg(s.config.ECConnector)
+			if len(prefillHostPort) > 0 {
+				metrics.RecordDisagg(metrics.DisaggTypeEPD)
+			} else {
+				metrics.RecordDisagg(metrics.DisaggTypeED)
+			}
 			s.handleECConnector(w, r, prefillHostPort, allowedEncoders)
 			return
 		}
@@ -205,7 +209,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 
 		if len(prefillHostPort) > 0 {
 			s.logger.V(4).Info("using P/D protocol")
-			metrics.RecordDisagg(s.config.KVConnector)
+			metrics.RecordDisagg(metrics.DisaggTypePD)
 			s.handlePDConnector(w, r, prefillHostPort, kvCacheSource, apiType)
 			return
 		}

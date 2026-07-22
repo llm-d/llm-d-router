@@ -223,13 +223,13 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 		pw := &bufferedResponseWriter{}
 		prefillHandler.ServeHTTP(pw, prefillReq)
 		prefillDuration := time.Since(prefillStart)
-		metrics.RecordPrefillDuration(KVConnectorMooncake, prefillDuration)
+		metrics.RecordPrefillDuration(prefillDuration)
 		prefillSpan.SetAttributes(
 			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
 			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
 		)
 		if isHTTPError(pw.statusCode) {
-			metrics.RecordError(KVConnectorMooncake, metrics.StagePrefill)
+			metrics.RecordError(metrics.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		}
 		s.logger.V(5).Info("mooncake prefill request completed", "status", pw.statusCode)
@@ -251,7 +251,7 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 	s.decoderProxy.ServeHTTP(w, decodeReq)
 
 	decodeDuration := time.Since(decodeStart)
-	metrics.RecordDecodeDuration(KVConnectorMooncake, decodeDuration)
+	metrics.RecordDecodeDuration(decodeDuration)
 	decodeSpan.SetAttributes(
 		attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())),
 		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),
