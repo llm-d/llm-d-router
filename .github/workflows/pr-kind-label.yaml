@@ -34,13 +34,19 @@ jobs:
                 echo "::warning::Label 'kind/$kind' not found in repository"
             done
 
-      - name: Sync area labels
+      - name: Set area labels
         env:
           GH_TOKEN: ${{ github.token }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
+          # Absence of a directive is a no-op. Area labels are also set by the
+          # /area comment command and clearing here would wipe those.
+          areas=$(printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/area[[:space:]][[:space:]]*||p' | \
+            sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
+          [ -z "$areas" ] && exit 0
+
           # Remove existing area/* labels
           gh pr view "$PR_NUMBER" --repo "$REPO" --json labels \
             -q '.labels[].name | select(startswith("area/"))' | \
@@ -48,10 +54,8 @@ jobs:
               gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label"
             done
 
-          # Extract /area values from PR body and apply labels
-          printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/area[[:space:]][[:space:]]*||p' | sed 's|[[:space:]]*$||' | sort -u | \
+          printf '%s\n' "$areas" | \
             while IFS= read -r area; do
-              [ -z "$area" ] && continue
               gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "area/$area" || \
                 echo "::warning::Label 'area/$area' not found in repository"
             done
@@ -65,7 +69,7 @@ jobs:
         run: |
           # Use the last /milestone directive in the PR body
           milestone=$(printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/milestone[[:space:]][[:space:]]*||p' | \
-             sed 's|[[:space:]]*$||' | tail -n 1)
+             sed 's|[[:space:]]*$||' | sed '/^$/d' | tail -n 1)
           [ -z "$milestone" ] && exit 0
           gh pr edit "$PR_NUMBER" --repo "$REPO" --milestone "$milestone" || \
             echo "::warning::Milestone '$milestone' not found in repository"
