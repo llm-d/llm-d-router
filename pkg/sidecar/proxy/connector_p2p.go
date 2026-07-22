@@ -232,8 +232,8 @@ func (s *Server) addP2PPullToPrefill(prefillKVParams map[string]any, kvCacheSour
 	}
 }
 
-// p2pSourceParams builds the kv_transfer_params.p2p block for a pull from
-// sourceHostPort's OffloadingConnector P2P tier. The kv_request_id is its
+// p2pSourceParams builds the kv_transfer_params.remote_kv_source block for a
+// pull from sourceHostPort's OffloadingConnector P2P tier. The kv_request_id is its
 // own fresh UUID: in P2P mode it is consumer-side only.
 func (s *Server) p2pSourceParams(sourceHostPort string) map[string]any {
 	return map[string]any{
@@ -244,7 +244,7 @@ func (s *Server) p2pSourceParams(sourceHostPort string) map[string]any {
 }
 
 // decodeWithP2PSource serves a decoder-only request through the local vLLM
-// with kv_transfer_params.p2p injected, so the engine looks up and pulls
+// with kv_transfer_params.remote_kv_source injected, so the engine looks up and pulls
 // cached prefix blocks from the peer at sourceHostPort instead of recomputing
 // them. It replaces any client-supplied kv_transfer_params (the sidecar owns
 // that field) and routes through dispatchDecode so chunked decode still

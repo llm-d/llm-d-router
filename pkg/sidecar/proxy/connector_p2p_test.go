@@ -60,7 +60,7 @@ var _ = Describe("P2P Connector", func() {
 			return len(testInfo.prefillHandler.GetCompletionRequests())
 		}).Should(Equal(1))
 
-		// Prefill leg: kv_transfer_params.decode carries only kv_request_id,
+		// Prefill leg: kv_transfer_params.remote_decoder carries only kv_request_id,
 		// with no peer address.
 		prefillReqs := testInfo.prefillHandler.GetCompletionRequests()
 		Expect(prefillReqs).To(HaveLen(1))
@@ -82,7 +82,7 @@ var _ = Describe("P2P Connector", func() {
 		Expect(preq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
 		Expect(preq[requestFieldStream]).To(BeFalse())
 
-		// Decode leg: kv_transfer_params.prefill carries the prefiller's
+		// Decode leg: kv_transfer_params.remote_prefiller carries the prefiller's
 		// OffloadingConnector P2P tier address plus the matching kv_request_id.
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
