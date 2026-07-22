@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -34,33 +35,48 @@ func GRPCServer(name string, srv *grpc.Server, port int) manager.Runnable {
 		log := ctrl.Log.WithValues("name", name)
 		log.Info("gRPC server starting")
 
-		// Start listening.
 		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 		if err != nil {
 			return fmt.Errorf("gRPC server failed to listen - %w", err)
 		}
-
-		log.Info("gRPC server listening", "port", port)
-
-		// Shutdown on context closed.
-		// Terminate the server on context closed.
-		// Make sure the goroutine does not leak.
-		doneCh := make(chan struct{})
-		defer close(doneCh)
-		go func() {
-			select {
-			case <-ctx.Done():
-				log.Info("gRPC server shutting down")
-				srv.GracefulStop()
-			case <-doneCh:
-			}
-		}()
-
-		// Keep serving until terminated.
-		if err := srv.Serve(lis); err != nil && err != grpc.ErrServerStopped {
-			return fmt.Errorf("gRPC server failed - %w", err)
-		}
-		log.Info("gRPC server terminated")
-		return nil
+		log.Info("gRPC server listening", "port", lis.Addr().(*net.TCPAddr).Port)
+		return serveGRPC(ctx, log, srv, lis)
 	})
+}
+
+// GRPCServerOnListener converts the given gRPC server into a runnable serving on
+// an already-bound listener. Mirrors manager.Server's Listener field: reserving
+// the port in advance of the runnable starting removes the window in which
+// another process can take a port that was selected but not yet bound.
+// Takes ownership of the listener: grpc.Server.Serve closes it on return.
+func GRPCServerOnListener(name string, srv *grpc.Server, lis net.Listener) manager.Runnable {
+	return manager.RunnableFunc(func(ctx context.Context) error {
+		log := ctrl.Log.WithValues("name", name)
+		log.Info("gRPC server starting")
+		log.Info("gRPC server listening", "address", lis.Addr().String())
+		return serveGRPC(ctx, log, srv, lis)
+	})
+}
+
+func serveGRPC(ctx context.Context, log logr.Logger, srv *grpc.Server, lis net.Listener) error {
+	// Shutdown on context closed.
+	// Terminate the server on context closed.
+	// Make sure the goroutine does not leak.
+	doneCh := make(chan struct{})
+	defer close(doneCh)
+	go func() {
+		select {
+		case <-ctx.Done():
+			log.Info("gRPC server shutting down")
+			srv.GracefulStop()
+		case <-doneCh:
+		}
+	}()
+
+	// Keep serving until terminated.
+	if err := srv.Serve(lis); err != nil && err != grpc.ErrServerStopped {
+		return fmt.Errorf("gRPC server failed - %w", err)
+	}
+	log.Info("gRPC server terminated")
+	return nil
 }

@@ -33,3 +33,16 @@ func GetFreePort() (int, error) {
 	}
 	return addr.Port, nil
 }
+
+// ReserveListener binds an IPv4 TCP port on localhost and returns the live listener.
+// Unlike GetFreePort, the listener is never closed, so the port cannot be taken by
+// another process between selection and use. The caller owns the listener and must
+// either hand it to the server that will serve on it or close it.
+func ReserveListener() (net.Listener, error) {
+	// Force IPv4 to prevent flakes on dual-stack CI environments
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("failed to reserve a free port: %w", err)
+	}
+	return listener, nil
+}
