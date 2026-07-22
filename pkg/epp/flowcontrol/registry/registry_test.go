@@ -19,6 +19,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -28,10 +29,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	testclock "k8s.io/utils/clock/testing"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // --- Test Harness ---
@@ -1348,4 +1351,46 @@ func TestFlowRegistry_FlowErrorScoping(t *testing.T) {
 	// Assertion: all requests should fail.
 	assert.Equal(t, int32(concurrency), errorCount.Load(), "All requests should fail flow provisioning")
 	assert.Equal(t, int32(0), successCount.Load(), "No request should succeed if flow provisioning failed")
+}
+
+// countSeriesWithFairnessID gathers the global metrics registry and counts series carrying the
+// given fairness_id label value, across all metric families.
+func countSeriesWithFairnessID(t *testing.T, fairnessID string) int {
+	t.Helper()
+	families, err := crmetrics.Registry.Gather()
+	require.NoError(t, err, "gathering the metrics registry must succeed")
+	n := 0
+	for _, mf := range families {
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "fairness_id" && lp.GetValue() == fairnessID {
+					n++
+				}
+			}
+		}
+	}
+	return n
+}
+
+// Metric series are labeled by the flow's client-derived fairness ID, so they must not outlive the
+// flow: gcFlows prunes them via metrics.DeleteFlowControlFlowSeries once the flow is collected.
+func TestFlowRegistry_GarbageCollection_PrunesMetricSeries(t *testing.T) {
+	// Not parallel: reads the process-global metrics registry. The unique fairness ID keeps the
+	// assertions isolated from series recorded by other tests.
+	eppmetrics.Register()
+	h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
+	const flowID = "gc-metric-prune-flow"
+	key := flowcontrol.FlowKey{ID: flowID, Priority: highPriority}
+
+	h.openConnectionOnFlow(key)
+	eppmetrics.RecordFlowControlRequestEnqueueDuration(
+		flowID, strconv.Itoa(highPriority), "Dispatched", time.Millisecond)
+	require.Positive(t, countSeriesWithFairnessID(t, flowID), "Setup: series must exist before GC")
+
+	h.fakeClock.Step(h.config.FlowGCTimeout + time.Second)
+	h.fr.ExecuteGCCycle()
+
+	h.assertFlowDoesNotExist(key, "Setup: idle flow must have been collected")
+	assert.Zero(t, countSeriesWithFairnessID(t, flowID),
+		"GC must prune every metric series labeled with the collected flow's fairness ID")
 }
