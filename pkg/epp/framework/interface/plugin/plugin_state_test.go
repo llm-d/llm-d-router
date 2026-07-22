@@ -109,7 +109,7 @@ func TestPluginState_EvictionCallback(t *testing.T) {
 	data.evictedID = ""
 	data.evictedKey = ""
 	state.Write(requestID, key, data)
-	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*state.stalenessThreshold))
 	state.cleanStaleRequests()
 	assert.Equal(t, requestID, data.evictedID)
 	assert.Equal(t, key, data.evictedKey)
@@ -128,7 +128,7 @@ func TestPluginState_Touch(t *testing.T) {
 	state.Write(requestID, key, data)
 
 	// Set last access time to near-stale
-	nearStale := time.Now().Add(-defaultStalenessThreshold + time.Second*10)
+	nearStale := time.Now().Add(-state.stalenessThreshold + time.Second*10)
 	state.requestToLastAccessTime.Store(requestID, nearStale)
 
 	// Touch it
@@ -235,7 +235,7 @@ func TestPluginState_Cleanup(t *testing.T) {
 	state.Write(requestID, key, data)
 
 	// Manually set last access time to far in the past
-	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*state.stalenessThreshold))
 	// Manually CleanUp
 	state.cleanStaleRequests()
 
