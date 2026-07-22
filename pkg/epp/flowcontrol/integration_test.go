@@ -497,8 +497,9 @@ func TestGlobalAndBandCapacityInteraction(t *testing.T) {
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
-	release := h.fillQueue(t, key, 3, 100, func() bool {
-		return h.reg.Stats().TotalLen == 3
+    const count = 3
+	release := h.fillQueue(t, key, count, 100, func() bool {
+		return h.reg.Stats().TotalLen == count
 	})
 
 	// The global limit (3) is exhausted while the band limit (10) still has room, so a further
