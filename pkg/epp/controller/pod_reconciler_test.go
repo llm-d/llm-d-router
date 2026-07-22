@@ -35,6 +35,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
@@ -202,7 +203,7 @@ func TestPodReconciler(t *testing.T) {
 				store := datastore.NewDatastore(t.Context(), epf)
 				_ = store.PoolSet(t.Context(), fakeClient, pool.InferencePoolToEndpointPool(test.pool))
 				for _, pod := range test.existingPods {
-					store.PodUpdateOrAddIfNotExist(t.Context(), pod)
+					_ = store.PodUpdateOrAddIfNotExist(t.Context(), pod)
 				}
 
 				podReconciler := &PodReconciler{Reader: fakeClient, Datastore: store}
@@ -227,5 +228,42 @@ func TestPodReconciler(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestPodReconciler_ErrorsOnRegistrationDrop verifies that Reconcile surfaces a dropped endpoint
+// registration as an error so controller-runtime requeues the pod (#2060).
+func TestPodReconciler_ErrorsOnRegistrationDrop(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+
+	incomingPod := testutil.FromBase(basePod1).
+		Labels(map[string]string{"some-key": "some-val"}).
+		ReadyCondition().ObjRef()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(incomingPod).Build()
+
+	testPool := &v1.InferencePool{
+		Spec: v1.InferencePoolSpec{
+			TargetPorts: []v1.Port{{Number: v1.PortNumber(int32(8000))}},
+			Selector: v1.LabelSelector{
+				MatchLabels: map[v1.LabelKey]v1.LabelValue{"some-key": "some-val"},
+			},
+		},
+	}
+	// The factory stands in for a collector that is still registered for the endpoint (upsert
+	// overlapping an in-flight delete) or fails to start.
+	store := datastore.NewDatastore(t.Context(), &datalayer.FakeEndpointFactory{
+		NewEndpointFn: func(_ context.Context, _ *fwkdl.EndpointMetadata) fwkdl.Endpoint { return nil },
+	})
+	_ = store.PoolSet(t.Context(), fakeClient, pool.InferencePoolToEndpointPool(testPool))
+
+	podReconciler := &PodReconciler{Reader: fakeClient, Datastore: store}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: incomingPod.Name, Namespace: incomingPod.Namespace}}
+
+	if _, err := podReconciler.Reconcile(context.Background(), req); err == nil {
+		t.Error("expected Reconcile to return an error for a dropped endpoint registration, got nil")
+	}
+	if pods := store.PodList(datastore.AllPodsPredicate); len(pods) != 0 {
+		t.Errorf("expected no pods in datastore, got %d", len(pods))
 	}
 }

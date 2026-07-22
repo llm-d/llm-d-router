@@ -135,8 +135,8 @@ type SaturationDetector interface {
 // as described in [/pkg/epp/flowcontrol/contracts.SaturationDetector]
 //
 // Architecture (Stateless Singleton):
-// UsageLimitPolicy plugins are Singletons. A single instance handles limit computation for all priority bands
-// across all shards. The plugin MUST be stateless: it is a pure function that maps the current saturation and
+// UsageLimitPolicy plugins are Singletons. A single instance handles limit computation for all priority bands.
+// The plugin MUST be stateless: it is a pure function that maps the current saturation and
 // active priority domain to a set of ceilings. Any signal conditioning (trend detection, smoothing) belongs in
 // the SaturationDetector layer, not here.
 //

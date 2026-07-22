@@ -11,7 +11,6 @@ Documentation for developing the llm-d Router.
   - [Kind Development Environment](#kind-development-environment)
     - [Accessing the Gateway](#accessing-the-gateway)
     - [Prometheus Monitoring](#prometheus-monitoring)
-    - [Grafana Dashboard](#grafana-dashboard)
     - [Development Cycle](#development-cycle)
     - [Debugging](#debugging)
     - [Inference Disaggregation Modes](#inference-disaggregation-modes)
@@ -170,17 +169,10 @@ Prometheus will be accessible at `http://localhost:30090`. To use a different ho
 PROM_ENABLED=true KIND_PROM_HOST_PORT=30091 make env-dev-kind
 ```
 
-### Grafana Dashboard
-
-The bundled [Inference Gateway dashboard] covers EPP metrics across the inference
-pool, inference objective, and flow control layers.
-
-Add a Prometheus datasource at `http://localhost:30090`, then import the JSON via
-**Dashboards > New > Import**. See the
-[Grafana installation docs](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
-for setup.
-
-[Inference Gateway dashboard]:deploy/grafana/inference_gateway.json
+Grafana dashboards for the llm-d Router live in the
+[llm-d monorepo](https://github.com/llm-d/llm-d/tree/main/guides/recipes/observability/grafana/dashboards).
+See [Observability Setup](https://github.com/llm-d/llm-d/blob/main/docs/operations/observability/setup.md)
+for install and import instructions.
 
 > [!NOTE]
 > For significant customization beyond the standard deployment, use the `deploy/components`
@@ -447,7 +439,7 @@ The `deploy/components/` directory contains all reusable Kustomize components:
 - `vllm-decode/` — Decode pod with routing sidecar
 
 **Deployment overlays** — applied on top of the base components:
-- `overlays/simulator/` — adds `--mode=${VLLM_SIM_MODE}`, vllm renderer sidecar, KV cache args, and `--zmq-endpoint` on Decode. Included by default in all dev scenario overlays.
+- `overlays/simulator/` — adds `--mode=${VLLM_SIM_MODE}`, KV cache args, and `--zmq-endpoint` on Decode. Included by default in all dev scenario overlays.
 - `overlays/real-vllm/` — adds `--kv-events-config` on Decode, `--ec-transfer-config` on Encode, and a shared PVC for encoder embeddings.
 
 **Infrastructure components** — shared cluster infrastructure:
@@ -523,7 +515,7 @@ a shared PVC (`ec-cache-pvc`) for encoder embeddings transfer.
 
 | Component | What it adds | When to use |
 |---|---|---|
-| `overlays/simulator/` | `--mode=${VLLM_SIM_MODE}`, vLLM renderer, KV cache args, `--zmq-endpoint` on Decode | Dev/test with simulator image |
+| `overlays/simulator/` | `--mode=${VLLM_SIM_MODE}`, KV cache args, `--zmq-endpoint` on Decode | Dev/test with simulator image |
 | `overlays/real-vllm/` | `--kv-events-config` on Decode (per-pod ZMQ publisher), `--ec-transfer-config` on Encode, ec-cache PVC | Production with real vLLM image |
 
 | Variable | Default | Description |

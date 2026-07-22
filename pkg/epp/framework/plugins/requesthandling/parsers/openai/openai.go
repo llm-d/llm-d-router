@@ -61,7 +61,10 @@ const (
 )
 
 // compile-time type validation
-var _ fwkrh.Parser = &OpenAIParser{}
+var (
+	_ fwkrh.Parser            = &OpenAIParser{}
+	_ fwkrh.ModelNameRewriter = &OpenAIParser{}
+)
 
 // OpenAIParser implements the fwkrh.Parser interface for OpenAI API
 // https://developers.openai.com/api/reference/overview
@@ -121,11 +124,24 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		return nil, err
 	}
 	extractedBody.Payload = fwkrh.PayloadMap(bodyMap)
+	if model, ok := bodyMap["model"].(string); ok {
+		extractedBody.Model = model
+	}
 	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(apiType, bodyMap)
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		extractedBody.Stream = true
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// RewriteModelName writes the resolved model into the request payload map.
+func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
+	m, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
+		return payload, nil
+	}
+	m["model"] = model
+	return m, nil
 }
 
 // maxOutputTokensForAPI normalizes the per-API output-token cap field into a

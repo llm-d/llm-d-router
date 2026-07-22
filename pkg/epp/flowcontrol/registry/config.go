@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
@@ -43,8 +42,6 @@ const (
 	// defaultPriorityBandMaxBytes is the default global capacity for a priority band if not explicitly configured.
 	// It is set to 1 GB.
 	defaultPriorityBandMaxBytes uint64 = 1_000_000_000
-	// defaultQueue is the default queue implementation for flows.
-	defaultQueue queue.RegisteredQueueName = queue.PriorityQueueName
 	// defaultFlowGCTimeout is the default duration of inactivity after which an idle flow is garbage collected.
 	// This also serves as the interval for the periodic garbage collection scan.
 	defaultFlowGCTimeout time.Duration = 5 * time.Minute
@@ -66,13 +63,13 @@ type PriorityBandPolicyDefaults struct {
 // Config holds the master configuration for the entire FlowRegistry.
 // It serves as the top-level blueprint, defining global settings and the templates for its priority bands.
 type Config struct {
-	// MaxBytes defines an optional, global maximum total byte size limit aggregated across all priority bands and shards.
+	// MaxBytes defines an optional, global maximum total byte size limit aggregated across all priority bands.
 	// The `controller.FlowController` enforces this limit in addition to per-band capacity limits.
 	// A value of 0 signifies that this global limit is ignored, and only per-band limits apply.
 	// Optional: Defaults to 0.
 	MaxBytes uint64
 
-	// MaxRequests defines an optional, global maximum total request count aggregated across all priority bands and shards.
+	// MaxRequests defines an optional, global maximum total request count aggregated across all priority bands.
 	// The `controller.FlowController` enforces this limit in addition to per-band capacity limits.
 	// A value of 0 signifies that this global limit is ignored, and only per-band limits apply.
 	// Optional: Defaults to 0.
@@ -99,7 +96,7 @@ type Config struct {
 	FlowGCTimeout time.Duration
 
 	// PriorityBandGCTimeout defines the duration of inactivity after which a dynamically provisioned priority band
-	// is garbage collected. A band is considered idle when it has no flows and no buffered requests across all shards.
+	// is garbage collected. A band is considered idle when it has no flows and no buffered requests.
 	// Must be >= FlowGCTimeout to ensure flows are collected before bands.
 	// Optional: Defaults to `defaultPriorityBandGCTimeout` (10 minutes).
 	PriorityBandGCTimeout time.Duration
@@ -138,15 +135,11 @@ type PriorityBandConfig struct {
 	// Optional: Defaults to defaultFairnessPolicyRef ("global-strict-fairness-policy").
 	FairnessPolicy flowcontrol.FairnessPolicy
 
-	// Queue specifies the default name of the SafeQueue implementation for flow queues in this band.
-	// Optional: Defaults to defaultQueue ("PriorityQueue").
-	Queue queue.RegisteredQueueName
-
-	// MaxBytes defines the maximum total byte size for this priority band, aggregated across all shards.
+	// MaxBytes defines the maximum total byte size for this priority band.
 	// Optional: Defaults to defaultPriorityBandMaxBytes (1 GB).
 	MaxBytes uint64
 
-	// MaxRequests defines the maximum total request count for this priority band, aggregated across all shards.
+	// MaxRequests defines the maximum total request count for this priority band.
 	// A value of 0 signifies no request-count limit is enforced.
 	// Optional: Defaults to defaultPriorityBandMaxRequests (5000).
 	MaxRequests uint64
@@ -273,17 +266,6 @@ func WithFairnessPolicy(policy flowcontrol.FairnessPolicy) PriorityBandConfigOpt
 	}
 }
 
-// WithQueue sets the queue implementation (e.g., "PriorityQueue") for flows in this band.
-func WithQueue(name queue.RegisteredQueueName) PriorityBandConfigOption {
-	return func(p *PriorityBandConfig) error {
-		if name == "" {
-			return errors.New("Queue cannot be empty")
-		}
-		p.Queue = name
-		return nil
-	}
-}
-
 // WithBandMaxBytes sets the capacity limit for this specific priority band.
 func WithBandMaxBytes(maxBytes uint64) PriorityBandConfigOption {
 	return func(p *PriorityBandConfig) error {
@@ -401,9 +383,6 @@ func (p *PriorityBandConfig) applyDefaults(defaults PriorityBandPolicyDefaults) 
 		}
 		p.OrderingPolicy = defaults.OrderingPolicy
 	}
-	if p.Queue == "" {
-		p.Queue = defaultQueue
-	}
 	if p.MaxBytes == 0 {
 		p.MaxBytes = defaultPriorityBandMaxBytes
 	}
@@ -423,9 +402,6 @@ func (p *PriorityBandConfig) validate() error {
 	}
 	if p.FairnessPolicy == nil {
 		return fmt.Errorf("FairnessPolicy instance is missing for priority band %d", p.Priority)
-	}
-	if p.Queue == "" {
-		return fmt.Errorf("Queue required for priority band %d", p.Priority)
 	}
 	return nil
 }
