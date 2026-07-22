@@ -88,11 +88,12 @@ func (wrongTypedExtractor) TypedName() fwkplugin.TypedName {
 func newDS(t *testing.T, srcType string, fc *fakeClient) *HTTPDataSource[int] {
 	t.Helper()
 	return &HTTPDataSource[int]{
-		typedName: fwkplugin.TypedName{Type: srcType, Name: srcType},
-		scheme:    "http",
-		path:      "/test",
-		client:    fc,
-		parser:    func(_ io.Reader) (int, error) { return 0, nil },
+		typedName:   fwkplugin.TypedName{Type: srcType, Name: srcType},
+		scheme:      "http",
+		path:        "/test",
+		client:      fc,
+		parser:      func(_ io.Reader) (int, error) { return 0, nil },
+		refreshCert: noopCertRefresh,
 	}
 }
 

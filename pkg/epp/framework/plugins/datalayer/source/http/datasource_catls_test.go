@@ -25,7 +25,6 @@ import (
 	"encoding/pem"
 	"io"
 	"math/big"
-	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -105,15 +104,12 @@ func TestNewHTTPDataSource_CACertPath(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			cl, ok := ds.client.(*client)
-			require.True(t, ok)
-			tr, ok := cl.Transport.(*http.Transport)
-			require.True(t, ok)
-			assert.False(t, tr.TLSClientConfig.InsecureSkipVerify)
+			tlsCfg := tlsConfigOf(t, ds.client)
+			assert.False(t, tlsCfg.InsecureSkipVerify)
 			if tt.wantRootCA {
-				assert.NotNil(t, tr.TLSClientConfig.RootCAs)
+				assert.NotNil(t, tlsCfg.RootCAs)
 			} else {
-				assert.Nil(t, tr.TLSClientConfig.RootCAs)
+				assert.Nil(t, tlsCfg.RootCAs)
 			}
 		})
 	}
@@ -122,10 +118,17 @@ func TestNewHTTPDataSource_CACertPath(t *testing.T) {
 // writeCertKey writes a self-signed cert and its key as separate PEMs; returns their paths.
 func writeCertKey(t *testing.T) (certPath, keyPath string) {
 	t.Helper()
+	dir := t.TempDir()
+	return writeCertKeyAt(t, dir, 2), filepath.Join(dir, "key.pem")
+}
+
+// writeCertKeyAt writes cert.pem and key.pem into dir, vary serial to rotate in place.
+func writeCertKeyAt(t *testing.T, dir string, serial int64) (certPath string) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
+		SerialNumber: big.NewInt(serial),
 		Subject:      pkix.Name{CommonName: "test-client"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
@@ -136,12 +139,11 @@ func writeCertKey(t *testing.T) (certPath, keyPath string) {
 	require.NoError(t, err)
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	require.NoError(t, err)
-	dir := t.TempDir()
 	certPath = filepath.Join(dir, "cert.pem")
-	keyPath = filepath.Join(dir, "key.pem")
+	keyPath := filepath.Join(dir, "key.pem")
 	require.NoError(t, os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
 	require.NoError(t, os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600))
-	return certPath, keyPath
+	return certPath
 }
 
 func TestNewHTTPDataSource_ClientCert(t *testing.T) {
@@ -154,7 +156,7 @@ func TestNewHTTPDataSource_ClientCert(t *testing.T) {
 		wantErr        error
 		wantClientCert bool
 	}{
-		{name: "valid client cert sets Certificates", opts: TLSOptions{ClientCertPath: certPath, ClientKeyPath: keyPath}, wantClientCert: true},
+		{name: "valid client cert is served by the watcher", opts: TLSOptions{ClientCertPath: certPath, ClientKeyPath: keyPath}, wantClientCert: true},
 		{name: "no client cert", opts: TLSOptions{}, wantClientCert: false},
 		{name: "bad client cert path errors", opts: TLSOptions{ClientCertPath: "/nonexistent/cert.pem", ClientKeyPath: "/nonexistent/key.pem"}, wantErr: ErrLoadClientCert},
 	}
@@ -167,15 +169,18 @@ func TestNewHTTPDataSource_ClientCert(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			cl, ok := ds.client.(*client)
-			require.True(t, ok)
-			tr, ok := cl.Transport.(*http.Transport)
-			require.True(t, ok)
-			if tt.wantClientCert {
-				assert.Len(t, tr.TLSClientConfig.Certificates, 1)
-			} else {
-				assert.Empty(t, tr.TLSClientConfig.Certificates)
+			tlsCfg := tlsConfigOf(t, ds.client)
+			// The cert is served by the watcher, not pinned into Certificates.
+			assert.Empty(t, tlsCfg.Certificates)
+			if !tt.wantClientCert {
+				assert.Nil(t, tlsCfg.GetClientCertificate)
+				return
 			}
+			require.NotNil(t, tlsCfg.GetClientCertificate)
+			cert, err := tlsCfg.GetClientCertificate(nil)
+			require.NoError(t, err)
+			require.NotNil(t, cert)
+			assert.NotEmpty(t, cert.Certificate)
 		})
 	}
 }
