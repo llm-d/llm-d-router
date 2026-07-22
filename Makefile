@@ -163,6 +163,11 @@ BASE_IMAGE ?=
 # test packages
 epp_TEST_PACKAGES = $$(go list ./... | grep -v /test/ | grep -v ./pkg/sidecar/ | grep -v ./pkg/coordinator/ | grep -v ./cmd/coordinator | tr '\n' ' ')
 sidecar_TEST_PACKAGES = ./pkg/sidecar/...
+# framework is intentionally absent from the worktree coverage-compare baseline
+# block (epp+sidecar only); CI's baseline cache unions all coverage/*.out, so
+# framework enters the CI baseline once this is on main. The PR run reports
+# coverage/framework.out as a new component.
+framework_TEST_PACKAGES = ./test/framework/...
 
 # Internal variables for generic targets
 epp_IMAGE = $(EPP_IMAGE)
@@ -259,7 +264,7 @@ lint: image-build-builder ## Run lint (use LINT_NEW_ONLY=true to only check new 
 test: test-unit test-e2e ## Run all tests (unit and e2e)
 
 .PHONY: test-unit
-test-unit: test-unit-epp test-unit-sidecar ## Run unit tests
+test-unit: test-unit-epp test-unit-sidecar test-unit-framework ## Run unit tests
 
 .PHONY: test-unit-%
 test-unit-%: image-build-builder
@@ -373,7 +378,7 @@ COVERAGE_LABEL     ?= main
 BASE_REF           ?= main
 
 .PHONY: test-coverage
-test-coverage: test-unit-epp test-unit-sidecar ## Run all unit tests with coverage (alias for test-unit)
+test-coverage: test-unit ## Run all unit tests with coverage (alias for test-unit)
 
 .PHONY: test-coverage-integration
 test-coverage-integration: test-integration ## Run integration tests with coverage (alias for test-integration)
