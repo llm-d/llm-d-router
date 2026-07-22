@@ -234,6 +234,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: token-producer
   parameters:
+    backend: vllm
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
       url: http://vllm-render:%s
@@ -269,6 +270,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: token-producer
   parameters:
+    backend: vllm
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
       url: http://vllm-render:%s
