@@ -34,6 +34,10 @@ func TestRegisterMetrics(t *testing.T) {
 	require.NoError(t, RegisterMetrics(registry))
 }
 
+func TestRegisterMetrics_NilRegisterer(t *testing.T) {
+	require.Error(t, RegisterMetrics(nil))
+}
+
 func TestRecordPrefixCacheMetrics(t *testing.T) {
 	resetMetrics()
 	t.Cleanup(resetMetrics)

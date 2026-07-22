@@ -24,20 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRegisterMetrics(t *testing.T) {
-	resetMetrics()
-	t.Cleanup(resetMetrics)
-
-	registry := prometheus.NewRegistry()
-	require.NoError(t, approximateprefix.RegisterMetrics(registry))
-	// second call must be idempotent
-	require.NoError(t, approximateprefix.RegisterMetrics(registry))
-}
-
-func TestRegisterMetrics_NilRegisterer(t *testing.T) {
-	require.Error(t, approximateprefix.RegisterMetrics(nil))
-}
-
 func TestRecordPrefixCacheMatch_FullHit(t *testing.T) {
 	resetMetrics()
 	t.Cleanup(resetMetrics)
