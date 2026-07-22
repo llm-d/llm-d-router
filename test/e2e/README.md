@@ -18,6 +18,14 @@ The end-to-end tests are designed to validate end-to-end Gateway API Inference E
    export HF_TOKEN=<MY_HF_TOKEN>
    ```
 
+## Running the End-to-End Tests in Parallel
+
+By default the end to end tests run in groups that run in parallel to each other on the same Kubernetes cluster.
+As each group is setup various Kubernetes objects are created for the test group. They include the Namespace,
+the Envoy Deployment and Service, ServiceAccount, EPP Service, and RBAC. When running on Kind each Namespace is
+assigned its own pair of NodePorts for Envoy and the EPP's metrics port. When the test group ends the created
+Kubernetes objects are delete.
+
 ## Running the End-to-End Tests
 
 Follow these steps to run the end-to-end tests:
@@ -29,6 +37,10 @@ Follow these steps to run the end-to-end tests:
    ```
 
 1. **Optional Settings**
+
+   - **Running all of the tests serially** By default the end to end tests are run in groups that are parallel to
+     each other. The number of groups running in parallel at any time is controlled via the E2E_NUM_PROCS environment
+     variable, which defaults to five. To run all of the tests in a serial fashion, use `E2E_NUM_PROCS=1`.
 
    - **Run the tests on a real cluster**: By default the end to end tests are run on a kind cluster that is created
      and torn down by the test code. If you want to run the tests on a real Kubernetes cluster, set the following
@@ -43,8 +55,19 @@ Follow these steps to run the end-to-end tests:
      **Note:** When running on a real cluster the tests will start a pair of `kubectl port-forward` processes
      to sent various requests to the cluster under test.
 
-   - **Set the test namespace**: By default, the e2e test creates resources in the `default` namespace.
-     If you would like to change this namespace, set the following environment variable:
+   - **Set the test namespace**: The namespace(s) in which the tests run vary based on whether or not the tests
+     are being run in parallel or not. 
+
+     If the tests are being run in parallel, the e2e test creates resources in namespaces of the form <base>-N,
+     where <base> by default is `e2e` and N is the process number of the process running the test. <base> can
+     changed by setting the following environment variable:
+
+     ```sh
+     export NAMESPACE=<MY_NS>
+     ```
+
+     If the test are not being run in parallel, then by default, the e2e test creates resources in the `default`
+     namespace. If you would like to change this namespace, set the following environment variable:
 
      ```sh
      export NAMESPACE=<MY_NS>
