@@ -35,6 +35,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const (
@@ -95,6 +96,10 @@ type Options struct {
 	LoRAInfoMetric                   string        // Prometheus metric specification for the LoRA info metrics.
 	CacheInfoMetric                  string        // Prometheus metric specification for the cache info metrics.
 	//
+	// Plugin state.
+	//
+	PluginStateStalenessThreshold time.Duration // Inactivity duration after which a request's plugin state is reaped.
+	//
 	// Diagnostics.
 	//
 	logging.LoggingOptions         // Logging configuration.
@@ -137,6 +142,7 @@ func NewOptions() *Options {
 		KVCacheUsagePercentageMetric:     "vllm:kv_cache_usage_perc",
 		LoRAInfoMetric:                   "vllm:lora_requests_info",
 		CacheInfoMetric:                  "vllm:cache_config_info",
+		PluginStateStalenessThreshold:    fwkplugin.DefaultStalenessThreshold,
 		LoggingOptions:                   *logging.NewOptions(),
 		Tracing:                          true,
 		MetricsPort:                      9090,
@@ -194,6 +200,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	_ = fs.MarkDeprecated("lora-info-metric", "use engineConfigs in EndpointPickerConfig instead")
 	fs.StringVar(&opts.CacheInfoMetric, "cache-info-metric", opts.CacheInfoMetric, "Prometheus metric for the cache info metrics.")
 	_ = fs.MarkDeprecated("cache-info-metric", "use engineConfigs in EndpointPickerConfig instead")
+
+	fs.DurationVar(&opts.PluginStateStalenessThreshold, "plugin-state-staleness-threshold", opts.PluginStateStalenessThreshold,
+		"Inactivity duration after which a request's plugin state (e.g. in-flight load accounting) is reaped. "+
+			"Set this above the maximum expected request duration to avoid releasing in-flight accounting for long-running requests.")
 
 	opts.LoggingOptions.AddFlags(fs) // Add logging flags.
 
@@ -358,6 +368,10 @@ func (opts *Options) Validate() error {
 	}
 	if opts.GRPCMaxSendMsgSize < 0 {
 		return fmt.Errorf("grpc-max-send-msg-size must be non-negative, got %d", opts.GRPCMaxSendMsgSize)
+	}
+
+	if opts.PluginStateStalenessThreshold <= 0 {
+		return fmt.Errorf("plugin-state-staleness-threshold must be positive, got %v", opts.PluginStateStalenessThreshold)
 	}
 
 	// Validate deprecated metric flags are not explicitly set

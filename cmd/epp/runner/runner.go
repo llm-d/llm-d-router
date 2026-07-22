@@ -222,6 +222,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Apply the process-wide plugin-state staleness threshold before any plugin is instantiated.
+	fwkplugin.SetDefaultStalenessThreshold(opts.PluginStateStalenessThreshold)
+
 	// Print flag values, skipping deprecated metric flags configured via engineConfigs
 	flags := make(map[string]any)
 	pflag.VisitAll(func(f *pflag.Flag) {
