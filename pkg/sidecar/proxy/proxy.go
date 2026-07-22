@@ -35,6 +35,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
@@ -43,26 +44,26 @@ const (
 
 	defaultMaxIdleConnsPerHost = 1024
 
-	requestHeaderRequestID = "x-request-id"
+	requestHeaderRequestID = reqcommon.RequestIDHeaderKey
 
-	requestFieldKVTransferParams     = "kv_transfer_params"
-	requestFieldECTransferParams     = "ec_transfer_params"
-	requestFieldMaxTokens            = "max_tokens"
-	requestFieldMaxCompletionTokens  = "max_completion_tokens"
-	requestFieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
-	requestFieldMinTokens            = "min_tokens"
-	requestFieldSamplingParams       = "sampling_params"
-	requestFieldDoRemotePrefill      = "do_remote_prefill"
-	requestFieldDoRemoteDecode       = "do_remote_decode"
-	requestFieldRemoteBlockIDs       = "remote_block_ids"
-	requestFieldRemoteEngineID       = "remote_engine_id"
-	requestFieldRemoteHost           = "remote_host"
-	requestFieldRemotePort           = "remote_port"
-	requestFieldStream               = "stream"
-	requestFieldStreamOptions        = "stream_options"
-	requestFieldCacheHitThreshold    = "cache_hit_threshold"
-	requestFieldContinueFinalMessage = "continue_final_message"
-	requestFieldAddGenerationPrompt  = "add_generation_prompt"
+	requestFieldKVTransferParams     = reqcommon.FieldKVTransferParams
+	requestFieldECTransferParams     = reqcommon.FieldECTransferParams
+	requestFieldMaxTokens            = reqcommon.FieldMaxTokens
+	requestFieldMaxCompletionTokens  = reqcommon.FieldMaxCompletionTokens
+	requestFieldMaxOutputTokens      = reqcommon.FieldMaxOutputTokens
+	requestFieldMinTokens            = reqcommon.FieldMinTokens
+	requestFieldSamplingParams       = reqcommon.FieldSamplingParams
+	requestFieldDoRemotePrefill      = reqcommon.FieldDoRemotePrefill
+	requestFieldDoRemoteDecode       = reqcommon.FieldDoRemoteDecode
+	requestFieldRemoteBlockIDs       = reqcommon.FieldRemoteBlockIDs
+	requestFieldRemoteEngineID       = reqcommon.FieldRemoteEngineID
+	requestFieldRemoteHost           = reqcommon.FieldRemoteHost
+	requestFieldRemotePort           = reqcommon.FieldRemotePort
+	requestFieldStream               = reqcommon.FieldStream
+	requestFieldStreamOptions        = reqcommon.FieldStreamOptions
+	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
+	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
+	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
 	// data-parallel rank, set on both legs of a disagg pair (see pickDPRank).
@@ -135,7 +136,7 @@ func (a APIType) String() string {
 // JSON request field names used for token limits in prefill/decode staging.
 // Do not mutate these slices.
 var (
-	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens}
+	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens, requestFieldMinTokens}
 	responsesStyleTokenLimitFields = []string{requestFieldMaxOutputTokens}
 	generateStyleTokenLimitFields  = []string{requestFieldMaxTokens, requestFieldMinTokens}
 )

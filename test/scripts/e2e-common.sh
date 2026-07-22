@@ -29,14 +29,8 @@ e2e_handle_interrupt() {
   exit 130 # SIGINT (Ctrl+C)
 }
 
-# run_ginkgo_suite runs the Ginkgo e2e suite in the given package directory,
-# applying E2E_LABEL_FILTER when set.
+# run_ginkgo_suite runs the Ginkgo e2e suite in the given package directory.
 run_ginkgo_suite() {
   local pkg="$1"
-  if [ -n "${E2E_LABEL_FILTER:-}" ]; then
-    echo "Label filter: ${E2E_LABEL_FILTER}"
-    go test -v -timeout 45m "${pkg}" -ginkgo.v -ginkgo.fail-fast "-ginkgo.label-filter=${E2E_LABEL_FILTER}"
-  else
-    go test -v -timeout 45m "${pkg}" -ginkgo.v -ginkgo.fail-fast
-  fi
+  ginkgo run --procs="${E2E_NUM_PROCS}" --timeout 45m -v --fail-fast "${pkg}"
 }

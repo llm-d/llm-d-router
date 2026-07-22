@@ -1,4 +1,4 @@
-# Matrix jobs (e2e-image-common, e2e-image-router, e2e-router) are each
+# Matrix jobs (e2e-image-common, e2e-image-router) are each
 # followed by a *-status job that aggregates their result, since GitHub
 # required status checks cannot reference individual matrix legs.
 name: CI - Test
@@ -45,6 +45,11 @@ jobs:
               - .github/actions/docker-build-and-push/action.yml
               - .github/actions/e2e-runner-setup/action.yml
               - .github/workflows/ci-pr-checks.yaml
+              - '!Dockerfile.coordinator'
+              - '!Makefile.coord.mk'
+              - '!cmd/coordinator/**'
+              - '!pkg/coordinator/**'
+              - '!test/coordinator/**'
             helm:
               - 'config/charts/**'
               - 'hack/verify-helm.sh'
@@ -59,7 +64,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -107,6 +112,16 @@ jobs:
           GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
           GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make test-unit
+
+      # Anti-rot: execute the benchmark bodies once so runtime breakage (panics,
+      # deadlocks) is caught. `go test` only compiles benchmarks; it never runs
+      # them without -bench.
+      - name: Run benchmark smoke
+        shell: bash
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
+        run: make bench-smoke
 
       - name: Run hermetic integration tests
         shell: bash
@@ -343,29 +358,6 @@ jobs:
     if: ${{ needs.check-changes.outputs.src == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        suite:
-          - name: pd
-            label-filter: "!Disruptive && !Extended && !SharedStorage && !Metrics"
-            needs-renderer: "false"
-          - name: pd-shared-storage-deprecated
-            label-filter: "SharedStorage && DeprecatedPD"
-            needs-renderer: "false"
-          - name: pd-shared-storage-disagg
-            label-filter: "SharedStorage && Disagg"
-            needs-renderer: "false"
-          - name: pd-metrics
-            label-filter: "Metrics"
-            needs-renderer: "false"
-          - name: extended
-            label-filter: "Extended"
-            needs-renderer: "true"
-          - name: disruption
-            label-filter: "Disruptive"
-            needs-renderer: "false"
-    name: e2e-router (${{ matrix.suite.name }})
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -399,7 +391,6 @@ jobs:
           path: ${{ runner.temp }}/e2e-images
 
       - name: Download renderer image
-        if: ${{ matrix.suite.needs-renderer == 'true' }}
         uses: actions/download-artifact@v8
         with:
           name: e2e-image-renderer
@@ -412,26 +403,11 @@ jobs:
             docker load --input "$image"
           done
 
-      - name: Run e2e-router (${{ matrix.suite.name }})
+      - name: Run e2e-router
         shell: bash
         env:
           GO_MOD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-mod-cache }}
           GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
-          E2E_LABEL_FILTER: ${{ matrix.suite.label-filter }}
-          LOAD_VLLM_RENDER_IMAGE: ${{ matrix.suite.needs-renderer }}
           PULL_VLLM_RENDER_IMAGE: "false"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: make test-e2e-run
-
-  e2e-router-status:
-    needs: e2e-router
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check e2e-router result
-        run: |
-          result="${{ needs.e2e-router.result }}"
-          if [[ "$result" != "success" && "$result" != "skipped" ]]; then
-            echo "::error::e2e-router failed for at least one matrix suite"
-            exit 1
-          fi

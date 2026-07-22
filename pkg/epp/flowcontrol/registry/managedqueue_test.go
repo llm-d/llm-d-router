@@ -60,9 +60,7 @@ func newRealMqHarness(t *testing.T, key flowcontrol.FlowKey) *mqTestHarness {
 			return a.EnqueueTime().Before(b.EnqueueTime())
 		},
 	}
-	q, err := queue.NewQueueFromName(queue.PriorityQueueName, policy)
-	require.NoError(t, err, "Test setup: creating a real PriorityQueue implementation should not fail")
-	return newMqHarness(t, q, key)
+	return newMqHarness(t, queue.New(policy), key)
 }
 
 // newMqHarness is the base constructor for the test harness.
@@ -334,13 +332,11 @@ func TestManagedQueue_FlowQueueAccessor(t *testing.T) {
 		harness := newMockedMqHarness(t, q, flowKey)
 		item := fwkfcmocks.NewMockQueueItemAccessor(100, "req-1", flowKey)
 		q.PeekV = item
-		q.NameV = "MockQueue"
 		require.NoError(t, harness.mq.Add(item), "Test setup: Adding an item must succeed")
 
 		accessor := harness.mq.FlowQueueAccessor()
 		require.NotNil(t, accessor, "FlowQueueAccessor must return a non-nil instance (guaranteed by contract)")
 
-		assert.Equal(t, harness.mq.queue.Name(), accessor.Name(), "Accessor Name() must proxy the underlying queue's name")
 		assert.Equal(t, harness.mq.Len(), accessor.Len(), "Accessor Len() must reflect the managed queue's current length")
 		assert.Equal(t, harness.mq.ByteSize(), accessor.ByteSize(),
 			"Accessor ByteSize() must reflect the managed queue's current byte size")

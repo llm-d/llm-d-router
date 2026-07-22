@@ -18,17 +18,7 @@ package request
 
 import (
 	"testing"
-
-	"github.com/stretchr/testify/assert"
 )
-
-func TestGetHeader(t *testing.T) {
-	headers := map[string]string{"X-LLM-D-SLO-TTFT-MS": "42", "Other": "x"}
-	assert.Equal(t, "42", GetHeader(headers, "X-LLM-D-SLO-TTFT-MS"))
-	assert.Equal(t, "42", GetHeader(headers, "x-llm-d-slo-ttft-ms"))
-	assert.Equal(t, "", GetHeader(headers, "missing"))
-	assert.Equal(t, "", GetHeader(nil, "k"))
-}
 
 func TestGetRequestPath(t *testing.T) {
 	tests := []struct {
