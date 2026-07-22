@@ -182,8 +182,7 @@ func dumpEnvoyClusters(nsName string) {
 	if k8sContext != "" {
 		args = append(args, "--context="+k8sContext)
 	}
-	args = append(args, "--", "curl", "-s", "http://localhost:19000/clusters")
-	out, err := exec.Command("kubectl", args...).CombinedOutput()
+	args = append(args, "--", "curl", "-sS", "--connect-timeout", "1", "--max-time", "5", "http://localhost:19000/clusters")
 	if err != nil {
 		fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- envoy /clusters (kubectl error: %v) ---\n%s\n---\n", err, string(out))
 		return
