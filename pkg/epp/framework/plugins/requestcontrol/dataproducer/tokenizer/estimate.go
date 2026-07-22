@@ -224,7 +224,7 @@ func (b estimateBackend) appendChatMessage(ctx context.Context, out []byte, feat
 		case "image_url":
 			out, features = appendMMAsset(out, features, fwkrh.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
 		case "video_url":
-			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(ctx, meta.video))
+			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(meta.video))
 		case "input_audio", "audio_url":
 			data := block.InputAudio.Data + block.InputAudio.Format
 			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, assetPlaceholderCount(len(data)))
