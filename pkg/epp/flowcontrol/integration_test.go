@@ -497,37 +497,56 @@ func TestGlobalAndBandCapacityInteraction(t *testing.T) {
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
-	results := make(chan dispatchResult, 5)
-	for i := 0; i < 5; i++ {
-		id := fmt.Sprintf("req-%d", i)
+	// Fill the global capacity with 3 requests that stay queued (blocked detector, long TTL), and
+	// wait until the queue observably holds all of them before sending the overflow. Enqueuing
+	// everything on a fixed stagger instead would race with goroutine scheduling under CI load.
+	queuedCtx, queuedCancel := context.WithCancel(h.ctx)
+	defer queuedCancel()
+	queued := make(chan dispatchResult, 3)
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("queued-req-%d", i)
 		go func() {
-			reqCtx, reqCancel := context.WithTimeout(h.ctx, 500*time.Millisecond)
-			defer reqCancel()
-			req := &testRequest{id: id, key: key, byteSize: 100, ttl: 500 * time.Millisecond}
-			outcome, err := h.fc.EnqueueAndWait(reqCtx, req)
-			results <- dispatchResult{id: id, outcome: outcome, err: err}
+			req := &testRequest{id: id, key: key, byteSize: 100, ttl: 5 * time.Minute}
+			outcome, err := h.fc.EnqueueAndWait(queuedCtx, req)
+			queued <- dispatchResult{id: id, outcome: outcome, err: err}
 		}()
-		time.Sleep(5 * time.Millisecond)
 	}
+	require.Eventually(t, func() bool {
+		return h.reg.Stats().TotalLen == 3
+	}, time.Second, time.Millisecond, "3 requests should queue, exhausting the global limit")
 
-	var admitted, rejected int
-	for i := 0; i < 5; i++ {
+	// The global limit (3) is exhausted while the band limit (10) still has room, so further
+	// requests must be rejected for capacity.
+	overflow := make(chan dispatchResult, 2)
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("overflow-req-%d", i)
+		go func() {
+			req := &testRequest{id: id, key: key, byteSize: 100, ttl: 5 * time.Minute}
+			outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+			overflow <- dispatchResult{id: id, outcome: outcome, err: err}
+		}()
+	}
+	for i := 0; i < 2; i++ {
 		select {
-		case r := <-results:
-			if r.outcome == fcTypes.QueueOutcomeRejectedCapacity {
-				rejected++
-			} else {
-				admitted++
-			}
+		case r := <-overflow:
+			require.Equal(t, fcTypes.QueueOutcomeRejectedCapacity, r.outcome,
+				"global MaxRequests=3 should reject %s even though the band allows 10", r.id)
 		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for result %d", i)
+			t.Fatalf("timed out waiting for overflow rejection %d", i)
 		}
 	}
 
-	require.LessOrEqual(t, admitted, 3,
-		"global MaxRequests=3 should cap admissions even though band allows 10")
-	require.GreaterOrEqual(t, rejected, 2,
-		"at least 2 requests should be rejected by global limit")
+	// Release the queued requests and verify none of them was rejected for capacity.
+	queuedCancel()
+	for i := 0; i < 3; i++ {
+		select {
+		case r := <-queued:
+			require.NotEqual(t, fcTypes.QueueOutcomeRejectedCapacity, r.outcome,
+				"queued request %s should have been admitted, not capacity-rejected", r.id)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for queued request %d after cancellation", i)
+		}
+	}
 }
 
 // TestByteCapacityEnforcement verifies that the per-band byte capacity limit
@@ -545,34 +564,48 @@ func TestByteCapacityEnforcement(t *testing.T) {
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
-	const numRequests = 4
-	results := make(chan dispatchResult, numRequests)
-	for i := 0; i < numRequests; i++ {
+	// Queue 3 requests of 300 bytes each (900 total, within the 1000-byte budget), waiting until
+	// all are observably queued before sending the request that would exceed the budget.
+	queuedCtx, queuedCancel := context.WithCancel(h.ctx)
+	defer queuedCancel()
+	queued := make(chan dispatchResult, 3)
+	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("byte-req-%d", i)
 		go func() {
-			reqCtx, reqCancel := context.WithTimeout(h.ctx, 500*time.Millisecond)
-			defer reqCancel()
-			req := &testRequest{id: id, key: key, byteSize: 300, ttl: 500 * time.Millisecond}
-			outcome, err := h.fc.EnqueueAndWait(reqCtx, req)
-			results <- dispatchResult{id: id, outcome: outcome, err: err}
+			req := &testRequest{id: id, key: key, byteSize: 300, ttl: 5 * time.Minute}
+			outcome, err := h.fc.EnqueueAndWait(queuedCtx, req)
+			queued <- dispatchResult{id: id, outcome: outcome, err: err}
 		}()
-		time.Sleep(5 * time.Millisecond)
+	}
+	require.Eventually(t, func() bool {
+		return h.reg.Stats().TotalByteSize == 900
+	}, time.Second, time.Millisecond, "3x300 bytes should be queued within the 1000-byte budget")
+
+	// A 4th 300-byte request would bring the band to 1200 bytes, so it must be rejected.
+	overflow := make(chan dispatchResult, 1)
+	go func() {
+		req := &testRequest{id: "byte-req-overflow", key: key, byteSize: 300, ttl: 5 * time.Minute}
+		outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+		overflow <- dispatchResult{id: "byte-req-overflow", outcome: outcome, err: err}
+	}()
+	select {
+	case r := <-overflow:
+		require.Equal(t, fcTypes.QueueOutcomeRejectedCapacity, r.outcome,
+			"request exceeding the band byte budget should be rejected")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for byte-capacity rejection")
 	}
 
-	var rejected int
-	for i := 0; i < numRequests; i++ {
+	queuedCancel()
+	for i := 0; i < 3; i++ {
 		select {
-		case r := <-results:
-			if r.outcome == fcTypes.QueueOutcomeRejectedCapacity {
-				rejected++
-			}
+		case r := <-queued:
+			require.NotEqual(t, fcTypes.QueueOutcomeRejectedCapacity, r.outcome,
+				"queued request %s should have been admitted, not capacity-rejected", r.id)
 		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for result %d", i)
+			t.Fatalf("timed out waiting for queued request %d after cancellation", i)
 		}
 	}
-
-	require.GreaterOrEqual(t, rejected, 1,
-		"at least 1 request should be rejected when 4x300 bytes exceeds band budget of 1000")
 }
 
 // TestEmptyPoolRejectsAsNoEndpoints verifies the scale-from-zero path: when the candidate pool has no
@@ -591,41 +624,51 @@ func TestEmptyPoolRejectsAsNoEndpoints(t *testing.T) {
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
-	const numRequests = 4
-	results := make(chan dispatchResult, numRequests)
-	for i := 0; i < numRequests; i++ {
+	// Fill the 1000-byte band with 3 requests of 300 bytes, waiting until all are observably
+	// queued before sending the request that overflows the budget.
+	queuedCtx, queuedCancel := context.WithCancel(h.ctx)
+	defer queuedCancel()
+	queued := make(chan dispatchResult, 3)
+	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("noep-req-%d", i)
 		go func() {
-			reqCtx, reqCancel := context.WithTimeout(h.ctx, 500*time.Millisecond)
-			defer reqCancel()
-			req := &testRequest{id: id, key: key, byteSize: 300, ttl: 500 * time.Millisecond}
-			outcome, err := h.fc.EnqueueAndWait(reqCtx, req)
-			results <- dispatchResult{id: id, outcome: outcome, err: err}
+			req := &testRequest{id: id, key: key, byteSize: 300, ttl: 5 * time.Minute}
+			outcome, err := h.fc.EnqueueAndWait(queuedCtx, req)
+			queued <- dispatchResult{id: id, outcome: outcome, err: err}
 		}()
-		time.Sleep(5 * time.Millisecond)
+	}
+	require.Eventually(t, func() bool {
+		return h.reg.Stats().TotalByteSize == 900
+	}, time.Second, time.Millisecond, "3x300 bytes should be queued within the 1000-byte budget")
+
+	// The 4th request exceeds the byte budget, but because the pool is empty the rejection must
+	// surface as RejectedNoEndpoints (503), not RejectedCapacity (429).
+	overflow := make(chan dispatchResult, 1)
+	go func() {
+		req := &testRequest{id: "noep-req-overflow", key: key, byteSize: 300, ttl: 5 * time.Minute}
+		outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+		overflow <- dispatchResult{id: "noep-req-overflow", outcome: outcome, err: err}
+	}()
+	select {
+	case r := <-overflow:
+		require.Equal(t, fcTypes.QueueOutcomeRejectedNoEndpoints, r.outcome,
+			"with an empty pool, a full-queue rejection should be RejectedNoEndpoints")
+		require.ErrorIs(t, r.err, fcTypes.ErrNoEndpoints,
+			"no-endpoints rejection should wrap ErrNoEndpoints")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for no-endpoints rejection")
 	}
 
-	var noEndpoints, capacity int
-	for i := 0; i < numRequests; i++ {
+	queuedCancel()
+	for i := 0; i < 3; i++ {
 		select {
-		case r := <-results:
-			switch r.outcome {
-			case fcTypes.QueueOutcomeRejectedNoEndpoints:
-				noEndpoints++
-				require.ErrorIs(t, r.err, fcTypes.ErrNoEndpoints,
-					"no-endpoints rejection should wrap ErrNoEndpoints")
-			case fcTypes.QueueOutcomeRejectedCapacity:
-				capacity++
-			}
+		case r := <-queued:
+			require.NotEqual(t, fcTypes.QueueOutcomeRejectedCapacity, r.outcome,
+				"with an empty pool, no rejection should be classified as RejectedCapacity")
 		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for result %d", i)
+			t.Fatalf("timed out waiting for queued request %d after cancellation", i)
 		}
 	}
-
-	require.GreaterOrEqual(t, noEndpoints, 1,
-		"with an empty pool, a full-queue rejection should be RejectedNoEndpoints")
-	require.Zero(t, capacity,
-		"with an empty pool, no rejection should be classified as RejectedCapacity")
 }
 
 // ============================================================================
@@ -1149,12 +1192,32 @@ func TestEndpointIdentityCollisionDuringPodReplacement(t *testing.T) {
 // Metrics Emission Tests
 // ============================================================================
 
-// TestFlowControlMetricsEmitted verifies that EnqueueAndWait emits queue_size
-// metrics. A blocked request holds the gauge > 0 while queued; after TTL
-// expiry the gauge returns to 0.
-func TestFlowControlMetricsEmitted(t *testing.T) {
-	t.Parallel()
+// queueSizeGaugeSum returns the sum of the llm_d_epp_flow_control_queue_size gauge across all
+// label sets, or 0 if the family has no series yet.
+func queueSizeGaugeSum(t *testing.T) float64 {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var sum float64
+	for _, f := range families {
+		if f.GetName() == "llm_d_epp_flow_control_queue_size" {
+			for _, m := range f.GetMetric() {
+				sum += m.GetGauge().GetValue()
+			}
+		}
+	}
+	return sum
+}
 
+// TestFlowControlMetricsEmitted verifies that EnqueueAndWait maintains the queue_size gauge: a
+// blocked request holds the gauge > 0 while queued, and the gauge returns to 0 once the request
+// finalizes.
+//
+// This test intentionally does NOT run in parallel: it asserts exact values on the process-global
+// metrics registry, so it must not interleave with other tests that enqueue requests. Every other
+// test in this package calls t.Parallel() before doing any work, so the sequential phase gives
+// this test exclusive access to the registry.
+func TestFlowControlMetricsEmitted(t *testing.T) {
 	eppmetrics.Register()
 
 	detector := newBlockedDetector()
@@ -1164,37 +1227,34 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 
 	results := make(chan dispatchResult, 1)
 	go func() {
-		req := &testRequest{id: "metrics-req", key: key, byteSize: 512, ttl: 200 * time.Millisecond}
+		req := &testRequest{id: "metrics-req", key: key, byteSize: 512, ttl: 5 * time.Minute}
 		outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
 		results <- dispatchResult{outcome: outcome, err: err}
 	}()
 
-	// While the request is queued (blocked detector), the gauge should be > 0.
-	time.Sleep(50 * time.Millisecond)
-
-	families, gatherErr := ctrlmetrics.Registry.Gather()
-	require.NoError(t, gatherErr)
-
-	var queueSizeWhileQueued float64
-	var foundQueueSize bool
-	for _, f := range families {
-		if f.GetName() == "llm_d_epp_flow_control_queue_size" {
-			foundQueueSize = true
-			for _, m := range f.GetMetric() {
-				queueSizeWhileQueued += m.GetGauge().GetValue()
-			}
-		}
-	}
-	require.True(t, foundQueueSize,
-		"llm_d_epp_flow_control_queue_size metric should exist")
-	require.Greater(t, queueSizeWhileQueued, 0.0,
+	// The gauge is incremented on the EnqueueAndWait goroutine, so poll for it rather than sleep:
+	// a fixed delay races with goroutine scheduling under CI load (#2117). The long TTL keeps the
+	// request queued for as long as the poll needs.
+	require.Eventually(t, func() bool {
+		return queueSizeGaugeSum(t) > 0
+	}, 5*time.Second, 5*time.Millisecond,
 		"queue_size should be > 0 while a request is actively queued")
 
+	// Unblock the detector so the request finalizes deterministically via dispatch.
+	detector.Unblock(1)
+
 	select {
-	case <-results:
+	case r := <-results:
+		require.NoError(t, r.err)
+		require.Equal(t, fcTypes.QueueOutcomeDispatched, r.outcome)
 	case <-time.After(5 * time.Second):
-		t.Fatal("request did not expire")
+		t.Fatal("request did not dispatch after detector was unblocked")
 	}
+
+	// The gauge decrement runs before EnqueueAndWait returns, so once the result is observed the
+	// gauge is already back at 0 -- no polling needed.
+	require.Zero(t, queueSizeGaugeSum(t),
+		"queue_size should return to 0 after the request finalizes")
 }
 
 // ============================================================================
