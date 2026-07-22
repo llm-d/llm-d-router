@@ -481,6 +481,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(LlmdDataLayerPollErrorsTotal)
 		metrics.Registry.MustRegister(DataLayerExtractErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
+		metrics.Registry.MustRegister(LlmdDataLayerTLSReloadErrorsTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
 		}

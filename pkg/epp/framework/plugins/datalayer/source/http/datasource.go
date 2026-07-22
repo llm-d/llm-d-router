@@ -18,6 +18,7 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -32,6 +33,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -132,13 +134,11 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		},
 	}
 	if scheme == "https" {
-		tlsCfg, err := tlsClientConfig(tlsOpts)
+		rt, err := newTLSReloader(tlsOpts)
 		if err != nil {
 			return nil, err
 		}
-		httpsTransport := baseTransport.Clone()
-		httpsTransport.TLSClientConfig = tlsCfg
-		cl.Transport = httpsTransport
+		cl.Transport = rt
 	}
 	return &HTTPDataSource[T]{
 		typedName:      fwkplugin.TypedName{Type: pluginType, Name: pluginName},
@@ -151,45 +151,199 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 	}, nil
 }
 
+// tlsReloadInterval bounds how often the scrape client re-reads its TLS files.
+// Rotation is rare, so a coarse interval keeps the check off the hot scrape path.
+const tlsReloadInterval = 10 * time.Second
+
+// tlsRetryInterval is the shorter re-check after a failed read, so a transient error
+// (a partial write mid-rotation) recovers without waiting a full interval or coupling
+// retry cadence to scrape volume.
+const tlsRetryInterval = time.Second
+
+// tlsReloader is the https scrape transport. It presents the client certificate and
+// verifies the server against a CA bundle, reloading both from disk when the files
+// change: the client cert is served through GetClientCertificate, a changed CA
+// rebuilds the transport with a fresh RootCAs pool. Verification stays with the
+// standard library, so a rotated bundle applies without a restart.
+type tlsReloader struct {
+	caPath, certPath, keyPath string
+	skipVerify                bool
+
+	base      time.Time    // monotonic anchor for nextCheck
+	nextCheck atomic.Int64 // monotonic nanos since base gating the next file read
+
+	reloadMu                  sync.Mutex // serializes a reload
+	caHash, certHash, keyHash [sha256.Size]byte
+
+	cert    atomic.Pointer[tls.Certificate] // current client cert, nil when none configured
+	current atomic.Pointer[http.Transport]  // transport in use, swapped on CA change
+}
+
+// newTLSReloader loads the initial CA and client certificate, failing if either is
+// configured but unreadable or invalid.
+func newTLSReloader(opts TLSOptions) (*tlsReloader, error) {
+	t := &tlsReloader{
+		caPath:     opts.CACertPath,
+		certPath:   opts.ClientCertPath,
+		keyPath:    opts.ClientKeyPath,
+		skipVerify: opts.SkipVerify,
+		base:       time.Now(),
+	}
+	var pool *x509.CertPool
+	if t.caPath != "" && !t.skipVerify {
+		data, err := os.ReadFile(t.caPath)
+		if err != nil {
+			return nil, fmt.Errorf("%w %s: %w", ErrReadCACert, t.caPath, err)
+		}
+		pool = x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) {
+			return nil, fmt.Errorf("%w in %s", ErrNoValidCACerts, t.caPath)
+		}
+		t.caHash = sha256.Sum256(data)
+	}
+	if t.certPath != "" || t.keyPath != "" {
+		certData, keyData, err := t.readCert()
+		if err != nil {
+			return nil, err
+		}
+		if err := t.storeCert(certData, keyData); err != nil {
+			return nil, err
+		}
+	}
+	t.current.Store(t.buildTransport(pool))
+	t.nextCheck.Store(t.since() + tlsReloadInterval.Nanoseconds())
+	return t, nil
+}
+
+func (t *tlsReloader) readCert() (cert, key []byte, err error) {
+	if cert, err = os.ReadFile(t.certPath); err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
+	}
+	if key, err = os.ReadFile(t.keyPath); err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
+	}
+	return cert, key, nil
+}
+
+// storeCert parses the keypair into the served pointer and records the file hashes.
+func (t *tlsReloader) storeCert(certData, keyData []byte) error {
+	pair, err := tls.X509KeyPair(certData, keyData)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrLoadClientCert, err)
+	}
+	t.cert.Store(&pair)
+	t.certHash, t.keyHash = sha256.Sum256(certData), sha256.Sum256(keyData)
+	return nil
+}
+
+// buildTransport clones the base transport with a tls.Config that verifies the server
+// against pool (nil means the system pool) and presents the current client cert.
+func (t *tlsReloader) buildTransport(pool *x509.CertPool) *http.Transport {
+	cfg := &tls.Config{InsecureSkipVerify: t.skipVerify, RootCAs: pool}
+	if t.certPath != "" {
+		cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return t.cert.Load(), nil
+		}
+	}
+	tr := baseTransport.Clone()
+	tr.TLSClientConfig = cfg
+	return tr
+}
+
+func (t *tlsReloader) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.maybeReload(req.Context())
+	return t.current.Load().RoundTrip(req)
+}
+
+func (t *tlsReloader) CloseIdleConnections() { t.current.Load().CloseIdleConnections() }
+
+// since returns monotonic nanoseconds elapsed since the reloader was created, so
+// the throttle is unaffected by wall-clock steps (NTP correction, live-migration).
+func (t *tlsReloader) since() int64 { return int64(time.Since(t.base)) }
+
+// maybeReload re-reads the TLS files at most once per interval and applies what
+// changed. Reload is scrape-driven: an unscraped endpoint never reloads, which is
+// fine since it presents the cert to no one. On a read or parse error it keeps the
+// last-good material (a partial write never drops verification) and retries after a
+// short backoff.
+func (t *tlsReloader) maybeReload(ctx context.Context) {
+	elapsed := t.since()
+	next := t.nextCheck.Load()
+	if elapsed < next {
+		return
+	}
+	if !t.nextCheck.CompareAndSwap(next, elapsed+tlsReloadInterval.Nanoseconds()) {
+		return
+	}
+	t.reloadMu.Lock()
+	defer t.reloadMu.Unlock()
+	ok := true
+	if t.certPath != "" {
+		ok = t.reloadCert(ctx) && ok
+	}
+	if t.caPath != "" && !t.skipVerify {
+		ok = t.reloadCA(ctx) && ok
+	}
+	if !ok {
+		t.nextCheck.Store(t.since() + tlsRetryInterval.Nanoseconds()) // read failed, retry soon
+	}
+}
+
+// reloadCert reports whether the files were read successfully (a no-op re-read
+// counts as success). A false return drives a retry on the next scrape.
+func (t *tlsReloader) reloadCert(ctx context.Context) bool {
+	logger := log.FromContext(ctx)
+	certData, keyData, err := t.readCert()
+	if err != nil {
+		metrics.LlmdDataLayerTLSReloadErrorsTotal.WithLabelValues("cert").Inc()
+		logger.Error(err, "client cert reload read failed, keeping current cert")
+		return false
+	}
+	if sha256.Sum256(certData) == t.certHash && sha256.Sum256(keyData) == t.keyHash {
+		return true
+	}
+	if err := t.storeCert(certData, keyData); err != nil {
+		metrics.LlmdDataLayerTLSReloadErrorsTotal.WithLabelValues("cert").Inc()
+		logger.Error(err, "client cert reload parse failed, keeping current cert")
+		return false
+	}
+	t.current.Load().CloseIdleConnections() // re-handshake so keep-alives present the new cert
+	logger.Info("client certificate reloaded")
+	return true
+}
+
+// reloadCA reports whether the bundle was read successfully. A false return drives
+// a retry on the next scrape.
+func (t *tlsReloader) reloadCA(ctx context.Context) bool {
+	logger := log.FromContext(ctx)
+	data, err := os.ReadFile(t.caPath)
+	if err != nil {
+		metrics.LlmdDataLayerTLSReloadErrorsTotal.WithLabelValues("ca").Inc()
+		logger.Error(err, "CA reload read failed, keeping current bundle")
+		return false
+	}
+	h := sha256.Sum256(data)
+	if h == t.caHash {
+		return true
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(data) {
+		metrics.LlmdDataLayerTLSReloadErrorsTotal.WithLabelValues("ca").Inc()
+		logger.Error(ErrNoValidCACerts, "CA reload parse failed, keeping current bundle")
+		return false
+	}
+	old := t.current.Swap(t.buildTransport(pool))
+	t.caHash = h
+	old.CloseIdleConnections()
+	logger.Info("CA bundle reloaded")
+	return true
+}
+
 var (
 	ErrReadCACert     = errors.New("reading CA cert")
 	ErrNoValidCACerts = errors.New("no valid CA certs")
 	ErrLoadClientCert = errors.New("loading client cert")
 )
-
-// caCertPool loads a PEM CA bundle for TLS verification.
-func caCertPool(path string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("%w %s: %w", ErrReadCACert, path, err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("%w in %s", ErrNoValidCACerts, path)
-	}
-	return pool, nil
-}
-
-// tlsClientConfig builds a tls.Config: server verification via CACertPath (or the
-// system pool), plus an mTLS client certificate when ClientCertPath is set.
-func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
-	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify}
-	if !opts.SkipVerify && opts.CACertPath != "" {
-		pool, err := caCertPool(opts.CACertPath)
-		if err != nil {
-			return nil, err
-		}
-		cfg.RootCAs = pool
-	}
-	if opts.ClientCertPath != "" || opts.ClientKeyPath != "" {
-		cert, err := tls.LoadX509KeyPair(opts.ClientCertPath, opts.ClientKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
-		}
-		cfg.Certificates = []tls.Certificate{cert}
-	}
-	return cfg, nil
-}
 
 func (s *HTTPDataSource[T]) TypedName() fwkplugin.TypedName { return s.typedName }
 
