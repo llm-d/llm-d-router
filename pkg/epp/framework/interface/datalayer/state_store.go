@@ -35,9 +35,10 @@ type CrossReplicaStore interface {
 	Set(ctx context.Context, key StateKey, endpointID string, value any) error
 
 	// Get returns the aggregated value for the given key and endpoint across
-	// all replicas. Returns (value, true, nil) on hit, (nil, false, nil) on
-	// miss, or (nil, false, err) on failure.
-	Get(ctx context.Context, key StateKey, endpointID string) (any, bool, error)
+	// all replicas. The aggregate function folds per-replica values into a
+	// single result. Returns (value, true, nil) on hit, (nil, false, nil)
+	// on miss, or (nil, false, err) on failure.
+	Get(ctx context.Context, key StateKey, endpointID string, aggregate func([]any) any) (any, bool, error)
 
 	// Delete removes the value for the given key and endpoint.
 	Delete(ctx context.Context, key StateKey, endpointID string) error

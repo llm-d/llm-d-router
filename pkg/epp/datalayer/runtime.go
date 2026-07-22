@@ -453,7 +453,7 @@ func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger,
 					case fwkdl.EventAddOrUpdate:
 						processed.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
 							Get: func() fwkdl.Cloneable {
-								if val, ok, _ := r.store.Get(ctx, spec.StateKey, endpointID); ok {
+								if val, ok, _ := r.store.Get(ctx, spec.StateKey, endpointID, spec.Aggregate); ok {
 									if c, ok := val.(fwkdl.Cloneable); ok {
 										return c
 									}

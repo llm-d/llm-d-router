@@ -66,7 +66,7 @@ func (s *LocalStateStore) Set(_ context.Context, key fwkdl.StateKey, endpointID 
 	return nil
 }
 
-func (s *LocalStateStore) Get(_ context.Context, key fwkdl.StateKey, endpointID string) (any, bool, error) {
+func (s *LocalStateStore) Get(_ context.Context, key fwkdl.StateKey, endpointID string, _ func([]any) any) (any, bool, error) {
 	v, ok := s.data.Load(s.storeKey(key, endpointID))
 	return v, ok, nil
 }
