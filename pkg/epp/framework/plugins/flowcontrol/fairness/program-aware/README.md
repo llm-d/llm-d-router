@@ -18,7 +18,7 @@ Choose this policy when:
 * **Identifies programs** via the fairness ID header carried on each request.
 * **Tracks per-program metrics** through the request lifecycle: queue wait time, dispatched count, in-flight count, last completion time, and (LAS) attained service in weighted tokens.
 * **Selects a queue to dispatch from** using the configured strategy. Currently `las` (Least Attained Service) is supported; programs with the lowest accumulated service score highest.
-* **Decays attained service** for inactive programs so a long-idle program is not penalized indefinitely. Both wall-clock half-life and per-Pick factor decay are supported.
+* **Decays attained service** in wall-clock time so a long-idle program is not penalized indefinitely. Decay is applied lazily whenever a program's service is read or accumulated, so it does not depend on the program being visited by the dispatch loop. Two parameterizations are supported: an explicit half-life, or a per-second decay factor.
 * **Evicts idle program state** on a periodic sweep so per-program memory and Prometheus label series do not accumulate forever.
 
 ## Unit of Fairness
@@ -54,8 +54,8 @@ flowControl:
 | `strategy` | `las` | Scoring strategy. Only `las` is supported. |
 | `lasWeightService` | `0.8` | Weight on the inverted attained-service signal. Higher values prioritize underserved programs more aggressively. |
 | `lasWeightHeadWait` | `0.2` | Weight on the head-of-queue age. Acts as a tiebreaker on cold start when programs have equal attained service. |
-| `lasDecayFactor` | `0.99997` | Per-Pick decay factor applied to inactive programs when `lasHalfLifeSeconds` is `0`. Must be in `(0, 1]`. Coupled to Pick rate. |
-| `lasHalfLifeSeconds` | `0` | Wall-clock half-life of attained service for inactive programs. When `> 0` it overrides `lasDecayFactor`. |
+| `lasDecayFactor` | `0.99997` | Per-second decay factor applied to attained service when `lasHalfLifeSeconds` is `0`. Must be in `(0, 1]`. |
+| `lasHalfLifeSeconds` | `60` | Wall-clock half-life of attained service. When `> 0` it overrides `lasDecayFactor`. |
 | `evictionTtlSeconds` | `3600` | A program with no completion in this window is evicted from the metrics map. |
 | `evictionSweepSeconds` | `300` | How often the eviction sweep runs. Must be `> 0`. |
 
@@ -75,7 +75,7 @@ The plugin exports two shared collectors and one strategy-owned collector under 
 
 * **Abandoned requests block eviction**: Requests abandoned after dispatch leave `inFlight` non-zero, and the eviction sweep skips any program with non-zero `inFlight`, so its `ProgramMetrics` entry and Prometheus series persist indefinitely.
 * **Memory and label-series growth**: A new program ID adds a `ProgramMetrics` entry plus per-program Prometheus label series. The eviction sweep bounds growth, but a workload with rapidly churning program IDs (e.g. a fresh ID per request) will see TTL-bounded accumulation. Choose a TTL that matches your churn rate.
-* **Decay tuning depends on workload**: `lasDecayFactor` is per-Pick, so its effective half-life depends on the cluster's pick rate. Use `lasHalfLifeSeconds` for predictable wall-clock decay.
+* **Decay accrues during generation**: Decay is continuous wall-clock time, including while a program's requests are in flight; the service consumed by an in-flight request is added back, post-decay, when it completes. With half-lives well above typical generation times this effect is negligible.
 
 ## Related Documentation
 

@@ -42,7 +42,7 @@ func DefaultConfig() Config {
 		LASWeightService:     0.8,
 		LASWeightHeadWait:    0.2,
 		LASDecayFactor:       0.99997,
-		LASHalfLifeSeconds:   0,
+		LASHalfLifeSeconds:   60,
 	}
 }
 
@@ -201,6 +201,9 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 		return nil, nil //nolint:nilnil
 	}
 
+	// IterateQueues visits only active (non-empty) queues. That is sufficient: attained-service
+	// decay is time-anchored inside the strategy, so an idle program's service ages out without its
+	// queue being visited.
 	infos := make(map[string]QueueInfo)
 	band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
 		if queue == nil {
