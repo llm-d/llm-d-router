@@ -127,11 +127,7 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 		if !ginkgo.CurrentSpecReport().Failed() && !printCoordinatorLogs {
 			return
 		}
-		dumpDeploymentLogs(nsName, "llm-d-coordinator", "coordinator")
-		dumpDeploymentLogs(nsName, eppName+"-encode", "epp")
-		dumpDeploymentLogs(nsName, eppName+"-prefill", "epp")
-		dumpDeploymentLogs(nsName, eppName+"-decode", "epp")
-		dumpDeploymentLogs(nsName, "envoy", "envoy")
+		testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
 		dumpEnvoyClusters(nsName)
 	})
 
@@ -175,21 +171,6 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 		"coordinator returned non-200: body=%s", string(raw))
 	gomega.Expect(raw).NotTo(gomega.BeEmpty(), "coordinator returned empty body")
 	verifyCoordinatorSteps(nsName, expectedSteps, expectedImages, true, true)
-}
-
-// dumpDeploymentLogs writes a deployment's container logs to the Ginkgo output.
-// A kubectl error is reported inline rather than failing the spec.
-func dumpDeploymentLogs(nsName, deployment, container string) {
-	args := []string{"logs", "deployment/" + deployment, "-c", container, "--namespace=" + nsName}
-	if k8sContext != "" {
-		args = append(args, "--context="+k8sContext)
-	}
-	out, err := exec.Command("kubectl", args...).CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- %s logs (kubectl error: %v) ---\n%s\n---\n", deployment, err, string(out))
-		return
-	}
-	fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- %s logs ---\n%s\n---\n", deployment, string(out))
 }
 
 // dumpEnvoyClusters writes Envoy's admin /clusters (resolved endpoints and health

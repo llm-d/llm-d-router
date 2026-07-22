@@ -245,7 +245,10 @@ func applyManifest(path string, subs map[string]string, excludeKinds ...string) 
 // churn per spec. Mirrors the non-coordinator e2e, which creates the EPP
 // Services and RBAC once in its setup and recreates only the Deployment per test.
 func createStableInfra() []string {
-	objects := make([]string, 0, 12)
+	eppManifests := []string{encodeEPPManifest, prefillEPPManifest, decodeEPPManifest}
+	// Coordinator Service + ServiceAccount, plus Service + ServiceAccount +
+	// RoleBinding per EPP.
+	objects := make([]string, 0, 2+len(eppManifests)*3)
 
 	docs := e2eutil.RunKustomize(coordinatorComponentDir)
 	docs = e2eutil.FilterKinds(docs, "ConfigMap", "Deployment")
@@ -253,7 +256,7 @@ func createStableInfra() []string {
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())...)
 
-	for _, manifest := range []string{encodeEPPManifest, prefillEPPManifest, decodeEPPManifest} {
+	for _, manifest := range eppManifests {
 		objects = append(objects, applyManifest(manifest, eppSubstitutions(), "Deployment")...)
 	}
 	return objects
