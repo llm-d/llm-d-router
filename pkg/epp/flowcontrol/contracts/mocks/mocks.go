@@ -159,7 +159,6 @@ func (m *MockEndpointCandidates) Locate(ctx context.Context, requestMetadata map
 // It is used for tests that need to control the exact return values of a queue's methods without simulating the queue's
 // internal logic or state.
 type MockSafeQueue struct {
-	NameV       string
 	LenV        int
 	ByteSizeV   uint64
 	PeekV       flowcontrol.QueueItemAccessor
@@ -169,7 +168,6 @@ type MockSafeQueue struct {
 	DrainFunc   func() []flowcontrol.QueueItemAccessor
 }
 
-func (m *MockSafeQueue) Name() string     { return m.NameV }
 func (m *MockSafeQueue) Len() int         { return m.LenV }
 func (m *MockSafeQueue) ByteSize() uint64 { return m.ByteSizeV }
 
@@ -330,7 +328,6 @@ func (m *MockManagedQueue) Drain() []flowcontrol.QueueItemAccessor {
 }
 
 func (m *MockManagedQueue) FlowKey() flowcontrol.FlowKey { return m.FlowKeyV }
-func (m *MockManagedQueue) Name() string                 { return "" }
 func (m *MockManagedQueue) OrderingPolicy() flowcontrol.OrderingPolicy {
 	if m.OrderingPolicyFunc != nil {
 		return m.OrderingPolicyFunc()

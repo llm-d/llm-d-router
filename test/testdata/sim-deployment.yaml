@@ -19,7 +19,7 @@ spec:
         imagePullPolicy: IfNotPresent
         restartPolicy: Always
         command: ["vllm"]
-        args: ["launch", "render", "Qwen/Qwen3-32B", "--port=8082"]
+        args: ["launch", "render", "Qwen/Qwen2.5-1.5B-Instruct", "--port=8082"]
         ports:
         - name: http
           containerPort: 8082
@@ -57,7 +57,7 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - --model
-        - Qwen/Qwen3-32B
+        - Qwen/Qwen2.5-1.5B-Instruct
         - --port
         - "8000"
         - --max-loras

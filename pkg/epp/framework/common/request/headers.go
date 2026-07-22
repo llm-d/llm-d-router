@@ -18,20 +18,6 @@ package request
 
 import "strings"
 
-// GetHeader returns the value for key from headers, with case-insensitive lookup.
-func GetHeader(headers map[string]string, key string) string {
-	if v, ok := headers[key]; ok {
-		return v
-	}
-	lower := strings.ToLower(key)
-	for k, v := range headers {
-		if strings.ToLower(k) == lower {
-			return v
-		}
-	}
-	return ""
-}
-
 // GetRequestPath extracts the request path from headers with fallback priority.
 // Query parameters are stripped because the path is used only for parser routing.
 func GetRequestPath(headers map[string]string) string {
