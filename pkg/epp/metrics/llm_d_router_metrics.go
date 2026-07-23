@@ -399,6 +399,55 @@ var (
 	)
 )
 
+// --- llm-d Tool Calling Metrics ---
+var (
+	llmdToolCallingRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "tool_calling_requests_total",
+			Help:      metricsutil.HelpMsgWithStability("Total requests by tool-calling presence.", compbasemetrics.ALPHA),
+		},
+		[]string{"parser", "present"},
+	)
+
+	llmdToolChoiceTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "tool_choice_total",
+			Help:      metricsutil.HelpMsgWithStability("Total requests by tool_choice kind.", compbasemetrics.ALPHA),
+		},
+		[]string{"parser", "tool_choice_kind"},
+	)
+
+	llmdToolDefinitionsCount = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "tool_definitions_count",
+			Help:      metricsutil.HelpMsgWithStability("Distribution of tool definition count per request.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0, 1, 2, 3, 5, 10, 20, 50, 100},
+		},
+		[]string{"parser"},
+	)
+
+	llmdParallelToolCallsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "parallel_tool_calls_total",
+			Help:      metricsutil.HelpMsgWithStability("Total requests by parallel_tool_calls value.", compbasemetrics.ALPHA),
+		},
+		[]string{"parser", "value"},
+	)
+
+	llmdToolCallingPreservedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "tool_calling_preserved_total",
+			Help:      metricsutil.HelpMsgWithStability("Total requests by tool-calling preservation status across the EPP boundary.", compbasemetrics.ALPHA),
+		},
+		[]string{"parser", "preserved"},
+	)
+)
+
 var (
 	// DescInferencePoolPerEndpointQueueSize is the standardized exported prometheus descriptor.
 	DescInferencePoolPerEndpointQueueSize = prometheus.NewDesc(
