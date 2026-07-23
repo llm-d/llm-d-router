@@ -247,43 +247,119 @@ func TestGatingFilter_KeepsOneRevisionPerCall(t *testing.T) {
 	}
 }
 
-func TestGatingFilter_WeightedPickAcrossRolesLikeUsersExample(t *testing.T) {
-	// 2p+18d (v1) / 1p+2d (v2) — weight v1=20, v2=3, so v2's share of the
-	// weighted pick is 3/23 ≈ 13% over many iterations. Runs 10k
-	// iterations for a tight-enough Monte Carlo bound.
-	c := gatingFixture(t, validConfig(), map[string]map[string]int{
-		"v1": {"prefill": 2, "decode": 18},
-		"v2": {"prefill": 1, "decode": 2},
-	})
-	f := newGatingFilter(c)
-	// The prefill EPP only sees prefill pods as candidates.
-	pods := []fwksched.Endpoint{
-		endpoint("p1a", revLabels("v1")),
-		endpoint("p1b", revLabels("v1")),
-		endpoint("p2", revLabels("v2")),
+// TestGatingFilter_WeightedPickMatchesLiveSlowTransitionShapes covers the
+// three shapes exercised by scripts/verify-slow-transition.sh
+// (10p10d, 2p20d, 20p2d). Each case picks the middle-rollout step where
+// the pod counts are unbalanced enough that the weighted-pick math is
+// observable, and pins the expected v2 share to (crossRoleWeight(v2) /
+// Σ crossRoleWeight). 10k iterations per case; ±3pp tolerance is
+// comfortable at that sample size (3σ for p=0.13, N=10k is ~1pp).
+//
+// The 2p20d / 20p2d "step2" rows are the specific regression case:
+// under the pre-weighted-pick behaviour they would land near 33%
+// (prefill count ratio), not 13% (cross-role weight ratio).
+func TestGatingFilter_WeightedPickMatchesLiveSlowTransitionShapes(t *testing.T) {
+	tests := []struct {
+		name        string
+		podCounts   map[string]map[string]int // Ready pods per revision per role in scope
+		candidates  []fwksched.Endpoint       // prefill-side candidates the picker sees
+		wantV2Share float64                   // expected v2 fraction of the weighted pick
+	}{
+		{
+			name: "10p10d step2 (7+3 p / 7+3 d) — balanced, expect v2=30%",
+			podCounts: map[string]map[string]int{
+				"v1": {"prefill": 7, "decode": 7},
+				"v2": {"prefill": 3, "decode": 3},
+			},
+			candidates:  candidatePool(7, 3),
+			wantV2Share: 6.0 / 20.0, // = 30%
+		},
+		{
+			name: "2p20d step2 (2+1 p / 18+2 d) — decode-heavy, expect v2=13% (would be 33% under prefill-only)",
+			podCounts: map[string]map[string]int{
+				"v1": {"prefill": 2, "decode": 18},
+				"v2": {"prefill": 1, "decode": 2},
+			},
+			candidates:  candidatePool(2, 1),
+			wantV2Share: 3.0 / 23.0, // ≈ 13%
+		},
+		{
+			name: "2p20d step4 (1+2 p / 2+18 d) — mirror of step2, expect v2=87%",
+			podCounts: map[string]map[string]int{
+				"v1": {"prefill": 1, "decode": 2},
+				"v2": {"prefill": 2, "decode": 18},
+			},
+			candidates:  candidatePool(1, 2),
+			wantV2Share: 20.0 / 23.0, // ≈ 87%
+		},
+		{
+			name: "20p2d step2 (18+2 p / 2+1 d) — prefill-heavy, expect v2=13%",
+			podCounts: map[string]map[string]int{
+				"v1": {"prefill": 18, "decode": 2},
+				"v2": {"prefill": 2, "decode": 1},
+			},
+			candidates:  candidatePool(18, 2),
+			wantV2Share: 3.0 / 23.0, // ≈ 13%
+		},
+		{
+			name: "20p2d step4 (2+18 p / 1+2 d) — mirror of step2, expect v2=87%",
+			podCounts: map[string]map[string]int{
+				"v1": {"prefill": 2, "decode": 1},
+				"v2": {"prefill": 18, "decode": 2},
+			},
+			candidates:  candidatePool(2, 18),
+			wantV2Share: 20.0 / 23.0, // ≈ 87%
+		},
 	}
+
 	const iterations = 10000
-	v1Wins := 0
-	for i := 0; i < iterations; i++ {
-		got := f.Filter(context.Background(), nil, pods)
-		if len(got) == 0 {
-			t.Fatalf("iter %d: empty survivor set", i)
-		}
-		switch got[0].GetMetadata().Labels[testRevLabel] {
-		case "v1":
-			v1Wins++
-		case "v2":
-			// counted implicitly
-		default:
-			t.Fatalf("iter %d: unexpected revision label", i)
-		}
+	const tolerance = 0.03 // ±3pp — comfortable at N=10k
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := gatingFixture(t, validConfig(), tt.podCounts)
+			f := newGatingFilter(c)
+
+			v2Wins := 0
+			for i := 0; i < iterations; i++ {
+				got := f.Filter(context.Background(), nil, tt.candidates)
+				if len(got) == 0 {
+					t.Fatalf("iter %d: empty survivor set", i)
+				}
+				// All survivors are the same revision (gating collapsed
+				// candidates to one revision). Sample the first.
+				switch got[0].GetMetadata().Labels[testRevLabel] {
+				case "v2":
+					v2Wins++
+				case "v1":
+					// counted implicitly
+				default:
+					t.Fatalf("iter %d: unexpected revision label %q", i, got[0].GetMetadata().Labels[testRevLabel])
+				}
+			}
+
+			gotV2Share := float64(v2Wins) / float64(iterations)
+			diff := gotV2Share - tt.wantV2Share
+			if diff < -tolerance || diff > tolerance {
+				t.Fatalf("v2 share: want %.3f (±%.3f), got %.3f (%d/%d) — diff %.3fpp",
+					tt.wantV2Share, tolerance, gotV2Share, v2Wins, iterations, diff*100)
+			}
+		})
 	}
-	v2Share := float64(iterations-v1Wins) / float64(iterations)
-	// Expected 3/23 ≈ 0.1304 — tolerance loose enough for 10k iterations
-	// with the process-global RNG.
-	if v2Share < 0.11 || v2Share > 0.16 {
-		t.Fatalf("v2 share (2p+18d vs 1p+2d): want ≈13%%, got %.2f%% over %d iterations", v2Share*100, iterations)
+}
+
+// candidatePool builds a candidate list with n1 v1-labelled endpoints and
+// n2 v2-labelled endpoints — mirrors what a prefill EPP would receive from
+// endpoint discovery when the pool has (n1, n2) prefill Ready pods.
+func candidatePool(n1, n2 int) []fwksched.Endpoint {
+	pods := make([]fwksched.Endpoint, 0, n1+n2)
+	for i := 0; i < n1; i++ {
+		pods = append(pods, endpoint("v1-"+strconv.Itoa(i), revLabels("v1")))
 	}
+	for i := 0; i < n2; i++ {
+		pods = append(pods, endpoint("v2-"+strconv.Itoa(i), revLabels("v2")))
+	}
+	return pods
 }
 
 func TestGatingFilter_SingleRevisionDoesNotConsumeRand(t *testing.T) {
