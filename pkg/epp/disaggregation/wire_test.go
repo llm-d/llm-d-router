@@ -38,7 +38,7 @@ func TestWireInto_StrictAtHead_PreferAtTail(t *testing.T) {
 		LabelKey:   "mistral.ai/slice",
 		Mode:       ModePrefer,
 	})
-	controller := NewController(config, nil)
+	controller := newTestController(config)
 	requestControlConfig := requestcontrol.NewConfig()
 
 	if err := WireInto(schedulerConfig, requestControlConfig, controller); err != nil {
@@ -68,7 +68,7 @@ func TestWireInto_OmitsStrictWhenNoStrictSelectors(t *testing.T) {
 
 	config := validConfig()
 	config.Selectors[0].Mode = ModePrefer
-	controller := NewController(config, nil)
+	controller := newTestController(config)
 	requestControlConfig := requestcontrol.NewConfig()
 
 	if err := WireInto(schedulerConfig, requestControlConfig, controller); err != nil {

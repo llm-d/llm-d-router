@@ -23,14 +23,13 @@ func resetMetrics(t *testing.T) {
 	headerStampedTotal.Reset()
 	filterOutcomeTotal.Reset()
 	gatingDroppedTotal.Reset()
-	cacheReadyPods.Reset()
 }
 
 // --- Header stamped --------------------------------------------------------
 
 func TestMetric_HeaderStamped_IncrementsPerSelector(t *testing.T) {
 	resetMetrics(t)
-	controller := NewController(validConfig(), nil)
+	controller := newTestController(validConfig())
 	controller.ResponseHeader(context.Background(), nil,
 		&fwkrc.Response{Headers: map[string]string{}},
 		&fwkdl.EndpointMetadata{Labels: revLabels("v1")},
@@ -42,7 +41,7 @@ func TestMetric_HeaderStamped_IncrementsPerSelector(t *testing.T) {
 
 func TestMetric_HeaderStamped_SkipsMissingLabel(t *testing.T) {
 	resetMetrics(t)
-	controller := NewController(validConfig(), nil)
+	controller := newTestController(validConfig())
 	controller.ResponseHeader(context.Background(), nil,
 		&fwkrc.Response{Headers: map[string]string{}},
 		&fwkdl.EndpointMetadata{Labels: map[string]string{}},
@@ -56,7 +55,7 @@ func TestMetric_HeaderStamped_SkipsMissingLabel(t *testing.T) {
 
 func TestMetric_FilterOutcome_Matched(t *testing.T) {
 	resetMetrics(t)
-	controller := NewController(validConfig(), nil)
+	controller := newTestController(validConfig())
 	controller.Filter(context.Background(),
 		&fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v1"}},
 		[]fwksched.Endpoint{endpoint("p1", revLabels("v1"))},
@@ -69,7 +68,7 @@ func TestMetric_FilterOutcome_Matched(t *testing.T) {
 
 func TestMetric_FilterOutcome_NoMatchStrict(t *testing.T) {
 	resetMetrics(t)
-	controller := NewController(validConfig(), nil)
+	controller := newTestController(validConfig())
 	controller.Filter(context.Background(),
 		&fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}},
 		[]fwksched.Endpoint{endpoint("p1", revLabels("v1"))},
@@ -84,7 +83,7 @@ func TestMetric_FilterOutcome_NoMatchPreferFallback(t *testing.T) {
 	resetMetrics(t)
 	config := validConfig()
 	config.Selectors[0].Mode = ModePrefer
-	controller := NewController(config, nil)
+	controller := newTestController(config)
 	controller.Filter(context.Background(),
 		&fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}},
 		[]fwksched.Endpoint{endpoint("p1", revLabels("v1"))},
@@ -99,14 +98,13 @@ func TestMetric_FilterOutcome_NoMatchPreferFallback(t *testing.T) {
 
 func TestMetric_GatingDropped_OncePerRevisionPerCall(t *testing.T) {
 	resetMetrics(t)
-	podCache := seedCache(t,
+	controller := newTestController(validConfig(),
 		readyPod("p1", "v1", "prefill"),
 		readyPod("p2", "v1", "prefill"),
 		readyPod("p3", "v1", "prefill"),
 		readyPod("p4", "v2", "prefill"),
 		readyPod("d4", "v2", "decode"),
 	)
-	controller := NewController(validConfig(), podCache)
 	filter := newGatingFilter(controller)
 	pods := []fwksched.Endpoint{
 		endpoint("p1", revLabels("v1")),
@@ -124,23 +122,5 @@ func TestMetric_GatingDropped_OncePerRevisionPerCall(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(gatingDroppedTotal.WithLabelValues("v2")); got != 0 {
 		t.Fatalf("v2 satisfied gate: want 0, got %v", got)
-	}
-}
-
-// --- Cache gauge -----------------------------------------------------------
-
-func TestMetric_CacheReadyPods_TracksInformerState(t *testing.T) {
-	resetMetrics(t)
-	seedCache(t,
-		readyPod("p1", "v1", "prefill"),
-		readyPod("p2", "v1", "prefill"),
-		readyPod("d1", "v1", "decode"),
-	)
-
-	if got := testutil.ToFloat64(cacheReadyPods.WithLabelValues("prefill", "v1")); got != 2 {
-		t.Errorf("prefill v1: want 2, got %v", got)
-	}
-	if got := testutil.ToFloat64(cacheReadyPods.WithLabelValues("decode", "v1")); got != 1 {
-		t.Errorf("decode v1: want 1, got %v", got)
 	}
 }

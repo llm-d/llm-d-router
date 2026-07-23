@@ -2,15 +2,63 @@ package disaggregation
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
+
+const (
+	testRevLabel  = "disaggregatedset.x-k8s.io/revision"
+	testRoleLabel = "disaggregatedset.x-k8s.io/role"
+	testNS        = "default"
+	testSelector  = "disaggregatedset.x-k8s.io/name=my-set"
+)
+
+func readyPod(name, revision, role string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testNS,
+			Labels: map[string]string{
+				testRevLabel:                     revision,
+				testRoleLabel:                    role,
+				"disaggregatedset.x-k8s.io/name": "my-set",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+}
+
+// fakeReader builds a controller-runtime fake client seeded with the given
+// pods. Used everywhere a test needs a controller with a functional reader.
+func fakeReader(pods ...*corev1.Pod) client.Reader {
+	objs := make([]client.Object, 0, len(pods))
+	for _, p := range pods {
+		objs = append(objs, p)
+	}
+	return fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(objs...).Build()
+}
+
+func newTestController(cfg Config, pods ...*corev1.Pod) *Controller {
+	scope, _ := labels.Parse(testSelector)
+	return NewController(cfg, fakeReader(pods...), testNS, scope)
+}
 
 func endpoint(name string, labels map[string]string) fwksched.Endpoint {
 	meta := &fwkdl.EndpointMetadata{
@@ -23,15 +71,15 @@ func endpoint(name string, labels map[string]string) fwksched.Endpoint {
 
 func revLabels(revision string) map[string]string {
 	return map[string]string{
-		"disaggregatedset.x-k8s.io/revision": revision,
-		"disaggregatedset.x-k8s.io/role":     "prefill",
+		testRevLabel:  revision,
+		testRoleLabel: "prefill",
 	}
 }
 
 // --- Filter tests -----------------------------------------------------------
 
 func TestFilter_StrictWithMatch(t *testing.T) {
-	c := NewController(validConfig(), nil)
+	c := newTestController(validConfig())
 	pods := []fwksched.Endpoint{
 		endpoint("p1", revLabels("v1")),
 		endpoint("p2", revLabels("v2")),
@@ -44,10 +92,8 @@ func TestFilter_StrictWithMatch(t *testing.T) {
 }
 
 func TestFilter_StrictNoMatchReturnsEmpty(t *testing.T) {
-	c := NewController(validConfig(), nil)
-	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1")),
-	}
+	c := newTestController(validConfig())
+	pods := []fwksched.Endpoint{endpoint("p1", revLabels("v1"))}
 	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}}
 	got := c.Filter(context.Background(), req, pods)
 	if len(got) != 0 {
@@ -58,7 +104,7 @@ func TestFilter_StrictNoMatchReturnsEmpty(t *testing.T) {
 func TestFilter_PreferFallsBack(t *testing.T) {
 	cfg := validConfig()
 	cfg.Selectors[0].Mode = ModePrefer
-	c := NewController(cfg, nil)
+	c := newTestController(cfg)
 	pods := []fwksched.Endpoint{
 		endpoint("p1", revLabels("v1")),
 		endpoint("p2", revLabels("v2")),
@@ -71,7 +117,7 @@ func TestFilter_PreferFallsBack(t *testing.T) {
 }
 
 func TestFilter_HeaderAbsentIsNoop(t *testing.T) {
-	c := NewController(validConfig(), nil)
+	c := newTestController(validConfig())
 	pods := []fwksched.Endpoint{
 		endpoint("p1", revLabels("v1")),
 		endpoint("p2", revLabels("v2")),
@@ -91,7 +137,7 @@ func TestFilter_MultipleSelectorsAppliedInOrder(t *testing.T) {
 		LabelKey:   "mistral.ai/slice",
 		Mode:       ModeStrict,
 	})
-	c := NewController(cfg, nil)
+	c := newTestController(cfg)
 	makeLabels := func(rev, slice string) map[string]string {
 		m := revLabels(rev)
 		m["mistral.ai/slice"] = slice
@@ -113,7 +159,7 @@ func TestFilter_MultipleSelectorsAppliedInOrder(t *testing.T) {
 }
 
 func TestFilter_NilRequestIsNoop(t *testing.T) {
-	c := NewController(validConfig(), nil)
+	c := newTestController(validConfig())
 	pods := []fwksched.Endpoint{endpoint("p1", revLabels("v1"))}
 	got := c.Filter(context.Background(), nil, pods)
 	if len(got) != 1 {
@@ -121,26 +167,19 @@ func TestFilter_NilRequestIsNoop(t *testing.T) {
 	}
 }
 
-// TestFilter_PreferDoesNotRescueAfterStrictEmpties verifies that when a
-// strict selector has already emptied the current pool, a subsequent prefer
-// selector does NOT restore anything. Prefer's fallback is "keep what you
-// have," and after strict zeroed it, "what you have" is nothing.
 func TestFilter_PreferDoesNotRescueAfterStrictEmpties(t *testing.T) {
 	config := validConfig()
-	// Second selector: prefer mode on a different label.
 	config.Selectors = append(config.Selectors, Selector{
 		Name:       "slice",
 		HeaderName: "x-disagg-slice",
 		LabelKey:   "mistral.ai/slice",
 		Mode:       ModePrefer,
 	})
-	c := NewController(config, nil)
+	c := newTestController(config)
 	pods := []fwksched.Endpoint{
 		endpoint("p1", revLabels("v1")),
 		endpoint("p2", revLabels("v2")),
 	}
-	// Strict revision header will match zero pods → current becomes empty.
-	// Prefer slice header with a match SHOULD NOT resurrect anything.
 	req := &fwksched.InferenceRequest{Headers: map[string]string{
 		"x-disagg-revision": "v99",
 		"x-disagg-slice":    "any",
@@ -151,16 +190,12 @@ func TestFilter_PreferDoesNotRescueAfterStrictEmpties(t *testing.T) {
 	}
 }
 
-// TestFilter_ReturnsFreshSlice locks in the convention that Filter never
-// hands back the caller's slice. Callers should be free to mutate the input
-// after Filter returns without seeing our result change.
 func TestFilter_ReturnsFreshSlice(t *testing.T) {
-	c := NewController(validConfig(), nil)
+	c := newTestController(validConfig())
 	pods := []fwksched.Endpoint{
 		endpoint("p1", revLabels("v1")),
 		endpoint("p2", revLabels("v2")),
 	}
-	// No header → filter is a no-op, but must still return a copy.
 	req := &fwksched.InferenceRequest{Headers: map[string]string{}}
 	got := c.Filter(context.Background(), req, pods)
 	if len(got) != 2 || len(pods) != 2 {
@@ -172,11 +207,11 @@ func TestFilter_ReturnsFreshSlice(t *testing.T) {
 	}
 }
 
-// --- gatingFilter fixture --------------------------------------------------
+// --- gatingFilter tests ----------------------------------------------------
 
-// scoreFixture builds a controller wired to a cache with the given pod counts.
-// counts[revision][role] = ready pod count.
-func scoreFixture(t *testing.T, cfg Config, counts map[string]map[string]int) *Controller {
+// gatingFixture builds a controller wired to a fake reader with the given
+// pod counts. counts[revision][role] = ready pod count.
+func gatingFixture(t *testing.T, cfg Config, counts map[string]map[string]int) *Controller {
 	t.Helper()
 	var pods []*corev1.Pod
 	i := 0
@@ -184,32 +219,15 @@ func scoreFixture(t *testing.T, cfg Config, counts map[string]map[string]int) *C
 		for role, n := range roles {
 			for k := 0; k < n; k++ {
 				i++
-				name := "pod-" + rev + "-" + role + "-" + itoa(i)
-				pods = append(pods, readyPod(name, rev, role))
+				pods = append(pods, readyPod("pod-"+rev+"-"+role+"-"+strconv.Itoa(i), rev, role))
 			}
 		}
 	}
-	return NewController(cfg, seedCache(t, pods...))
+	return newTestController(cfg, pods...)
 }
-
-// itoa avoids importing strconv just for tests.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	digits := "0123456789"
-	buf := make([]byte, 0, 6)
-	for n > 0 {
-		buf = append([]byte{digits[n%10]}, buf...)
-		n /= 10
-	}
-	return string(buf)
-}
-
-// --- gatingFilter tests ----------------------------------------------------
 
 func TestGatingFilter_KeepsCandidatesWithLiveCrossRoles(t *testing.T) {
-	c := scoreFixture(t, validConfig(), map[string]map[string]int{
+	c := gatingFixture(t, validConfig(), map[string]map[string]int{
 		"v1": {"prefill": 3, "decode": 3},
 		"v2": {"prefill": 1, "decode": 1},
 	})
@@ -225,8 +243,7 @@ func TestGatingFilter_KeepsCandidatesWithLiveCrossRoles(t *testing.T) {
 }
 
 func TestGatingFilter_DropsCandidatesWithMissingRole(t *testing.T) {
-	// decode-v1 has zero Ready pods → v1 candidates must be dropped.
-	c := scoreFixture(t, validConfig(), map[string]map[string]int{
+	c := gatingFixture(t, validConfig(), map[string]map[string]int{
 		"v1": {"prefill": 3, "decode": 0},
 		"v2": {"prefill": 1, "decode": 4},
 	})
@@ -244,8 +261,7 @@ func TestGatingFilter_DropsCandidatesWithMissingRole(t *testing.T) {
 }
 
 func TestGatingFilter_AllRevisionsDeadReturnsEmpty(t *testing.T) {
-	// no decode pods anywhere → every revision fails the gate.
-	c := scoreFixture(t, validConfig(), map[string]map[string]int{
+	c := gatingFixture(t, validConfig(), map[string]map[string]int{
 		"v1": {"prefill": 3},
 		"v2": {"prefill": 1},
 	})
@@ -263,8 +279,7 @@ func TestGatingFilter_AllRevisionsDeadReturnsEmpty(t *testing.T) {
 func TestGatingFilter_NoGatingConfigIsNoop(t *testing.T) {
 	cfg := validConfig()
 	cfg.Gating = nil
-	// Fresh controller without a pod cache (nil is safe when gating is off).
-	c := NewController(cfg, nil)
+	c := newTestController(cfg)
 	f := newGatingFilter(c)
 	pods := []fwksched.Endpoint{
 		endpoint("p1", revLabels("v1")),
@@ -277,11 +292,9 @@ func TestGatingFilter_NoGatingConfigIsNoop(t *testing.T) {
 }
 
 func TestGatingFilter_DisabledModeIsNoop(t *testing.T) {
-	// mode=disabled with a filled sub-block should still pass through: the
-	// user asked us not to gate.
 	cfg := validConfig()
 	cfg.Gating.Mode = GatingModeDisabled
-	c := NewController(cfg, nil)
+	c := newTestController(cfg)
 	f := newGatingFilter(c)
 	pods := []fwksched.Endpoint{
 		endpoint("p1", revLabels("v1")),
@@ -296,7 +309,7 @@ func TestGatingFilter_DisabledModeIsNoop(t *testing.T) {
 // --- ResponseHeader tests ---------------------------------------------------
 
 func TestResponseHeader_StampsSelectorHeader(t *testing.T) {
-	c := NewController(validConfig(), nil)
+	c := newTestController(validConfig())
 	resp := &fwkrc.Response{Headers: map[string]string{}}
 	ep := &fwkdl.EndpointMetadata{Labels: revLabels("v1")}
 	c.ResponseHeader(context.Background(), nil, resp, ep)
@@ -311,7 +324,7 @@ func TestResponseHeader_MultipleSelectorsStampAll(t *testing.T) {
 		Name: "slice", HeaderName: "x-disagg-slice",
 		LabelKey: "mistral.ai/slice", Mode: ModeStrict,
 	})
-	c := NewController(cfg, nil)
+	c := newTestController(cfg)
 	resp := &fwkrc.Response{Headers: map[string]string{}}
 	labels := revLabels("v1")
 	labels["mistral.ai/slice"] = "s1"
@@ -322,9 +335,8 @@ func TestResponseHeader_MultipleSelectorsStampAll(t *testing.T) {
 }
 
 func TestResponseHeader_MissingLabelSkipsSilently(t *testing.T) {
-	c := NewController(validConfig(), nil)
+	c := newTestController(validConfig())
 	resp := &fwkrc.Response{Headers: map[string]string{}}
-	// no revision label on this pod
 	c.ResponseHeader(context.Background(), nil, resp, &fwkdl.EndpointMetadata{Labels: map[string]string{}})
 	if _, ok := resp.Headers["x-disagg-revision"]; ok {
 		t.Fatalf("no-label pod should not stamp: %v", resp.Headers)
@@ -332,7 +344,7 @@ func TestResponseHeader_MissingLabelSkipsSilently(t *testing.T) {
 }
 
 func TestResponseHeader_NilEndpointIsNoop(t *testing.T) {
-	c := NewController(validConfig(), nil)
+	c := newTestController(validConfig())
 	resp := &fwkrc.Response{Headers: map[string]string{}}
 	c.ResponseHeader(context.Background(), nil, resp, nil)
 	if len(resp.Headers) != 0 {
@@ -341,7 +353,6 @@ func TestResponseHeader_NilEndpointIsNoop(t *testing.T) {
 }
 
 func TestResponseHeader_NilResponseIsNoop(t *testing.T) {
-	c := NewController(validConfig(), nil)
-	// must not panic
+	c := newTestController(validConfig())
 	c.ResponseHeader(context.Background(), nil, nil, &fwkdl.EndpointMetadata{Labels: revLabels("v1")})
 }

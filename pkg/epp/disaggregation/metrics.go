@@ -41,15 +41,6 @@ var (
 		},
 		[]string{"revision"},
 	)
-
-	cacheReadyPods = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: metricsSubsystem,
-			Name:      metricsPrefix + "_cache_ready_pods",
-			Help:      "Ready pod count observed by the disaggregation informer, by role and revision.",
-		},
-		[]string{"role", "revision"},
-	)
 )
 
 var registerMetricsOnce sync.Once
@@ -62,7 +53,6 @@ func registerMetrics() {
 			headerStampedTotal,
 			filterOutcomeTotal,
 			gatingDroppedTotal,
-			cacheReadyPods,
 		)
 	})
 }
@@ -91,12 +81,4 @@ func recordFilterOutcome(selectorName string, mode SelectorMode, outcome string)
 
 func recordGatingDropped(revision string) {
 	gatingDroppedTotal.WithLabelValues(revision).Inc()
-}
-
-func recordCacheSet(role, revision string, count int) {
-	cacheReadyPods.WithLabelValues(role, revision).Set(float64(count))
-}
-
-func recordCacheDelete(role, revision string) {
-	cacheReadyPods.DeleteLabelValues(role, revision)
 }

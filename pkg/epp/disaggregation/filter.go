@@ -49,14 +49,17 @@ func (f *modeSelectorsFilter) Filter(ctx context.Context, request *fwksched.Infe
 }
 
 // gatingFilter drops candidates whose revision fails the gating check.
-// Appended after the strict and prefer selector wrappers so revision selection
-// has already narrowed the pool. Runs even when no selector header is set:
-// this filter is the safety gate against rollout drift, independent of client
-// behaviour.
+// Appended after the strict and prefer selector wrappers so revision
+// selection has already narrowed the pool. Runs even when no selector
+// header is set: this is the safety gate against rollout drift,
+// independent of client behaviour.
+//
+// One cache-backed List per Filter call, memoized against the revisions
+// that actually appear in the candidate list — so gating cost scales with
+// the number of distinct revisions in play, not the size of the namespace.
 type gatingFilter struct {
-	controller       *Controller
-	revisionLabelKey string
-	typedName        fwkplugin.TypedName
+	controller *Controller
+	typedName  fwkplugin.TypedName
 }
 
 var (
@@ -65,27 +68,28 @@ var (
 )
 
 func newGatingFilter(controller *Controller) *gatingFilter {
-	// Group by the first selector's label key (typically "revision"), same
-	// as elsewhere in the controller.
-	revisionLabelKey := ""
-	if len(controller.config.Selectors) > 0 {
-		revisionLabelKey = controller.config.Selectors[0].LabelKey
-	}
 	return &gatingFilter{
-		controller:       controller,
-		revisionLabelKey: revisionLabelKey,
-		typedName:        fwkplugin.TypedName{Type: gatingFilterType, Name: gatingFilterType},
+		controller: controller,
+		typedName:  fwkplugin.TypedName{Type: gatingFilterType, Name: gatingFilterType},
 	}
 }
 
 func (f *gatingFilter) TypedName() fwkplugin.TypedName { return f.typedName }
 
-func (f *gatingFilter) Filter(_ context.Context, _ *fwksched.InferenceRequest, pods []fwksched.Endpoint) []fwksched.Endpoint {
+func (f *gatingFilter) Filter(ctx context.Context, _ *fwksched.InferenceRequest, pods []fwksched.Endpoint) []fwksched.Endpoint {
 	gating := f.controller.config.Gating
-	if !gating.Active() || f.revisionLabelKey == "" {
+	revisionLabelKey := f.controller.revisionLabelKey
+	if !gating.Active() || revisionLabelKey == "" {
 		return append(make([]fwksched.Endpoint, 0, len(pods)), pods...)
 	}
 	requiredRoles := gating.RequireRoles.Values
+
+	_, liveRoles, err := f.controller.scanCoverage(ctx)
+	if err != nil {
+		// Cache-backed List failing is unexpected; be pessimistic and drop
+		// everything rather than route to potentially-broken revisions.
+		return nil
+	}
 
 	survivors := make([]fwksched.Endpoint, 0, len(pods))
 	droppedRevisions := make(map[string]struct{})
@@ -93,18 +97,11 @@ func (f *gatingFilter) Filter(_ context.Context, _ *fwksched.InferenceRequest, p
 		if endpoint == nil || endpoint.GetMetadata() == nil {
 			continue
 		}
-		revision := endpoint.GetMetadata().Labels[f.revisionLabelKey]
+		revision := endpoint.GetMetadata().Labels[revisionLabelKey]
 		if revision == "" {
 			continue
 		}
-		gated := false
-		for _, requiredRole := range requiredRoles {
-			if !f.controller.podCache.HasRoleForRevision(revision, requiredRole) {
-				gated = true
-				break
-			}
-		}
-		if gated {
+		if !allRolesLive(liveRoles[revision], requiredRoles) {
 			if _, reported := droppedRevisions[revision]; !reported {
 				recordGatingDropped(revision)
 				droppedRevisions[revision] = struct{}{}
@@ -114,4 +111,13 @@ func (f *gatingFilter) Filter(_ context.Context, _ *fwksched.InferenceRequest, p
 		survivors = append(survivors, endpoint)
 	}
 	return survivors
+}
+
+func allRolesLive(present map[string]bool, required []string) bool {
+	for _, role := range required {
+		if !present[role] {
+			return false
+		}
+	}
+	return true
 }
