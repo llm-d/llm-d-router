@@ -191,3 +191,15 @@ func (s *LASStrategy) EvictProgram(id string) {
 func (s *LASStrategy) Collectors() []prometheus.Collector {
 	return []prometheus.Collector{attainedServiceTokens}
 }
+
+// ServiceForProgram returns a program's current attained service, or 0 if the
+// program has no LAS state. It never creates state, so calling it from the debug
+// dump cannot resurrect an evicted program.
+func (s *LASStrategy) ServiceForProgram(id string) float64 {
+	if a, ok := s.state.Load(id); ok {
+		if st, ok := a.(*lasState); ok {
+			return st.Service()
+		}
+	}
+	return 0
+}
