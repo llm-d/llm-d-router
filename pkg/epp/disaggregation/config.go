@@ -87,9 +87,15 @@ type Gating struct {
 type GatingMode string
 
 const (
-	// GatingModeSum drops a revision's candidates when any listed role has
-	// zero Ready pods for that revision. The "sum" name reflects the
-	// per-role sum-then-nonzero check across every listed role.
+	// GatingModeSum does two things per Filter call:
+	//   1. Drop any revision missing Ready pods on any listed role
+	//      (rollout drift safety).
+	//   2. Weighted-random-pick ONE surviving revision, weighted by the
+	//      SUM of Ready pod counts across every listed role, and keep
+	//      only that revision's candidates.
+	// Traffic converges on (Σ crossRolePods(rev) / Σ Σ crossRolePods),
+	// independent of the picker downstream. The "sum" name refers to the
+	// per-revision sum used as weight.
 	GatingModeSum GatingMode = "sum"
 	// GatingModeDisabled skips wiring the filter even when a Gating block
 	// is present. Lets operators keep the block for documentation while

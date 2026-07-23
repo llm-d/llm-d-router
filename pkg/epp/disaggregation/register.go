@@ -92,7 +92,7 @@ func gatingForLog(g *Gating) string {
 //     single revision — the filter would otherwise silently drop every
 //     endpoint at request time.
 func validateRolesObserved(ctx context.Context, c *Controller, roles []string) error {
-	revisions, liveRoles, err := c.scanCoverage(ctx)
+	revisions, roleCounts, err := c.scanCoverage(ctx)
 	if err != nil {
 		return err
 	}
@@ -102,7 +102,7 @@ func validateRolesObserved(ctx context.Context, c *Controller, roles []string) e
 	for _, role := range roles {
 		observed := false
 		for revision := range revisions {
-			if liveRoles[revision][role] {
+			if roleCounts[revision][role] > 0 {
 				observed = true
 				break
 			}
@@ -112,7 +112,7 @@ func validateRolesObserved(ctx context.Context, c *Controller, roles []string) e
 		}
 	}
 	for revision := range revisions {
-		if allRolesLive(liveRoles[revision], roles) {
+		if crossRoleWeight(roleCounts[revision], roles) > 0 {
 			return nil
 		}
 	}

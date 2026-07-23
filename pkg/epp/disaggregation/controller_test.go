@@ -226,20 +226,86 @@ func gatingFixture(t *testing.T, cfg Config, counts map[string]map[string]int) *
 	return newTestController(cfg, pods...)
 }
 
-func TestGatingFilter_KeepsCandidatesWithLiveCrossRoles(t *testing.T) {
+func TestGatingFilter_KeepsOneRevisionPerCall(t *testing.T) {
+	// Both revisions are alive → gating picks ONE per request, weighted by
+	// cross-role pod count. The picker downstream then sees only that
+	// revision's pods. Which one wins depends on rand01; here we fix it
+	// so the assertion is deterministic.
 	c := gatingFixture(t, validConfig(), map[string]map[string]int{
 		"v1": {"prefill": 3, "decode": 3},
 		"v2": {"prefill": 1, "decode": 1},
 	})
 	f := newGatingFilter(c)
+	f.rand01 = constRand(0.0) // pick the first revision in sorted order (v1)
 	pods := []fwksched.Endpoint{
 		endpoint("p1", revLabels("v1")),
 		endpoint("p2", revLabels("v2")),
 	}
 	got := f.Filter(context.Background(), nil, pods)
-	if len(got) != 2 {
-		t.Fatalf("both revisions alive → both survive; got %d", len(got))
+	if len(got) != 1 || got[0].GetMetadata().PodName != "p1" {
+		t.Fatalf("rand01=0 with sorted revs [v1,v2] must pick v1's p1; got %v", got)
 	}
+}
+
+func TestGatingFilter_WeightedPickAcrossRolesLikeUsersExample(t *testing.T) {
+	// 2p+18d (v1) / 1p+2d (v2) — weight v1=20, v2=3, so v2's share of the
+	// weighted pick is 3/23 ≈ 13% over many iterations. Runs 10k
+	// iterations for a tight-enough Monte Carlo bound.
+	c := gatingFixture(t, validConfig(), map[string]map[string]int{
+		"v1": {"prefill": 2, "decode": 18},
+		"v2": {"prefill": 1, "decode": 2},
+	})
+	f := newGatingFilter(c)
+	// The prefill EPP only sees prefill pods as candidates.
+	pods := []fwksched.Endpoint{
+		endpoint("p1a", revLabels("v1")),
+		endpoint("p1b", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
+	}
+	const iterations = 10000
+	v1Wins := 0
+	for i := 0; i < iterations; i++ {
+		got := f.Filter(context.Background(), nil, pods)
+		if len(got) == 0 {
+			t.Fatalf("iter %d: empty survivor set", i)
+		}
+		switch got[0].GetMetadata().Labels[testRevLabel] {
+		case "v1":
+			v1Wins++
+		case "v2":
+			// counted implicitly
+		default:
+			t.Fatalf("iter %d: unexpected revision label", i)
+		}
+	}
+	v2Share := float64(iterations-v1Wins) / float64(iterations)
+	// Expected 3/23 ≈ 0.1304 — tolerance loose enough for 10k iterations
+	// with the process-global RNG.
+	if v2Share < 0.11 || v2Share > 0.16 {
+		t.Fatalf("v2 share (2p+18d vs 1p+2d): want ≈13%%, got %.2f%% over %d iterations", v2Share*100, iterations)
+	}
+}
+
+func TestGatingFilter_SingleRevisionDoesNotConsumeRand(t *testing.T) {
+	// When only one revision is present, the pick is deterministic and
+	// rand01 must not be called (avoiding needless RNG contention). A
+	// panicking rand asserts this.
+	c := gatingFixture(t, validConfig(), map[string]map[string]int{
+		"v1": {"prefill": 3, "decode": 3},
+	})
+	f := newGatingFilter(c)
+	f.rand01 = func() float64 { panic("rand01 should not be called with a single revision") }
+	pods := []fwksched.Endpoint{endpoint("p1", revLabels("v1"))}
+	got := f.Filter(context.Background(), nil, pods)
+	if len(got) != 1 {
+		t.Fatalf("single-revision passthrough failed: %v", got)
+	}
+}
+
+// constRand returns a rand01 stub that always yields x. Used in tests to
+// pin the weighted pick to a known outcome.
+func constRand(x float64) func() float64 {
+	return func() float64 { return x }
 }
 
 func TestGatingFilter_DropsCandidatesWithMissingRole(t *testing.T) {

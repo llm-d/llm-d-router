@@ -137,9 +137,10 @@ func (c *Controller) ResponseHeader(_ context.Context, _ *fwksched.InferenceRequ
 }
 
 // scanCoverage lists Ready pods matching the controller's scope and groups
-// them by (revision → set of live roles). One cache-backed List per call.
-// Used by the gating filter (per request) and by boot validation.
-func (c *Controller) scanCoverage(ctx context.Context) (revisions map[string]struct{}, liveRoles map[string]map[string]bool, err error) {
+// them by (revision → role → count). One cache-backed List per call. Used
+// by the gating filter (per request, for both coverage AND revision-weight
+// computation) and by boot validation.
+func (c *Controller) scanCoverage(ctx context.Context) (revisions map[string]struct{}, roleCounts map[string]map[string]int, err error) {
 	var podList corev1.PodList
 	if err := c.reader.List(ctx, &podList,
 		client.InNamespace(c.namespace),
@@ -148,7 +149,7 @@ func (c *Controller) scanCoverage(ctx context.Context) (revisions map[string]str
 		return nil, nil, fmt.Errorf("list pods in scope: %w", err)
 	}
 	revisions = make(map[string]struct{})
-	liveRoles = make(map[string]map[string]bool)
+	roleCounts = make(map[string]map[string]int)
 	for i := range podList.Items {
 		pod := &podList.Items[i]
 		if !isPodReady(pod) {
@@ -168,12 +169,12 @@ func (c *Controller) scanCoverage(ctx context.Context) (revisions map[string]str
 			// a coverage check for that revision.
 			continue
 		}
-		if liveRoles[revision] == nil {
-			liveRoles[revision] = make(map[string]bool)
+		if roleCounts[revision] == nil {
+			roleCounts[revision] = make(map[string]int)
 		}
-		liveRoles[revision][role] = true
+		roleCounts[revision][role]++
 	}
-	return revisions, liveRoles, nil
+	return revisions, roleCounts, nil
 }
 
 // isPodReady reports whether a pod is Running, not being terminated, and
