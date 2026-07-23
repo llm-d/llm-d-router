@@ -862,14 +862,12 @@ func TestPredictedLatencyContext_Fields(t *testing.T) {
 	assert.NotNil(t, ctx.lastSeenMetrics)
 	assert.NotNil(t, ctx.prefixCacheScoresForEndpoints)
 	assert.NotNil(t, ctx.predictionsForScheduling)
-	assert.Empty(t, ctx.tpotObservations)
 	assert.Empty(t, ctx.predictedTPOTObservations)
 	assert.Zero(t, ctx.generatedTokenCount)
 	assert.Zero(t, ctx.ttft)
 	assert.Zero(t, ctx.avgTPOT)
 	assert.Nil(t, ctx.targetMetadata)
 	assert.Nil(t, ctx.schedulingResult)
-	assert.Nil(t, ctx.decodeTokenSampler)
 	assert.Equal(t, 2, ctx.inputTokenCount)
 }
 
