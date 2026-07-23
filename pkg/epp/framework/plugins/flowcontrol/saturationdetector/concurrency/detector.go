@@ -124,6 +124,10 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 // It returns an aggregate saturation signal where:
 //
 //	Saturation = Total Inflight Requests / Total MaxConcurrency Capacity.
+//
+// The inflight counts are read from the InFlightLoad attribute, which the
+// InFlightLoadProducer increments at dispatch and decrements on request
+// completion, so the signal already reflects completions with no scrape lag.
 func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
 	if len(endpoints) == 0 {
 		return 1.0

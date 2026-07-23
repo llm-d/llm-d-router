@@ -28,6 +28,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 )
 
 func makePodMetric(name string, queueDepth int, kvUsage float64, updateTime time.Time) fwkdl.Endpoint {
@@ -216,8 +217,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod2: Q=0/5(0.0), KV=0.2/0.9(0.22). Max=0.22...
 				makePodMetric("pod2", 0, 0.2, baseTime),
 			},
-			// Avg(0.2, 0.222...) = 0.2111...
-			wantSaturation: (0.2 + (0.2 / 0.9)) / 2.0,
+			// Max(0.2, 0.222...) = 0.222...  (pool = hottest endpoint)
+			wantSaturation: 0.2 / 0.9,
 		},
 		{
 			name: "Multiple pods, one good, one stale",
@@ -227,8 +228,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod2 (Stale): 1.0.
 				makePodMetric("pod2", 0, 0.2, baseTime.Add(-300*time.Millisecond)),
 			},
-			// Avg(0.2, 1.0) = 0.6
-			wantSaturation: 0.6,
+			// Max(0.2, 1.0) = 1.0
+			wantSaturation: 1.0,
 		},
 		{
 			name: "Multiple pods, one good, one bad (high queue)",
@@ -238,8 +239,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod2 (Bad): Q=15/5(3.0). Max=3.0.
 				makePodMetric("pod2", 15, 0.2, baseTime),
 			},
-			// Avg(0.2, 3.0) = 1.6
-			wantSaturation: 1.6,
+			// Max(0.2, 3.0) = 3.0  (hottest endpoint drives the pool)
+			wantSaturation: 3.0,
 		},
 		{
 			name: "Multiple pods, all bad capacity",
@@ -251,8 +252,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod3 (High KV): 0.99/0.90 = 1.1
 				makePodMetric("pod3", 1, 0.99, baseTime),
 			},
-			// Avg(1.0, 4.0, 1.1) = 6.1 / 3 = 2.033...
-			wantSaturation: (1.0 + 4.0 + 1.1) / 3.0,
+			// Max(1.0, 4.0, 1.1) = 4.0
+			wantSaturation: 4.0,
 		},
 		{
 			name: "Queue depth exactly at threshold",
@@ -280,6 +281,68 @@ func TestDetector_Saturation(t *testing.T) {
 			require.InDelta(t, tc.wantSaturation, got, 1e-4, "Saturation mismatch")
 		})
 	}
+}
+
+// withInFlightLoad attaches the InFlightLoad attribute an inflight-load-producer
+// would inject, under the key the detector reads for a default (unnamed)
+// producer.
+func withInFlightLoad(e fwkdl.Endpoint, requests int64) fwkdl.Endpoint {
+	e.GetAttributes().Put(
+		attrconcurrency.InFlightLoadDataKey.String(),
+		&attrconcurrency.InFlightLoad{Requests: requests},
+	)
+	return e
+}
+
+func TestDetector_Saturation_ScrapeLagCredit(t *testing.T) {
+	t.Parallel()
+
+	baseTime := time.Now()
+	// Queue=3 so the credit maps cleanly: a credit of 3 == +1.0 qRatio.
+	config := &Config{
+		QueueDepthThreshold:       3,
+		KVCacheUtilThreshold:      1.0,
+		MetricsStalenessThreshold: 100 * time.Millisecond,
+	}
+	detector := NewDetector("test-detector", *config, logr.Discard())
+	ctx := context.Background()
+
+	// pod builds a single fresh endpoint with a settable scraped waiting/running
+	// split and a low fixed KV term, so the queue term drives the score.
+	pod := func(waiting, running int) fwkdl.Endpoint {
+		meta := &fwkdl.EndpointMetadata{
+			NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "ns1"},
+		}
+		metrics := fwkdl.NewMetrics()
+		metrics.WaitingQueueSize = waiting
+		metrics.RunningRequestsSize = running
+		metrics.KVCacheUsagePercent = 0.1
+		metrics.UpdateTime = baseTime
+		return fwkdl.NewEndpoint(meta, metrics)
+	}
+
+	// No InFlightLoad attribute: falls back to scraped queue depth. KV=0.1 wins.
+	noAttr := []fwkdl.Endpoint{pod(0, 0)}
+	require.InDelta(t, 0.1, detector.Saturation(ctx, noAttr), 1e-4,
+		"no in-flight attribute -> scraped queue depth only")
+
+	// In-flight tracks 3 requests the scrape has not reflected (waiting+running=0):
+	// credit 3 -> qRatio (0+3)/3 = 1.0 > KV(0.1).
+	lag := []fwkdl.Endpoint{withInFlightLoad(pod(0, 0), 3)}
+	require.InDelta(t, 1.0, detector.Saturation(ctx, lag), 1e-4,
+		"3 in-flight unobserved -> qRatio 1.0")
+
+	// Scrape has caught up: waiting+running already accounts for all in-flight, so
+	// the credit floors at 0 and the term is the measured queue depth (2/3).
+	caughtUp := []fwkdl.Endpoint{withInFlightLoad(pod(2, 1), 3)}
+	require.InDelta(t, 2.0/3.0, detector.Saturation(ctx, caughtUp), 1e-4,
+		"scrape reflects all in-flight -> credit 0, measured queue depth")
+
+	// Running requests are not double-counted: in-flight 4, scrape shows 1 waiting +
+	// 2 running, so only 1 request is unobserved -> qRatio (1+1)/3.
+	partial := []fwkdl.Endpoint{withInFlightLoad(pod(1, 2), 4)}
+	require.InDelta(t, 2.0/3.0, detector.Saturation(ctx, partial), 1e-4,
+		"only unobserved in-flight credited, running not double-counted")
 }
 
 func TestDetector_Filter(t *testing.T) {
