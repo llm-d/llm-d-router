@@ -1,4 +1,4 @@
-name: Apply kind labels from PR body
+name: Apply kind/area labels and milestone from PR body
 
 on:
   pull_request_target:
@@ -23,14 +23,53 @@ jobs:
           gh pr view "$PR_NUMBER" --repo "$REPO" --json labels \
             -q '.labels[].name | select(startswith("kind/"))' | \
             while IFS= read -r label; do
-              gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label"
+              gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$label'"
             done
 
           # Extract /kind values from PR body and apply labels
-          printf '%s' "$PR_BODY" | tr -d '\r' | grep '^/kind ' | \
-            sed 's|^/kind ||' | sort -u | \
+          printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/kind[[:space:]][[:space:]]*||p' | sed 's|[[:space:]]*$||' | sort -u | \
             while IFS= read -r kind; do
               [ -z "$kind" ] && continue
               gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "kind/$kind" || \
                 echo "::warning::Label 'kind/$kind' not found in repository"
             done
+
+      - name: Set area labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Absence of a directive is a no-op. Area labels are also set by the
+          # /area comment command and clearing here would wipe those.
+          areas=$(printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/area[[:space:]][[:space:]]*||p' | \
+            sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
+          [ -z "$areas" ] && exit 0
+
+          # Remove existing area/* labels
+          gh pr view "$PR_NUMBER" --repo "$REPO" --json labels \
+            -q '.labels[].name | select(startswith("area/"))' | \
+            while IFS= read -r label; do
+              gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$label'"
+            done
+
+          printf '%s\n' "$areas" | \
+            while IFS= read -r area; do
+              gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "area/$area" || \
+                echo "::warning::Label 'area/$area' not found in repository"
+            done
+
+      - name: Set milestone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Use the last /milestone directive in the PR body
+          milestone=$(printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/milestone[[:space:]][[:space:]]*||p' | \
+             sed 's|[[:space:]]*$||' | sed '/^$/d' | tail -n 1)
+          [ -z "$milestone" ] && exit 0
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --milestone "$milestone" || \
+            echo "::warning::Milestone '$milestone' not found in repository"

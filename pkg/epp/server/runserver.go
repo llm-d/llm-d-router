@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -49,7 +50,12 @@ import (
 
 // ExtProcServerRunner provides methods to manage an external process server.
 type ExtProcServerRunner struct {
-	GrpcPort                         int
+	GrpcPort int
+	// GrpcListener is an optional pre-bound listener for the ext_proc server.
+	// When set, GrpcPort is ignored. Reserving the port in advance of this
+	// runnable starting closes the window in which another process can take a
+	// port that was selected but not yet bound.
+	GrpcListener                     net.Listener
 	GKNN                             common.GKNN
 	ControllerCfg                    ControllerConfig
 	Datastore                        datastore.Datastore
@@ -227,6 +233,9 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 
 		// Forward to the gRPC runnable.
+		if r.GrpcListener != nil {
+			return runnable.GRPCServerOnListener("ext-proc", srv, r.GrpcListener).Start(ctx)
+		}
 		return runnable.GRPCServer("ext-proc", srv, r.GrpcPort).Start(ctx)
 	}))
 }

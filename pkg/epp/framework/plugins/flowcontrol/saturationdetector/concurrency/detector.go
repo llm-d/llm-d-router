@@ -121,49 +121,69 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 
 // Saturation calculates the saturation level of the pool.
 //
-// It returns an aggregate saturation signal where:
+// In "requests" and "tokens" mode it returns an aggregate signal, evaluated as:
 //
-//	Saturation = Total Inflight Requests / Total MaxConcurrency Capacity.
+//	Saturation = Total Inflight / Total Capacity.
+//
+// In "hybrid" mode saturation is instead evaluated per endpoint as
+// max(requestRatio, tokenRatio) and averaged across endpoints. Evaluating each
+// endpoint independently ensures an endpoint saturated on either dimension is
+// reflected in the pool signal.
 func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
 	if len(endpoints) == 0 {
 		return 1.0
 	}
 
-	var totalInflight, totalCapacity int64
+	var reqInflight, reqCapacity, tokInflight, tokCapacity int64
+	var endpointCount int
+	var hybridSatSum float64
 	for _, e := range endpoints {
 		if e == nil {
 			continue
 		}
 
-		if d.config.mode == modeTokens {
-			totalCapacity += d.config.maxTokenConcurrency
-		} else {
-			totalCapacity += d.config.maxConcurrency
-		}
+		endpointCount++
+		reqCapacity += d.config.maxConcurrency
+		tokCapacity += d.config.maxTokenConcurrency
 
 		if e.GetMetadata() == nil {
 			continue
 		}
 
 		load := d.getLoad(e.GetAttributes())
-
-		if d.config.mode == modeTokens {
-			totalInflight += load.Tokens
-		} else {
-			totalInflight += load.Requests
-		}
+		reqInflight += load.Requests
+		tokInflight += load.Tokens
+		hybridSatSum += max(
+			ratio(load.Requests, d.config.maxConcurrency),
+			ratio(load.Tokens, d.config.maxTokenConcurrency),
+		)
 	}
 
-	if totalCapacity == 0 {
+	switch d.config.mode {
+	case modeTokens:
+		return ratio(tokInflight, tokCapacity)
+	case modeHybrid:
+		if endpointCount == 0 {
+			return 1.0
+		}
+		return hybridSatSum / float64(endpointCount)
+	default:
+		return ratio(reqInflight, reqCapacity)
+	}
+}
+
+// ratio computes inflight/capacity, failing closed (1.0) when capacity is zero.
+func ratio(inflight, capacity int64) float64 {
+	if capacity == 0 {
 		return 1.0
 	}
-
-	return float64(totalInflight) / float64(totalCapacity)
+	return float64(inflight) / float64(capacity)
 }
 
 // Filter blocks traffic to specific endpoints that are physically saturated or exceeding their safety limits.
 //
-// It applies a relaxed limit (MaxConcurrency * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
+// It applies a relaxed limit (Capacity * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
+// In "hybrid" mode an endpoint is dropped when either its request load or its token load reaches the limit.
 func (d *detector) Filter(
 	_ context.Context,
 	_ *fwksched.InferenceRequest,
@@ -172,12 +192,8 @@ func (d *detector) Filter(
 	// Pre-allocate assuming most endpoints will pass the filter to minimize allocations.
 	filtered := make([]fwksched.Endpoint, 0, len(endpoints))
 
-	var limit int64
-	if d.config.mode == modeTokens {
-		limit = int64(float64(d.config.maxTokenConcurrency) * (1.0 + d.config.headroom))
-	} else {
-		limit = int64(float64(d.config.maxConcurrency) * (1.0 + d.config.headroom))
-	}
+	reqLimit := int64(float64(d.config.maxConcurrency) * (1.0 + d.config.headroom))
+	tokLimit := int64(float64(d.config.maxTokenConcurrency) * (1.0 + d.config.headroom))
 
 	for _, e := range endpoints {
 		if e == nil {
@@ -185,15 +201,21 @@ func (d *detector) Filter(
 		}
 		load := d.getLoad(e)
 
-		if d.config.mode == modeTokens {
-			if load.Tokens < limit {
-				filtered = append(filtered, e)
-			}
-		} else {
-			if load.Requests < limit {
-				filtered = append(filtered, e)
-			}
+		if d.admits(load, reqLimit, tokLimit) {
+			filtered = append(filtered, e)
 		}
 	}
 	return filtered
+}
+
+// admits reports whether an endpoint is below its safety limit for the active mode.
+func (d *detector) admits(load *attrconcurrency.InFlightLoad, reqLimit, tokLimit int64) bool {
+	switch d.config.mode {
+	case modeTokens:
+		return load.Tokens < tokLimit
+	case modeHybrid:
+		return load.Requests < reqLimit && load.Tokens < tokLimit
+	default:
+		return load.Requests < reqLimit
+	}
 }

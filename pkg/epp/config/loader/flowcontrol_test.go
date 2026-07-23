@@ -154,10 +154,13 @@ func TestBuildRegistryConfig(t *testing.T) {
 			apiConfig: nil,
 			assertion: func(t *testing.T, cfg *registry.Config) {
 				assert.Equal(t, uint64(0), cfg.MaxBytes, "Default global limit should be 0 (unlimited)")
+				assert.Equal(t, uint64(0), cfg.MaxRequests, "Default global request limit should be 0 (unlimited)")
 				require.NotNil(t, cfg.DefaultPriorityBand,
 					"Default priority band template should be initialized automatically")
 				assert.Equal(t, uint64(1_000_000_000) /* registry default: 1 GB */, cfg.DefaultPriorityBand.MaxBytes,
 					"Default template should use system default capacity")
+				assert.Equal(t, uint64(5000) /* registry default */, cfg.DefaultPriorityBand.MaxRequests,
+					"Default template should use the system default request-count capacity")
 			},
 		},
 
@@ -205,6 +208,49 @@ func TestBuildRegistryConfig(t *testing.T) {
 				require.NotNil(t, cfg.DefaultPriorityBand)
 				assert.Equal(t, uint64(1_000_000_000) /* registry default: 1 GB */, cfg.DefaultPriorityBand.MaxBytes,
 					"Explicit 0 in DefaultPriorityBand template should be treated as 'Use Default'")
+			},
+		},
+		{
+			name: "ShouldApplyDefault_WhenBandMaxRequestsIsNilOrZero",
+			apiConfig: &configapi.FlowControlConfig{
+				PriorityBands: []configapi.PriorityBandConfig{
+					{
+						Priority: 1,
+						// MaxRequests omitted
+					},
+					{
+						Priority:    2,
+						MaxRequests: ptr.To(resource.MustParse("0")), // Explicitly zero
+					},
+					{
+						Priority:    3,
+						MaxRequests: ptr.To(resource.MustParse("250")),
+					},
+				},
+			},
+			assertion: func(t *testing.T, cfg *registry.Config) {
+				require.Contains(t, cfg.PriorityBands, 1)
+				assert.Equal(t, uint64(5000) /* registry default */, cfg.PriorityBands[1].MaxRequests,
+					"Omitted MaxRequests (nil) should result in the system default (5000)")
+				require.Contains(t, cfg.PriorityBands, 2)
+				assert.Equal(t, uint64(5000) /* registry default */, cfg.PriorityBands[2].MaxRequests,
+					"Explicit MaxRequests (0) should be treated as 'Use Default' (5000)")
+				require.Contains(t, cfg.PriorityBands, 3)
+				assert.Equal(t, uint64(250), cfg.PriorityBands[3].MaxRequests,
+					"Explicit MaxRequests should be preserved")
+			},
+		},
+		{
+			name: "ShouldApplyDefault_WhenNegativeBandTemplateMaxRequestsIsZero",
+			apiConfig: &configapi.FlowControlConfig{
+				DefaultNegativePriorityBand: &configapi.PriorityBandConfig{
+					MaxRequests: ptr.To(resource.MustParse("0")), // Explicitly zero
+				},
+			},
+			assertion: func(t *testing.T, cfg *registry.Config) {
+				require.NotNil(t, cfg.DefaultNegativePriorityBand)
+				assert.Equal(t, uint64(5000) /* registry default */, cfg.DefaultNegativePriorityBand.MaxRequests,
+					"Explicit 0 in the negative band template should be treated as 'Use Default', not zero capacity")
 			},
 		},
 
@@ -299,37 +345,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 
 		// --- MaxRequests: Defaulting Logic ---
-		{
-			name: "ShouldDefaultToZero_WhenMaxRequestsIsNil",
-			apiConfig: &configapi.FlowControlConfig{
-				PriorityBands: []configapi.PriorityBandConfig{
-					{
-						Priority: 1,
-					},
-				},
-			},
-			assertion: func(t *testing.T, cfg *registry.Config) {
-				require.Contains(t, cfg.PriorityBands, 1)
-				assert.Equal(t, uint64(0), cfg.PriorityBands[1].MaxRequests,
-					"Omitted MaxRequests should default to 0 (no request limit)")
-			},
-		},
-		{
-			name: "ShouldDefaultToZero_WhenMaxRequestsIsZero",
-			apiConfig: &configapi.FlowControlConfig{
-				PriorityBands: []configapi.PriorityBandConfig{
-					{
-						Priority:    1,
-						MaxRequests: ptr.To(resource.MustParse("0")),
-					},
-				},
-			},
-			assertion: func(t *testing.T, cfg *registry.Config) {
-				require.Contains(t, cfg.PriorityBands, 1)
-				assert.Equal(t, uint64(0), cfg.PriorityBands[1].MaxRequests,
-					"Explicit MaxRequests=0 should remain 0 (no request limit)")
-			},
-		},
+		// Nil and explicit-zero band MaxRequests defaulting is covered by
+		// ShouldApplyDefault_WhenBandMaxRequestsIsNilOrZero above.
 
 		// --- MaxRequests: Validation Errors ---
 		{
