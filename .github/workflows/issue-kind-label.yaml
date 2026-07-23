@@ -17,6 +17,11 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
+          # Extract /kind values from issue body. Absence of a directive is a no-op
+          # to avoid wiping kind/* labels set by maintainers through the UI.
+          kinds=$(printf '%s' "$ISSUE_BODY" | tr -d '\r' | sed -n 's|^/kind[[:space:]][[:space:]]*||p' | sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
+          [ -z "$kinds" ] && exit 0
+
           # Remove existing kind/* labels
           gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels \
             -q '.labels[].name | select(startswith("kind/"))' | \
@@ -24,10 +29,8 @@ jobs:
               gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$label'"
             done
 
-          # Extract /kind values from issue body and apply labels
-          printf '%s' "$ISSUE_BODY" | tr -d '\r' | sed -n 's|^/kind[[:space:]][[:space:]]*||p' | sed 's|[[:space:]]*$||' | sort -u | \
+          printf '%s\n' "$kinds" | \
             while IFS= read -r kind; do
-              [ -z "$kind" ] && continue
               gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "kind/$kind" || \
                 echo "::warning::Label 'kind/$kind' not found in repository"
             done
