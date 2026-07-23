@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"k8s.io/client-go/kubernetes"
+	ctrl "sigs.k8s.io/controller-runtime"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 // ErrDisabled is returned by Register when called with a disabled config.
@@ -14,19 +15,21 @@ import (
 // as a no-op signal rather than a failure.
 var ErrDisabled = errors.New("disaggregation is disabled")
 
-// Register validates config, starts the informer-backed pod cache, waits for
-// cache sync, and returns a ready controller. Boot fails when:
+// Register validates config, attaches an event handler to the Manager's
+// shared Pod informer, and (when Gating is active) registers a boot-time
+// validation Runnable that runs once the Manager's cache has synced. Boot
+// fails when:
 //
 //   - config is disabled (returns ErrDisabled — caller-side gate)
 //   - config is invalid (see Config.Validate)
-//   - the pod cache cannot be built or does not sync within ctx
-//   - Gating is set and any listed role has zero observed Ready pods,
-//     or no observed revision has Ready pods for every listed role
-//     simultaneously
+//   - the pod cache cannot attach its event handler
+//   - Gating is set and, after cache sync, any listed role has zero observed
+//     Ready pods, or no observed revision has Ready pods for every listed
+//     role simultaneously (surfaced as an mgr.Start error)
 //
 // Fail-fast keeps a wrongly-labelled deployment from starting the EPP with
 // silent misdirected routing.
-func Register(ctx context.Context, client kubernetes.Interface, namespace string, config Config) (*Controller, error) {
+func Register(ctx context.Context, mgr ctrl.Manager, namespace string, config Config) (*Controller, error) {
 	if !config.Enabled {
 		return nil, ErrDisabled
 	}
@@ -45,27 +48,32 @@ func Register(ctx context.Context, client kubernetes.Interface, namespace string
 
 	// scope.namespace overrides the caller-provided namespace when set. The
 	// runner passes the InferencePool's namespace by default; explicit
-	// config wins when the operator wants to target a different namespace
-	// (e.g. when the EPP itself lives in an ops namespace but observes
-	// workloads elsewhere).
+	// config wins when the operator wants to target a different namespace.
 	watchNamespace := config.Scope.Namespace
 	if watchNamespace == "" {
 		watchNamespace = namespace
 	}
 
 	registerMetrics()
-	podCache, err := NewPodCache(client, watchNamespace, config.Scope.LabelSelector, revisionLabelKey, roleLabelKey)
+	podCache, err := NewPodCache(ctx, mgr, watchNamespace, config.Scope.LabelSelector, revisionLabelKey, roleLabelKey)
 	if err != nil {
 		return nil, fmt.Errorf("build pod cache: %w", err)
 	}
-	podCache.Start(ctx)
-	if !podCache.WaitForCacheSync(ctx) {
-		return nil, errors.New("pod cache did not sync before context expired")
-	}
 
 	if config.Gating.Active() {
-		if err := validateRolesObserved(podCache, config.Gating.RequireRoles.Values); err != nil {
-			return nil, err
+		roles := config.Gating.RequireRoles.Values
+		// Boot-time role coverage check has to wait until the informer has
+		// listed its initial pod set. Registering it as a Manager Runnable
+		// makes the Manager block cache-dependent runnables until sync and
+		// surfaces the failure through mgr.Start returning an error.
+		err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			if !mgr.GetCache().WaitForCacheSync(ctx) {
+				return errors.New("pod cache did not sync before context expired")
+			}
+			return validateRolesObserved(podCache, roles)
+		}))
+		if err != nil {
+			return nil, fmt.Errorf("register boot-validation runnable: %w", err)
 		}
 	}
 
@@ -86,8 +94,8 @@ func gatingForLog(g *Gating) string {
 	return string(g.Mode)
 }
 
-// validateRolesObserved fails at boot when the required-roles gate would
-// drop every observed revision. Two checks:
+// validateRolesObserved fails when the required-roles gate would drop every
+// observed revision. Two checks:
 //
 //   - Per-role liveness: each listed role must have ≥1 Ready pod for at
 //     least one revision. Catches typos in role names.

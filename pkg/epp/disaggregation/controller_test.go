@@ -189,9 +189,7 @@ func scoreFixture(t *testing.T, cfg Config, counts map[string]map[string]int) *C
 			}
 		}
 	}
-	pc, cancel := startCache(t, pods...)
-	t.Cleanup(cancel)
-	return NewController(cfg, pc)
+	return NewController(cfg, seedCache(t, pods...))
 }
 
 // itoa avoids importing strconv just for tests.

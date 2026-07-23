@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -60,6 +61,10 @@ func (h *fakeHandle) PodList() []k8stypes.NamespacedName {
 }
 
 func (h *fakeHandle) Metrics() plugin.MetricsRecorder {
+	return nil
+}
+
+func (h *fakeHandle) Manager() ctrl.Manager {
 	return nil
 }
 

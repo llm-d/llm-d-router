@@ -99,23 +99,13 @@ func TestMetric_FilterOutcome_NoMatchPreferFallback(t *testing.T) {
 
 func TestMetric_GatingDropped_OncePerRevisionPerCall(t *testing.T) {
 	resetMetrics(t)
-	client := newSeededClient(t,
+	podCache := seedCache(t,
 		readyPod("p1", "v1", "prefill"),
 		readyPod("p2", "v1", "prefill"),
 		readyPod("p3", "v1", "prefill"),
 		readyPod("p4", "v2", "prefill"),
 		readyPod("d4", "v2", "decode"),
 	)
-	podCache, err := NewPodCache(client, testNS, "disaggregatedset.x-k8s.io/name=my-set", testRevLabel, testRoleLabel)
-	if err != nil {
-		t.Fatalf("NewPodCache: %v", err)
-	}
-	ctx, cancel := registerCtx(t)
-	defer cancel()
-	podCache.Start(ctx)
-	if !podCache.WaitForCacheSync(ctx) {
-		t.Fatalf("cache did not sync")
-	}
 	controller := NewController(validConfig(), podCache)
 	filter := newGatingFilter(controller)
 	pods := []fwksched.Endpoint{
@@ -141,21 +131,11 @@ func TestMetric_GatingDropped_OncePerRevisionPerCall(t *testing.T) {
 
 func TestMetric_CacheReadyPods_TracksInformerState(t *testing.T) {
 	resetMetrics(t)
-	client := newSeededClient(t,
+	seedCache(t,
 		readyPod("p1", "v1", "prefill"),
 		readyPod("p2", "v1", "prefill"),
 		readyPod("d1", "v1", "decode"),
 	)
-	podCache, err := NewPodCache(client, testNS, "disaggregatedset.x-k8s.io/name=my-set", testRevLabel, testRoleLabel)
-	if err != nil {
-		t.Fatalf("NewPodCache: %v", err)
-	}
-	ctx, cancel := registerCtx(t)
-	defer cancel()
-	podCache.Start(ctx)
-	if !podCache.WaitForCacheSync(ctx) {
-		t.Fatalf("cache did not sync")
-	}
 
 	if got := testutil.ToFloat64(cacheReadyPods.WithLabelValues("prefill", "v1")); got != 2 {
 		t.Errorf("prefill v1: want 2, got %v", got)

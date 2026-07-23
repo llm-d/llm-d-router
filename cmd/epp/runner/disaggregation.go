@@ -11,10 +11,10 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/disaggregation"
 )
@@ -22,8 +22,8 @@ import (
 // registerDisaggregation instantiates the disaggregation controller if the
 // rawConfig contains a disaggregation block and hands it to WireInto, which
 // does the correct-position registration in the scheduler and request-control
-// pipelines. No-op when the block is absent.
-func (r *Runner) registerDisaggregation(ctx context.Context, restCfg *rest.Config, namespace string) error {
+// pipelines. No-op when the block is absent or disabled.
+func (r *Runner) registerDisaggregation(ctx context.Context, mgr ctrl.Manager, namespace string) error {
 	if r.rawConfig == nil || r.rawConfig.Disaggregation == nil {
 		return nil
 	}
@@ -36,13 +36,11 @@ func (r *Runner) registerDisaggregation(ctx context.Context, restCfg *rest.Confi
 		return nil
 	}
 
-	client, err := kubernetes.NewForConfig(restCfg)
+	controller, err := disaggregation.Register(ctx, mgr, namespace, config)
 	if err != nil {
-		return fmt.Errorf("build kubernetes client for disaggregation: %w", err)
-	}
-
-	controller, err := disaggregation.Register(ctx, client, namespace, config)
-	if err != nil {
+		if errors.Is(err, disaggregation.ErrDisabled) {
+			return nil
+		}
 		return fmt.Errorf("register disaggregation controller: %w", err)
 	}
 	return disaggregation.WireInto(r.schedulerConfig, r.requestControlConfig, controller)

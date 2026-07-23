@@ -7,141 +7,143 @@ import (
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+	toolscache "k8s.io/client-go/tools/cache"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-// PodCache tallies Ready pods observed by an informer, keyed by
-// (revision label value, role label value). It is safe for concurrent use.
+// PodCache tallies Ready pods matching a label selector, keyed by
+// (revision label value, role label value). Safe for concurrent use.
 //
-// The design deliberately rebuilds the count map on every informer event rather
-// than doing incremental accounting. The cardinality is tiny (a handful of
-// revisions × a handful of roles) and full recomputation eliminates a whole
+// Backing storage is the controller-runtime Manager's shared Pod informer;
+// the constructor attaches an event handler and rebuilds counts on every
+// change. Cardinality is tiny (a handful of revisions × roles) so full
+// recomputation is cheaper than incremental accounting and eliminates a
 // class of double-count / stale-count bugs.
 type PodCache struct {
-	mutex            sync.RWMutex
+	mutex            sync.Mutex
+	pods             map[types.NamespacedName]*corev1.Pod
 	counts           map[string]map[string]int
 	revisionLabelKey string
 	roleLabelKey     string
-	informer         cache.SharedIndexInformer
-	factory          informers.SharedInformerFactory
+	namespace        string
+	selector         labels.Selector
 }
 
-// NewPodCache builds an informer scoped to namespace + labelSelector and
-// returns a cache that will track Ready pods once Start is called. An empty
-// roleLabelKey is allowed and means "no role dimension" — the cache stores
-// per-revision counts only and HasRoleForRevision always returns false
-// (callers should skip role-based checks in that mode).
-func NewPodCache(client kubernetes.Interface, namespace, labelSelector, revisionLabelKey, roleLabelKey string) (*PodCache, error) {
+// NewPodCache attaches an event handler to the Manager's shared Pod informer
+// so the cache reflects Ready pods matching (namespace, labelSelector). Empty
+// roleLabelKey means "no role dimension" — the cache stores per-revision
+// counts only and HasRoleForRevision always returns false.
+func NewPodCache(ctx context.Context, mgr ctrl.Manager, namespace, labelSelector, revisionLabelKey, roleLabelKey string) (*PodCache, error) {
+	pc, err := newPodCache(namespace, labelSelector, revisionLabelKey, roleLabelKey)
+	if err != nil {
+		return nil, err
+	}
+	informer, err := mgr.GetCache().GetInformer(ctx, &corev1.Pod{})
+	if err != nil {
+		return nil, fmt.Errorf("get pod informer: %w", err)
+	}
+	if _, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { pc.upsert(obj) },
+		UpdateFunc: func(_, obj interface{}) { pc.upsert(obj) },
+		DeleteFunc: func(obj interface{}) { pc.remove(obj) },
+	}); err != nil {
+		return nil, fmt.Errorf("register informer event handler: %w", err)
+	}
+	return pc, nil
+}
+
+// newPodCache constructs an unattached cache. Tests seed via upsert/remove.
+func newPodCache(namespace, labelSelector, revisionLabelKey, roleLabelKey string) (*PodCache, error) {
 	if revisionLabelKey == "" {
 		return nil, errors.New("revisionLabelKey is required")
 	}
-	factory := informers.NewSharedInformerFactoryWithOptions(
-		client,
-		0,
-		informers.WithNamespace(namespace),
-		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
-			options.LabelSelector = labelSelector
-		}),
-	)
-	informer := factory.Core().V1().Pods().Informer()
-	podCache := &PodCache{
+	sel, err := labels.Parse(labelSelector)
+	if err != nil {
+		return nil, fmt.Errorf("parse label selector %q: %w", labelSelector, err)
+	}
+	return &PodCache{
+		pods:             make(map[types.NamespacedName]*corev1.Pod),
 		counts:           make(map[string]map[string]int),
 		revisionLabelKey: revisionLabelKey,
 		roleLabelKey:     roleLabelKey,
-		informer:         informer,
-		factory:          factory,
-	}
-	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(interface{}) { podCache.rebuild() },
-		UpdateFunc: func(_, _ interface{}) { podCache.rebuild() },
-		DeleteFunc: func(interface{}) { podCache.rebuild() },
-	})
-	if err != nil {
-		return nil, fmt.Errorf("register informer event handler: %w", err)
-	}
-	return podCache, nil
-}
-
-// Start begins the informer factory. Runs until ctx is done.
-func (podCache *PodCache) Start(ctx context.Context) {
-	podCache.factory.Start(ctx.Done())
-}
-
-// WaitForCacheSync blocks until the informer's initial list has completed or ctx
-// is cancelled. Returns true on successful sync.
-func (podCache *PodCache) WaitForCacheSync(ctx context.Context) bool {
-	synced := cache.WaitForCacheSync(ctx.Done(), podCache.informer.HasSynced)
-	if synced {
-		podCache.rebuild()
-	}
-	return synced
+		namespace:        namespace,
+		selector:         sel,
+	}, nil
 }
 
 // Count returns the number of Ready pods with the given (revision, role).
-func (podCache *PodCache) Count(revision, role string) int {
-	podCache.mutex.RLock()
-	defer podCache.mutex.RUnlock()
-	if perRole, ok := podCache.counts[revision]; ok {
-		return perRole[role]
-	}
-	return 0
+func (pc *PodCache) Count(revision, role string) int {
+	pc.mutex.Lock()
+	defer pc.mutex.Unlock()
+	return pc.counts[revision][role]
 }
 
-// HasRoleForRevision returns true when at least one Ready pod exists for the
-// given (revision, role).
-func (podCache *PodCache) HasRoleForRevision(revision, role string) bool {
-	return podCache.Count(revision, role) > 0
+// HasRoleForRevision returns true when ≥1 Ready pod exists for (revision, role).
+func (pc *PodCache) HasRoleForRevision(revision, role string) bool {
+	return pc.Count(revision, role) > 0
 }
 
-// rolesForRevision returns the set of roles observed with ≥1 Ready pod for
-// the given revision. Iteration order is unspecified. Unexported because no
-// production caller needs it — the accessor exists for tests only.
-func (podCache *PodCache) rolesForRevision(revision string) map[string]int {
-	podCache.mutex.RLock()
-	defer podCache.mutex.RUnlock()
-	source, ok := podCache.counts[revision]
-	if !ok {
-		return nil
-	}
-	out := make(map[string]int, len(source))
-	for role, count := range source {
-		out[role] = count
-	}
-	return out
-}
-
-// Revisions returns the set of revisions observed with ≥1 Ready pod for any role.
-func (podCache *PodCache) Revisions() []string {
-	podCache.mutex.RLock()
-	defer podCache.mutex.RUnlock()
-	out := make([]string, 0, len(podCache.counts))
-	for revision := range podCache.counts {
+// Revisions returns the set of revisions observed with ≥1 Ready pod.
+func (pc *PodCache) Revisions() []string {
+	pc.mutex.Lock()
+	defer pc.mutex.Unlock()
+	out := make([]string, 0, len(pc.counts))
+	for revision := range pc.counts {
 		out = append(out, revision)
 	}
 	return out
 }
 
-func (podCache *PodCache) rebuild() {
-	all := podCache.informer.GetStore().List()
+func (pc *PodCache) upsert(obj interface{}) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod.Namespace != pc.namespace || !pc.selector.Matches(labels.Set(pod.Labels)) {
+		// Manager's shared informer sees every Pod in the namespace — filter
+		// at the boundary so out-of-scope pods never enter our count map.
+		return
+	}
+	pc.mutex.Lock()
+	pc.pods[types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}] = pod
+	previous := pc.counts
+	pc.counts = pc.computeCountsLocked()
+	pc.mutex.Unlock()
+	publishGaugeDelta(previous, pc.counts)
+}
+
+func (pc *PodCache) remove(obj interface{}) {
+	pod, _ := obj.(*corev1.Pod)
+	if pod == nil {
+		// Watch-relist can hand us a tombstone; unwrap the real pod.
+		if tombstone, ok := obj.(toolscache.DeletedFinalStateUnknown); ok {
+			pod, _ = tombstone.Obj.(*corev1.Pod)
+		}
+	}
+	if pod == nil {
+		return
+	}
+	pc.mutex.Lock()
+	delete(pc.pods, types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name})
+	previous := pc.counts
+	pc.counts = pc.computeCountsLocked()
+	pc.mutex.Unlock()
+	publishGaugeDelta(previous, pc.counts)
+}
+
+func (pc *PodCache) computeCountsLocked() map[string]map[string]int {
 	counts := make(map[string]map[string]int)
-	for _, obj := range all {
-		pod, ok := obj.(*corev1.Pod)
-		if !ok || !isPodReady(pod) {
+	for _, pod := range pc.pods {
+		if !isPodReady(pod) {
 			continue
 		}
-		revision := pod.Labels[podCache.revisionLabelKey]
+		revision := pod.Labels[pc.revisionLabelKey]
 		if revision == "" {
 			continue
 		}
 		role := ""
-		if podCache.roleLabelKey != "" {
-			role = pod.Labels[podCache.roleLabelKey]
+		if pc.roleLabelKey != "" {
+			role = pod.Labels[pc.roleLabelKey]
 			if role == "" {
-				// Pod is missing the required role label — skip so it
-				// doesn't accidentally satisfy a HasRoleForRevision check.
 				continue
 			}
 		}
@@ -150,21 +152,12 @@ func (podCache *PodCache) rebuild() {
 		}
 		counts[revision][role]++
 	}
-
-	podCache.mutex.Lock()
-	previous := podCache.counts
-	podCache.counts = counts
-	podCache.mutex.Unlock()
-
-	// Publish only the deltas. Reset+Set-everything would leave the gauge
-	// briefly showing zero for pairs whose count didn't change, which trips
-	// scrape-window alerts. Diffing keeps unchanged series untouched.
-	publishGaugeDelta(previous, counts)
+	return counts
 }
 
-// publishGaugeDelta walks two count maps and emits Set for pairs whose count
-// differs and Delete for pairs that vanished from the new map. Pairs whose
-// count is unchanged are not touched.
+// publishGaugeDelta emits Set for pairs whose count differs and Delete for
+// pairs that vanished. Reset+Set-everything would leave unchanged pairs
+// briefly showing zero, tripping scrape-window alerts.
 func publishGaugeDelta(previous, current map[string]map[string]int) {
 	for revision, perRole := range current {
 		previousPerRole := previous[revision]
@@ -185,13 +178,7 @@ func publishGaugeDelta(previous, current map[string]map[string]int) {
 }
 
 func isPodReady(pod *corev1.Pod) bool {
-	if pod == nil {
-		return false
-	}
-	if pod.Status.Phase != corev1.PodRunning {
-		return false
-	}
-	if pod.DeletionTimestamp != nil {
+	if pod == nil || pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil {
 		return false
 	}
 	for _, condition := range pod.Status.Conditions {

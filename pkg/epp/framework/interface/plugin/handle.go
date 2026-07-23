@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 // Handle provides plugins a set of standard data and tools to work with
@@ -36,6 +37,12 @@ type Handle interface {
 	// Metrics returns a recorder plugins can use to register metrics. It may return
 	// nil when no recorder is configured.
 	Metrics() MetricsRecorder
+
+	// Manager returns the controller-runtime Manager. Plugins can call
+	// mgr.GetCache().GetInformer(ctx, obj) to attach event handlers to the
+	// same informers the router already runs, avoiding a second watch.
+	// May return nil in tests or when the runner has not attached one.
+	Manager() ctrl.Manager
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -62,6 +69,7 @@ type eppHandle struct {
 	HandlePlugins
 	podList         PodListFunc
 	metricsRecorder MetricsRecorder
+	manager         ctrl.Manager
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -111,6 +119,11 @@ func (h *eppHandle) Metrics() MetricsRecorder {
 	return h.metricsRecorder
 }
 
+// Manager returns the controller-runtime Manager if one was attached.
+func (h *eppHandle) Manager() ctrl.Manager {
+	return h.manager
+}
+
 // HandleOption configures an eppHandle constructed via NewEppHandle.
 type HandleOption func(*eppHandle)
 
@@ -120,6 +133,17 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 	return func(h *eppHandle) {
 		if recorder != nil {
 			h.metricsRecorder = recorder
+		}
+	}
+}
+
+// WithManager attaches the controller-runtime Manager to the handle so
+// plugins can join the shared informer cache instead of running their own.
+// A nil manager is ignored.
+func WithManager(mgr ctrl.Manager) HandleOption {
+	return func(h *eppHandle) {
+		if mgr != nil {
+			h.manager = mgr
 		}
 	}
 }
