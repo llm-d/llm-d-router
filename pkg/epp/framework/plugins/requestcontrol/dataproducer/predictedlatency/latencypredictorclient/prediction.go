@@ -167,13 +167,16 @@ func (p *Predictor) predictBayesianRidge(req PredictionRequest, mr *MetricsRespo
 	}
 	c := mr.Coefficients
 
-	// Updated linear combination for TTFT to include prefix_cache_score
+	// Linear combination for TTFT; encoder-cache coefficients are absent from
+	// models trained without multimodal features and contribute 0 in that case.
 	ttft := c.TTFTIntercept +
 		c.TTFTCoeffs["kv_cache_percentage"]*req.KVCachePercentage +
 		c.TTFTCoeffs["input_token_length"]*float64(req.InputTokenLength) +
 		c.TTFTCoeffs["num_request_waiting"]*float64(req.NumRequestWaiting) +
 		c.TTFTCoeffs["num_request_running"]*float64(req.NumRequestRunning) +
-		c.TTFTCoeffs["prefix_cache_score"]*req.PrefixCacheScore
+		c.TTFTCoeffs["prefix_cache_score"]*req.PrefixCacheScore +
+		c.TTFTCoeffs["encoder_input_size"]*float64(req.EncoderInputSize) +
+		c.TTFTCoeffs["encoder_matched_size"]*float64(req.EncoderMatchedSize)
 
 	// Linear combination for TPOT (remains unchanged - no prefix cache effect)
 	tpot := c.TPOTIntercept +
@@ -251,6 +254,12 @@ func (p *Predictor) ValidatePredictionRequest(req PredictionRequest) error {
 	}
 	if req.PrefixCacheScore < 0.0 || req.PrefixCacheScore > 1.0 {
 		return fmt.Errorf("prefix_cache_score must be between 0.0 and 1.0, got %f", req.PrefixCacheScore)
+	}
+	if req.EncoderInputSize < 0 {
+		return fmt.Errorf("encoder_input_size must be non-negative, got %d", req.EncoderInputSize)
+	}
+	if req.EncoderMatchedSize < 0 || req.EncoderMatchedSize > req.EncoderInputSize {
+		return fmt.Errorf("encoder_matched_size must be between 0 and encoder_input_size (%d), got %d", req.EncoderInputSize, req.EncoderMatchedSize)
 	}
 	return nil
 }

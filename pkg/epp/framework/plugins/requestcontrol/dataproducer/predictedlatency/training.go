@@ -37,6 +37,8 @@ func buildPredictionRequest(
 	inputTokenLength int,
 	generatedTokens int,
 	prefixCacheScore float64,
+	encoderInputSize int,
+	encoderMatchedSize int,
 ) latencypredictor.PredictionRequest {
 	podType := ""
 	if endpointRoleLabel != "" && targetEndpointMetadata != nil && targetEndpointMetadata.Labels != nil {
@@ -50,6 +52,8 @@ func buildPredictionRequest(
 		NumRequestRunning:  metrics.RunningRequestsSize,
 		NumTokensGenerated: generatedTokens,
 		PrefixCacheScore:   prefixCacheScore,
+		EncoderInputSize:   encoderInputSize,
+		EncoderMatchedSize: encoderMatchedSize,
 		PodType:            podType,
 	}
 }
@@ -65,6 +69,8 @@ func buildTrainingEntry(
 	timestamp time.Time,
 	generatedTokens int,
 	prefixCacheScore float64,
+	encoderInputSize int,
+	encoderMatchedSize int,
 ) latencypredictor.TrainingEntry {
 	podType := ""
 	if endpointRoleLabel != "" && targetEndpointMetadata != nil && targetEndpointMetadata.Labels != nil {
@@ -81,6 +87,8 @@ func buildTrainingEntry(
 		NumRequestRunning:  m.RunningRequestsSize,
 		NumTokensGenerated: generatedTokens,
 		PrefixCacheScore:   prefixCacheScore,
+		EncoderInputSize:   encoderInputSize,
+		EncoderMatchedSize: encoderMatchedSize,
 		PodType:            podType,
 	}
 }
@@ -95,6 +103,7 @@ func recordTTFTTrainingData(
 	targetEndpointMetadata *fwkdl.EndpointMetadata,
 	now time.Time,
 	prefixCacheScore float64,
+	encoderMatchedSize int,
 ) {
 	logger := log.FromContext(ctx)
 	entry := buildTrainingEntry(
@@ -107,6 +116,8 @@ func recordTTFTTrainingData(
 		now,
 		0,
 		prefixCacheScore,
+		predictedLatencyCtx.encoderInputSize,
+		encoderMatchedSize,
 	)
 	// In disaggregated serving TTFT is incurred on the prefill endpoint, so the
 	// in-flight features are snapshotted from that endpoint; otherwise the decode
@@ -168,6 +179,8 @@ func bulkPredictWithMetrics(
 	prefixCacheScores []float64,
 	prefillTokensInFlights []int64,
 	numRequestRunnings []int,
+	encoderInputSizes []int,
+	encoderMatchedSizes []int,
 ) ([]*latencypredictor.PredictionResponse, error) {
 	logger := log.FromContext(ctx)
 
@@ -201,12 +214,22 @@ func bulkPredictWithMetrics(
 			inputTokenLengths[i],
 			generatedTokenCounts[i],
 			prefixCacheScores[i],
+			0,
+			0,
 		)
 		if i < len(prefillTokensInFlights) {
 			bulkRequests[i].PrefillTokensInFlight = prefillTokensInFlights[i]
 		}
 		if i < len(numRequestRunnings) {
 			bulkRequests[i].NumRequestRunning = numRequestRunnings[i]
+		}
+		if i < len(encoderInputSizes) {
+			bulkRequests[i].EncoderInputSize = encoderInputSizes[i]
+		}
+		if i < len(encoderMatchedSizes) {
+			// The predictor rejects matched > input, so clamp instead of
+			// failing the whole bulk request when the slices are inconsistent.
+			bulkRequests[i].EncoderMatchedSize = min(encoderMatchedSizes[i], bulkRequests[i].EncoderInputSize)
 		}
 	}
 

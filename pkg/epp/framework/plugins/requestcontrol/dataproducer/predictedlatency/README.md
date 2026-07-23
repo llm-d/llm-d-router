@@ -16,6 +16,8 @@ DataProducer, PreRequest, ResponseHeader, ResponseBody, ProducerPlugin, Consumer
 - TPOT training data collection at EOS (streaming mode)
 - Per-endpoint running request queue tracking (TPOT SLO priority queue)
 - Prefix cache score forwarding from `PrefixCacheMatchInfo` attributes
+- Multimodal encoder-cache size forwarding from `EncoderCacheMatchInfo` attributes
+  (opt-in via `useEncoderCacheFeatures`)
 - TPOT neutralization for prefill endpoints in disaggregated serving
 - E2E latency metrics when `streamingMode=false`
 
@@ -30,6 +32,8 @@ DataProducer, PreRequest, ResponseHeader, ResponseBody, ProducerPlugin, Consumer
 | `streamingMode` | `false` | Record TTFT on first chunk (true) vs EOS (false) |
 | `endpointRoleLabel` | `""` | Label key for disaggregated serving roles |
 | `predictInProduce` | `true` | Enable/disable bulk predictions. Set false for training-only mode |
+| `useEncoderCacheFeatures` | `false` | Feed multimodal encoder-cache sizes (`encoder_input_size`, `encoder_matched_size`) to the predictor. Requires (and auto-creates) a multimodal encoder-cache producer |
+| `encoderCacheMatchInfoProducerName` | `""` | Multimodal encoder-cache producer to read match data from. Empty defaults to the auto-created producer |
 
 ## Default Behavior (`streamingMode: false`)
 
