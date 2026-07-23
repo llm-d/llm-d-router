@@ -676,6 +676,22 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 	}
 }
 
+func TestNewRejectsUnsupportedKVEventEngineType(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	idxCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	kvEventsCfg := kvevents.DefaultConfig()
+	kvEventsCfg.EngineType = "unsupported"
+
+	_, err = New(ctx, "unsupported-engine", PluginConfig{
+		IndexerConfig:  idxCfg,
+		KVEventsConfig: kvEventsCfg,
+	})
+	require.ErrorContains(t, err, `unsupported engine type: "unsupported"`)
+}
+
 type fakeSubscriberManager struct {
 	ids       []string
 	endpoints []string

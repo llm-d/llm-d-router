@@ -113,7 +113,20 @@ type Pool struct {
 	// tier, KV-cache group, DP rank) and a store must be counted only after
 	// Index.Add succeeds — both of which only the Pool observes.
 	dedup *eventDedupFilter
-	wg    sync.WaitGroup
+	// SGLang can emit one KV event per page even when its page size is smaller
+	// than the canonical index block size. Keep those immutable page links until
+	// they form a complete canonical block; otherwise the first partial page is
+	// discarded and every following parent hash becomes unresolvable.
+	engineType         string
+	pendingStoreMu     sync.Mutex
+	pendingSGLangStore map[sglangPendingStoreKey]*BlockStoredEvent
+	wg                 sync.WaitGroup
+}
+
+type sglangPendingStoreKey struct {
+	podIdentifier string
+	modelName     string
+	lastHash      uint64
 }
 
 // NewPool creates a Pool with a sharded worker setup.
@@ -127,13 +140,15 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 	}
 
 	p := &Pool{
-		queues:         make([]workqueue.TypedRateLimitingInterface[*RawMessage], cfg.Concurrency),
-		concurrency:    cfg.Concurrency,
-		index:          index,
-		tokenProcessor: tokenProcessor,
-		adapter:        adapter,
-		groupCatalog:   kvblock.NewGroupCatalog(),
-		dedup:          newEventDedupFilter(),
+		queues:             make([]workqueue.TypedRateLimitingInterface[*RawMessage], cfg.Concurrency),
+		concurrency:        cfg.Concurrency,
+		index:              index,
+		tokenProcessor:     tokenProcessor,
+		adapter:            adapter,
+		groupCatalog:       kvblock.NewGroupCatalog(),
+		dedup:              newEventDedupFilter(),
+		engineType:         strings.ToLower(strings.TrimSpace(cfg.EngineType)),
+		pendingSGLangStore: make(map[sglangPendingStoreKey]*BlockStoredEvent),
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -141,6 +156,118 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 	}
 
 	return p
+}
+
+// cloneBlockStoredEvent copies slices that the SGLang accumulator extends.
+func cloneBlockStoredEvent(event *BlockStoredEvent) *BlockStoredEvent {
+	clone := *event
+	clone.BlockHashes = append([]uint64(nil), event.BlockHashes...)
+	clone.Tokens = append([]uint32(nil), event.Tokens...)
+	clone.ExtraKeys = append([][]any(nil), event.ExtraKeys...)
+	return &clone
+}
+
+// accumulateSGLangStore returns an event only after sub-canonical SGLang pages
+// form a full canonical block. Messages for one pod are processed in order by
+// the sharded Pool, while the mutex protects state belonging to different pods.
+func (p *Pool) accumulateSGLangStore(
+	event *BlockStoredEvent, podIdentifier, modelName string,
+) (*BlockStoredEvent, bool) {
+	canonicalBlockSize := p.tokenProcessor.BlockSize()
+	if p.engineType != "sglang" || canonicalBlockSize <= 0 ||
+		len(event.Tokens) == 0 || len(event.Tokens) >= canonicalBlockSize ||
+		canonicalBlockSize%len(event.Tokens) != 0 || len(event.BlockHashes) == 0 {
+		return event, true
+	}
+
+	p.pendingStoreMu.Lock()
+	defer p.pendingStoreMu.Unlock()
+
+	page := cloneBlockStoredEvent(event)
+	pages := []*BlockStoredEvent{page}
+	tokenCount := len(page.Tokens)
+	parentHash := page.ParentHash
+	for tokenCount < canonicalBlockSize && parentHash != 0 {
+		parent, ok := p.pendingSGLangStore[sglangPendingStoreKey{
+			podIdentifier: podIdentifier,
+			modelName:     modelName,
+			lastHash:      parentHash,
+		}]
+		if !ok {
+			break
+		}
+		pages = append(pages, parent)
+		tokenCount += len(parent.Tokens)
+		parentHash = parent.ParentHash
+	}
+
+	lastHash := page.BlockHashes[len(page.BlockHashes)-1]
+	if tokenCount < canonicalBlockSize {
+		p.pendingSGLangStore[sglangPendingStoreKey{
+			podIdentifier: podIdentifier,
+			modelName:     modelName,
+			lastHash:      lastHash,
+		}] = page
+		return nil, false
+	}
+	if tokenCount != canonicalBlockSize {
+		return event, true
+	}
+
+	combined := cloneBlockStoredEvent(pages[len(pages)-1])
+	combined.ParentHash = parentHash
+	combined.BlockHashes = combined.BlockHashes[:0]
+	combined.Tokens = combined.Tokens[:0]
+	combined.ExtraKeys = combined.ExtraKeys[:0]
+	for i := len(pages) - 1; i >= 0; i-- {
+		combined.BlockHashes = append(combined.BlockHashes, pages[i].BlockHashes...)
+		combined.Tokens = append(combined.Tokens, pages[i].Tokens...)
+		combined.ExtraKeys = append(combined.ExtraKeys, pages[i].ExtraKeys...)
+	}
+	return combined, true
+}
+
+// dropPendingSGLangStores removes incomplete chains touched by an eviction.
+func (p *Pool) dropPendingSGLangStores(podIdentifier string, blockHashes []uint64) {
+	if p.engineType != "sglang" {
+		return
+	}
+	hashes := make(map[uint64]struct{}, len(blockHashes))
+	for _, hash := range blockHashes {
+		hashes[hash] = struct{}{}
+	}
+
+	p.pendingStoreMu.Lock()
+	defer p.pendingStoreMu.Unlock()
+	for changed := true; changed; {
+		changed = false
+		for key, pending := range p.pendingSGLangStore {
+			if key.podIdentifier != podIdentifier {
+				continue
+			}
+			_, removesPage := hashes[key.lastHash]
+			_, removesParent := hashes[pending.ParentHash]
+			if removesPage || removesParent {
+				delete(p.pendingSGLangStore, key)
+				hashes[key.lastHash] = struct{}{}
+				changed = true
+			}
+		}
+	}
+}
+
+// clearPendingSGLangStores removes all incomplete chains for a reset pod.
+func (p *Pool) clearPendingSGLangStores(podIdentifier string) {
+	if p.engineType != "sglang" {
+		return
+	}
+	p.pendingStoreMu.Lock()
+	defer p.pendingStoreMu.Unlock()
+	for key := range p.pendingSGLangStore {
+		if key.podIdentifier == podIdentifier {
+			delete(p.pendingSGLangStore, key)
+		}
+	}
 }
 
 // GroupCatalog returns the KV cache group metadata learned from events.
@@ -336,6 +463,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 	for _, genericEvent := range batch.Events {
 		switch ev := genericEvent.(type) {
 		case *BlockStoredEvent:
+			var ready bool
+			ev, ready = p.accumulateSGLangStore(ev, podIdentifier, modelName)
+			if !ready {
+				continue
+			}
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
 
 			// Scope for reference-counting this store against duplicate removes.
@@ -460,6 +592,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			p.dedup.trackStore(storeScope, ev.BlockHashes)
 
 		case *BlockRemovedEvent:
+			p.dropPendingSGLangStores(podIdentifier, ev.BlockHashes)
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
 
 			// Create PodEntry for this specific event's device tier.
@@ -506,6 +639,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			}
 
 		case *AllBlocksClearedEvent:
+			p.clearPendingSGLangStores(podIdentifier)
 			debugLogger.Info("All blocks cleared event received",
 				"podIdentifier", podIdentifier,
 				"deviceTier", ev.DeviceTier,

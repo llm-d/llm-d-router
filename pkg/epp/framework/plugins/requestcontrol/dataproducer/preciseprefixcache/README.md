@@ -36,6 +36,9 @@ upstream. No-op otherwise.
 | `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions. |
 | `speculativeTTL` | duration | `2s` | TTL for speculative entries. |
 
+Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
+to `vllm` when omitted.
+
 See [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md)
 for nested parameter details.
 
