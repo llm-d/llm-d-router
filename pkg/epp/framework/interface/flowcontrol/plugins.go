@@ -148,9 +148,9 @@ type SaturationDetector interface {
 // considered on that call.
 //
 // Conformance: Implementations MUST ensure all methods are goroutine-safe. Returned ceilings MUST be
-// monotonically non-increasing in the given priority order: because the dispatch loop stops at the first
-// gated band, a lower band whose ceiling exceeds that of a higher band can be marked open on calls where
-// it is unreachable, starving it.
+// monotonically non-increasing in the given priority order (highest priority first): because the
+// dispatch loop stops at the first gated band, a lower band whose ceiling exceeds that of a higher band
+// can be marked open on calls where it is unreachable, starving it.
 type UsageLimitPolicy interface {
 	plugin.Plugin
 
