@@ -60,13 +60,27 @@ pipeline:
 // EPP-Phase header value (see header-phase-profile-handler); the role filters
 // narrow the combined encode+prefill+decode pod pool down to the profile's own
 // role, since the InferencePool now selects across all three roles at once.
+//
+// The decode profile uses label-selector-filter instead of decode-filter: the
+// decode-filter shorthand hardcodes allowsNoLabel=true (bylabel.NewDecodeRole),
+// which is safe only when decode has its own role-scoped InferencePool, so a
+// pod without the role label was never a candidate in the first place. Here
+// the InferencePool selects across all three roles, so an unlabeled or
+// mislabeled encode/prefill pod would otherwise be accepted as a decode
+// candidate; label-selector-filter's matchExpressions has no such exception.
 const eppConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser
 - type: encode-filter
 - type: prefill-filter
-- type: decode-filter
+- type: label-selector-filter
+  name: decode-filter
+  parameters:
+    matchExpressions:
+    - key: llm-d.ai/role
+      operator: In
+      values: ["decode", "prefill-decode", "both", "encode-prefill-decode"]
 - type: queue-scorer
 - type: max-score-picker
 - type: header-phase-profile-handler

@@ -14,10 +14,10 @@ Reads the configured header from the incoming request and looks up the
 
 - If a matching profile hasn't run yet, it runs that profile alone.
 - If the header is missing or names a profile that isn't configured, no profile runs. The
-  request fails with the scheduler's own generic "no profile ran" error (a 429 to the
-  client, since the scheduler doesn't distinguish a malformed request from exhausted
-  capacity); the EPP logs the specific reason (missing header vs. unconfigured value) for
-  operators.
+  scheduler reports that no profile could be run at all, without a reason, which the EPP
+  maps to a 429 response to the client -- misleading, since the scheduler doesn't
+  distinguish a malformed request from exhausted capacity. The EPP logs the specific
+  reason (missing header vs. unconfigured value) for operators.
 
 This differs from the [disagg profile handler](../disagg/README.md), which decides which
 profiles to run via decider plugins rather than a header.
