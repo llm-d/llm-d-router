@@ -268,6 +268,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 	if finalState := outcome; finalState != nil {
 		p.logger.V(logutil.TRACE).Info("Item finalized externally before processing, discarding.",
 			"outcome", finalState.Outcome, "err", finalState.Err, "flowKey", key, "requestID", req.ID())
+		p.recordDrop(finalState.Outcome)
 		return
 	}
 
@@ -536,6 +537,7 @@ func (p *Processor) shutdown() {
 		// We do not close enqueueChan because external goroutines (Controller) send on it.
 		// The channel will be garbage collected when the processor terminates.
 		p.evictAll()
+		p.flushDropSummary()
 	})
 }
 
@@ -558,7 +560,7 @@ func (p *Processor) evictAll() {
 			// Finalization is idempotent; safe to call even if already finalized externally.
 			// The per-request log is emitted by EnqueueAndWait when it unblocks.
 			item.FinalizeWithOutcome(outcome, errShutdown)
-			p.recordDrop(outcome)
+			p.recordDrop(item.FinalState().Outcome)
 		}
 	}
 	p.processAllQueuesConcurrently("evictAll", processFn)

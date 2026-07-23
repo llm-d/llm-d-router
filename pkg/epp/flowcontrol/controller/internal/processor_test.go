@@ -1191,6 +1191,10 @@ func TestProcessor(t *testing.T) {
 				assert.Equal(t, types.QueueOutcomeEvictedContextCancelled, finalState.Outcome,
 					"Outcome should be EvictedContextCancelled")
 				assert.ErrorIs(t, finalState.Err, types.ErrContextCancelled, "Error should be ErrContextCancelled")
+
+				// Verify the sweep path recorded the drop.
+				assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load(),
+					"Drop should be recorded for EvictedContextCancelled")
 			})
 
 			t.Run("should not sweep items not finalized", func(t *testing.T) {
