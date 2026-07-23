@@ -103,7 +103,7 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		// NIXL fields still drive the NixlConnector under MultiConnector.
 		Expect(kv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
 		Expect(kv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
-		// The p2p block drives the OffloadingConnector's cached-prefix pull.
+		// The remote_kv_source block drives the OffloadingConnector's cached-prefix pull.
 		p2p, ok := kv[requestFieldP2PParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(p2p[requestFieldKVRequestID]).ToNot(BeEmpty())
@@ -157,7 +157,7 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		body, _ := io.ReadAll(resp.Body) //nolint:errcheck
 		Expect(resp.StatusCode).To(Equal(http.StatusOK), string(body))
 
-		// Prefill leg keeps the NIXL WRITE fields and gains the composed p2p block.
+		// Prefill leg keeps the NIXL WRITE fields and gains the composed remote_kv_source block.
 		pkv := kvParams(env.prefillHandler, 0)
 		Expect(pkv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
 		p2p, ok := pkv[requestFieldP2PParams].(map[string]any)

@@ -213,19 +213,20 @@ func (s *Server) handleP2PConcurrentRequests(w http.ResponseWriter, r *http.Requ
 // KVConnector is offloading, or is composed alongside NIXL via MultiConnector
 // (declared with --enable-p2p-pull) when the PD connector is NIXLv2. On any
 // other connector --enable-p2p-pull has no effect, since no MultiConnector
-// routes the p2p params to an OffloadingConnector.
+// routes the remote_kv_source params to an OffloadingConnector.
 func (s *Server) p2pPullAvailable() bool {
 	return s.config.KVConnector == KVConnectorOffloading ||
 		(s.config.EnableP2PPull && s.config.KVConnector == KVConnectorNIXLV2)
 }
 
-// addP2PPullToPrefill adds the OffloadingConnector p2p pull block to a prefill
+// addP2PPullToPrefill adds the OffloadingConnector P2P pull block to a prefill
 // leg's kv_transfer_params so the prefiller pulls cached prefix from
 // kvCacheSource while keeping its own computed blocks available for the
 // decoder. It is a no-op when no source is set or the source resolves to the
-// prefiller itself, since there is nothing to pull from oneself. The p2p key
-// composes with NIXL params: vLLM's MultiConnector routes it to the
-// OffloadingConnector and the NIXL fields to the NixlConnector.
+// prefiller itself, since there is nothing to pull from oneself. The
+// remote_kv_source key composes with NIXL params: vLLM's MultiConnector
+// routes it to the OffloadingConnector and the NIXL fields to the
+// NixlConnector.
 func (s *Server) addP2PPullToPrefill(prefillKVParams map[string]any, kvCacheSource, prefillPodHostPort string) {
 	if kvCacheSource != "" && extractHost(kvCacheSource) != extractHost(prefillPodHostPort) {
 		prefillKVParams[requestFieldP2PParams] = s.p2pSourceParams(kvCacheSource)

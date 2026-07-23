@@ -73,7 +73,7 @@ var _ = Describe("P2P KV cache source header", func() {
 		return sendBody(proxyBaseAddr, chatCompletionsRequestBodyWithMaxCompletionTokens, headers)
 	}
 
-	It("should inject p2p params on the local request without disaggregation", func() {
+	It("should inject remote_kv_source params on the local request without disaggregation", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: kvCacheSource})
@@ -99,7 +99,7 @@ var _ = Describe("P2P KV cache source header", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should add p2p params to the prefill leg under disaggregation", func() {
+	It("should add remote_kv_source params to the prefill leg under disaggregation", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -162,7 +162,7 @@ var _ = Describe("P2P KV cache source header", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should not inject p2p params without the header", func() {
+	It("should not inject remote_kv_source params without the header", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		sendRequest(proxyBaseAddr, nil)
@@ -198,7 +198,7 @@ var _ = Describe("P2P KV cache source header", func() {
 		Expect(decodeReqs).To(HaveLen(1))
 		kvParams, ok := decodeReqs[0][requestFieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		// Only the sidecar-owned p2p key survives; the client's keys are gone.
+		// Only the sidecar-owned remote_kv_source key survives; the client's keys are gone.
 		Expect(kvParams).To(HaveLen(1))
 		p2p, ok := kvParams[requestFieldP2PParams].(map[string]any)
 		Expect(ok).To(BeTrue())
@@ -221,7 +221,7 @@ var _ = Describe("P2P KV cache source header", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should not inject p2p params when the source is the local pod", func() {
+	It("should not inject remote_kv_source params when the source is the local pod", func() {
 		GinkgoT().Setenv("POD_IP", "10.9.9.9")
 		proxyBaseAddr := testInfo.startProxy()
 
