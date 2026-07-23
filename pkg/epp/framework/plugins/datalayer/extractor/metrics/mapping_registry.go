@@ -25,6 +25,10 @@ const (
 	// DefaultEngineType is the key for the fallback mapping.
 	DefaultEngineType = "default"
 
+	// SpokeEPPEngineType is the engine type for multi-cluster Hub-and-Spoke deployments.
+	// Cluster endpoints (identified by empty PodName) automatically use this engine type.
+	SpokeEPPEngineType = "spoke-epp"
+
 	// DefaultEngineTypeLabelKey is the default label on Pods that indicates the inference engine type.
 	DefaultEngineTypeLabelKey = "llm-d.ai/engine-type"
 
