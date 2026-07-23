@@ -279,7 +279,7 @@ plugins:
     parameters:
       autoTune: false
       blockSizeTokens: 5
-      maxPrefixBlocksToMatch: 256
+      maxPrefixTokensToMatch: 1280
       lruCapacityPerServer: 31250
   - type: max-score-picker
   - type: prefix-based-pd-decider
@@ -342,7 +342,7 @@ plugins:
     parameters:
       autoTune: false
       blockSizeTokens: 5
-      maxPrefixBlocksToMatch: 256
+      maxPrefixTokensToMatch: 1280
       lruCapacityPerServer: 31250
   - type: max-score-picker
   - type: always-disagg-multimodal-decider

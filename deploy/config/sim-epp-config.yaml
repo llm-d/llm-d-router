@@ -5,7 +5,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
   parameters:
-    maxPrefixBlocksToMatch: 256
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 31250
 - type: prefix-cache-scorer
 - type: decode-filter

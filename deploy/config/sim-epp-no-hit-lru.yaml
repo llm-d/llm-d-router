@@ -7,9 +7,9 @@ plugins:
   parameters:
     indexerConfig:
       tokenProcessorConfig:
-        blockSize: 5
+        blockSizeTokens: 5
       kvBlockIndexConfig:
-        maxPrefixBlocksToMatch: 256
+        maxPrefixTokensToMatch: 1280
 - type: prefix-cache-scorer
   parameters:
     prefixMatchInfoProducerName: precise-prefix-cache-producer
