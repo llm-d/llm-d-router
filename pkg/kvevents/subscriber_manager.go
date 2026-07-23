@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -36,6 +37,8 @@ type subscriberEntry struct {
 	subscriber *zmqSubscriber
 	cancel     context.CancelFunc
 	endpoint   string
+	// done is closed once the subscriber's goroutine has returned.
+	done chan struct{}
 }
 
 // NewSubscriberManager creates a new subscriber manager.
@@ -71,22 +74,30 @@ func (sm *SubscriberManager) EnsureSubscriber(ctx context.Context, podIdentifier
 			"newEndpoint", endpoint)
 		entry.cancel()
 		delete(sm.subscribers, podIdentifier)
+		// The replacement subscriber below reuses podIdentifier, so its series
+		// are kept rather than cleaned up.
 	}
 
 	// Create new subscriber
 	debugLogger.Info("Creating new subscriber", "podIdentifier", podIdentifier, "endpoint", endpoint)
-	subscriber := newZMQSubscriber(sm.pool, endpoint, topicFilter, remoteSocket)
+	subscriber := newZMQSubscriber(sm.pool, podIdentifier, endpoint, topicFilter, remoteSocket)
 
 	// Create a context and start subscriber
 	subCtx, cancel := context.WithCancel(ctx)
-	go subscriber.Start(subCtx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		subscriber.Start(subCtx)
+	}()
 
 	// Update subscribers
 	sm.subscribers[podIdentifier] = &subscriberEntry{
 		subscriber: subscriber,
 		cancel:     cancel,
 		endpoint:   endpoint,
+		done:       done,
 	}
+	metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
 
 	debugLogger.Info("Subscriber created and started", "podIdentifier", podIdentifier, "endpoint", endpoint)
 	return nil
@@ -108,6 +119,18 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	debugLogger.Info("Removing subscriber", "podIdentifier", podIdentifier, "endpoint", entry.endpoint)
 	entry.cancel()
 	delete(sm.subscribers, podIdentifier)
+	metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
+	cleanupSubscriberMetrics(podIdentifier, entry.done)
+}
+
+// cleanupSubscriberMetrics drops the per-pod series for a removed subscriber
+// once its goroutine has exited. Cancellation is asynchronous, so cleaning up
+// eagerly would let a final message or error increment resurrect the series.
+func cleanupSubscriberMetrics(podIdentifier string, done <-chan struct{}) {
+	go func() {
+		<-done
+		metrics.CleanupSubscriber(podIdentifier)
+	}()
 }
 
 // Shutdown shuts down all subscribers.
@@ -121,9 +144,11 @@ func (sm *SubscriberManager) Shutdown(ctx context.Context) {
 	for podIdentifier, entry := range sm.subscribers {
 		debugLogger.Info("Shutting down subscriber", "podIdentifier", podIdentifier)
 		entry.cancel()
+		cleanupSubscriberMetrics(podIdentifier, entry.done)
 	}
 
 	sm.subscribers = make(map[string]*subscriberEntry)
+	metrics.SubscriberActive.Set(0)
 	debugLogger.Info("All subscribers shut down")
 }
 

@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
 const (
@@ -32,19 +33,21 @@ const (
 
 // zmqSubscriber connects to a ZMQ publisher and forwards messages to a pool.
 type zmqSubscriber struct {
-	pool        *Pool
-	endpoint    string
-	remote      bool
-	topicFilter string
+	pool          *Pool
+	podIdentifier string
+	endpoint      string
+	remote        bool
+	topicFilter   string
 }
 
 // newZMQSubscriber creates a new ZMQ subscriber.
-func newZMQSubscriber(pool *Pool, endpoint, topicFilter string, remote bool) *zmqSubscriber {
+func newZMQSubscriber(pool *Pool, podIdentifier, endpoint, topicFilter string, remote bool) *zmqSubscriber {
 	return &zmqSubscriber{
-		pool:        pool,
-		endpoint:    endpoint,
-		remote:      remote,
-		topicFilter: topicFilter,
+		pool:          pool,
+		podIdentifier: podIdentifier,
+		endpoint:      endpoint,
+		remote:        remote,
+		topicFilter:   topicFilter,
 	}
 }
 
@@ -66,6 +69,7 @@ func (z *zmqSubscriber) Start(ctx context.Context) {
 			// wait before retrying, unless the context has been canceled.
 			select {
 			case <-time.After(retryInterval):
+				metrics.SubscriberReconnections.WithLabelValues(z.podIdentifier).Inc()
 				logger.Info("retrying zmq-subscriber")
 			case <-ctx.Done():
 				logger.Info("shutting down zmq-subscriber")
@@ -90,12 +94,14 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 	// Bind for local endpoints, connect for remote ones.
 	if !z.remote {
 		if err := sub.Listen(z.endpoint); err != nil {
+			metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "bind").Inc()
 			logger.Error(err, "Failed to bind subscriber socket", "endpoint", z.endpoint)
 			return
 		}
 		logger.Info("Bound subscriber socket", "endpoint", z.endpoint)
 	} else {
 		if err := sub.Dial(z.endpoint); err != nil {
+			metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "connect").Inc()
 			logger.Error(err, "Failed to connect subscriber socket", "endpoint", z.endpoint)
 			return
 		}
@@ -103,6 +109,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 	}
 
 	if err := sub.SetOption(zmq4.OptionSubscribe, z.topicFilter); err != nil {
+		metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "subscribe").Inc()
 		logger.Error(err, "Failed to subscribe to topic filter", "topic", z.topicFilter)
 		return
 	}
@@ -115,9 +122,11 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			if ctx.Err() != nil {
 				return // context cancelled, clean shutdown
 			}
+			metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "recv").Inc()
 			debugLogger.Error(err, "Failed to receive message from zmq subscriber", "endpoint", z.endpoint)
 			return // exit to trigger reconnect
 		}
+		metrics.MessagesReceived.WithLabelValues(z.podIdentifier).Inc()
 		parts := msg.Frames
 		if len(parts) != 3 {
 			debugLogger.Error(nil, "Unexpected frame count", "got", len(parts), "want", 3)
