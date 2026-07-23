@@ -282,6 +282,9 @@ retryLoop:
 		// so treat a missing prefiller cached_tokens value as zero.
 		pCachedTokens = 0
 	}
+	// Prefill routing to splice over the decode response's invalid prompt-region
+	// rows (D never forwards the prompt). Empty when capture is off.
+	prefillRoutedExperts := extractRoutedExperts(prefillerResponse)
 
 	s.logger.V(5).Info("received prefiller response", requestFieldKVTransferParams, pKVTransferParams)
 
@@ -394,6 +397,7 @@ retryLoop:
 
 	s.logger.V(5).Info("sending request to decoder", "body", string(dbody))
 	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens)
+	decodeWriter, finalizeRoutedExperts := newRoutedExpertsResponseWriterWithFinalize(decodeWriter, prefillRoutedExperts)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
 	decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
 
@@ -401,6 +405,12 @@ retryLoop:
 		s.logger.V(4).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
 		decodeSpan.SetAttributes(attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host))
 		s.dispatchDecode(decodeWriter, dreq, completionRequest)
+	}
+	// Splice routed_experts into the cached-tokens writer before flushing it.
+	if err := finalizeRoutedExperts(); err != nil {
+		s.logger.Error(err, "failed to flush routed experts response writer")
+		decodeSpan.SetStatus(codes.Error, "failed to flush routed experts response writer")
+		return
 	}
 	if err := finalizeDecodeWriter(); err != nil {
 		s.logger.Error(err, "failed to flush cached token response writer")

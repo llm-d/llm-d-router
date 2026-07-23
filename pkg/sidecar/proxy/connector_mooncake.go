@@ -35,6 +35,10 @@ import (
 
 const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the other timeout on vllm
 
+// Safety bound on waiting for the concurrent prefill's routed_experts at decode
+// finalize; prefill is normally done well before decode finishes.
+const mooncakeRoutedExpertsTimeout = 30 * time.Second
+
 const mooncakeDataParallelRankHeader = "X-data-parallel-rank" // to send rank id in header to prefill
 
 func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
@@ -211,6 +215,10 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 		return
 	}
 
+	// Carries the prefill's routed_experts to the decode finalizer to splice over
+	// the decode response's invalid prompt-region rows. Buffered (cap 1) and always
+	// sent once, so the finalizer never blocks on a non-capturing/failed prefill.
+	prefillRoutedExperts := make(chan map[int]string, 1)
 	go func() {
 		defer prefillSpan.End()
 		defer func() {
@@ -226,9 +234,16 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
 			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
 		)
+		var routedExperts map[int]string
 		if isHTTPError(pw.statusCode) {
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
+		} else {
+			var prefillerResponse map[string]any
+			if err := json.Unmarshal(pw.bodyBytes(), &prefillerResponse); err == nil {
+				routedExperts = extractRoutedExperts(prefillerResponse)
+			}
 		}
+		prefillRoutedExperts <- routedExperts
 		s.logger.V(5).Info("mooncake prefill request completed", "status", pw.statusCode)
 	}()
 
@@ -245,7 +260,21 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 	decodeStart := time.Now()
 
 	decodeReq = decodeReq.WithContext(ctx)
-	s.decoderProxy.ServeHTTP(w, decodeReq)
+	// Resolve the prefill routing at finalize (it is ready by then, since decode
+	// pulled its KV); the timeout just forwards unspliced rather than blocking.
+	decodeWriter, finalizeRoutedExperts := newDeferredRoutedExpertsResponseWriter(w, func() map[int]string {
+		select {
+		case re := <-prefillRoutedExperts:
+			return re
+		case <-time.After(mooncakeRoutedExpertsTimeout):
+			s.logger.Info("timed out waiting for prefill routed_experts; forwarding decode response unspliced")
+			return nil
+		}
+	})
+	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	if err := finalizeRoutedExperts(); err != nil {
+		s.logger.Error(err, "failed to flush routed experts response writer")
+	}
 
 	decodeDuration := time.Since(decodeStart)
 	decodeSpan.SetAttributes(
