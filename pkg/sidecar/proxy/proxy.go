@@ -95,10 +95,10 @@ const (
 	// nesting key, named for the remote party it describes: "remote_decoder" on
 	// the prefiller leg, "remote_prefiller" on the decoder leg, "remote_kv_source"
 	// for a symmetric cached-prefix pull.
-	requestFieldP2PDecodeParams  = "remote_decoder"
-	requestFieldP2PPrefillParams = "remote_prefiller"
-	requestFieldP2PParams        = "remote_kv_source"
-	requestFieldKVRequestID      = "kv_request_id"
+	requestFieldRemoteDecoder   = "remote_decoder"
+	requestFieldRemotePrefiller = "remote_prefiller"
+	requestFieldRemoteKVSource  = "remote_kv_source"
+	requestFieldKVRequestID     = "kv_request_id"
 
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage

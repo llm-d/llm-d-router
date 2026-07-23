@@ -69,7 +69,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		prefillData[k] = v
 	}
 	prefillKVParams := map[string]any{
-		requestFieldP2PDecodeParams: map[string]any{
+		requestFieldRemoteDecoder: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
 		},
 	}
@@ -95,7 +95,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		decodeData[k] = v
 	}
 	decodeData[requestFieldKVTransferParams] = map[string]any{
-		requestFieldP2PPrefillParams: map[string]any{
+		requestFieldRemotePrefiller: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
 			requestFieldRemoteHost:  extractHost(prefillPodHostPort),
 			requestFieldRemotePort:  s.config.P2PConnectorPort,
@@ -229,7 +229,7 @@ func (s *Server) p2pPullAvailable() bool {
 // NixlConnector.
 func (s *Server) addP2PPullToPrefill(prefillKVParams map[string]any, kvCacheSource, prefillPodHostPort string) {
 	if kvCacheSource != "" && extractHost(kvCacheSource) != extractHost(prefillPodHostPort) {
-		prefillKVParams[requestFieldP2PParams] = s.p2pSourceParams(kvCacheSource)
+		prefillKVParams[requestFieldRemoteKVSource] = s.p2pSourceParams(kvCacheSource)
 	}
 }
 
@@ -267,7 +267,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 	p2pParams := s.p2pSourceParams(sourceHostPort)
 	// Rebuild kv_transfer_params from scratch: the sidecar owns this field, so
 	// client-supplied keys are dropped rather than forwarded to vLLM.
-	requestData[requestFieldKVTransferParams] = map[string]any{requestFieldP2PParams: p2pParams}
+	requestData[requestFieldKVTransferParams] = map[string]any{requestFieldRemoteKVSource: p2pParams}
 
 	s.logger.Info("running P2P source protocol",
 		"source_host", extractHost(sourceHostPort),
