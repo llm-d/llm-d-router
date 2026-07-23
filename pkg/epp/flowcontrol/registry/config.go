@@ -39,9 +39,14 @@ const (
 )
 
 const (
-	// defaultPriorityBandMaxBytes is the default global capacity for a priority band if not explicitly configured.
-	// It is set to 1 GB.
+	// defaultPriorityBandMaxBytes is the default byte-size capacity for a priority band if not explicitly
+	// configured. It is set to 1 GB.
 	defaultPriorityBandMaxBytes uint64 = 1_000_000_000
+	// defaultPriorityBandMaxRequests is the default request-count capacity for a priority band if not
+	// explicitly configured. Together with the default request TTL (60s), it only binds when a band's
+	// arrival rate under a dispatch halt exceeds maxRequests/TTL (~83 req/s); below that, TTL expiry
+	// bounds occupancy first.
+	defaultPriorityBandMaxRequests uint64 = 5000
 	// defaultFlowGCTimeout is the default duration of inactivity after which an idle flow is garbage collected.
 	// This also serves as the interval for the periodic garbage collection scan.
 	defaultFlowGCTimeout time.Duration = 5 * time.Minute
@@ -85,14 +90,15 @@ type Config struct {
 	DefaultPriorityBand *PriorityBandConfig
 
 	// DefaultNegativePriorityBand is an optional template for dynamically provisioning priority bands when a request
-	// arrives with a priority level strictly below zero. This allows setting lower capacity limits (or zero) for
-	// negative-priority traffic to designate it as sheddable.
+	// arrives with a priority level strictly below zero. This allows setting lower capacity limits for
+	// negative-priority traffic to designate it as sheddable (a value of 0 is treated as unset and receives the
+	// default).
 	// If nil, negative priorities fall back to DefaultPriorityBand.
 	DefaultNegativePriorityBand *PriorityBandConfig
 
 	// FlowGCTimeout defines the interval at which the registry scans for and garbage collects idle flows.
 	// A flow is collected if it has been observed to be Idle for at least one full scan interval.
-	// Optional: Defaults to `defaultFlowGCTimeout` (1 hour).
+	// Optional: Defaults to `defaultFlowGCTimeout` (5 minutes).
 	FlowGCTimeout time.Duration
 
 	// PriorityBandGCTimeout defines the duration of inactivity after which a dynamically provisioned priority band
@@ -136,12 +142,15 @@ type PriorityBandConfig struct {
 	FairnessPolicy flowcontrol.FairnessPolicy
 
 	// MaxBytes defines the maximum total byte size for this priority band.
-	// Optional: Defaults to defaultPriorityBandMaxBytes (1 GB).
+	// Optional: Defaults to defaultPriorityBandMaxBytes (1 GB). A value of 0 is treated as unset and receives the
+	// default; per-band limits are always bounded, unlike the optional global limits. To effectively remove the
+	// bound, set an explicit large value.
 	MaxBytes uint64
 
 	// MaxRequests defines the maximum total request count for this priority band.
-	// A value of 0 signifies no request-count limit is enforced.
-	// Optional: Defaults to defaultPriorityBandMaxRequests (5000).
+	// Optional: Defaults to defaultPriorityBandMaxRequests (5000). A value of 0 is treated as unset and receives
+	// the default; per-band limits are always bounded, unlike the optional global limits. To effectively remove
+	// the bound, set an explicit large value.
 	MaxRequests uint64
 }
 
@@ -385,6 +394,9 @@ func (p *PriorityBandConfig) applyDefaults(defaults PriorityBandPolicyDefaults) 
 	}
 	if p.MaxBytes == 0 {
 		p.MaxBytes = defaultPriorityBandMaxBytes
+	}
+	if p.MaxRequests == 0 {
+		p.MaxRequests = defaultPriorityBandMaxRequests
 	}
 	if p.FairnessPolicy == nil {
 		if defaults.FairnessPolicy == nil {
