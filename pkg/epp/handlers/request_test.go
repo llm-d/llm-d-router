@@ -231,6 +231,72 @@ func TestGenerateRequestHeaderResponse_MergeMetadata(t *testing.T) {
 	assert.Equal(t, "1.2.3.4:8080", endpointKey.GetStringValue(), "Unexpected value for DestinationEndpointKey")
 }
 
+func TestGenerateRequestHeaderResponse_EndpointScores(t *testing.T) {
+	t.Parallel()
+
+	scores := map[string]float64{
+		"1.2.3.4:8080": 0.91,
+		"5.6.7.8:8080": 0.74,
+	}
+
+	tests := []struct {
+		name               string
+		emitEndpointScores bool
+		targetScores       map[string]float64
+		wantScores         map[string]float64
+	}{
+		{
+			name:               "enabled with scores",
+			emitEndpointScores: true,
+			targetScores:       scores,
+			wantScores:         scores,
+		},
+		{
+			name:               "enabled without scores",
+			emitEndpointScores: true,
+		},
+		{
+			name:         "disabled with scores",
+			targetScores: scores,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{}
+			server.SetEmitEndpointScores(tc.emitEndpointScores)
+			reqCtx := &RequestContext{
+				TargetEndpoint:       "1.2.3.4:8080,5.6.7.8:8080",
+				TargetEndpointScores: tc.targetScores,
+				Request: &Request{
+					Headers: make(map[string]string),
+				},
+				Response: &Response{},
+			}
+
+			resp := server.generateRequestHeaderResponse(context.Background(), reqCtx)
+
+			endpointNamespace, ok := resp.DynamicMetadata.Fields[metadata.DestinationEndpointNamespace]
+			assert.True(t, ok, "Expected DestinationEndpointNamespace to be in DynamicMetadata")
+			endpointKey, ok := endpointNamespace.GetStructValue().Fields[metadata.DestinationEndpointKey]
+			assert.True(t, ok, "Expected DestinationEndpointKey to be in DestinationEndpointNamespace")
+			assert.Equal(t, "1.2.3.4:8080,5.6.7.8:8080", endpointKey.GetStringValue(), "Unexpected value for DestinationEndpointKey")
+
+			scoresValue, ok := endpointNamespace.GetStructValue().Fields[metadata.DestinationEndpointScoresKey]
+			if tc.wantScores == nil {
+				assert.False(t, ok, "Expected DestinationEndpointScoresKey to be absent from DestinationEndpointNamespace")
+				return
+			}
+			assert.True(t, ok, "Expected DestinationEndpointScoresKey to be in DestinationEndpointNamespace")
+			gotScores := make(map[string]float64)
+			for endpoint, score := range scoresValue.GetStructValue().Fields {
+				gotScores[endpoint] = score.GetNumberValue()
+			}
+			assert.Equal(t, tc.wantScores, gotScores, "Unexpected values for DestinationEndpointScoresKey")
+		})
+	}
+}
+
 func TestFallbackToRandomEndpoint(t *testing.T) {
 	t.Parallel()
 

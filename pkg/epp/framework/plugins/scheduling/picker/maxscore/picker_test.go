@@ -115,6 +115,15 @@ func TestPickMaxScorePicker(t *testing.T) {
 			result := test.picker.Pick(context.Background(), test.input)
 			got := result.TargetEndpoints
 
+			if len(result.ScoredEndpoints) != len(got) {
+				t.Fatalf("Expected ScoredEndpoints length %d, got %d", len(got), len(result.ScoredEndpoints))
+			}
+			for i, scoredEndpoint := range result.ScoredEndpoints {
+				if got[i] != fwksched.Endpoint(scoredEndpoint) {
+					t.Errorf("ScoredEndpoints[%d] is not parallel to TargetEndpoints[%d]", i, i)
+				}
+			}
+
 			if test.tieBreakCandidates > 0 {
 				testMaxScoredEndpoints := test.output[:test.tieBreakCandidates]
 				gotMaxScoredEndpoints := got[:test.tieBreakCandidates]
