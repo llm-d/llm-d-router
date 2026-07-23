@@ -159,6 +159,10 @@ func (p *Producer) PreRequest(ctx context.Context,
 		Speculative:   true,
 	}
 
+	// Surface the routing decision so the health monitor can compare
+	// last-routed vs last-confirmed and detect a broken KV-events pipeline.
+	p.healthMonitor.RecordRouting(speculativePod.PodIdentifier)
+
 	index := p.kvCacheIndexer.KVBlockIndex()
 	// Insert per-prompt keys separately to preserve correct block adjacency.
 	for _, promptKeys := range state.perPromptKeys {
