@@ -33,7 +33,7 @@ func TestMetric_HeaderStamped_IncrementsPerSelector(t *testing.T) {
 	controller := NewController(validConfig(), nil)
 	controller.ResponseHeader(context.Background(), nil,
 		&fwkrc.Response{Headers: map[string]string{}},
-		&fwkdl.EndpointMetadata{Labels: revLabels("v1", "prefill")},
+		&fwkdl.EndpointMetadata{Labels: revLabels("v1")},
 	)
 	if got := testutil.ToFloat64(headerStampedTotal.WithLabelValues("revision")); got != 1 {
 		t.Fatalf("want 1, got %v", got)
@@ -59,7 +59,7 @@ func TestMetric_FilterOutcome_Matched(t *testing.T) {
 	controller := NewController(validConfig(), nil)
 	controller.Filter(context.Background(),
 		&fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v1"}},
-		[]fwksched.Endpoint{endpoint("p1", revLabels("v1", "prefill"))},
+		[]fwksched.Endpoint{endpoint("p1", revLabels("v1"))},
 	)
 	got := testutil.ToFloat64(filterOutcomeTotal.WithLabelValues("revision", string(ModeStrict), filterOutcomeMatched))
 	if got != 1 {
@@ -72,7 +72,7 @@ func TestMetric_FilterOutcome_NoMatchStrict(t *testing.T) {
 	controller := NewController(validConfig(), nil)
 	controller.Filter(context.Background(),
 		&fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}},
-		[]fwksched.Endpoint{endpoint("p1", revLabels("v1", "prefill"))},
+		[]fwksched.Endpoint{endpoint("p1", revLabels("v1"))},
 	)
 	got := testutil.ToFloat64(filterOutcomeTotal.WithLabelValues("revision", string(ModeStrict), filterOutcomeNoMatchStrict))
 	if got != 1 {
@@ -87,7 +87,7 @@ func TestMetric_FilterOutcome_NoMatchPreferFallback(t *testing.T) {
 	controller := NewController(config, nil)
 	controller.Filter(context.Background(),
 		&fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}},
-		[]fwksched.Endpoint{endpoint("p1", revLabels("v1", "prefill"))},
+		[]fwksched.Endpoint{endpoint("p1", revLabels("v1"))},
 	)
 	got := testutil.ToFloat64(filterOutcomeTotal.WithLabelValues("revision", string(ModePrefer), filterOutcomeNoMatchPreferFallback))
 	if got != 1 {
@@ -119,10 +119,10 @@ func TestMetric_GatingDropped_OncePerRevisionPerCall(t *testing.T) {
 	controller := NewController(validConfig(), podCache)
 	filter := newGatingFilter(controller)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v1", "prefill")),
-		endpoint("p3", revLabels("v1", "prefill")),
-		endpoint("p4", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v1")),
+		endpoint("p3", revLabels("v1")),
+		endpoint("p4", revLabels("v2")),
 	}
 
 	filter.Filter(context.Background(), nil, pods)
@@ -164,4 +164,3 @@ func TestMetric_CacheReadyPods_TracksInformerState(t *testing.T) {
 		t.Errorf("decode v1: want 1, got %v", got)
 	}
 }
-

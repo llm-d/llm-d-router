@@ -21,10 +21,10 @@ func endpoint(name string, labels map[string]string) fwksched.Endpoint {
 	return fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, nil)
 }
 
-func revLabels(revision, role string) map[string]string {
+func revLabels(revision string) map[string]string {
 	return map[string]string{
 		"disaggregatedset.x-k8s.io/revision": revision,
-		"disaggregatedset.x-k8s.io/role":     role,
+		"disaggregatedset.x-k8s.io/role":     "prefill",
 	}
 }
 
@@ -33,8 +33,8 @@ func revLabels(revision, role string) map[string]string {
 func TestFilter_StrictWithMatch(t *testing.T) {
 	c := NewController(validConfig(), nil)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
 	}
 	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v1"}}
 	got := c.Filter(context.Background(), req, pods)
@@ -46,7 +46,7 @@ func TestFilter_StrictWithMatch(t *testing.T) {
 func TestFilter_StrictNoMatchReturnsEmpty(t *testing.T) {
 	c := NewController(validConfig(), nil)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
+		endpoint("p1", revLabels("v1")),
 	}
 	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}}
 	got := c.Filter(context.Background(), req, pods)
@@ -60,8 +60,8 @@ func TestFilter_PreferFallsBack(t *testing.T) {
 	cfg.Selectors[0].Mode = ModePrefer
 	c := NewController(cfg, nil)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
 	}
 	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}}
 	got := c.Filter(context.Background(), req, pods)
@@ -73,8 +73,8 @@ func TestFilter_PreferFallsBack(t *testing.T) {
 func TestFilter_HeaderAbsentIsNoop(t *testing.T) {
 	c := NewController(validConfig(), nil)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
 	}
 	req := &fwksched.InferenceRequest{Headers: map[string]string{}}
 	got := c.Filter(context.Background(), req, pods)
@@ -93,7 +93,7 @@ func TestFilter_MultipleSelectorsAppliedInOrder(t *testing.T) {
 	})
 	c := NewController(cfg, nil)
 	makeLabels := func(rev, slice string) map[string]string {
-		m := revLabels(rev, "prefill")
+		m := revLabels(rev)
 		m["mistral.ai/slice"] = slice
 		return m
 	}
@@ -114,7 +114,7 @@ func TestFilter_MultipleSelectorsAppliedInOrder(t *testing.T) {
 
 func TestFilter_NilRequestIsNoop(t *testing.T) {
 	c := NewController(validConfig(), nil)
-	pods := []fwksched.Endpoint{endpoint("p1", revLabels("v1", "prefill"))}
+	pods := []fwksched.Endpoint{endpoint("p1", revLabels("v1"))}
 	got := c.Filter(context.Background(), nil, pods)
 	if len(got) != 1 {
 		t.Fatalf("nil request should be no-op, got %d", len(got))
@@ -136,8 +136,8 @@ func TestFilter_PreferDoesNotRescueAfterStrictEmpties(t *testing.T) {
 	})
 	c := NewController(config, nil)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
 	}
 	// Strict revision header will match zero pods → current becomes empty.
 	// Prefer slice header with a match SHOULD NOT resurrect anything.
@@ -157,8 +157,8 @@ func TestFilter_PreferDoesNotRescueAfterStrictEmpties(t *testing.T) {
 func TestFilter_ReturnsFreshSlice(t *testing.T) {
 	c := NewController(validConfig(), nil)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
 	}
 	// No header → filter is a no-op, but must still return a copy.
 	req := &fwksched.InferenceRequest{Headers: map[string]string{}}
@@ -166,7 +166,7 @@ func TestFilter_ReturnsFreshSlice(t *testing.T) {
 	if len(got) != 2 || len(pods) != 2 {
 		t.Fatalf("setup wrong: got %d, pods %d", len(got), len(pods))
 	}
-	got[0] = endpoint("mutated", revLabels("mutated", "prefill"))
+	got[0] = endpoint("mutated", revLabels("mutated"))
 	if pods[0].GetMetadata().PodName != "p1" {
 		t.Fatalf("Filter leaked aliased slice: mutation of returned slice changed caller's input")
 	}
@@ -207,6 +207,7 @@ func itoa(n int) string {
 	}
 	return string(buf)
 }
+
 // --- gatingFilter tests ----------------------------------------------------
 
 func TestGatingFilter_KeepsCandidatesWithLiveCrossRoles(t *testing.T) {
@@ -216,8 +217,8 @@ func TestGatingFilter_KeepsCandidatesWithLiveCrossRoles(t *testing.T) {
 	})
 	f := newGatingFilter(c)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
 	}
 	got := f.Filter(context.Background(), nil, pods)
 	if len(got) != 2 {
@@ -233,10 +234,10 @@ func TestGatingFilter_DropsCandidatesWithMissingRole(t *testing.T) {
 	})
 	f := newGatingFilter(c)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v1", "prefill")),
-		endpoint("p3", revLabels("v1", "prefill")),
-		endpoint("p4", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v1")),
+		endpoint("p3", revLabels("v1")),
+		endpoint("p4", revLabels("v2")),
 	}
 	got := f.Filter(context.Background(), nil, pods)
 	if len(got) != 1 || got[0].GetMetadata().PodName != "p4" {
@@ -252,8 +253,8 @@ func TestGatingFilter_AllRevisionsDeadReturnsEmpty(t *testing.T) {
 	})
 	f := newGatingFilter(c)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
 	}
 	got := f.Filter(context.Background(), nil, pods)
 	if len(got) != 0 {
@@ -268,8 +269,8 @@ func TestGatingFilter_NoGatingConfigIsNoop(t *testing.T) {
 	c := NewController(cfg, nil)
 	f := newGatingFilter(c)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
 	}
 	got := f.Filter(context.Background(), nil, pods)
 	if len(got) != 2 {
@@ -285,8 +286,8 @@ func TestGatingFilter_DisabledModeIsNoop(t *testing.T) {
 	c := NewController(cfg, nil)
 	f := newGatingFilter(c)
 	pods := []fwksched.Endpoint{
-		endpoint("p1", revLabels("v1", "prefill")),
-		endpoint("p2", revLabels("v2", "prefill")),
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
 	}
 	got := f.Filter(context.Background(), nil, pods)
 	if len(got) != 2 {
@@ -299,7 +300,7 @@ func TestGatingFilter_DisabledModeIsNoop(t *testing.T) {
 func TestResponseHeader_StampsSelectorHeader(t *testing.T) {
 	c := NewController(validConfig(), nil)
 	resp := &fwkrc.Response{Headers: map[string]string{}}
-	ep := &fwkdl.EndpointMetadata{Labels: revLabels("v1", "prefill")}
+	ep := &fwkdl.EndpointMetadata{Labels: revLabels("v1")}
 	c.ResponseHeader(context.Background(), nil, resp, ep)
 	if resp.Headers["x-disagg-revision"] != "v1" {
 		t.Fatalf("header not stamped: %v", resp.Headers)
@@ -314,7 +315,7 @@ func TestResponseHeader_MultipleSelectorsStampAll(t *testing.T) {
 	})
 	c := NewController(cfg, nil)
 	resp := &fwkrc.Response{Headers: map[string]string{}}
-	labels := revLabels("v1", "prefill")
+	labels := revLabels("v1")
 	labels["mistral.ai/slice"] = "s1"
 	c.ResponseHeader(context.Background(), nil, resp, &fwkdl.EndpointMetadata{Labels: labels})
 	if resp.Headers["x-disagg-revision"] != "v1" || resp.Headers["x-disagg-slice"] != "s1" {
@@ -344,5 +345,5 @@ func TestResponseHeader_NilEndpointIsNoop(t *testing.T) {
 func TestResponseHeader_NilResponseIsNoop(t *testing.T) {
 	c := NewController(validConfig(), nil)
 	// must not panic
-	c.ResponseHeader(context.Background(), nil, nil, &fwkdl.EndpointMetadata{Labels: revLabels("v1", "prefill")})
+	c.ResponseHeader(context.Background(), nil, nil, &fwkdl.EndpointMetadata{Labels: revLabels("v1")})
 }

@@ -6,11 +6,10 @@ import (
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/random"
+	singleprofilehandler "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
-
-	singleprofilehandler "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/random"
 )
 
 // buildSchedulerConfigForTest builds a minimal scheduler config with a
@@ -57,7 +56,7 @@ func TestWireInto_StrictAtHead_PreferAtTail(t *testing.T) {
 	if strictAt < 0 || operatorAt < 0 || preferAt < 0 || gatingAt < 0 {
 		t.Fatalf("expected all four filters in profile string, got %q", got)
 	}
-	if !(strictAt < operatorAt && operatorAt < preferAt && preferAt < gatingAt) {
+	if strictAt >= operatorAt || operatorAt >= preferAt || preferAt >= gatingAt {
 		t.Fatalf("expected order strict < operator < prefer < gating in %q (positions %d, %d, %d, %d)",
 			got, strictAt, operatorAt, preferAt, gatingAt)
 	}

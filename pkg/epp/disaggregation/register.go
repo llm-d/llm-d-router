@@ -2,15 +2,22 @@ package disaggregation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"k8s.io/client-go/kubernetes"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// ErrDisabled is returned by Register when called with a disabled config.
+// Callers should gate on config.Enabled before calling and treat this error
+// as a no-op signal rather than a failure.
+var ErrDisabled = errors.New("disaggregation is disabled")
+
 // Register validates config, starts the informer-backed pod cache, waits for
 // cache sync, and returns a ready controller. Boot fails when:
 //
+//   - config is disabled (returns ErrDisabled — caller-side gate)
 //   - config is invalid (see Config.Validate)
 //   - the pod cache cannot be built or does not sync within ctx
 //   - Gating is set and any listed role has zero observed Ready pods,
@@ -21,7 +28,7 @@ import (
 // silent misdirected routing.
 func Register(ctx context.Context, client kubernetes.Interface, namespace string, config Config) (*Controller, error) {
 	if !config.Enabled {
-		return nil, nil
+		return nil, ErrDisabled
 	}
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -53,7 +60,7 @@ func Register(ctx context.Context, client kubernetes.Interface, namespace string
 	}
 	podCache.Start(ctx)
 	if !podCache.WaitForCacheSync(ctx) {
-		return nil, fmt.Errorf("pod cache did not sync before context expired")
+		return nil, errors.New("pod cache did not sync before context expired")
 	}
 
 	if config.Gating.Active() {
@@ -92,7 +99,7 @@ func gatingForLog(g *Gating) string {
 func validateRolesObserved(podCache *PodCache, roles []string) error {
 	revisions := podCache.Revisions()
 	if len(revisions) == 0 {
-		return fmt.Errorf("no revisions observed in scope after cache sync")
+		return errors.New("no revisions observed in scope after cache sync")
 	}
 	for _, role := range roles {
 		observed := false

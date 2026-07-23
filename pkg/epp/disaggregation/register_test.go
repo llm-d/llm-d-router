@@ -27,16 +27,6 @@ func registerCtx(t *testing.T) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
 }
 
-func TestRegister_DisabledReturnsNilNil(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	ctx, cancel := registerCtx(t)
-	defer cancel()
-	c, err := Register(ctx, client, testNS, Config{Enabled: false})
-	if err != nil || c != nil {
-		t.Fatalf("disabled: want (nil, nil), got (%v, %v)", c, err)
-	}
-}
-
 func TestRegister_InvalidConfigReturnsError(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	ctx, cancel := registerCtx(t)

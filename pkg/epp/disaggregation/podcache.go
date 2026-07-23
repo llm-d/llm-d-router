@@ -2,6 +2,7 @@ package disaggregation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -35,7 +36,7 @@ type PodCache struct {
 // (callers should skip role-based checks in that mode).
 func NewPodCache(client kubernetes.Interface, namespace, labelSelector, revisionLabelKey, roleLabelKey string) (*PodCache, error) {
 	if revisionLabelKey == "" {
-		return nil, fmt.Errorf("revisionLabelKey is required")
+		return nil, errors.New("revisionLabelKey is required")
 	}
 	factory := informers.NewSharedInformerFactoryWithOptions(
 		client,

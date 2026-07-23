@@ -45,8 +45,5 @@ func (r *Runner) registerDisaggregation(ctx context.Context, restCfg *rest.Confi
 	if err != nil {
 		return fmt.Errorf("register disaggregation controller: %w", err)
 	}
-	if controller == nil {
-		return nil
-	}
 	return disaggregation.WireInto(r.schedulerConfig, r.requestControlConfig, controller)
 }

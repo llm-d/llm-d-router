@@ -15,6 +15,7 @@ package disaggregation
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -128,14 +129,14 @@ func (c *Config) Validate() error {
 	}
 
 	if c.Scope.LabelSelector == "" {
-		return fmt.Errorf("disaggregation.scope.labelSelector is required when enabled")
+		return errors.New("disaggregation.scope.labelSelector is required when enabled")
 	}
 	if _, err := labels.Parse(c.Scope.LabelSelector); err != nil {
 		return fmt.Errorf("disaggregation.scope.labelSelector is not a valid label selector: %w", err)
 	}
 
 	if len(c.Selectors) == 0 {
-		return fmt.Errorf("disaggregation.selectors must contain at least one entry")
+		return errors.New("disaggregation.selectors must contain at least one entry")
 	}
 	seenNames := make(map[string]struct{}, len(c.Selectors))
 	seenHeaders := make(map[string]struct{}, len(c.Selectors))
@@ -173,13 +174,13 @@ func (c *Config) Validate() error {
 			// Nothing else to validate: disabled skips wiring.
 		case GatingModeSum:
 			if c.Gating.RequireRoles == nil {
-				return fmt.Errorf("disaggregation.gating.requireRoles is required when gating.mode=sum")
+				return errors.New("disaggregation.gating.requireRoles is required when gating.mode=sum")
 			}
 			if c.Gating.RequireRoles.LabelKey == "" {
-				return fmt.Errorf("disaggregation.gating.requireRoles.labelKey is required")
+				return errors.New("disaggregation.gating.requireRoles.labelKey is required")
 			}
 			if len(c.Gating.RequireRoles.Values) == 0 {
-				return fmt.Errorf("disaggregation.gating.requireRoles.values must contain at least one role")
+				return errors.New("disaggregation.gating.requireRoles.values must contain at least one role")
 			}
 		default:
 			return fmt.Errorf("disaggregation.gating.mode %q must be one of sum|disabled", c.Gating.Mode)

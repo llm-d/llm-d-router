@@ -22,9 +22,9 @@ func readyPod(name, revision, role string) *corev1.Pod {
 			Name:      name,
 			Namespace: testNS,
 			Labels: map[string]string{
-				testRevLabel:                            revision,
-				testRoleLabel:                           role,
-				"disaggregatedset.x-k8s.io/name":        "my-set",
+				testRevLabel:                     revision,
+				testRoleLabel:                    role,
+				"disaggregatedset.x-k8s.io/name": "my-set",
 			},
 		},
 		Status: corev1.PodStatus{
@@ -45,11 +45,6 @@ func pendingPod(name, revision, role string) *corev1.Pod {
 
 func startCache(t *testing.T, pods ...*corev1.Pod) (*PodCache, context.CancelFunc) {
 	t.Helper()
-	objs := make([]interface{}, 0, len(pods))
-	for _, p := range pods {
-		objs = append(objs, p)
-	}
-	// fake.NewSimpleClientset accepts runtime.Object variadic
 	client := fake.NewSimpleClientset()
 	for _, p := range pods {
 		if _, err := client.CoreV1().Pods(testNS).Create(context.Background(), p, metav1.CreateOptions{}); err != nil {
