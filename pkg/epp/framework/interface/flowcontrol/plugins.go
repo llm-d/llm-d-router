@@ -144,9 +144,14 @@ type SaturationDetector interface {
 // Integration:
 // This policy is called during dispatch decision-making, before a request is allowed to proceed. For each
 // priority band, the returned ceiling is compared against current saturation. If saturation exceeds the
-// ceiling for a given priority, requests at that priority are gated (not dispatched).
+// ceiling for a given priority, requests at that priority are gated (not dispatched). The dispatch loop
+// visits bands from highest to lowest priority and stops at the first gated band; lower bands are not
+// considered on that call.
 //
-// Conformance: Implementations MUST ensure all methods are goroutine-safe.
+// Conformance: Implementations MUST ensure all methods are goroutine-safe. Returned ceilings MUST be
+// monotonically non-increasing in the given priority order (highest priority first): because the
+// dispatch loop stops at the first gated band, a lower band whose ceiling exceeds that of a higher band
+// can be marked open on calls where it is unreachable, starving it.
 type UsageLimitPolicy interface {
 	plugin.Plugin
 
