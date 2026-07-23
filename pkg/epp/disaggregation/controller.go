@@ -101,6 +101,9 @@ func (c *Controller) filterSelectors(_ context.Context, request *fwksched.Infere
 		}
 		switch selector.Mode {
 		case ModeStrict:
+			// Replace the survivor set with the intersection unconditionally
+			// — an empty intersection propagates and downstream filters see
+			// no candidates (framework returns 503).
 			current = matched
 			if len(matched) == 0 {
 				recordFilterOutcome(selector.Name, selector.Mode, filterOutcomeNoMatchStrict)
@@ -108,6 +111,9 @@ func (c *Controller) filterSelectors(_ context.Context, request *fwksched.Infere
 				recordFilterOutcome(selector.Name, selector.Mode, filterOutcomeMatched)
 			}
 		case ModePrefer:
+			// Only narrow when the intersection is non-empty. An empty
+			// intersection leaves `current` untouched — this is the "prefer
+			// but tolerate absence" escape hatch.
 			if len(matched) > 0 {
 				current = matched
 				recordFilterOutcome(selector.Name, selector.Mode, filterOutcomeMatched)
@@ -125,6 +131,14 @@ func (c *Controller) filterSelectors(_ context.Context, request *fwksched.Infere
 // ResponseHeader stamps each selector's headerName onto the response with
 // the serving endpoint's labelKey value. Skips silently on empty labels or
 // a nil endpoint/response.
+//
+// The `endpoint` argument is not something the disaggregation controller
+// forwards to itself — the request-control pipeline passes the metadata of
+// whichever endpoint the picker chose (see pkg/epp/requestcontrol/director.go).
+// That endpoint's labels come straight from EndpointSlice discovery, so the
+// values we stamp are the same labels the pod carries in the cluster —
+// regardless of whether the pod was chosen via strict pin, prefer
+// fallback, or the gating filter's weighted-random pick.
 func (c *Controller) ResponseHeader(_ context.Context, _ *fwksched.InferenceRequest, response *fwkrc.Response, endpoint *fwkdl.EndpointMetadata) {
 	if endpoint == nil || response == nil || response.Headers == nil {
 		return

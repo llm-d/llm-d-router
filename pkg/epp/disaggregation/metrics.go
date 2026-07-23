@@ -57,12 +57,21 @@ func registerMetrics() {
 	})
 }
 
-// Filter outcome labels. "absent" (no header sent) is deliberately not
-// recorded — it is the silent default on every request that doesn't opt in,
-// so the counter would balloon with near-zero-signal increments.
+// Filter outcome labels attached to disagg_filter_outcome_total. "absent"
+// (no header sent) is deliberately NOT recorded — it is the silent default
+// on every request that doesn't opt in, so the counter would balloon with
+// near-zero-signal increments.
 const (
-	filterOutcomeMatched               = "matched"
-	filterOutcomeNoMatchStrict         = "no_match_strict"
+	// filterOutcomeMatched: header matched at least one candidate; survivor
+	// set narrowed to the intersection. Fires for both strict and prefer.
+	filterOutcomeMatched = "matched"
+	// filterOutcomeNoMatchStrict: strict-mode header matched zero candidates;
+	// survivor set became empty and the framework will return 503. This is
+	// the "no fallback" case operators alert on.
+	filterOutcomeNoMatchStrict = "no_match_strict"
+	// filterOutcomeNoMatchPreferFallback: prefer-mode header matched zero
+	// candidates; survivor set kept unchanged (fallback engaged). Not an
+	// error — expected during rollouts before the client updates its header.
 	filterOutcomeNoMatchPreferFallback = "no_match_prefer_fallback"
 )
 
