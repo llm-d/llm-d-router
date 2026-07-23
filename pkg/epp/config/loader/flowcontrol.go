@@ -27,7 +27,14 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/priorityholdback"
 )
+
+// ExplicitPolicyInfo represents an interface to introspect priority holdback policies.
+type ExplicitPolicyInfo interface {
+	Domain() string
+	Ceilings() map[int]float64
+}
 
 // buildFlowControlConfig resolves all flow-control policy plugins
 // and returns the Config.
@@ -57,6 +64,27 @@ func buildFlowControlConfig(
 	usageLimitPolicy, err := resolvePlugin[fwkfc.UsageLimitPolicy](handle, usageLimitRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve usage limit policy: %w", err)
+	}
+
+	if phPolicy, ok := usageLimitPolicy.(ExplicitPolicyInfo); ok && phPolicy.Domain() == priorityholdback.DomainExplicit {
+		ceilings := phPolicy.Ceilings()
+		if apiConfig != nil {
+			if apiConfig.DefaultPriorityBand != nil || apiConfig.DefaultNegativePriorityBand != nil {
+				return nil, fmt.Errorf("priority holdback policy with explicit domain cannot be used with dynamic priority band templates")
+			}
+			if _, ok := ceilings[0]; !ok {
+				return nil, fmt.Errorf("priority band 0 must have a configured ceiling in explicit domain")
+			}
+			for _, band := range apiConfig.PriorityBands {
+				if _, ok := ceilings[band.Priority]; !ok {
+					return nil, fmt.Errorf("priority band %d must have a configured ceiling in explicit domain", band.Priority)
+				}
+			}
+		} else {
+			if _, ok := ceilings[0]; !ok {
+				return nil, fmt.Errorf("priority band 0 must have a configured ceiling in explicit domain")
+			}
+		}
 	}
 
 	return flowcontrol.NewConfig(ctrlCfg, registryConfig, usageLimitPolicy), nil

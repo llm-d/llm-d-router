@@ -173,7 +173,7 @@ func TestComputeLimit_EmptyPriorities(t *testing.T) {
 	t.Parallel()
 	policy := newPriorityHoldbackPolicy(config{
 		shape:      shapeLinear,
-		domain:     domainRank,
+		domain:     DomainRank,
 		minCeiling: 0.5,
 		maxCeiling: 1.0,
 	})
@@ -191,9 +191,9 @@ func TestComputeLimit_SinglePriority(t *testing.T) {
 		domain string
 		cMax   float64
 	}{
-		{"rank domain", domainRank, 1.0},
-		{"value domain", domainValue, 1.0},
-		{"custom maxCeiling", domainRank, 0.9},
+		{"rank domain", DomainRank, 1.0},
+		{"value domain", DomainValue, 1.0},
+		{"custom maxCeiling", DomainRank, 0.9},
 	}
 
 	for _, tc := range tests {
@@ -508,6 +508,160 @@ func TestBuildConfig_ValidConfigs(t *testing.T) {
 			assert.Equal(t, tc.wantMax, cfg.maxCeiling)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Explicit domain — factory / config tests
+// ---------------------------------------------------------------------------
+
+func TestPolicyFactory_ExplicitDomain(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		config    []byte
+		wantError bool
+	}{
+		{
+			name:      "valid explicit domain config",
+			config:    []byte(`{"domain":"explicit","ceilings":{"100":0.95,"50":0.70,"10":0.30}}`),
+			wantError: false,
+		},
+		{
+			name:      "valid explicit domain single entry",
+			config:    []byte(`{"domain":"explicit","ceilings":{"100":0.80}}`),
+			wantError: false,
+		},
+		{
+			name:      "valid explicit domain monotonic equal ceilings",
+			config:    []byte(`{"domain":"explicit","ceilings":{"100":0.80,"50":0.80}}`),
+			wantError: false,
+		},
+		{
+			name:      "explicit domain missing ceilings",
+			config:    []byte(`{"domain":"explicit"}`),
+			wantError: true,
+		},
+		{
+			name:      "explicit domain with shape set",
+			config:    []byte(`{"domain":"explicit","shape":"linear","ceilings":{"100":0.9,"10":0.3}}`),
+			wantError: true,
+		},
+		{
+			name:      "explicit domain with minCeiling set",
+			config:    []byte(`{"domain":"explicit","minCeiling":0.3,"ceilings":{"100":0.9,"10":0.3}}`),
+			wantError: true,
+		},
+		{
+			name:      "explicit domain with maxCeiling set",
+			config:    []byte(`{"domain":"explicit","maxCeiling":0.9,"ceilings":{"100":0.9,"10":0.3}}`),
+			wantError: true,
+		},
+		{
+			name:      "explicit domain ceiling above 1.0",
+			config:    []byte(`{"domain":"explicit","ceilings":{"100":1.1,"10":0.3}}`),
+			wantError: true,
+		},
+		{
+			name:      "explicit domain ceiling below 0.0",
+			config:    []byte(`{"domain":"explicit","ceilings":{"100":0.9,"10":-0.1}}`),
+			wantError: true,
+		},
+		{
+			name:      "explicit domain non-monotonic ceilings",
+			config:    []byte(`{"domain":"explicit","ceilings":{"100":0.30,"50":0.70}}`),
+			wantError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, err := PolicyFactory("test-policy", fwkplugin.StrictDecoder(tc.config), nil)
+			if tc.wantError {
+				require.Error(t, err)
+				require.Nil(t, p)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, p)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Explicit domain — computeLimitExplicit unit tests
+// ---------------------------------------------------------------------------
+
+func TestComputeLimitExplicit_TwoPriorities(t *testing.T) {
+	t.Parallel()
+	m := map[int]float64{100: 0.95, 10: 0.30}
+	ceilings := computeLimitExplicit(m, []int{100, 10})
+	require.Len(t, ceilings, 2)
+	assert.InDelta(t, 0.95, ceilings[0], 1e-9)
+	assert.InDelta(t, 0.30, ceilings[1], 1e-9)
+}
+
+func TestComputeLimitExplicit_ThreePriorities(t *testing.T) {
+	t.Parallel()
+	m := map[int]float64{100: 0.95, 50: 0.70, 10: 0.30}
+	ceilings := computeLimitExplicit(m, []int{100, 50, 10})
+	require.Len(t, ceilings, 3)
+	assert.InDelta(t, 0.95, ceilings[0], 1e-9)
+	assert.InDelta(t, 0.70, ceilings[1], 1e-9)
+	assert.InDelta(t, 0.30, ceilings[2], 1e-9)
+}
+
+func TestComputeLimitExplicit_SinglePriority(t *testing.T) {
+	t.Parallel()
+	m := map[int]float64{100: 0.80}
+	ceilings := computeLimitExplicit(m, []int{100})
+	require.Len(t, ceilings, 1)
+	assert.InDelta(t, 0.80, ceilings[0], 1e-9)
+}
+
+// ---------------------------------------------------------------------------
+// Explicit domain — ComputeLimit integration tests
+// ---------------------------------------------------------------------------
+
+func TestComputeLimit_ExplicitDomain_SinglePriority(t *testing.T) {
+	t.Parallel()
+	// Explicit domain does not apply the single-priority bypass; it uses the mapped ceiling.
+	policy := newPriorityHoldbackPolicy(config{
+		domain:   DomainExplicit,
+		ceilings: map[int]float64{100: 0.80},
+	})
+
+	ceilings := policy.ComputeLimit(t.Context(), 0.5, []int{100})
+	require.Len(t, ceilings, 1)
+	assert.InDelta(t, 0.80, ceilings[0], 1e-9,
+		"explicit domain single priority should return the configured ceiling, not cMax")
+}
+
+func TestComputeLimit_ExplicitDomain_MultiplePriorities(t *testing.T) {
+	t.Parallel()
+	policy := newPriorityHoldbackPolicy(config{
+		domain:   DomainExplicit,
+		ceilings: map[int]float64{100: 0.95, 50: 0.70, 10: 0.30},
+	})
+
+	ceilings := policy.ComputeLimit(t.Context(), 0.5, []int{100, 50, 10})
+	require.Len(t, ceilings, 3)
+	assert.InDelta(t, 0.95, ceilings[0], 1e-9)
+	assert.InDelta(t, 0.70, ceilings[1], 1e-9)
+	assert.InDelta(t, 0.30, ceilings[2], 1e-9)
+}
+
+func TestComputeLimit_ExplicitDomain_EmptyPriorities(t *testing.T) {
+	t.Parallel()
+	policy := newPriorityHoldbackPolicy(config{
+		domain:   DomainExplicit,
+		ceilings: map[int]float64{100: 0.95},
+	})
+
+	ceilings := policy.ComputeLimit(t.Context(), 0.5, []int{})
+	assert.Empty(t, ceilings)
+	assert.NotNil(t, ceilings, "should return empty slice, not nil")
 }
 
 // ---------------------------------------------------------------------------

@@ -43,16 +43,29 @@ Scales ceilings proportionally to the numerical priority value within the observ
 
 Use when the numerical spacing between priority values carries meaning and priorities that are numerically close should behave similarly under pressure.
 
+#### `explicit`
+
+Each priority level's admission ceiling is taken directly from the operator-supplied `ceilings` map. No interpolation is performed.
+
+Use when hand-tuned, per-band ceiling values are required and the algorithmic domains do not produce the desired distribution.
+
+**Constraints:**
+- `ceilings` (map of integer priority to float64) is required.
+- Each ceiling must be in `[0.0, 1.0]`.
+- Ceilings must be monotonically non-increasing when priorities are sorted highest-first.
+- `shape`, `minCeiling`, and `maxCeiling` must not be set; they are rejected at config load time.
+
 **Parameters:**
 
 - `shape` (string, optional, default: `"linear"`): Interpolation curve. Currently only `"linear"` is supported.
-- `domain` (string, optional, default: `"rank"`): Priority mapping: `"rank"` or `"value"`.
-- `minCeiling` (float64, required, no default): Ceiling for the lowest priority. Must be in `[0.0, 1.0)`.
+- `domain` (string, optional, default: `"rank"`): Priority mapping: `"rank"`, `"value"`, or `"explicit"`.
+- `minCeiling` (float64, required unless domain is `"explicit"`, no default): Ceiling for the lowest priority. Must be in `[0.0, 1.0)`.
 - `maxCeiling` (float64, optional, default: `1.0`): Ceiling for the highest priority. Must be in `(0.0, 1.0]`.
+- `ceilings` (map[int]float64, required when domain is `"explicit"`): Maps each priority level to its admission ceiling in `[0.0, 1.0]`.
 
-`minCeiling` is required because it determines how aggressively low-priority traffic is gated and there is no universally correct default.
+`minCeiling` is required for algorithmic domains because it determines how aggressively low-priority traffic is gated and there is no universally correct default.
 
-**Configuration Example:**
+**Configuration Example (algorithmic):**
 ```yaml
 plugins:
   - type: priority-holdback-policy
@@ -66,8 +79,24 @@ flowControl:
   usageLimitPolicyPluginRef: my-holdback-policy
 ```
 
+**Configuration Example (explicit):**
+```yaml
+plugins:
+  - type: priority-holdback-policy
+    name: my-explicit-holdback
+    parameters:
+      domain: explicit
+      ceilings:
+        100: 0.95
+        50: 0.70
+        10: 0.30
+flowControl:
+  usageLimitPolicyPluginRef: my-explicit-holdback
+```
+
 ---
 
 ## Related Documentation
 - [Static Usage Limit Policy](../README.md)
 - [Flow Control Overview](../../fairness/README.md)
+
