@@ -62,7 +62,7 @@ type Runtime struct {
 }
 
 const (
-	defaultRefreshInterval = 50 * time.Millisecond
+	defaultRefreshInterval = 60 * time.Second
 )
 
 // NewRuntime creates a new Runtime with the given polling interval.

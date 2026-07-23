@@ -129,7 +129,7 @@ func NewOptions() *Options {
 		PoolGroup:                        routing.InferencePoolAPIGroup,
 		EndpointTargetPorts:              []int{},
 		DisableEndpointSubsetFilter:      false,
-		RefreshMetricsInterval:           50 * time.Millisecond,
+		RefreshMetricsInterval:           60 * time.Second,
 		RefreshPrometheusMetricsInterval: 5 * time.Second,
 		MetricsStalenessThreshold:        2 * time.Second,
 		TotalQueuedRequestsMetric:        "vllm:num_requests_waiting",
