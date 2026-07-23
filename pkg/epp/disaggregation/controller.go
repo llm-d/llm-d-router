@@ -38,11 +38,11 @@ var (
 	_ fwkrc.ResponseHeaderProcessor = (*Controller)(nil)
 )
 
-// NewController builds a controller from an already-validated config, a
+// newController builds a controller from an already-validated config, a
 // cache-backed reader (typically mgr.GetCache()), and the scope the reader
 // should be filtered against. Prefer Register() from an EPP boot path;
-// NewController is the low-level constructor for tests.
-func NewController(config Config, reader client.Reader, namespace string, scope labels.Selector) *Controller {
+// newController is the low-level constructor for tests.
+func newController(config Config, reader client.Reader, namespace string, scope labels.Selector) *Controller {
 	revisionLabelKey := ""
 	if len(config.Selectors) > 0 {
 		revisionLabelKey = config.Selectors[0].LabelKey
@@ -65,14 +65,15 @@ func NewController(config Config, reader client.Reader, namespace string, scope 
 // TypedName implements plugin.Plugin.
 func (c *Controller) TypedName() fwkplugin.TypedName { return c.typedName }
 
-// Filter is a test-only entry point that applies every configured selector
+// filter is a test-only entry point that applies every configured selector
 // in declaration order. Production wiring uses the mode-specific wrappers
-// installed by WireInto — never the Controller itself as a Filter.
+// installed by WireInto — never the Controller itself as a Filter — so
+// this stays unexported.
 //
-// The returned slice is always a fresh allocation — matches the convention
-// followed by every other scheduler filter and lets callers treat their
-// input as read-only regardless of what happens downstream.
-func (c *Controller) Filter(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) []fwksched.Endpoint {
+// The returned slice is always a fresh allocation, matching the
+// scheduler-filter convention so callers can treat their input as
+// read-only regardless of what happens downstream.
+func (c *Controller) filter(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) []fwksched.Endpoint {
 	return c.filterSelectors(ctx, request, pods, func(Selector) bool { return true })
 }
 

@@ -51,7 +51,7 @@ func Register(ctx context.Context, mgr ctrl.Manager, namespace string, config Co
 	}
 
 	registerMetrics()
-	controller := NewController(config, mgr.GetCache(), watchNamespace, scope)
+	controller := newController(config, mgr.GetCache(), watchNamespace, scope)
 
 	if config.Gating.Active() {
 		roles := config.Gating.RequireRoles.Values
@@ -65,20 +65,17 @@ func Register(ctx context.Context, mgr ctrl.Manager, namespace string, config Co
 		}
 	}
 
+	gatingLog := "off"
+	if config.Gating != nil {
+		gatingLog = string(config.Gating.Mode)
+	}
 	ctrllog.FromContext(ctx).Info("disaggregation controller registered",
 		"namespace", watchNamespace,
 		"scope", config.Scope.LabelSelector,
 		"selectors", len(config.Selectors),
-		"gating", gatingForLog(config.Gating),
+		"gating", gatingLog,
 	)
 	return controller, nil
-}
-
-func gatingForLog(g *Gating) string {
-	if g == nil {
-		return "off"
-	}
-	return string(g.Mode)
 }
 
 // validateRolesObserved fails when the required-roles gate would drop every

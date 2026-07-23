@@ -57,7 +57,7 @@ func fakeReader(pods ...*corev1.Pod) client.Reader {
 
 func newTestController(cfg Config, pods ...*corev1.Pod) *Controller {
 	scope, _ := labels.Parse(testSelector)
-	return NewController(cfg, fakeReader(pods...), testNS, scope)
+	return newController(cfg, fakeReader(pods...), testNS, scope)
 }
 
 func endpoint(name string, labels map[string]string) fwksched.Endpoint {
@@ -85,7 +85,7 @@ func TestFilter_StrictWithMatch(t *testing.T) {
 		endpoint("p2", revLabels("v2")),
 	}
 	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v1"}}
-	got := c.Filter(context.Background(), req, pods)
+	got := c.filter(context.Background(), req, pods)
 	if len(got) != 1 || got[0].GetMetadata().PodName != "p1" {
 		t.Fatalf("expected only p1, got %v", got)
 	}
@@ -95,7 +95,7 @@ func TestFilter_StrictNoMatchReturnsEmpty(t *testing.T) {
 	c := newTestController(validConfig())
 	pods := []fwksched.Endpoint{endpoint("p1", revLabels("v1"))}
 	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}}
-	got := c.Filter(context.Background(), req, pods)
+	got := c.filter(context.Background(), req, pods)
 	if len(got) != 0 {
 		t.Fatalf("strict mode should return empty on no match, got %d", len(got))
 	}
@@ -110,7 +110,7 @@ func TestFilter_PreferFallsBack(t *testing.T) {
 		endpoint("p2", revLabels("v2")),
 	}
 	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}}
-	got := c.Filter(context.Background(), req, pods)
+	got := c.filter(context.Background(), req, pods)
 	if len(got) != 2 {
 		t.Fatalf("prefer mode should fall back to full set, got %d", len(got))
 	}
@@ -123,7 +123,7 @@ func TestFilter_HeaderAbsentIsNoop(t *testing.T) {
 		endpoint("p2", revLabels("v2")),
 	}
 	req := &fwksched.InferenceRequest{Headers: map[string]string{}}
-	got := c.Filter(context.Background(), req, pods)
+	got := c.filter(context.Background(), req, pods)
 	if len(got) != 2 {
 		t.Fatalf("absent header should be no-op, got %d", len(got))
 	}
@@ -152,7 +152,7 @@ func TestFilter_MultipleSelectorsAppliedInOrder(t *testing.T) {
 		"x-disagg-revision": "v1",
 		"x-disagg-slice":    "s2",
 	}}
-	got := c.Filter(context.Background(), req, pods)
+	got := c.filter(context.Background(), req, pods)
 	if len(got) != 1 || got[0].GetMetadata().PodName != "p2" {
 		t.Fatalf("expected only p2 (v1+s2), got %v", got)
 	}
@@ -161,7 +161,7 @@ func TestFilter_MultipleSelectorsAppliedInOrder(t *testing.T) {
 func TestFilter_NilRequestIsNoop(t *testing.T) {
 	c := newTestController(validConfig())
 	pods := []fwksched.Endpoint{endpoint("p1", revLabels("v1"))}
-	got := c.Filter(context.Background(), nil, pods)
+	got := c.filter(context.Background(), nil, pods)
 	if len(got) != 1 {
 		t.Fatalf("nil request should be no-op, got %d", len(got))
 	}
@@ -184,7 +184,7 @@ func TestFilter_PreferDoesNotRescueAfterStrictEmpties(t *testing.T) {
 		"x-disagg-revision": "v99",
 		"x-disagg-slice":    "any",
 	}}
-	got := c.Filter(context.Background(), req, pods)
+	got := c.filter(context.Background(), req, pods)
 	if len(got) != 0 {
 		t.Fatalf("prefer must not restore after strict emptied; got %d pods", len(got))
 	}
@@ -197,7 +197,7 @@ func TestFilter_ReturnsFreshSlice(t *testing.T) {
 		endpoint("p2", revLabels("v2")),
 	}
 	req := &fwksched.InferenceRequest{Headers: map[string]string{}}
-	got := c.Filter(context.Background(), req, pods)
+	got := c.filter(context.Background(), req, pods)
 	if len(got) != 2 || len(pods) != 2 {
 		t.Fatalf("setup wrong: got %d, pods %d", len(got), len(pods))
 	}

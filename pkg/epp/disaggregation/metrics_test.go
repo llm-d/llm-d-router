@@ -56,7 +56,7 @@ func TestMetric_HeaderStamped_SkipsMissingLabel(t *testing.T) {
 func TestMetric_FilterOutcome_Matched(t *testing.T) {
 	resetMetrics(t)
 	controller := newTestController(validConfig())
-	controller.Filter(context.Background(),
+	controller.filter(context.Background(),
 		&fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v1"}},
 		[]fwksched.Endpoint{endpoint("p1", revLabels("v1"))},
 	)
@@ -69,7 +69,7 @@ func TestMetric_FilterOutcome_Matched(t *testing.T) {
 func TestMetric_FilterOutcome_NoMatchStrict(t *testing.T) {
 	resetMetrics(t)
 	controller := newTestController(validConfig())
-	controller.Filter(context.Background(),
+	controller.filter(context.Background(),
 		&fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}},
 		[]fwksched.Endpoint{endpoint("p1", revLabels("v1"))},
 	)
@@ -84,7 +84,7 @@ func TestMetric_FilterOutcome_NoMatchPreferFallback(t *testing.T) {
 	config := validConfig()
 	config.Selectors[0].Mode = ModePrefer
 	controller := newTestController(config)
-	controller.Filter(context.Background(),
+	controller.filter(context.Background(),
 		&fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}},
 		[]fwksched.Endpoint{endpoint("p1", revLabels("v1"))},
 	)
