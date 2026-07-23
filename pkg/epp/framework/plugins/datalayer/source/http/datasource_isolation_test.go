@@ -18,7 +18,6 @@ package http
 
 import (
 	"io"
-	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,21 +35,15 @@ func TestHTTPDataSource_ClientIsolation(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify ds1 uses isolated transport config
-	cl1, ok := ds1.client.(*client)
-	assert.True(t, ok)
-	t1, ok := cl1.Transport.(*http.Transport)
-	assert.True(t, ok)
-	assert.NotNil(t, t1.TLSClientConfig)
-	assert.False(t, t1.TLSClientConfig.InsecureSkipVerify)
+	t1 := tlsConfigOf(t, ds1.client)
+	assert.NotNil(t, t1)
+	assert.False(t, t1.InsecureSkipVerify)
 
 	// Verify ds2 uses isolated transport config and does not pollute ds1
-	cl2, ok := ds2.client.(*client)
-	assert.True(t, ok)
-	t2, ok := cl2.Transport.(*http.Transport)
-	assert.True(t, ok)
-	assert.NotNil(t, t2.TLSClientConfig)
-	assert.True(t, t2.TLSClientConfig.InsecureSkipVerify)
+	t2 := tlsConfigOf(t, ds2.client)
+	assert.NotNil(t, t2)
+	assert.True(t, t2.InsecureSkipVerify)
 
 	// Verify ds1 remains false (no configuration pollution)
-	assert.False(t, t1.TLSClientConfig.InsecureSkipVerify)
+	assert.False(t, t1.InsecureSkipVerify)
 }

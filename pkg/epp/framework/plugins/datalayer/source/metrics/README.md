@@ -26,6 +26,7 @@ The plugin config supports:
 -   `insecureSkipVerify` (default true): Whether to skip TLS certificate verification when using the "https" scheme.
 -   `caCertPath`: PEM CA bundle to verify the target's server cert.
 -   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together.
+    Reloaded on rotation without a restart. `caCertPath` is read once at startup.
 
 ### Example Configuration
 

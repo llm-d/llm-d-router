@@ -32,8 +32,10 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -47,6 +49,9 @@ var ErrExtractorTypeMismatch = errors.New("extractor type mismatch")
 // defaultStepTimeout bounds each Poll and each Extract independently so a slow
 // extractor cannot starve sibling extractors of their tick budget.
 const defaultStepTimeout = time.Second
+
+// certCheckInterval throttles the cert re-read, rotations are far rarer than scrapes.
+const certCheckInterval = time.Minute
 
 // HTTPDataSource is a typed polling dispatcher. T is the data type the source
 // produces; bound extractors must implement Extractor[PollInput[T]].
@@ -67,6 +72,9 @@ type HTTPDataSource[T any] struct {
 	// parser converts the response body to T. MUST NOT return (zero, nil) for nilable T;
 	// the dispatcher does not validate.
 	parser func(io.Reader) (T, error)
+
+	// refreshCert re-reads the mTLS client cert, otherwise a no-op.
+	refreshCert func(context.Context)
 
 	mu   sync.RWMutex
 	exts []fwkdl.PollingExtractor[T]
@@ -131,14 +139,17 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 			Transport: baseTransport,
 		},
 	}
+	refreshCert := noopCertRefresh
 	if scheme == "https" {
-		tlsCfg, err := tlsClientConfig(tlsOpts)
+		rt := newReloadingTransport()
+		tlsCfg, refresh, err := tlsClientConfig(tlsOpts, rt.reload)
 		if err != nil {
 			return nil, err
 		}
-		httpsTransport := baseTransport.Clone()
-		httpsTransport.TLSClientConfig = tlsCfg
-		cl.Transport = httpsTransport
+		rt.tlsCfg = tlsCfg
+		rt.reload()
+		cl.Transport = rt
+		refreshCert = refresh
 	}
 	return &HTTPDataSource[T]{
 		typedName:      fwkplugin.TypedName{Type: pluginType, Name: pluginName},
@@ -148,6 +159,7 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		useNodeAddress: cfg.useNodeAddress,
 		client:         cl,
 		parser:         parser,
+		refreshCert:    refreshCert,
 	}, nil
 }
 
@@ -170,25 +182,82 @@ func caCertPool(path string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
+// noopCertRefresh is the refresher used when there is no client cert to reload.
+func noopCertRefresh(context.Context) {}
+
+// reloadingTransport swaps in a fresh transport on rotation, closing idle
+// connections would leave a busy one on its old-cert handshake indefinitely.
+type reloadingTransport struct {
+	tlsCfg *tls.Config // set once, before the first reload that uses it
+	cur    atomic.Pointer[http.Transport]
+}
+
+func newReloadingTransport() *reloadingTransport {
+	t := &reloadingTransport{}
+	t.cur.Store(baseTransport.Clone())
+	return t
+}
+
+func (t *reloadingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.cur.Load().RoundTrip(req)
+}
+
+// reload retires the current transport, draining its connections in the background.
+func (t *reloadingTransport) reload() {
+	next := baseTransport.Clone()
+	next.TLSClientConfig = t.tlsCfg
+	t.cur.Swap(next).CloseIdleConnections()
+}
+
 // tlsClientConfig builds a tls.Config: server verification via CACertPath (or the
 // system pool), plus an mTLS client certificate when ClientCertPath is set.
-func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
-	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify}
+// The returned func reloads that certificate and calls onCertReload, the CA does not.
+// onCertReload fires once during setup, before the caller has finished wiring.
+func tlsClientConfig(opts TLSOptions, onCertReload func()) (*tls.Config, func(context.Context), error) {
+	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify, MinVersion: tls.VersionTLS12}
 	if !opts.SkipVerify && opts.CACertPath != "" {
 		pool, err := caCertPool(opts.CACertPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		cfg.RootCAs = pool
 	}
-	if opts.ClientCertPath != "" || opts.ClientKeyPath != "" {
-		cert, err := tls.LoadX509KeyPair(opts.ClientCertPath, opts.ClientKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
-		}
-		cfg.Certificates = []tls.Certificate{cert}
+	if opts.ClientCertPath == "" && opts.ClientKeyPath == "" {
+		return cfg, noopCertRefresh, nil
 	}
-	return cfg, nil
+	watcher, err := certwatcher.New(opts.ClientCertPath, opts.ClientKeyPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
+	}
+	// Cached so handshakes do not take certwatcher's lock, RegisterCallback seeds it.
+	var current atomic.Pointer[tls.Certificate]
+	watcher.RegisterCallback(func(cert tls.Certificate) {
+		current.Store(&cert)
+		onCertReload()
+	})
+	cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		cert := current.Load()
+		if cert == nil {
+			// crypto/tls dereferences the result, so a nil would panic the dial.
+			return nil, fmt.Errorf("%w: no certificate loaded", ErrLoadClientCert)
+		}
+		return cert, nil
+	}
+	return cfg, throttledReload(watcher), nil
+}
+
+// throttledReload re-reads the cert at most once per certCheckInterval.
+func throttledReload(watcher *certwatcher.CertWatcher) func(context.Context) {
+	var lastCheck atomic.Int64
+	return func(ctx context.Context) {
+		last, now := lastCheck.Load(), time.Now().UnixNano()
+		if now-last < int64(certCheckInterval) || !lastCheck.CompareAndSwap(last, now) {
+			return
+		}
+		if err := watcher.ReadCertificate(); err != nil {
+			log.FromContext(ctx).Error(err, "failed to re-read scrape client certificate")
+		}
+	}
 }
 
 func (s *HTTPDataSource[T]) TypedName() fwkplugin.TypedName { return s.typedName }
@@ -221,6 +290,7 @@ func (s *HTTPDataSource[T]) Poll(ctx context.Context, ep fwkdl.Endpoint) (T, err
 // in DataLayerExtractErrorsTotal and do NOT surface as a returned error.
 // This keeps the collector's poll/extract counters cleanly separated.
 func (s *HTTPDataSource[T]) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
+	s.refreshCert(ctx)
 	pollCtx, cancelPoll := context.WithTimeout(ctx, defaultStepTimeout)
 	data, err := s.Poll(pollCtx, ep)
 	cancelPoll()
