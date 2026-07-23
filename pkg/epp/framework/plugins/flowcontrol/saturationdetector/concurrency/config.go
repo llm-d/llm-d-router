@@ -62,8 +62,8 @@ type apiConfig struct {
 	// Valid values are:
 	// - "requests": use discrete request counts for capacity accounting.
 	// - "tokens": use estimated token counts for capacity accounting.
-	// - "hybrid": evaluate both request and token accounting and report whichever
-	//   reaches saturation first (the more constraining of the two).
+	// - "hybrid": evaluate each endpoint as the more constraining of its request and
+	//   token ratios; pool saturation is the average of these across endpoints.
 	//
 	// Defaults to "requests" if unset.
 	ConcurrencyMode *concurrencyMode `json:"concurrencyMode,omitempty"`
@@ -87,7 +87,7 @@ const (
 	modeRequests concurrencyMode = "requests"
 	// modeTokens uses token count for concurrency detection.
 	modeTokens concurrencyMode = "tokens"
-	// modeHybrid uses both request and token counts, reporting whichever saturates first.
+	// modeHybrid uses endpoint average saturation across both request and token counts.
 	modeHybrid concurrencyMode = "hybrid"
 )
 
