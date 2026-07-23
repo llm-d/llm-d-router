@@ -52,6 +52,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/payload"
 )
 
 // EvictChannelLookup is an optional interface for looking up eviction channels by request ID.
@@ -82,6 +83,12 @@ func (s *StreamingServer) SetEvictChannelLookup(lookup EvictChannelLookup) {
 	s.evictionLookup = lookup
 }
 
+// SetPayloadCapturer enables opt-in GenAI payload capture on the request path.
+// A nil capturer (the default) captures nothing.
+func (s *StreamingServer) SetPayloadCapturer(c *payload.Capturer) {
+	s.payloadCapturer = c
+}
+
 type Director interface {
 	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
@@ -100,6 +107,7 @@ type StreamingServer struct {
 	director          Director
 	parserRegistry    *ParserRegistry
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
+	payloadCapturer   *payload.Capturer  // optional, nil unless payload capture is enabled
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
 }
@@ -450,6 +458,14 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 				if reqCtx.SchedulingRequest != nil && reqCtx.SchedulingRequest.Body != nil {
 					reqCtx.modelServerStreaming = reqCtx.SchedulingRequest.Body.Stream
+				}
+
+				// Opt-in GenAI payload capture: record the prompt on the gateway
+				// span once the request has been scheduled. Never fails the
+				// request. The nil check makes the disabled path explicit at
+				// the callsite (Capturer.CaptureRequest also guards internally).
+				if s.payloadCapturer != nil {
+					s.payloadCapturer.CaptureRequest(ctx, parseResult.Body)
 				}
 
 				reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)

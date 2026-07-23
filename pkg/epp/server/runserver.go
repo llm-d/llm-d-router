@@ -45,6 +45,7 @@ import (
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/payload"
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 )
 
@@ -220,6 +221,9 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			poolCap = 4 * 1024 * 1024 // gRPC default 4MB
 		}
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
+		if capturer := payload.NewCapturerFromEnv(logger); capturer != nil {
+			extProcServer.SetPayloadCapturer(capturer)
+		}
 		extProcPb.RegisterExternalProcessorServer(srv, extProcServer)
 
 		if r.HealthChecking {
