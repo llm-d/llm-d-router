@@ -19,6 +19,23 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
+          # Extract /kind values from PR body
+          kinds=$(printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/kind[[:space:]][[:space:]]*||p' | \
+            sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
+
+          # Validate every requested label before mutating. Removing first and
+          # failing to add a mistyped label would leave the PR with no kind/*.
+          if [ -n "$kinds" ]; then
+            existing=$(gh label list --repo "$REPO" --limit 200 --json name -q '.[].name')
+            unknown=$(printf '%s\n' "$kinds" | while IFS= read -r kind; do
+              printf '%s\n' "$existing" | grep -qxF "kind/$kind" || printf "kind/%s " "$kind"
+            done)
+            if [ -n "$unknown" ]; then
+              echo "::warning::Unknown label(s) ${unknown% }, skipping kind sync"
+              exit 0
+            fi
+          fi
+
           # Remove existing kind/* labels
           gh pr view "$PR_NUMBER" --repo "$REPO" --json labels \
             -q '.labels[].name | select(startswith("kind/"))' | \
@@ -26,8 +43,7 @@ jobs:
               gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$label'"
             done
 
-          # Extract /kind values from PR body and apply labels
-          printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/kind[[:space:]][[:space:]]*||p' | sed 's|[[:space:]]*$||' | sort -u | \
+          printf '%s\n' "$kinds" | \
             while IFS= read -r kind; do
               [ -z "$kind" ] && continue
               gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "kind/$kind" || \
@@ -46,6 +62,15 @@ jobs:
           areas=$(printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/area[[:space:]][[:space:]]*||p' | \
             sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
           [ -z "$areas" ] && exit 0
+
+          existing=$(gh label list --repo "$REPO" --limit 200 --json name -q '.[].name')
+          unknown=$(printf '%s\n' "$areas" | while IFS= read -r area; do
+            printf '%s\n' "$existing" | grep -qxF "area/$area" || printf "area/%s " "$area"
+          done)
+          if [ -n "$unknown" ]; then
+            echo "::warning::Unknown label(s) ${unknown% }, skipping area sync"
+            exit 0
+          fi
 
           # Remove existing area/* labels
           gh pr view "$PR_NUMBER" --repo "$REPO" --json labels \

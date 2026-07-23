@@ -22,6 +22,17 @@ jobs:
           kinds=$(printf '%s' "$ISSUE_BODY" | tr -d '\r' | sed -n 's|^/kind[[:space:]][[:space:]]*||p' | sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
           [ -z "$kinds" ] && exit 0
 
+          # Validate every requested label before mutating. Removing first and
+          # failing to add a mistyped label would leave the issue with no kind/*.
+          existing=$(gh label list --repo "$REPO" --limit 200 --json name -q '.[].name')
+          unknown=$(printf '%s\n' "$kinds" | while IFS= read -r kind; do
+            printf '%s\n' "$existing" | grep -qxF "kind/$kind" || printf "kind/%s " "$kind"
+          done)
+          if [ -n "$unknown" ]; then
+            echo "::warning::Unknown label(s) ${unknown% }, skipping kind sync"
+            exit 0
+          fi
+
           # Remove existing kind/* labels
           gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels \
             -q '.labels[].name | select(startswith("kind/"))' | \
@@ -47,6 +58,15 @@ jobs:
           areas=$(printf '%s' "$ISSUE_BODY" | tr -d '\r' | sed -n 's|^/area[[:space:]][[:space:]]*||p' | \
             sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
           [ -z "$areas" ] && exit 0
+
+          existing=$(gh label list --repo "$REPO" --limit 200 --json name -q '.[].name')
+          unknown=$(printf '%s\n' "$areas" | while IFS= read -r area; do
+            printf '%s\n' "$existing" | grep -qxF "area/$area" || printf "area/%s " "$area"
+          done)
+          if [ -n "$unknown" ]; then
+            echo "::warning::Unknown label(s) ${unknown% }, skipping area sync"
+            exit 0
+          fi
 
           # Remove existing area/* labels
           gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels \
