@@ -1,0 +1,73 @@
+name: Apply kind/area labels and milestone from issue body
+
+on:
+  issues:
+    types: [opened, edited]
+
+jobs:
+  kind-labels:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Sync kind labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Remove existing kind/* labels
+          gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels \
+            -q '.labels[].name | select(startswith("kind/"))' | \
+            while IFS= read -r label; do
+              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$label'"
+            done
+
+          # Extract /kind values from issue body and apply labels
+          printf '%s' "$ISSUE_BODY" | tr -d '\r' | sed -n 's|^/kind[[:space:]][[:space:]]*||p' | sed 's|[[:space:]]*$||' | sort -u | \
+            while IFS= read -r kind; do
+              [ -z "$kind" ] && continue
+              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "kind/$kind" || \
+                echo "::warning::Label 'kind/$kind' not found in repository"
+            done
+
+      - name: Set area labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Absence of a directive is a no-op. Area labels are also set by
+          # maintainers through the UI and clearing here would wipe those.
+          areas=$(printf '%s' "$ISSUE_BODY" | tr -d '\r' | sed -n 's|^/area[[:space:]][[:space:]]*||p' | \
+            sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
+          [ -z "$areas" ] && exit 0
+
+          # Remove existing area/* labels
+          gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels \
+            -q '.labels[].name | select(startswith("area/"))' | \
+            while IFS= read -r label; do
+              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$label'"
+            done
+
+          printf '%s\n' "$areas" | \
+            while IFS= read -r area; do
+              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "area/$area" || \
+                echo "::warning::Label 'area/$area' not found in repository"
+            done
+
+      - name: Set milestone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Use the last /milestone directive in the issue body
+          milestone=$(printf '%s' "$ISSUE_BODY" | tr -d '\r' | sed -n 's|^/milestone[[:space:]][[:space:]]*||p' | \
+             sed 's|[[:space:]]*$||' | sed '/^$/d' | tail -n 1)
+          [ -z "$milestone" ] && exit 0
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --milestone "$milestone" || \
+            echo "::warning::Milestone '$milestone' not found in repository"
