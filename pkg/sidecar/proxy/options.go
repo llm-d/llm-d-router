@@ -132,7 +132,7 @@ type Options struct {
 	// Fields with direct CLI flags are bound here via embedding; derived fields are set in Complete().
 	Config
 
-	// modelServerPort is the port the model server(vLLM, SGLang etc) is listening on; used to compute Config.DecoderURL in Complete().
+	// modelServerPort is the port the model server (vLLM, SGLang, etc.) is listening on; used to compute Config.DecoderURL in Complete().
 	modelServerPort string
 	// vllmPort is the deprecated alias for modelServerPort; migrated in Complete().
 	vllmPort string
@@ -247,7 +247,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	// Add Go flags to pflag (for zap options compatibility)
 	fs.AddGoFlagSet(goFlagSet)
 	fs.StringVar(&opts.Port, port, opts.Port, "the port the sidecar is listening on")
-	fs.StringVar(&opts.modelServerPort, modelServerPort, opts.modelServerPort, "the port the model server is listening on")
+	fs.StringVar(&opts.modelServerPort, modelServerPort, opts.modelServerPort,
+		fmt.Sprintf("the port the model server is listening on (default %s)", defaultVLLMPort))
 	fs.StringVar(&opts.vllmPort, vllmPort, opts.vllmPort, "the port the model server is listening on")
 	_ = fs.MarkDeprecated(vllmPort, "use --model-server-port instead; --vllm-port will be removed after the deprecation period")
 	fs.IntVar(&opts.DataParallelSize, dataParallelSize, opts.DataParallelSize, "the model server's data-parallel size")
@@ -339,10 +340,10 @@ func (opts *Options) Complete() error {
 		return err
 	}
 
-	// Migrate deprecated --vllm-port to --model-server-port.
-	// defaults to empty, so an unset value means neither flag nor YAML provided a --model-server-port
-	// fall back to the --vllm-port value.
-	if opts.modelServerPort == "" {
+	// Resolve the effective model server port with flag-over-config precedence:
+	//   --model-server-port flag > --vllm-port flag > model-server-port YAML > vllm-port YAML > default.
+	// The deprecated --vllm-port flag must still override a YAML model-server-port.
+	if (opts.isFlagSet(vllmPort) && !opts.isFlagSet(modelServerPort)) || opts.modelServerPort == "" {
 		opts.modelServerPort = opts.vllmPort
 	}
 

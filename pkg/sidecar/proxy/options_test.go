@@ -1131,9 +1131,9 @@ func TestCompleteMoRIIOWriteModeGuards(t *testing.T) {
 	})
 }
 
-// TestModelServerPortMigration is intentional reference to the deprecated
-// vllm-port flag; it verifies migration to model-server-port.
-// Remove test when we drop vllm-port in v0.12 (see issue 2172).
+// TestModelServerPortMigration verifies that the deprecated vllm-port flag
+// migrates to model-server-port.
+// Remove when vllm-port is dropped in v0.12 (see issue 2172).
 func TestModelServerPortMigration(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -1170,6 +1170,20 @@ func TestModelServerPortYAML(t *testing.T) {
 	require.NoError(t, opts.Complete())
 	require.NoError(t, opts.Validate())
 	require.Equal(t, "http://localhost:8203", opts.DecoderURL.String())
+}
+
+// A CLI flag overrides YAML config, including the deprecated --vllm-port over a
+// model-server-port key.
+func TestModelServerPortFlagBeatsYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{model-server-port: 8203}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	setFlag(t, testPFlagSet, vllmPort, "9001")
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.NoError(t, opts.Validate())
+	require.Equal(t, "http://localhost:9001", opts.DecoderURL.String())
 }
 
 func TestCompleteTLSConfiguration(t *testing.T) {
