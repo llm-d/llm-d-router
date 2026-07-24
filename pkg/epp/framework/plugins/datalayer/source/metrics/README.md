@@ -24,6 +24,8 @@ The plugin config supports:
 -   `scheme` (default "http"): The protocol scheme to use for metrics retrieval.
 -   `path` (default "/metrics"): The URL path to use for metrics retrieval.
 -   `insecureSkipVerify` (default true): Whether to skip TLS certificate verification when using the "https" scheme.
+-   `caCertPath`: PEM CA bundle to verify the target's server cert.
+-   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together.
 
 ### Example Configuration
 

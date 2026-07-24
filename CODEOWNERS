@@ -14,9 +14,9 @@
 *                                                                         @llm-d/router-maintainers
 
 # Flow control framework + plugins
-/pkg/epp/flowcontrol/                                                     @LukeAVanDrie @shmuelk @llm-d/router-maintainers
-/pkg/epp/framework/interface/flowcontrol/                                 @LukeAVanDrie @shmuelk @llm-d/router-maintainers
-/pkg/epp/framework/plugins/flowcontrol/                                   @LukeAVanDrie @shmuelk @llm-d/router-maintainers
+/pkg/epp/flowcontrol/                                                     @LukeAVanDrie @RishabhSaini @shmuelk @llm-d/router-maintainers
+/pkg/epp/framework/interface/flowcontrol/                                 @LukeAVanDrie @RishabhSaini @shmuelk @llm-d/router-maintainers
+/pkg/epp/framework/plugins/flowcontrol/                                   @LukeAVanDrie @RishabhSaini @shmuelk @llm-d/router-maintainers
 
 # Envoy ext_proc message layer
 /pkg/common/envoy/                                                        @shmuelk @llm-d/router-maintainers
@@ -43,6 +43,10 @@
 
 # Tokenization
 /pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/          @vMaroon @liu-cong @sagearc @llm-d/router-maintainers
+
+# KV-cache subsystem — indexer, KV-block index, KV-events
+/pkg/kvcache/                                                              @vMaroon @liu-cong @hyeongyun0916 @yankay @sagearc @llm-d/router-maintainers
+/pkg/kvevents/                                                             @vMaroon @liu-cong @hyeongyun0916 @yankay @sagearc @llm-d/router-maintainers
 
 # Request handling
 /pkg/epp/framework/interface/requesthandling/                             @zetxqx @llm-d/router-maintainers
