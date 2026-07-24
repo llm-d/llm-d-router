@@ -18,7 +18,6 @@ package runner
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -67,13 +66,6 @@ featureGates:
 // feature-gate map instead of hardcoding it, so this test keeps passing unchanged when the gate
 // flips to enabled-by-default (#2104) and pins that the flip actually changes the default wiring.
 func TestFlowControlFeatureGateAdmissionControlWiring(t *testing.T) {
-	// The deprecated ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER env var appends the gate to the config
-	// during phase two; clear it so only the featureGates stanza under test drives the outcome.
-	if v, ok := os.LookupEnv(enableExperimentalFlowControlLayer); ok {
-		require.NoError(t, os.Unsetenv(enableExperimentalFlowControlLayer))
-		t.Cleanup(func() { _ = os.Setenv(enableExperimentalFlowControlLayer, v) })
-	}
-
 	boolPtr := func(b bool) *bool { return &b }
 	testCases := []struct {
 		name       string

@@ -139,15 +139,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
-	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
 	"github.com/llm-d/llm-d-router/version"
-)
-
-const (
-	// enableExperimentalFlowControlLayer defines the environment variable used as a feature flag for the pluggable flow
-	// control layer.
-	// DEPRECATION NOTICE - this env var will be removed in the next version as we switch to configuring the EPP using FeatureGates in the config file.
-	enableExperimentalFlowControlLayer = "ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER"
 )
 
 var (
@@ -717,8 +709,6 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
 	logger := log.FromContext(ctx)
 
-	applyDeprecatedEnvFeatureGate(enableExperimentalFlowControlLayer, "Flow Control layer", flowcontrol.FeatureGate, rawConfig)
-
 	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
@@ -761,18 +751,6 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	logger.Info("loaded configuration from file/text successfully")
 
 	return cfg, nil
-}
-
-func applyDeprecatedEnvFeatureGate(envVar, featureName, featureGate string, rawConfig *configapi.EndpointPickerConfig) {
-	if _, ok := os.LookupEnv(envVar); ok {
-		setupLog.Info(fmt.Sprintf("Enabling the experimental %s using environment variables is deprecated and will be removed in next version", featureName))
-		if env.GetEnvBool(envVar, false, setupLog) {
-			if rawConfig.FeatureGates == nil {
-				rawConfig.FeatureGates = make(configapi.FeatureGates, 0)
-			}
-			rawConfig.FeatureGates = append(rawConfig.FeatureGates, featureGate)
-		}
-	}
 }
 
 func (r *Runner) configureAndStartDatalayer(ctx context.Context, cfg *datalayer.Config, mgr ctrl.Manager) error {
