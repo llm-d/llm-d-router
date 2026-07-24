@@ -446,6 +446,9 @@ For image 0 (given `token_ids[0]=1` as BOS, `token_ids[1]=32000` as placeholder 
 }
 ```
 
+> [!NOTE]
+> Each `kwargs_data.image[i]` may be `null` (and the whole `kwargs_data` field may be absent) when the image is already resident in the multimodal cache under `mm_hashes.image[i]`. A `null` item carries no pixel tensor: the worker resolves that image from the cache by hash instead of deserializing a tensor (`token_in_token_out/serving.py`, "None -> cache hit"). The coordinator emits `null` for any entry whose `KwargsData` is empty; a `null` still occupies a slot, so the per-image slice lengths still match. The example above shows the tensor-carrying (cache-miss) form.
+
 `model` is required by the `/inference/v1/generate` request validator and must match the served model name. Coordinator sources it from `reqCtx.Model` (populated from the inbound request body's `model` field).
 
 #### Response
