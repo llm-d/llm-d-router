@@ -91,6 +91,11 @@ type Processor struct {
 	wg             sync.WaitGroup
 	isShuttingDown atomic.Bool
 	shutdownOnce   sync.Once
+
+	// dropCounts accumulates non-dispatched request outcomes between periodic summary flushes.
+	// Written by both the main Run goroutine (enqueue, shutdown) and the runCleanupSweep goroutine (sweep),
+	// so each slot is an atomic to avoid a data race.
+	dropCounts [types.NumQueueOutcomes]atomic.Uint64
 }
 
 // NewProcessor creates a new Processor instance.
@@ -263,6 +268,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 	if finalState := outcome; finalState != nil {
 		p.logger.V(logutil.TRACE).Info("Item finalized externally before processing, discarding.",
 			"outcome", finalState.Outcome, "err", finalState.Err, "flowKey", key, "requestID", req.ID())
+		p.recordDrop(finalState.Outcome)
 		return
 	}
 
@@ -272,6 +278,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 		finalErr := fmt.Errorf("configuration error: failed to get queue for flow key %s: %w", key, err)
 		p.logger.Error(finalErr, "Rejecting request, queue lookup failed", "flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
+		p.recordDrop(types.QueueOutcomeRejectedOther)
 		return
 	}
 
@@ -280,6 +287,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 		finalErr := fmt.Errorf("configuration error: failed to get priority band for priority %d: %w", key.Priority, err)
 		p.logger.Error(finalErr, "Rejecting request, priority band lookup failed", "flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
+		p.recordDrop(types.QueueOutcomeRejectedOther)
 		return
 	}
 
@@ -290,9 +298,12 @@ func (p *Processor) enqueue(item *FlowItem) {
 		// that state reflects genuine unavailability (surfaced as 503), not backpressure against a contended pool (429).
 		if p.poolEmpty {
 			p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity with no endpoints",
-				"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize())
+				"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
+				"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
+				"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
 			item.FinalizeWithOutcome(types.QueueOutcomeRejectedNoEndpoints, fmt.Errorf("%w: %w",
 				types.ErrRejected, types.ErrNoEndpoints))
+			p.recordDrop(types.QueueOutcomeRejectedNoEndpoints)
 			return
 		}
 		p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
@@ -301,6 +312,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 			"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, fmt.Errorf("%w: %w",
 			types.ErrRejected, types.ErrQueueAtCapacity))
+		p.recordDrop(types.QueueOutcomeRejectedCapacity)
 		return
 	}
 
@@ -311,6 +323,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 		p.logger.Error(finalErr, "Rejecting request, queue add failed",
 			"flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
+		p.recordDrop(types.QueueOutcomeRejectedOther)
 		return
 	}
 	p.logger.V(logutil.TRACE).Info("Item enqueued.",
@@ -446,7 +459,7 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 		// This happens benignly if the item was already removed by the cleanup sweep loop.
 		// We log it at a low level for visibility but return nil so the dispatch cycle proceeds.
 		p.logger.V(logutil.DEBUG).Info("Failed to remove item during dispatch (likely already finalized and swept).",
-			"flowKey", key, "requestID", req.ID(), "error", err)
+			"flowKey", key, "requestID", req.ID(), "err", err)
 		return nil
 	}
 
@@ -473,6 +486,7 @@ func (p *Processor) runCleanupSweep(ctx context.Context) {
 			return
 		case <-ticker.C():
 			p.sweepFinalizedItems()
+			p.flushDropSummary()
 		}
 	}
 }
@@ -486,6 +500,11 @@ func (p *Processor) sweepFinalizedItems() {
 		}
 		removedItems := managedQ.Cleanup(predicate)
 		if len(removedItems) > 0 {
+			for _, itemAcc := range removedItems {
+				if fi, ok := itemAcc.(*FlowItem); ok && fi != nil && fi.FinalState() != nil {
+					p.recordDrop(fi.FinalState().Outcome)
+				}
+			}
 			logger.V(logutil.TRACE).Info("Swept finalized items and released capacity.",
 				"count", len(removedItems))
 		}
@@ -510,6 +529,7 @@ func (p *Processor) shutdown() {
 				// Finalize buffered items.
 				item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther,
 					fmt.Errorf("%w: %w", types.ErrRejected, types.ErrFlowControllerNotRunning))
+				p.recordDrop(types.QueueOutcomeRejectedOther)
 			default:
 				break DrainLoop
 			}
@@ -517,6 +537,7 @@ func (p *Processor) shutdown() {
 		// We do not close enqueueChan because external goroutines (Controller) send on it.
 		// The channel will be garbage collected when the processor terminates.
 		p.evictAll()
+		p.flushDropSummary()
 	})
 }
 
@@ -539,9 +560,34 @@ func (p *Processor) evictAll() {
 			// Finalization is idempotent; safe to call even if already finalized externally.
 			// The per-request log is emitted by EnqueueAndWait when it unblocks.
 			item.FinalizeWithOutcome(outcome, errShutdown)
+			p.recordDrop(item.FinalState().Outcome)
 		}
 	}
 	p.processAllQueuesConcurrently("evictAll", processFn)
+}
+
+func (p *Processor) recordDrop(outcome types.QueueOutcome) {
+	if outcome == types.QueueOutcomeDispatched || outcome == types.QueueOutcomeNotYetFinalized {
+		return
+	}
+	p.dropCounts[outcome].Add(1)
+}
+
+func (p *Processor) flushDropSummary() {
+	var total uint64
+	counts := make(map[string]uint64)
+	for i := range p.dropCounts {
+		if c := p.dropCounts[i].Swap(0); c > 0 {
+			total += c
+			counts[types.QueueOutcome(i).String()] = c
+		}
+	}
+	if total > 0 {
+		p.logger.V(logutil.DEFAULT).Info("Flow control request drop summary",
+			"poolName", p.poolName,
+			"totalDropped", total,
+			"counts", counts)
+	}
 }
 
 // processAllQueuesConcurrently iterates over all queues in all priority bands and executes the given

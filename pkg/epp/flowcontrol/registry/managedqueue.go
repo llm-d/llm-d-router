@@ -146,7 +146,17 @@ func (mq *managedQueue) Cleanup(predicate contracts.PredicateFunc) []flowcontrol
 		return nil
 	}
 	mq.propagateStatsDeltaForRemovedItemsLocked(cleanedItems)
-	mq.logger.V(logging.DEBUG).Info("Cleaned up queue", "removedItemCount", len(cleanedItems))
+	if v := mq.logger.V(logging.DEBUG); v.Enabled() {
+		reqIDs := make([]string, 0, len(cleanedItems))
+		for _, item := range cleanedItems {
+			if req := item.OriginalRequest(); req != nil {
+				reqIDs = append(reqIDs, req.ID())
+			}
+		}
+		v.Info("Cleaned up queue", "removedItemCount", len(cleanedItems), "requestIDs", reqIDs)
+	} else {
+		mq.logger.V(logging.DEBUG).Info("Cleaned up queue", "removedItemCount", len(cleanedItems))
+	}
 	return cleanedItems
 }
 
@@ -160,7 +170,17 @@ func (mq *managedQueue) Drain() []flowcontrol.QueueItemAccessor {
 		return nil
 	}
 	mq.propagateStatsDeltaForRemovedItemsLocked(drainedItems)
-	mq.logger.V(logging.DEBUG).Info("Drained queue", "itemCount", len(drainedItems))
+	if v := mq.logger.V(logging.DEBUG); v.Enabled() {
+		reqIDs := make([]string, 0, len(drainedItems))
+		for _, item := range drainedItems {
+			if req := item.OriginalRequest(); req != nil {
+				reqIDs = append(reqIDs, req.ID())
+			}
+		}
+		v.Info("Drained queue", "itemCount", len(drainedItems), "requestIDs", reqIDs)
+	} else {
+		mq.logger.V(logging.DEBUG).Info("Drained queue", "itemCount", len(drainedItems))
+	}
 	return drainedItems
 }
 
