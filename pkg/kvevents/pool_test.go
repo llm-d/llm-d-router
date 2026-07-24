@@ -1105,3 +1105,25 @@ func counterValue(t *testing.T, c prometheus.Counter) float64 {
 	require.NoError(t, c.Write(&m))
 	return m.GetCounter().GetValue()
 }
+
+func TestEffectiveReplayPort(t *testing.T) {
+	tests := []struct {
+		name       string
+		socketPort int
+		replayPort int
+		want       int
+	}{
+		{"disabled by default", 5556, 0, -1},
+		{"explicit value", 5556, 6000, 6000},
+		{"negative disabled", 5556, -1, -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &PodDiscoveryConfig{
+				SocketPort:       tt.socketPort,
+				ReplaySocketPort: tt.replayPort,
+			}
+			assert.Equal(t, tt.want, cfg.EffectiveReplayPort())
+		})
+	}
+}

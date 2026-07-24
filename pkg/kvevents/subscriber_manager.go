@@ -33,9 +33,10 @@ type SubscriberManager struct {
 
 // subscriberEntry represents a single subscriber and its cancellation.
 type subscriberEntry struct {
-	subscriber *zmqSubscriber
-	cancel     context.CancelFunc
-	endpoint   string
+	subscriber     *zmqSubscriber
+	cancel         context.CancelFunc
+	endpoint       string
+	replayEndpoint string
 }
 
 // NewSubscriberManager creates a new subscriber manager.
@@ -49,7 +50,7 @@ func NewSubscriberManager(pool *Pool) *SubscriberManager {
 // EnsureSubscriber ensures a subscriber exists for the given pod.
 // If the subscriber already exists with the same endpoint, it's a no-op.
 // If the endpoint changed, the old subscriber is removed and a new one is created.
-func (sm *SubscriberManager) EnsureSubscriber(ctx context.Context, podIdentifier, endpoint, topicFilter string,
+func (sm *SubscriberManager) EnsureSubscriber(ctx context.Context, podIdentifier, endpoint, replayEndpoint, topicFilter string,
 	remoteSocket bool,
 ) error {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
@@ -59,7 +60,7 @@ func (sm *SubscriberManager) EnsureSubscriber(ctx context.Context, podIdentifier
 
 	// Check if subscriber already exists
 	if entry, exists := sm.subscribers[podIdentifier]; exists {
-		if entry.endpoint == endpoint {
+		if entry.endpoint == endpoint && entry.replayEndpoint == replayEndpoint {
 			// Subscriber already exists with the same endpoint, nothing to do
 			debugLogger.V(logging.TRACE).Info("Subscriber already exists", "podIdentifier", podIdentifier, "endpoint", endpoint)
 			return nil
@@ -75,7 +76,7 @@ func (sm *SubscriberManager) EnsureSubscriber(ctx context.Context, podIdentifier
 
 	// Create new subscriber
 	debugLogger.Info("Creating new subscriber", "podIdentifier", podIdentifier, "endpoint", endpoint)
-	subscriber := newZMQSubscriber(sm.pool, endpoint, topicFilter, remoteSocket)
+	subscriber := newZMQSubscriber(sm.pool, endpoint, replayEndpoint, topicFilter, remoteSocket)
 
 	// Create a context and start subscriber
 	subCtx, cancel := context.WithCancel(ctx)
@@ -83,9 +84,10 @@ func (sm *SubscriberManager) EnsureSubscriber(ctx context.Context, podIdentifier
 
 	// Update subscribers
 	sm.subscribers[podIdentifier] = &subscriberEntry{
-		subscriber: subscriber,
-		cancel:     cancel,
-		endpoint:   endpoint,
+		subscriber:     subscriber,
+		cancel:         cancel,
+		endpoint:       endpoint,
+		replayEndpoint: replayEndpoint,
 	}
 
 	debugLogger.Info("Subscriber created and started", "podIdentifier", podIdentifier, "endpoint", endpoint)

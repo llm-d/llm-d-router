@@ -184,7 +184,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	subscribersManager := kvevents.NewSubscriberManager(pool)
 	if config.KVEventsConfig.ZMQEndpoint != "" {
 		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber",
-			config.KVEventsConfig.ZMQEndpoint, config.KVEventsConfig.TopicFilter, false); err != nil {
+			config.KVEventsConfig.ZMQEndpoint, "", config.KVEventsConfig.TopicFilter, false); err != nil {
 			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
 		}
 	}

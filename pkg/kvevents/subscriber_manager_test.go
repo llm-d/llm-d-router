@@ -47,7 +47,7 @@ func TestSubscriberManager_EnsureSubscriber(t *testing.T) {
 	endpoint := "tcp://127.0.0.1:5557"
 	topicFilter := "kv@"
 
-	err = sm.EnsureSubscriber(ctx, podID, endpoint, topicFilter, true)
+	err = sm.EnsureSubscriber(ctx, podID, endpoint, "", topicFilter, true)
 	assert.NoError(t, err)
 
 	identifiers, endpoints := sm.GetActiveSubscribers()
@@ -56,7 +56,7 @@ func TestSubscriberManager_EnsureSubscriber(t *testing.T) {
 	assert.Contains(t, endpoints, endpoint)
 
 	// Ensure with same endpoint should be no-op
-	err = sm.EnsureSubscriber(ctx, podID, endpoint, topicFilter, true)
+	err = sm.EnsureSubscriber(ctx, podID, endpoint, "", topicFilter, true)
 	assert.NoError(t, err)
 	identifiers, _ = sm.GetActiveSubscribers()
 	assert.Len(t, identifiers, 1)
@@ -84,7 +84,7 @@ func TestSubscriberManager_RemoveSubscriber(t *testing.T) {
 	endpoint := "tcp://127.0.0.1:5557"
 	topicFilter := "kv@"
 
-	err = sm.EnsureSubscriber(ctx, podID, endpoint, topicFilter, true)
+	err = sm.EnsureSubscriber(ctx, podID, endpoint, "", topicFilter, true)
 	require.NoError(t, err)
 
 	sm.RemoveSubscriber(ctx, podID)
@@ -121,7 +121,7 @@ func TestSubscriberManager_MultipleSubscribers(t *testing.T) {
 	}
 
 	for _, pod := range pods {
-		err := sm.EnsureSubscriber(ctx, pod.id, pod.endpoint, "kv@", true)
+		err := sm.EnsureSubscriber(ctx, pod.id, pod.endpoint, "", "kv@", true)
 		require.NoError(t, err)
 	}
 
@@ -163,12 +163,12 @@ func TestSubscriberManager_EndpointChange(t *testing.T) {
 	endpoint1 := "tcp://10.0.0.1:5557"
 	endpoint2 := "tcp://10.0.0.2:5557"
 
-	err = sm.EnsureSubscriber(ctx, podID, endpoint1, "kv@", true)
+	err = sm.EnsureSubscriber(ctx, podID, endpoint1, "", "kv@", true)
 	require.NoError(t, err)
 	identifiers, _ := sm.GetActiveSubscribers()
 	assert.Len(t, identifiers, 1)
 
-	err = sm.EnsureSubscriber(ctx, podID, endpoint2, "kv@", true)
+	err = sm.EnsureSubscriber(ctx, podID, endpoint2, "", "kv@", true)
 	require.NoError(t, err)
 
 	identifiers, endpoints := sm.GetActiveSubscribers()
@@ -202,7 +202,7 @@ func TestSubscriberManager_ConcurrentOperations(t *testing.T) {
 			defer func() { done <- true }()
 			podID := fmt.Sprintf("default/pod-%d", id)
 			endpoint := fmt.Sprintf("tcp://10.0.0.%d:5557", id)
-			if err := sm.EnsureSubscriber(ctx, podID, endpoint, "kv@", true); err != nil {
+			if err := sm.EnsureSubscriber(ctx, podID, endpoint, "", "kv@", true); err != nil {
 				t.Errorf("failed to add subscriber %s: %v", podID, err)
 			}
 		}(i)

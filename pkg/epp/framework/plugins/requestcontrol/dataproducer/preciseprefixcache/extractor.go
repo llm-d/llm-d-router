@@ -74,11 +74,18 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
 	zmqEndpoint := fmt.Sprintf("tcp://%s:%d", meta.Address, port)
 
+	replayEndpoint := ""
+	if p.kvEventsConfig.PodDiscoveryConfig != nil {
+		if replayPort := p.kvEventsConfig.PodDiscoveryConfig.EffectiveReplayPort(); replayPort > 0 {
+			replayEndpoint = fmt.Sprintf("tcp://%s:%d", meta.Address, replayPort+meta.GetRankIndex())
+		}
+	}
+
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers
 	// down on request completion.
 	if err := p.subscribersManager.EnsureSubscriber(p.subscriberCtx, endpointKey,
-		zmqEndpoint, p.kvEventsConfig.TopicFilter, true); err != nil {
+		zmqEndpoint, replayEndpoint, p.kvEventsConfig.TopicFilter, true); err != nil {
 		logger.Error(err, "Failed to ensure KV-events subscriber for endpoint",
 			"endpoint", endpointKey, "address", meta.Address)
 		return fmt.Errorf("ensure subscriber for %s: %w", endpointKey, err)
