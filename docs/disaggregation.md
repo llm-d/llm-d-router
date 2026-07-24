@@ -559,7 +559,28 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
 
 `host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
 
-**Data parallelism:** with `--data-parallel-size` N > 1, vLLM binds DP replica `i`'s P2P tier on `<p2p-connector-port>+i`, where `i` is the **global** `data_parallel_index`, and gives each replica a distinct shared-memory offload region, so ranks in one pod do not collide. The sidecar derives the target's pod-local rank from the routed endpoint's port (rank `r` is served on `<port>+r`) and injects `remote_port` = `--p2p-connector-port` + `r`; a port outside the rank range falls back to rank 0. Local rank equals the global index only when each pod is its own DP group, so this derivation covers per-pod DP deployments; in multi-pod DP groups (e.g. LWS wide-EP, where pod k's replicas hold global indices k*N..k*N+N-1 behind the same serving ports) the source's global index must be supplied per request and is not derivable from the endpoint port. Requires vLLM with per-DP-rank P2P ports and per-replica offload regions ([PR #47636](https://github.com/vllm-project/vllm/pull/47636), [PR #47987](https://github.com/vllm-project/vllm/pull/47987)); on older engines every rank binds the same `POD_IP:<p2p-connector-port>` and DP > 1 fails at engine startup. Size `/dev/shm` for N regions: pod shm must exceed N x `cpu_bytes_to_use`.
+**Data parallelism:** the P2P tier supports `--data-parallel-size` N > 1 when
+each pod is a complete DP group (the per-pod DP deployment).
+
+- vLLM gives each DP replica its own P2P listener and offload region:
+  replica `i` serves on `<p2p-connector-port>+i`, where `i` is the
+  **global** `data_parallel_index`
+  ([PR #47636](https://github.com/vllm-project/vllm/pull/47636),
+  [PR #47987](https://github.com/vllm-project/vllm/pull/47987)). Engines
+  without those changes bind every replica to the same
+  `POD_IP:<p2p-connector-port>`, and DP > 1 fails at engine startup.
+- The sidecar serves rank `r` on its own port + `r`, so the routed
+  endpoint's port names the target rank. The sidecar injects
+  `remote_port` = `--p2p-connector-port` + `r`; a port outside the rank
+  range falls back to rank 0.
+- The endpoint port encodes the pod-local rank, which matches the global
+  index only when the pod is a whole DP group. In multi-pod DP groups (for
+  example LWS wide-EP, where pod `k`'s replicas hold global indices
+  `k*N..k*N+N-1` behind the same serving ports), the global index cannot
+  be read from the port and would have to be supplied with the request, so
+  those deployments are not covered.
+- Every replica maps its own offload region, so the pod's `/dev/shm` must
+  exceed N x `cpu_bytes_to_use`.
 
 ### General Sidecar Flags
 
