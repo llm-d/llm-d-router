@@ -604,7 +604,7 @@ EPP-Phase: prefill
 `kwargs_data` carries the same per-image base64 tensors from the render step (same values sent to the encode stage). Each blob is a msgpack-serialized `MultiModalKwargsItem` containing both `pixel_values` and `image_grid_thw` (and any other model-specific keys). The prefill worker needs `image_grid_thw` to compute mRoPE (multimodal Rotary Position Embedding) positional encodings for the visual tokens.
 
 > [!NOTE]
-> Due to a bug in the `/inference/v1/generate` implementation, the `kv_transfer_params` are not propagated as expected, so we will use a workaround:
+> Due to a bug in the `/inference/v1/generate` implementation, top-level `kv_transfer_params` and `ec_transfer_params` are not propagated to the engine: the endpoint reads transfer parameters only from `sampling_params.extra_args` (the top-level `ec_transfer_params` is used solely to echo back in the response). The coordinator nests both under `extra_args`:
 
 ```
 POST <gateway>/inference/v1/generate
@@ -626,11 +626,16 @@ EPP-Phase: prefill
     ]},
     "kwargs_data": {"image": ["<base64-encoded-pixel-tensor-1>", "<base64-encoded-pixel-tensor-2>"]}
   },
-  "ec_transfer_params": {
-    "abc123hash": {"peer_host": "10.0.0.1", "peer_port": 5501, "size_bytes": 2359296, "nixl_agent_metadata_b64": "TklYTA..."},
-    "def456hash": {"peer_host": "10.0.0.2", "peer_port": 5502, "size_bytes": 2359296, "nixl_agent_metadata_b64": "QWdlbnQ..."}
-  },
-  "sampling_params": {"max_tokens": 1, "extra_args": {"kv_transfer_params":{"do_remote_decode": true, "do_remote_prefill": false}}}
+  "sampling_params": {
+    "max_tokens": 1,
+    "extra_args": {
+      "kv_transfer_params": {"do_remote_decode": true, "do_remote_prefill": false},
+      "ec_transfer_params": {
+        "abc123hash": {"peer_host": "10.0.0.1", "peer_port": 5501, "size_bytes": 2359296, "nixl_agent_metadata_b64": "TklYTA..."},
+        "def456hash": {"peer_host": "10.0.0.2", "peer_port": 5502, "size_bytes": 2359296, "nixl_agent_metadata_b64": "QWdlbnQ..."}
+      }
+    }
+  }
 }
 ```
 
@@ -893,7 +898,7 @@ EPP-Phase: decode
 - For `/v1/completions`: the original text `prompt` is replaced with the `token_ids` array from the render response
 - `uuid` is added to each `image_url` content part (value is the mm_hash from the render step) for multimodal cache lookup
 - `image_url` retains the original base64 data URI from the replace-media-urls step so the decode worker can process images and produce the correct token sequence (matching what prefill computed)
-- `kv_transfer_params` is injected at the top level of the request body
+- `kv_transfer_params` is injected at the top level of the request body for `/v1/chat/completions` and `/v1/completions`; for `/inference/v1/generate` it is nested in `sampling_params.extra_args`, since that engine reads transfer params only from there (same as the prefill request)
 - `do_remote_decode: false, do_remote_prefill: true` is added by the coordinator to signal the decode worker to fetch KV from the remote prefill worker
 - The `EPP-Phase: decode` header is used for routing (replaces the old `/decode/` path prefix)
 

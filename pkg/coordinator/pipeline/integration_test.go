@@ -174,12 +174,18 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 			if captured == nil {
 				t.Fatal("prefill was not called")
 			}
-			_, hasEC := captured["ec_transfer_params"]
+			// Generate format nests transfer params in sampling_params.extra_args.
+			var hasEC bool
+			if sp, ok := captured["sampling_params"].(map[string]any); ok {
+				if ea, ok := sp["extra_args"].(map[string]any); ok {
+					_, hasEC = ea["ec_transfer_params"]
+				}
+			}
 			if tc.wantECInPrefill && !hasEC {
-				t.Error("expected ec_transfer_params in prefill body")
+				t.Error("expected ec_transfer_params in prefill body sampling_params.extra_args")
 			}
 			if !tc.wantECInPrefill && hasEC {
-				t.Error("unexpected ec_transfer_params in prefill body")
+				t.Error("unexpected ec_transfer_params in prefill body sampling_params.extra_args")
 			}
 		})
 	}
