@@ -1,0 +1,146 @@
+# Precise prefix EPP configuration.
+# Instead of pod discovery and watching, use static endpoint mode
+# to establish a local listener for zmq messages
+# that are published by the model server simulator pods.
+router:
+  extraServicePorts:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8081
+
+  tokenizer:
+    enabled: true
+    modelName: Qwen/Qwen3-8B
+    image:
+      registry: docker.io
+      repository: vllm/vllm-openai-cpu
+      tag: v0.21.0
+      pullPolicy: IfNotPresent
+    env:
+    - name: HF_HOME
+      value: /tmp/hf/hub
+    - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+      value: '1'
+    - name: TOKENIZERS_PARALLELISM
+      value: 'true'
+    - name: OMP_NUM_THREADS
+      value: '4'
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: hf-secret
+    args:
+    - Qwen/Qwen3-8B
+    - --port=8000
+    - --max-model-len=131072
+    resources:
+      requests:
+        cpu: "4"
+        memory: 8Gi
+      limits:
+        memory: 16Gi
+
+  epp:
+    replicas: 1
+    image:
+      registry: ghcr.io/llm-d
+      repository: llm-d-router-endpoint-picker-dev
+      tag: main
+      pullPolicy: Always
+    flags:
+      v: 4
+      health-checking: true
+      enable-pprof: "true"
+      ha-enable-leader-election: false
+    env:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: hf-secret
+    pluginsConfigFile: "precise-baseline-plugins.yaml"
+    pluginsCustomConfig:
+      precise-baseline-plugins.yaml: |
+        apiVersion: llm-d.ai/v1alpha1
+        kind: EndpointPickerConfig
+        plugins:
+          - type: token-producer
+            parameters:
+              modelName: Qwen/Qwen3-8B
+              vllm:
+                url: "http://localhost:8000"
+          - type: endpoint-notification-source
+          - type: precise-prefix-cache-producer
+            parameters:
+              tokenProcessorConfig:
+                blockSizeTokens: 16
+              speculativeIndexing: true
+              indexerConfig:
+                kvBlockIndexConfig:
+                  enableMetrics: true
+              kvEventsConfig:
+                topicFilter: "kv@"
+                concurrency: 32
+                discoverPods: true
+                podDiscoveryConfig:
+                  socketPort: 5557
+          - type: prefix-cache-scorer
+            parameters:
+              prefixMatchInfoProducerName: precise-prefix-cache-producer
+          - type: kv-cache-utilization-scorer
+          - type: active-request-scorer
+          - type: no-hit-lru-scorer
+            parameters:
+              prefixMatchInfoProducerName: precise-prefix-cache-producer
+        dataLayer:
+          sources:
+            - pluginRef: endpoint-notification-source
+              extractors:
+                - pluginRef: precise-prefix-cache-producer
+        schedulingProfiles:
+          - name: default
+            plugins:
+              - pluginRef: active-request-scorer
+                weight: 4
+              - pluginRef: kv-cache-utilization-scorer
+                weight: 2
+              - pluginRef: prefix-cache-scorer
+                weight: 2
+              - pluginRef: no-hit-lru-scorer
+                weight: 2
+
+  inferencePool:
+    failureMode: "FailOpen"
+
+  modelServers:
+    protocol: http
+
+  proxy:
+    mode: "sidecar"
+    args:
+      - "--service-node"
+      - "envoy-sidecar"
+      - "--log-level"
+      - "warn"
+      - "--concurrency"
+      - "32"
+      - "--drain-strategy"
+      - "immediate"
+      - "--drain-time-s"
+      - "60"
+      - "-c"
+      - "/etc/envoy/envoy.yaml"
+    resources:
+      requests:
+        cpu: "4"
+        memory: 8Gi
+      limits:
+        memory: 16Gi
+
+  tracing:
+    otelExporterEndpoint: "http://localhost:4317"
+    sampling:
+      sampler: "parentbased_traceidratio"
+      samplerArg: "0.1"
