@@ -152,7 +152,7 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
 	}
-	if err := registerMetrics(handle.Metrics()); err != nil {
+	if err := RegisterMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
 	// Surface the override to the operator so a too-small configured value is
@@ -238,10 +238,17 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		totalBlocks += len(hashes)
 	}
 
+	endpointHitRatios := make([]float64, 0, len(pods))
 	for _, pod := range pods {
 		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().NamespacedName)]
 		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
+		if totalBlocks > 0 {
+			endpointHitRatios = append(endpointHitRatios, float64(matchLen)/float64(totalBlocks))
+		}
 	}
+
+	max, avg, std := CalculateHitRatioStats(endpointHitRatios)
+	RecordPrefixCacheHitRatioStats(p.typedName.Name, p.typedName.Type, max, avg, std)
 
 	state := &SchedulingContextState{
 		PerPromptHashes:    perPromptHashes,
@@ -295,7 +302,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
-	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
+	RecordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {

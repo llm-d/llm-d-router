@@ -41,6 +41,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
+	approximateprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -138,6 +139,13 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	//nolint:staticcheck // SA1019
 	if parameters.IndexerConfig.TokenizersPoolConfig != nil {
 		return nil, errors.New("tokenizersPoolConfig is not supported; configure a token-producer plugin instead")
+	}
+
+	if handle == nil {
+		return nil, errors.New("plugin handle is required")
+	}
+	if err := approximateprefix.RegisterMetrics(handle.Metrics()); err != nil {
+		return nil, err
 	}
 
 	p, err := New(handle.Context(), name, parameters)
@@ -363,6 +371,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	maxMatch := 0
+	endpointHitRatios := make([]float64, 0, len(endpoints))
 	for _, ep := range endpoints {
 		md := ep.GetMetadata()
 		if md == nil {
@@ -370,6 +379,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		}
 		addr := fmt.Sprintf("%s:%s", md.Address, md.Port)
 		matchLen := int(aggregatedScores[addr])
+		endpointHitRatios = append(endpointHitRatios, float64(matchLen)/float64(totalBlocks))
 		if matchLen > maxMatch {
 			maxMatch = matchLen
 		}
@@ -387,9 +397,15 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 				WithCachedBlocksByTier(cachedBlocksByTier))
 	}
 
+	max, avg, std := approximateprefix.CalculateHitRatioStats(endpointHitRatios)
+	approximateprefix.RecordPrefixCacheHitRatioStats(p.typedName.Name, p.typedName.Type, max, avg, std)
+
 	if p.speculativeEnabled {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,
-			&blockKeysState{perPromptKeys: perPromptKeys})
+			&blockKeysState{
+				perPromptKeys:           perPromptKeys,
+				prefixCacheMatchLengths: aggregatedScores,
+			})
 	}
 
 	span.SetAttributes(
