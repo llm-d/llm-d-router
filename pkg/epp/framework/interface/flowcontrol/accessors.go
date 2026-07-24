@@ -63,7 +63,9 @@ type PriorityBandAccessor interface {
 	// Returns nil if the ID is not found in this group.
 	Queue(id string) FlowQueueAccessor
 
-	// IterateQueues executes the given callback for each active Flow in this group.
+	// IterateQueues executes the given callback for each active Flow in this group. A Flow is active while its queue
+	// holds at least one item; implementations may skip empty queues entirely. The view may be eventually consistent
+	// under concurrent mutation, so callbacks must tolerate a visited queue reporting Len() == 0.
 	// Iteration stops if the callback returns false. The order of iteration is not guaranteed unless specified by
 	// the implementation.
 	IterateQueues(callback func(flow FlowQueueAccessor) (keepIterating bool))
