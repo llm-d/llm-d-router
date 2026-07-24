@@ -63,6 +63,37 @@ the defaults below):
 | `estimate.image.dynamic.factor`    | `1024`    | Dynamic-mode pixels-per-placeholder-token divisor.                         |
 | `estimate.image.static.staticToken`| –         | Static-mode per-image placeholder count.                                   |
 
+Video estimation is `min(frames × tokensPerFrame, maxVideoTokens)`. The per-frame
+token count and the frame count are configured independently, so the two common
+model shapes are mode combinations: qwen3 is `tokensPerFrame.mode=dynamic` +
+`frames.mode=sampled`; gemma4 is `tokensPerFrame.mode=static` +
+`frames.mode=strided`. Video duration, resolution, and source FPS come from the
+`x-llm-d-video-*` request headers below when present; otherwise each falls back to
+its config value and then the built-in default. Headers are request-level, so they
+apply to every video in the request.
+
+| Request header                  | Format          | Description                                     |
+| ------------------------------- | --------------- | ----------------------------------------------- |
+| `x-llm-d-video-duration-seconds`| float seconds   | Video length; overrides `defaultDuration`.      |
+| `x-llm-d-video-resolution`      | `WIDTHxHEIGHT`  | Frame resolution; overrides `defaultResolution`.|
+| `x-llm-d-video-fps`             | float           | Source frame rate; overrides `frames.strided.defaultSourceFPS` (strided mode). |
+
+| Parameter                             | Default   | Description                                                                                                                                                 |
+| ------------------------------------- | --------- |-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `estimate.video.tokensPerFrame.mode`  | `dynamic` | `dynamic` (width×height/factor) or `static` (a constant per-frame count).                                                                                   |
+| `estimate.video.tokensPerFrame.dynamic.factor`| `1024` | Dynamic-mode pixels-per-placeholder-token divisor.                                                                                                          |
+| `estimate.video.tokensPerFrame.static.numTokensPerFrame` | – | Static-mode per-frame placeholder count.                                                                                                                    |
+| `estimate.video.frames.mode`          | `sampled` | `sampled` (clamp(duration×sampleFPS, minFrames, maxFrames) / temporalPatchSize) or `strided` (clamp(duration×sourceFPS/frameStride, minFrames, maxFrames)). |
+| `estimate.video.frames.minFrames`     | –         | Sampled/strided frame floor (0 = none). Models a processor's minimum frames.                                                                                |
+| `estimate.video.frames.maxFrames`     | –         | Sampled/strided frame cap (0 = uncapped).                                                                                                                   |
+| `estimate.video.frames.sampled.sampleFPS`     | `1`       | Sampled-mode sampling rate.                                                                                                                                 |
+| `estimate.video.frames.sampled.temporalPatchSize` | –     | Sampled-mode: merge every N sampled frames into one token group (qwen3-vl = 2; <2 = no merge).                                                              |
+| `estimate.video.frames.strided.defaultSourceFPS` | `24`   | Strided-mode source frame rate; fallback for the `x-llm-d-video-fps` header.                                                                                |
+| `estimate.video.frames.strided.frameStride`   | `1`       | Strided-mode divisor: keep every Nth source frame.                                                                                                          |
+| `estimate.video.defaultResolution`    | 640×360   | Per-frame resolution for dynamic tokens-per-frame; fallback for the `x-llm-d-video-resolution` header.                                                      |
+| `estimate.video.defaultDuration`      | `10`      | Video length in seconds for frame counting; fallback for the `x-llm-d-video-duration-seconds` header.                                                       |
+| `estimate.video.maxVideoTokens`       | –         | Overall placeholder cap for a video (0 = uncapped).                                                                                                         |
+
 ## Failure mode
 
 Per-request errors are returned to the Director, which currently logs and

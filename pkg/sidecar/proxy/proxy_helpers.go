@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"syscall"
 	"time"
 
@@ -196,14 +197,24 @@ func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *ht
 	return cloned
 }
 
-// extractHost returns the host part of a host:port string. If parsing
-// fails (e.g. no port), the input is returned as-is.
+// extractHost returns the host part of a host:port string. A `http://`
+// prefix is trimmed first, matching createProxyHandler's tolerance for
+// routed endpoint values. If parsing fails (e.g. no port), the input is
+// returned as-is.
 func extractHost(hostWithPort string) string {
+	hostWithPort, _ = strings.CutPrefix(hostWithPort, "http://")
 	host, _, err := net.SplitHostPort(hostWithPort)
 	if err != nil {
 		return hostWithPort
 	}
 	return host
+}
+
+// isHostPort reports whether s parses as host:port with a non-empty host.
+// net.SplitHostPort accepts ":8000" (empty host), which is not a usable target.
+func isHostPort(s string) bool {
+	host, _, err := net.SplitHostPort(s)
+	return err == nil && host != ""
 }
 
 func newUUID() string {

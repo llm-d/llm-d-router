@@ -15,7 +15,32 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
+
+func TestModelDataSourceFactory_TLS(t *testing.T) {
+	tests := []struct {
+		name    string
+		params  string
+		wantErr error
+	}{
+		{name: "https no certs", params: `{"scheme":"https"}`},
+		{name: "client cert wired to loader", params: `{"scheme":"https","clientCertPath":"/nope/c.pem","clientKeyPath":"/nope/k.pem"}`, wantErr: http.ErrLoadClientCert},
+		{name: "ca path wired to loader", params: `{"scheme":"https","insecureSkipVerify":false,"caCertPath":"/nope/ca.pem"}`, wantErr: http.ErrReadCACert},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ds, err := ModelDataSourceFactory("m", fwkplugin.StrictDecoder(json.RawMessage(tt.params)), nil)
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			assert.NoError(t, err)
+			assert.NotNil(t, ds)
+		})
+	}
+}
 
 func TestDatasource(t *testing.T) {
 	srcPlugin, err := ModelDataSourceFactory("models-data-source",

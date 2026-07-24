@@ -108,10 +108,15 @@ func recordTTFTTrainingData(
 		0,
 		prefixCacheScore,
 	)
-	if predictedLatencyCtx.prefillTokensAtDispatchOnPrefill > 0 {
+	// In disaggregated serving TTFT is incurred on the prefill endpoint, so the
+	// in-flight features are snapshotted from that endpoint; otherwise the decode
+	// (monolithic) endpoint snapshot applies.
+	if predictedLatencyCtx.prefillTargetMetadata != nil {
 		entry.PrefillTokensInFlight = predictedLatencyCtx.prefillTokensAtDispatchOnPrefill
+		entry.NumRequestRunning = predictedLatencyCtx.requestsAtDispatchOnPrefill
 	} else {
 		entry.PrefillTokensInFlight = predictedLatencyCtx.prefillTokensAtDispatch
+		entry.NumRequestRunning = predictedLatencyCtx.requestsAtDispatch
 	}
 	entry.DecodeTokensInFlight = predictedLatencyCtx.decodeTokensAtDispatch
 	if err := predictor.AddTrainingDataBulk([]latencypredictor.TrainingEntry{entry}); err != nil {
@@ -162,6 +167,7 @@ func bulkPredictWithMetrics(
 	generatedTokenCounts []int,
 	prefixCacheScores []float64,
 	prefillTokensInFlights []int64,
+	numRequestRunnings []int,
 ) ([]*latencypredictor.PredictionResponse, error) {
 	logger := log.FromContext(ctx)
 
@@ -198,6 +204,9 @@ func bulkPredictWithMetrics(
 		)
 		if i < len(prefillTokensInFlights) {
 			bulkRequests[i].PrefillTokensInFlight = prefillTokensInFlights[i]
+		}
+		if i < len(numRequestRunnings) {
+			bulkRequests[i].NumRequestRunning = numRequestRunnings[i]
 		}
 	}
 

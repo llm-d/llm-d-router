@@ -70,7 +70,7 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods [
 	return 0.0
 }
 
-// testHarness provides a unified, mock-based testing environment for the ShardProcessor. It centralizes all mock state
+// testHarness provides a unified, mock-based testing environment for the Processor. It centralizes all mock state
 // and provides helper methods for setting up tests and managing the processor's lifecycle.
 type testHarness struct {
 	t *testing.T
@@ -115,7 +115,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
 
-	// Wire up the harness to provide the mock implementations for the shard's dependencies.
+	// Wire up the harness to provide the mock implementations for the processor's dependencies.
 	h.ManagedQueueFunc = h.managedQueue
 	h.AllOrderedPriorityLevelsFunc = h.allOrderedPriorityLevels
 	h.PriorityBandAccessorFunc = h.priorityBandAccessor
@@ -143,7 +143,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		expiryCleanupInterval,
 		100,
 		h.logger)
-	require.NotNil(t, h.processor, "NewShardProcessor should not return nil")
+	require.NotNil(t, h.processor, "NewProcessor should not return nil")
 
 	t.Cleanup(func() { h.Stop() })
 
@@ -209,7 +209,7 @@ func (h *testHarness) addQueue(key flowcontrol.FlowKey) *mocks.MockManagedQueue 
 
 // --- Mock Interface Implementations ---
 
-// managedQueue provides the mock implementation for the `RegistryShard` interface.
+// managedQueue provides the mock implementation for the `registry data-plane` interface.
 func (h *testHarness) managedQueue(key flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -219,7 +219,7 @@ func (h *testHarness) managedQueue(key flowcontrol.FlowKey) (contracts.ManagedQu
 	return nil, fmt.Errorf("test setup error: no queue for %q", key)
 }
 
-// allOrderedPriorityLevels provides the mock implementation for the `RegistryShard` interface.
+// allOrderedPriorityLevels provides the mock implementation for the `registry data-plane` interface.
 func (h *testHarness) allOrderedPriorityLevels() []int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -234,7 +234,7 @@ func (h *testHarness) allOrderedPriorityLevels() []int {
 	return prios
 }
 
-// priorityBandAccessor provides the mock implementation for the `RegistryShard` interface. It acts as a factory for a
+// priorityBandAccessor provides the mock implementation for the `registry data-plane` interface. It acts as a factory for a
 // fully-configured, stateless mock that is safe for concurrent use.
 func (h *testHarness) priorityBandAccessor(p int) (flowcontrol.PriorityBandAccessor, error) {
 	band := &fwkfcmocks.MockPriorityBandAccessor{PriorityV: p}
@@ -261,7 +261,7 @@ func (h *testHarness) priorityBandAccessor(p int) (flowcontrol.PriorityBandAcces
 	return band, nil
 }
 
-// fairnessPolicy provides the mock implementation for the RegistryShard interface.
+// fairnessPolicy provides the mock implementation for the registry data-plane interface.
 func (h *testHarness) fairnessPolicy(p int) (flowcontrol.FairnessPolicy, error) {
 	policy := &fwkfcmocks.MockFairnessPolicy{}
 	// If the test provided a custom implementation, use it.
@@ -288,8 +288,8 @@ func (h *testHarness) fairnessPolicy(p int) (flowcontrol.FairnessPolicy, error) 
 	return policy, nil
 }
 
-// TestShardProcessor contains all tests for the `ShardProcessor`.
-func TestShardProcessor(t *testing.T) {
+// TestProcessor contains all tests for the `Processor`.
+func TestProcessor(t *testing.T) {
 	t.Parallel()
 
 	// Integration tests use the processor's main `Run` loop to verify the complete end-to-end lifecycle of a request, from
@@ -708,13 +708,13 @@ func TestShardProcessor(t *testing.T) {
 				expectHasCap bool
 			}{
 				{
-					name:         "should deny item if shard byte capacity exceeded",
+					name:         "should deny item if global byte capacity exceeded",
 					itemByteSize: 1,
 					stats:        contracts.AggregateStats{TotalByteSize: 100, TotalCapacityBytes: 100},
 					expectHasCap: false,
 				},
 				{
-					name:         "should deny item if shard request capacity exceeded",
+					name:         "should deny item if global request capacity exceeded",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 10,
@@ -755,7 +755,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: false,
 				},
 				{
-					name:         "should allow item if both shard and band have byte capacity",
+					name:         "should allow item if both global and band have byte capacity",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 200, TotalByteSize: 100,
@@ -766,7 +766,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: true,
 				},
 				{
-					name:         "should allow item if both shard and band have request capacity",
+					name:         "should allow item if both global and band have request capacity",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 5,
@@ -790,7 +790,7 @@ func TestShardProcessor(t *testing.T) {
 				},
 				// --- Mixed dimension tests ---
 				{
-					name:         "should deny if shard bytes ok but band requests exceeded",
+					name:         "should deny if global bytes ok but band requests exceeded",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 200, TotalByteSize: 50,
@@ -802,7 +802,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: false,
 				},
 				{
-					name:         "should deny if shard requests ok but band bytes exceeded",
+					name:         "should deny if global requests ok but band bytes exceeded",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 200, TotalByteSize: 50,
@@ -827,7 +827,7 @@ func TestShardProcessor(t *testing.T) {
 				},
 				// --- Boundary value tests ---
 				{
-					name:         "should allow when shard bytes exactly at capacity after add",
+					name:         "should allow when global bytes exactly at capacity after add",
 					itemByteSize: 10,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 110, TotalByteSize: 100,
@@ -838,7 +838,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: true,
 				},
 				{
-					name:         "should deny when shard bytes one over capacity after add",
+					name:         "should deny when global bytes one over capacity after add",
 					itemByteSize: 11,
 					stats: contracts.AggregateStats{
 						TotalCapacityBytes: 110, TotalByteSize: 100,
@@ -849,7 +849,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: false,
 				},
 				{
-					name:         "should allow when shard requests exactly at capacity after add",
+					name:         "should allow when global requests exactly at capacity after add",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 9,
@@ -860,7 +860,7 @@ func TestShardProcessor(t *testing.T) {
 					expectHasCap: true,
 				},
 				{
-					name:         "should deny when shard requests one over capacity after add",
+					name:         "should deny when global requests one over capacity after add",
 					itemByteSize: 0,
 					stats: contracts.AggregateStats{
 						TotalCapacityRequests: 10, TotalLen: 10,
@@ -1191,6 +1191,10 @@ func TestShardProcessor(t *testing.T) {
 				assert.Equal(t, types.QueueOutcomeEvictedContextCancelled, finalState.Outcome,
 					"Outcome should be EvictedContextCancelled")
 				assert.ErrorIs(t, finalState.Err, types.ErrContextCancelled, "Error should be ErrContextCancelled")
+
+				// Verify the sweep path recorded the drop.
+				assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load(),
+					"Drop should be recorded for EvictedContextCancelled")
 			})
 
 			t.Run("should not sweep items not finalized", func(t *testing.T) {
@@ -1445,5 +1449,126 @@ func TestShardProcessor(t *testing.T) {
 				assert.Nil(t, item.FinalState(), "Item should not be finalized by the processor")
 			})
 		})
+	})
+}
+
+// TestProcessor_DropSummary verifies the periodic drop-count accounting introduced in #2101.
+func TestProcessor_DropSummary(t *testing.T) {
+	t.Parallel()
+
+	// Verify that the dropCounts array is large enough to hold every QueueOutcome value.
+	// If new outcomes are added in the future, this check will catch them at compile time.
+	var _ = [types.NumQueueOutcomes]struct{}{}
+
+	t.Run("capacity rejection increments counter", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+
+		// Force capacity-full: band has 1 slot already used, CapacityRequests=1.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 1, Len: 1},
+				},
+			}
+		}
+
+		item := h.newTestItem("req-cap", testFlow, testTTL)
+		h.processor.enqueue(item)
+
+		outcome, _ := h.waitForFinalization(item)
+		require.Equal(t, types.QueueOutcomeRejectedCapacity, outcome)
+
+		count := h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load()
+		assert.Equal(t, uint64(1), count, "RejectedCapacity counter should be 1 after one capacity rejection")
+	})
+
+	t.Run("counters reset after flush", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+
+		// Force capacity-full.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 1, Len: 1},
+				},
+			}
+		}
+
+		item := h.newTestItem("req-flush", testFlow, testTTL)
+		h.processor.enqueue(item)
+		h.waitForFinalization(item) //nolint:errcheck
+
+		require.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load())
+
+		// Flushing should zero out all counters.
+		h.processor.flushDropSummary()
+		assert.Equal(t, uint64(0), h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load(),
+			"Counter should be 0 after flush")
+	})
+
+	t.Run("multiple outcome types are counted independently", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+
+		// Reject via capacity: band has 1 slot already used, CapacityRequests=1.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 1, Len: 1},
+				},
+			}
+		}
+		for i := range 2 {
+			item := h.newTestItem(fmt.Sprintf("req-multi-cap-%d", i), testFlow, testTTL)
+			h.processor.enqueue(item)
+			h.waitForFinalization(item) //nolint:errcheck
+		}
+
+		// Reject via configuration error (RejectedOther): pass capacity, fail priority band lookup.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 100, Len: 0},
+				},
+			}
+		}
+		h.PriorityBandAccessorFunc = func(priority int) (flowcontrol.PriorityBandAccessor, error) {
+			return nil, errors.New("forced priority band failure")
+		}
+		item := h.newTestItem("req-multi-other", testFlow, testTTL)
+		h.processor.enqueue(item)
+		h.waitForFinalization(item) //nolint:errcheck
+
+		assert.Equal(t, uint64(2), h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load(),
+			"RejectedCapacity counter should be 2")
+		assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeRejectedOther].Load(),
+			"RejectedOther counter should be 1")
+	})
+
+	t.Run("shutdown eviction counts unfinalized queued items exactly once", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		mockQueue := h.addQueue(testFlow)
+
+		item := h.newTestItem("req-evict-shutdown", testFlow, testTTL)
+		require.NoError(t, mockQueue.Add(item))
+		require.Nil(t, item.FinalState(), "item must not be finalized before evictAll")
+
+		// evictAll runs on shutdown to drain all queues.
+		h.processor.evictAll()
+
+		h.waitForFinalization(item) //nolint:errcheck
+
+		assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedOther].Load(),
+			"evictAll should count the unfinalized queued item exactly once")
 	})
 }

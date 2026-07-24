@@ -53,3 +53,7 @@ vendor
 # Helm dependency artifacts
 config/charts/*/charts/
 config/charts/*/Chart.lock
+
+# Performance benchmark local results directory
+test/perf/__pycache__/
+test/perf/results/

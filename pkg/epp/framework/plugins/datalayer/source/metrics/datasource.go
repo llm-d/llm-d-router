@@ -45,13 +45,19 @@ type metricsDatasourceParams struct {
 	Path string `json:"path"`
 	// InsecureSkipVerify defines whether model server certificate should be verified or not.
 	InsecureSkipVerify bool `json:"insecureSkipVerify"`
+	// CACertPath is an optional PEM CA bundle to verify the scrape target cert.
+	CACertPath string `json:"caCertPath"`
+	// ClientCertPath and ClientKeyPath present a client certificate for mTLS, so the scrape
+	// target authenticates this scraper by certificate instead of a bearer token. Both set together.
+	ClientCertPath string `json:"clientCertPath"`
+	ClientKeyPath  string `json:"clientKeyPath"`
 }
 
 // NewHTTPMetricsDataSource constructs a MetricsDataSource with the given scheme and path.
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
 func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
-	return http.NewHTTPDataSource(scheme, path, defaultMetricsInsecureSkipVerify,
+	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultMetricsInsecureSkipVerify},
 		MetricsDataSourceType, name, parseMetrics)
 }
 
@@ -66,7 +72,13 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		}
 	}
 
-	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path, cfg.InsecureSkipVerify,
+	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
+		http.TLSOptions{
+			SkipVerify:     cfg.InsecureSkipVerify,
+			CACertPath:     cfg.CACertPath,
+			ClientCertPath: cfg.ClientCertPath,
+			ClientKeyPath:  cfg.ClientKeyPath,
+		},
 		MetricsDataSourceType, name, parseMetrics)
 }
 

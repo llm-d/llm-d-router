@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-render
+  labels:
+    app: vllm-render
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-render
+  template:
+    metadata:
+      labels:
+        app: vllm-render
+    spec:
+      containers:
+      - name: vllm-render
+        image: ${VLLM_RENDER_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - "--model=${MODEL_NAME}"
+        - "--port=${VLLM_RENDER_PORT}"
+        - "--mode=echo"
+        - "--force-dummy-tokenizer"
+        ports:
+        - name: http
+          containerPort: ${VLLM_RENDER_PORT}
+        startupProbe:
+          httpGet:
+            path: /health
+            port: ${VLLM_RENDER_PORT}
+          initialDelaySeconds: 2
+          periodSeconds: 1
+          failureThreshold: 600
+          timeoutSeconds: 1
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: ${VLLM_RENDER_PORT}
+          periodSeconds: 10
+          failureThreshold: 5
+          timeoutSeconds: 1
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: ${VLLM_RENDER_PORT}
+          periodSeconds: 5
+          failureThreshold: 1
+          timeoutSeconds: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-render
+  labels:
+    app: vllm-render
+spec:
+  selector:
+    app: vllm-render
+  ports:
+  - name: http
+    protocol: TCP
+    port: ${VLLM_RENDER_PORT}
+    targetPort: ${VLLM_RENDER_PORT}
+  type: ClusterIP

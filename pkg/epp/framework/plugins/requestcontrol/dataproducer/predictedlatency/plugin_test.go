@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +35,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -44,6 +44,9 @@ import (
 type mockPredictor struct {
 	predictions map[string]*latencypredictor.PredictionResponse
 	err         error
+	// capturedBulkStrictRequests records the requests passed to the most recent
+	// PredictBulkStrict call, so tests can assert what was sent to the predictor.
+	capturedBulkStrictRequests []latencypredictor.PredictionRequest
 }
 
 func (m *mockPredictor) Predict(ctx context.Context, request latencypredictor.PredictionRequest) (*latencypredictor.PredictionResponse, error) {
@@ -74,6 +77,7 @@ func (m *mockPredictor) PredictBulk(ctx context.Context, requests []latencypredi
 }
 
 func (m *mockPredictor) PredictBulkStrict(ctx context.Context, requests []latencypredictor.PredictionRequest) (*latencypredictor.BulkPredictionResponse, error) {
+	m.capturedBulkStrictRequests = requests
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -103,6 +107,24 @@ func (m *mockPredictor) HealthCheck() error {
 
 func (m *mockPredictor) GetServerStatus(ctx context.Context) (*latencypredictor.ServerStatusResponse, error) {
 	return &latencypredictor.ServerStatusResponse{}, nil
+}
+
+func TestReadInFlightLoad(t *testing.T) {
+	pl := &PredictedLatency{inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey}
+
+	// Fallback path (no InFlightLoad attribute): tokens are zero and requests
+	// fall back to vLLM metrics. Both fields are always set.
+	ep := createTestEndpoint("pod1", 0.5, 5, 0)
+	got := pl.readInFlightLoad(ep)
+	assert.Equal(t, int64(0), got.tokens, "tokens must be zero on the fallback path")
+	assert.Equal(t, 5, got.requests, "requests falls back to metrics RunningRequestsSize")
+
+	// Attribute present: both fields come from InFlightLoad.
+	epWithLoad := createTestEndpoint("pod2", 0.5, 5, 0)
+	epWithLoad.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 42, Requests: 3})
+	got = pl.readInFlightLoad(epWithLoad)
+	assert.Equal(t, int64(42), got.tokens)
+	assert.Equal(t, 3, got.requests)
 }
 
 func createTestEndpoint(name string, kvCacheUsage float64, runningRequestsSize, waitingQueueSize int) fwksched.Endpoint {
@@ -489,13 +511,10 @@ func dumpNN(name string) types.NamespacedName {
 func TestPredictedLatency_DumpState(t *testing.T) {
 	t.Parallel()
 
-	t.Run("populated sorted by busyness", func(t *testing.T) {
+	t.Run("populated sorted by running requests", func(t *testing.T) {
 		pl := &PredictedLatency{}
 		pl.runningRequestLists.Store(dumpNN("pod-a"), dumpSeedQueue(map[string]float64{"r1": 5, "r2": 5}))
 		pl.runningRequestLists.Store(dumpNN("pod-b"), dumpSeedQueue(map[string]float64{"r3": 9}))
-		c := new(atomic.Int64)
-		c.Store(30)
-		pl.prefillTokensInFlight.Store(dumpNN("pod-b").String(), c)
 
 		payload, err := pl.DumpState()
 		require.NoError(t, err)
@@ -505,8 +524,8 @@ func TestPredictedLatency_DumpState(t *testing.T) {
 		require.NoError(t, json.Unmarshal(payload, &state))
 		require.Equal(t, predictedLatencyState{
 			Endpoints: []endpointPredictedLatencyState{
-				{Endpoint: dumpNN("pod-b").String(), RunningRequests: 1, MinTPOTSLO: 9, PrefillTokensInFlight: 30},
-				{Endpoint: dumpNN("pod-a").String(), RunningRequests: 2, MinTPOTSLO: 5, PrefillTokensInFlight: 0},
+				{Endpoint: dumpNN("pod-a").String(), RunningRequests: 2, MinTPOTSLO: 5},
+				{Endpoint: dumpNN("pod-b").String(), RunningRequests: 1, MinTPOTSLO: 9},
 			},
 			TotalEndpoints: 2,
 			MaxEndpoints:   maxDebugDumpEndpoints,
@@ -526,33 +545,15 @@ func TestPredictedLatency_DumpState(t *testing.T) {
 		require.Equal(t, 0, state.TrackedRequests)
 	})
 
-	t.Run("merge across maps", func(t *testing.T) {
-		pl := &PredictedLatency{}
-		pl.runningRequestLists.Store(dumpNN("pod-a"), dumpSeedQueue(map[string]float64{"r1": 3}))
-		c := new(atomic.Int64)
-		c.Store(40)
-		pl.prefillTokensInFlight.Store(dumpNN("pod-b").String(), c)
-
-		var state predictedLatencyState
-		payload, err := pl.DumpState()
-		require.NoError(t, err)
-		require.NoError(t, json.Unmarshal(payload, &state))
-		require.Equal(t, 2, state.TotalEndpoints)
-		// pod-b busier (40) sorts first; pod-a has prefill 0, pod-b has running 0.
-		require.Equal(t, dumpNN("pod-b").String(), state.Endpoints[0].Endpoint)
-		require.Equal(t, int64(40), state.Endpoints[0].PrefillTokensInFlight)
-		require.Equal(t, 0, state.Endpoints[0].RunningRequests)
-		require.Equal(t, dumpNN("pod-a").String(), state.Endpoints[1].Endpoint)
-		require.Equal(t, 1, state.Endpoints[1].RunningRequests)
-		require.Equal(t, int64(0), state.Endpoints[1].PrefillTokensInFlight)
-	})
-
 	t.Run("caps endpoints", func(t *testing.T) {
 		pl := &PredictedLatency{}
 		for i := range maxDebugDumpEndpoints + 5 {
-			c := new(atomic.Int64)
-			c.Store(int64(i))
-			pl.prefillTokensInFlight.Store(dumpNN(fmt.Sprintf("pod-%03d", i)).String(), c)
+			// pod-i gets i+1 running requests so the busiest sort deterministically.
+			seed := map[string]float64{}
+			for r := 0; r <= i; r++ {
+				seed[fmt.Sprintf("r%03d", r)] = 1
+			}
+			pl.runningRequestLists.Store(dumpNN(fmt.Sprintf("pod-%03d", i)), dumpSeedQueue(seed))
 		}
 		var state predictedLatencyState
 		payload, err := pl.DumpState()
@@ -561,7 +562,7 @@ func TestPredictedLatency_DumpState(t *testing.T) {
 		require.True(t, state.Truncated)
 		require.Equal(t, maxDebugDumpEndpoints+5, state.TotalEndpoints)
 		require.Len(t, state.Endpoints, maxDebugDumpEndpoints)
-		require.Equal(t, int64(maxDebugDumpEndpoints+4), state.Endpoints[0].PrefillTokensInFlight)
+		require.Equal(t, maxDebugDumpEndpoints+5, state.Endpoints[0].RunningRequests)
 	})
 
 	t.Run("tracked requests count", func(t *testing.T) {

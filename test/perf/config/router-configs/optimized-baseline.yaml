@@ -11,7 +11,7 @@ router:
     replicas: 1
     image:
       registry: ghcr.io/llm-d
-      repository: llm-d-router-endpoint-picker-dev
+      repository: llm-d-router-endpoint-picker
       tag: main
       pullPolicy: Always
     flags:
@@ -26,6 +26,9 @@ router:
         plugins:
         - type: queue-scorer
         - type: kv-cache-utilization-scorer
+        - type: approx-prefix-cache-producer
+          parameters:
+            maxPrefixTokensToMatch: 100000
         - type: prefix-cache-scorer
         - type: no-hit-lru-scorer
         schedulingProfiles:

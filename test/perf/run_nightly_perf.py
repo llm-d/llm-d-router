@@ -3,12 +3,14 @@
 import argparse
 import json
 import os
+import random
 import re
 import subprocess
 import socket
 import sys
 import time
 from threading import Thread
+import urllib.request
 import yaml
 
 # Global flag to stop the metric monitoring thread
@@ -107,7 +109,7 @@ def double_memory(mem_str):
     val = int(mem_str)
     return str(val * 2)
 
-def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", epp_memory="4Gi", machine_family=None):
+def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", epp_memory="4Gi", machine_family=None, epp_replicas=1):
     print(f"Deploying EPP standalone using Helm chart from: {chart_path} (version: {chart_version})")
     
     if not os.path.exists(router_config_path):
@@ -116,7 +118,7 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
     release_name = os.path.splitext(os.path.basename(router_config_path))[0]
     
     epp_registry = os.environ.get("EPP_REGISTRY", "ghcr.io/llm-d")
-    epp_repository = os.environ.get("EPP_REPOSITORY", "llm-d-router-endpoint-picker-dev")
+    epp_repository = os.environ.get("EPP_REPOSITORY", "llm-d-router-endpoint-picker")
     epp_tag = os.environ.get("EPP_TAG", "main")
     
     cpu_limit = double_cpu(epp_cpu)
@@ -125,6 +127,7 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
     overrides = {
         "router": {
             "epp": {
+                "replicas": epp_replicas,
                 "image": {
                     "registry": epp_registry,
                     "repository": epp_repository,
@@ -236,10 +239,11 @@ def get_container_images(ns, pod_name):
     )
     return res.stdout.strip().split()
 
-def sample_resources(ns, pod_name):
+def sample_resources(ns, target, is_label=False):
     # Output of: kubectl top pod <pod> -n <ns> --containers --no-headers
     # Format: <pod>  <container>  <cpu>  <memory>
-    res = run_cmd(f"kubectl top pod {pod_name} -n {ns} --containers --no-headers", check=False)
+    cmd_target = f"-l {target}" if is_label else target
+    res = run_cmd(f"kubectl top pod {cmd_target} -n {ns} --containers --no-headers", check=False)
     if res.returncode != 0:
         return None
         
@@ -269,18 +273,21 @@ def sample_resources(ns, pod_name):
         else:
             mem = int(mem_str)
             
-        metrics[container] = {'cpu': cpu, 'mem': mem}
+        if container not in metrics:
+            metrics[container] = {'cpu': 0, 'mem': 0}
+        metrics[container]['cpu'] += cpu
+        metrics[container]['mem'] += mem
         total_cpu += cpu
         total_mem += mem
         
     metrics['TOTAL'] = {'cpu': total_cpu, 'mem': total_mem}
     return metrics
 
-def monitor_resources_loop(ns, pod_name, interval, peak_metrics):
+def monitor_resources_loop(ns, target, interval, peak_metrics, is_label=False):
     global stop_monitoring
     print("Starting background resource monitoring...")
     while not stop_monitoring:
-        sample = sample_resources(ns, pod_name)
+        sample = sample_resources(ns, target, is_label)
         if sample:
             for container, usage in sample.items():
                 if container not in peak_metrics:
@@ -461,7 +468,7 @@ def cleanup_namespace(ns):
     print(f"Cleaning up namespace: {ns}")
     run_cmd(f"kubectl delete namespace {ns} --wait=false")
 
-def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, router_config_path, perf_job, machine_family, sim_replicas, images, idle_metrics, peak_metrics, p50, p95, status):
+def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, router_config_path, perf_job, machine_family, sim_replicas, images, idle_metrics, peak_metrics, p50, p95, status, profile_results=None):
     os.makedirs(results_dir, exist_ok=True)
     results_file = os.path.join(results_dir, f"{test_name}.md")
     file_exists = os.path.exists(results_file)
@@ -470,8 +477,8 @@ def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, route
         if not file_exists:
             # Write header
             f.write(f"# EPP Router Performance Benchmarking Results: {test_name}\n\n")
-            f.write("| Timestamp | Namespace | Router Config | Perf Job | Machine Family | Sim Replicas | EPP Images | Container | Idle CPU (m) | Idle Mem (MiB) | Peak CPU (m) | Peak Mem (MiB) | P50 Latency (ms) | P95 Latency (ms) | Status |\n")
-            f.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+            f.write("| Timestamp | Namespace | Router Config | Perf Job | Machine Family | Sim Replicas | EPP Images | Container | Idle CPU (m) | Idle Mem (MiB) | Peak CPU (m) | Peak Mem (MiB) | P50 Latency (ms) | P95 Latency (ms) | CPU Profile | Memory Profile | Status |\n")
+            f.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
             
         epp_images = "<br>".join(images)
         mf_str = machine_family if machine_family else "-"
@@ -484,6 +491,34 @@ def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, route
         job_basename = os.path.basename(perf_job)
         job_link = f"[{job_basename}]({rel_perf_job})"
         
+        cpu_link = "-"
+        mem_link = "-"
+        if profile_results:
+            cpu_svg = profile_results.get('cpu_svg')
+            cpu_png = profile_results.get('cpu_png')
+            cpu_pprof = profile_results.get('cpu_pprof')
+            mem_svg = profile_results.get('mem_svg')
+            mem_png = profile_results.get('mem_png')
+            mem_pprof = profile_results.get('mem_pprof')
+            
+            if cpu_svg and cpu_pprof:
+                rel_cpu_svg = os.path.relpath(cpu_svg, results_dir)
+                rel_cpu_pprof = os.path.relpath(cpu_pprof, results_dir)
+                if cpu_png:
+                    rel_cpu_png = os.path.relpath(cpu_png, results_dir)
+                    cpu_link = f"[PNG]({rel_cpu_png}) ([SVG]({rel_cpu_svg}) / [pprof]({rel_cpu_pprof}))"
+                else:
+                    cpu_link = f"[SVG]({rel_cpu_svg}) ([pprof]({rel_cpu_pprof}))"
+                
+            if mem_svg and mem_pprof:
+                rel_mem_svg = os.path.relpath(mem_svg, results_dir)
+                rel_mem_pprof = os.path.relpath(mem_pprof, results_dir)
+                if mem_png:
+                    rel_mem_png = os.path.relpath(mem_png, results_dir)
+                    mem_link = f"[PNG]({rel_mem_png}) ([SVG]({rel_mem_svg}) / [pprof]({rel_mem_pprof}))"
+                else:
+                    mem_link = f"[SVG]({rel_mem_svg}) ([pprof]({rel_mem_pprof}))"
+
         # Write rows for each container
         for container in sorted(peak_metrics.keys()):
             idle_cpu = idle_metrics.get(container, {}).get('cpu', '-')
@@ -491,7 +526,137 @@ def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, route
             peak_cpu = peak_metrics.get(container, {}).get('cpu', '-')
             peak_mem = peak_metrics.get(container, {}).get('mem', '-')
             
-            f.write(f"| {run_time} | {ns} | {config_link} | {job_link} | {mf_str} | {sim_replicas} | {epp_images} | {container} | {idle_cpu} | {idle_mem} | {peak_cpu} | {peak_mem} | {p50:.2f} | {p95:.2f} | {status} |\n")
+            f.write(f"| {run_time} | {ns} | {config_link} | {job_link} | {mf_str} | {sim_replicas} | {epp_images} | {container} | {idle_cpu} | {idle_mem} | {peak_cpu} | {peak_mem} | {p50:.2f} | {p95:.2f} | {cpu_link} | {mem_link} | {status} |\n")
+
+
+def collect_profiles(ns, epp_pod_name, results_dir, test_name, run_time_clean, profile_results):
+    os.makedirs(results_dir, exist_ok=True)
+    print("Profile collector: waiting for benchmark job to be created...")
+    job_pod_name = ""
+    for _ in range(120):
+        res = run_cmd(f"kubectl get pods -n {ns} -l app=inference-perf -o jsonpath='{{.items[0].metadata.name}}'", check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            job_pod_name = res.stdout.strip()
+            break
+        time.sleep(5)
+        
+    if not job_pod_name:
+        print("Profile collector: timed out waiting for benchmark job pod. Profiles will not be collected.")
+        return
+
+    print(f"Profile collector: found benchmark pod {job_pod_name}. Waiting for it to start running...")
+    pod_running = False
+    for _ in range(120): # Wait up to 10 minutes
+        phase_res = run_cmd(f"kubectl get pod {job_pod_name} -n {ns} -o jsonpath='{{.status.phase}}'", check=False)
+        if phase_res.returncode == 0 and phase_res.stdout.strip() == "Running":
+            pod_running = True
+            break
+        time.sleep(5)
+        
+    if not pod_running:
+        print(f"Profile collector: pod {job_pod_name} did not enter Running state. Exiting.")
+        return
+
+    print(f"Profile collector: pod {job_pod_name} is running. Monitoring logs for 'Stage 1 - run started'...")
+    
+    found_started = False
+    start_time = time.time()
+    timeout = 1200
+    
+    while time.time() - start_time < timeout:
+        log_proc = subprocess.Popen(
+            ["kubectl", "logs", "-n", ns, job_pod_name, "-f"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        
+        stream_closed = False
+        while not stream_closed:
+            if time.time() - start_time > timeout:
+                break
+            
+            line = log_proc.stdout.readline()
+            if not line:
+                stream_closed = True
+                break
+                
+            if "Stage 1 - run started" in line:
+                print("Profile collector: detected 'Stage 1 - run started' in logs!")
+                found_started = True
+                break
+        
+        log_proc.terminate()
+        log_proc.wait()
+        
+        if found_started:
+            break
+            
+        print("Profile collector: log stream disconnected or ended, reconnecting in 5s...")
+        time.sleep(5)
+        
+    if not found_started:
+        print("Profile collector: failed to detect run start within timeout. Exiting.")
+        return
+        
+    print("Profile collector: waiting 60 seconds before initiating profiling...")
+    time.sleep(60)
+    
+    pf_port = random.randint(30000, 40000)
+    print(f"Profile collector: port-forwarding to EPP pod {epp_pod_name} on port {pf_port}...")
+    pf_process = subprocess.Popen(
+        ["kubectl", "port-forward", "-n", ns, f"pod/{epp_pod_name}", f"{pf_port}:9090"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+    time.sleep(5)
+    
+    try:
+        artifact_dir = os.path.join(results_dir, f"{test_name}-{run_time_clean}")
+        os.makedirs(artifact_dir, exist_ok=True)
+
+        cpu_profile_path = os.path.join(artifact_dir, f"{test_name}-{run_time_clean}-cpu.pprof")
+        cpu_svg_path = os.path.join(artifact_dir, f"{test_name}-{run_time_clean}-cpu.svg")
+        cpu_png_path = os.path.join(artifact_dir, f"{test_name}-{run_time_clean}-cpu.png")
+        print("Profile collector: fetching CPU profile (30s)...")
+        req = urllib.request.Request(f"http://localhost:{pf_port}/debug/pprof/profile?seconds=30")
+        with urllib.request.urlopen(req, timeout=45) as response:
+            cpu_data = response.read()
+        with open(cpu_profile_path, "wb") as f:
+            f.write(cpu_data)
+        print(f"Profile collector: CPU profile saved to {cpu_profile_path}")
+
+        mem_profile_path = os.path.join(artifact_dir, f"{test_name}-{run_time_clean}-memory.pprof")
+        mem_svg_path = os.path.join(artifact_dir, f"{test_name}-{run_time_clean}-memory.svg")
+        mem_png_path = os.path.join(artifact_dir, f"{test_name}-{run_time_clean}-memory.png")
+        print("Profile collector: fetching memory (heap) profile...")
+        req = urllib.request.Request(f"http://localhost:{pf_port}/debug/pprof/heap")
+        with urllib.request.urlopen(req, timeout=15) as response:
+            mem_data = response.read()
+        with open(mem_profile_path, "wb") as f:
+            f.write(mem_data)
+        print(f"Profile collector: Memory profile saved to {mem_profile_path}")
+
+        print("Profile collector: generating visualizations using go tool pprof...")
+        run_cmd(f"go tool pprof -svg -output {cpu_svg_path} {cpu_profile_path}")
+        run_cmd(f"go tool pprof -png -output {cpu_png_path} {cpu_profile_path}")
+        run_cmd(f"go tool pprof -svg -output {mem_svg_path} {mem_profile_path}")
+        run_cmd(f"go tool pprof -png -output {mem_png_path} {mem_profile_path}")
+        print(f"Profile collector: visualizations generated in {artifact_dir}")
+        
+        profile_results['cpu_pprof'] = cpu_profile_path
+        profile_results['cpu_svg'] = cpu_svg_path
+        profile_results['cpu_png'] = cpu_png_path
+        profile_results['mem_pprof'] = mem_profile_path
+        profile_results['mem_svg'] = mem_svg_path
+        profile_results['mem_png'] = mem_png_path
+
+    except Exception as e:
+        print(f"Profile collector failed with error: {e}")
+    finally:
+        pf_process.terminate()
+        pf_process.wait()
+
 
 
 def main():
@@ -501,7 +666,7 @@ def main():
     # Resolve relative defaults
     default_sim_deploy = os.path.join(script_dir, "config", "llm-d-sim-deployment.yaml")
     default_sim_svc = os.path.join(script_dir, "config", "llm-d-sim-service.yaml")
-    default_router_chart = "oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev"
+    default_router_chart = "oci://ghcr.io/llm-d/charts/llm-d-router-standalone"
     default_perf_chart = os.path.abspath(os.path.join(script_dir, "..", "..", "..", "..", "inference-perf", "deploy", "inference-perf"))
     default_perf_job = os.path.join(script_dir, "config", "shared_prefix_job1.yaml")
     default_results_dir = os.path.abspath(os.path.join(script_dir, "results"))
@@ -525,6 +690,9 @@ def main():
     parser.add_argument("--epp-cpu", default="2", help="EPP CPU request (limit will be 2x this amount)")
     parser.add_argument("--epp-memory", default="4Gi", help="EPP memory request (limit will be 2x this amount)")
     parser.add_argument("--router-machine-family", default=None, help="Add node affinity for specific Google Cloud machine-family (e.g. c3)")
+    parser.add_argument("--epp-replicas", type=int, default=1, help="Number of EPP replicas")
+    parser.add_argument("--collect-pprof-profiles", action="store_true", help="Collect EPP CPU & memory pprof profiles and render them as SVGs")
+    parser.add_argument("--gcs-bucket", default=None, help="Optional GCS bucket name or URI (e.g. gs://my-bucket) to sync performance results to")
     args = parser.parse_args()
 
 
@@ -540,6 +708,14 @@ def main():
     peak_metrics = {}
     p50, p95 = 0.0, 0.0
     images = []
+    profile_results = {
+        'cpu_pprof': None,
+        'cpu_svg': None,
+        'cpu_png': None,
+        'mem_pprof': None,
+        'mem_svg': None,
+        'mem_png': None
+    }
 
     try:
         # Step 1: Create Namespace
@@ -574,7 +750,8 @@ def main():
             args.router_config,
             epp_cpu=args.epp_cpu, 
             epp_memory=args.epp_memory, 
-            machine_family=args.router_machine_family
+            machine_family=args.router_machine_family,
+            epp_replicas=args.epp_replicas
         )
 
         # Get EPP pod details
@@ -582,6 +759,7 @@ def main():
         print(f"EPP Pod name: {pod_name}")
         images = get_container_images(ns, pod_name)
         print(f"EPP Container images: {images}")
+        epp_label = f"llm-d-router-gateway={release_name}-epp"
 
         # Step 5: Measure Idle Performance
         print("Measuring idle resource usage (waiting up to 5m for metrics-server)...")
@@ -596,7 +774,7 @@ def main():
                 print("Timeout waiting for idle resource metrics.")
                 break
                 
-            sample = sample_resources(ns, pod_name)
+            sample = sample_resources(ns, epp_label, is_label=True)
             if sample:
                 idle_samples.append(sample)
                 print(f"Captured idle metrics sample {len(idle_samples)}/3.")
@@ -624,14 +802,22 @@ def main():
         metrics_before = scrape_scheduler_metrics(ns, pod_name)
 
         # Step 7: Execute Benchmark & Monitor Peak Usage
-        monitoring_thread = Thread(target=monitor_resources_loop, args=(ns, pod_name, 5, peak_metrics))
+        monitoring_thread = Thread(target=monitor_resources_loop, args=(ns, epp_label, 5, peak_metrics, True))
         monitoring_thread.start()
+
+        profile_thread = None
+        if args.collect_pprof_profiles:
+            run_time_clean = run_time.replace(" ", "_").replace(":", "")
+            profile_thread = Thread(target=collect_profiles, args=(ns, pod_name, args.results_dir, args.test_name, run_time_clean, profile_results))
+            profile_thread.start()
 
         try:
             run_benchmark(ns, args.perf_job, args.perf_chart, release_name)
         finally:
             stop_monitoring = True
             monitoring_thread.join()
+            if profile_thread:
+                profile_thread.join()
 
         # Step 8: Scrape Post-Benchmark Metrics & Compute Latency
         metrics_after = scrape_scheduler_metrics(ns, pod_name)
@@ -651,8 +837,16 @@ def main():
         else:
             print(f"Skipping namespace cleanup. Namespace '{ns}' remains active.")
 
-        # Step 10: Log Results to Markdown File
+        # Step 10: Log Results to Markdown File and optional GCS sync
         if idle_metrics or peak_metrics:
+            gcs_dest = None
+            if args.gcs_bucket:
+                bucket = args.gcs_bucket if args.gcs_bucket.startswith("gs://") else f"gs://{args.gcs_bucket}"
+                recipe_folder = os.path.basename(os.path.normpath(args.results_dir))
+                gcs_dest = f"{bucket}/{recipe_folder}"
+                print(f"Syncing existing performance results from GCS bucket {gcs_dest}...")
+                run_cmd(f"gcloud storage cp -r {gcs_dest}/* {args.results_dir}/", check=False)
+
             write_results_to_markdown_folder(
                 args.results_dir, 
                 args.test_name,
@@ -667,9 +861,15 @@ def main():
                 peak_metrics, 
                 p50, 
                 p95, 
-                status
+                status,
+                profile_results=profile_results
             )
             print(f"Performance results successfully written to {args.results_dir}/{args.test_name}.md")
+
+            if gcs_dest:
+                print(f"Uploading performance results to GCS bucket {gcs_dest}...")
+                run_cmd(f"gcloud storage cp -r {args.results_dir}/* {gcs_dest}/")
+                print(f"Successfully uploaded performance results to {gcs_dest}")
 
 if __name__ == "__main__":
     main()

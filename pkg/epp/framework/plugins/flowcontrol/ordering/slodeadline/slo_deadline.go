@@ -69,11 +69,6 @@ func (p *sloDeadlinePolicy) Name() string {
 	return p.name
 }
 
-// RequiredQueueCapabilities returns the queue capabilities required by this policy.
-func (p *sloDeadlinePolicy) RequiredQueueCapabilities() []flowcontrol.QueueCapability {
-	return []flowcontrol.QueueCapability{flowcontrol.CapabilityPriorityConfigurable}
-}
-
 func (p *sloDeadlinePolicy) TypedName() plugin.TypedName {
 	return plugin.TypedName{
 		Type: SLODeadlineOrderingPolicyType,

@@ -1,12 +1,5 @@
 SHELL := /usr/bin/env bash
 
-# Image registry + dev-environment image tags (single source of truth).
-include versions.mk
-
-# Export all dev-env image references so the e2e suite sees them.
-export IMAGE_REGISTRY COORDINATOR_TAG VLLM_SIMULATOR_TAG EPP_TAG
-export COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE
-
 # Defaults
 TARGETOS ?= $(shell command -v go >/dev/null 2>&1 && go env GOOS || uname -s | tr '[:upper:]' '[:lower:]')
 TARGETARCH ?= $(shell command -v go >/dev/null 2>&1 && go env GOARCH || uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/; s/armv7l/arm/')
@@ -14,9 +7,28 @@ PROJECT_NAME ?= llm-d-coordinator
 BUILDER_IMAGE_NAME ?= llm-d-coordinator-builder
 IMAGE_REGISTRY ?= ghcr.io/llm-d
 
+# Image tags
+COORDINATOR_TAG      ?= dev
+VLLM_SIMULATOR_TAG   ?= v0.10.2
+EPP_TAG              ?= dev
+
+# Full image references (derived; override only if you need a non-standard repo)
+COORDINATOR_IMAGE    ?= $(IMAGE_REGISTRY)/llm-d-coordinator:$(COORDINATOR_TAG)
+VLLM_IMAGE           ?= $(IMAGE_REGISTRY)/llm-d-inference-sim:$(VLLM_SIMULATOR_TAG)
+EPP_IMAGE            ?= $(IMAGE_REGISTRY)/llm-d-router-endpoint-picker:$(EPP_TAG)
+
+# vllm-render defaults to the same image as the other simulated vLLM roles; override
+# independently to point it at a real vLLM image (e.g. vllm/vllm-openai-cpu:v0.21.0).
+VLLM_RENDER_IMAGE    ?= $(VLLM_IMAGE)
+VLLM_RENDER_PORT     ?= 8082
+
 # Internal variable mappings for the generic image-build-% target.
 coordinator_IMAGE = $(COORDINATOR_IMAGE)
 epp_IMAGE         = $(EPP_IMAGE)
+
+# Export all dev-env image references so the e2e suite sees them.
+export IMAGE_REGISTRY COORDINATOR_TAG VLLM_SIMULATOR_TAG EPP_TAG
+export COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE VLLM_RENDER_IMAGE VLLM_RENDER_PORT
 
 BUILDER_TAG ?= dev
 BUILDER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(BUILDER_IMAGE_NAME)
@@ -39,7 +51,7 @@ LINT_NEW_ONLY ?= false
 # Optional: override the runtime base image used in container builds.
 BASE_IMAGE ?=
 
-TEST_PACKAGES = $$(go list ./... | grep -v /test/ | tr '\n' ' ')
+TEST_PACKAGES = $$(go list ./pkg/coordinator/... ./cmd/coordinator/... | tr '\n' ' ')
 
 # Common flags for running the builder container: mounts source, Go caches, and runs as current user.
 # Podman rootless requires --userns=keep-id to correctly map host UID; docker uses -u directly.
@@ -56,10 +68,63 @@ endif
 
 BUILDER_RUN_FLAGS = --rm $(BUILDER_USER_FLAGS) \
 	-v $$(pwd):/app:Z -w /app \
-	-v $(GO_MOD_CACHE_VOL):/go/pkg/mod \
-	-v $(GO_BUILD_CACHE_VOL):/go/cache
+	-v $(GO_MOD_CACHE_VOL):/go/pkg/mod:z \
+	-v $(GO_BUILD_CACHE_VOL):/go/cache:z
 
 BUILDER_RUN = $(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_IMAGE) sh -c
+
+# Mount the container runtime socket and set CONTAINER_HOST so podman --remote
+# inside the builder can talk to the host's container runtime.
+ifeq ($(CONTAINER_RUNTIME),podman)
+CONTAINER_SOCK ?= $(or $(shell podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null | sed 's|^unix://||'),/run/podman/podman.sock)
+BUILDER_SOCK_FLAGS = --security-opt label=disable \
+	-v $(CONTAINER_SOCK):$(CONTAINER_SOCK) \
+	-e CONTAINER_HOST=unix://$(CONTAINER_SOCK) \
+	-e DOCKER_HOST=unix://$(CONTAINER_SOCK) \
+	-e CONTAINER_RUNTIME=podman \
+	-e KIND_EXPERIMENTAL_PROVIDER=podman
+else
+CONTAINER_SOCK ?= /var/run/docker.sock
+ifeq ($(TARGETOS),darwin)
+DOCKER_SOCK_GID := $(shell stat -f '%g' $(CONTAINER_SOCK) 2>/dev/null)
+else
+DOCKER_SOCK_GID := $(shell stat -c '%g' $(CONTAINER_SOCK) 2>/dev/null)
+endif
+ifneq ($(DOCKER_SOCK_GID),)
+DOCKER_GROUP_PARAM := --group-add $(DOCKER_SOCK_GID)
+else
+DOCKER_GROUP_PARAM :=
+endif
+BUILDER_SOCK_FLAGS = $(DOCKER_GROUP_PARAM) \
+	-v $(CONTAINER_SOCK):$(CONTAINER_SOCK) \
+	-e DOCKER_HOST=unix://$(CONTAINER_SOCK) \
+	-e CONTAINER_RUNTIME=docker
+endif
+
+# Respect host KUBECONFIG if set; fall back to ~/.kube/config.
+HOST_KUBECONFIG ?= $(or $(KUBECONFIG),$(HOME)/.kube/config)
+
+# When K8S_CONTEXT is set, mount the host kubeconfig so the e2e suite can call
+# config.GetConfigWithContext(K8S_CONTEXT) against an existing cluster instead of
+# creating a new kind cluster.
+ifdef K8S_CONTEXT
+BUILDER_E2E_KUBECONFIG_FLAGS = -v $(HOST_KUBECONFIG):/.kube/config:ro -e KUBECONFIG=/.kube/config
+else
+BUILDER_E2E_KUBECONFIG_FLAGS =
+endif
+
+# Env vars forwarded into the e2e test container.
+E2E_ENV_VARS = COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE VLLM_RENDER_IMAGE VLLM_RENDER_PORT \
+               E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE \
+               E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME
+BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
+ifneq ($(filter command line environment,$(origin NAMESPACE)),)
+BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
+endif
+
+# E2e tests create their own kind cluster, need host network (for NodePort access)
+# and the container socket (for kind), but not the host kubeconfig.
+BUILDER_E2E_FLAGS = --network=host $(BUILDER_SOCK_FLAGS) $(BUILDER_E2E_ENV_FLAGS) $(BUILDER_E2E_KUBECONFIG_FLAGS)
 
 BUILDER_STAMP = build/.builder.stamp
 
@@ -130,9 +195,15 @@ test-unit: image-build-builder
 	@printf "\033[33;1m==== Running Unit Tests ====\033[0m\n"
 	$(BUILDER_RUN) "go test -v -race $(TEST_PACKAGES)"
 
+.PHONY: test-e2e-coordinator-run
+test-e2e-coordinator-run: image-pull ## Ensure images are present, then run coordinator e2e tests
+	@printf "\033[33;1m==== Running Coordinator End to End Tests ====\033[0m\n"
+	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
+		$(BUILDER_IMAGE) test/coordinator/scripts/run_e2e_coordinator.sh
+
 .PHONY: test-e2e-coordinator
-test-e2e-coordinator: image-build-coordinator image-build-epp image-build-builder image-pull ## Run coordinator e2e tests against a new kind cluster
-	test/coordinator/scripts/run_e2e_coordinator.sh
+test-e2e-coordinator: image-build-builder image-build-coordinator image-build-epp ## Build images and run coordinator e2e tests
+	$(MAKE) -f Makefile.coord.mk test-e2e-coordinator-run
 
 .PHONY: build
 build: image-build-builder ## Build the coordinator binary
@@ -182,12 +253,8 @@ image-build-builder: check-container-tool ## Build builder image if missing loca
 		touch $(BUILDER_STAMP); \
 	fi
 
-.PHONY: image-build-epp
-image-build-epp: ## Clone llm-d-inference-scheduler at pinned commit and build EPP image
-	scripts/build-epp-image.sh
-
 .PHONY: image-pull
 image-pull: check-container-tool ## Pull all related images using $(CONTAINER_RUNTIME)
 	@printf "\033[33;1m==== Pulling Container images ====\033[0m\n"
-	./scripts/pull_images.sh
+	PULL_EPP_IMAGE=false PULL_SIDECAR_IMAGE=false ./scripts/pull_images.sh
 

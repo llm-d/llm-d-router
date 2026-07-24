@@ -16,29 +16,8 @@ limitations under the License.
 
 package flowcontrol
 
-// QueueCapability defines a functional capability that a SafeQueue implementation can provide.
-// These capabilities allow policies to declare their operational requirements, ensuring that a policy is always paired
-// with a compatible queue.
-type QueueCapability string
-
-const (
-	// CapabilityFIFO indicates that the queue operates in a First-In, First-Out manner.
-	// Peek() will return the oldest item (by logical enqueue time).
-	CapabilityFIFO QueueCapability = "FIFO"
-
-	// CapabilityPriorityConfigurable indicates that the queue's ordering is determined by an ItemComparator.
-	// Peek() will return the highest priority item according to this comparator.
-	CapabilityPriorityConfigurable QueueCapability = "PriorityConfigurable"
-)
-
 // QueueInspectionMethods defines SafeQueue's read-only methods.
 type QueueInspectionMethods interface {
-	// Name returns a string identifier for the concrete queue implementation type (e.g., "ListQueue").
-	Name() string
-
-	// Capabilities returns the set of functional capabilities this queue instance provides.
-	Capabilities() []QueueCapability
-
 	// Len returns the current number of items in the queue.
 	Len() int
 

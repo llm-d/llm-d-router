@@ -16,6 +16,7 @@ kind: Kustomization
 resources:
 - destination-rules.yaml
 - services.yaml
+- vllm-render.yaml
 - ../../../components/istio-control-plane/
 - ../../../components/inference-gateway/
 

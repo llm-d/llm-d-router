@@ -21,20 +21,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 )
 
 var testFlowKey = flowcontrol.FlowKey{ID: "test-flow", Priority: 0}
-
-func TestFCFS_RequiredQueueCapabilities(t *testing.T) {
-	t.Parallel()
-	policy := newFCFS()
-	caps := policy.RequiredQueueCapabilities()
-	require.Empty(t, caps, "No required capabilities should be returned")
-}
 
 func TestFCFS_Less(t *testing.T) {
 	t.Parallel()

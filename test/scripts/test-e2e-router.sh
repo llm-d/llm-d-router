@@ -31,4 +31,6 @@ trap 'e2e_handle_interrupt "e2e-tests"' INT TERM
 
 echo "Running end to end tests"
 
+export VLLM_RENDER_IMAGE=${VLLM_IMAGE}
+
 run_ginkgo_suite "${DIR}/../e2e/"

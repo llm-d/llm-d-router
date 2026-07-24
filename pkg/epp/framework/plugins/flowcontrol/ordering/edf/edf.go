@@ -63,12 +63,6 @@ func (p *EDFPolicy) Name() string {
 	return p.name
 }
 
-// RequiredQueueCapabilities returns the queue capabilities required by this policy.
-// It requires a priority-configurable queue (e.g., heap-based) to maintain items in deadline-sorted order.
-func (p *EDFPolicy) RequiredQueueCapabilities() []flowcontrol.QueueCapability {
-	return []flowcontrol.QueueCapability{flowcontrol.CapabilityPriorityConfigurable}
-}
-
 // TypedName returns the type and name tuple of this plugin instance.
 func (p *EDFPolicy) TypedName() plugin.TypedName {
 	return plugin.TypedName{

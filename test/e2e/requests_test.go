@@ -28,7 +28,7 @@ func extractInferenceHeaders(httpResp *http.Response) (string, string, string) {
 func generateAndCheckLoad(count int) {
 	nsName := getNamespace()
 	for range count {
-		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 		gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -304,16 +304,13 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 
 	metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
-	if k8sContext != "" {
-		// Use port-forward to access the EPP pod's metrics endpoint.
-		startEPPMetricsPortForward()
-	}
+	startEPPMetricsPortForward()
 
 	theMetrics := getMetrics(metricsURL)
 	gomega.Expect(theMetrics).ShouldNot(gomega.BeEmpty())
 	metricsAsString := strings.Join(theMetrics, "\n")
 
-	_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+	_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, getNamespace())
 
 	// Define the metrics we expect to see
 	preset := []string{ //nolint:prealloc
@@ -347,6 +344,8 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 		"llm_d_epp_request_running",
 		"llm_d_epp_ready_endpoints",
 		"llm_d_epp_info",
+		"llm_d_epp_request_processing_duration_seconds",
+		"llm_d_epp_response_processing_duration_seconds",
 	}
 	expectedMetrics := make([]string, 0, len(preset)+len(decodePods)*numTargetPorts*2)
 	expectedMetrics = append(expectedMetrics, preset...)

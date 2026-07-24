@@ -24,6 +24,7 @@ import (
 
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -54,7 +55,7 @@ func TestBulkPredictWithMetrics(t *testing.T) {
 	generatedTokenCounts := []int{1, 1}
 	prefixCacheScores := []float64{0.0, 0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 2)
@@ -62,6 +63,45 @@ func TestBulkPredictWithMetrics(t *testing.T) {
 	assert.Equal(t, 0.03, results[0].TPOT)
 	assert.Equal(t, 0.6, results[1].TTFT)
 	assert.Equal(t, 0.04, results[1].TPOT)
+}
+
+// TestBulkPredictWithMetrics_PropagatesInFlightOverrides verifies that the
+// per-endpoint numRequestRunnings and prefillTokensInFlights slices are written
+// onto the outgoing PredictionRequests, overriding the metrics-sourced defaults.
+func TestBulkPredictWithMetrics_PropagatesInFlightOverrides(t *testing.T) {
+	mockPredictor := &mockPredictor{
+		predictions: map[string]*latencypredictor.PredictionResponse{
+			"0.5": {TTFT: 0.5, TPOT: 0.03},
+			"0.6": {TTFT: 0.6, TPOT: 0.04},
+		},
+	}
+
+	// RunningRequestsSize is non-zero and distinct from the override values, so a
+	// passing assertion proves the override replaced the metrics default.
+	metricsStates := []*fwkdl.Metrics{
+		{KVCacheUsagePercent: 0.5, RunningRequestsSize: 1},
+		{KVCacheUsagePercent: 0.6, RunningRequestsSize: 2},
+	}
+	pods := []*fwkdl.EndpointMetadata{
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"}},
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod2"}},
+	}
+	inputTokenLengths := []int{1, 1}
+	generatedTokenCounts := []int{1, 1}
+	prefixCacheScores := []float64{0.0, 0.0}
+	prefillTokensInFlights := []int64{100, 200}
+	numRequestRunnings := []int{7, 13}
+
+	_, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor,
+		metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores,
+		prefillTokensInFlights, numRequestRunnings)
+	require.NoError(t, err)
+
+	require.Len(t, mockPredictor.capturedBulkStrictRequests, 2)
+	assert.Equal(t, 7, mockPredictor.capturedBulkStrictRequests[0].NumRequestRunning)
+	assert.Equal(t, 13, mockPredictor.capturedBulkStrictRequests[1].NumRequestRunning)
+	assert.Equal(t, int64(100), mockPredictor.capturedBulkStrictRequests[0].PrefillTokensInFlight)
+	assert.Equal(t, int64(200), mockPredictor.capturedBulkStrictRequests[1].PrefillTokensInFlight)
 }
 
 func TestBulkPredictWithMetrics_Error(t *testing.T) {
@@ -81,7 +121,7 @@ func TestBulkPredictWithMetrics_Error(t *testing.T) {
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)
@@ -99,7 +139,7 @@ func TestBulkPredictWithMetrics_InputMismatch(t *testing.T) {
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)
@@ -132,7 +172,7 @@ func TestBulkPredictWithMetrics_WithPredictedLatencyCtx(t *testing.T) {
 		incomingModelName: "incoming-model",
 	}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", plCtx, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", plCtx, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 1)
@@ -156,7 +196,7 @@ func TestBulkPredictWithMetrics_ChatCompletionsInputTokenLength(t *testing.T) {
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mp, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, []int64{0})
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mp, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, []int64{0}, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 1)
@@ -175,7 +215,7 @@ func TestBulkPredictWithMetrics_NilMetricsState(t *testing.T) {
 	generatedTokenCounts := []int{1}
 	prefixCacheScores := []float64{0.0}
 
-	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil)
+	results, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor, metricsStates, "", pods, inputTokenLengths, generatedTokenCounts, prefixCacheScores, nil, nil)
 
 	assert.Error(t, err)
 	assert.Nil(t, results)

@@ -227,11 +227,7 @@ func (p *dataProducer) PluginState() *plugin.PluginState {
 // Produce is called by the director before scheduling requests.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
 	blockSize := p.GetBlockSize(pods)
-	maxBlocks := p.config.MaxPrefixBlocksToMatch
-	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
-		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
-	}
-	perPromptHashes := prefixhash.GetBlockHashes(ctx, request, blockSize, maxBlocks)
+	perPromptHashes := prefixhash.GetBlockHashes(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
 
 	prefixCacheServers := make(map[ServerID]int)
 	totalBlocks := 0
@@ -357,6 +353,24 @@ func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
 		return minBlockSizeTokens
 	}
 	return blockSize
+}
+
+// resolveMaxBlocks returns the per-request cap on hashed prefix blocks.
+//
+// MaxPrefixTokensToMatch wins when set, converting tokens to blocks at the
+// effective block size. Zeroing both caps means unlimited: prompt length is
+// already bounded by the model server's context window, so the whole prompt is
+// at most one context window of tokens. A token cap smaller than the block size
+// still resolves to 0 and hashes nothing; that is a misconfiguration, not a
+// request for unlimited matching.
+func (p *dataProducer) resolveMaxBlocks(blockSize int) int {
+	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
+		return p.config.MaxPrefixTokensToMatch / blockSize
+	}
+	if p.config.MaxPrefixBlocksToMatch == 0 {
+		return unlimitedPrefixBlocks
+	}
+	return p.config.MaxPrefixBlocksToMatch
 }
 
 // ApproxPrefixCacheFactory is the factory function for the prefix cache data producer plugin.

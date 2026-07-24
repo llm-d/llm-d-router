@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	PreAdmissionExtensionPoint      = "PreAdmission"
+	RequestHeaderExtensionPoint     = "RequestHeader"
 	AdmissionExtensionPoint         = "Admission"
 	DataProducerExtensionPoint      = "DataProducer"
 	PreRequestExtensionPoint        = "PreRequest"
@@ -92,9 +92,10 @@ type Admitter interface {
 	Admit(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
 }
 
-// PreAdmitter runs after InferenceRequest creation but before admission control.
-// It can mutate InferenceRequest fields such as FairnessID and Headers.
-type PreAdmitter interface {
+// RequestHeaderProcessor runs after InferenceRequest creation but before admission control.
+// It processes request metadata (headers, path, method) to attach attributes to the request
+// via request.PutAttribute().
+type RequestHeaderProcessor interface {
 	plugin.Plugin
-	PreAdmit(ctx context.Context, request *fwksched.InferenceRequest) error
+	RequestHeader(ctx context.Context, request *fwksched.InferenceRequest) error
 }

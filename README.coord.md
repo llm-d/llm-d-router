@@ -2,10 +2,52 @@
 
 A Go service that orchestrates multi-phase LLM inference pipelines (Encode/Prefill/Decode) across specialized worker pools. It exposes OpenAI-compatible APIs and routes requests through an Inference Gateway to disaggregated vLLM workers.
 
+## Table of Contents
+
+- [LLM-D Coordinator](#llm-d-coordinator)
+  - [Table of Contents](#table-of-contents)
+  - [Architecture](#architecture)
+  - [Quick Start](#quick-start)
+  - [Configuration](#configuration)
+    - [Server](#server)
+    - [Gateway](#gateway)
+    - [Pipeline](#pipeline)
+    - [Built-in Step Parameters](#built-in-step-parameters)
+    - [Gateway Routing](#gateway-routing)
+  - [Plugin API](#plugin-api)
+    - [Step Interface](#step-interface)
+    - [Writing a Custom Step](#writing-a-custom-step)
+    - [Registering the Step](#registering-the-step)
+    - [Dependency Injection](#dependency-injection)
+    - [RequestContext](#requestcontext)
+  - [API Endpoints](#api-endpoints)
+  - [Docker](#docker)
+  - [Development](#development)
+    - [Running Tests](#running-tests)
+      - [Unit Tests](#unit-tests)
+      - [End-to-End Tests](#end-to-end-tests)
+
 ## Architecture
 
 ```
-Client -> Coordinator -> Inference Gateway -> EPP -> vLLM Workers
++--------+
+| Client |
++--------+
+    |
+    v
++-------------------+       +-------------+
+| Inference Gateway | <---> | Coordinator |
++-------------------+       +-------------+
+    |
+    v
++-----+
+| EPP |
++-----+
+    |
+    v
++--------------+
+| vLLM Workers |
++--------------+
 ```
 
 The Coordinator processes each request through a configurable pipeline of steps:
@@ -243,9 +285,70 @@ docker run -p 8080:8080 -v $(pwd)/config/coordinator:/config/coordinator coordin
 The coordinator targets live in `Makefile.coord.mk`; pass it with `-f`:
 
 ```bash
-make -f Makefile.coord.mk build    # Build binary to bin/coordinator
-make -f Makefile.coord.mk test     # Run all tests
-make -f Makefile.coord.mk lint     # Run golangci-lint
-make -f Makefile.coord.mk tidy     # Run go mod tidy
-make -f Makefile.coord.mk clean    # Remove build artifacts
+make -f Makefile.coord.mk build   # Build binary to bin/coordinator
+make -f Makefile.coord.mk lint    # Run golangci-lint
+make -f Makefile.coord.mk tidy    # Run go mod tidy
+make -f Makefile.coord.mk clean   # Remove build artifacts
 ```
+
+### Running Tests
+
+#### Unit Tests
+
+```bash
+make -f Makefile.coord.mk test   # run coordinator unit tests
+```
+
+#### End-to-End Tests
+
+```bash
+make -f Makefile.coord.mk test-e2e-coordinator
+```
+
+This creates a temporary Kind cluster named `e2e-coordinator-tests`, runs the coordinator e2e suite against it, and deletes the cluster on completion.
+
+**Keeping the cluster on failure**
+
+Set `E2E_KEEP_CLUSTER_ON_FAILURE=true` to preserve the cluster when any test fails. This is useful for inspecting pod logs, events, or cluster state after a failure.
+
+```bash
+E2E_KEEP_CLUSTER_ON_FAILURE=true make -f Makefile.coord.mk test-e2e-coordinator
+```
+
+When set, a successful run still cleans up normally: the cluster is only kept if there is at least one test failure.
+
+**Accessing the cluster after a failure**
+
+E2E tests do not update the host's kubeconfig to point at the `e2e-coordinator-tests` Kind cluster. After a preserved failure, export the kubeconfig manually:
+
+```bash
+# Merge into the default kubeconfig ($HOME/.kube/config or $KUBECONFIG)
+kind export kubeconfig --name e2e-coordinator-tests
+
+# Or write to a specific file
+kind export kubeconfig --name e2e-coordinator-tests --kubeconfig /path/to/kubeconfig
+```
+
+Then use it as normal:
+
+```bash
+kubectl --context kind-e2e-coordinator-tests get pods
+```
+
+**Environment variables**
+
+| Variable | Default | Description |
+|---|---|---|
+| `E2E_KEEP_CLUSTER_ON_FAILURE` | `false` | Preserve the Kind cluster when the suite fails |
+| `E2E_GATEWAY_PORT` | `30080` | Host port mapped to the gateway NodePort |
+| `E2E_PRINT_LOGS` | `false` | Print all pod logs (coordinator, EPPs, Envoy, workers) for every spec, not just on failure |
+| `CONTAINER_RUNTIME` | `docker` | Container runtime used to load images into Kind (`docker` or `podman`) |
+| `EPP_IMAGE` | `ghcr.io/llm-d/llm-d-router-endpoint-picker:dev` | EPP image loaded into the Kind cluster |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` | vLLM image loaded into the Kind cluster |
+| `VLLM_RENDER_IMAGE` | same as `VLLM_IMAGE` | vLLM render image loaded into the Kind cluster |
+| `VLLM_RENDER_PORT` | `8082` | Port the vllm-render service listens on |
+| `COORDINATOR_IMAGE` | _(empty)_ | Coordinator image loaded into the Kind cluster |
+| `MODEL_NAME` | `Qwen/Qwen3-VL-2B-Instruct` | Model name used by the test pools |
+| `NAMESPACE` | `default` | Namespace to deploy test resources into |
+| `K8S_CONTEXT` | _(empty)_ | Use an existing cluster context instead of creating a Kind cluster |
+| `READY_TIMEOUT` | `10m` | How long to wait for resources to become ready |

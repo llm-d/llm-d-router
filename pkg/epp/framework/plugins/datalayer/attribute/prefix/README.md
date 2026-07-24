@@ -11,6 +11,8 @@ Contains information about how much of a request's prefix matched the cache on a
   - `MatchBlocks`: Number of blocks that matched the cache.
   - `TotalBlocks`: Total number of blocks in the request prefix.
   - `BlockSizeTokens`: Number of tokens per block. This is fixed across endpoints.
+  - `CachedBlockCount`: Unweighted count of contiguous cached prefix blocks, regardless of device tier. Defaults to `MatchBlocks` when the producer does not set it.
+  - `CachedBlocksByTier`: Per device tier, the count of contiguous cached prefix blocks the endpoint holds in that tier. Nil when the producer supplies no tier data.
 
 This information is used by affinity-based scheduling scorers to prefer endpoints with high cache hits.
 

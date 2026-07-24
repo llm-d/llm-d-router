@@ -19,7 +19,7 @@ to the auto-spawned approx producer.
 Pipeline per request:
 - Consume `TokenizedPrompt` from `token-producer`.
 - Hash tokens → KV-block keys → `kvblock.Index.Lookup`.
-- Write `PrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens)` per endpoint.
+- Write `PrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens)` per endpoint, including the unweighted cached-block count and its per-device-tier breakdown.
 - (`PreRequest`) Speculative-index the selected endpoint(s) with TTL eviction.
 - (`EndpointExtractor`) Per-pod ZMQ subscriber lifecycle on add/delete.
 

@@ -881,6 +881,60 @@ func TestSchedulerE2ELatency(t *testing.T) {
 	}
 }
 
+func TestRequestProcessingLatency(t *testing.T) {
+	Reset()
+	durations := []time.Duration{
+		200 * time.Microsecond,
+		800 * time.Microsecond,
+		1500 * time.Microsecond,
+		3 * time.Millisecond,
+		8 * time.Millisecond,
+		15 * time.Millisecond,
+		30 * time.Millisecond,
+		75 * time.Millisecond,
+		150 * time.Millisecond,
+	}
+	for _, duration := range durations {
+		RecordRequestProcessingLatency(duration)
+	}
+
+	want, err := os.Open("testdata/llm_d_request_processing_duration_seconds_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_epp_request_processing_duration_seconds"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestResponseProcessingLatency(t *testing.T) {
+	Reset()
+	durations := []time.Duration{
+		200 * time.Microsecond,
+		800 * time.Microsecond,
+		1500 * time.Microsecond,
+		3 * time.Millisecond,
+		8 * time.Millisecond,
+		15 * time.Millisecond,
+		30 * time.Millisecond,
+		75 * time.Millisecond,
+		150 * time.Millisecond,
+	}
+	for _, duration := range durations {
+		RecordResponseProcessingLatency(duration)
+	}
+
+	want, err := os.Open("testdata/llm_d_response_processing_duration_seconds_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_epp_response_processing_duration_seconds"); err != nil {
+		t.Error(err)
+	}
+}
+
 func TestFlowControlDispatchCycleLengthMetric(t *testing.T) {
 	Reset()
 	scenarios := []struct {
@@ -1329,6 +1383,24 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool))
 	require.NoError(t, err)
 	require.Equal(t, 0.5, valNew)
+}
+
+func TestFlowControlRequestsTotalMetric(t *testing.T) {
+	Reset()
+
+	const pool = "test-pool"
+
+	IncFlowControlRequestsTotal("Dispatched", "0", pool)
+	IncFlowControlRequestsTotal("Dispatched", "0", pool)
+	IncFlowControlRequestsTotal("RejectedCapacity", "10", pool)
+
+	val, err := testutil.GetCounterMetricValue(llmdFlowControlRequestsTotal.WithLabelValues("Dispatched", "0", pool))
+	require.NoError(t, err)
+	require.Equal(t, float64(2), val)
+
+	val, err = testutil.GetCounterMetricValue(llmdFlowControlRequestsTotal.WithLabelValues("RejectedCapacity", "10", pool))
+	require.NoError(t, err)
+	require.Equal(t, float64(1), val)
 }
 
 func TestRecordRequestTTFT(t *testing.T) {

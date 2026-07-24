@@ -22,15 +22,15 @@ limitations under the License.
 // # Design Philosophy: The Single-Writer Actor Model
 //
 // The concurrency model for this package is built around a single-writer, channel-based actor pattern, as implemented
-// in the ShardProcessor. All state-mutating operations for a given shard (primarily enqueuing new requests) are
-// funneled through a single Run goroutine.
+// in the Processor. All state-mutating operations (primarily enqueuing new requests) are funneled through a single Run
+// goroutine.
 //
-// This design makes complex, multi-step transactions (like a hierarchical capacity check against both a shard's total
+// This design makes complex, multi-step transactions (like a hierarchical capacity check against both the global total
 // limit and a priority band's limit) inherently atomic without locks. This avoids the performance bottleneck of a
-// coarse, shard-wide lock and allows the top-level Controller to remain decoupled and highly concurrent.
+// coarse, global lock and allows the top-level Controller to remain decoupled and highly concurrent.
 //
 // # Key Components
 //
-//   - ShardProcessor: The implementation of the worker actor. Manages the lifecycle of requests for a single shard.
+//   - Processor: The implementation of the worker actor. Manages the lifecycle of all queued requests.
 //   - FlowItem: The internal representation of a request, managing its state and synchronization across goroutines.
 package internal

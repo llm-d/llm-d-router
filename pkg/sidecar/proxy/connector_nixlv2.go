@@ -51,7 +51,7 @@ func tokenLimitMap(req map[string]any, apiType APIType) (map[string]any, bool) {
 	return sp, true
 }
 
-func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType APIType) {
+func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType APIType) {
 	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
 	s.logger.V(4).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
 
@@ -75,7 +75,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	if s.config.MoRIIOParallelDispatch && s.config.MoRIIOWriteMode {
 		// MoRI-IO requires transfer_id to carry the "tx" prefix for message routing.
 		transferID := "tx" + uuidStr
-		s.runNIXLProtocolV2WriteParallel(w, r, original, completionRequest, uuidStr, transferID, prefillPodHostPort)
+		s.runNIXLProtocolV2WriteParallel(w, r, original, completionRequest, uuidStr, transferID, prefillPodHostPort, kvCacheSource)
 		return
 	}
 
@@ -115,7 +115,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		present bool
 	}
 	tokenMap, createdSamplingParams := tokenLimitMap(completionRequest, apiType)
-	var savedTokenValues [2]savedField
+	savedTokenValues := make([]savedField, len(tokenLimitFields))
 	for i, field := range tokenLimitFields {
 		if v, ok := tokenMap[field]; ok {
 			savedTokenValues[i] = savedField{field: field, val: v, present: true}
@@ -167,6 +167,9 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			requestFieldRemotePort:      nil,
 		}
 	}
+
+	// Compose the OffloadingConnector p2p pull onto the NIXL prefill leg.
+	s.addP2PPullToPrefill(completionRequest[requestFieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
 
 	completionRequest[requestFieldStream] = false
 	delete(completionRequest, requestFieldStreamOptions)
@@ -321,7 +324,7 @@ retryLoop:
 		completionRequest[requestFieldStreamOptions] = streamOptionsValue
 	}
 
-	for i := range savedTokenValues[:len(tokenLimitFields)] {
+	for i := range savedTokenValues {
 		sv := &savedTokenValues[i]
 		delete(tokenMap, sv.field)
 		if sv.present {
@@ -440,7 +443,7 @@ retryLoop:
 // two upstream calls in parallel so decode's block allocation overlaps prefill.
 func (s *Server) runNIXLProtocolV2WriteParallel(
 	w http.ResponseWriter, r *http.Request, original []byte,
-	completionRequest map[string]any, uuidStr, transferID, prefillPodHostPort string,
+	completionRequest map[string]any, uuidStr, transferID, prefillPodHostPort, kvCacheSource string,
 ) {
 	s.logger.V(4).Info("running NIXL protocol V2 (concurrent dispatch)",
 		"url", prefillPodHostPort, "request_id", uuidStr)
@@ -456,6 +459,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	maxTokensValue, maxTokensOk := completionRequest[requestFieldMaxTokens]
 	maxCompletionTokensValue, maxCompletionTokensOk := completionRequest[requestFieldMaxCompletionTokens]
 	maxOutputTokensValue, maxOutputTokensOk := completionRequest[requestFieldMaxOutputTokens]
+	minTokensValue, minTokensOk := completionRequest[requestFieldMinTokens]
 
 	// Pin both legs to the same DP rank (kv_transfer_params + HTTP header).
 	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
@@ -492,11 +496,15 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			pkv["remote_dp_size_local"] = s.config.MoRIIODPSizeLocal
 		}
 	}
+	// Compose the OffloadingConnector p2p pull onto the NIXL prefill leg.
+	s.addP2PPullToPrefill(completionRequest[requestFieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+
 	completionRequest[requestFieldStream] = false
 	delete(completionRequest, requestFieldStreamOptions)
 	completionRequest[requestFieldMaxTokens] = 1
 	completionRequest[requestFieldMaxCompletionTokens] = 1
 	completionRequest[requestFieldMaxOutputTokens] = 1
+	completionRequest[requestFieldMinTokens] = 1
 
 	pbody, err := json.Marshal(completionRequest)
 	if err != nil {
@@ -507,7 +515,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	}
 
 	// ---------- Build decode body ----------
-	// Restore the client's streaming flags and max-token caps.
+	// Restore the client's streaming flags and token-limit fields.
 	delete(completionRequest, requestFieldStream)
 	if streamOk {
 		completionRequest[requestFieldStream] = streamValue
@@ -526,6 +534,10 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	delete(completionRequest, requestFieldMaxOutputTokens)
 	if maxOutputTokensOk {
 		completionRequest[requestFieldMaxOutputTokens] = maxOutputTokensValue
+	}
+	delete(completionRequest, requestFieldMinTokens)
+	if minTokensOk {
+		completionRequest[requestFieldMinTokens] = minTokensValue
 	}
 
 	// Synthesise decode-leg kv_transfer_params that the serial path would

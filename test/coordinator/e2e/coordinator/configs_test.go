@@ -17,13 +17,17 @@ limitations under the License.
 package coordinate2e
 
 // coordinatorConfigNIXL is the coordinator pipeline config for the e-p-d-pools topology.
-// ${NAMESPACE} is substituted by createCoordinator before the ConfigMap is built.
+// ${NAMESPACE} and ${VLLM_RENDER_PORT} are substituted by createCoordinator before the ConfigMap is built.
 const coordinatorConfigNIXL = `log_level: 5
 server:
   listen_addr: ":8080"
   read_timeout: 30s
   write_timeout: 120s
-  shutdown_timeout: 25s
+  # Recreated per spec behind a suite-lived Envoy; drain fast so a deleted
+  # coordinator stops serving immediately instead of lingering on a stale
+  # endpoint the gateway may still route to. 0s is avoided: it makes the
+  # server Shutdown context expire instantly and the process exit non-zero.
+  shutdown_timeout: 1s
 
 gateway:
   address: "http://envoy.${NAMESPACE}.svc:8081"
@@ -42,7 +46,7 @@ pipeline:
         max_concurrent_downloads: 10
     - type: render
       params:
-        address: "http://vllm-render.${NAMESPACE}.svc:8082"
+        address: "http://vllm-render.${NAMESPACE}.svc:${VLLM_RENDER_PORT}"
         timeout: 60s
     - type: encode
       params:

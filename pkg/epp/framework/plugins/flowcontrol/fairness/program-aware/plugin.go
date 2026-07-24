@@ -72,6 +72,7 @@ var (
 	_ flowcontrol.FairnessPolicy  = &ProgramAwarePlugin{}
 	_ fwkrc.PreRequest            = &ProgramAwarePlugin{}
 	_ fwkrc.ResponseBodyProcessor = &ProgramAwarePlugin{}
+	_ plugin.StateDumper          = &ProgramAwarePlugin{}
 )
 
 //nolint:revive // factory name matches sibling fairness plugins.
@@ -118,6 +119,45 @@ type ProgramAwarePlugin struct {
 
 func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 	return plugin.TypedName{Type: ProgramAwarePluginType, Name: p.name}
+}
+
+// fairnessDumpState is the sanitized snapshot returned by DumpState. Program IDs
+// come from a user-controlled request header, so they are omitted; only these
+// bounded aggregates are reported.
+type fairnessDumpState struct {
+	TotalPrograms int     `json:"totalPrograms"`
+	TotalInFlight int64   `json:"totalInFlight"`
+	FairnessIndex float64 `json:"fairnessIndex"`
+}
+
+// DumpState reports aggregate fairness health: how many programs are tracked,
+// the total in-flight requests across them, and Jain's fairness index. Per-program
+// IDs are deliberately excluded because they are user-controlled and high-cardinality.
+// All three values come from a single pass over the program map.
+func (p *ProgramAwarePlugin) DumpState() (json.RawMessage, error) {
+	var totalPrograms int
+	var totalInFlight int64
+	var sum, sumSq, n float64
+	p.programMetrics.Range(func(_, value any) bool {
+		totalPrograms++
+		m, ok := value.(*ProgramMetrics)
+		if !ok {
+			return true
+		}
+		totalInFlight += m.InFlight()
+		if m.WaitCount() > 0 {
+			x := m.AverageWaitTime()
+			sum += x
+			sumSq += x * x
+			n++
+		}
+		return true
+	})
+	return json.Marshal(fairnessDumpState{
+		TotalPrograms: totalPrograms,
+		TotalInFlight: totalInFlight,
+		FairnessIndex: jainFairnessIndex(sum, sumSq, n),
+	})
 }
 
 // getStrategy falls back to a default LAS strategy for zero-value plugin
@@ -261,6 +301,16 @@ func (p *ProgramAwarePlugin) evictKey(key any) {
 	}
 }
 
+// jainFairnessIndex returns Jain's fairness index for the given sum, sum of
+// squares, and count of per-program wait observations. It is 1.0 (perfectly
+// fair) when fewer than two programs have observations.
+func jainFairnessIndex(sum, sumSq, n float64) float64 {
+	if n <= 1 || sumSq == 0 {
+		return 1.0
+	}
+	return (sum * sum) / (n * sumSq)
+}
+
 // computeFairnessIndex returns Jain's Fairness Index over the average wait
 // time per program. Programs with no wait observations are skipped.
 func (p *ProgramAwarePlugin) computeFairnessIndex() float64 {
@@ -279,8 +329,5 @@ func (p *ProgramAwarePlugin) computeFairnessIndex() float64 {
 		n++
 		return true
 	})
-	if n <= 1 || sumSq == 0 {
-		return 1.0
-	}
-	return (sum * sum) / (n * sumSq)
+	return jainFairnessIndex(sum, sumSq, n)
 }

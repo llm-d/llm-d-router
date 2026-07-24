@@ -145,6 +145,25 @@ func (ms *modelRewriteStore) getAll() []*v1alpha2.InferenceModelRewrite {
 	return rewrites
 }
 
+// configuredModelNames returns every model name an InferenceModelRewrite
+// enumerates: exact-match sources and rewrite targets. These form the closed
+// set of operator-configured names that metric labels must never fold into the
+// cardinality overflow bucket.
+func configuredModelNames(infModelRewrite *v1alpha2.InferenceModelRewrite) []string {
+	names := sets.New[string]()
+	for _, rule := range infModelRewrite.Spec.Rules {
+		for _, match := range rule.Matches {
+			if match.Model != nil {
+				names.Insert(match.Model.Value)
+			}
+		}
+		for _, target := range rule.Targets {
+			names.Insert(target.ModelRewrite)
+		}
+	}
+	return names.UnsortedList()
+}
+
 // rewriteRuleWithMetadata decorates a rule with metadata from its parent object
 // to be used in precedence sorting.
 type rewriteRuleWithMetadata struct {

@@ -53,6 +53,7 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 	generatedTokenCounts := make([]int, len(candidateEndpoints))
 	prefixCacheScores := make([]float64, len(candidateEndpoints))
 	prefillTokensInFlights := make([]int64, len(candidateEndpoints))
+	numRequestRunnings := make([]int, len(candidateEndpoints))
 
 	for i, endpoint := range candidateEndpoints {
 		logger.V(logutil.TRACE).Info("Candidate pod for scheduling", "endpoint", endpoint.GetMetadata().String(), "metrics", endpoint.GetMetrics().String())
@@ -68,12 +69,19 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 		generatedTokenCounts[i] = 1
 		prefixCacheScores[i] = prefixCacheScore
 
-		podKey := endpoint.GetMetadata().NamespacedName.String()
-		prefillTokensInFlights[i] = pl.endpointCounter(&pl.prefillTokensInFlight, podKey).Load()
+		// Reuse the in-flight load captured for this endpoint earlier in Produce,
+		// so the prediction features are identical to the dispatch-time training
+		// features and neither depends on PreRequest hook ordering.
+		snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[endpoint.GetMetadata().NamespacedName.String()]
+		if !ok {
+			snapshot = pl.readInFlightLoad(endpoint)
+		}
+		prefillTokensInFlights[i] = snapshot.tokens
+		numRequestRunnings[i] = snapshot.requests
 	}
 
 	// Bulk predict
-	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, inputTokenLengths, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights)
+	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, inputTokenLengths, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights, numRequestRunnings)
 	if err != nil {
 		logger.V(logutil.DEBUG).Error(err, "Bulk prediction failed")
 		return nil, err
