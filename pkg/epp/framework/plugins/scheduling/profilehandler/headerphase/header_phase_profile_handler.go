@@ -24,6 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -181,7 +182,11 @@ func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.
 
 	profile, ok := profiles[resolvedPhase]
 	if !ok {
-		log.FromContext(ctx).Error(h.noMatchError(phase), "no scheduling profile selected for request")
+		// A missing or unrecognized header value is a per-request client issue, not a
+		// system fault - log at DEBUG so it doesn't page anyone or drown out real
+		// errors, matching how parseSLOHeaders logs a malformed client header
+		// (pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/plugin.go).
+		log.FromContext(ctx).V(logging.DEBUG).Error(h.noMatchError(phase), "no scheduling profile selected for request")
 		return map[string]fwksched.SchedulerProfile{}
 	}
 
