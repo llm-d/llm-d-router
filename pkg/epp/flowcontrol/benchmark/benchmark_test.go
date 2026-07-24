@@ -346,7 +346,7 @@ func BenchmarkFlowController_FullPath(b *testing.B) {
 			//    detector reads to compute saturation.
 			infReq := &scheduling.InferenceRequest{
 				RequestID: reqID,
-				Body:      &requesthandling.InferenceRequestBody{TokenizedPrompt: &requesthandling.TokenizedPrompt{PerPromptTokens: [][]uint32{benchTokenIDs}}},
+				Body:      &requesthandling.InferenceRequestBody{TokenizedRequest: &requesthandling.TokenizedRequest{Prompts: []requesthandling.PromptTokens{{TokenIDs: benchTokenIDs}}}},
 			}
 			schedResult := &scheduling.SchedulingResult{ProfileResults: profileResults}
 			h.producer.PreRequest(ctx, infReq, schedResult)

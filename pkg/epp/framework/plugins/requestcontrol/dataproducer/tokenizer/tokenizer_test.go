@@ -142,7 +142,7 @@ func TestPluginFactory_Validation(t *testing.T) {
 	}
 }
 
-func TestProduce_PopulatesTokenizedPrompt(t *testing.T) {
+func TestProduce_PopulatesTokenizedRequest(t *testing.T) {
 	mm := &tokenization.MultiModalFeatures{
 		MMHashes: map[string][]string{"image": {"hash-a", "hash-b"}},
 		MMPlaceholders: map[string][]kvblock.PlaceholderRange{
@@ -165,25 +165,26 @@ func TestProduce_PopulatesTokenizedPrompt(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, []uint32{1, 2, 3, 4}, req.Body.TokenizedPrompt.PerPromptTokens[0])
-	require.Len(t, req.Body.TokenizedPrompt.MultiModalFeatures, 2)
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []uint32{1, 2, 3, 4}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	require.Len(t, req.Body.TokenizedRequest.Prompts, 1)
+	require.Len(t, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures, 2)
 
-	assert.Equal(t, 3, req.Body.TokenizedPrompt.MultiModalFeatures[0].Offset)
-	assert.Equal(t, "hash-a", req.Body.TokenizedPrompt.MultiModalFeatures[0].Hash)
-	assert.Equal(t, 20, req.Body.TokenizedPrompt.MultiModalFeatures[1].Offset)
-	assert.Equal(t, "hash-b", req.Body.TokenizedPrompt.MultiModalFeatures[1].Hash)
-	assert.Equal(t, fwkrh.ModalityImage, req.Body.TokenizedPrompt.MultiModalFeatures[0].Modality)
+	assert.Equal(t, 3, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[0].Offset)
+	assert.Equal(t, "hash-a", req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[0].Hash)
+	assert.Equal(t, 20, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[1].Offset)
+	assert.Equal(t, "hash-b", req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[1].Hash)
+	assert.Equal(t, fwkrh.ModalityImage, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[0].Modality)
 }
 
 func TestProduce_SkipsWhenAlreadyPopulated(t *testing.T) {
-	existing := &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{{42}}}
+	existing := &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{42}}}}
 	p := newTestPlugin(&mockTokenizer{})
 	req := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{TokenizedPrompt: existing},
+		Body: &fwkrh.InferenceRequestBody{TokenizedRequest: existing},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	assert.Same(t, existing, req.Body.TokenizedPrompt)
+	assert.Same(t, existing, req.Body.TokenizedRequest)
 }
 
 func TestProduce_SetsCacheSaltOnSkipPath(t *testing.T) {
@@ -193,18 +194,18 @@ func TestProduce_SetsCacheSaltOnSkipPath(t *testing.T) {
 			return nil, nil, nil
 		},
 	}
-	existing := &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{{1, 2, 3}}}
+	existing := &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}}}
 	p := newTestPlugin(tok)
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{CacheSalt: "tenant-x"},
-			TokenizedPrompt: existing,
+			ChatCompletions:  &fwkrh.ChatCompletionsRequest{CacheSalt: "tenant-x"},
+			TokenizedRequest: existing,
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	assert.Same(t, existing, req.Body.TokenizedPrompt)
-	assert.Equal(t, "tenant-x", req.Body.TokenizedPrompt.CacheSalt)
-	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedPrompt.PerPromptTokens[0])
+	assert.Same(t, existing, req.Body.TokenizedRequest)
+	assert.Equal(t, "tenant-x", req.Body.TokenizedRequest.CacheSalt)
+	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
 }
 
 func TestRenderBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
@@ -218,7 +219,7 @@ func TestRenderBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: []uint32{5, 6, 7}}},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []uint32{5, 6, 7}, tp.PerPromptTokens[0])
+	assert.Equal(t, []uint32{5, 6, 7}, tp.Prompts[0].TokenIDs)
 }
 
 func TestRenderBackend_CompletionsArrayPassesArrayPayload(t *testing.T) {
@@ -236,7 +237,7 @@ func TestRenderBackend_CompletionsArrayPassesArrayPayload(t *testing.T) {
 		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Strings: []string{"alpha", "beta"}}},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, [][]uint32{{1, 2}, {3}}, tp.PerPromptTokens)
+	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{3}}}, tp.Prompts)
 }
 
 func TestRenderBackend_CompletionsSingleArrayUsesPlainText(t *testing.T) {
@@ -254,7 +255,7 @@ func TestRenderBackend_CompletionsSingleArrayUsesPlainText(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "alpha beta", got)
-	assert.Equal(t, [][]uint32{{1}}, tp.PerPromptTokens)
+	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: []uint32{1}}}, tp.Prompts)
 }
 
 func TestProduce_NilBody(t *testing.T) {
@@ -283,7 +284,7 @@ func TestProduce_TokenizerError(t *testing.T) {
 	err := p.Produce(context.Background(), req, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tokenization failed")
-	assert.Nil(t, req.Body.TokenizedPrompt)
+	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
 func TestProduce_UnsupportedBodyType(t *testing.T) {
@@ -296,7 +297,7 @@ func TestProduce_UnsupportedBodyType(t *testing.T) {
 	err := p.Produce(context.Background(), req, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported request body type")
-	assert.Nil(t, req.Body.TokenizedPrompt)
+	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
 func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
@@ -323,13 +324,13 @@ func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
 	}
 
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, tokenIDs, req.Body.TokenizedPrompt.PerPromptTokens[0])
-	assert.Nil(t, req.Body.TokenizedPrompt.MultiModalFeatures)
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, tokenIDs, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	assert.Nil(t, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures)
 }
 
 func TestProduce_GenerateFlattensFeatures(t *testing.T) {
-	// Generate requests with multimodal features must populate TokenizedPrompt.MultiModalFeatures
+	// Generate requests with multimodal features must populate PromptTokens.MultiModalFeatures
 	// in offset-sorted prompt order, so downstream prefix-cache scoring picks up image hashes.
 	tok := &mockTokenizer{
 		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
@@ -364,14 +365,14 @@ func TestProduce_GenerateFlattensFeatures(t *testing.T) {
 	}
 
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, tokenIDs, req.Body.TokenizedPrompt.PerPromptTokens[0])
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, tokenIDs, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
 	assert.Equal(t,
 		[]fwkrh.MultiModalFeature{
 			{Modality: fwkrh.ModalityImage, Hash: "abc123hash", Offset: 1, Length: 3},
 			{Modality: fwkrh.ModalityImage, Hash: "def456hash", Offset: 4, Length: 3},
 		},
-		req.Body.TokenizedPrompt.MultiModalFeatures,
+		req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures,
 	)
 }
 
@@ -461,10 +462,10 @@ func TestProduce_StringArrayPrompt(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	require.Len(t, req.Body.TokenizedPrompt.PerPromptTokens, 2)
-	assert.Equal(t, []uint32{10, 20, 30}, req.Body.TokenizedPrompt.PerPromptTokens[0])
-	assert.Equal(t, []uint32{40, 50}, req.Body.TokenizedPrompt.PerPromptTokens[1])
+	require.NotNil(t, req.Body.TokenizedRequest)
+	require.Len(t, req.Body.TokenizedRequest.Prompts, 2)
+	assert.Equal(t, []uint32{10, 20, 30}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	assert.Equal(t, []uint32{40, 50}, req.Body.TokenizedRequest.Prompts[1].TokenIDs)
 }
 
 func TestProduce_StringArrayPromptRenderError(t *testing.T) {
@@ -485,7 +486,7 @@ func TestProduce_StringArrayPromptRenderError(t *testing.T) {
 	err := p.Produce(context.Background(), req, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tokenization failed")
-	assert.Nil(t, req.Body.TokenizedPrompt)
+	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
 func TestProduce_StringArrayPromptDoesNotPublishEmptyTokenResult(t *testing.T) {
@@ -504,10 +505,10 @@ func TestProduce_StringArrayPromptDoesNotPublishEmptyTokenResult(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	assert.Nil(t, req.Body.TokenizedPrompt)
+	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
-func TestProduce_SinglePromptSetsPerPromptTokens(t *testing.T) {
+func TestProduce_SinglePromptSetsPrompts(t *testing.T) {
 	tok := &mockTokenizer{
 		renderFunc: func(_ fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 			return [][]uint32{{10, 20, 30}}, nil, nil
@@ -523,8 +524,8 @@ func TestProduce_SinglePromptSetsPerPromptTokens(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, [][]uint32{{10, 20, 30}}, req.Body.TokenizedPrompt.PerPromptTokens)
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: []uint32{10, 20, 30}}}, req.Body.TokenizedRequest.Prompts)
 }
 
 func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {
@@ -791,8 +792,8 @@ func TestProduce_MessagesRequest(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, [][]uint32{wantTokens}, req.Body.TokenizedPrompt.PerPromptTokens)
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: wantTokens}}, req.Body.TokenizedRequest.Prompts)
 
 	pm, ok := gotPayload.AsMap()
 	require.True(t, ok, "RenderChat payload must be a map")

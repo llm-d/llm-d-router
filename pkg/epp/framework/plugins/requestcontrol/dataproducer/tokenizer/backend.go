@@ -29,10 +29,10 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
-// tokenInputProducer turns a request body into a TokenizedPrompt. Backends vary
+// tokenInputProducer turns a request body into a TokenizedRequest. Backends vary
 // in fidelity (render vs estimate); callers never branch on which produced it.
 type tokenInputProducer interface {
-	produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error)
+	produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error)
 }
 
 // timeoutAware is implemented by backends (and the tokenizers they wrap) whose
@@ -104,11 +104,11 @@ type renderBackend struct {
 	tk tokenizer
 }
 
-func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
+func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
 	switch {
 	case body.Completions != nil:
 		if ids := body.Completions.Prompt.TokenIDs; len(ids) > 0 {
-			return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{ids}}, nil
+			return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: ids}}}, nil
 		}
 		return b.renderCompletions(ctx, body)
 	case body.ChatCompletions != nil:
@@ -116,21 +116,24 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 		if err != nil {
 			return nil, fmt.Errorf("tokenization failed: %w", err)
 		}
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokenIDs}, MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures)}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           tokenIDs,
+			MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
+		}}}, nil
 	case body.Messages != nil:
 		tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, messagesPayload(body))
 		if err != nil {
 			return nil, fmt.Errorf("tokenization failed: %w", err)
 		}
-		return &fwkrh.TokenizedPrompt{
-			PerPromptTokens:    [][]uint32{tokenIDs},
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           tokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
-		}, nil
+		}}}, nil
 	case body.Generate != nil:
-		return &fwkrh.TokenizedPrompt{
-			PerPromptTokens:    [][]uint32{body.Generate.TokenIDs},
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
-		}, nil
+		}}}, nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping tokenization")
 	}
@@ -181,7 +184,7 @@ func messagesPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 }
 
 // CacheSaltFromBody returns the cache salt from whichever protocol is populated.
-// The protocol switch lives here so producers populate TokenizedPrompt.CacheSalt
+// The protocol switch lives here so producers populate TokenizedRequest.CacheSalt
 // from one place and consumers read only that field.
 func CacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
 	switch {
@@ -207,10 +210,14 @@ func CacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
 // renderCompletions tokenizes a completions prompt via a single Render call.
 // completionsPayload builds the appropriate payload shape (single string or
 // string array), and the renderer returns the tokenized result.
-func (b renderBackend) renderCompletions(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
+func (b renderBackend) renderCompletions(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
 	allTokenIDs, _, err := b.tk.Render(ctx, completionsPayload(body))
 	if err != nil {
 		return nil, fmt.Errorf("tokenization failed: %w", err)
 	}
-	return &fwkrh.TokenizedPrompt{PerPromptTokens: allTokenIDs}, nil
+	prompts := make([]fwkrh.PromptTokens, len(allTokenIDs))
+	for i, ids := range allTokenIDs {
+		prompts[i] = fwkrh.PromptTokens{TokenIDs: ids}
+	}
+	return &fwkrh.TokenizedRequest{Prompts: prompts}, nil
 }

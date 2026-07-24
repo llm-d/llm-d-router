@@ -125,7 +125,7 @@ func (pl *PredictedLatency) Consumes() plugin.DataDependencies {
 		Required: map[plugin.DataKey]any{
 			pl.prefixMatchDataKey:                attrprefix.PrefixCacheMatchInfo{},
 			pl.inFlightLoadDataKey:               attrconcurrency.InFlightLoad{},
-			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{},
+			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{},
 		},
 	}
 }

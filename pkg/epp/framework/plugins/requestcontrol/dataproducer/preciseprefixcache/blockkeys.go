@@ -32,36 +32,30 @@ type kvCacheIndexer interface {
 	KVBlockIndex() kvblock.Index
 }
 
-// computeBlockKeys hashes the request's TokenizedPrompt into KV-block keys.
-// When PerPromptTokens has more than one entry (multi-prompt completions),
-// each prompt is hashed independently so cross-prompt block adjacency (which
-// never exists in the model server cache) is avoided. Single-prompt requests
-// produce a length-1 outer slice. A non-empty CacheSalt is folded into each
-// prompt's first block. Returns nil when the request carries no tokens or no
-// prompt produces full KV blocks.
+// computeBlockKeys hashes the request's TokenizedRequest into KV-block keys.
+// When Prompts has more than one entry (multi-prompt completions), each prompt
+// is hashed independently so cross-prompt block adjacency (which never exists
+// in the model server cache) is avoided. Single-prompt requests produce a
+// length-1 outer slice. A non-empty CacheSalt is folded into each prompt's
+// first block. Returns nil when the request carries no tokens or no prompt
+// produces full KV blocks.
 func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	request *scheduling.InferenceRequest, blockSizeTokens int,
 ) ([][]kvblock.BlockHash, error) {
 	if request == nil || request.Body == nil {
 		return nil, nil
 	}
-	tp := request.Body.TokenizedPrompt
-	if tp == nil || len(tp.PerPromptTokens) == 0 {
+	tp := request.Body.TokenizedRequest
+	if tp == nil || len(tp.Prompts) == 0 {
 		return nil, nil
 	}
 
 	var result [][]kvblock.BlockHash
-	for _, tokens := range tp.PerPromptTokens {
-		if len(tokens) == 0 {
+	for _, p := range tp.Prompts {
+		if len(p.TokenIDs) == 0 {
 			continue
 		}
-		// MM features apply only to single-prompt requests (chat); multi-prompt
-		// completions never carry multimodal content.
-		var mmf []fwkrh.MultiModalFeature
-		if len(tp.PerPromptTokens) == 1 {
-			mmf = tp.MultiModalFeatures
-		}
-		keys, err := computeBlockKeysForTokens(ctx, idx, tokens, mmf, tp.CacheSalt, request.TargetModel, blockSizeTokens)
+		keys, err := computeBlockKeysForTokens(ctx, idx, p.TokenIDs, p.MultiModalFeatures, tp.CacheSalt, request.TargetModel, blockSizeTokens)
 		if err != nil {
 			return nil, err
 		}

@@ -133,9 +133,9 @@ func (s *stubPromptTokenizer) Tokenize(rr *tokenizerTypes.RenderChatRequest, pro
 }
 
 // With a wrapper-owned tokenizer pool, Consumes must drop the inner
-// producer's TokenizedPrompt dependency — the wrapper supplies tokens
+// producer's TokenizedRequest dependency — the wrapper supplies tokens
 // itself and no upstream token-producer is required.
-func TestLegacyProducer_ConsumesDropsTokenizedPromptWhenPoolSet(t *testing.T) {
+func TestLegacyProducer_ConsumesDropsTokenizedRequestWhenPoolSet(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
@@ -150,12 +150,12 @@ func TestLegacyProducer_ConsumesDropsTokenizedPromptWhenPoolSet(t *testing.T) {
 	assert.Empty(t, lp.Consumes())
 
 	lpNoPool := &legacyProducer{Producer: inner.(*preciseproducer.Producer)}
-	assert.NotEmpty(t, lpNoPool.Consumes(), "without a pool, Consumes must keep TokenizedPrompt")
+	assert.NotEmpty(t, lpNoPool.Consumes(), "without a pool, Consumes must keep TokenizedRequest")
 }
 
-// When a completions prompt arrives without TokenizedPrompt and the pool
+// When a completions prompt arrives without TokenizedRequest and the pool
 // is set, Produce must route the prompt through the pool and stash the
-// resulting tokens on request.Body.TokenizedPrompt.
+// resulting tokens on request.Body.TokenizedRequest.
 func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
@@ -182,11 +182,11 @@ func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
 
 	assert.Equal(t, 1, stub.calls)
 	assert.Equal(t, "hello world", stub.lastRaw)
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedPrompt.PerPromptTokens[0])
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
 	// Wrapper-owned tokenization must still carry the cache salt so precise
 	// keys stay isolated on this path.
-	assert.Equal(t, "leg-salt", req.Body.TokenizedPrompt.CacheSalt)
+	assert.Equal(t, "leg-salt", req.Body.TokenizedRequest.CacheSalt)
 }
 
 // End-to-end: tokens from the pool flow into the embedded producer, get
@@ -237,9 +237,9 @@ func TestLegacyProducer_TokensFlowToEndpointAttribute(t *testing.T) {
 		"empty index → no matches")
 }
 
-// Pre-existing TokenizedPrompt must skip the pool entirely, so the new-path
+// Pre-existing TokenizedRequest must skip the pool entirely, so the new-path
 // token-producer pipeline isn't shadowed by the legacy pool.
-func TestLegacyProducer_KeepsExistingTokenizedPrompt(t *testing.T) {
+func TestLegacyProducer_KeepsExistingTokenizedRequest(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
@@ -255,12 +255,12 @@ func TestLegacyProducer_KeepsExistingTokenizedPrompt(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{{5, 5, 5}}},
-			Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "should not tokenize"}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{5, 5, 5}}}},
+			Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "should not tokenize"}},
 		},
 	}
 	require.NoError(t, lp.Produce(ctx, req, nil))
 
 	assert.Equal(t, 0, stub.calls, "pool must not be called when tokens already present")
-	assert.Equal(t, []uint32{5, 5, 5}, req.Body.TokenizedPrompt.PerPromptTokens[0])
+	assert.Equal(t, []uint32{5, 5, 5}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
 }

@@ -401,7 +401,7 @@ type predictedLatencyCtx struct {
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
 	inputTokenCount := 0
 	if request.Body != nil {
-		if tp := request.Body.TokenizedPrompt; tp != nil {
+		if tp := request.Body.TokenizedRequest; tp != nil {
 			inputTokenCount = tp.TokenCount()
 		}
 	}
