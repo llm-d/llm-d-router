@@ -17,9 +17,7 @@ limitations under the License.
 package registry
 
 import (
-	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/go-logr/logr"
 
@@ -28,30 +26,20 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
-// managedQueue implements `contracts.ManagedQueue`. It acts as a stateful decorator around a SafeQueue.
+// managedQueue implements `contracts.ManagedQueue`. It decorates a SafeQueue with registry
+// integration: aggregate statistics propagation and a read-only policy-facing accessor.
 //
-// # Role: The Stateful Statistics Decorator
+// # Statistics Ownership
 //
-// Its sole responsibility is to augment a generic queue with strictly consistent, atomic statistics tracking.
-// All mutating operations (`Add`, `Remove`, etc.) are wrapped to ensure that the queue's internal state and its
-// externally visible statistics (`Len`, `ByteSize`) are always perfectly synchronized.
-//
-// # Concurrency Model: Mutex for Writes, Atomics for Reads
-//
-// The `managedQueue` employs a hybrid locking strategy to guarantee strict consistency while maintaining high read
-// performance.
-//
-//  1. Mutex-Protected Writes (`sync.Mutex`): A single mutex protects all mutating operations.
-//     This ensures the update to the underlying queue and the update to the internal counters occur as a single, atomic
-//     transaction.
-//  2. Synchronous Propagation: Statistics deltas are propagated synchronously within this critical section,
-//     guaranteeing a non-negativity invariant across the entire system (registry aggregates).
-//  3. Lock-Free Reads (Atomics): The counters use `atomic.Int64`, allowing high-frequency accessors (`Len()`,
-//     `ByteSize()`) to read statistics without acquiring the mutex.
+// Per-queue statistics (`Len`, `ByteSize`) have a single owner: the underlying SafeQueue. This
+// wrapper does not keep its own copy; reads delegate to the queue. Registry aggregates are updated
+// with deltas measured from the queue's reported stats before and after each mutation, all within
+// the same critical section, so the aggregates are sums of true per-queue histories and cannot go
+// negative. There is no duplicated state and therefore no cross-copy invariant to enforce.
 //
 // # Invariant Protection
 //
-// To guarantee statistical integrity, the following invariants must be upheld:
+// To keep aggregates consistent with queue state, the following must be upheld:
 //  1. Exclusive Access: All mutations on the underlying `SafeQueue` MUST be performed exclusively through this wrapper.
 //  2. Non-Autonomous State: The underlying queue must not change state autonomously (e.g., no internal TTL eviction).
 type managedQueue struct {
@@ -65,22 +53,14 @@ type managedQueue struct {
 
 	// --- State Protected by `mu` ---
 
-	// mu protects all mutating operations. It ensures that any changes to the underlying `queue` and the updates to the
-	// atomic counters occur as a single, atomic transaction.
+	// mu protects all mutating operations. It ensures that the mutation of the underlying `queue`
+	// and the propagation of the measured statistics delta occur as a single, atomic transaction.
 	mu sync.Mutex
 	// queue is the underlying, concurrency-safe queue implementation that this `managedQueue` decorates.
 	// Its state must only be modified while holding `mu`.
 	queue contracts.SafeQueue
 
 	flowQueueAccessor *flowQueueAccessor
-
-	// --- Concurrent-Safe State (Atomics) ---
-
-	// Queue-level statistics.
-	// These are written under the protection of `mu` but can be read lock-free at any time using atomic operations.
-	// They are guaranteed to be non-negative.
-	byteSize atomic.Int64
-	len      atomic.Int64
 }
 
 var _ contracts.ManagedQueue = &managedQueue{}
@@ -110,42 +90,41 @@ func (mq *managedQueue) FlowQueueAccessor() flowcontrol.FlowQueueAccessor {
 	return mq.flowQueueAccessor
 }
 
-// Add enqueues an item into the underlying queue and atomically updates the queue's statistics under the lock.
+// Add enqueues an item into the underlying queue and propagates the measured statistics delta.
 func (mq *managedQueue) Add(item flowcontrol.QueueItemAccessor) error {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
 
-	mq.queue.Add(item)
-
-	mq.propagateStatsDeltaLocked(1, int64(item.OriginalRequest().ByteSize()))
+	mq.applyAndPropagateLocked(func() { mq.queue.Add(item) })
 	mq.logger.V(logging.TRACE).Info("Request added to queue", "requestID", item.OriginalRequest().ID())
 	return nil
 }
 
-// Remove wraps the underlying SafeQueue.Remove and updates statistics.
+// Remove wraps the underlying SafeQueue.Remove and propagates the measured statistics delta.
 func (mq *managedQueue) Remove(handle flowcontrol.QueueItemHandle) (flowcontrol.QueueItemAccessor, error) {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
 
-	removedItem, err := mq.queue.Remove(handle)
+	var removedItem flowcontrol.QueueItemAccessor
+	var err error
+	mq.applyAndPropagateLocked(func() { removedItem, err = mq.queue.Remove(handle) })
 	if err != nil {
 		return nil, err
 	}
-	mq.propagateStatsDeltaLocked(-1, -int64(removedItem.OriginalRequest().ByteSize()))
 	mq.logger.V(logging.TRACE).Info("Request removed from queue", "requestID", removedItem.OriginalRequest().ID())
 	return removedItem, nil
 }
 
-// Cleanup wraps the underlying SafeQueue.Cleanup and updates statistics.
+// Cleanup wraps the underlying SafeQueue.Cleanup and propagates the measured statistics delta.
 func (mq *managedQueue) Cleanup(predicate contracts.PredicateFunc) []flowcontrol.QueueItemAccessor {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
 
-	cleanedItems := mq.queue.Cleanup(predicate)
+	var cleanedItems []flowcontrol.QueueItemAccessor
+	mq.applyAndPropagateLocked(func() { cleanedItems = mq.queue.Cleanup(predicate) })
 	if len(cleanedItems) == 0 {
 		return nil
 	}
-	mq.propagateStatsDeltaForRemovedItemsLocked(cleanedItems)
 	if v := mq.logger.V(logging.DEBUG); v.Enabled() {
 		reqIDs := make([]string, 0, len(cleanedItems))
 		for _, item := range cleanedItems {
@@ -160,16 +139,16 @@ func (mq *managedQueue) Cleanup(predicate contracts.PredicateFunc) []flowcontrol
 	return cleanedItems
 }
 
-// Drain wraps the underlying SafeQueue.Drain and updates statistics.
+// Drain wraps the underlying SafeQueue.Drain and propagates the measured statistics delta.
 func (mq *managedQueue) Drain() []flowcontrol.QueueItemAccessor {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
 
-	drainedItems := mq.queue.Drain()
+	var drainedItems []flowcontrol.QueueItemAccessor
+	mq.applyAndPropagateLocked(func() { drainedItems = mq.queue.Drain() })
 	if len(drainedItems) == 0 {
 		return nil
 	}
-	mq.propagateStatsDeltaForRemovedItemsLocked(drainedItems)
 	if v := mq.logger.V(logging.DEBUG); v.Enabled() {
 		reqIDs := make([]string, 0, len(drainedItems))
 		for _, item := range drainedItems {
@@ -186,41 +165,30 @@ func (mq *managedQueue) Drain() []flowcontrol.QueueItemAccessor {
 
 // Len returns the current number of items in the queue.
 func (mq *managedQueue) Len() int {
-	return int(mq.len.Load())
+	return mq.queue.Len()
 }
 
 // ByteSize returns the current total byte size of all items in the queue.
 func (mq *managedQueue) ByteSize() uint64 {
-	return uint64(mq.byteSize.Load())
+	return mq.queue.ByteSize()
 }
 
-// propagateStatsDeltaLocked updates the queue's statistics and propagates the delta to the registry.
+// applyAndPropagateLocked runs mutate on the underlying queue and propagates the statistics delta
+// measured across it, keeping the registry aggregates consistent with the queue's actual state.
 // It must be called while holding the `managedQueue.mu` lock.
-//
-// Invariant Check: This function panics if a statistic becomes negative. This enforces the non-negative invariant
-// locally, which mathematically guarantees that the aggregated statistics (registry level) also remain
-// non-negative.
-func (mq *managedQueue) propagateStatsDeltaLocked(lenDelta, byteSizeDelta int64) {
-	newLen := mq.len.Add(lenDelta)
-	if newLen < 0 {
-		panic(fmt.Sprintf("invariant violation: managedQueue length for flow %s became negative (%d)", mq.key, newLen))
-	}
-	mq.byteSize.Add(byteSizeDelta)
+func (mq *managedQueue) applyAndPropagateLocked(mutate func()) {
+	beforeLen := mq.queue.Len()
+	beforeBytes := mq.queue.ByteSize()
 
+	mutate()
+
+	lenDelta := int64(mq.queue.Len() - beforeLen)
+	byteSizeDelta := int64(mq.queue.ByteSize()) - int64(beforeBytes)
+	if lenDelta == 0 && byteSizeDelta == 0 {
+		return
+	}
 	// Propagate the delta up to the registry. This propagation is lock-free and eventually consistent.
 	mq.onStatsDelta(mq.key.Priority, lenDelta, byteSizeDelta)
-}
-
-// propagateStatsDeltaForRemovedItemsLocked calculates the total stat changes for a slice of removed items and applies
-// them. It must be called while holding the `managedQueue.mu` lock.
-func (mq *managedQueue) propagateStatsDeltaForRemovedItemsLocked(items []flowcontrol.QueueItemAccessor) {
-	var lenDelta int64
-	var byteSizeDelta int64
-	for _, item := range items {
-		lenDelta--
-		byteSizeDelta -= int64(item.OriginalRequest().ByteSize())
-	}
-	mq.propagateStatsDeltaLocked(lenDelta, byteSizeDelta)
 }
 
 // --- `flowQueueAccessor` ---

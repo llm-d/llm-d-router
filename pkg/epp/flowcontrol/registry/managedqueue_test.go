@@ -129,9 +129,13 @@ func TestManagedQueue_Add(t *testing.T) {
 		expectedByteSizeDelta int64
 	}{
 		{
-			name: "ShouldSucceed_AndIncrementStats",
+			name: "ShouldSucceed_AndPropagateMeasuredDelta",
 			setupMock: func(q *mocks.MockSafeQueue) {
-				q.AddFunc = func(flowcontrol.QueueItemAccessor) {}
+				q.AddFunc = func(flowcontrol.QueueItemAccessor) {
+					// Deltas are measured from queue-reported stats, so the mock reports the change.
+					q.LenV = 1
+					q.ByteSizeV = 100
+				}
 			},
 			expectErr:             false,
 			expectedLenDelta:      1,
@@ -179,9 +183,15 @@ func TestManagedQueue_Remove(t *testing.T) {
 		expectedByteSizeDelta int64
 	}{
 		{
-			name: "ShouldSucceed_AndDecrementStats",
+			name: "ShouldSucceed_AndPropagateMeasuredDelta",
 			setupMock: func(q *mocks.MockSafeQueue, item flowcontrol.QueueItemAccessor) {
+				// Deltas are measured from queue-reported stats: prime the pre-mutation state and
+				// have the mock report the post-mutation state.
+				q.LenV = 1
+				q.ByteSizeV = 100
 				q.RemoveFunc = func(_ flowcontrol.QueueItemHandle) (flowcontrol.QueueItemAccessor, error) {
+					q.LenV = 0
+					q.ByteSizeV = 0
 					return item, nil
 				}
 			},
@@ -192,6 +202,8 @@ func TestManagedQueue_Remove(t *testing.T) {
 		{
 			name: "ShouldFail_AndNotChangeStats_WhenUnderlyingQueueFails",
 			setupMock: func(q *mocks.MockSafeQueue, item flowcontrol.QueueItemAccessor) {
+				q.LenV = 1
+				q.ByteSizeV = 100
 				q.RemoveFunc = func(_ flowcontrol.QueueItemHandle) (flowcontrol.QueueItemAccessor, error) {
 					return nil, errors.New("remove failed")
 				}
@@ -238,9 +250,13 @@ func TestManagedQueue_Cleanup(t *testing.T) {
 		expectedByteSizeDelta int64
 	}{
 		{
-			name: "ShouldSucceed_AndDecrementStats_WhenItemsRemoved",
+			name: "ShouldSucceed_AndPropagateMeasuredDelta_WhenItemsRemoved",
 			setupMock: func(q *mocks.MockSafeQueue, items []flowcontrol.QueueItemAccessor) {
+				q.LenV = 2
+				q.ByteSizeV = 125
 				q.CleanupFunc = func(_ contracts.PredicateFunc) []flowcontrol.QueueItemAccessor {
+					q.LenV = 0
+					q.ByteSizeV = 0
 					return items
 				}
 			},
@@ -250,6 +266,8 @@ func TestManagedQueue_Cleanup(t *testing.T) {
 		{
 			name: "ShouldSucceed_AndNotChangeStats_WhenNoItemsRemoved",
 			setupMock: func(q *mocks.MockSafeQueue, items []flowcontrol.QueueItemAccessor) {
+				q.LenV = 2
+				q.ByteSizeV = 125
 				q.CleanupFunc = func(_ contracts.PredicateFunc) []flowcontrol.QueueItemAccessor {
 					return nil // Simulate no items matching predicate.
 				}
@@ -290,9 +308,13 @@ func TestManagedQueue_Drain(t *testing.T) {
 		expectedByteSizeDelta int64
 	}{
 		{
-			name: "ShouldSucceed_AndDecrementStats",
+			name: "ShouldSucceed_AndPropagateMeasuredDelta",
 			setupMock: func(q *mocks.MockSafeQueue, items []flowcontrol.QueueItemAccessor) {
+				q.LenV = 2
+				q.ByteSizeV = 125
 				q.DrainFunc = func() []flowcontrol.QueueItemAccessor {
+					q.LenV = 0
+					q.ByteSizeV = 0
 					return items
 				}
 			},
@@ -401,30 +423,34 @@ func TestManagedQueue_Concurrency_StatsIntegrity(t *testing.T) {
 		"The net byte size delta propagated across all operations must be exactly zero")
 }
 
-// --- Invariant Test ---
+// --- Structural Invariant Test ---
 
-func TestManagedQueue_InvariantPanics_OnUnderflow(t *testing.T) {
+// TestManagedQueue_MeasuredDeltas_CannotUnderflow verifies the structural non-negativity property:
+// because aggregate deltas are measured from queue-reported stats rather than derived from returned
+// items, a queue that hands back the same item repeatedly (without its stats changing) produces no
+// delta at all. There is no independent counter to underflow and nothing to panic about.
+func TestManagedQueue_MeasuredDeltas_CannotUnderflow(t *testing.T) {
 	t.Parallel()
 	flowKey := flowcontrol.FlowKey{ID: "flow", Priority: 1}
 	item := fwkfcmocks.NewMockQueueItemAccessor(100, "req", flowKey)
 	q := &mocks.MockSafeQueue{}
 	q.AddFunc = func(flowcontrol.QueueItemAccessor) {}
 	q.RemoveFunc = func(flowcontrol.QueueItemHandle) (flowcontrol.QueueItemAccessor, error) {
+		// Logically inconsistent mock: always "succeeds" but never changes its reported stats.
 		return item, nil
 	}
 	h := newMockedMqHarness(t, q, flowKey)
 
 	require.NoError(t, h.mq.Add(item), "Test setup: Initial Add must succeed")
-	_, err := h.mq.Remove(item.Handle())
-	require.NoError(t, err, "Test setup: First Remove must succeed")
+	h.propagator.reset()
 
-	// This remove call should cause the stats to go negative.
-	assert.Panics(t,
-		func() {
-			// Mock the underlying queue to succeed on the second remove, even though it's logically inconsistent.
-			// This isolates the panic to the `managedQueue`'s decorator logic.
-			_, _ = h.mq.Remove(item.Handle())
-		},
-		"Attempting to remove an item that results in negative statistics must trigger an invariant violation panic",
-	)
+	for range 3 {
+		_, err := h.mq.Remove(item.Handle())
+		require.NoError(t, err, "Remove against the misreporting mock should surface no error")
+	}
+
+	assert.Equal(t, int64(0), h.propagator.lenDelta.Load(),
+		"A queue whose reported stats never change must produce zero length delta, however many items it returns")
+	assert.Equal(t, int64(0), h.propagator.byteSizeDelta.Load(),
+		"A queue whose reported stats never change must produce zero byte size delta")
 }

@@ -111,13 +111,15 @@ type FlowRegistry struct {
 	// Key: int (priority), Value: *priorityBand
 	priorityBands sync.Map
 
+	// orderedPriorityLevels is a sorted list of active priority levels, published copy-on-write.
+	// Writers (band provisioning and removal, serialized by fr.mu) build a fresh slice and swap the
+	// pointer; a published slice is never mutated. Readers load the pointer and iterate the shared
+	// slice directly, with no lock and no per-call copy on the dispatch hot path.
+	orderedPriorityLevels atomic.Pointer[[]int]
+
 	// --- Administrative state (protected by `mu`) ---
 
 	mu sync.RWMutex
-
-	// orderedPriorityLevels is a sorted list of active priority levels.
-	// It is updated dynamically when new bands are provisioned.
-	orderedPriorityLevels []int
 
 	// initialPriorities tracks priority bands provisioned at startup.
 	// These are never removed by control-plane sync or garbage collection.
@@ -161,6 +163,7 @@ func NewFlowRegistry(config *Config, logger logr.Logger, opts ...RegistryOption)
 		desiredPriorities:    make(map[int]struct{}),
 		priorityBandUpdateCh: make(chan map[int]struct{}, 1),
 	}
+	fr.orderedPriorityLevels.Store(&[]int{})
 
 	for _, opt := range opts {
 		opt(fr)
@@ -176,7 +179,7 @@ func NewFlowRegistry(config *Config, logger logr.Logger, opts ...RegistryOption)
 	}
 
 	fr.logger.V(logging.DEFAULT).Info("FlowRegistry initialized successfully",
-		"orderedPriorities", fr.orderedPriorityLevels)
+		"orderedPriorities", fr.AllOrderedPriorityLevels())
 	return fr
 }
 
@@ -425,8 +428,8 @@ func (fr *FlowRegistry) Stats() contracts.AggregateStats {
 	fr.mu.RLock()
 	defer fr.mu.RUnlock()
 
-	// Casts from `int64` to `uint64` are safe because the non-negativity invariant is strictly enforced at the
-	// `managedQueue` level.
+	// Casts from `int64` to `uint64` are safe: aggregates are sums of deltas measured from
+	// queue-reported stats (see managedQueue), and per-queue stats are non-negative by construction.
 	stats := contracts.AggregateStats{
 		TotalCapacityBytes:    fr.config.MaxBytes,
 		TotalCapacityRequests: fr.config.MaxRequests,
@@ -545,7 +548,9 @@ func (fr *FlowRegistry) cleanupPriorityBandResourcesLocked(priority int) {
 	fr.perPriorityBandStats.Delete(priority)
 	fr.priorityBands.Delete(priority)
 
-	fr.orderedPriorityLevels = slices.DeleteFunc(fr.orderedPriorityLevels, func(p int) bool { return p == priority })
+	// Copy-on-write: the published slice is shared with lock-free readers and must not be mutated.
+	updated := slices.DeleteFunc(slices.Clone(*fr.orderedPriorityLevels.Load()), func(p int) bool { return p == priority })
+	fr.orderedPriorityLevels.Store(&updated)
 
 	fr.logger.V(logging.DEFAULT).Info("Successfully deleted priority band", "priority", priority)
 }
