@@ -17,7 +17,9 @@ Choose this policy when:
 
 * **Identifies programs** via the fairness ID header carried on each request.
 * **Tracks per-program metrics** through the request lifecycle: queue wait time, dispatched count, in-flight count, last completion time, and (LAS) attained service in weighted tokens.
-* **Selects a queue to dispatch from** using the configured strategy. Currently `las` (Least Attained Service) is supported; programs with the lowest accumulated service score highest.
+* **Selects a queue to dispatch from** using the configured strategy. Two are supported:
+  * `las` (Least Attained Service): programs with the lowest accumulated service score highest.
+  * `turn-priority`: scoring engages only under contention. With no flow waiting nothing is dispatched; with exactly one waiting flow it is dispatched directly. When two or more flows are waiting, each scores by its head request's `prio = turn_number + turnPriorityTimeWeight * time_elapsed_in_seconds`, highest first. The elapsed term ages waiting flows up so lower-turn flows are not starved. Turn number is the program's dispatched-request count plus the waiting request itself: each program (fairness ID) has its own counter, advanced once per dispatch. The counter resets when idle program state is evicted: a program idle past the eviction TTL has likely lost its KV cache, so on return it restarts from turn one and re-earns priority from a cold state.
 * **Decays attained service** for inactive programs so a long-idle program is not penalized indefinitely. Both wall-clock half-life and per-Pick factor decay are supported.
 * **Evicts idle program state** on a periodic sweep so per-program memory and Prometheus label series do not accumulate forever.
 
@@ -51,11 +53,12 @@ flowControl:
 
 | Field | Default | Description |
 |---|---|---|
-| `strategy` | `las` | Scoring strategy. Only `las` is supported. |
+| `strategy` | `las` | Scoring strategy: `las` or `turn-priority`. |
 | `lasWeightService` | `0.8` | Weight on the inverted attained-service signal. Higher values prioritize underserved programs more aggressively. |
 | `lasWeightHeadWait` | `0.2` | Weight on the head-of-queue age. Acts as a tiebreaker on cold start when programs have equal attained service. |
 | `lasDecayFactor` | `0.99997` | Per-Pick decay factor applied to inactive programs when `lasHalfLifeSeconds` is `0`. Must be in `(0, 1]`. Coupled to Pick rate. |
 | `lasHalfLifeSeconds` | `0` | Wall-clock half-life of attained service for inactive programs. When `> 0` it overrides `lasDecayFactor`. |
+| `turnPriorityTimeWeight` | `0.5` | (`turn-priority`) Weight on the elapsed-seconds term of the head-request priority score. |
 | `evictionTtlSeconds` | `3600` | A program with no completion in this window is evicted from the metrics map. |
 | `evictionSweepSeconds` | `300` | How often the eviction sweep runs. Must be `> 0`. |
 
