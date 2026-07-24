@@ -24,6 +24,7 @@ const (
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
 	FieldSamplingParams       = "sampling_params"
+	FieldExtraArgs            = "extra_args"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"

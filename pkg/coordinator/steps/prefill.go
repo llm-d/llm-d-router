@@ -190,7 +190,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			"model":      reqCtx.Model,
 			reqcommon.FieldSamplingParams: map[string]any{
 				reqcommon.FieldMaxTokens: 1,
-				"extra_args":             extraArgs,
+				reqcommon.FieldExtraArgs: extraArgs,
 			},
 		}
 		if features != nil {

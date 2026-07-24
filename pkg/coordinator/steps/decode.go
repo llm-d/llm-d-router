@@ -111,10 +111,10 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 			sampling = map[string]any{}
 			reqCtx.Body[reqcommon.FieldSamplingParams] = sampling
 		}
-		extraArgs, ok := sampling["extra_args"].(map[string]any)
+		extraArgs, ok := sampling[reqcommon.FieldExtraArgs].(map[string]any)
 		if !ok {
 			extraArgs = map[string]any{}
-			sampling["extra_args"] = extraArgs
+			sampling[reqcommon.FieldExtraArgs] = extraArgs
 		}
 		extraArgs[reqcommon.FieldKVTransferParams] = kvParams
 	}
