@@ -235,10 +235,10 @@ func chatVideoBody(url string) *fwkrh.InferenceRequestBody {
 func TestVideoEstimator_Default(t *testing.T) {
 	tp, err := estimateBackend{}.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
-	require.Len(t, tp.MultiModalFeatures, 1)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
 	frames := defaultVideoDuration * defaultVideoSampleFPS
 	tpf := (defaultVideoWidth * defaultVideoHeight) / videoTokenFactor
-	assert.Equal(t, frames*tpf, tp.MultiModalFeatures[0].Length, "default video length")
+	assert.Equal(t, frames*tpf, tp.Prompts[0].MultiModalFeatures[0].Length, "default video length")
 }
 
 // TestVideoEstimator_StaticTokensPerFrame asserts static mode emits a constant
@@ -250,7 +250,7 @@ func TestVideoEstimator_StaticTokensPerFrame(t *testing.T) {
 	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
 	frames := defaultVideoDuration * defaultVideoSampleFPS
-	assert.Equal(t, frames*100, tp.MultiModalFeatures[0].Length, "static tokens-per-frame video length")
+	assert.Equal(t, frames*100, tp.Prompts[0].MultiModalFeatures[0].Length, "static tokens-per-frame video length")
 }
 
 // TestVideoEstimator_DynamicFactor asserts the dynamic factor knob changes the
@@ -263,7 +263,7 @@ func TestVideoEstimator_DynamicFactor(t *testing.T) {
 	require.NoError(t, err)
 	frames := defaultVideoDuration * defaultVideoSampleFPS
 	tpf := (defaultVideoWidth * defaultVideoHeight) / 2048
-	assert.Equal(t, frames*tpf, tp.MultiModalFeatures[0].Length, "custom-factor video length")
+	assert.Equal(t, frames*tpf, tp.Prompts[0].MultiModalFeatures[0].Length, "custom-factor video length")
 }
 
 // TestVideoEstimator_SampledFrames asserts sampled frames scale with sampleFPS
@@ -276,7 +276,7 @@ func TestVideoEstimator_SampledFrames(t *testing.T) {
 	}})}
 	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
-	assert.Equal(t, 8*2*10, tp.MultiModalFeatures[0].Length, "sampled-frames video length")
+	assert.Equal(t, 8*2*10, tp.Prompts[0].MultiModalFeatures[0].Length, "sampled-frames video length")
 }
 
 // TestVideoEstimator_StridedFramesCapped asserts strided frames apply the
@@ -290,7 +290,7 @@ func TestVideoEstimator_StridedFramesCapped(t *testing.T) {
 	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
 	// duration*sourceFPS/stride = 10*24/4 = 60, capped to 16; 16*100 tokens.
-	assert.Equal(t, 16*100, tp.MultiModalFeatures[0].Length, "strided-frames video length")
+	assert.Equal(t, 16*100, tp.Prompts[0].MultiModalFeatures[0].Length, "strided-frames video length")
 }
 
 // TestVideoEstimator_StridedFramesFloored asserts strided frames apply the
@@ -304,7 +304,7 @@ func TestVideoEstimator_StridedFramesFloored(t *testing.T) {
 	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
 	// duration*sourceFPS/stride = 1*24/4 = 6, floored to 8; 8*100 tokens.
-	assert.Equal(t, 8*100, tp.MultiModalFeatures[0].Length, "strided-frames floored video length")
+	assert.Equal(t, 8*100, tp.Prompts[0].MultiModalFeatures[0].Length, "strided-frames floored video length")
 }
 
 // TestVideoEstimator_MaxVideoTokens asserts the overall cap bounds the total
@@ -316,7 +316,7 @@ func TestVideoEstimator_MaxVideoTokens(t *testing.T) {
 	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
 	// Default frames*tpf = 10*225 = 2250, capped to 500.
-	assert.Equal(t, 500, tp.MultiModalFeatures[0].Length, "max-video-tokens cap")
+	assert.Equal(t, 500, tp.Prompts[0].MultiModalFeatures[0].Length, "max-video-tokens cap")
 }
 
 // TestVideoEstimator_Qwen3AndGemma4 asserts the two documented model shapes
@@ -332,7 +332,7 @@ func TestVideoEstimator_Qwen3AndGemma4(t *testing.T) {
 	tp, err := qwen3.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
 	// frames = 10*2 = 20, tpf = 640*480/1024 = 300, tokens = 6000.
-	assert.Equal(t, 20*((640*480)/1024), tp.MultiModalFeatures[0].Length, "qwen3-shaped video length")
+	assert.Equal(t, 20*((640*480)/1024), tp.Prompts[0].MultiModalFeatures[0].Length, "qwen3-shaped video length")
 
 	gemma4 := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
 		DefaultDuration: 10,
@@ -342,7 +342,7 @@ func TestVideoEstimator_Qwen3AndGemma4(t *testing.T) {
 	tp, err = gemma4.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
 	// frames = min(10*24/4, 16) = 16, tokens = 16*256.
-	assert.Equal(t, 16*256, tp.MultiModalFeatures[0].Length, "gemma4-shaped video length")
+	assert.Equal(t, 16*256, tp.Prompts[0].MultiModalFeatures[0].Length, "gemma4-shaped video length")
 }
 
 // TestParseVideoMetadataHeaders covers full, partial, missing, and malformed
@@ -433,11 +433,11 @@ func TestVideoEstimator_HeaderMetadataOverridesDefaults(t *testing.T) {
 	withMeta, err := estimateBackend{}.produce(ctx, chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
 	// sampled frames = duration(3)*sampleFPS(2) = 6; dynamic tpf = 320*240/1024 = 75.
-	assert.Equal(t, 6*((320*240)/videoTokenFactor), withMeta.MultiModalFeatures[0].Length)
+	assert.Equal(t, 6*((320*240)/videoTokenFactor), withMeta.Prompts[0].MultiModalFeatures[0].Length)
 
 	def, err := estimateBackend{}.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
-	assert.NotEqual(t, def.MultiModalFeatures[0].Length, withMeta.MultiModalFeatures[0].Length, "header metadata must change the count")
+	assert.NotEqual(t, def.Prompts[0].MultiModalFeatures[0].Length, withMeta.Prompts[0].MultiModalFeatures[0].Length, "header metadata must change the count")
 }
 
 // TestVideoEstimator_HeaderFPSStridedMode asserts header source FPS and duration
@@ -450,7 +450,7 @@ func TestVideoEstimator_HeaderFPSStridedMode(t *testing.T) {
 	// strided frames = int(duration(3)*fps(30))/2 = 45.
 	tp, err := b.produce(videoCtx(videoMetadata{duration: 3, fps: 30}), chatVideoBody("https://cdn.example.com/movie.mp4"))
 	require.NoError(t, err)
-	assert.Equal(t, 45, tp.MultiModalFeatures[0].Length)
+	assert.Equal(t, 45, tp.Prompts[0].MultiModalFeatures[0].Length)
 }
 
 // TestVideoEstimator_SampledIgnoresHeaderFPS asserts sampled mode honors the
@@ -465,8 +465,8 @@ func TestVideoEstimator_SampledIgnoresHeaderFPS(t *testing.T) {
 	require.NoError(t, err)
 	fps60, err := b.produce(videoCtx(videoMetadata{duration: 3, fps: 60}), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
-	assert.Equal(t, 6, fps30.MultiModalFeatures[0].Length)
-	assert.Equal(t, fps30.MultiModalFeatures[0].Length, fps60.MultiModalFeatures[0].Length, "sampled mode must ignore header source fps")
+	assert.Equal(t, 6, fps30.Prompts[0].MultiModalFeatures[0].Length)
+	assert.Equal(t, fps30.Prompts[0].MultiModalFeatures[0].Length, fps60.Prompts[0].MultiModalFeatures[0].Length, "sampled mode must ignore header source fps")
 }
 
 // TestVideoEstimator_NoHeadersUseDefaults asserts that without header metadata the
@@ -476,7 +476,7 @@ func TestVideoEstimator_NoHeadersUseDefaults(t *testing.T) {
 	require.NoError(t, err)
 	frames := defaultVideoDuration * defaultVideoSampleFPS
 	tpf := (defaultVideoWidth * defaultVideoHeight) / videoTokenFactor
-	assert.Equal(t, frames*tpf, tp.MultiModalFeatures[0].Length, "default video length")
+	assert.Equal(t, frames*tpf, tp.Prompts[0].MultiModalFeatures[0].Length, "default video length")
 }
 
 // TestVideoEstimator_TemporalMergeAndMinFrames asserts sampled frames are floored
@@ -490,11 +490,11 @@ func TestVideoEstimator_TemporalMergeAndMinFrames(t *testing.T) {
 	// 10s: 10*2 = 20 sampled frames, /2 temporal merge = 10 groups.
 	long, err := b.produce(videoCtx(videoMetadata{duration: 10}), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
-	assert.Equal(t, 10, long.MultiModalFeatures[0].Length)
+	assert.Equal(t, 10, long.Prompts[0].MultiModalFeatures[0].Length)
 	// 1s: 2 sampled frames floored to minFrames 4, /2 merge = 2 groups.
 	short, err := b.produce(videoCtx(videoMetadata{duration: 1}), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
-	assert.Equal(t, 2, short.MultiModalFeatures[0].Length)
+	assert.Equal(t, 2, short.Prompts[0].MultiModalFeatures[0].Length)
 }
 
 // TestVideoEstimator_HeaderRespectsMaxVideoTokens asserts the overall cap still
@@ -504,7 +504,7 @@ func TestVideoEstimator_HeaderRespectsMaxVideoTokens(t *testing.T) {
 	// Uncapped would be 6*75 = 450; capped to 100.
 	tp, err := b.produce(videoCtx(videoMetadata{width: 320, height: 240, duration: 3}), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
-	assert.Equal(t, 100, tp.MultiModalFeatures[0].Length)
+	assert.Equal(t, 100, tp.Prompts[0].MultiModalFeatures[0].Length)
 }
 
 // TestEstimateBackend_MessagesImageFeature asserts an Anthropic messages image
