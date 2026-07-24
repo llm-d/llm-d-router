@@ -92,11 +92,13 @@ const (
 	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 
 	// OffloadingConnector kv_transfer_params fields. The role is encoded by the
-	// nesting key: "decode" on the prefiller leg, "prefill" on the decoder leg.
-	requestFieldP2PDecodeParams  = "decode"
-	requestFieldP2PPrefillParams = "prefill"
-	requestFieldP2PParams        = "p2p"
-	requestFieldKVRequestID      = "kv_request_id"
+	// nesting key, named for the remote party it describes: "remote_decoder" on
+	// the prefiller leg, "remote_prefiller" on the decoder leg, "remote_kv_source"
+	// for a symmetric cached-prefix pull.
+	requestFieldRemoteDecoder   = "remote_decoder"
+	requestFieldRemotePrefiller = "remote_prefiller"
+	requestFieldRemoteKVSource  = "remote_kv_source"
+	requestFieldKVRequestID     = "kv_request_id"
 
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage

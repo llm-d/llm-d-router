@@ -60,7 +60,7 @@ var _ = Describe("P2P Connector", func() {
 			return len(testInfo.prefillHandler.GetCompletionRequests())
 		}).Should(Equal(1))
 
-		// Prefill leg: kv_transfer_params.decode carries only kv_request_id,
+		// Prefill leg: kv_transfer_params.remote_decoder carries only kv_request_id,
 		// with no peer address.
 		prefillReqs := testInfo.prefillHandler.GetCompletionRequests()
 		Expect(prefillReqs).To(HaveLen(1))
@@ -69,8 +69,8 @@ var _ = Describe("P2P Connector", func() {
 		Expect(preq).To(HaveKey(requestFieldKVTransferParams))
 		prefillKVParams, ok := preq[requestFieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(prefillKVParams).ToNot(HaveKey(requestFieldP2PPrefillParams))
-		prefillDecode, ok := prefillKVParams[requestFieldP2PDecodeParams].(map[string]any)
+		Expect(prefillKVParams).ToNot(HaveKey(requestFieldRemotePrefiller))
+		prefillDecode, ok := prefillKVParams[requestFieldRemoteDecoder].(map[string]any)
 		Expect(ok).To(BeTrue())
 		prefillKVRequestID := prefillDecode[requestFieldKVRequestID]
 		Expect(prefillKVRequestID).ToNot(BeEmpty())
@@ -82,7 +82,7 @@ var _ = Describe("P2P Connector", func() {
 		Expect(preq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
 		Expect(preq[requestFieldStream]).To(BeFalse())
 
-		// Decode leg: kv_transfer_params.prefill carries the prefiller's
+		// Decode leg: kv_transfer_params.remote_prefiller carries the prefiller's
 		// OffloadingConnector P2P tier address plus the matching kv_request_id.
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
@@ -92,8 +92,8 @@ var _ = Describe("P2P Connector", func() {
 		Expect(dreq).To(HaveKey(requestFieldKVTransferParams))
 		decodeKVParams, ok := dreq[requestFieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(decodeKVParams).ToNot(HaveKey(requestFieldP2PDecodeParams))
-		decodePrefill, ok := decodeKVParams[requestFieldP2PPrefillParams].(map[string]any)
+		Expect(decodeKVParams).ToNot(HaveKey(requestFieldRemoteDecoder))
+		decodePrefill, ok := decodeKVParams[requestFieldRemotePrefiller].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(decodePrefill[requestFieldKVRequestID]).To(Equal(prefillKVRequestID))
 		Expect(decodePrefill[requestFieldRemoteHost]).To(Equal(extractHost(prefillHostPort)))

@@ -69,7 +69,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		prefillData[k] = v
 	}
 	prefillKVParams := map[string]any{
-		requestFieldP2PDecodeParams: map[string]any{
+		requestFieldRemoteDecoder: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
 		},
 	}
@@ -95,7 +95,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		decodeData[k] = v
 	}
 	decodeData[requestFieldKVTransferParams] = map[string]any{
-		requestFieldP2PPrefillParams: map[string]any{
+		requestFieldRemotePrefiller: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
 			requestFieldRemoteHost:  extractHost(prefillPodHostPort),
 			requestFieldRemotePort:  s.config.P2PConnectorPort,
@@ -213,27 +213,28 @@ func (s *Server) handleP2PConcurrentRequests(w http.ResponseWriter, r *http.Requ
 // KVConnector is offloading, or is composed alongside NIXL via MultiConnector
 // (declared with --enable-p2p-pull) when the PD connector is NIXLv2. On any
 // other connector --enable-p2p-pull has no effect, since no MultiConnector
-// routes the p2p params to an OffloadingConnector.
+// routes the remote_kv_source params to an OffloadingConnector.
 func (s *Server) p2pPullAvailable() bool {
 	return s.config.KVConnector == KVConnectorOffloading ||
 		(s.config.EnableP2PPull && s.config.KVConnector == KVConnectorNIXLV2)
 }
 
-// addP2PPullToPrefill adds the OffloadingConnector p2p pull block to a prefill
+// addP2PPullToPrefill adds the OffloadingConnector P2P pull block to a prefill
 // leg's kv_transfer_params so the prefiller pulls cached prefix from
 // kvCacheSource while keeping its own computed blocks available for the
 // decoder. It is a no-op when no source is set or the source resolves to the
-// prefiller itself, since there is nothing to pull from oneself. The p2p key
-// composes with NIXL params: vLLM's MultiConnector routes it to the
-// OffloadingConnector and the NIXL fields to the NixlConnector.
+// prefiller itself, since there is nothing to pull from oneself. The
+// remote_kv_source key composes with NIXL params: vLLM's MultiConnector
+// routes it to the OffloadingConnector and the NIXL fields to the
+// NixlConnector.
 func (s *Server) addP2PPullToPrefill(prefillKVParams map[string]any, kvCacheSource, prefillPodHostPort string) {
 	if kvCacheSource != "" && extractHost(kvCacheSource) != extractHost(prefillPodHostPort) {
-		prefillKVParams[requestFieldP2PParams] = s.p2pSourceParams(kvCacheSource)
+		prefillKVParams[requestFieldRemoteKVSource] = s.p2pSourceParams(kvCacheSource)
 	}
 }
 
-// p2pSourceParams builds the kv_transfer_params.p2p block for a pull from
-// sourceHostPort's OffloadingConnector P2P tier. The kv_request_id is its
+// p2pSourceParams builds the kv_transfer_params.remote_kv_source block for a
+// pull from sourceHostPort's OffloadingConnector P2P tier. The kv_request_id is its
 // own fresh UUID: in P2P mode it is consumer-side only.
 func (s *Server) p2pSourceParams(sourceHostPort string) map[string]any {
 	return map[string]any{
@@ -244,7 +245,7 @@ func (s *Server) p2pSourceParams(sourceHostPort string) map[string]any {
 }
 
 // decodeWithP2PSource serves a decoder-only request through the local vLLM
-// with kv_transfer_params.p2p injected, so the engine looks up and pulls
+// with kv_transfer_params.remote_kv_source injected, so the engine looks up and pulls
 // cached prefix blocks from the peer at sourceHostPort instead of recomputing
 // them. It replaces any client-supplied kv_transfer_params (the sidecar owns
 // that field) and routes through dispatchDecode so chunked decode still
@@ -266,7 +267,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 	p2pParams := s.p2pSourceParams(sourceHostPort)
 	// Rebuild kv_transfer_params from scratch: the sidecar owns this field, so
 	// client-supplied keys are dropped rather than forwarded to vLLM.
-	requestData[requestFieldKVTransferParams] = map[string]any{requestFieldP2PParams: p2pParams}
+	requestData[requestFieldKVTransferParams] = map[string]any{requestFieldRemoteKVSource: p2pParams}
 
 	s.logger.Info("running P2P source protocol",
 		"source_host", extractHost(sourceHostPort),
