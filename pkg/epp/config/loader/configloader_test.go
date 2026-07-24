@@ -81,6 +81,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 	// Register known feature gates for validation.
 	RegisterFeatureGate(testFeatureGate, true)
 	RegisterFeatureGate(flowcontrol.FeatureGate, false)
+	RegisterFeatureGate(fwkplugin.ExperimentalPluginsFeatureGate, false)
 
 	queueScorerWeight := 2.0
 	kvCacheUtilizationScorerWeight := 2.0
@@ -129,8 +130,9 @@ func TestLoadRawConfiguration(t *testing.T) {
 				},
 			},
 			wantFeatures: map[string]bool{
-				testFeatureGate:         true,
-				flowcontrol.FeatureGate: true,
+				testFeatureGate:                          true,
+				flowcontrol.FeatureGate:                  true,
+				fwkplugin.ExperimentalPluginsFeatureGate: false,
 			},
 			wantErr:    false,
 			deprecated: false,
@@ -188,8 +190,9 @@ func TestLoadRawConfiguration(t *testing.T) {
 				},
 			},
 			wantFeatures: map[string]bool{
-				testFeatureGate:         false,
-				flowcontrol.FeatureGate: false,
+				testFeatureGate:                          false,
+				flowcontrol.FeatureGate:                  false,
+				fwkplugin.ExperimentalPluginsFeatureGate: false,
 			},
 			wantErr:    false,
 			deprecated: false,
@@ -256,8 +259,9 @@ func TestLoadRawConfiguration(t *testing.T) {
 				},
 			},
 			wantFeatures: map[string]bool{
-				testFeatureGate:         true,
-				flowcontrol.FeatureGate: false,
+				testFeatureGate:                          true,
+				flowcontrol.FeatureGate:                  false,
+				fwkplugin.ExperimentalPluginsFeatureGate: false,
 			},
 			wantErr:    false,
 			deprecated: false,
@@ -429,7 +433,8 @@ func TestPluginsWithDependencies(t *testing.T) {
 
 			// 2. Instantiate
 			handle := testutils.NewTestHandle(context.Background())
-			err = instantiatePlugins(rawConfig.Plugins, handle)
+			featureGates, _ := loadFeatureConfig(rawConfig.FeatureGates)
+			err = instantiatePlugins(rawConfig.Plugins, handle, featureGates, logger)
 			if tc.wantErr {
 				require.Error(t, err, "Expected instantiatePlugins to fail")
 				return
@@ -1008,7 +1013,7 @@ func registerTestPlugins(t *testing.T) {
 
 	// Helper to generate simple factories.
 	register := func(name string, factory fwkplugin.FactoryFunc) {
-		fwkplugin.Register(name, factory)
+		fwkplugin.Register(name, fwkplugin.StabilityStable, factory)
 	}
 
 	mockFactory := func(tType string) fwkplugin.FactoryFunc {
@@ -1020,7 +1025,7 @@ func registerTestPlugins(t *testing.T) {
 	// Register standard test mocks.
 	register(testPluginType, mockFactory(testPluginType))
 
-	fwkplugin.Register(testScorerType, func(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testScorerType, fwkplugin.StabilityStable, func(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		// Attempt to unmarshal to trigger errors for invalid JSON in tests.
 		if params != nil {
 			var p struct {
@@ -1033,19 +1038,19 @@ func registerTestPlugins(t *testing.T) {
 		return &mockScorer{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testScorerType}}}, nil
 	})
 
-	fwkplugin.Register("utilization-detector", func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register("utilization-detector", fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockSaturationDetector{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: "utilization-detector"}}}, nil
 	})
 
-	fwkplugin.Register(testPickerType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testPickerType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockPicker{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testPickerType}}}, nil
 	})
 
-	fwkplugin.Register(testProfileHandler, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testProfileHandler, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockHandler{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testProfileHandler}}}, nil
 	})
 
-	fwkplugin.RegisterWithPluginDependencies(testWithDependencies,
+	fwkplugin.RegisterWithPluginDependencies(testWithDependencies, fwkplugin.StabilityStable,
 		func(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 			rawCfg, err := mockWithDependenciesConfigParser(decoder, handle)
 			if err != nil {
@@ -1064,7 +1069,7 @@ func registerTestPlugins(t *testing.T) {
 		}, mockWithDependenciesConfigParser,
 	)
 
-	fwkplugin.RegisterWithPluginDependencies(testWithNestedDependencies,
+	fwkplugin.RegisterWithPluginDependencies(testWithNestedDependencies, fwkplugin.StabilityStable,
 		func(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 			rawCfg, err := mockWithNestedDependenciesConfigParser(decoder, handle)
 			if err != nil {
@@ -1093,38 +1098,38 @@ func registerTestPlugins(t *testing.T) {
 		}, mockWithNestedDependenciesConfigParser,
 	)
 
-	fwkplugin.Register(testSourceType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testSourceType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockSource{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testSourceType}}}, nil
 	})
 
-	fwkplugin.Register(testExtractorType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testExtractorType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockExtractor{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testExtractorType}}}, nil
 	})
 
-	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &fwkfcmocks.MockFairnessPolicy{
 			TypedNameV: fwkplugin.TypedName{Name: name, Type: globalstrict.GlobalStrictFairnessPolicyType},
 		}, nil
 	})
-	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &fwkfcmocks.MockOrderingPolicy{
 			TypedNameV: fwkplugin.TypedName{Name: name, Type: fcfs.FCFSOrderingPolicyType},
 		}, nil
 	})
 
 	// Ensure system defaults are registered too.
-	fwkplugin.Register(maxscore.MaxScorePickerType, maxscore.MaxScorePickerFactory)
-	fwkplugin.Register(single.SingleProfileHandlerType, single.SingleProfileHandlerFactory)
-	fwkplugin.Register(openai.OpenAIParserType, openai.OpenAIParserPluginFactory)
-	fwkplugin.Register(vertexai.VertexAIParserType, vertexai.VertexAIParserPluginFactory)
-	fwkplugin.Register(anthropic.AnthropicParserType, anthropic.AnthropicParserPluginFactory)
-	fwkplugin.Register(vllmhttp.VllmHTTPParserType, vllmhttp.VllmHTTPParserPluginFactory)
-	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, usagelimits.StaticPolicyFactory)
-	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, prefix.PrefixCachePluginFactory)
-	fwkplugin.Register(reqdataprodprefix.ApproxPrefixCachePluginType, reqdataprodprefix.ApproxPrefixCacheFactory)
+	fwkplugin.Register(maxscore.MaxScorePickerType, fwkplugin.StabilityStable, maxscore.MaxScorePickerFactory)
+	fwkplugin.Register(single.SingleProfileHandlerType, fwkplugin.StabilityStable, single.SingleProfileHandlerFactory)
+	fwkplugin.Register(openai.OpenAIParserType, fwkplugin.StabilityStable, openai.OpenAIParserPluginFactory)
+	fwkplugin.Register(vertexai.VertexAIParserType, fwkplugin.StabilityStable, vertexai.VertexAIParserPluginFactory)
+	fwkplugin.Register(anthropic.AnthropicParserType, fwkplugin.StabilityStable, anthropic.AnthropicParserPluginFactory)
+	fwkplugin.Register(vllmhttp.VllmHTTPParserType, fwkplugin.StabilityStable, vllmhttp.VllmHTTPParserPluginFactory)
+	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, fwkplugin.StabilityStable, usagelimits.StaticPolicyFactory)
+	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, fwkplugin.StabilityStable, prefix.PrefixCachePluginFactory)
+	fwkplugin.Register(reqdataprodprefix.ApproxPrefixCachePluginType, fwkplugin.StabilityStable, reqdataprodprefix.ApproxPrefixCacheFactory)
 	// Datalayer plugins are now defaults; register their real factories.
-	fwkplugin.Register(sourcemetrics.MetricsDataSourceType, sourcemetrics.MetricsDataSourceFactory)
-	fwkplugin.Register(extractormetrics.MetricsExtractorType, extractormetrics.CoreMetricsExtractorFactory)
+	fwkplugin.Register(sourcemetrics.MetricsDataSourceType, fwkplugin.StabilityStable, sourcemetrics.MetricsDataSourceFactory)
+	fwkplugin.Register(extractormetrics.MetricsExtractorType, fwkplugin.StabilityStable, extractormetrics.CoreMetricsExtractorFactory)
 }
 
 func TestValidateSaturationDetector(t *testing.T) {
@@ -1265,4 +1270,49 @@ func TestFilterExecutionOrderFromYAML(t *testing.T) {
 	}
 	require.Equal(t, []string{"filter-A", "filter-B", "filter-C", "scorer-X", "scorer-Y", "maxScorePicker"}, pluginRefs,
 		"Plugins slice must preserve YAML declaration order")
+}
+
+func TestExperimentalPluginsFeatureGate(t *testing.T) {
+	RegisterFeatureGate(fwkplugin.ExperimentalPluginsFeatureGate, false)
+
+	const alphaPluginType = "test-alpha-plugin"
+	fwkplugin.Register(alphaPluginType, fwkplugin.StabilityAlpha, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockPlugin{t: fwkplugin.TypedName{Name: name, Type: alphaPluginType}}, nil
+	})
+	fwkplugin.Register(single.SingleProfileHandlerType, fwkplugin.StabilityStable, single.SingleProfileHandlerFactory)
+	fwkplugin.Register("utilization-detector", fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockSaturationDetector{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: "utilization-detector"}}}, nil
+	})
+
+	handle := testutils.NewTestHandle(context.Background())
+	logger := logging.NewTestLogger()
+
+	// 1. Without feature gate enabled -> should fail
+	rawConfigNoGate := &configapi.EndpointPickerConfig{
+		Plugins: []configapi.PluginSpec{
+			{Name: "alpha-inst", Type: alphaPluginType},
+		},
+	}
+	_, err := InstantiateAndConfigure(rawConfigNoGate, handle, logger)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "has Alpha stability level, but feature gate 'experimentalPlugins' is not enabled")
+
+	// 2. With feature gate enabled -> should succeed (given required profile handler)
+	rawConfigWithGate := &configapi.EndpointPickerConfig{
+		FeatureGates: configapi.FeatureGates{fwkplugin.ExperimentalPluginsFeatureGate},
+		Plugins: []configapi.PluginSpec{
+			{Name: "alpha-inst", Type: alphaPluginType},
+			{Name: "ph", Type: single.SingleProfileHandlerType},
+			{Name: "sat", Type: "utilization-detector"},
+		},
+		SchedulingProfiles: []configapi.SchedulingProfile{
+			{Name: "default", Plugins: []configapi.SchedulingPlugin{{PluginRef: "ph"}}},
+		},
+		FlowControl: &configapi.FlowControlConfig{
+			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: "sat"},
+		},
+	}
+
+	_, err = InstantiateAndConfigure(rawConfigWithGate, testutils.NewTestHandle(context.Background()), logger)
+	require.NoError(t, err)
 }

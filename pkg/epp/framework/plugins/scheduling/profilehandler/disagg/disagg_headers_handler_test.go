@@ -19,8 +19,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	fwkplugin.Register(DisaggHeadersHandlerType, HeadersHandlerFactory)
-	fwkplugin.Register(PrefillHeaderHandlerType, HeadersHandlerFactory) //nolint:staticcheck
+	fwkplugin.Register(DisaggHeadersHandlerType, fwkplugin.StabilityBeta, HeadersHandlerFactory)
+	fwkplugin.Register(PrefillHeaderHandlerType, fwkplugin.StabilityBeta, HeadersHandlerFactory) //nolint:staticcheck
 	os.Exit(m.Run())
 }
 

@@ -27,10 +27,6 @@ import (
 // breaking ties by newest dispatch time (least KV-cache investment).
 const PriorityThenTimeOrderingType = "priority-then-time-eviction-order-policy"
 
-func init() {
-	plugin.Register(PriorityThenTimeOrderingType, PriorityThenTimeOrderingFactory)
-}
-
 // PriorityThenTimeOrderingFactory creates a PriorityThenTimeOrdering plugin.
 func PriorityThenTimeOrderingFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	p := &PriorityThenTimeOrdering{name: PriorityThenTimeOrderingType}

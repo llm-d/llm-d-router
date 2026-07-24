@@ -45,29 +45,66 @@ func StrictDecoder(raw json.RawMessage) *json.Decoder {
 	return dec
 }
 
-// Register is a static function that can be called to register plugin factory functions.
-func Register(pluginType string, factory FactoryFunc) {
+// Register registers a factory function for the given plugin type along with its stability level.
+func Register(pluginType string, stability StabilityLevel, factory FactoryFunc) {
 	Registry[pluginType] = factory
+	RegistryMetadata[pluginType] = PluginMetadata{
+		Type:      pluginType,
+		Stability: stability,
+	}
 }
 
-// RegisterAsDefaultProducer registers a factory for the given plugin type and records it as the
-// default producer for the given data key. Only one producer may be registered as default per key.
-// Out-of-tree projects that extend the EPP can call this to make their producers eligible for
-// auto-configuration alongside in-tree producers.
-func RegisterAsDefaultProducer(pluginType string, factory FactoryFunc, key DataKey) {
-	Register(pluginType, factory)
+// RegisterAsDefaultProducer registers a factory for the given plugin type with an explicit
+// stability level and records it as the default producer for the given data key.
+func RegisterAsDefaultProducer(pluginType string, stability StabilityLevel, factory FactoryFunc, key DataKey) {
+	Register(pluginType, stability, factory)
 	DefaultProducerRegistry[key.String()] = pluginType
 }
 
-// RegisterWithPluginDependencies registers a factory for the given plugin type and records it as dependent on
-// other plugins referenced in the configuration struct returned by the plugin's configuration parser function.
-func RegisterWithPluginDependencies(pluginType string, factory FactoryFunc, parser ConfigParserFunc) {
-	Register(pluginType, factory)
+// RegisterWithPluginDependencies registers a factory for the given plugin type with an explicit
+// stability level and records it as dependent on other plugins referenced in the configuration struct
+// returned by the plugin's configuration parser function.
+func RegisterWithPluginDependencies(pluginType string, stability StabilityLevel, factory FactoryFunc, parser ConfigParserFunc) {
+	Register(pluginType, stability, factory)
 	PluginsWithPluginDependencies[pluginType] = parser
+}
+
+// RegisterDeprecated registers a plugin factory function with stability and deprecation metadata.
+func RegisterDeprecated(pluginType string, stability StabilityLevel, factory FactoryFunc, deprecatedIn, scheduledRemovalIn, replacementType string) {
+	Register(pluginType, stability, factory)
+	meta := RegistryMetadata[pluginType]
+	meta.Deprecated = true
+	meta.DeprecatedIn = deprecatedIn
+	meta.ScheduledRemovalIn = scheduledRemovalIn
+	meta.ReplacementType = replacementType
+	RegistryMetadata[pluginType] = meta
+}
+
+// RegisterDeprecatedWithPluginDependencies registers a plugin with dependencies and deprecation metadata.
+func RegisterDeprecatedWithPluginDependencies(pluginType string, stability StabilityLevel, factory FactoryFunc, parser ConfigParserFunc, deprecatedIn, scheduledRemovalIn, replacementType string) {
+	RegisterWithPluginDependencies(pluginType, stability, factory, parser)
+	meta := RegistryMetadata[pluginType]
+	meta.Deprecated = true
+	meta.DeprecatedIn = deprecatedIn
+	meta.ScheduledRemovalIn = scheduledRemovalIn
+	meta.ReplacementType = replacementType
+	RegistryMetadata[pluginType] = meta
+}
+
+// GetPluginStability looks up the stability level of a registered plugin type.
+// Returns StabilityStable by default for unregistered plugins.
+func GetPluginStability(pluginType string) StabilityLevel {
+	if meta, ok := RegistryMetadata[pluginType]; ok {
+		return meta.Stability
+	}
+	return StabilityStable
 }
 
 // Registry is a mapping from plugin type to Factory function.
 var Registry = map[string]FactoryFunc{}
+
+// RegistryMetadata maps a plugin type to its PluginMetadata.
+var RegistryMetadata = map[string]PluginMetadata{}
 
 // DefaultProducerRegistry maps a data key to the default producer plugin name (same as type).
 // Populated via RegisterAsDefaultProducer.

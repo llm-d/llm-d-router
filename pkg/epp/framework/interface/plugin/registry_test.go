@@ -31,12 +31,17 @@ func snapshotRegistries(t *testing.T) {
 	for k, v := range Registry {
 		origRegistry[k] = v
 	}
+	origMetadata := make(map[string]PluginMetadata, len(RegistryMetadata))
+	for k, v := range RegistryMetadata {
+		origMetadata[k] = v
+	}
 	origDefaults := make(map[string]string, len(DefaultProducerRegistry))
 	for k, v := range DefaultProducerRegistry {
 		origDefaults[k] = v
 	}
 	t.Cleanup(func() {
 		Registry = origRegistry
+		RegistryMetadata = origMetadata
 		DefaultProducerRegistry = origDefaults
 	})
 }
@@ -48,24 +53,36 @@ func dummyFactory(name string, parameters *json.Decoder, handle Handle) (Plugin,
 func TestRegister(t *testing.T) {
 	snapshotRegistries(t)
 
-	Register("my-plugin-type", dummyFactory)
+	Register("my-plugin-type", StabilityStable, dummyFactory)
 
 	factory, ok := Registry["my-plugin-type"]
 	assert.True(t, ok)
 	assert.NotNil(t, factory)
+	assert.Equal(t, StabilityStable, GetPluginStability("my-plugin-type"))
 
 	p, err := factory("instance-a", nil, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, "instance-a/dummy", p.TypedName().String())
 }
 
+func TestRegisterWithStability(t *testing.T) {
+	snapshotRegistries(t)
+
+	Register("alpha-plugin", StabilityAlpha, dummyFactory)
+	Register("beta-plugin", StabilityBeta, dummyFactory)
+
+	assert.Equal(t, StabilityAlpha, GetPluginStability("alpha-plugin"))
+	assert.Equal(t, StabilityBeta, GetPluginStability("beta-plugin"))
+	assert.Equal(t, StabilityStable, GetPluginStability("unregistered-plugin"))
+}
+
 func TestRegister_Overwrites(t *testing.T) {
 	snapshotRegistries(t)
 
-	Register("dup-type", dummyFactory)
+	Register("dup-type", StabilityStable, dummyFactory)
 
 	var sentinel Plugin = &basePlugin{name: TypedName{Type: "sentinel", Name: "sentinel"}}
-	Register("dup-type", func(name string, parameters *json.Decoder, handle Handle) (Plugin, error) {
+	Register("dup-type", StabilityStable, func(name string, parameters *json.Decoder, handle Handle) (Plugin, error) {
 		return sentinel, nil
 	})
 
@@ -79,10 +96,11 @@ func TestRegisterAsDefaultProducer(t *testing.T) {
 
 	key := NewDataKey("metric.cache", "default-scraper")
 
-	RegisterAsDefaultProducer("cache-scraper", dummyFactory, key)
+	RegisterAsDefaultProducer("cache-scraper", StabilityStable, dummyFactory, key)
 
 	_, ok := Registry["cache-scraper"]
 	assert.True(t, ok, "factory should be registered")
+	assert.Equal(t, StabilityStable, GetPluginStability("cache-scraper"))
 
 	pluginType, ok := DefaultProducerRegistry[key.String()]
 	assert.True(t, ok, "default producer should be recorded")
@@ -94,14 +112,15 @@ func TestRegisterAsDefaultProducer_OverwritesDefault(t *testing.T) {
 
 	key := NewDataKey("metric.queue", "scraper-v1")
 
-	RegisterAsDefaultProducer("scraper-v1", dummyFactory, key)
-	RegisterAsDefaultProducer("scraper-v2", dummyFactory, key)
+	RegisterAsDefaultProducer("scraper-v1", StabilityStable, dummyFactory, key)
+	RegisterAsDefaultProducer("scraper-v2", StabilityBeta, dummyFactory, key)
 
 	assert.Equal(t, "scraper-v2", DefaultProducerRegistry[key.String()])
 	_, ok := Registry["scraper-v1"]
 	assert.True(t, ok, "v1 factory should still be registered")
 	_, ok = Registry["scraper-v2"]
 	assert.True(t, ok)
+	assert.Equal(t, StabilityBeta, GetPluginStability("scraper-v2"))
 }
 
 func TestRegistry_IsolatedBetweenTests(t *testing.T) {
@@ -110,7 +129,21 @@ func TestRegistry_IsolatedBetweenTests(t *testing.T) {
 	const key = "isolation-marker"
 	_, exists := Registry[key]
 	assert.False(t, exists, "previous test must not have leaked into Registry")
-	Register(key, dummyFactory)
+	Register(key, StabilityStable, dummyFactory)
 	_, exists = Registry[key]
 	assert.True(t, exists)
+}
+
+func TestRegisterDeprecated(t *testing.T) {
+	snapshotRegistries(t)
+
+	RegisterDeprecated("old-plugin", StabilityBeta, dummyFactory, "v0.9.0", "v0.11.0", "new-plugin")
+
+	meta, ok := RegistryMetadata["old-plugin"]
+	assert.True(t, ok)
+	assert.True(t, meta.Deprecated)
+	assert.Equal(t, "v0.9.0", meta.DeprecatedIn)
+	assert.Equal(t, "v0.11.0", meta.ScheduledRemovalIn)
+	assert.Equal(t, "new-plugin", meta.ReplacementType)
+	assert.Equal(t, StabilityBeta, meta.Stability)
 }
