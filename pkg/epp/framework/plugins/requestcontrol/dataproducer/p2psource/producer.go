@@ -161,9 +161,26 @@ func (p *Producer) attrKey() string {
 // mildly prefer a one-request-shorter queue, and starve deeply-queued
 // sources. No-op when no candidate holds any cached block.
 func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
+	// Endpoints without metadata cannot serve as sources (no address to
+	// join), so they must not pin the pool maximum either: an inflated
+	// maximum would exclude every real endpoint below.
+	type sourceMatch struct {
+		ep        scheduling.Endpoint
+		cached    int
+		blockSize int
+	}
 	maxCached := 0
+	var matches []sourceMatch
 	for _, ep := range endpoints {
-		if cached := p.cachedTokenCount(ep); cached > maxCached {
+		if ep.GetMetadata() == nil {
+			continue
+		}
+		cached, blockSize := p.cachedTokens(ep)
+		if cached == 0 {
+			continue
+		}
+		matches = append(matches, sourceMatch{ep: ep, cached: cached, blockSize: blockSize})
+		if cached > maxCached {
 			maxCached = cached
 		}
 	}
@@ -174,14 +191,13 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		var cachedCounts []int
 		var weights []float64
 		total := 0.0
-		for _, ep := range endpoints {
-			cached, blockSize := p.cachedTokens(ep)
-			if ep.GetMetadata() == nil || cached == 0 || cached+blockSize < maxCached {
+		for _, m := range matches {
+			if m.cached+m.blockSize < maxCached {
 				continue
 			}
-			w := 1.0 / (1.0 + float64(waitingQueueSize(ep)))
-			candidates = append(candidates, ep)
-			cachedCounts = append(cachedCounts, cached)
+			w := 1.0 / (1.0 + float64(waitingQueueSize(m.ep)))
+			candidates = append(candidates, m.ep)
+			cachedCounts = append(cachedCounts, m.cached)
 			weights = append(weights, w)
 			total += w
 		}

@@ -141,6 +141,25 @@ func TestProduce_MissingMatchInfo_TreatedAsZero(t *testing.T) {
 	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
 }
 
+// A metadata-less endpoint must not pin the pool maximum: it cannot serve as
+// a source itself, and an inflated maximum would exclude every real endpoint
+// and silently suppress the stash.
+func TestProduce_MetadataNilMax_DoesNotSuppressStash(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	noMD := scheduling.NewEndpoint(nil, nil, nil)
+	noMD.Put(p.prefixMatchDataKey.String(),
+		attrprefix.NewPrefixCacheMatchInfo(10, 4, testBlockSize).WithCachedBlockCount(10))
+
+	req := &scheduling.InferenceRequest{RequestID: "req-nil-md"}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{noMD, endpoint(p, "pod-b", "10.0.0.2", 2)}))
+
+	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	require.True(t, ok)
+	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
+}
+
 // Best peer exceeds the decode pod's cached tokens by >= delta: header set.
 func TestPreRequest_SetsKVCacheSourceHeader(t *testing.T) {
 	ctx := utils.NewTestContext(t)
