@@ -99,13 +99,14 @@ their justifications, please refer to the detailed documentation within the rele
     processing loop. It manages a worker that distributes incoming requests, apply policies, and dispatch
     requests to the backends. Its design focuses on high throughput and backpressure.
 
-2.  **Pluggable `Policy` Framework (`./framework`)**: This defines the core interfaces for all pluggable logic. It
-    features a two-tier policy system for `Fairness` (decisions *between* different flows) and `Ordering`
-    (decisions *within* a single flow) logic, covering both request dispatch and displacement.
+2.  **Pluggable `Policy` Contracts (`/pkg/epp/framework/interface/flowcontrol`)**: The plugin SDK defines the core
+    interfaces for all pluggable logic. It features a two-tier policy system for `Fairness` (decisions *between*
+    different flows) and `Ordering` (decisions *within* a single flow) logic, covering both request dispatch and
+    displacement.
 
-3.  **Extensible `SafeQueue` System (`./framework`)**: This defines the `framework.SafeQueue` interface for
-    concurrent-safe request storage. It uses a `QueueCapability` system that allows for diverse and extensible queue
-    implementations (e.g., FIFO, Priority Heap) while maintaining a stable interface.
+3.  **The `SafeQueue` (`./contracts`, `./queue`)**: The `contracts.SafeQueue` interface defines concurrent-safe
+    request storage, and `./queue` provides the priority-queue implementation whose dispatch order is determined by
+    the flow's configured `OrderingPolicy`.
 
 4.  **The `FlowRegistry` (`./registry`, `./contracts`)**: This is the stateful control plane of the system. It manages
     the configuration and lifecycle of all flows, policies, and queues. It presents a view of its state to the

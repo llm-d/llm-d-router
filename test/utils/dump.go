@@ -37,13 +37,34 @@ const (
 	dumpLimitBytes = int64(1 << 20) // 1MiB
 )
 
+// dumpConfig controls how much container log DumpPodsAndLogs fetches.
+type dumpConfig struct {
+	tailLines  int64
+	limitBytes int64
+}
+
+// DumpOption overrides DumpPodsAndLogs defaults.
+type DumpOption func(*dumpConfig)
+
+// WithFullLogs streams complete container logs instead of the default tail, for
+// callers that need the entire log (e.g. a gateway access log). A non-positive
+// tail/limit disables that cap.
+func WithFullLogs() DumpOption {
+	return func(c *dumpConfig) { c.tailLines, c.limitBytes = 0, 0 }
+}
+
 // DumpPodsAndLogs prints pod statuses and container logs for the given namespace
 // to the Ginkgo writer. Call this before cleanup to ensure the information is
 // available when CI tests fail.
-func DumpPodsAndLogs(cfg *TestConfig, nsName string) {
+func DumpPodsAndLogs(cfg *TestConfig, nsName string, opts ...DumpOption) {
 	if cfg == nil || cfg.KubeCli == nil {
 		ginkgo.GinkgoWriter.Println("Skipping pod dump: cluster not initialized")
 		return
+	}
+
+	dc := dumpConfig{tailLines: dumpTailLines, limitBytes: dumpLimitBytes}
+	for _, opt := range opts {
+		opt(&dc)
 	}
 
 	ginkgo.GinkgoWriter.Printf("\n=== Dumping pod states and logs (namespace: %s) ===\n", nsName)
@@ -113,15 +134,15 @@ func DumpPodsAndLogs(cfg *TestConfig, nsName string) {
 
 		for _, c := range pod.Spec.InitContainers {
 			if restarted[c.Name] {
-				dumpContainerLogs(ctx, cfg, pod.Namespace, pod.Name, c.Name, true)
+				dumpContainerLogs(ctx, cfg, pod.Namespace, pod.Name, c.Name, true, dc)
 			}
-			dumpContainerLogs(ctx, cfg, pod.Namespace, pod.Name, c.Name, false)
+			dumpContainerLogs(ctx, cfg, pod.Namespace, pod.Name, c.Name, false, dc)
 		}
 		for _, c := range pod.Spec.Containers {
 			if restarted[c.Name] {
-				dumpContainerLogs(ctx, cfg, pod.Namespace, pod.Name, c.Name, true)
+				dumpContainerLogs(ctx, cfg, pod.Namespace, pod.Name, c.Name, true, dc)
 			}
-			dumpContainerLogs(ctx, cfg, pod.Namespace, pod.Name, c.Name, false)
+			dumpContainerLogs(ctx, cfg, pod.Namespace, pod.Name, c.Name, false, dc)
 		}
 	}
 	ginkgo.GinkgoWriter.Println("=== End of pod dump ===")
@@ -138,15 +159,15 @@ func printContainerStatus(kind string, cs corev1.ContainerStatus) {
 	ginkgo.GinkgoWriter.Println(status)
 }
 
-func dumpContainerLogs(ctx context.Context, cfg *TestConfig, nsName, podName, containerName string, previous bool) {
-	tailLines := dumpTailLines
-	limitBytes := dumpLimitBytes
-	req := cfg.KubeCli.CoreV1().Pods(nsName).GetLogs(podName, &corev1.PodLogOptions{
-		Container:  containerName,
-		TailLines:  &tailLines,
-		LimitBytes: &limitBytes,
-		Previous:   previous,
-	})
+func dumpContainerLogs(ctx context.Context, cfg *TestConfig, nsName, podName, containerName string, previous bool, dc dumpConfig) {
+	logOpts := &corev1.PodLogOptions{Container: containerName, Previous: previous}
+	if dc.tailLines > 0 {
+		logOpts.TailLines = &dc.tailLines
+	}
+	if dc.limitBytes > 0 {
+		logOpts.LimitBytes = &dc.limitBytes
+	}
+	req := cfg.KubeCli.CoreV1().Pods(nsName).GetLogs(podName, logOpts)
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to stream logs: %v\n", podName, containerName, err)
@@ -163,9 +184,12 @@ func dumpContainerLogs(ctx context.Context, cfg *TestConfig, nsName, podName, co
 		ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to read logs: %v\n", podName, containerName, err)
 		return
 	}
-	label := fmt.Sprintf("last %d lines", dumpTailLines)
-	if previous {
-		label = fmt.Sprintf("previous instance, last %d lines", dumpTailLines)
+	scope := "full log"
+	if dc.tailLines > 0 {
+		scope = fmt.Sprintf("last %d lines", dc.tailLines)
 	}
-	ginkgo.GinkgoWriter.Printf("  [logs] %s/%s (%s):\n%s\n", podName, containerName, label, buf.String())
+	if previous {
+		scope = "previous instance, " + scope
+	}
+	ginkgo.GinkgoWriter.Printf("  [logs] %s/%s (%s):\n%s\n", podName, containerName, scope, buf.String())
 }

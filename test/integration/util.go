@@ -26,9 +26,9 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net"
 	"strconv"
 	"testing"
 	"time"
@@ -39,6 +39,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -569,7 +570,8 @@ func StartExtProcServer(
 ) (extProcPb.ExternalProcessor_ProcessClient, *grpc.ClientConn) {
 	t.Helper()
 
-	// Force IPv4 to match GetFreePort's binding and avoid IPv6 race conditions in CI.
+	// Force IPv4: the server binds on IPv4 localhost, and a dual-stack target would let
+	// the client reach for an IPv6 address nothing is listening on.
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	// Start server in background.
@@ -580,42 +582,80 @@ func StartExtProcServer(
 		}
 	}()
 
-	return ExtProcServerClient(ctx, t, port, logger)
+	return ExtProcServerClient(ctx, t, port, logger, nil)
 }
 
 // ExtProcServerClient returns a ExternalProcessor_ProcessClient listen to localhost on given port.
+// mgrErr, when non-nil, carries the early exit of the manager hosting the server so a start
+// failure fails the test immediately instead of waiting out extprocConnSetupTimeout.
 func ExtProcServerClient(
 	ctx context.Context,
 	t *testing.T,
 	port int,
 	logger logr.Logger,
+	mgrErr <-chan error,
 ) (extProcPb.ExternalProcessor_ProcessClient, *grpc.ClientConn) {
 	t.Helper()
 
-	// Force IPv4 to match GetFreePort's binding and avoid IPv6 race conditions in CI.
+	// Force IPv4: the server binds on IPv4 localhost, and a dual-stack target would let
+	// the client reach for an IPv6 address nothing is listening on.
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
 
-	// Wait for TCP readiness.
-	// We must poll the port until the server successfully binds and listens.
-	require.Eventually(t, func() bool {
-		// Check if the port is open.
-		conn, err := net.DialTimeout("tcp", serverAddr, 50*time.Millisecond)
-		if err != nil {
-			return false
-		}
-		conn.Close()
-		return true
-	}, extprocConnSetupTimeout, extPorcConnSetupPollInterval, "Server failed to bind port %s", serverAddr)
-
-	// Connect client.
-	// Blocking dial is safe because we know the port is open.
 	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err, "failed to create grpc connection")
+	// Registered before any require below can call FailNow, so the conn and its
+	// goroutines do not leak on the failure path.
+	t.Cleanup(func() { _ = conn.Close() })
+
+	require.NoError(t, WaitExtProcReady(ctx, conn, mgrErr), "ext-proc server did not become ready")
 
 	extProcClient, err := extProcPb.NewExternalProcessorClient(conn).Process(ctx)
 	require.NoError(t, err, "failed to initialize ext_proc stream client")
 
 	return extProcClient, conn
+}
+
+// WaitExtProcReady blocks until conn reaches connectivity.Ready (nil), the manager
+// reports an early exit via mgrErr, ctx is done, or extprocConnSetupTimeout elapses.
+//
+// The server serves on a listener bound before it starts, so the kernel completes the
+// TCP handshake out of the listen backlog and a dial succeeds even while grpc.Serve has
+// not run yet. Only Ready, which requires the HTTP/2 handshake, proves it is serving.
+// The state wait is bounded by the poll interval so an early mgrErr is still observed
+// promptly rather than after the full timeout.
+func WaitExtProcReady(ctx context.Context, conn *grpc.ClientConn, mgrErr <-chan error) error {
+	deadline := time.Now().Add(extprocConnSetupTimeout)
+	for {
+		state := conn.GetState()
+		if state == connectivity.Ready {
+			return nil
+		}
+		if state == connectivity.Idle {
+			// A ClientConn only leaves Idle on Connect or a started RPC, so a
+			// Ready to Idle flap would otherwise stall until the deadline.
+			conn.Connect()
+		}
+
+		select {
+		case err := <-mgrErr:
+			if err == nil {
+				return errors.New("manager exited before ext-proc server became ready")
+			}
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("ext-proc server at %s not ready within %s (state %s)",
+				conn.Target(), extprocConnSetupTimeout, state)
+		}
+
+		waitCtx, cancel := context.WithTimeout(ctx, extPorcConnSetupPollInterval)
+		conn.WaitForStateChange(waitCtx, state)
+		cancel()
+	}
 }
 
 // --- Internal Helpers ---

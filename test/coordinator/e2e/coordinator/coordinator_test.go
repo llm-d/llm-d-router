@@ -121,23 +121,14 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 		testutils.DeleteObjects(testConfig, encodePool, nsName)
 	})
 
-	// Dump coordinator logs on failure, or always when E2E_PRINT_COORDINATOR_LOGS is
-	// set. Registered second → runs first (LIFO), so the deployment still exists.
+	// Dump all pod logs (coordinator, EPPs, Envoy, workers) on failure, or always
+	// when E2E_PRINT_LOGS is set. Registered second → runs first (LIFO), so the
+	// pods still exist.
 	ginkgo.DeferCleanup(func() {
-		if !ginkgo.CurrentSpecReport().Failed() && !printCoordinatorLogs {
+		if !ginkgo.CurrentSpecReport().Failed() && !printLogs {
 			return
 		}
-		args := []string{"logs", "deployment/llm-d-coordinator",
-			"-c", "coordinator", "--namespace=" + nsName}
-		if k8sContext != "" {
-			args = append(args, "--context="+k8sContext)
-		}
-		out, err := exec.Command("kubectl", args...).CombinedOutput()
-		if err != nil {
-			fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- coordinator logs (kubectl error: %v) ---\n%s\n---\n", err, string(out))
-		} else {
-			fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- coordinator logs ---\n%s\n---\n", string(out))
-		}
+		testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
 	})
 
 	// Pools first so each EPP can resolve its --pool-name.
