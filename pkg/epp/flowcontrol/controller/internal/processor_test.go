@@ -1458,7 +1458,7 @@ func TestProcessor_DropSummary(t *testing.T) {
 
 	// Verify that the dropCounts array is large enough to hold every QueueOutcome value.
 	// If new outcomes are added in the future, this check will catch them at compile time.
-	var _ [types.NumQueueOutcomes]struct{} = [types.NumQueueOutcomes]struct{}{}
+	var _  = [types.NumQueueOutcomes]struct{}{}
 
 	t.Run("capacity rejection increments counter", func(t *testing.T) {
 		t.Parallel()
@@ -1542,7 +1542,7 @@ func TestProcessor_DropSummary(t *testing.T) {
 			}
 		}
 		h.PriorityBandAccessorFunc = func(priority int) (flowcontrol.PriorityBandAccessor, error) {
-			return nil, fmt.Errorf("forced priority band failure")
+			return nil, errors.New("forced priority band failure")
 		}
 		item := h.newTestItem("req-multi-other", testFlow, testTTL)
 		h.processor.enqueue(item)
