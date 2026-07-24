@@ -176,22 +176,25 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		return body, nil
 
 	default:
+		// The /inference/v1/generate engine reads transfer params only from
+		// sampling_params.extra_args; top-level fields are ignored on input.
+		extraArgs := map[string]any{
+			reqcommon.FieldKVTransferParams: kvParams,
+		}
+		if len(ecParams) > 0 {
+			extraArgs[reqcommon.FieldECTransferParams] = ecParams
+		}
 		body := map[string]any{
 			"request_id": reqCtx.RequestID,
 			"token_ids":  reqCtx.TokenIDs,
 			"model":      reqCtx.Model,
 			reqcommon.FieldSamplingParams: map[string]any{
 				reqcommon.FieldMaxTokens: 1,
-				"extra_args": map[string]any{
-					reqcommon.FieldKVTransferParams: kvParams,
-				},
+				"extra_args":             extraArgs,
 			},
 		}
 		if features != nil {
 			body["features"] = features
-		}
-		if len(ecParams) > 0 {
-			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 	}

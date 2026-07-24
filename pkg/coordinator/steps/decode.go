@@ -88,17 +88,35 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // maps.Clone would still share. This is sound only while the pipeline runs steps
 // sequentially; if it ever goes concurrent, decode must copy like the others.
 func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) {
-	reqCtx.Body[reqcommon.FieldKVTransferParams] = s.kv.PrepareDecodeKVParams(ctx, reqCtx)
+	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 	s.injectUUIDs(reqCtx)
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	switch format {
 	case gateway.FormatChatCompletions:
+		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		s.injectTokensField(reqCtx)
 	case gateway.FormatCompletions:
+		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(reqCtx.TokenIDs) > 0 {
 			reqCtx.Body["prompt"] = reqCtx.TokenIDs
 		}
+	default:
+		// The /inference/v1/generate engine reads transfer params only from
+		// sampling_params.extra_args; a top-level kv_transfer_params is ignored,
+		// so the decode worker never pulls the prefill KV over NIXL. Merge into
+		// the client's sampling_params to preserve max_tokens and other fields.
+		sampling, ok := reqCtx.Body[reqcommon.FieldSamplingParams].(map[string]any)
+		if !ok {
+			sampling = map[string]any{}
+			reqCtx.Body[reqcommon.FieldSamplingParams] = sampling
+		}
+		extraArgs, ok := sampling["extra_args"].(map[string]any)
+		if !ok {
+			extraArgs = map[string]any{}
+			sampling["extra_args"] = extraArgs
+		}
+		extraArgs[reqcommon.FieldKVTransferParams] = kvParams
 	}
 }
 
