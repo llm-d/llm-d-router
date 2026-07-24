@@ -79,7 +79,7 @@ func (e *Extractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.
 
 	podName := ""
 	if meta := in.Endpoint.GetMetadata(); meta != nil {
-		podName = meta.PodName
+		podName = meta.Name
 	}
 
 	maxUtil := 0.0

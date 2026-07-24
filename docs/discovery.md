@@ -115,11 +115,20 @@ type DiscoveryNotifier interface {
 | Field | Type | Description |
 |---|---|---|
 | `NamespacedName` | `types.NamespacedName` | Unique identity of the endpoint. |
-| `PodName` | `string` | Logical name (used in metrics). |
+| `Name` | `string` | Name of the workload behind the endpoint, shared by all its ranks. `NamespacedName` is the identity. |
 | `Address` | `string` | IP address of the inference server. |
 | `Port` | `string` | Port as a string (e.g. `"8000"`). |
 | `MetricsHost` | `string` | `host:port` for metrics scraping. Defaults to `address:port` if empty. |
 | `Labels` | `map[string]string` | Arbitrary labels available to scheduler plugins. |
+| `Type` | `EndpointType` | What the endpoint is: `engine` or `epp`. Defaults to `engine` when omitted in the endpoints file. |
+
+### Endpoint types
+
+`engine` is an inference server. Its load signals are that server's own engine metrics,
+and the `llm-d.ai/engine-type` label selects which schema to read (`vllm`, `sglang`, ...).
+
+`epp` is an endpoint picker. Its load signals are aggregates over the servers behind it,
+so `llm-d.ai/engine-type` does not apply.
 
 ### Ordering contract
 
@@ -197,6 +206,7 @@ endpoints:
     port: <string>              # required -- integer 1-65535 as a string
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
+    type: <engine|epp>          # optional -- defaults to engine
 ```
 
 Example with two vLLM instances:

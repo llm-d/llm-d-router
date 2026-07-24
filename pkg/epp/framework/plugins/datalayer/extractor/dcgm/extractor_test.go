@@ -189,7 +189,7 @@ func TestExtractorExtract(t *testing.T) {
 				}
 			}()
 
-			meta := &fwkdl.EndpointMetadata{PodName: tt.podName}
+			meta := &fwkdl.EndpointMetadata{Name: tt.podName}
 			ep := fwkdl.NewEndpoint(meta, nil)
 			attr := ep.GetAttributes()
 			before, _ := attr.Get(key)

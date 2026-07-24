@@ -1044,7 +1044,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
 								NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
-								PodName:        "pod-1",
+								Name:           "pod-1",
 								Port:           "8080",
 							},
 							nil, nil,
@@ -1069,7 +1069,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
 								NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
-								PodName:        "pod-1",
+								Name:           "pod-1",
 								Port:           "8080",
 							},
 							nil, nil,
@@ -1077,7 +1077,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
 								NamespacedName: k8stypes.NamespacedName{Name: "pod-2", Namespace: "ns-2"},
-								PodName:        "pod-2",
+								Name:           "pod-2",
 								Port:           "9090",
 							},
 							nil, nil,
@@ -1102,7 +1102,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
 								NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
-								PodName:        "pod-1",
+								Name:           "pod-1",
 								Port:           "8080",
 							},
 							nil, nil,
@@ -1119,7 +1119,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
 								NamespacedName: k8stypes.NamespacedName{Name: "pod-2", Namespace: "ns-2"},
-								PodName:        "pod-2",
+								Name:           "pod-2",
 								Port:           "9090",
 							},
 							nil, nil,

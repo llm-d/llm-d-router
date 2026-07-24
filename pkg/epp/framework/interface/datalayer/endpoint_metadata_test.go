@@ -69,11 +69,12 @@ func TestEndpointMetadataClone(t *testing.T) {
 func TestEndpointMetadataEqual(t *testing.T) {
 	base := &EndpointMetadata{
 		NamespacedName: types.NamespacedName{Name: "pod-a-rank-0", Namespace: "default"},
-		PodName:        "pod-a",
+		Name:           "pod-a",
 		Address:        "10.0.0.1",
 		Port:           "8000",
 		MetricsHost:    "10.0.0.1:9000",
 		Labels:         map[string]string{"app": "vllm"},
+		Type:           EndpointTypeEngine,
 		RankIndex:      1,
 	}
 
@@ -99,9 +100,9 @@ func TestEndpointMetadataEqual(t *testing.T) {
 			},
 		},
 		{
-			name: "pod name",
+			name: "endpoint name",
 			mutate: func(meta *EndpointMetadata) {
-				meta.PodName = "pod-b"
+				meta.Name = "pod-b"
 			},
 		},
 		{
@@ -129,6 +130,12 @@ func TestEndpointMetadataEqual(t *testing.T) {
 			},
 		},
 		{
+			name: "type",
+			mutate: func(meta *EndpointMetadata) {
+				meta.Type = EndpointTypeEPP
+			},
+		},
+		{
 			name: "rank index",
 			mutate: func(meta *EndpointMetadata) {
 				meta.RankIndex = 2
@@ -151,7 +158,7 @@ func TestEndpointMetadataString(t *testing.T) {
 			Name:      pod.Name,
 			Namespace: pod.Namespace,
 		},
-		PodName:     pod.Name,
+		Name:        pod.Name,
 		Address:     pod.Status.PodIP,
 		Port:        "8000",
 		MetricsHost: "127.0.0.1:8000",

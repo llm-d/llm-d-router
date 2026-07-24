@@ -11,7 +11,7 @@ GPU-aware filters and scorers.
 1. Receives the parsed Prometheus metric families forwarded by `dcgm-data-source`.
 2. Looks up the `DCGM_FI_DEV_GPU_UTIL` metric family.
 3. Keeps samples that belong to this endpoint:
-   - If a sample has a `pod` label and the endpoint has a `PodName`, only
+   - If a sample has a `pod` label and the endpoint has a `Name`, only
      matching samples are kept (DaemonSet multi-pod payloads).
    - If the sample has no `pod` label, it is kept (sidecar / unlabeled payloads).
 4. Aggregates matching samples using `max` (highest-utilized GPU for the pod).

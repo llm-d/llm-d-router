@@ -137,6 +137,72 @@ func TestStart_LoadsEndpoints(t *testing.T) {
 	}
 }
 
+func TestStart_EndpointType(t *testing.T) {
+	tests := []struct {
+		name    string
+		typeVal string // value for `type:`; empty means the key is omitted
+		want    fwkdl.EndpointType
+		wantErr error
+	}{
+		{name: "omitted defaults to engine", want: fwkdl.EndpointTypeEngine},
+		{name: "explicit engine", typeVal: "engine", want: fwkdl.EndpointTypeEngine},
+		{name: "epp", typeVal: "epp", want: fwkdl.EndpointTypeEPP},
+		{name: "unknown value", typeVal: "bogus", wantErr: fwkdl.ErrUnknownEndpointType},
+		{name: "wrong case", typeVal: "EPP", wantErr: fwkdl.ErrUnknownEndpointType},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := `
+endpoints:
+  - name: ep1
+    address: "10.0.0.1"
+    port: "8000"
+`
+			if tt.typeVal != "" {
+				content += "    type: " + tt.typeVal + "\n"
+			}
+			notifier := &recordingNotifier{}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			err := newFD(writeTemp(t, content), false).Start(ctx, notifier)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				assert.Empty(t, notifier.upserted, "an entry with an invalid type is not upserted")
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, notifier.upserted, 1)
+			assert.Equal(t, tt.want, notifier.upserted[0].Type)
+		})
+	}
+}
+
+func TestStart_MixedEndpointTypes(t *testing.T) {
+	path := writeTemp(t, `
+endpoints:
+  - name: spoke-epp
+    address: "10.0.0.1"
+    port: "8000"
+    type: epp
+  - name: vllm-pod
+    address: "10.0.0.2"
+    port: "8001"
+`)
+	notifier := &recordingNotifier{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, newFD(path, false).Start(ctx, notifier))
+
+	got := map[string]fwkdl.EndpointType{}
+	for _, m := range notifier.upserted {
+		got[m.NamespacedName.Name] = m.Type
+	}
+	assert.Equal(t, fwkdl.EndpointTypeEPP, got["spoke-epp"])
+	assert.Equal(t, fwkdl.EndpointTypeEngine, got["vllm-pod"])
+}
+
 func TestReady_StaysOpenWhenInitialLoadFails(t *testing.T) {
 	fd := newFD("/nonexistent/endpoints.yaml", false)
 	ctx, cancel := context.WithCancel(context.Background())
