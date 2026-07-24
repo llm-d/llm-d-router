@@ -6,20 +6,26 @@ import (
 )
 
 // WireInto attaches a Controller to a SchedulerConfig and a request-control
-// Config in the correct positions:
+// Config. The scheduler filter chain, in execution order per request:
 //
-//   - strict-selector filter prepended to every scheduler profile's filter
-//     chain, so no downstream filter ever sees a wrong-revision candidate.
-//   - prefer-selector filter appended to every profile's filter chain, so
-//     its fallback captures the fully-narrowed pool.
-//   - gating filter appended after the two selector wrappers (only when the
-//     config declares an active Gating block), so revisions that fail the
-//     gating check are dropped before the picker sees them.
-//   - response-header processor attached to the request-control pipeline.
+//	gating → strict → operator filters → prefer
 //
-// No scorer is registered: pick behaviour is left to the operator's YAML
-// picker choice. The gating filter handles cross-role liveness; any
-// traffic-shaping across surviving revisions is a follow-on concern.
+// The revision axis is decided at the head of the chain — either by the
+// gating filter (stochastic, cache-driven weighted pick, fires when no
+// client header is present) or by the strict filter (deterministic, from
+// the request header, fires when the header is set). Only one of the two
+// makes the revision decision on any given request; the other detects the
+// situation and fast-paths.
+//
+// Everything downstream of the head therefore sees a candidate pool
+// already narrowed to a single revision. Operator-declared filters run in
+// the middle. The prefer filter is appended at the tail so that its
+// "keep-if-empty" fallback captures the fully-narrowed pool — an operator
+// filter that trims after prefer would violate prefer's fallback set.
+//
+// The response-header processor is attached to the request-control
+// pipeline. No scorer is registered: pick behaviour is left to the
+// operator's YAML picker choice.
 func WireInto(schedulerConfig *scheduling.SchedulerConfig, requestControlConfig *requestcontrol.Config, controller *Controller) error {
 	if controller == nil {
 		return nil
@@ -38,14 +44,17 @@ func WireInto(schedulerConfig *scheduling.SchedulerConfig, requestControlConfig 
 	}
 
 	for _, profile := range schedulerConfig.Profiles() {
+		// Prepend order matters: the LAST PrependFilter call ends up at
+		// position 0 of the chain. Strict is prepended first so gating
+		// ends up in front of it — gating is the first thing to run.
 		if hasStrict {
 			profile.PrependFilter(strictFilter)
 		}
+		if gatingActive {
+			profile.PrependFilter(gating)
+		}
 		if hasPrefer {
 			profile.AppendFilter(preferFilter)
-		}
-		if gatingActive {
-			profile.AppendFilter(gating)
 		}
 	}
 	requestControlConfig.AddPlugins(controller)

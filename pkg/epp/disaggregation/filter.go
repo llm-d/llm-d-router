@@ -48,8 +48,9 @@ func (f *modeSelectorsFilter) Filter(ctx context.Context, request *fwksched.Infe
 	return f.controller.filterSelectors(ctx, request, pods, f.keepFn)
 }
 
-// gatingFilter is where the disaggregation controller actually shapes
-// traffic. Two things happen per Filter call:
+// gatingFilter is where the disaggregation controller decides the revision
+// axis when no client header has done so. Runs at the HEAD of the filter
+// chain. Two things happen per Filter call:
 //
 //  1. Drop any candidate whose revision fails the coverage check —
 //     revisions missing pods on any listed role (rollout drift) are
@@ -65,6 +66,14 @@ func (f *modeSelectorsFilter) Filter(ctx context.Context, request *fwksched.Infe
 // the picker choice in the operator YAML: prefill traffic to revision R
 // converges on (crossRolePods(R) / Σ crossRolePods) even when prefill and
 // decode replica counts differ per revision (2p+18d vs. 1p+2d etc.).
+//
+// The filter short-circuits (passthrough, no cache read) when:
+//   - The request carries the revision-axis strict header — the strict
+//     filter downstream will pin the revision, we shouldn't stochastic-
+//     pick something that would then get dropped as a mismatch (503).
+//   - The candidate pool contains at most one unique revision — nothing
+//     to shape, either because the fleet has one revision or because an
+//     upstream filter already narrowed things.
 type gatingFilter struct {
 	controller *Controller
 	typedName  fwkplugin.TypedName
@@ -89,35 +98,37 @@ func newGatingFilter(controller *Controller) *gatingFilter {
 
 func (f *gatingFilter) TypedName() fwkplugin.TypedName { return f.typedName }
 
-func (f *gatingFilter) Filter(ctx context.Context, _ *fwksched.InferenceRequest, pods []fwksched.Endpoint) []fwksched.Endpoint {
+func (f *gatingFilter) Filter(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) []fwksched.Endpoint {
 	gating := f.controller.config.Gating
 	revisionLabelKey := f.controller.revisionLabelKey
 	if !gating.Active() || revisionLabelKey == "" {
 		return append(make([]fwksched.Endpoint, 0, len(pods)), pods...)
 	}
+
+	// Fast path: header-pinned. Strict downstream will do the narrowing.
+	if f.hasRevisionHeader(request) {
+		return append(make([]fwksched.Endpoint, 0, len(pods)), pods...)
+	}
+
+	// Fast path: pool already has ≤1 unique revision. Nothing to shape.
+	seenRevisions := uniqueRevisions(pods, revisionLabelKey)
+	if len(seenRevisions) <= 1 {
+		return append(make([]fwksched.Endpoint, 0, len(pods)), pods...)
+	}
+
 	requiredRoles := gating.RequireRoles.Values
 
-	_, roleCounts, err := f.controller.scanCoverage(ctx)
+	_, roleCounts, err := f.controller.readyPodsByRevisionRole(ctx)
 	if err != nil {
 		// Cache-backed List failing is unexpected; be pessimistic and drop
 		// everything rather than route to potentially-broken revisions.
 		return nil
 	}
 
-	// Collect the revisions present in the candidate pool and their
-	// cross-role weights (0 if any required role has no Ready pod → gated).
-	weights := make(map[string]int)
-	for _, endpoint := range pods {
-		if endpoint == nil || endpoint.GetMetadata() == nil {
-			continue
-		}
-		revision := endpoint.GetMetadata().Labels[revisionLabelKey]
-		if revision == "" {
-			continue
-		}
-		if _, already := weights[revision]; already {
-			continue
-		}
+	// Weight per revision in the pool (0 if any required role has no Ready
+	// pod → gated).
+	weights := make(map[string]int, len(seenRevisions))
+	for revision := range seenRevisions {
 		weights[revision] = crossRoleWeight(roleCounts[revision], requiredRoles)
 	}
 
@@ -160,6 +171,41 @@ func crossRoleWeight(perRole map[string]int, required []string) int {
 		total += count
 	}
 	return total
+}
+
+// hasRevisionHeader reports whether the request carries the header that
+// pins the revision axis. Convention: the revision axis is the first
+// entry in Selectors — same source as controller.revisionLabelKey — and
+// only counts when it's a strict-mode selector (prefer mode is a hint,
+// not a pin).
+func (f *gatingFilter) hasRevisionHeader(request *fwksched.InferenceRequest) bool {
+	if request == nil {
+		return false
+	}
+	selectors := f.controller.config.Selectors
+	if len(selectors) == 0 {
+		return false
+	}
+	revSelector := selectors[0]
+	if revSelector.Mode != ModeStrict {
+		return false
+	}
+	return request.Headers[revSelector.HeaderName] != ""
+}
+
+// uniqueRevisions returns the set of distinct revision-label values in
+// the candidate pool. Used only by the gating fast path.
+func uniqueRevisions(pods []fwksched.Endpoint, revisionLabelKey string) map[string]struct{} {
+	seen := make(map[string]struct{})
+	for _, endpoint := range pods {
+		if endpoint == nil || endpoint.GetMetadata() == nil {
+			continue
+		}
+		if revision := endpoint.GetMetadata().Labels[revisionLabelKey]; revision != "" {
+			seen[revision] = struct{}{}
+		}
+	}
+	return seen
 }
 
 // pickWeightedRevision returns one revision from weights, chosen with

@@ -433,6 +433,49 @@ func TestGatingFilter_NoGatingConfigIsNoop(t *testing.T) {
 	}
 }
 
+func TestGatingFilter_SkipsWhenRevisionHeaderPresent(t *testing.T) {
+	// A request with the revision-axis strict header means strict downstream
+	// will pin the revision; gating firing here would either waste work or,
+	// worse, weight-pick a revision that strict then rejects (503). The
+	// filter must passthrough without reading the cache — assert by using a
+	// panicking rand01 as a canary.
+	c := gatingFixture(t, validConfig(), map[string]map[string]int{
+		"v1": {"prefill": 2, "decode": 18},
+		"v2": {"prefill": 1, "decode": 2},
+	})
+	f := newGatingFilter(c)
+	f.rand01 = func() float64 { panic("rand01 must not be called when the revision header is set") }
+	pods := []fwksched.Endpoint{
+		endpoint("p1a", revLabels("v1")),
+		endpoint("p2", revLabels("v2")),
+	}
+	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v1"}}
+	got := f.Filter(context.Background(), req, pods)
+	if len(got) != len(pods) {
+		t.Fatalf("expected passthrough of all %d pods, got %d", len(pods), len(got))
+	}
+}
+
+func TestGatingFilter_SkipsWhenSingleRevisionInPool(t *testing.T) {
+	// If the candidate pool already has only one unique revision — e.g.
+	// because the fleet has one revision, or an upstream filter narrowed —
+	// gating has nothing to shape and must skip. Panicking rand01 asserts
+	// the fast path fires.
+	c := gatingFixture(t, validConfig(), map[string]map[string]int{
+		"v1": {"prefill": 3, "decode": 3},
+	})
+	f := newGatingFilter(c)
+	f.rand01 = func() float64 { panic("rand01 must not be called with a single-revision pool") }
+	pods := []fwksched.Endpoint{
+		endpoint("p1", revLabels("v1")),
+		endpoint("p2", revLabels("v1")),
+	}
+	got := f.Filter(context.Background(), nil, pods)
+	if len(got) != len(pods) {
+		t.Fatalf("expected passthrough of all %d pods, got %d", len(pods), len(got))
+	}
+}
+
 func TestGatingFilter_DisabledModeIsNoop(t *testing.T) {
 	cfg := validConfig()
 	cfg.Gating.Mode = GatingModeDisabled

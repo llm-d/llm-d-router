@@ -23,10 +23,12 @@ func buildSchedulerConfigForTest(t *testing.T) *scheduling.SchedulerConfig {
 	return scheduling.NewSchedulerConfig(singleprofilehandler.NewSingleProfileHandler(), profiles)
 }
 
-// TestWireInto_StrictAtHead_PreferAtTail proves the placement contract: an
-// existing operator-declared filter ends up sandwiched between our strict and
-// prefer filters.
-func TestWireInto_StrictAtHead_PreferAtTail(t *testing.T) {
+// TestWireInto_GatingAtHead_PreferAtTail proves the placement contract:
+// the revision decision is made at the head (gating first, then strict —
+// only one of them fires per request), any operator-declared filters run
+// on the resulting single-revision pool, and prefer runs at the tail so
+// its keep-if-empty fallback sees the fully-narrowed pool.
+func TestWireInto_GatingAtHead_PreferAtTail(t *testing.T) {
 	schedulerConfig := buildSchedulerConfigForTest(t)
 	profile := schedulerConfig.Profiles()["default"]
 	profile.AppendFilter(&namedTestFilter{name: "operator-filter"})
@@ -47,18 +49,18 @@ func TestWireInto_StrictAtHead_PreferAtTail(t *testing.T) {
 
 	// Read back the filter chain via profile.String() — the framework does
 	// not expose the private slice directly. Expected order in the string:
-	// strict, operator, prefer, gating.
+	// gating, strict, operator, prefer.
 	got := profile.String()
+	gatingAt := indexOf(got, gatingFilterType)
 	strictAt := indexOf(got, strictFilterType)
 	operatorAt := indexOf(got, "operator-filter")
 	preferAt := indexOf(got, preferFilterType)
-	gatingAt := indexOf(got, gatingFilterType)
-	if strictAt < 0 || operatorAt < 0 || preferAt < 0 || gatingAt < 0 {
+	if gatingAt < 0 || strictAt < 0 || operatorAt < 0 || preferAt < 0 {
 		t.Fatalf("expected all four filters in profile string, got %q", got)
 	}
-	if strictAt >= operatorAt || operatorAt >= preferAt || preferAt >= gatingAt {
-		t.Fatalf("expected order strict < operator < prefer < gating in %q (positions %d, %d, %d, %d)",
-			got, strictAt, operatorAt, preferAt, gatingAt)
+	if gatingAt >= strictAt || strictAt >= operatorAt || operatorAt >= preferAt {
+		t.Fatalf("expected order gating < strict < operator < prefer in %q (positions %d, %d, %d, %d)",
+			got, gatingAt, strictAt, operatorAt, preferAt)
 	}
 }
 

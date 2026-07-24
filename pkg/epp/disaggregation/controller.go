@@ -151,11 +151,11 @@ func (c *Controller) ResponseHeader(_ context.Context, _ *fwksched.InferenceRequ
 	}
 }
 
-// scanCoverage lists Ready pods matching the controller's scope and groups
+// readyPodsByRevisionRole lists Ready pods matching the controller's scope and groups
 // them by (revision → role → count). One cache-backed List per call. Used
 // by the gating filter (per request, for both coverage AND revision-weight
 // computation) and by boot validation.
-func (c *Controller) scanCoverage(ctx context.Context) (revisions map[string]struct{}, roleCounts map[string]map[string]int, err error) {
+func (c *Controller) readyPodsByRevisionRole(ctx context.Context) (revisions map[string]struct{}, roleCounts map[string]map[string]int, err error) {
 	var podList corev1.PodList
 	if err := c.reader.List(ctx, &podList,
 		client.InNamespace(c.namespace),

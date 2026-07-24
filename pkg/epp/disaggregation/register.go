@@ -92,7 +92,7 @@ func gatingForLog(g *Gating) string {
 //     single revision — the filter would otherwise silently drop every
 //     endpoint at request time.
 func validateRolesObserved(ctx context.Context, c *Controller, roles []string) error {
-	revisions, roleCounts, err := c.scanCoverage(ctx)
+	revisions, roleCounts, err := c.readyPodsByRevisionRole(ctx)
 	if err != nil {
 		return err
 	}
