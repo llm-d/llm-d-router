@@ -189,6 +189,19 @@ func TestHeaderPhaseNoMatchError(t *testing.T) {
 	}
 }
 
+func TestHeaderPhaseDefaultProfileNotConfiguredError(t *testing.T) {
+	handler := NewHeaderPhaseProfileHandler(defaultHeaderName, "prefill")
+
+	err := handler.defaultProfileNotConfiguredError()
+	if err == nil {
+		t.Fatalf("defaultProfileNotConfiguredError() returned nil, want an error")
+	}
+	wantErrContain := `defaultProfile "prefill" is not a configured scheduling profile`
+	if !strings.Contains(err.Error(), wantErrContain) {
+		t.Errorf("defaultProfileNotConfiguredError() = %q, want it to contain %q", err.Error(), wantErrContain)
+	}
+}
+
 func TestHeaderPhaseWithName(t *testing.T) {
 	handler := NewHeaderPhaseProfileHandler(defaultHeaderName, defaultProfileName).WithName("renamed")
 

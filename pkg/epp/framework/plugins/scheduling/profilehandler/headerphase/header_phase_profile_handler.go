@@ -145,6 +145,14 @@ func (h *HeaderPhaseProfileHandler) noMatchError(phase string) error {
 	return fmt.Errorf("header-phase profile handler: no scheduling profile configured for %q header value %q", h.headerName, phase)
 }
 
+// defaultProfileNotConfiguredError explains that defaultProfile itself isn't a
+// configured scheduling profile. Distinct from noMatchError: this is a configuration
+// bug that fails every request whose phase header is missing or blank, not an ordinary
+// client-side unrecognized header value.
+func (h *HeaderPhaseProfileHandler) defaultProfileNotConfiguredError() error {
+	return fmt.Errorf("header-phase profile handler: defaultProfile %q is not a configured scheduling profile", h.defaultProfile)
+}
+
 // Pick selects the single SchedulingProfile to run: the only configured profile when
 // there is just one, otherwise the one named by the request's phase header, falling
 // back to defaultProfile when the header is missing or blank. It returns an empty map
@@ -186,7 +194,15 @@ func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.
 		// system fault - log at DEBUG so it doesn't page anyone or drown out real
 		// errors, matching how parseSLOHeaders logs a malformed client header
 		// (pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/plugin.go).
-		log.FromContext(ctx).V(logging.DEBUG).Error(h.noMatchError(phase), "no scheduling profile selected for request")
+		// A missing header whose defaultProfile substitute also fails to resolve is a
+		// distinct, config-time condition - it fails every header-less request, not just
+		// an occasional bad caller - so it gets its own message rather than being
+		// reported as an ordinary missing header.
+		err := h.noMatchError(phase)
+		if phase == "" {
+			err = h.defaultProfileNotConfiguredError()
+		}
+		log.FromContext(ctx).V(logging.DEBUG).Error(err, "no scheduling profile selected for request")
 		return map[string]fwksched.SchedulerProfile{}
 	}
 
