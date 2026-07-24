@@ -242,10 +242,20 @@ func translateFlowControlOutcome(outcome types.QueueOutcome, err error) error {
 	case types.QueueOutcomeEvictedContextCancelled:
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "client disconnected: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled)}}
 	case types.QueueOutcomeRejectedOther, types.QueueOutcomeEvictedOther:
-		if errors.Is(err, types.ErrFlowControllerNotRunning) {
+		switch {
+		case errors.Is(err, types.ErrFlowControllerNotRunning):
 			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "flow controller shutting down: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonShuttingDown)}}
+		// A TTL expiry or client disconnect that fires before the item is admitted to a queue (e.g. while
+		// buffered in the enqueue channel or blocked in submission) surfaces as RejectedOther/EvictedOther
+		// rather than as a dedicated eviction outcome. These are client-caused terminations, so delegate
+		// to the mapping of the post-admission equivalent; the two paths then agree by construction.
+		case errors.Is(err, types.ErrTTLExpired):
+			return translateFlowControlOutcome(types.QueueOutcomeEvictedTTL, err)
+		case errors.Is(err, types.ErrContextCancelled):
+			return translateFlowControlOutcome(types.QueueOutcomeEvictedContextCancelled, err)
+		default:
+			return errcommon.Error{Code: errcommon.Internal, Msg: "internal flow control error: " + msg}
 		}
-		return errcommon.Error{Code: errcommon.Internal, Msg: "internal flow control error: " + msg}
 	default:
 		return errcommon.Error{Code: errcommon.Internal, Msg: "unhandled flow control outcome: " + msg}
 	}

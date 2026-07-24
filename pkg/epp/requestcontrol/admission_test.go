@@ -19,6 +19,7 @@ package requestcontrol
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -361,6 +362,41 @@ func TestTranslateFlowControlOutcome(t *testing.T) {
 			name:       "shutdown rejection returns 503",
 			outcome:    fctypes.QueueOutcomeRejectedOther,
 			err:        fctypes.ErrFlowControllerNotRunning,
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonShuttingDown),
+		},
+		{
+			name:       "pre-admission TTL rejection maps like TTL eviction",
+			outcome:    fctypes.QueueOutcomeRejectedOther,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrTTLExpired),
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonTTLExpired),
+		},
+		{
+			name:       "pre-admission cancellation rejection maps like cancellation eviction",
+			outcome:    fctypes.QueueOutcomeRejectedOther,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrContextCancelled),
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonContextCancelled),
+		},
+		{
+			name:       "other TTL eviction maps like TTL eviction",
+			outcome:    fctypes.QueueOutcomeEvictedOther,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrEvicted, fctypes.ErrTTLExpired),
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonTTLExpired),
+		},
+		{
+			name:       "other cancellation eviction maps like cancellation eviction",
+			outcome:    fctypes.QueueOutcomeEvictedOther,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrEvicted, fctypes.ErrContextCancelled),
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonContextCancelled),
+		},
+		{
+			name:       "shutdown takes precedence over TTL",
+			outcome:    fctypes.QueueOutcomeRejectedOther,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrFlowControllerNotRunning, fctypes.ErrTTLExpired),
 			wantCode:   errcommon.ServiceUnavailable,
 			wantReason: string(errcommon.RequestDroppedReasonShuttingDown),
 		},
