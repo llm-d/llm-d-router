@@ -228,11 +228,12 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		require.Error(t, waitAdmit(t, filler), "queued filler should be evicted on shutdown")
 	})
 
-	t.Run("evicted_ttl_returns_503_ttl_expired", func(t *testing.T) {
+	t.Run("evicted_ttl_returns_429_ttl_expired", func(t *testing.T) {
 		t.Parallel()
 		// The admission adapter always defers to the controller-default TTL
 		// (flowControlRequest.InitialEffectiveTTL() == 0), so a short DefaultRequestTTL plus a
-		// saturated detector forces a TTL eviction of the queued request.
+		// saturated detector forces a TTL eviction of the queued request. With a non-empty pool
+		// the eviction is backpressure, not unavailability.
 		h := newRealFlowControlHarness(t, realFlowControlOpts{
 			saturation: 1.0,
 			candidates: nonEmptyEndpoints(),
@@ -240,7 +241,21 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		})
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "ttl-req"))
-		requireDropped(t, err, errcommon.ServiceUnavailable, errcommon.RequestDroppedReasonTTLExpired)
+		requireDropped(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonTTLExpired)
+	})
+
+	t.Run("evicted_ttl_empty_pool_returns_503_no_endpoints", func(t *testing.T) {
+		t.Parallel()
+		// Same TTL eviction, but against an EMPTY candidate pool the eviction signals genuine
+		// unavailability: 503 with the no-endpoints drop reason.
+		h := newRealFlowControlHarness(t, realFlowControlOpts{
+			saturation: 1.0,
+			candidates: nil,
+			requestTTL: 100 * time.Millisecond,
+		})
+
+		err := waitAdmit(t, admitAsync(ctx, h.ac, "ttl-empty-req"))
+		requireDropped(t, err, errcommon.ServiceUnavailable, errcommon.RequestDroppedReasonNoEndpoints)
 	})
 
 	t.Run("evicted_context_cancelled_returns_503_context_cancelled", func(t *testing.T) {
