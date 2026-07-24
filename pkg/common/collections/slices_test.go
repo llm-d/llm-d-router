@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package utils_test
+package collections_test
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/llm-d/llm-d-router/pkg/utils"
+	"github.com/llm-d/llm-d-router/pkg/common/collections"
 )
 
 func TestSliceMap(t *testing.T) {
@@ -52,7 +52,7 @@ func TestSliceMap(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ans := utils.SliceMap(c.slice, c.fn)
+			ans := collections.SliceMap(c.slice, c.fn)
 			assert.Equal(t, c.want, ans)
 		})
 	}
