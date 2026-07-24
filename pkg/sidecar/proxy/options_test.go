@@ -626,18 +626,36 @@ func TestP2PConnectorPort(t *testing.T) {
 }
 
 func TestValidateOffloadingDP(t *testing.T) {
-	t.Run("rejects offloading with data-parallel-size > 1", func(t *testing.T) {
+	t.Run("allows offloading with data-parallel-size > 1", func(t *testing.T) {
 		opts := NewOptions()
 		opts.KVConnector = KVConnectorOffloading
 		opts.DataParallelSize = 2
 		require.NoError(t, opts.Complete())
-		require.ErrorContains(t, opts.Validate(), "--kv-connector=offloading does not support --data-parallel-size > 1")
+		require.NoError(t, opts.Validate())
 	})
 
 	t.Run("allows offloading with data-parallel-size 1", func(t *testing.T) {
 		opts := NewOptions()
 		opts.KVConnector = KVConnectorOffloading
 		opts.DataParallelSize = 1
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+	})
+
+	t.Run("rejects a rank port beyond 65535", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 4
+		opts.P2PConnectorPort = 65533
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "exceeds 65535")
+	})
+
+	t.Run("allows the highest rank port at 65535", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 4
+		opts.P2PConnectorPort = 65532
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
 	})

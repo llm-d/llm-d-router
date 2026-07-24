@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -208,6 +209,8 @@ type Config struct {
 
 	// P2PConnectorPort is the prefiller's OffloadingConnector P2P tier listening port,
 	// injected as remote_port on the decode leg so the decoder can pull KV from it.
+	// With data parallelism it is the rank-0 port: rank r's tier listens on
+	// P2PConnectorPort+r and the injected port is offset by the target's rank.
 	// Meaningful with --kv-connector=offloading or --enable-p2p-pull.
 	P2PConnectorPort int
 
@@ -330,6 +333,11 @@ type Server struct {
 
 	prefillSamplerFn func(n int) int // allow test override
 
+	// dpBasePort is the rank-0 proxy port. Rank clones override config.Port
+	// (data_parallel.go), so rank derivation from a routed endpoint's port
+	// needs the pre-clone base. 0 disables derivation.
+	dpBasePort int
+
 	config Config
 }
 
@@ -350,6 +358,9 @@ func NewProxy(config Config) *Server {
 		dataParallelProxies: map[string]http.Handler{},
 		forwardDataParallel: true,
 		prefillSamplerFn:    rand.IntN,
+	}
+	if basePort, err := strconv.Atoi(config.Port); err == nil {
+		server.dpBasePort = basePort
 	}
 
 	server.setKVConnector()
@@ -419,6 +430,7 @@ func (s *Server) Clone() *Server {
 		dataParallelProxies: s.dataParallelProxies,
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,
+		dpBasePort:          s.dpBasePort,
 		config:              s.config,
 	}
 }
