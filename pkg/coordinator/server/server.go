@@ -111,6 +111,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline) (*Server, error) {
 
 	r.Post(gateway.PathChatCompletions, s.handleInference)
 	r.Post(gateway.PathCompletions, s.handleInference)
+	r.Post(gateway.DefaultGeneratePath, s.handleInference)
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
 

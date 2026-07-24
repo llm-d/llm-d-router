@@ -424,3 +424,118 @@ func TestRenderStep_ServiceError(t *testing.T) {
 		t.Fatal("expected error for 500 response")
 	}
 }
+
+func TestRenderStep_GenerateFormat_TextOnly(t *testing.T) {
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body: map[string]any{
+			"model":     "test-model",
+			"token_ids": []any{float64(1), float64(2345), float64(6789)},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.TokenIDs) != 3 {
+		t.Fatalf("expected 3 token IDs, got %d: %v", len(reqCtx.TokenIDs), reqCtx.TokenIDs)
+	}
+	if reqCtx.TokenIDs[0] != 1 || reqCtx.TokenIDs[1] != 2345 || reqCtx.TokenIDs[2] != 6789 {
+		t.Fatalf("unexpected token IDs: %v", reqCtx.TokenIDs)
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected no multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
+func TestRenderStep_GenerateFormat_Multimodal(t *testing.T) {
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body: map[string]any{
+			"model":     "test-model",
+			"token_ids": []any{float64(1), float64(32000), float64(32000), float64(32000), float64(2)},
+			"features": map[string]any{
+				"mm_hashes": map[string]any{"image": []any{"abc123"}},
+				"mm_placeholders": map[string]any{"image": []any{
+					map[string]any{"offset": float64(1), "length": float64(3)},
+				}},
+				"kwargs_data": map[string]any{"image": []any{"dGVuc29y"}},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.TokenIDs) != 5 {
+		t.Fatalf("expected 5 token IDs, got %d", len(reqCtx.TokenIDs))
+	}
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 multimodal entry, got %d", len(reqCtx.MultimodalEntries))
+	}
+	e := reqCtx.MultimodalEntries[0]
+	if e.Hash != "abc123" || e.Placeholder.Offset != 1 || e.Placeholder.Length != 3 || e.KwargsData != "dGVuc29y" {
+		t.Errorf("unexpected entry: %+v", e)
+	}
+}
+
+func TestRenderStep_GenerateFormat_MultipleImages(t *testing.T) {
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body: map[string]any{
+			"model":     "test-model",
+			"token_ids": []any{float64(1), float64(32000), float64(32000), float64(3), float64(41000), float64(41000), float64(2)},
+			"features": map[string]any{
+				"mm_hashes": map[string]any{"image": []any{"abc123", "def456"}},
+				"mm_placeholders": map[string]any{"image": []any{
+					map[string]any{"offset": float64(1), "length": float64(2)},
+					map[string]any{"offset": float64(4), "length": float64(2)},
+				}},
+				"kwargs_data": map[string]any{"image": []any{"dGVuc29yMA==", "dGVuc29yMQ=="}},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 2 {
+		t.Fatalf("expected 2 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+	want := []pipeline.MultimodalEntry{
+		{Index: 0, Hash: "abc123", KwargsData: "dGVuc29yMA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+		{Index: 1, Hash: "def456", KwargsData: "dGVuc29yMQ==", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 2}},
+	}
+	for i, w := range want {
+		if reqCtx.MultimodalEntries[i] != w {
+			t.Errorf("entry %d: expected %+v, got %+v", i, w, reqCtx.MultimodalEntries[i])
+		}
+	}
+}
+
+func TestRenderStep_GenerateFormat_MissingTokenIDs(t *testing.T) {
+	step, _ := NewRenderStep(nil, map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body:         map[string]any{"model": "test-model"},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for missing token_ids")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Errorf("expected ErrBadRequest, got %v", err)
+	}
+}

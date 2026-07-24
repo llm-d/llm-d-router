@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"net/http"
 	"strings"
@@ -124,6 +123,9 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
+		return s.executeGenerate(ctx, reqCtx)
+	}
 	if strings.Contains(reqCtx.OriginalPath, gateway.PathCompletions) {
 		return s.executeCompletions(ctx, reqCtx)
 	} else if strings.Contains(reqCtx.OriginalPath, gateway.PathChatCompletions) {
@@ -131,6 +133,32 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	}
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 	logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)
+	return nil
+}
+
+func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	logger := log.FromContext(ctx).WithName(RenderStepName)
+
+	tokenIDs, err := extractTokenIDs(reqCtx.Body["token_ids"])
+	if err != nil {
+		return fmt.Errorf("render: %w", err)
+	}
+	if err := s.checkTokenLimit(len(tokenIDs)); err != nil {
+		return err
+	}
+	reqCtx.TokenIDs = tokenIDs
+
+	features, _ := reqCtx.Body["features"].(map[string]any)
+	entries, err := extractMultimodalEntries(features)
+	if err != nil {
+		return fmt.Errorf("render: %w", err)
+	}
+	if err := s.checkPlaceholderLimit(entries); err != nil {
+		return err
+	}
+	reqCtx.MultimodalEntries = entries
+
+	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(tokenIDs), "images", len(entries))
 	return nil
 }
 
@@ -184,7 +212,7 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 			// reaching vLLM as garbage tokens.
 			tokenIDs, err := toIntSlice(p)
 			if err != nil {
-				return err
+				return fmt.Errorf("render: %w", err)
 			}
 			reqCtx.TokenIDs = tokenIDs
 			logger.V(logutil.DEFAULT).Info("prompt is token array, skipping render", "token_ids_len", len(tokenIDs))
@@ -325,29 +353,4 @@ func (s *RenderStep) checkPlaceholderLimit(entries []pipeline.MultimodalEntry) e
 		return fmt.Errorf("too many placeholder tokens: got %d, max %d: %w", total, s.maxTotalPlaceholderTokens, pipeline.ErrBadRequest)
 	}
 	return nil
-}
-
-func toIntSlice(values []any) ([]int, error) {
-	out := make([]int, 0, len(values))
-	for _, v := range values {
-		switch n := v.(type) {
-		case float64:
-			if n < 0 || n != math.Trunc(n) {
-				return nil, fmt.Errorf("render: invalid token in prompt array: %v (must be a non-negative integer): %w", v, pipeline.ErrBadRequest)
-			}
-			out = append(out, int(n))
-		case json.Number:
-			i, err := n.Int64()
-			if err != nil {
-				return nil, fmt.Errorf("render: invalid token in prompt array: %v: %w", v, pipeline.ErrBadRequest)
-			}
-			if i < 0 {
-				return nil, fmt.Errorf("render: invalid token in prompt array: %v (must be a non-negative integer): %w", v, pipeline.ErrBadRequest)
-			}
-			out = append(out, int(i))
-		default:
-			return nil, fmt.Errorf("render: invalid token in prompt array: %T: %w", v, pipeline.ErrBadRequest)
-		}
-	}
-	return out, nil
 }

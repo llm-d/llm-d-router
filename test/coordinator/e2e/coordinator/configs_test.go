@@ -60,12 +60,14 @@ const encodeEPPConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser
+- type: vllmhttp-parser
 - type: encode-filter
 - type: max-score-picker
 - type: single-profile-handler
 requestHandler:
   parsers:
   - pluginRef: openai-parser
+  - pluginRef: vllmhttp-parser
 schedulingProfiles:
 - name: default
   plugins:
@@ -78,6 +80,7 @@ const prefillEPPConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser
+- type: vllmhttp-parser
 - type: prefill-filter
 - type: queue-scorer
 - type: max-score-picker
@@ -85,6 +88,7 @@ plugins:
 requestHandler:
   parsers:
   - pluginRef: openai-parser
+  - pluginRef: vllmhttp-parser
 schedulingProfiles:
 - name: default
   plugins:
@@ -99,6 +103,7 @@ const decodeEPPConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser
+- type: vllmhttp-parser
 - type: decode-filter
 - type: queue-scorer
 - type: max-score-picker
@@ -106,6 +111,7 @@ plugins:
 requestHandler:
   parsers:
   - pluginRef: openai-parser
+  - pluginRef: vllmhttp-parser
 schedulingProfiles:
 - name: default
   plugins:
