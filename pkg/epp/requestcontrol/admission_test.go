@@ -205,6 +205,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 		priority        int
 		fcOutcome       fctypes.QueueOutcome
 		fcErr           error
+		locatorPods     []fwkdl.Endpoint
 		expectErr       bool
 		expectErrCode   string
 		expectErrSubstr string
@@ -246,10 +247,22 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			priority:        0,
 			fcOutcome:       fctypes.QueueOutcomeEvictedTTL,
 			fcErr:           errors.New("timeout"),
+			locatorPods:     []fwkdl.Endpoint{fwkdl.NewEndpoint(nil, nil)},
 			expectErr:       true,
-			expectErrCode:   errcommon.ServiceUnavailable,
+			expectErrCode:   errcommon.ResourceExhausted,
 			expectErrSubstr: "request timed out in queue: timeout",
 			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)},
+		},
+		{
+			name:            "fc_evict_ttl_empty_pool",
+			priority:        0,
+			fcOutcome:       fctypes.QueueOutcomeEvictedTTL,
+			fcErr:           errors.New("timeout"),
+			locatorPods:     []fwkdl.Endpoint{},
+			expectErr:       true,
+			expectErrCode:   errcommon.ServiceUnavailable,
+			expectErrSubstr: "request timed out in queue and no endpoints are available: timeout",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		},
 		{
 			name:            "fc_evict_context_cancelled",
@@ -291,7 +304,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fc := &mockFlowController{outcome: tc.fcOutcome, err: tc.fcErr}
-			ac := NewFlowControlAdmissionController(fc, "pool")
+			ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{Candidates: tc.locatorPods})
 
 			err := ac.Admit(ctx, reqCtx, tc.priority)
 
@@ -316,12 +329,13 @@ func TestTranslateFlowControlOutcome(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		outcome    fctypes.QueueOutcome
-		err        error
-		wantCode   string
-		wantReason string
-		wantNil    bool
+		name         string
+		outcome      fctypes.QueueOutcome
+		err          error
+		ttlPoolEmpty bool
+		wantCode     string
+		wantReason   string
+		wantNil      bool
 	}{
 		{
 			name:    "dispatched returns nil",
@@ -337,11 +351,19 @@ func TestTranslateFlowControlOutcome(t *testing.T) {
 			wantReason: string(errcommon.RequestDroppedReasonSaturated),
 		},
 		{
-			name:       "TTL expiry returns 503",
+			name:       "TTL expiry with endpoints returns 429",
 			outcome:    fctypes.QueueOutcomeEvictedTTL,
 			err:        fctypes.ErrTTLExpired,
-			wantCode:   errcommon.ServiceUnavailable,
+			wantCode:   errcommon.ResourceExhausted,
 			wantReason: string(errcommon.RequestDroppedReasonTTLExpired),
+		},
+		{
+			name:         "TTL expiry with empty pool returns 503",
+			outcome:      fctypes.QueueOutcomeEvictedTTL,
+			err:          fctypes.ErrTTLExpired,
+			ttlPoolEmpty: true,
+			wantCode:     errcommon.ServiceUnavailable,
+			wantReason:   string(errcommon.RequestDroppedReasonNoEndpoints),
 		},
 		{
 			name:       "context cancellation returns 503",
@@ -375,7 +397,7 @@ func TestTranslateFlowControlOutcome(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := translateFlowControlOutcome(tt.outcome, tt.err)
+			result := translateFlowControlOutcome(tt.outcome, tt.err, tt.ttlPoolEmpty)
 			if tt.wantNil {
 				require.NoError(t, result)
 				return
