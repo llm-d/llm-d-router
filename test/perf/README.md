@@ -6,9 +6,9 @@ This directory contains the performance testing pipeline for the Endpoint Picker
 
 - **`config/`**: Configuration manifests for test runs.
   - **`router-configs/`**: Router Helm configuration values recipes (e.g. `optimized-baseline.yaml`).
+  - **`studyanalysis/`**: Detailed analysis reports covering prefix-caching scaling performance, ITL streaming duration impact, input/output token scaling, and high QPS comparisons.
   - `llm-d-sim-deployment.yaml` / `llm-d-sim-service.yaml`: Kubernetes manifests for deploying the vLLM simulator.
   - `shared_prefix_job1.yaml`: Performance test workload specification defining load stages, API target, and request distributions.
-- **`results/`**: Execution results logged as Markdown tables, grouped by test recipe name (e.g., `results/optimized-baseline/`). If profiling is enabled, the `.pprof` and `.svg` files are saved here as well.
 - **`run_nightly_perf.py`**: The Python orchestrator script responsible for test namespace setup, EPP and simulator deployments, pprof profiling collection, metrics scraping, and markdown generation. It assumes that `kubectl` is already configured to target an active Kubernetes cluster.
 
 ---

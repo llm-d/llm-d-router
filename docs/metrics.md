@@ -110,6 +110,15 @@ Label `{name}` (the pool name).
 | `scheduler_e2e_duration_seconds` | Histogram | End-to-end scheduling latency. |
 | `scheduler_attempts_total` | Counter | Scheduling attempts; labels `{status, target_model_name, endpoint_name, namespace, port}`. |
 
+### EPP processing overhead
+
+Unlabelled.
+
+| Name | Type | Notes |
+|---|---|---|
+| `request_processing_duration_seconds` | Histogram | Time from request receipt until the request body has been handled. Includes admission control, so under the flow control feature gate this covers queue wait; `flow_control_request_queue_duration_seconds` separates it out. |
+| `response_processing_duration_seconds` | Histogram | Sum of the per-chunk handler slices for a streamed response, so model-server generation time between chunks is excluded. For a non-streaming response, the interval from response headers to completion. |
+
 ### Plugin, info, and model rewrite
 
 | Name | Type | Notes |
