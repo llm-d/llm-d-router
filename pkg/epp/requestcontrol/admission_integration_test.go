@@ -98,6 +98,7 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 	detector := &mockSaturationDetector{
 		SaturationFunc: func(context.Context, []fwkdl.Endpoint) float64 { return opts.saturation },
 	}
+	candidates := &mocks.MockEndpointCandidates{Candidates: opts.candidates}
 	fc := fccontroller.NewFlowController(ctx, "test-pool", &fccontroller.Config{
 		DefaultRequestTTL:        requestTTL,
 		ExpiryCleanupInterval:    10 * time.Millisecond,
@@ -105,13 +106,13 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 	}, fccontroller.Deps{
 		Registry:           reg,
 		SaturationDetector: detector,
-		EndpointCandidates: &mocks.MockEndpointCandidates{Candidates: opts.candidates},
+		EndpointCandidates: candidates,
 		UsageLimitPolicy:   usagelimits.DefaultPolicy(),
 	})
 
 	return &realFlowControlHarness{
 		cancel: cancel,
-		ac:     NewFlowControlAdmissionController(fc, "test-pool"),
+		ac:     NewFlowControlAdmissionController(fc, "test-pool", candidates),
 		reg:    reg,
 	}
 }
