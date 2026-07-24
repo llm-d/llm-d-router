@@ -80,7 +80,7 @@ type subscriberManager interface {
 }
 
 // Producer is a DataProducer plugin that maintains a KV-block prefix-cache
-// index by subscribing to vLLM KV-events and writes per-endpoint
+// index by subscribing to engine KV-events and writes per-endpoint
 // PrefixCacheMatchInfo for each request. Operators pair it with the
 // generic prefix-cache-scorer (set prefixMatchInfoProducerName to this
 // producer's instance name) to route requests by precise cache locality.
@@ -178,7 +178,11 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		return nil, fmt.Errorf("failed to create KVBlockScorer: %w", err)
 	}
 
-	pool := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, engineadapter.NewVLLMAdapter())
+	adapter, err := engineadapter.NewAdapter(config.KVEventsConfig.EngineType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
+	}
+	pool := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
 	pool.Start(ctx)
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)

@@ -132,6 +132,63 @@ func TestCanonicalWritePath_ManyToOne(t *testing.T) {
 	}
 }
 
+func TestSGLangSubcanonicalPagesAccumulateAcrossBatches(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+	pool.engineType = "sglang"
+
+	for i := range 32 {
+		parentHash := uint64(0)
+		if i > 0 {
+			parentHash = uint64(100 + i - 1) // #nosec G115 -- bounded test data
+		}
+		batch := &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+			BlockHashes: []uint64{uint64(100 + i)}, // #nosec G115 -- bounded test data
+			Tokens:      []uint32{uint32(i + 1)},   // #nosec G115 -- bounded test data
+			ParentHash:  parentHash,
+			BlockSize:   1,
+		}}}
+		pool.processEventBatch(ctx, batch, "sglang-pod", "test-model")
+
+		if i == 14 {
+			_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(100))
+			require.Error(t, err, "partial canonical block must not be indexed")
+		}
+	}
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, makeTokens(32), "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, canonicalKeys, 2)
+
+	for i := range 32 {
+		requestKey, err := idx.GetRequestKey(ctx, kvblock.BlockHash(100+i))
+		require.NoError(t, err, "SGLang page hash %d should be indexed", 100+i)
+		assert.Equal(t, canonicalKeys[i/16], requestKey)
+	}
+
+	branchTokens := append(makeTokens(10), 101, 102, 103, 104, 105, 106)
+	for i := range 6 {
+		parentHash := uint64(109)
+		if i > 0 {
+			parentHash = uint64(200 + i - 1) // #nosec G115 -- bounded test data
+		}
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+			BlockHashes: []uint64{uint64(200 + i)}, // #nosec G115 -- bounded test data
+			Tokens:      []uint32{uint32(101 + i)}, // #nosec G115 -- bounded test data
+			ParentHash:  parentHash,
+			BlockSize:   1,
+		}}}, "sglang-pod", "test-model")
+	}
+	branchKeys, err := tp.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, branchTokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, branchKeys, 1)
+	branchRequestKey, err := idx.GetRequestKey(ctx, kvblock.BlockHash(205))
+	require.NoError(t, err)
+	assert.Equal(t, branchKeys[0], branchRequestKey)
+}
+
 // TestCanonicalWritePath_OneToMany verifies the 1:many mapping when engine block size (128)
 // is larger than canonical (64): 1 engine key maps to 2 canonical request keys.
 func TestCanonicalWritePath_OneToMany(t *testing.T) {
