@@ -115,6 +115,14 @@ func (in *EndpointPickerConfig) DeepCopyInto(out *EndpointPickerConfig) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.Disaggregation != nil {
+		in, out := &in.Disaggregation, &out.Disaggregation
+		*out = new(json.RawMessage)
+		if *in != nil {
+			**out = make(json.RawMessage, len(**in))
+			copy(**out, **in)
+		}
+	}
 	if in.DataLayer != nil {
 		in, out := &in.DataLayer, &out.DataLayer
 		*out = new(DataLayerConfig)

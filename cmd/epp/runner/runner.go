@@ -369,13 +369,6 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		setupLog.Error(err, "Failed to setup datastore")
 		return nil, nil, err
 	}
-	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
-	if err != nil {
-		setupLog.Error(err, "Failed to parse configuration")
-		return nil, nil, err
-	}
-	setupLog.Info("EPP config after phase two", "config", eppConfig)
-
 	// --- Setup Metrics Server ---
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.Register(r.customCollectors...)
@@ -403,6 +396,9 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	isLeader := &atomic.Bool{}
 	isLeader.Store(false)
 
+	// The Manager is created before parseConfigurationPhaseTwo so plugins can
+	// receive it through the framework Handle (WithManager) and join the
+	// shared informer cache instead of running their own watches.
 	mgr, err := runserver.NewDefaultManager(controllerCfg, *gknn, cfg, metricsServerOptions, opts.EnableLeaderElection, managerOverrides...)
 	if err != nil {
 		setupLog.Error(err, "Failed to create controller manager")
@@ -429,6 +425,13 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		}
 	}
 
+	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, mgr)
+	if err != nil {
+		setupLog.Error(err, "Failed to parse configuration")
+		return nil, nil, err
+	}
+	setupLog.Info("EPP config after phase two", "config", eppConfig)
+
 	if r.PluginHandle == nil {
 		setupLog.Info("Plugin state debug handler not registered: plugin handle unavailable")
 	} else if err = runserver.SetupPluginStateDebugHandler(mgr, r.PluginHandle); err != nil {
@@ -444,6 +447,11 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	}
 
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
+
+	if err := r.registerDisaggregation(ctx, mgr, gknn.Namespace); err != nil {
+		setupLog.Error(err, "failed to register disaggregation controller")
+		return nil, nil, err
+	}
 
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
 
@@ -714,12 +722,15 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 	}
 }
 
-func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
+func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore, mgr ctrl.Manager) (*config.Config, error) {
 	logger := log.FromContext(ctx)
 
 	applyDeprecatedEnvFeatureGate(enableExperimentalFlowControlLayer, "Flow Control layer", flowcontrol.FeatureGate, rawConfig)
 
-	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
+	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds),
+		fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry),
+		fwkplugin.WithManager(mgr),
+	)
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 
@@ -955,7 +966,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		"(InferenceModelRewrite, InferenceObjective reconciler, and any " +
 		"k8s-notification-source data layer plugins); see docs/discovery.md")
 
-	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+	// File-discovery mode has no Manager (no k8s cluster); pass nil. Plugins
+	// that require handle.Manager() must guard against nil accordingly.
+	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, nil)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err

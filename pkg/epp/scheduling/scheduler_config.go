@@ -43,3 +43,25 @@ func (c *SchedulerConfig) String() string {
 		c.profiles,
 	)
 }
+
+// Profiles exposes the internal profile map for programmatic augmentation by
+// native subsystems that need to attach filters, scorers, or pickers after
+// configuration parsing (e.g. pkg/epp/disaggregation).
+//
+// Returns a fresh map keyed by profile name. The stored value type is always
+// *SchedulerProfile — the only constructor path (NewSchedulerProfile) — so
+// callers can call PrependFilter, AppendFilter, and AddPlugins without a
+// type assertion. Any future entry that doesn't satisfy that shape is
+// silently skipped rather than panicking.
+//
+// The returned map is a snapshot; adding or deleting keys does not affect
+// the scheduler's internal state.
+func (c *SchedulerConfig) Profiles() map[string]*SchedulerProfile {
+	snapshot := make(map[string]*SchedulerProfile, len(c.profiles))
+	for name, profile := range c.profiles {
+		if concrete, ok := profile.(*SchedulerProfile); ok {
+			snapshot[name] = concrete
+		}
+	}
+	return snapshot
+}
