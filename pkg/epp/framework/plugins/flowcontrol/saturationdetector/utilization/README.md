@@ -30,7 +30,11 @@ health of model-server metrics collection (scrape path, port, TLS, auth). A flee
 `flow_control_pool_saturation` at 1.0 and halts dispatch entirely. The `flow_control_stale_endpoints` gauge and a
 rate-limited detector log distinguish this from genuine overload: stale endpoints read exactly 1.0, while genuine
 oversubscription typically reads above 1.0. This fail-closed posture is deliberate — admitting blind on missing
-data risks overloading model servers with no backpressure signal at all.
+data risks overloading model servers with no backpressure signal at all. Staleness also tends to correlate with
+overload: a server too busy to serve its metrics endpoint is often the one that is saturated, so failing open
+would hide exactly the wrong endpoints. The posture is not configurable; if field evidence shows a need, a
+staleness policy (for example, holding the last known score for a bounded window) can be added later without
+changing this default.
 
 ### Role in Scheduling (The Traffic Shaper)
 The detector implements the `Filter` interface to protect individual endpoints. It removes endpoints from candidate lists if their telemetry is stale, or if they exceed specific safety limits:
