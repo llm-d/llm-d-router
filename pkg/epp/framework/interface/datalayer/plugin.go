@@ -50,11 +50,20 @@ type PollInput[D any] struct {
 	Endpoint Endpoint
 }
 
+// StreamInput pairs the stream payload with the endpoint being monitored.
+type StreamInput[D any] struct {
+	Payload  D
+	Endpoint Endpoint
+}
+
 // EndpointExtractor is the typed contract for endpoint-lifecycle extractors.
 type EndpointExtractor = Extractor[EndpointEvent]
 
 // PollingExtractor is the typed contract for poll-based extractors.
 type PollingExtractor[T any] = Extractor[PollInput[T]]
+
+// StreamingExtractor is the typed contract for stream-based extractors.
+type StreamingExtractor[T any] = Extractor[StreamInput[T]]
 
 // NotificationExtractor is the typed contract for k8s-event extractors.
 // GVK identifies the kind this extractor handles; it must match the paired
@@ -77,6 +86,15 @@ type NotificationExtractor interface {
 type PollingDispatcher interface {
 	plugin.Plugin
 	Dispatch(ctx context.Context, ep Endpoint) error
+	AppendExtractor(ext plugin.Plugin) error
+}
+
+// StreamingDispatcher is the framework's contract for push/stream sources (e.g. ZMQ).
+// The source owns its extractors, receives continuous message streams for an endpoint,
+// and dispatches incoming payloads to its bound extractors in insertion order.
+type StreamingDispatcher interface {
+	plugin.Plugin
+	Start(ctx context.Context, ep Endpoint) error
 	AppendExtractor(ext plugin.Plugin) error
 }
 

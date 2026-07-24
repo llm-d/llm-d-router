@@ -27,6 +27,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
+	sourcezmq "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/zmqmetrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -302,7 +303,7 @@ func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handl
 	if cfg.DataLayer != nil && cfg.DataLayer.InjectDefaults != nil && !*cfg.DataLayer.InjectDefaults {
 		return nil
 	}
-	if cfg.DataLayer != nil && hasSourceOfType(cfg.DataLayer, sourcemetrics.MetricsDataSourceType) {
+	if cfg.DataLayer != nil && (hasSourceOfType(cfg.DataLayer, sourcemetrics.MetricsDataSourceType) || hasSourceOfType(cfg.DataLayer, sourcezmq.ZMQDataSourceType)) {
 		return nil
 	}
 

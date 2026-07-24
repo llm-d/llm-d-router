@@ -71,10 +71,12 @@ import (
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	exttopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/topology"
+	extractorzmq "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/zmqmetrics"
 	srcdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/dcgm"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	sourcezmq "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/zmqmetrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	programaware "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/program-aware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
@@ -640,6 +642,8 @@ func (r *Runner) registerInTreePlugins() {
 	// register datalayer metrics collection plugins
 	fwkplugin.Register(sourcemetrics.MetricsDataSourceType, sourcemetrics.MetricsDataSourceFactory)
 	fwkplugin.Register(extractormetrics.MetricsExtractorType, extractormetrics.CoreMetricsExtractorFactory)
+	fwkplugin.Register(sourcezmq.ZMQDataSourceType, sourcezmq.ZMQDataSourceFactory)
+	fwkplugin.Register(extractorzmq.ZMQExtractorType, extractorzmq.ZMQExtractorFactory)
 	// register datalayer notification source plugins
 	fwkplugin.Register(sourcenotifications.NotificationSourceType, sourcenotifications.NotificationSourceFactory)
 	fwkplugin.Register(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointSourceFactory)

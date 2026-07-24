@@ -122,12 +122,15 @@ func TestCollectorStartInputs(t *testing.T) {
 		name        string
 		ctxCanceled bool
 		sources     []fwkdl.PollingDispatcher
+		streamers   []fwkdl.StreamingDispatcher
 		wantErr     bool
 		wantErrIs   error
 	}{
 		{name: "valid sources, live ctx", sources: sources},
-		{name: "empty sources", sources: []fwkdl.PollingDispatcher{}, wantErr: true},
-		{name: "nil source", sources: []fwkdl.PollingDispatcher{nil}, wantErr: true},
+		{name: "valid streamers, live ctx", streamers: []fwkdl.StreamingDispatcher{&mockStreamingDispatcher{kind: "stream"}}},
+		{name: "empty sources and streamers", sources: []fwkdl.PollingDispatcher{}, wantErr: true},
+		{name: "nil poller", sources: []fwkdl.PollingDispatcher{nil}, wantErr: true},
+		{name: "nil streamer", streamers: []fwkdl.StreamingDispatcher{nil}, wantErr: true},
 		{name: "cancelled parent ctx", ctxCanceled: true, sources: sources, wantErr: true, wantErrIs: context.Canceled},
 	}
 
@@ -141,13 +144,13 @@ func TestCollectorStartInputs(t *testing.T) {
 
 			c := NewCollector()
 			ticker := mocks.NewTicker()
-			err := c.Start(ctx, ticker, endpoint, tt.sources)
+			err := c.Start(ctx, ticker, endpoint, tt.sources, tt.streamers)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.wantErrIs != nil {
 					assert.ErrorIs(t, err, tt.wantErrIs)
 				}
-				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources),
+				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, nil),
 					"retry after failed Start should succeed")
 			} else {
 				require.NoError(t, err)
@@ -162,8 +165,8 @@ func TestCollectorCanStartOnlyOnce(t *testing.T) {
 	ticker := mocks.NewTicker()
 	ctx := context.Background()
 
-	require.NoError(t, c.Start(ctx, ticker, endpoint, sources))
-	assert.Error(t, c.Start(ctx, ticker, endpoint, sources),
+	require.NoError(t, c.Start(ctx, ticker, endpoint, sources, nil))
+	assert.Error(t, c.Start(ctx, ticker, endpoint, sources, nil),
 		"second Start after success should error")
 	c.Stop()
 }
@@ -182,7 +185,7 @@ func TestCollectorStop(t *testing.T) {
 			setup: func(t *testing.T) *Collector {
 				c := NewCollector()
 				ticker := mocks.NewTicker()
-				_ = c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{})
+				_ = c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{}, nil)
 				return c
 			},
 		},
@@ -191,7 +194,7 @@ func TestCollectorStop(t *testing.T) {
 			setup: func(t *testing.T) *Collector {
 				c := NewCollector()
 				ticker := mocks.NewTicker()
-				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources))
+				require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, nil))
 				return c
 			},
 		},
@@ -213,7 +216,7 @@ func TestCollectorCollectsOnTicks(t *testing.T) {
 	c := NewCollector()
 	ticker := mocks.NewTicker()
 
-	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{source}))
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{source}, nil))
 	defer c.Stop()
 
 	ticker.Tick()
@@ -223,6 +226,47 @@ func TestCollectorCollectsOnTicks(t *testing.T) {
 		return atomic.LoadInt64(&source.CallCount) == 2
 	}, 1*time.Second, 2*time.Millisecond, "expected 2 collections")
 }
+
+// TestCollectorStreamingDispatcher verifies the streaming dispatcher lifecycle in Collector.
+func TestCollectorStreamingDispatcher(t *testing.T) {
+	started := make(chan struct{})
+	streamer := &mockStreamingDispatcher{kind: "zmq-test", started: started}
+
+	c := NewCollector()
+	ticker := mocks.NewTicker()
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, nil, []fwkdl.StreamingDispatcher{streamer}))
+
+	select {
+	case <-started:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected streaming dispatcher to start")
+	}
+
+	c.Stop()
+}
+
+type mockStreamingDispatcher struct {
+	kind     string
+	started  chan struct{}
+	stopWait chan struct{}
+	err      error
+}
+
+func (m *mockStreamingDispatcher) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: m.kind, Name: m.kind}
+}
+func (m *mockStreamingDispatcher) Start(ctx context.Context, _ fwkdl.Endpoint) error {
+	if m.started != nil {
+		close(m.started)
+	}
+	if m.stopWait != nil {
+		<-m.stopWait
+	} else {
+		<-ctx.Done()
+	}
+	return m.err
+}
+func (m *mockStreamingDispatcher) AppendExtractor(_ fwkplugin.Plugin) error { return nil }
 
 // TestCollectorErrorMetrics confirms Poll/Extract errors increment per-event
 // counters (no transition dedup) and successes do not.
@@ -285,7 +329,7 @@ func TestCollectorErrorMetrics(t *testing.T) {
 
 			c := NewCollector()
 			ticker := mocks.NewTicker()
-			require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{src}))
+			require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{src}, nil))
 			defer c.Stop()
 
 			for i := 0; i < tt.ticks; i++ {
@@ -324,7 +368,7 @@ func TestCollectorRapidStartStopRaceFree(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		c := NewCollector()
 		ticker := mocks.NewTicker()
-		require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{src}))
+		require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{src}, nil))
 		ticker.Tick()
 		c.Stop()
 	}
@@ -335,7 +379,7 @@ func TestCollectorRapidStartStopRaceFree(t *testing.T) {
 func TestCollectorConcurrentStopRaceFree(t *testing.T) {
 	c := NewCollector()
 	ticker := mocks.NewTicker()
-	require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources))
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, sources, nil))
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
