@@ -464,6 +464,8 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdSchedulerAttemptsTotal)
 		metrics.Registry.MustRegister(pluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginProcessingLatencies)
+		metrics.Registry.MustRegister(llmdRequestProcessingLatency)
+		metrics.Registry.MustRegister(llmdResponseProcessingLatency)
 		metrics.Registry.MustRegister(inferenceExtensionInfo)
 		metrics.Registry.MustRegister(llmdInferenceExtensionInfo)
 		metrics.Registry.MustRegister(flowControlRequestQueueDuration)
@@ -537,6 +539,8 @@ func Reset() {
 	llmdSchedulerAttemptsTotal.Reset()
 	pluginProcessingLatencies.Reset()
 	llmdPluginProcessingLatencies.Reset()
+	llmdRequestProcessingLatency.Reset()
+	llmdResponseProcessingLatency.Reset()
 	inferenceExtensionInfo.Reset()
 	llmdInferenceExtensionInfo.Reset()
 	flowControlRequestQueueDuration.Reset()
@@ -773,6 +777,18 @@ func RecordInferencePoolReadyPods(name string, runningPods float64) {
 func RecordSchedulerE2ELatency(duration time.Duration) {
 	schedulerE2ELatency.WithLabelValues().Observe(duration.Seconds())
 	llmdSchedulerE2ELatency.WithLabelValues().Observe(duration.Seconds())
+}
+
+// RecordRequestProcessingLatency records the EPP request processing latency,
+// measured from request receipt until the request body has been handled.
+func RecordRequestProcessingLatency(duration time.Duration) {
+	llmdRequestProcessingLatency.WithLabelValues().Observe(duration.Seconds())
+}
+
+// RecordResponseProcessingLatency records the EPP response processing latency
+// for a single request.
+func RecordResponseProcessingLatency(duration time.Duration) {
+	llmdResponseProcessingLatency.WithLabelValues().Observe(duration.Seconds())
 }
 
 // RecordSchedulerAttempt records a scheduling attempt with status and endpoint information.

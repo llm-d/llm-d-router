@@ -782,6 +782,11 @@ func TestConcurrentEnqueueDuringShutdown(t *testing.T) {
 
 	h := newHarness(t, harnessOpts{
 		detector: detector,
+		controllerCfg: &controller.Config{
+			DefaultRequestTTL:        0,
+			ExpiryCleanupInterval:    10 * time.Millisecond,
+			EnqueueChannelBufferSize: 100,
+		},
 	})
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
@@ -791,8 +796,8 @@ func TestConcurrentEnqueueDuringShutdown(t *testing.T) {
 	for i := 0; i < numRequests; i++ {
 		id := fmt.Sprintf("req-%d", i)
 		go func() {
-			req := &testRequest{id: id, key: key, byteSize: 100, ttl: 5 * time.Minute}
-			outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+			req := &testRequest{id: id, key: key, byteSize: 100}
+			outcome, err := h.fc.EnqueueAndWait(context.Background(), req)
 			results <- dispatchResult{id: id, outcome: outcome, err: err}
 		}()
 	}
@@ -809,6 +814,8 @@ func TestConcurrentEnqueueDuringShutdown(t *testing.T) {
 				"no request should dispatch (detector is blocked and controller is shutting down)")
 			require.Error(t, r.err,
 				"every request should receive an error during shutdown")
+			require.ErrorIs(t, r.err, fcTypes.ErrFlowControllerNotRunning,
+				"every request should report the shutdown cause")
 		case <-time.After(5 * time.Second):
 			t.Fatalf("request %d hung during concurrent shutdown", i)
 		}

@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: llm-d-sim
+  name: llm-d-sim
+  namespace: llm-d-sim
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: llm-d-sim
+  template:
+    metadata:
+      labels:
+        app: llm-d-sim
+    spec:
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: llm-d-sim
+      containers:
+      - args:
+        - --model
+        - deepseek-ai/DeepSeek-V4-Flash
+        - --port
+        - '8000'
+        - --max-model-len
+        - '1000000'
+        - --max-num-seqs
+        - '256'
+        - --max-waiting-queue-length
+        - '2048'
+        - --inter-token-latency
+        - 0.1ms
+        - --prefill-time-per-token
+        - 0.1us
+        - --prefill-overhead
+        - 5ms
+        - --enable-kvcache
+        - --enable-prefix-caching
+        - --kv-cache-size
+        - '1000000'
+        - --block-size
+        - '16'
+        # - --render-timeout
+        # - 120s
+        # - --mm-render-timeout
+        # - 120s
+        - --force-dummy-tokenizer
+        - --max-request-body-size-mb
+        - '10'
+        - '--v'
+        - '4'
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: GOMEMLIMIT
+          value: 12GiB
+        - name: GOGC
+          value: "50"
+        image: ghcr.io/llm-d/llm-d-inference-sim:v0.10.2
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        name: vllm-sim
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        - containerPort: 5557
+          name: zmq-kv-events
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: '16'
+            memory: 16Gi
