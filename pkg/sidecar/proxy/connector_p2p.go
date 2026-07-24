@@ -269,14 +269,21 @@ func (s *Server) p2pPortFor(targetHostPort string) int {
 	targetHostPort, _ = strings.CutPrefix(targetHostPort, "http://")
 	_, portStr, err := net.SplitHostPort(targetHostPort)
 	if err != nil {
+		s.logger.V(logging.DEBUG).Info("P2P target has no parsable port, using base P2P port",
+			"target", targetHostPort, "error", err)
 		return base
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
+		s.logger.V(logging.DEBUG).Info("P2P target port is not numeric, using base P2P port",
+			"target", targetHostPort, "error", err)
 		return base
 	}
 	rank := port - s.dpBasePort
 	if rank < 0 || rank >= s.config.DataParallelSize {
+		s.logger.V(logging.DEBUG).Info("P2P target port outside the DP rank range, using base P2P port",
+			"target", targetHostPort, "dpBasePort", s.dpBasePort,
+			"dataParallelSize", s.config.DataParallelSize)
 		return base
 	}
 	return base + rank
