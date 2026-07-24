@@ -1191,6 +1191,10 @@ func TestProcessor(t *testing.T) {
 				assert.Equal(t, types.QueueOutcomeEvictedContextCancelled, finalState.Outcome,
 					"Outcome should be EvictedContextCancelled")
 				assert.ErrorIs(t, finalState.Err, types.ErrContextCancelled, "Error should be ErrContextCancelled")
+
+				// Verify the sweep path recorded the drop.
+				assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load(),
+					"Drop should be recorded for EvictedContextCancelled")
 			})
 
 			t.Run("should not sweep items not finalized", func(t *testing.T) {
@@ -1445,5 +1449,126 @@ func TestProcessor(t *testing.T) {
 				assert.Nil(t, item.FinalState(), "Item should not be finalized by the processor")
 			})
 		})
+	})
+}
+
+// TestProcessor_DropSummary verifies the periodic drop-count accounting introduced in #2101.
+func TestProcessor_DropSummary(t *testing.T) {
+	t.Parallel()
+
+	// Verify that the dropCounts array is large enough to hold every QueueOutcome value.
+	// If new outcomes are added in the future, this check will catch them at compile time.
+	var _ = [types.NumQueueOutcomes]struct{}{}
+
+	t.Run("capacity rejection increments counter", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+
+		// Force capacity-full: band has 1 slot already used, CapacityRequests=1.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 1, Len: 1},
+				},
+			}
+		}
+
+		item := h.newTestItem("req-cap", testFlow, testTTL)
+		h.processor.enqueue(item)
+
+		outcome, _ := h.waitForFinalization(item)
+		require.Equal(t, types.QueueOutcomeRejectedCapacity, outcome)
+
+		count := h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load()
+		assert.Equal(t, uint64(1), count, "RejectedCapacity counter should be 1 after one capacity rejection")
+	})
+
+	t.Run("counters reset after flush", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+
+		// Force capacity-full.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 1, Len: 1},
+				},
+			}
+		}
+
+		item := h.newTestItem("req-flush", testFlow, testTTL)
+		h.processor.enqueue(item)
+		h.waitForFinalization(item) //nolint:errcheck
+
+		require.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load())
+
+		// Flushing should zero out all counters.
+		h.processor.flushDropSummary()
+		assert.Equal(t, uint64(0), h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load(),
+			"Counter should be 0 after flush")
+	})
+
+	t.Run("multiple outcome types are counted independently", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+
+		// Reject via capacity: band has 1 slot already used, CapacityRequests=1.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 1, Len: 1},
+				},
+			}
+		}
+		for i := range 2 {
+			item := h.newTestItem(fmt.Sprintf("req-multi-cap-%d", i), testFlow, testTTL)
+			h.processor.enqueue(item)
+			h.waitForFinalization(item) //nolint:errcheck
+		}
+
+		// Reject via configuration error (RejectedOther): pass capacity, fail priority band lookup.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 100, Len: 0},
+				},
+			}
+		}
+		h.PriorityBandAccessorFunc = func(priority int) (flowcontrol.PriorityBandAccessor, error) {
+			return nil, errors.New("forced priority band failure")
+		}
+		item := h.newTestItem("req-multi-other", testFlow, testTTL)
+		h.processor.enqueue(item)
+		h.waitForFinalization(item) //nolint:errcheck
+
+		assert.Equal(t, uint64(2), h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load(),
+			"RejectedCapacity counter should be 2")
+		assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeRejectedOther].Load(),
+			"RejectedOther counter should be 1")
+	})
+
+	t.Run("shutdown eviction counts unfinalized queued items exactly once", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		mockQueue := h.addQueue(testFlow)
+
+		item := h.newTestItem("req-evict-shutdown", testFlow, testTTL)
+		require.NoError(t, mockQueue.Add(item))
+		require.Nil(t, item.FinalState(), "item must not be finalized before evictAll")
+
+		// evictAll runs on shutdown to drain all queues.
+		h.processor.evictAll()
+
+		h.waitForFinalization(item) //nolint:errcheck
+
+		assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedOther].Load(),
+			"evictAll should count the unfinalized queued item exactly once")
 	})
 }
