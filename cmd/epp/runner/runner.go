@@ -456,7 +456,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
 	endpointCandidates, admissionController, priorityBandControlPlane := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
-	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig, eppConfig.DataConfig.Store)
 
 	serverRunner := &runserver.ExtProcServerRunner{
 		GrpcPort:                         opts.GRPCPort,
@@ -987,7 +987,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// File-discovery mode has no InferenceObjective reconciler to drive the
 	// control plane; static bands from config apply at registry construction.
 	endpointCandidates, admissionController, _ := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
-	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig, eppConfig.DataConfig.Store)
 
 	gknn := common.GKNN{
 		NamespacedName: types.NamespacedName{Name: poolName, Namespace: namespace},

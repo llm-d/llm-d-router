@@ -432,6 +432,14 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 		return &cfg, nil
 	}
 
+	if ref := rawDataConfig.CrossReplicaStorePluginRef; ref != "" {
+		store, ok := handle.Plugin(ref).(fwkdl.CrossReplicaStore)
+		if !ok {
+			return nil, fmt.Errorf("the plugin %s is not a fwkdl.CrossReplicaStore", ref)
+		}
+		cfg.Store = store
+	}
+
 	for _, source := range rawDataConfig.Sources {
 		if sourcePlugin, ok := handle.Plugin(source.PluginRef).(fwkdl.DataSource); ok {
 			sourceConfig := datalayer.DataSourceConfig{

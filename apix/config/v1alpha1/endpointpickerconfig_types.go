@@ -238,13 +238,19 @@ type DataLayerConfig struct {
 	// endpoints. This enables running the EPP without a Kubernetes cluster.
 	// If omitted, the EPP uses the default Kubernetes-based discovery.
 	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
+	// +optional
+	// CrossReplicaStorePluginRef names the plugin instance to use as the cross-EPP
+	// cross-replica store. The reference is to the name of an entry in the
+	// top-level Plugins section. If omitted, no cross-replica store is used
+	// and plugins that read cross-replica state fall back to local data.
+	CrossReplicaStorePluginRef string `json:"crossReplicaStorePluginRef,omitempty"`
 }
 
 func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v, Discovery: %v}", dlc.Sources, dlc.Discovery)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v, CrossReplicaStorePluginRef: %s}", dlc.Sources, dlc.Discovery, dlc.CrossReplicaStorePluginRef)
 }
 
 // DiscoveryConfig references the EndpointDiscovery plugin to use.

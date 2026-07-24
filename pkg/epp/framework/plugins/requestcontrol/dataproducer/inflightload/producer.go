@@ -116,6 +116,7 @@ var (
 	_ requestcontrol.DataProducer          = &InFlightLoadProducer{}
 	_ datalayer.EndpointExtractor          = (*InFlightLoadProducer)(nil)
 	_ datalayer.Registrant                 = &InFlightLoadProducer{}
+	_ datalayer.CrossReplicaContributor    = (*InFlightLoadProducer)(nil)
 	_ fwkplugin.ConsumerPlugin             = &InFlightLoadProducer{}
 	_ fwkplugin.StateDumper                = &InFlightLoadProducer{}
 )
@@ -276,6 +277,32 @@ func (p *InFlightLoadProducer) RegisterDependencies(r datalayer.Registrar) error
 		Extractor:     p,
 		DefaultSource: sourcenotifications.NewEndpointDataSource(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
 	})
+}
+
+// CrossReplicaState declares the cross-EPP state this plugin contributes.
+func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
+	return datalayer.CrossReplicaSpec{
+		StateKey:     datalayer.StateKey("inflight:" + p.typedName.Name),
+		AttributeKey: p.dk.String(),
+		Supply: func(endpointID string) func() datalayer.Cloneable {
+			return func() datalayer.Cloneable {
+				return &attrconcurrency.InFlightLoad{
+					Requests: p.requestTracker.get(endpointID),
+					Tokens:   p.tokenTracker.get(endpointID),
+				}
+			}
+		},
+		Aggregate: func(values []any) any {
+			total := &attrconcurrency.InFlightLoad{}
+			for _, v := range values {
+				if ifl, ok := v.(*attrconcurrency.InFlightLoad); ok {
+					total.Requests += ifl.Requests
+					total.Tokens += ifl.Tokens
+				}
+			}
+			return total
+		},
+	}
 }
 
 // Extract handles endpoint lifecycle events to manage dynamic attributes.

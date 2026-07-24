@@ -129,6 +129,7 @@ func NewDirectorWithConfig(
 	admissionController AdmissionController,
 	endpointCandidates contracts.EndpointCandidates,
 	config *Config,
+	store fwkdl.CrossReplicaStore,
 ) *Director {
 	return &Director{
 		datastore:             datastore,
@@ -136,6 +137,7 @@ func NewDirectorWithConfig(
 		admissionController:   admissionController,
 		endpointCandidates:    endpointCandidates,
 		requestControlPlugins: *config,
+		store:                 store,
 		defaultPriority:       0, // define default priority explicitly
 	}
 }
@@ -200,6 +202,7 @@ type Director struct {
 	admissionController   AdmissionController
 	endpointCandidates    contracts.EndpointCandidates
 	requestControlPlugins Config
+	store                 fwkdl.CrossReplicaStore
 	// We just need a pointer to an int32 variable since Priority is a pointer in InferenceObjective.
 	// No need to set this in the constructor, since the value we want is the default (0)
 	// and value types cannot be nil.
@@ -628,6 +631,18 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 	for _, p := range plugins {
 		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
 			return err
+		}
+		if contributor, ok := p.(fwkdl.CrossReplicaContributor); ok && d.store != nil {
+			spec := contributor.CrossReplicaState()
+			for _, ep := range endpoints {
+				if ep == nil || ep.GetMetadata() == nil {
+					continue
+				}
+				id := ep.GetMetadata().GetNamespacedName().String()
+				if err := d.store.Set(ctx, spec.StateKey, id, spec.Supply(id)()); err != nil {
+					log.FromContext(ctx).Error(err, "failed to sync shared state", "key", spec.StateKey, "endpoint", id)
+				}
+			}
 		}
 	}
 	return nil
