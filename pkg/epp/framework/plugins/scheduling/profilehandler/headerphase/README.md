@@ -12,12 +12,25 @@ each request is for, instead of needing one EPP instance per phase.
 Reads the configured header from the incoming request and looks up the
 `schedulingProfiles` entry with that exact name:
 
-- If a matching profile hasn't run yet, it runs that profile alone.
-- If the header is missing or names a profile that isn't configured, no profile runs. The
-  scheduler reports that no profile could be run at all, without a reason, which the EPP
-  maps to a 429 response to the client -- misleading, since the scheduler doesn't
-  distinguish a malformed request from exhausted capacity. The EPP logs the specific
-  reason (missing header vs. unconfigured value) for operators.
+- With exactly one profile configured, that profile always runs, regardless of the
+  header (or its absence). There is nothing else to disaggregate to, so a deployment
+  scaled down to a single stage -- or one that never disaggregates at all -- works
+  without swapping to a different profile handler.
+- With more than one profile configured and a matching profile named by the header, it
+  runs that profile alone.
+- With more than one profile configured and the header missing or blank, `defaultProfile`
+  runs instead of failing. This covers calls that never carry the header at all, such as
+  pass-through requests (e.g. `/models`) that don't go through phase-tagged scheduling.
+- With more than one profile configured and the header naming a profile that isn't
+  configured, no profile runs -- an unrecognized value is a real error, not treated the
+  same as an absent header. The scheduler reports that no profile could be run at all,
+  without a reason, which the EPP maps to a 429 response to the client -- misleading,
+  since the scheduler doesn't distinguish a malformed request from exhausted capacity.
+  The EPP logs the specific reason (missing header vs. unconfigured value) for operators.
+  A 400 would be the accurate status here, but `Pick` has no way to carry a typed error
+  through the scheduler to the client; that needs the same kind of `ProfileHandler`
+  extension-point signature change tracked for the conditional-decode gate in
+  [llm-d/llm-d-router#1686](https://github.com/llm-d/llm-d-router/issues/1686).
 
 ## How this differs from disagg-profile-handler
 
@@ -44,6 +57,7 @@ answer and makes one separate scheduling call per phase.
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `headerName` | string | `EPP-Phase` | Request header whose value names the scheduling profile to run. Matched case-insensitively: the EPP lowercases every incoming header name, so this is normalized to lowercase regardless of how it's written here. |
+| `defaultProfile` | string | `decode` | Scheduling profile to run when the header is missing or blank and more than one profile is configured. Matched case-sensitively against `schedulingProfiles` names, like the header value itself. Ignored when only one profile is configured, since that profile always runs. |
 
 ### Example
 
@@ -65,4 +79,13 @@ schedulingProfiles:
   - pluginRef: decode-filter
 ```
 
-A request with `EPP-Phase: prefill` runs only the `prefill` profile.
+A request with `EPP-Phase: prefill` runs only the `prefill` profile. A request with no
+`EPP-Phase` header at all -- e.g. `GET /models` -- runs `decode`, the default.
+
+To use a different fallback than `decode`:
+
+```yaml
+- type: header-phase-profile-handler
+  parameters:
+    defaultProfile: prefill
+```
