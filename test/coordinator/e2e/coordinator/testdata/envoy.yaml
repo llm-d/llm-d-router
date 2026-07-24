@@ -1,15 +1,16 @@
-# Hand-rolled Envoy manifest for the multi-pool e2e test.
+# Hand-rolled Envoy manifest for the e-p-d-pool e2e test.
 #
-# Mirrors deploy/environments/dev/e2e-infra/envoy.yaml in shape but routes
-# requests to three different EPP ext_proc clusters based on the EPP-Phase
-# header (encode | prefill | decode). The chosen EPP picks an endpoint and
-# Envoy forwards the request to it via the ORIGINAL_DST cluster (just like
-# the single-pool e2e Envoy).
+# Mirrors deploy/environments/dev/e2e-infra/envoy.yaml in shape but routes any
+# request carrying an EPP-Phase header (encode | prefill | decode) to the
+# single EPP's ext_proc cluster; the EPP itself picks the scheduling profile
+# named by that header value (see header-phase-profile-handler). The chosen
+# EPP picks an endpoint and Envoy forwards the request to it via the
+# ORIGINAL_DST cluster (just like the single-pool e2e Envoy).
 #
 # A request without an EPP-Phase header is the external client request: it
 # matches the default route and is forwarded to the coordinator, the pipeline
 # entry point. The coordinator then re-enters the gateway once per phase with
-# the EPP-Phase header set, hitting the phase routes above.
+# the EPP-Phase header set, hitting the phase route above.
 #
 # Placeholders ${NAMESPACE} and ${EPP_NAME} are substituted by the suite
 # before apply (mirrors single_pool/createEnvoy substitution pattern).
@@ -98,13 +99,13 @@ data:
                         - name: vllm-${NAMESPACE}
                           domains: ["*"]
                           routes:
-                            # encode pool — EPP-Phase: encode
+                            # e-p-d pool — any EPP-Phase value. The single EPP picks the
+                            # scheduling profile named by the header (encode/prefill/decode).
                             - match:
                                 prefix: "/"
                                 headers:
                                   - name: EPP-Phase
-                                    string_match:
-                                      exact: encode
+                                    present_match: true
                               route:
                                 cluster: original_destination_cluster
                                 timeout: 86400s
@@ -117,52 +118,8 @@ data:
                                   overrides:
                                     grpc_service:
                                       envoy_grpc:
-                                        cluster_name: ext_proc_encode
-                                        authority: ${EPP_NAME}-encode.${NAMESPACE}:9002
-                                      timeout: 10s
-                            # prefill pool — EPP-Phase: prefill
-                            - match:
-                                prefix: "/"
-                                headers:
-                                  - name: EPP-Phase
-                                    string_match:
-                                      exact: prefill
-                              route:
-                                cluster: original_destination_cluster
-                                timeout: 86400s
-                                idle_timeout: 86400s
-                                upgrade_configs:
-                                  - upgrade_type: websocket
-                              typed_per_filter_config:
-                                envoy.filters.http.ext_proc:
-                                  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
-                                  overrides:
-                                    grpc_service:
-                                      envoy_grpc:
-                                        cluster_name: ext_proc_prefill
-                                        authority: ${EPP_NAME}-prefill.${NAMESPACE}:9002
-                                      timeout: 10s
-                            # decode pool — EPP-Phase: decode
-                            - match:
-                                prefix: "/"
-                                headers:
-                                  - name: EPP-Phase
-                                    string_match:
-                                      exact: decode
-                              route:
-                                cluster: original_destination_cluster
-                                timeout: 86400s
-                                idle_timeout: 86400s
-                                upgrade_configs:
-                                  - upgrade_type: websocket
-                              typed_per_filter_config:
-                                envoy.filters.http.ext_proc:
-                                  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
-                                  overrides:
-                                    grpc_service:
-                                      envoy_grpc:
-                                        cluster_name: ext_proc_decode
-                                        authority: ${EPP_NAME}-decode.${NAMESPACE}:9002
+                                        cluster_name: ext_proc_epd
+                                        authority: ${EPP_NAME}.${NAMESPACE}:9002
                                       timeout: 10s
                             # default route — no EPP-Phase header — to the
                             # coordinator, the pipeline entry point. ext_proc is
@@ -192,14 +149,15 @@ data:
                       - name: envoy.filters.http.ext_proc
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
-                          # Default ext_proc target — the per-route overrides above pick
-                          # the actual phase EPP. A request without an EPP-Phase header
-                          # matches the default route to the coordinator, which disables
-                          # ext_proc, so this default is only used as a wiring fallback.
+                          # Default ext_proc target — the per-route override above sends
+                          # every EPP-Phase request to the single EPP. A request without
+                          # an EPP-Phase header matches the default route to the
+                          # coordinator, which disables ext_proc, so this default is only
+                          # used as a wiring fallback.
                           grpc_service:
                             envoy_grpc:
-                              cluster_name: ext_proc_encode
-                              authority: ${EPP_NAME}-encode.${NAMESPACE}:9002
+                              cluster_name: ext_proc_epd
+                              authority: ${EPP_NAME}.${NAMESPACE}:9002
                             timeout: 10s
                           processing_mode:
                             request_header_mode: SEND
@@ -269,8 +227,8 @@ data:
                         socket_address:
                           address: llm-d-coordinator.${NAMESPACE}
                           port_value: 8080
-        # Three ext_proc clusters — one per phase EPP.
-        - name: ext_proc_encode
+        # Single ext_proc cluster — the one EPP serving all three phases.
+        - name: ext_proc_epd
           type: STRICT_DNS
           connect_timeout: 86400s
           lb_policy: LEAST_REQUEST
@@ -305,105 +263,15 @@ data:
                   initial_stream_window_size: 65536
                   initial_connection_window_size: 1048576
           load_assignment:
-            cluster_name: ext_proc_encode
+            cluster_name: ext_proc_epd
             endpoints:
               - locality:
-                  region: ext_proc/encode/0
+                  region: ext_proc/epd/0
                 lb_endpoints:
                   - endpoint:
                       address:
                         socket_address:
-                          address: ${EPP_NAME}-encode.${NAMESPACE}
-                          port_value: 9002
-                    load_balancing_weight: 1
-        - name: ext_proc_prefill
-          type: STRICT_DNS
-          connect_timeout: 86400s
-          lb_policy: LEAST_REQUEST
-          circuit_breakers:
-            thresholds:
-              - max_connections: 40000
-                max_pending_requests: 40000
-                max_requests: 40000
-                max_retries: 1024
-          health_checks:
-            - timeout: 2s
-              interval: 10s
-              unhealthy_threshold: 3
-              healthy_threshold: 2
-              reuse_connection: true
-              grpc_health_check:
-                service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
-              tls_options:
-                alpn_protocols: ["h2"]
-          transport_socket:
-            name: "envoy.transport_sockets.tls"
-            typed_config:
-              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-              common_tls_context:
-                validation_context:
-          typed_extension_protocol_options:
-            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-              explicit_http_config:
-                http2_protocol_options:
-                  initial_stream_window_size: 65536
-                  initial_connection_window_size: 1048576
-          load_assignment:
-            cluster_name: ext_proc_prefill
-            endpoints:
-              - locality:
-                  region: ext_proc/prefill/0
-                lb_endpoints:
-                  - endpoint:
-                      address:
-                        socket_address:
-                          address: ${EPP_NAME}-prefill.${NAMESPACE}
-                          port_value: 9002
-                    load_balancing_weight: 1
-        - name: ext_proc_decode
-          type: STRICT_DNS
-          connect_timeout: 86400s
-          lb_policy: LEAST_REQUEST
-          circuit_breakers:
-            thresholds:
-              - max_connections: 40000
-                max_pending_requests: 40000
-                max_requests: 40000
-                max_retries: 1024
-          health_checks:
-            - timeout: 2s
-              interval: 10s
-              unhealthy_threshold: 3
-              healthy_threshold: 2
-              reuse_connection: true
-              grpc_health_check:
-                service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
-              tls_options:
-                alpn_protocols: ["h2"]
-          transport_socket:
-            name: "envoy.transport_sockets.tls"
-            typed_config:
-              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-              common_tls_context:
-                validation_context:
-          typed_extension_protocol_options:
-            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-              explicit_http_config:
-                http2_protocol_options:
-                  initial_stream_window_size: 65536
-                  initial_connection_window_size: 1048576
-          load_assignment:
-            cluster_name: ext_proc_decode
-            endpoints:
-              - locality:
-                  region: ext_proc/decode/0
-                lb_endpoints:
-                  - endpoint:
-                      address:
-                        socket_address:
-                          address: ${EPP_NAME}-decode.${NAMESPACE}
+                          address: ${EPP_NAME}.${NAMESPACE}
                           port_value: 9002
                     load_balancing_weight: 1
 ---

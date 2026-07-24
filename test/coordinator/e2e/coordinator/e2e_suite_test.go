@@ -15,10 +15,11 @@ limitations under the License.
 */
 
 // Package coordinate2e runs end-to-end tests for the coordinator service
-// against the e-p-d-pools topology: one InferencePool per phase (encode,
-// prefill, decode), each with its own EPP, a hand-rolled standalone Envoy
-// routing on EPP-Phase header, and the coordinator deployed as a pod.
-// No Istio, no Gateway/HTTPRoute CRDs.
+// against the e-p-d-pools topology: a single InferencePool covering the
+// encode, prefill, and decode worker pods, served by one EPP that runs the
+// scheduling profile named by each request's EPP-Phase header, behind a
+// hand-rolled standalone Envoy routing on that same header, and the
+// coordinator deployed as a pod. No Istio, no Gateway/HTTPRoute CRDs.
 package coordinate2e
 
 import (
@@ -55,12 +56,8 @@ const (
 	poolNameBase = "qwen3-vl-2b-instruct-inference-pool"
 	eppName      = "e2e-epp"
 
-	encodeEPPManifest   = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/encode/epp.yaml"
-	encodePoolManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/encode/inference-pool.yaml"
-	prefillEPPManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/prefill/epp.yaml"
-	prefillPoolManifest = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/prefill/inference-pool.yaml"
-	decodeEPPManifest   = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/decode/epp.yaml"
-	decodePoolManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/decode/inference-pool.yaml"
+	eppManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pool/epp.yaml"
+	poolManifest = "../../../../deploy/coordinator/components/inference-gateway/epd-pool/inference-pool.yaml"
 
 	epdPoolsKustomizeDir    = "../../../../deploy/coordinator/environments/dev/epd-pools"
 	coordinatorComponentDir = "../../../../deploy/coordinator/components/coordinator"

@@ -98,12 +98,8 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 	var (
 		coordinator  []string
 		modelServers []string
-		decodeEPP    []string
-		prefillEPP   []string
-		encodeEPP    []string
-		decodePool   []string
-		prefillPool  []string
-		encodePool   []string
+		epp          []string
+		pool         []string
 	)
 
 	// Registered first → runs last (LIFO), after the log dump below.
@@ -113,12 +109,8 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 		}
 		testutils.DeleteObjects(testConfig, coordinator, nsName)
 		testutils.DeleteObjects(testConfig, modelServers, nsName)
-		testutils.DeleteObjects(testConfig, decodeEPP, nsName)
-		testutils.DeleteObjects(testConfig, prefillEPP, nsName)
-		testutils.DeleteObjects(testConfig, encodeEPP, nsName)
-		testutils.DeleteObjects(testConfig, decodePool, nsName)
-		testutils.DeleteObjects(testConfig, prefillPool, nsName)
-		testutils.DeleteObjects(testConfig, encodePool, nsName)
+		testutils.DeleteObjects(testConfig, epp, nsName)
+		testutils.DeleteObjects(testConfig, pool, nsName)
 	})
 
 	// Dump all pod logs (coordinator, EPPs, Envoy, workers) on failure, or always
@@ -131,15 +123,11 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 		testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
 	})
 
-	// Pools first so each EPP can resolve its --pool-name.
-	encodePool = createInferencePool("encode", true)
-	prefillPool = createInferencePool("prefill", true)
-	decodePool = createInferencePool("decode", true)
-	expectAllPoolsExist()
+	// Pool first so the EPP can resolve its --pool-name.
+	pool = createInferencePool(true)
+	expectPoolExists()
 
-	encodeEPP = createEndPointPicker("encode", encodeEPPConfig)
-	prefillEPP = createEndPointPicker("prefill", prefillEPPConfig)
-	decodeEPP = createEndPointPicker("decode", decodeEPPConfig)
+	epp = createEndPointPicker(eppConfig)
 
 	encodeReplicas, prefillReplicas, decodeReplicas := 1, 1, 1
 	modelServers = createModelServers(encodeReplicas, prefillReplicas, decodeReplicas)
