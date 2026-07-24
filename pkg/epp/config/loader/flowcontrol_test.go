@@ -448,13 +448,12 @@ func TestBuildFlowControlConfig(t *testing.T) {
 	handle := newFlowControlTestHandle(t)
 
 	const funcPolicyName = "func-policy"
-	handle.AddPlugin(funcPolicyName, usagelimits.NewPolicyFunc(funcPolicyName, func(_ context.Context, _ float64, priorities []int) []float64 {
-		result := make([]float64, len(priorities))
-		for i := range result {
-			result[i] = 0.8
-		}
-		return result
-	}))
+	handle.AddPlugin(funcPolicyName, usagelimits.NewPolicyFunc(funcPolicyName,
+		func(_ context.Context, _ float64, _ []int, ceilings []float64) {
+			for i := range ceilings {
+				ceilings[i] = 0.8
+			}
+		}))
 
 	const structPolicyName = "struct-policy"
 	handle.AddPlugin(structPolicyName, &constantPointEightPolicy{})
@@ -490,7 +489,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 			apiConfig: nil,
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
 				require.NotNil(t, cfg.UsageLimitPolicy, "UsageLimitPolicy should be resolved even when not explicitly configured")
-				ceilings := cfg.UsageLimitPolicy.ComputeLimit(context.Background(), 0.5, []int{0})
+				ceilings := computeLimits(t, cfg.UsageLimitPolicy, 0.5, []int{0})
 				assert.Equal(t, []float64{1.0}, ceilings, "Default noop policy should return 1.0 (no gating)")
 			},
 		},
@@ -501,7 +500,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 			},
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
 				require.NotNil(t, cfg.UsageLimitPolicy, "UsageLimitPolicy should be resolved from the handle")
-				ceilings := cfg.UsageLimitPolicy.ComputeLimit(context.Background(), 0.5, []int{0})
+				ceilings := computeLimits(t, cfg.UsageLimitPolicy, 0.5, []int{0})
 				assert.Equal(t, []float64{1.0}, ceilings, "Noop policy should return 1.0 (no gating)")
 			},
 		},
@@ -512,7 +511,6 @@ func TestBuildFlowControlConfig(t *testing.T) {
 			},
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
 				require.NotNil(t, cfg.UsageLimitPolicy)
-				ctx := context.Background()
 				for _, tc := range []struct {
 					name       string
 					priority   int
@@ -522,7 +520,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 					{"half saturation", 1, 0.5},
 					{"full saturation", 5, 1.0},
 				} {
-					assert.Equal(t, []float64{0.8}, cfg.UsageLimitPolicy.ComputeLimit(ctx, tc.saturation, []int{tc.priority}),
+					assert.Equal(t, []float64{0.8}, computeLimits(t, cfg.UsageLimitPolicy, tc.saturation, []int{tc.priority}),
 						"func-based policy should return 0.8 at %s", tc.name)
 				}
 			},
@@ -534,7 +532,6 @@ func TestBuildFlowControlConfig(t *testing.T) {
 			},
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
 				require.NotNil(t, cfg.UsageLimitPolicy)
-				ctx := context.Background()
 				for _, tc := range []struct {
 					name       string
 					priority   int
@@ -544,7 +541,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 					{"half saturation", 1, 0.5},
 					{"full saturation", 5, 1.0},
 				} {
-					assert.Equal(t, []float64{0.8}, cfg.UsageLimitPolicy.ComputeLimit(ctx, tc.saturation, []int{tc.priority}),
+					assert.Equal(t, []float64{0.8}, computeLimits(t, cfg.UsageLimitPolicy, tc.saturation, []int{tc.priority}),
 						"struct-based policy should return 0.8 at %s", tc.name)
 				}
 			},
@@ -608,12 +605,22 @@ func (p *constantPointEightPolicy) TypedName() fwkplugin.TypedName {
 	}
 }
 
-func (p *constantPointEightPolicy) ComputeLimit(_ context.Context, _ float64, priorities []int) []float64 {
-	result := make([]float64, len(priorities))
-	for i := range result {
-		result[i] = 0.8
+func (p *constantPointEightPolicy) ComputeLimit(_ context.Context, _ float64, _ []int, ceilings []float64) {
+	for i := range ceilings {
+		ceilings[i] = 0.8
 	}
-	return result
 }
 
 var _ fwkfc.UsageLimitPolicy = (*constantPointEightPolicy)(nil)
+
+// computeLimits invokes a UsageLimitPolicy with a framework-style output buffer (pre-filled with
+// 1.0, sized to priorities) and returns the filled ceilings.
+func computeLimits(t *testing.T, p fwkfc.UsageLimitPolicy, saturation float64, priorities []int) []float64 {
+	t.Helper()
+	ceilings := make([]float64, len(priorities))
+	for i := range ceilings {
+		ceilings[i] = 1.0
+	}
+	p.ComputeLimit(context.Background(), saturation, priorities, ceilings)
+	return ceilings
+}
