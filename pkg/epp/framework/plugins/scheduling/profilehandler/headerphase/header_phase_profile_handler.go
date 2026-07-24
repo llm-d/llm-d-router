@@ -191,9 +191,9 @@ func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.
 	profile, ok := profiles[resolvedPhase]
 	if !ok {
 		// A missing or unrecognized header value is a per-request client issue, not a
-		// system fault - log at DEBUG so it doesn't page anyone or drown out real
-		// errors, matching how parseSLOHeaders logs a malformed client header
-		// (pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/plugin.go).
+		// system fault - log at DEBUG via Info, not Error, so it doesn't page anyone or
+		// drown out real errors: logr.Logger.Error always emits regardless of V-level,
+		// only Info is verbosity-gated.
 		// A missing header whose defaultProfile substitute also fails to resolve is a
 		// distinct, config-time condition - it fails every header-less request, not just
 		// an occasional bad caller - so it gets its own message rather than being
@@ -202,7 +202,7 @@ func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.
 		if phase == "" {
 			err = h.defaultProfileNotConfiguredError()
 		}
-		log.FromContext(ctx).V(logging.DEBUG).Error(err, "no scheduling profile selected for request")
+		log.FromContext(ctx).V(logging.DEBUG).Info("no scheduling profile selected for request", "error", err)
 		return map[string]fwksched.SchedulerProfile{}
 	}
 
