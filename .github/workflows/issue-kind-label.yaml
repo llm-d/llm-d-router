@@ -17,6 +17,10 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
+          # Escape percent sequences before echoing body derived text into a
+          # ::warning:: so it cannot forge additional workflow commands.
+          esc() { local s=$1; s=${s//'%'/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
+
           # Extract /kind values from issue body. Absence of a directive is a no-op
           # to avoid wiping kind/* labels set by maintainers through the UI.
           kinds=$(printf '%s' "$ISSUE_BODY" | tr -d '\r' | sed -n 's|^/kind[[:space:]][[:space:]]*||p' | sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
@@ -29,7 +33,7 @@ jobs:
             printf '%s\n' "$existing" | grep -qxF "kind/$kind" || printf "kind/%s " "$kind"
           done)
           if [ -n "$unknown" ]; then
-            echo "::warning::Unknown label(s) ${unknown% }, skipping kind sync"
+            echo "::warning::Unknown label(s) $(esc "${unknown% }"), skipping kind sync"
             exit 0
           fi
 
@@ -37,13 +41,13 @@ jobs:
           gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels \
             -q '.labels[].name | select(startswith("kind/"))' | \
             while IFS= read -r label; do
-              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$label'"
+              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$(esc "$label")'"
             done
 
           printf '%s\n' "$kinds" | \
             while IFS= read -r kind; do
               gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "kind/$kind" || \
-                echo "::warning::Label 'kind/$kind' not found in repository"
+                echo "::warning::Label 'kind/$(esc "$kind")' not found in repository"
             done
 
       - name: Set area labels
@@ -53,6 +57,10 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
+          # Escape percent sequences before echoing body derived text into a
+          # ::warning:: so it cannot forge additional workflow commands.
+          esc() { local s=$1; s=${s//'%'/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
+
           # Absence of a directive is a no-op. Area labels are also set by
           # maintainers through the UI and clearing here would wipe those.
           areas=$(printf '%s' "$ISSUE_BODY" | tr -d '\r' | sed -n 's|^/area[[:space:]][[:space:]]*||p' | \
@@ -64,7 +72,7 @@ jobs:
             printf '%s\n' "$existing" | grep -qxF "area/$area" || printf "area/%s " "$area"
           done)
           if [ -n "$unknown" ]; then
-            echo "::warning::Unknown label(s) ${unknown% }, skipping area sync"
+            echo "::warning::Unknown label(s) $(esc "${unknown% }"), skipping area sync"
             exit 0
           fi
 
@@ -72,13 +80,13 @@ jobs:
           gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels \
             -q '.labels[].name | select(startswith("area/"))' | \
             while IFS= read -r label; do
-              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$label'"
+              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$label" || echo "::warning::Failed to remove label '$(esc "$label")'"
             done
 
           printf '%s\n' "$areas" | \
             while IFS= read -r area; do
               gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "area/$area" || \
-                echo "::warning::Label 'area/$area' not found in repository"
+                echo "::warning::Label 'area/$(esc "$area")' not found in repository"
             done
 
       - name: Set milestone
@@ -88,9 +96,13 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
+          # Escape percent sequences before echoing body derived text into a
+          # ::warning:: so it cannot forge additional workflow commands.
+          esc() { local s=$1; s=${s//'%'/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
+
           # Use the last /milestone directive in the issue body
           milestone=$(printf '%s' "$ISSUE_BODY" | tr -d '\r' | sed -n 's|^/milestone[[:space:]][[:space:]]*||p' | \
              sed 's|[[:space:]]*$||' | sed '/^$/d' | tail -n 1)
           [ -z "$milestone" ] && exit 0
           gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --milestone "$milestone" || \
-            echo "::warning::Milestone '$milestone' not found in repository"
+            echo "::warning::Milestone '$(esc "$milestone")' not found in repository"
