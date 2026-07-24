@@ -8,7 +8,7 @@ spec:
       image: routing-proxy
       args:
         - "--port=8000"
-        - "--vllm-port=8001"
+        - "--model-server-port=8001"
       restartPolicy: Always
       # readinessProbe:
       #   exec:
