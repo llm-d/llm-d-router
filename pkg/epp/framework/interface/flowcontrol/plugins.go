@@ -143,12 +143,17 @@ type SaturationDetector interface {
 //
 // Integration:
 // This policy is called during dispatch decision-making, before a request is allowed to proceed. For each
-// priority band, the returned ceiling is compared against current saturation. If saturation exceeds the
+// priority band, the computed ceiling is compared against current saturation. If saturation exceeds the
 // ceiling for a given priority, requests at that priority are gated (not dispatched). The dispatch loop
 // visits bands from highest to lowest priority and stops at the first gated band; lower bands are not
 // considered on that call.
 //
-// Conformance: Implementations MUST ensure all methods are goroutine-safe. Returned ceilings MUST be
+// The framework calls ComputeLimit exactly once per dispatch cycle. This is a contract term, not an
+// implementation detail: dispatch-spreading policies use the call itself as their time base (one tick
+// per cycle), and computing all ceilings in one call is what lets every gated band observe the same
+// open/closed decision within a cycle. The batch shape exists to preserve both properties.
+//
+// Conformance: Implementations MUST ensure all methods are goroutine-safe. Computed ceilings MUST be
 // monotonically non-increasing in the given priority order (highest priority first): because the
 // dispatch loop stops at the first gated band, a lower band whose ceiling exceeds that of a higher band
 // can be marked open on calls where it is unreachable, starving it.
@@ -156,19 +161,24 @@ type UsageLimitPolicy interface {
 	plugin.Plugin
 
 	// ComputeLimit calculates usage ceilings for all currently active priority levels based on current
-	// saturation. The plugin observes the active priority domain (which changes dynamically as workloads
-	// come and go) and computes relative ceilings from scratch on each call.
+	// saturation, writing the ceiling for the n-th priority into the n-th element of the
+	// caller-provided ceilings buffer. The plugin observes the active priority domain (which changes
+	// dynamically as workloads come and go) and computes relative ceilings from scratch on each call.
+	//
+	// The framework guarantees len(ceilings) == len(priorities) and pre-fills every element with 1.0
+	// (no gating), so an entry the plugin does not write fails open. Writing into the framework-owned
+	// buffer means a result of the wrong size cannot exist; there is no return value to validate.
 	//
 	// Parameters:
 	//   - ctx: Request context for logging, tracing, etc.
 	//   - saturation: Current pool-wide resource saturation as a fraction [0.0, 1.0]
-	//   - priorities: Ordered list of currently active priority levels (highest first)
-	//
-	// Returns:
-	//   - ceilings: Computed ceiling for each given priority (n-th ceiling is assigned to the given n-th priority)
+	//   - priorities: Ordered list of currently active priority levels (highest first).
+	//     The slice is a shared snapshot owned by the framework: read-only, and it MUST NOT be
+	//     retained after the call returns.
+	//   - ceilings: Output buffer owned by the framework, valid only for the duration of the call.
+	//     Ceiling semantics per element:
 	//     - 0.0 = fully gated (cannot dispatch regardless of current saturation)
 	//     - 1.0 = no gating (can dispatch until fully saturated)
 	//     - Values between 0.0 and 1.0 reserve capacity headroom
-	//
-	ComputeLimit(ctx context.Context, saturation float64, priorities []int) (ceilings []float64)
+	ComputeLimit(ctx context.Context, saturation float64, priorities []int, ceilings []float64)
 }

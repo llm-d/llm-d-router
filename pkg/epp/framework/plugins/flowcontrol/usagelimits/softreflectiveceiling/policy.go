@@ -25,9 +25,11 @@ limitations under the License.
 // ceiling is open on 1/period of calls, where
 // period = round(saturation/(1-saturation)).
 //
-// A single policy-wide tick counter drives the alternation. All gated bands
-// share it, so on any given call either every gated band's ceiling is open
-// or every gated band's ceiling is closed. This monotonicity is required by
+// A single policy-wide tick counter drives the alternation. The framework
+// calls ComputeLimit exactly once per dispatch cycle, so the tick counts
+// cycles: the duty cycle is a share of dispatch opportunities, not of wall
+// time. All gated bands share the tick, so on any given call either every
+// gated band's ceiling is open or every gated band's ceiling is closed. This monotonicity is required by
 // the dispatch loop, which stops at the first band whose ceiling is at or
 // below current saturation. Per-band counters would drift out of phase as
 // bands enter gating at different saturations, so a lower gated band's
@@ -100,19 +102,18 @@ func (p *policy) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: PolicyType, Name: p.name}
 }
 
-// ComputeLimit returns per-band ceilings. priorities[0] is the highest
-// priority band and receives ceiling=1.0. Lower bands whose reflective
-// ceiling has been reached alternate between 1.0 and 0.0 with period
-// round(saturation/(1-saturation)), producing a proportional duty cycle.
-func (p *policy) ComputeLimit(_ context.Context, saturation float64, priorities []int) []float64 {
+// ComputeLimit writes per-band ceilings into the caller-provided buffer. priorities[0] is the
+// highest priority band and receives ceiling=1.0. Lower bands whose reflective ceiling has been
+// reached alternate between 1.0 and 0.0 with period round(saturation/(1-saturation)), producing a
+// proportional duty cycle.
+func (p *policy) ComputeLimit(_ context.Context, saturation float64, priorities []int, ceilings []float64) {
 	n := len(priorities)
-	ceilings := make([]float64, n)
 	if n == 0 {
-		return ceilings
+		return
 	}
 	if n == 1 {
 		ceilings[0] = 1.0
-		return ceilings
+		return
 	}
 
 	// Ceilings decrease monotonically with rank, so any band is at or past
@@ -150,6 +151,4 @@ func (p *policy) ComputeLimit(_ context.Context, saturation float64, priorities 
 			}
 		}
 	}
-
-	return ceilings
 }
