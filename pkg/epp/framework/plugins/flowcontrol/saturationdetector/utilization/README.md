@@ -18,11 +18,10 @@ It relies on a "roofline model", evaluating both the queue depth and the KV cach
 
     EndpointScore = max(QueueDepth / QueueThreshold, KVCacheUsage / KVCacheThreshold)
 
-The global pool saturation is the roofline across all candidate endpoints:
+The global pool saturation is the average of the endpoint scores:
 
-    PoolSaturation = Max(EndpointScore)
+    PoolSaturation = Average(EndpointScore)
 
-The pool is saturated as soon as its hottest endpoint is, so a single overloaded endpoint is not diluted by idle ones.
 *Note: Endpoints with missing or stale metrics are aggressively scored as 100% saturated.*
 
 **Scrape-lag compensation:** `WaitingQueueSize` is scraped on a poller while the Flow Controller's dispatch loop runs far faster, so between two scrapes the queue term is stale-low and the gate would let the controller over-dispatch. When an `inflight-load-producer` is configured, the queue term is corrected by the in-flight requests the scrape does not yet reflect:
@@ -31,6 +30,12 @@ The pool is saturated as soon as its hottest endpoint is, so a single overloaded
     QueueScore = (WaitingQueueSize + Credit) / QueueThreshold
 
 `InFlightRequests` is the producer's per-endpoint counter, incremented at dispatch and decremented on request completion, so the correction already accounts for requests that returned since the last scrape. Endpoints without the attribute contribute zero credit.
+
+The correction rests on assumptions that hold for a single-writer, aggregated deployment:
+
+- **`RunningRequestsSize` must be populated.** The subtraction of running requests is only sound when the metrics mapping defines `runningRequestsSpec` (defaults exist for vLLM and SGLang). A custom mapping without it leaves `RunningRequestsSize` at 0, and the credit over-counts by the running count.
+- **Single EPP replica.** `InFlightRequests` is tracked per EPP replica, while `WaitingQueueSize + RunningRequestsSize` is engine-global. With multiple EPP replicas the credit floors at 0 and the compensation silently disappears (the same single-writer assumption the concurrency detector makes).
+- **Aggregated (non-P/D) pools.** With the default producer config the prefill profile's request counter is held until end-of-stream, so under P/D disaggregation a prefill endpoint shows phantom credit for the full decode duration of every request whose prefill it served. Correcting this requires releasing the prefill request counter at start-of-stream in the producer.
 
 ### Role in Scheduling (The Traffic Shaper)
 The detector implements the `Filter` interface to protect individual endpoints. It removes endpoints from candidate lists if their telemetry is stale, or if they exceed specific safety limits:

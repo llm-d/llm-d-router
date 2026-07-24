@@ -134,15 +134,11 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //
 // It returns an aggregate saturation signal where:
 //
-//	Saturation = Max(PodSaturationScore)   // hottest endpoint drives the pool
+//	Saturation = Average(PodSaturationScore)
 //
 // For each pod, the score is determined by the most constrained resource (Compute or Memory):
 //
 //	PodScore = Max(WaitingQueue / QueueThreshold, KVCacheUsage / KVCacheThreshold)
-//
-// Aggregation is the MAX across endpoints (roofline at the pool level): the pool
-// is saturated as soon as its hottest endpoint is, so a single overloaded
-// endpoint is not diluted by idle ones.
 //
 // # Scrape-lag compensation
 //
@@ -157,21 +153,27 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //
 //	credit = max(0, InFlightRequests - (WaitingQueueSize + RunningRequestsSize))
 //
-// This credit is added only to the queue-depth term (the fast, controllable
-// signal); the KV-cache term is left as measured. Endpoints without the
-// attribute contribute zero credit and fall back to the scraped queue depth.
+// The credit corrects each endpoint's score before aggregation, so it holds
+// under either aggregation shape. It is added only to the queue-depth term (the
+// fast, controllable signal); the KV-cache term is left as measured. Endpoints
+// without the attribute contribute zero credit and fall back to the scraped
+// queue depth.
+//
+// The compensation assumes aggregated (non-P/D) pools. Under P/D disaggregation
+// with the default producer config, a prefill endpoint's in-flight request count
+// stays elevated for the whole decode duration of every request whose prefill it
+// served, so its credit is inflated; see the package README.
 func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint) float64 {
 	if len(candidates) == 0 {
 		return 1.0
 	}
 
-	var maxScore float64
+	var totalScore float64
 	for _, e := range candidates {
 		metrics := e.GetMetrics()
 
 		if metrics == nil || time.Since(metrics.UpdateTime) > d.config.MetricsStalenessThreshold {
-			// Stale/missing metrics are treated as fully saturated (conservative).
-			maxScore = max(maxScore, 1.0)
+			totalScore += 1.0
 			continue
 		}
 
@@ -186,10 +188,10 @@ func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint
 		kvRatio := metrics.KVCacheUsagePercent / d.config.KVCacheUtilThreshold
 
 		// Roofline Analysis: The pod is saturated if either resource is exhausted.
-		maxScore = max(maxScore, max(qRatio, kvRatio))
+		totalScore += max(qRatio, kvRatio)
 	}
 
-	return maxScore
+	return totalScore / float64(len(candidates))
 }
 
 // Filter blocks traffic to specific pods that are physically saturated or exceeding their safety limits.

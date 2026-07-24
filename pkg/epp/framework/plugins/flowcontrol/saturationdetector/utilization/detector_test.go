@@ -217,8 +217,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod2: Q=0/5(0.0), KV=0.2/0.9(0.22). Max=0.22...
 				makePodMetric("pod2", 0, 0.2, baseTime),
 			},
-			// Max(0.2, 0.222...) = 0.222...  (pool = hottest endpoint)
-			wantSaturation: 0.2 / 0.9,
+			// Avg(0.2, 0.222...) = 0.2111...
+			wantSaturation: (0.2 + (0.2 / 0.9)) / 2.0,
 		},
 		{
 			name: "Multiple pods, one good, one stale",
@@ -228,8 +228,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod2 (Stale): 1.0.
 				makePodMetric("pod2", 0, 0.2, baseTime.Add(-300*time.Millisecond)),
 			},
-			// Max(0.2, 1.0) = 1.0
-			wantSaturation: 1.0,
+			// Avg(0.2, 1.0) = 0.6
+			wantSaturation: 0.6,
 		},
 		{
 			name: "Multiple pods, one good, one bad (high queue)",
@@ -239,8 +239,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod2 (Bad): Q=15/5(3.0). Max=3.0.
 				makePodMetric("pod2", 15, 0.2, baseTime),
 			},
-			// Max(0.2, 3.0) = 3.0  (hottest endpoint drives the pool)
-			wantSaturation: 3.0,
+			// Avg(0.2, 3.0) = 1.6
+			wantSaturation: 1.6,
 		},
 		{
 			name: "Multiple pods, all bad capacity",
@@ -252,8 +252,8 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod3 (High KV): 0.99/0.90 = 1.1
 				makePodMetric("pod3", 1, 0.99, baseTime),
 			},
-			// Max(1.0, 4.0, 1.1) = 4.0
-			wantSaturation: 4.0,
+			// Avg(1.0, 4.0, 1.1) = 6.1 / 3 = 2.033...
+			wantSaturation: (1.0 + 4.0 + 1.1) / 3.0,
 		},
 		{
 			name: "Queue depth exactly at threshold",

@@ -362,7 +362,6 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 
 	pool := p.endpointCandidates.Locate(ctx, nil)
 	p.poolEmpty = len(pool) == 0
-
 	saturation := p.saturationDetector.Saturation(ctx, pool)
 
 	// Record pool saturation metric
