@@ -128,18 +128,89 @@ func TestTracedIndexAddAndEvictSpans(t *testing.T) {
 	require.NoError(t, err)
 
 	spans := spanRecorder.Ended()
-	addSpan := spanByName(t, spans, "llm_d.kv_cache.index.add")
+	addSpan := spanByName(t, spans, "index_add")
 	addAttrs := spanAttributes(addSpan)
 	require.Equal(t, int64(1), addAttrs["llm_d.kv_cache.index.add.engine_key_count"].AsInt64())
 	require.Equal(t, int64(1), addAttrs["llm_d.kv_cache.index.add.request_key_count"].AsInt64())
 	require.Equal(t, int64(2), addAttrs["llm_d.kv_cache.index.add.pod_entry_count"].AsInt64())
 	require.Equal(t, int64(2), addAttrs["llm_d.kv_cache.index.add.device_tier_count"].AsInt64())
 
-	evictSpan := spanByName(t, spans, "llm_d.kv_cache.index.evict")
+	evictSpan := spanByName(t, spans, "index_evict")
 	evictAttrs := spanAttributes(evictSpan)
 	require.Equal(t, "engine", evictAttrs["llm_d.kv_cache.index.evict.key_type"].AsString())
 	require.Equal(t, int64(1), evictAttrs["llm_d.kv_cache.index.evict.pod_entry_count"].AsInt64())
 	require.Equal(t, int64(1), evictAttrs["llm_d.kv_cache.index.evict.device_tier_count"].AsInt64())
+}
+
+func TestTracedIndexLookupSpan(t *testing.T) {
+	ctx := context.Background()
+	spanRecorder := setupSpanRecorder(t)
+
+	baseIdx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+
+	tracedIdx := kvblock.NewTracedIndex(baseIdx)
+
+	engineKey := kvblock.BlockHash(123)
+	requestKey := kvblock.BlockHash(789)
+	entries := []kvblock.PodEntry{
+		{PodIdentifier: "pod1", DeviceTier: "gpu"},
+		{PodIdentifier: "pod2", DeviceTier: "cpu"},
+	}
+
+	err = tracedIdx.Add(ctx, []kvblock.BlockHash{engineKey}, []kvblock.BlockHash{requestKey}, entries)
+	require.NoError(t, err)
+
+	result, err := tracedIdx.Lookup(ctx, []kvblock.BlockHash{requestKey}, sets.Set[string]{})
+	require.NoError(t, err)
+	require.Len(t, result[requestKey], 2)
+
+	spans := spanRecorder.Ended()
+	lookupSpan := spanByName(t, spans, "index_lookup")
+	attrs := spanAttributes(lookupSpan)
+	require.Equal(t, int64(1), attrs["llm_d.kv_cache.index.lookup.block_count"].AsInt64())
+	require.Equal(t, int64(0), attrs["llm_d.kv_cache.lookup.pod_filter_count"].AsInt64())
+	require.Equal(t, true, attrs["llm_d.kv_cache.lookup.cache_hit"].AsBool())
+	require.Equal(t, int64(1), attrs["llm_d.kv_cache.lookup.blocks_found"].AsInt64())
+}
+
+func TestTracedIndexLookupSpanCacheMiss(t *testing.T) {
+	ctx := context.Background()
+	spanRecorder := setupSpanRecorder(t)
+
+	baseIdx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+
+	tracedIdx := kvblock.NewTracedIndex(baseIdx)
+
+	// Lookup a key that doesn't exist
+	nonExistentKey := kvblock.BlockHash(999)
+	result, err := tracedIdx.Lookup(ctx, []kvblock.BlockHash{nonExistentKey}, sets.Set[string]{})
+	require.NoError(t, err)
+	require.Len(t, result[nonExistentKey], 0)
+
+	spans := spanRecorder.Ended()
+	lookupSpan := spanByName(t, spans, "index_lookup")
+	attrs := spanAttributes(lookupSpan)
+	require.Equal(t, int64(1), attrs["llm_d.kv_cache.index.lookup.block_count"].AsInt64())
+	require.Equal(t, false, attrs["llm_d.kv_cache.lookup.cache_hit"].AsBool())
+	require.Equal(t, int64(0), attrs["llm_d.kv_cache.lookup.blocks_found"].AsInt64())
+}
+
+func TestTracedIndexLookupSpanRecordsError(t *testing.T) {
+	ctx := context.Background()
+	spanRecorder := setupSpanRecorder(t)
+
+	expectedErr := errors.New("lookup failed")
+	tracedIdx := kvblock.NewTracedIndex(&failingIndex{err: expectedErr})
+
+	_, err := tracedIdx.Lookup(ctx, []kvblock.BlockHash{1}, sets.Set[string]{})
+	require.ErrorIs(t, err, expectedErr)
+
+	spans := spanRecorder.Ended()
+	lookupSpan := spanByName(t, spans, "index_lookup")
+	require.Equal(t, codes.Error, lookupSpan.Status().Code)
+	require.Equal(t, expectedErr.Error(), lookupSpan.Status().Description)
 }
 
 func TestTracedIndexAddAndEvictSpansRecordErrors(t *testing.T) {
@@ -158,11 +229,11 @@ func TestTracedIndexAddAndEvictSpansRecordErrors(t *testing.T) {
 	require.ErrorIs(t, err, expectedErr)
 
 	spans := spanRecorder.Ended()
-	addSpan := spanByName(t, spans, "llm_d.kv_cache.index.add")
+	addSpan := spanByName(t, spans, "index_add")
 	require.Equal(t, codes.Error, addSpan.Status().Code)
 	require.Equal(t, expectedErr.Error(), addSpan.Status().Description)
 
-	evictSpan := spanByName(t, spans, "llm_d.kv_cache.index.evict")
+	evictSpan := spanByName(t, spans, "index_evict")
 	require.Equal(t, codes.Error, evictSpan.Status().Code)
 	require.Equal(t, expectedErr.Error(), evictSpan.Status().Description)
 }
