@@ -481,6 +481,10 @@ func Register(customCollectors ...prometheus.Collector) {
 		// No deprecated inference_extension twin: new flow control metrics are emitted under the
 		// llm_d_epp prefix only.
 		metrics.Registry.MustRegister(llmdFlowControlStaleEndpoints)
+		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationRequests)
+		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationBytes)
+		metrics.Registry.MustRegister(llmdFlowControlGlobalCapacityUtilizationRequests)
+		metrics.Registry.MustRegister(llmdFlowControlGlobalCapacityUtilizationBytes)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestsTotal)
@@ -552,6 +556,10 @@ func Reset() {
 	flowControlPoolSaturation.Reset()
 	llmdFlowControlPoolSaturation.Reset()
 	llmdFlowControlStaleEndpoints.Reset()
+	llmdFlowControlCapacityUtilizationRequests.Reset()
+	llmdFlowControlCapacityUtilizationBytes.Reset()
+	llmdFlowControlGlobalCapacityUtilizationRequests.Reset()
+	llmdFlowControlGlobalCapacityUtilizationBytes.Reset()
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	flowControlDispatchCycleDuration.Reset()
@@ -928,6 +936,34 @@ func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 // detector scored as fully saturated because their metrics were missing or stale.
 func RecordFlowControlStaleEndpoints(detector string, count int) {
 	llmdFlowControlStaleEndpoints.WithLabelValues(detector).Set(float64(count))
+}
+
+// RecordFlowControlCapacityUtilizationRequests sets the request-count capacity utilization ratio
+// (occupancy/effective capacity, 0.0-1.0) for a single priority band. The band denominator falls back to a default
+// when unconfigured, so every configured band reports a series.
+func RecordFlowControlCapacityUtilizationRequests(priority, inferencePool string, ratio float64) {
+	llmdFlowControlCapacityUtilizationRequests.WithLabelValues(priority, inferencePool).Set(ratio)
+}
+
+// RecordFlowControlCapacityUtilizationBytes sets the byte-size capacity utilization ratio (occupancy/effective
+// capacity, 0.0-1.0) for a single priority band. The band denominator falls back to a default when unconfigured, so
+// every configured band reports a series.
+func RecordFlowControlCapacityUtilizationBytes(priority, inferencePool string, ratio float64) {
+	llmdFlowControlCapacityUtilizationBytes.WithLabelValues(priority, inferencePool).Set(ratio)
+}
+
+// RecordFlowControlGlobalCapacityUtilizationRequests sets the all-bands request-count capacity utilization ratio
+// (occupancy/global capacity, 0.0-1.0). Global capacity is optional, so callers only invoke this when one is
+// configured; otherwise no series is emitted rather than a misleading 0.
+func RecordFlowControlGlobalCapacityUtilizationRequests(inferencePool string, ratio float64) {
+	llmdFlowControlGlobalCapacityUtilizationRequests.WithLabelValues(inferencePool).Set(ratio)
+}
+
+// RecordFlowControlGlobalCapacityUtilizationBytes sets the all-bands byte-size capacity utilization ratio
+// (occupancy/global capacity, 0.0-1.0). Global capacity is optional, so callers only invoke this when one is
+// configured; otherwise no series is emitted rather than a misleading 0.
+func RecordFlowControlGlobalCapacityUtilizationBytes(inferencePool string, ratio float64) {
+	llmdFlowControlGlobalCapacityUtilizationBytes.WithLabelValues(inferencePool).Set(ratio)
 }
 
 // IncFlowControlRequestsTotal increments the total request counter for a given outcome.

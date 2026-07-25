@@ -399,6 +399,62 @@ var (
 		[]string{"detector"},
 	)
 
+	llmdFlowControlCapacityUtilizationRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_capacity_utilization_requests",
+			Help: metricsutil.HelpMsgWithStability(
+				"Fraction of a priority band's effective request-count capacity currently occupied, aggregated over "+
+					"every flow in the band (0.0-1.0). The denominator falls back to a default when the band does not "+
+					"configure one, so every configured band reports a series. The all-bands rollup is a separate "+
+					"metric, flow_control_global_capacity_utilization_requests.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"priority", "inference_pool"},
+	)
+
+	llmdFlowControlCapacityUtilizationBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_capacity_utilization_bytes",
+			Help: metricsutil.HelpMsgWithStability(
+				"Fraction of a priority band's effective byte-size capacity currently occupied, aggregated over every "+
+					"flow in the band (0.0-1.0). The denominator falls back to a default when the band does not "+
+					"configure one, so every configured band reports a series. The all-bands rollup is a separate "+
+					"metric, flow_control_global_capacity_utilization_bytes.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"priority", "inference_pool"},
+	)
+
+	llmdFlowControlGlobalCapacityUtilizationRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_global_capacity_utilization_requests",
+			Help: metricsutil.HelpMsgWithStability(
+				"Fraction of the global request-count capacity currently occupied across all priority bands (0.0-1.0). "+
+					"Global capacity is optional and unset by default; this series is emitted only when it is "+
+					"configured. Kept separate from flow_control_capacity_utilization_requests so aggregations over "+
+					"the per-band family do not double count the rollup.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"inference_pool"},
+	)
+
+	llmdFlowControlGlobalCapacityUtilizationBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_global_capacity_utilization_bytes",
+			Help: metricsutil.HelpMsgWithStability(
+				"Fraction of the global byte-size capacity currently occupied across all priority bands (0.0-1.0). "+
+					"Global capacity is optional and unset by default; this series is emitted only when it is "+
+					"configured. Kept separate from flow_control_capacity_utilization_bytes so aggregations over the "+
+					"per-band family do not double count the rollup.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"inference_pool"},
+	)
+
 	llmdFlowControlRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,

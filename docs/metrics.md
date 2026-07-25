@@ -271,6 +271,55 @@ Exposed when the `flowControl` feature gate is enabled.
 *   **Usage:** A nonzero value during a dispatch stall indicates a model-server metrics collection
     problem (scrape path, port, TLS, auth) rather than genuine overload.
 
+#### `flow_control_capacity_utilization_requests`
+
+*   **Type:** Gauge
+*   **Labels:** `priority`, `inference_pool`
+*   **Description:** Fraction of a priority band's **effective** request-count capacity currently
+    occupied (0.0-1.0), aggregated over every flow in the band. This is not a per-flow-queue metric:
+    `priority` identifies the band. A band that does not configure `maxRequests` falls back to a
+    default denominator, so every configured band reports a series. The all-bands rollup is a
+    separate metric, `flow_control_global_capacity_utilization_requests`.
+*   **Usage:** Lets operators alert on "the band is at N% of its request limit" without joining
+    configured `maxRequests` values into the query. Sustained values near 1.0 precede
+    `flow_control_requests_total{outcome="RejectedCapacity"}` rising. Note the denominator is always
+    the band's own capacity: when a global cap sits below the sum of the band caps, admission is
+    bounded by the global cap first, so the per-band ratio understates real pressure — read it
+    alongside `flow_control_global_capacity_utilization_requests`. (Making a band's denominator
+    `min(band, global)` would make one band's ratio depend on other bands' configuration, which is
+    worse.)
+
+#### `flow_control_capacity_utilization_bytes`
+
+*   **Type:** Gauge
+*   **Labels:** `priority`, `inference_pool`
+*   **Description:** Byte-size counterpart of `flow_control_capacity_utilization_requests`: the
+    fraction of a priority band's effective byte-size capacity currently occupied (0.0-1.0),
+    aggregated over every flow in the band, with the same default-denominator fallback.
+*   **Usage:** Memory-pressure equivalent of the request-count ratio; a band can hit its `maxBytes`
+    ceiling long before its `maxRequests` one when payloads are large. The same global-cap caveat
+    applies — compare against `flow_control_global_capacity_utilization_bytes`.
+
+#### `flow_control_global_capacity_utilization_requests`
+
+*   **Type:** Gauge
+*   **Labels:** `inference_pool`
+*   **Description:** Fraction of the global request-count capacity currently occupied across all
+    priority bands (0.0-1.0). Global capacity is optional and unset by default, so this series is
+    emitted only when it is configured — absent, not 0.
+*   **Usage:** The rollup companion to the per-band ratio. It lives in its own metric family so that
+    aggregations over the per-band family (`sum`, `max`, `topk`) do not double count or rank against
+    the rollup.
+
+#### `flow_control_global_capacity_utilization_bytes`
+
+*   **Type:** Gauge
+*   **Labels:** `inference_pool`
+*   **Description:** Byte-size counterpart of `flow_control_global_capacity_utilization_requests`,
+    with the same optional-and-omitted-when-unset behaviour.
+*   **Usage:** Shows whether the global byte ceiling, rather than any single band, is what is
+    bounding admission.
+
 #### `flow_control_requests_total`
 
 *   **Type:** Counter
