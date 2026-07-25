@@ -19,6 +19,7 @@ package flowcontrol_test
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1163,7 +1164,10 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 	eppmetrics.Register()
 
 	detector := newBlockedDetector()
-	h := newHarness(t, harnessOpts{detector: detector})
+	// bandMaxRequests and maxRequests bound the band and the registry as a whole, so both the
+	// per-band ratio and the all-bands aggregate are computable (occupancy/configured capacity);
+	// without a configured capacity the ratio series is intentionally omitted.
+	h := newHarness(t, harnessOpts{detector: detector, bandMaxRequests: 10, maxRequests: 4})
 
 	key := flowcontrol.FlowKey{ID: "metrics-flow", Priority: 0}
 
@@ -1186,6 +1190,20 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 	require.Greater(t, queueSizeGaugeSum(t, key.ID), 0.0,
 		"queue_size should be > 0 while a request is actively queued")
 
+	// Both dimensions are bounded (bandMaxRequests=10, maxRequests=4 above), so with exactly one
+	// request queued the ratios are occupancy/configured capacity: 1/10 for the band and 1/4 for the
+	// all-bands aggregate. Unlike queue_size, these gauges are refreshed by the dispatch cycle rather
+	// than synchronously on enqueue, so they trail admission by up to one tick.
+	priorityStr := strconv.Itoa(key.Priority)
+	require.Eventually(t, func() bool {
+		return capacityUtilizationGauge(t, priorityStr) > 0
+	}, time.Second, time.Millisecond,
+		"band utilization ratio should be > 0 while a request is actively queued")
+	require.InDelta(t, 0.1, capacityUtilizationGauge(t, priorityStr), 1e-9,
+		"band ratio should equal occupancy/capacity (1 queued / bandMaxRequests=10)")
+	require.InDelta(t, 0.25, capacityUtilizationGauge(t, globalPriorityLabel), 1e-9,
+		"aggregate ratio should equal occupancy/global capacity (1 queued / maxRequests=4)")
+
 	// Unblock the detector so the request finalizes deterministically via dispatch.
 	detector.Unblock(1)
 
@@ -1201,6 +1219,37 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 	// gauge is already back at 0 -- no polling needed.
 	require.Zero(t, queueSizeGaugeSum(t, key.ID),
 		"queue_size should return to 0 after the request finalizes")
+
+	// The utilization gauges are dispatch-cycle driven, so they trail the drain by up to one tick.
+	require.Eventually(t, func() bool {
+		return capacityUtilizationGauge(t, priorityStr) == 0 &&
+			capacityUtilizationGauge(t, globalPriorityLabel) == 0
+	}, time.Second, time.Millisecond,
+		"band and aggregate utilization ratios should return to 0 after the queue drains")
+}
+
+// globalPriorityLabel is the priority label value carried by the all-bands aggregate series.
+const globalPriorityLabel = ""
+
+// capacityUtilizationGauge returns the request-count capacity utilization ratio recorded for the given
+// priority band, or -1 if no series exists for that band.
+func capacityUtilizationGauge(t *testing.T, priority string) float64 {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != "llm_d_epp_flow_control_capacity_utilization_requests" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "priority" && lp.GetValue() == priority {
+					return m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return -1
 }
 
 // ============================================================================

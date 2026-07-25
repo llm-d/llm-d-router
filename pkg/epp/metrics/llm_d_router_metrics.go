@@ -399,6 +399,24 @@ var (
 		[]string{"detector"},
 	)
 
+	llmdFlowControlCapacityUtilizationRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_capacity_utilization_requests",
+			Help:      metricsutil.HelpMsgWithStability("Fraction of the configured request-count capacity currently occupied, aggregated over every flow in a priority band (0.0-1.0). The aggregate across all bands is reported with priority=\"\" and only when a global request-count capacity is configured; a dimension with no configured capacity is omitted rather than reported as 0.", compbasemetrics.ALPHA),
+		},
+		[]string{"priority", "inference_pool"},
+	)
+
+	llmdFlowControlCapacityUtilizationBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_capacity_utilization_bytes",
+			Help:      metricsutil.HelpMsgWithStability("Fraction of the configured byte-size capacity currently occupied, aggregated over every flow in a priority band (0.0-1.0). The aggregate across all bands is reported with priority=\"\" and only when a global byte-size capacity is configured; a dimension with no configured capacity is omitted rather than reported as 0.", compbasemetrics.ALPHA),
+		},
+		[]string{"priority", "inference_pool"},
+	)
+
 	llmdFlowControlRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
