@@ -109,7 +109,7 @@ def double_memory(mem_str):
     val = int(mem_str)
     return str(val * 2)
 
-def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", epp_memory="4Gi", machine_family=None):
+def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", epp_memory="4Gi", machine_family=None, epp_replicas=1):
     print(f"Deploying EPP standalone using Helm chart from: {chart_path} (version: {chart_version})")
     
     if not os.path.exists(router_config_path):
@@ -127,6 +127,7 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
     overrides = {
         "router": {
             "epp": {
+                "replicas": epp_replicas,
                 "image": {
                     "registry": epp_registry,
                     "repository": epp_repository,
@@ -238,10 +239,11 @@ def get_container_images(ns, pod_name):
     )
     return res.stdout.strip().split()
 
-def sample_resources(ns, pod_name):
+def sample_resources(ns, target, is_label=False):
     # Output of: kubectl top pod <pod> -n <ns> --containers --no-headers
     # Format: <pod>  <container>  <cpu>  <memory>
-    res = run_cmd(f"kubectl top pod {pod_name} -n {ns} --containers --no-headers", check=False)
+    cmd_target = f"-l {target}" if is_label else target
+    res = run_cmd(f"kubectl top pod {cmd_target} -n {ns} --containers --no-headers", check=False)
     if res.returncode != 0:
         return None
         
@@ -271,18 +273,21 @@ def sample_resources(ns, pod_name):
         else:
             mem = int(mem_str)
             
-        metrics[container] = {'cpu': cpu, 'mem': mem}
+        if container not in metrics:
+            metrics[container] = {'cpu': 0, 'mem': 0}
+        metrics[container]['cpu'] += cpu
+        metrics[container]['mem'] += mem
         total_cpu += cpu
         total_mem += mem
         
     metrics['TOTAL'] = {'cpu': total_cpu, 'mem': total_mem}
     return metrics
 
-def monitor_resources_loop(ns, pod_name, interval, peak_metrics):
+def monitor_resources_loop(ns, target, interval, peak_metrics, is_label=False):
     global stop_monitoring
     print("Starting background resource monitoring...")
     while not stop_monitoring:
-        sample = sample_resources(ns, pod_name)
+        sample = sample_resources(ns, target, is_label)
         if sample:
             for container, usage in sample.items():
                 if container not in peak_metrics:
@@ -554,40 +559,44 @@ def collect_profiles(ns, epp_pod_name, results_dir, test_name, run_time_clean, p
 
     print(f"Profile collector: pod {job_pod_name} is running. Monitoring logs for 'Stage 1 - run started'...")
     
-    log_proc = subprocess.Popen(
-        ["kubectl", "logs", "-n", ns, job_pod_name, "-f"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
-    
     found_started = False
     start_time = time.time()
-    timeout = 300
+    timeout = 1200
     
-    while True:
-        if time.time() - start_time > timeout:
-            print("Profile collector: timed out waiting for log line 'Stage 1 - run started'")
+    while time.time() - start_time < timeout:
+        log_proc = subprocess.Popen(
+            ["kubectl", "logs", "-n", ns, job_pod_name, "-f"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        
+        stream_closed = False
+        while not stream_closed:
+            if time.time() - start_time > timeout:
+                break
+            
+            line = log_proc.stdout.readline()
+            if not line:
+                stream_closed = True
+                break
+                
+            if "Stage 1 - run started" in line:
+                print("Profile collector: detected 'Stage 1 - run started' in logs!")
+                found_started = True
+                break
+        
+        log_proc.terminate()
+        log_proc.wait()
+        
+        if found_started:
             break
             
-        if log_proc.poll() is not None:
-            break
-            
-        line = log_proc.stdout.readline()
-        if not line:
-            time.sleep(1)
-            continue
-            
-        if "Stage 1 - run started" in line:
-            print("Profile collector: detected 'Stage 1 - run started' in logs!")
-            found_started = True
-            break
-            
-    log_proc.terminate()
-    log_proc.wait()
-    
+        print("Profile collector: log stream disconnected or ended, reconnecting in 5s...")
+        time.sleep(5)
+        
     if not found_started:
-        print("Profile collector: failed to detect run start. Exiting.")
+        print("Profile collector: failed to detect run start within timeout. Exiting.")
         return
         
     print("Profile collector: waiting 60 seconds before initiating profiling...")
@@ -681,6 +690,7 @@ def main():
     parser.add_argument("--epp-cpu", default="2", help="EPP CPU request (limit will be 2x this amount)")
     parser.add_argument("--epp-memory", default="4Gi", help="EPP memory request (limit will be 2x this amount)")
     parser.add_argument("--router-machine-family", default=None, help="Add node affinity for specific Google Cloud machine-family (e.g. c3)")
+    parser.add_argument("--epp-replicas", type=int, default=1, help="Number of EPP replicas")
     parser.add_argument("--collect-pprof-profiles", action="store_true", help="Collect EPP CPU & memory pprof profiles and render them as SVGs")
     parser.add_argument("--gcs-bucket", default=None, help="Optional GCS bucket name or URI (e.g. gs://my-bucket) to sync performance results to")
     args = parser.parse_args()
@@ -740,7 +750,8 @@ def main():
             args.router_config,
             epp_cpu=args.epp_cpu, 
             epp_memory=args.epp_memory, 
-            machine_family=args.router_machine_family
+            machine_family=args.router_machine_family,
+            epp_replicas=args.epp_replicas
         )
 
         # Get EPP pod details
@@ -748,6 +759,7 @@ def main():
         print(f"EPP Pod name: {pod_name}")
         images = get_container_images(ns, pod_name)
         print(f"EPP Container images: {images}")
+        epp_label = f"llm-d-router-gateway={release_name}-epp"
 
         # Step 5: Measure Idle Performance
         print("Measuring idle resource usage (waiting up to 5m for metrics-server)...")
@@ -762,7 +774,7 @@ def main():
                 print("Timeout waiting for idle resource metrics.")
                 break
                 
-            sample = sample_resources(ns, pod_name)
+            sample = sample_resources(ns, epp_label, is_label=True)
             if sample:
                 idle_samples.append(sample)
                 print(f"Captured idle metrics sample {len(idle_samples)}/3.")
@@ -790,7 +802,7 @@ def main():
         metrics_before = scrape_scheduler_metrics(ns, pod_name)
 
         # Step 7: Execute Benchmark & Monitor Peak Usage
-        monitoring_thread = Thread(target=monitor_resources_loop, args=(ns, pod_name, 5, peak_metrics))
+        monitoring_thread = Thread(target=monitor_resources_loop, args=(ns, epp_label, 5, peak_metrics, True))
         monitoring_thread.start()
 
         profile_thread = None

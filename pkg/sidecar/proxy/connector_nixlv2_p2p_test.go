@@ -103,8 +103,8 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		// NIXL fields still drive the NixlConnector under MultiConnector.
 		Expect(kv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
 		Expect(kv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
-		// The p2p block drives the OffloadingConnector's cached-prefix pull.
-		p2p, ok := kv[requestFieldP2PParams].(map[string]any)
+		// The remote_kv_source block drives the OffloadingConnector's cached-prefix pull.
+		p2p, ok := kv[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(p2p[requestFieldKVRequestID]).ToNot(BeEmpty())
 		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.9.9.9"))
@@ -120,7 +120,7 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 			routing.KVCacheSourceHeader:   kvCacheSource,
 		})
 
-		Expect(prefillKV()).ToNot(HaveKey(requestFieldP2PParams))
+		Expect(prefillKV()).ToNot(HaveKey(requestFieldRemoteKVSource))
 	})
 
 	It("does not compose a p2p pull when the source is the prefiller itself", func() {
@@ -133,7 +133,7 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 			routing.KVCacheSourceHeader:   prefillHostPort,
 		})
 
-		Expect(prefillKV()).ToNot(HaveKey(requestFieldP2PParams))
+		Expect(prefillKV()).ToNot(HaveKey(requestFieldRemoteKVSource))
 	})
 
 	// The parallel-dispatch (MoRI-IO WRITE) path builds the prefill leg in a
@@ -157,10 +157,10 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		body, _ := io.ReadAll(resp.Body) //nolint:errcheck
 		Expect(resp.StatusCode).To(Equal(http.StatusOK), string(body))
 
-		// Prefill leg keeps the NIXL WRITE fields and gains the composed p2p block.
+		// Prefill leg keeps the NIXL WRITE fields and gains the composed remote_kv_source block.
 		pkv := kvParams(env.prefillHandler, 0)
 		Expect(pkv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
-		p2p, ok := pkv[requestFieldP2PParams].(map[string]any)
+		p2p, ok := pkv[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.9.9.9"))
 		Expect(p2p[requestFieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))

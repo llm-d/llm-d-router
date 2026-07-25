@@ -881,6 +881,60 @@ func TestSchedulerE2ELatency(t *testing.T) {
 	}
 }
 
+func TestRequestProcessingLatency(t *testing.T) {
+	Reset()
+	durations := []time.Duration{
+		200 * time.Microsecond,
+		800 * time.Microsecond,
+		1500 * time.Microsecond,
+		3 * time.Millisecond,
+		8 * time.Millisecond,
+		15 * time.Millisecond,
+		30 * time.Millisecond,
+		75 * time.Millisecond,
+		150 * time.Millisecond,
+	}
+	for _, duration := range durations {
+		RecordRequestProcessingLatency(duration)
+	}
+
+	want, err := os.Open("testdata/llm_d_request_processing_duration_seconds_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_epp_request_processing_duration_seconds"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestResponseProcessingLatency(t *testing.T) {
+	Reset()
+	durations := []time.Duration{
+		200 * time.Microsecond,
+		800 * time.Microsecond,
+		1500 * time.Microsecond,
+		3 * time.Millisecond,
+		8 * time.Millisecond,
+		15 * time.Millisecond,
+		30 * time.Millisecond,
+		75 * time.Millisecond,
+		150 * time.Millisecond,
+	}
+	for _, duration := range durations {
+		RecordResponseProcessingLatency(duration)
+	}
+
+	want, err := os.Open("testdata/llm_d_response_processing_duration_seconds_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_epp_response_processing_duration_seconds"); err != nil {
+		t.Error(err)
+	}
+}
+
 func TestFlowControlDispatchCycleLengthMetric(t *testing.T) {
 	Reset()
 	scenarios := []struct {

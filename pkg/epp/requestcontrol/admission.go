@@ -194,7 +194,13 @@ func (r *flowControlRequest) ID() string {
 	}
 	return r.inferenceRequest.RequestID
 }
-func (r *flowControlRequest) InitialEffectiveTTL() time.Duration { return 0 } // Use controller default.
+
+// InitialEffectiveTTL returns 0 to defer to the controller-level default TTL, which is therefore the only TTL
+// source for every request today.
+// TODO(https://github.com/llm-d/llm-d-router/issues/1090): plumb more specific TTL scopes and resolve
+// most-specific-wins: per-request (clamped), then per-band (effectively priority band config, eventually
+// codifiable in the InferenceObjective CRD), then the controller default.
+func (r *flowControlRequest) InitialEffectiveTTL() time.Duration { return 0 }
 func (r *flowControlRequest) ByteSize() uint64                   { return r.requestByteSize }
 
 func (r *flowControlRequest) InferenceRequest() *scheduling.InferenceRequest {

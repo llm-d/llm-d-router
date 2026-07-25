@@ -136,6 +136,14 @@ type RequestContext struct {
 	RequestDroppedReason errcommon.RequestDroppedReason
 	modelServerStreaming bool
 
+	// responseProcessingDuration is the EPP cost of handling the response. For a
+	// streamed response it is the sum of the per-chunk handler slices, since the
+	// gaps between chunks are model server generation time. For a non-streaming
+	// response it is the single interval from responseHeadersReceivedAt onward,
+	// during which the response is entirely in EPP's hands.
+	responseProcessingDuration time.Duration
+	responseHeadersReceivedAt  time.Time
+
 	Response *Response
 
 	reqHeaderResp  *extProcPb.ProcessingResponse
@@ -264,6 +272,25 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			Headers: make(map[string]string),
 		},
 	}
+
+	// Request-phase failures (parser resolution, body parsing, admission
+	// rejection) leave the switch before the success path, so both call this.
+	// Flow-control rejections carry the queue wait and are the slowest samples;
+	// dropping them would bias the histogram low.
+	recordRequestProcessing := sync.OnceFunc(func() {
+		metrics.RecordRequestProcessingLatency(time.Since(reqCtx.RequestReceivedTimestamp))
+	})
+
+	// Record EPP response processing latency once when the stream ends. Using a
+	// defer (rather than emitting on end-of-stream) ensures aborted streams
+	// (client cancel or upstream error before EOS) are also recorded, so the
+	// metric is not biased toward fully streamed responses. The guard skips
+	// requests that never reached the response phase.
+	defer func() {
+		if reqCtx.responseProcessingDuration > 0 {
+			metrics.RecordResponseProcessingLatency(reqCtx.responseProcessingDuration)
+		}
+	}()
 
 	buf := s.bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
@@ -461,10 +488,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				if parseResult.SkipResponseProcessing {
 					reqCtx.RequestState = RequestResponseProcessingSkipped
 				}
+
+				recordRequestProcessing()
 			}
 		case *extProcPb.ProcessingRequest_RequestTrailers:
 			// This is currently unused.
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
+			respHeadersReceivedAt := time.Now()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
 				value := string(header.RawValue)
 				loggerTrace.Info("header", "key", header.Key, "value", value)
@@ -478,12 +508,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			reqCtx.RequestState = ResponseReceived
 			reqCtx = s.HandleResponseHeaders(ctx, reqCtx, v)
 			reqCtx.respHeaderResp = s.generateResponseHeaderResponse(reqCtx)
+			reqCtx.responseHeadersReceivedAt = respHeadersReceivedAt
+			reqCtx.responseProcessingDuration += time.Since(respHeadersReceivedAt)
 
 		case *extProcPb.ProcessingRequest_ResponseBody:
 			endOfStream := v.ResponseBody.EndOfStream
 			chunk := v.ResponseBody.Body
 
 			if reqCtx.modelServerStreaming {
+				respBodyStart := time.Now()
 				if endOfStream {
 					reqCtx.ResponseComplete = true
 					reqCtx.ResponseCompleteTimestamp = time.Now()
@@ -493,6 +526,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				chunk = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
+				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
 			} else {
 				respBody = append(respBody, chunk...)
 				if endOfStream {
@@ -513,6 +547,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 		// Handle the err and fire an immediate response.
 		if err != nil {
+			recordRequestProcessing()
 			if logger.V(logutil.DEBUG).Enabled() {
 				logger.V(logutil.DEBUG).Error(err, "Failed to process request", "request", req)
 			} else {
@@ -553,6 +588,7 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 		return
 	}
 
+	start := time.Now()
 	reqCtx.ResponseComplete = true
 	reqCtx.ResponseCompleteTimestamp = time.Now()
 	reqCtx = s.HandleResponseBody(ctx, reqCtx, body, true)
@@ -561,6 +597,13 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 		body = rewriteModelName(body, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 		// For non-streaming response, we send response back to envoy after receiving all the response body.
 		reqCtx.respBodyResp = generateResponseBodyResponses(body, setEos, reqCtx.Response.DynamicMetadata)
+	}
+	if modelStreaming || reqCtx.responseHeadersReceivedAt.IsZero() {
+		reqCtx.responseProcessingDuration += time.Since(start)
+	} else {
+		// Supersedes the header slice already accumulated: the interval since the
+		// response headers arrived covers it and the body wait in between.
+		reqCtx.responseProcessingDuration = time.Since(reqCtx.responseHeadersReceivedAt)
 	}
 }
 
