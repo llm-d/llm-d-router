@@ -252,7 +252,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MooncakeBootstrapPort, mooncakeBootstrapPortFlag, opts.MooncakeBootstrapPort,
 		"the port used to query the Mooncake bootstrap endpoint on prefill pods (only used with --kv-connector=mooncake)")
 	fs.IntVar(&opts.P2PConnectorPort, p2pConnectorPortFlag, opts.P2PConnectorPort,
-		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode leg (used with --kv-connector=offloading or --enable-p2p-pull)")
+		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode leg; with --data-parallel-size > 1 this is the rank-0 port and rank r uses port+r (used with --kv-connector=offloading or --enable-p2p-pull)")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Enables secure proxy. Defaults to true.")
@@ -532,11 +532,11 @@ func (opts *Options) Validate() error {
 	if opts.P2PConnectorPort < 1 || opts.P2PConnectorPort > 65535 {
 		return fmt.Errorf("--p2p-connector-port must be between 1 and 65535, got %d", opts.P2PConnectorPort)
 	}
-
-	// offloading does not support wide-EP: every DP rank would bind the same
-	// POD_IP:<p2p-connector-port>. DP-aware support is not yet implemented.
-	if opts.KVConnector == KVConnectorOffloading && opts.DataParallelSize > 1 {
-		return fmt.Errorf("--kv-connector=offloading does not support --data-parallel-size > 1 (got %d)", opts.DataParallelSize)
+	// The injected port is offset by the target's DP rank, so the highest
+	// rank's port must stay in range too.
+	if opts.DataParallelSize > 1 && opts.P2PConnectorPort+opts.DataParallelSize-1 > 65535 {
+		return fmt.Errorf("--p2p-connector-port %d plus data-parallel rank %d exceeds 65535",
+			opts.P2PConnectorPort, opts.DataParallelSize-1)
 	}
 
 	// --enable-p2p-pull composes the OffloadingConnector P2P tier alongside NIXL
