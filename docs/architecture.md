@@ -26,7 +26,7 @@
 
 The design enables:
 
-- Support for **multiple base models** within a shared cluster (see [serving multiple inference pools](https://gateway-api-inference-extension.sigs.k8s.io/guides/serving-multiple-inference-pools-latest/))
+- Support for **multiple base models** within a shared cluster (see [InferencePool & InferenceModel Design](#inferencepool--inferencemodel-design))
 - Efficient routing based on **KV cache locality**, **session affinity**, **load**, and
 **model metadata**
 - Disaggregated **Prefill/Decode (P/D)** execution
