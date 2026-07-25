@@ -63,7 +63,7 @@ const (
 	coordinatorComponentDir = "../../../../deploy/coordinator/components/coordinator"
 	rendererComponentDir    = "../../../../deploy/coordinator/components/vllm-render"
 
-	envoyManifest = "testdata/envoy.yaml"
+	envoyManifest = "../../../../deploy/coordinator/environments/dev/e2e-infra/envoy.yaml"
 
 	crdGIEPath = "../../../../deploy/components/crds-gie"
 
