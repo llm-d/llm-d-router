@@ -59,20 +59,30 @@ type Runtime struct {
 
 	collectors *collectorManager // per-endpoint poller, keyed by namespaced name
 	logger     logr.Logger       // Set in Configure; used where no context is available (e.g. ReleaseEndpoint).
+
+	multiCluster bool // multi-cluster mode is enabled
 }
 
 const (
 	defaultRefreshInterval = 50 * time.Millisecond
 )
 
+// RuntimeOption configures a Runtime at construction.
+type RuntimeOption func(*Runtime)
+
+// WithMultiCluster enables multi-cluster mode on the Runtime.
+func WithMultiCluster(v bool) RuntimeOption {
+	return func(r *Runtime) { r.multiCluster = v }
+}
+
 // NewRuntime creates a new Runtime with the given polling interval.
 // If duration is <= 0, uses the defaultRefreshInterval.
-func NewRuntime(pollingInterval time.Duration) *Runtime {
+func NewRuntime(pollingInterval time.Duration, opts ...RuntimeOption) *Runtime {
 	interval := defaultRefreshInterval
 	if pollingInterval > 0 {
 		interval = pollingInterval
 	}
-	return &Runtime{
+	r := &Runtime{
 		pollingInterval: interval,
 		dispatchers:     newPollingDispatchers(),
 		notification:    newNotificationManager(),
@@ -81,6 +91,10 @@ func NewRuntime(pollingInterval time.Duration) *Runtime {
 		collectors:      newCollectorManager(),
 		logger:          logr.Discard(),
 	}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
 }
 
 // Configure is called to transform the configuration information into the Runtime's
@@ -372,6 +386,9 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 	logger = logger.WithValues("endpoint", endpointMetadata.GetNamespacedName())
 
 	endpoint := fwkdl.NewEndpoint(endpointMetadata, nil)
+	if r.multiCluster {
+		fwkdl.SetMultiCluster(endpoint)
+	}
 
 	dispatchers := make([]fwkdl.PollingDispatcher, 0, r.dispatchers.Count())
 	for _, d := range r.dispatchers.Dispatchers() {

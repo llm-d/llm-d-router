@@ -685,6 +685,7 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 
 	loader.RegisterFeatureGate(flowcontrol.FeatureGate, false)
 	loader.RegisterFeatureGate(runserver.HAPopulateNonLeaderDatastoreFeatureGate, true)
+	loader.RegisterFeatureGate(fwkdl.MultiClusterFeatureGate, false)
 
 	r.registerInTreePlugins()
 
@@ -784,7 +785,8 @@ func (r *Runner) configureAndStartDatalayer(ctx context.Context, cfg *datalayer.
 }
 
 func (r *Runner) setupMetricsCollection(opts *runserver.Options) datalayer.EndpointFactory {
-	r.dlRuntime = datalayer.NewRuntime(opts.RefreshMetricsInterval)
+	r.dlRuntime = datalayer.NewRuntime(opts.RefreshMetricsInterval,
+		datalayer.WithMultiCluster(r.featureGates[fwkdl.MultiClusterFeatureGate]))
 	return r.dlRuntime
 }
 
