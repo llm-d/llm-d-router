@@ -9,10 +9,27 @@ plugins:
     port: 9400
 - type: dcgm-extractor
   name: dcgm-extractor
-- type: gpu-utilization-filter
+- type: endpoint-attribute-filter
+  name: gpu-utilization-filter
   parameters:
-    threshold: 0.90
-- type: gpu-utilization-scorer
+    attribute: "GPUUtilization/dcgm-extractor"
+    onMissing: "Pass"
+    fallbackOnEmpty: true
+    algorithm:
+      type: "threshold"
+      threshold:
+        operator: "LessThanOrEqual"
+        value: 0.90
+- type: endpoint-attribute-scorer
+  name: gpu-utilization-scorer
+  parameters:
+    attributeKey: "GPUUtilization/dcgm-extractor"
+    algorithm:
+      type: "linear_lower_is_better"
+      normalization:
+        fixedRange:
+          min: 0.0
+          max: 1.0
 - type: kv-cache-utilization-scorer
 - type: max-score-picker
 - type: single-profile-handler

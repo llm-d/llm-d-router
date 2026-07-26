@@ -17,7 +17,6 @@ limitations under the License.
 package gpu
 
 import (
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -27,19 +26,6 @@ const (
 )
 
 // GPUUtilizationDataKey identifies per-endpoint GPU utilization published
-// by the DCGM extractor and consumed by GPU-aware filters and scorers.
+// by the DCGM extractor and consumed by the generic endpoint-attribute
+// filter and scorer.
 var GPUUtilizationDataKey = plugin.NewDataKey("GPUUtilization", DCGMExtractorType)
-
-// GPUUtilization is a normalized GPU compute utilization value in [0.0, 1.0],
-// derived from DCGM_FI_DEV_GPU_UTIL (which reports 0-100).
-// For multi-GPU pods the extractor aggregates across visible devices.
-type GPUUtilization float64
-
-func (v GPUUtilization) Clone() fwkdl.Cloneable {
-	return v
-}
-
-// ReadGPUUtilization retrieves GPU utilization from an endpoint's AttributeMap.
-func ReadGPUUtilization(attrs fwkdl.AttributeMap, key string) (GPUUtilization, bool) {
-	return fwkdl.ReadAttribute[GPUUtilization](attrs, key)
-}
