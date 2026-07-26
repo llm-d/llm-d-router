@@ -148,8 +148,15 @@ func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.Reque
 	}
 	reqCtx.TokenIDs = tokenIDs
 
-	features, _ := reqCtx.Body["features"].(map[string]any)
-	entries, err := extractMultimodalEntries(features)
+	rawFeatures := reqCtx.Body["features"]
+	var features map[string]any
+	if rawFeatures != nil {
+		var ok bool
+		features, ok = rawFeatures.(map[string]any)
+		if !ok {
+			return fmt.Errorf("render: features must be an object, got %T: %w", rawFeatures, pipeline.ErrBadRequest)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("render: %w", err)
 	}
