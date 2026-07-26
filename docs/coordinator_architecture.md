@@ -93,10 +93,14 @@ per-request context held by the coordinator, not in a sidecar on the decode pod.
           |
           |  inference request (OpenAI-compatible API)
           v
+     Inference Gateway  --- no EPP-Phase header: default route to coordinator
+          |
+          v
    Coordinator Service  ------------>  side services
           |                            (media download, render / tokenize)
           |
           |  one call per phase, tagged EPP-Phase: encode | prefill | decode
+          |  (re-enters the same Inference Gateway)
           v
      Inference Gateway
           |  endpoint picker protocol
@@ -112,18 +116,20 @@ per-request context held by the coordinator, not in a sidecar on the decode pod.
 In short:
 
 ```
-                         one request+response per phase (encode, prefill, decode)
-                        +---------------------------------------------------------+
-                        |                                                         v
-Client  <-->  Coordinator  -->  Inference Gateway  -->  EPP -->  vLLM worker pool
-                        ^                                                         |
-                        +---------------------------------------------------------+
-                                          response streamed/returned
+                                                  one request+response per phase (encode, prefill, decode)
+                                                  +------------------------------------------------------+
+                                                  |                                                      v
+Client  <-->  Inference Gateway  <-->  Coordinator  -->  Inference Gateway  -->  EPP -->  vLLM worker pool
+                                                  ^                                                      |
+                                                  +------------------------------------------------------+
+                                                                 response streamed/returned
 ```
 
-The client opens a single connection to the coordinator. Behind it, the coordinator
-issues several requests to the Inference Gateway and consumes each response before issuing
-the next: it is an active client of the Gateway, not a one-shot proxy. A single step
+The client opens a single connection through the Inference Gateway to the coordinator
+(the gateway's default route, taken when a request carries no `EPP-Phase` header).
+Behind it, the coordinator issues several requests back to that same Gateway and
+consumes each response before issuing the next: it is an active client of the Gateway,
+not a one-shot proxy. A single step
 can also fan out into several parallel requests: `replace-media-urls` downloads media
 concurrently (to the source URLs), and `encode` issues one Gateway request per
 multimodal item in parallel. The number and shape of these requests depend on the input
@@ -133,6 +139,87 @@ download or encode at all. Across phases the coordinator sequences the round-tri
 (prefill and decode are one each), threading state from each response into the next
 request. Each Gateway call routes it by the `EPP-Phase` header to the EPP, which runs
 the matching scheduling profile and picks a pod from that phase's pool.
+
+Every call the Coordinator makes for a phase (`conditional-decode`, `encode`, `prefill`,
+`decode`) goes through the same Gateway and the same EPP, which picks the pod for that
+phase via the [Endpoint Picker protocol](https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/docs/proposals/004-endpoint-picker-protocol)
+(`ext_proc`). `conditional-decode` tries decode first, optimistically, before running
+encode or prefill at all: if the chosen decode pod already has what it needs (e.g. the
+prompt is already cached), it serves the request directly and the full pipeline never
+runs. Only if decode responds `412 Precondition Failed` does the Coordinator fall back
+to the full `encode → prefill → decode` cascade — which is also how a request with
+multiple multimedia entries fans encode out in parallel, one call per entry.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Gateway
+    participant Coordinator
+    participant EPP
+    participant Media as External Media Service
+    participant Render as Render (side service)
+    participant Encode as Encode pool
+    participant Prefill as Prefill pool
+    participant Decode as Decode pool
+
+    Client->>Gateway: Request
+    Gateway->>Coordinator: Forward request
+
+    opt replace-media-urls step configured and request has media entries
+        par one call per media entry
+            Coordinator->>Media: Fetch / cache media URL
+            Media-->>Coordinator: Resolved reference
+        end
+    end
+
+    opt render step configured
+        Coordinator->>Render: Normalize multimodal input
+        Render-->>Coordinator: Normalized tensors
+    end
+
+    Note over Coordinator,Decode: conditional-decode — try decode alone first
+    Coordinator->>Gateway: Call (EPP-Phase: decode)
+    Gateway->>EPP: ext_proc: pick pod (profile=decode)
+    EPP-->>Gateway: Chosen decode pod
+    Gateway->>Decode: Forward request
+
+    alt Decode can serve the request
+        Decode-->>Gateway: 200 OK (tokens)
+        Gateway-->>Coordinator: Response
+        Coordinator-->>Client: Final response
+    else Decode cannot serve it (e.g. no KV cache for this prompt)
+        Decode-->>Gateway: 412 Precondition Failed
+        Gateway-->>Coordinator: 412
+        Note over Coordinator: Fall back to the full pipeline
+
+        opt request has multimodal entries
+            par one call per media entry
+                Coordinator->>Gateway: Call (EPP-Phase: encode)
+                Gateway->>EPP: ext_proc: pick pod (profile=encode)
+                EPP-->>Gateway: Chosen encode pod
+                Gateway->>Encode: Forward request
+                Encode-->>Gateway: Embeddings
+                Gateway-->>Coordinator: Embeddings
+            end
+        end
+
+        Note over Prefill,Decode: Shown here: kv-nixl. Other KV connectors (kv-shared-storage,<br/>kv-sglang) transfer KV differently - see KV and EC transfer protocols.
+        Coordinator->>Gateway: Call (EPP-Phase: prefill)
+        Gateway->>EPP: ext_proc: pick pod (profile=prefill)
+        EPP-->>Gateway: Chosen prefill pod
+        Gateway->>Prefill: Forward request
+        Prefill-->>Gateway: KV transfer descriptor
+        Gateway-->>Coordinator: Response
+
+        Coordinator->>Gateway: Call (EPP-Phase: decode)
+        Gateway->>EPP: ext_proc: pick pod (profile=decode)
+        EPP-->>Gateway: Chosen decode pod
+        Gateway->>Decode: Forward request (pulls KV via NIXL)
+        Decode-->>Gateway: 200 OK (tokens)
+        Gateway-->>Coordinator: Response
+        Coordinator-->>Client: Final response
+    end
+```
 
 Steps are skipped at runtime when they do not apply (for example, `encode` is a no-op
 when the request has no multimodal entries, and `render` short-circuits when the
