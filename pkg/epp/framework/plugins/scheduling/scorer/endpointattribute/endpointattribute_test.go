@@ -105,7 +105,7 @@ func TestEndpointAttributeScorerFactory(t *testing.T) {
 
 func newEndpointWithValue(value float64) fwksched.Endpoint {
 	attrs := fwkdl.NewAttributes()
-	attrs.Put(testAttributeKey, attrmetrics.ScalarMetricValue(value))
+	attrs.Put(attrmetrics.ScalarMetricDataKey(testAttributeKey), attrmetrics.ScalarMetricValue(value))
 	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{}, attrs)
 }
 

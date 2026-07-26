@@ -327,7 +327,7 @@ func (p *Producer) cachedTokenCount(ep scheduling.Endpoint) int {
 
 // matchInfo returns the endpoint's PrefixCacheMatchInfo, or nil when absent.
 func (p *Producer) matchInfo(ep scheduling.Endpoint) *attrprefix.PrefixCacheMatchInfo {
-	raw, ok := ep.Get(p.prefixMatchDataKey.String())
+	raw, ok := ep.Get(p.prefixMatchDataKey)
 	if !ok {
 		return nil
 	}

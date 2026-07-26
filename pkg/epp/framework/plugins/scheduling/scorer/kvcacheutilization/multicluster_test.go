@@ -40,7 +40,7 @@ func TestMultiClusterScorerFactory(t *testing.T) {
 	require.Equal(t, MultiClusterScorerType, p.TypedName().Type)
 	require.Equal(t, "mc", p.TypedName().Name)
 
-	_, ok := p.(*MultiClusterScorer).Consumes().Required[fwkplugin.NewDataKey(attrmetrics.MultiClusterKVCacheUtilizationKey, "")]
+	_, ok := p.(*MultiClusterScorer).Consumes().Required[attrmetrics.MultiClusterKVCacheUtilizationDataKey]
 	require.True(t, ok, "Consumes must require the pool KV-cache utilization key")
 }
 
@@ -48,7 +48,7 @@ func TestMultiClusterScorer_Score(t *testing.T) {
 	newEP := func(util float64, set bool) fwksched.Endpoint {
 		attr := fwkdl.NewAttributes()
 		if set {
-			attr.Put(attrmetrics.MultiClusterKVCacheUtilizationKey, attrmetrics.ScalarMetricValue(util))
+			attr.Put(attrmetrics.MultiClusterKVCacheUtilizationDataKey, attrmetrics.ScalarMetricValue(util))
 		}
 		return fwksched.NewEndpoint(nil, nil, attr)
 	}

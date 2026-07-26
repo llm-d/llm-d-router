@@ -44,7 +44,7 @@ func endpoint(p *Producer, name, address string, cachedBlocks int) scheduling.En
 		Address: address,
 		Port:    "8080",
 	}, nil, nil)
-	e.Put(p.prefixMatchDataKey.String(),
+	e.Put(p.prefixMatchDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).WithCachedBlockCount(cachedBlocks))
 	return e
 }
@@ -149,7 +149,7 @@ func TestProduce_MetadataNilMax_DoesNotSuppressStash(t *testing.T) {
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	noMD := scheduling.NewEndpoint(nil, nil, nil)
-	noMD.Put(p.prefixMatchDataKey.String(),
+	noMD.Put(p.prefixMatchDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(10, 4, testBlockSize).WithCachedBlockCount(10))
 
 	req := &scheduling.InferenceRequest{RequestID: "req-nil-md"}
@@ -338,7 +338,7 @@ func endpointWithLoad(p *Producer, name, address string, cachedBlocks, waiting i
 		Address: address,
 		Port:    "8080",
 	}, &fwkdl.Metrics{WaitingQueueSize: waiting}, nil)
-	e.Put(p.prefixMatchDataKey.String(),
+	e.Put(p.prefixMatchDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).WithCachedBlockCount(cachedBlocks))
 	return e
 }
@@ -499,7 +499,7 @@ func tierEndpoint(p *Producer, name, address string, cachedBlocks int, byTier ma
 		Address: address,
 		Port:    "8080",
 	}, nil, nil)
-	e.Put(p.prefixMatchDataKey.String(),
+	e.Put(p.prefixMatchDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).
 			WithCachedBlockCount(cachedBlocks).
 			WithCachedBlocksByTier(byTier))

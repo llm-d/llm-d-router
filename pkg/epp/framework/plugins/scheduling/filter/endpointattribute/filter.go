@@ -164,7 +164,7 @@ func (f *EndpointAttributeFilter) Consumes() map[string]any {
 func (f *EndpointAttributeFilter) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	filtered := make([]scheduling.Endpoint, 0, len(endpoints))
 	for _, endpoint := range endpoints {
-		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, f.attribute)
+		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, attrmetrics.ScalarMetricDataKey(f.attribute))
 		if !ok {
 			if f.passOnMissing {
 				filtered = append(filtered, endpoint)

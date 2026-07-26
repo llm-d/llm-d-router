@@ -39,7 +39,7 @@ import (
 
 func TestAnyMMHit(t *testing.T) {
 	const producerName = "test-producer"
-	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName)
 	makeEndpoint := func(name string, info *attrprefix.PrefixCacheMatchInfo) scheduling.Endpoint {
 		ep := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}}, fwkdl.NewMetrics(), nil)
 		if info != nil {
@@ -285,7 +285,7 @@ func TestLegacyProducer_TokensFlowToEndpointAttribute(t *testing.T) {
 
 	require.NoError(t, lp.Produce(ctx, req, []scheduling.Endpoint{endpoint}))
 
-	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("inner").String()
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("inner")
 	raw, ok := endpoint.Get(key)
 	require.True(t, ok, "endpoint should have PrefixCacheMatchInfo set")
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)

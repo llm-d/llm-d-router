@@ -58,7 +58,7 @@ var _ fwkplugin.ConsumerPlugin = &MultiClusterScorer{}
 func (s *MultiClusterScorer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			fwkplugin.NewDataKey(attrmetrics.MultiClusterQueueSizeKey, ""): attrmetrics.ScalarMetricValue(0),
+			attrmetrics.MultiClusterQueueSizeDataKey: attrmetrics.ScalarMetricValue(0),
 		},
 	}
 }
@@ -70,7 +70,7 @@ func (s *MultiClusterScorer) Score(_ context.Context, _ *fwksched.InferenceReque
 	queues := make(map[fwksched.Endpoint]float64, len(endpoints))
 	minQ, maxQ := math.MaxFloat64, -math.MaxFloat64
 	for _, ep := range endpoints {
-		q, ok := attrmetrics.ReadScalarMetricValue(ep, attrmetrics.MultiClusterQueueSizeKey)
+		q, ok := attrmetrics.ReadScalarMetricValue(ep, attrmetrics.MultiClusterQueueSizeDataKey)
 		if !ok {
 			continue
 		}

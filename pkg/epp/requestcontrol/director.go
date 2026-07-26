@@ -91,7 +91,7 @@ func primaryEndpointHasCachedPrefix(logger logr.Logger, result *fwksched.Schedul
 		debug.Info("conditional-decode: primary endpoint is nil")
 		return false
 	}
-	raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String())
+	raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey)
 	if !ok || raw == nil {
 		debug.Info("conditional-decode: endpoint has no prefix-cache match attribute (no scorer attached?)")
 		return false

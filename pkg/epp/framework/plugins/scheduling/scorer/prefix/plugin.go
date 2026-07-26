@@ -135,7 +135,7 @@ func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 	for _, endpoint := range endpoints {
 		// Default to score 0 if PrefixCacheMatchInfo is missing or invalid.
 		scores[endpoint] = 0.0
-		info, ok := endpoint.Get(p.prefixMatchDataKey.String())
+		info, ok := endpoint.Get(p.prefixMatchDataKey)
 		if !ok {
 			logger.V(logutil.DEFAULT).Error(nil, "PrefixCacheMatchInfo not found for endpoint, assigning score 0", "endpoint", endpoint, "key", p.prefixMatchDataKey.String())
 			continue

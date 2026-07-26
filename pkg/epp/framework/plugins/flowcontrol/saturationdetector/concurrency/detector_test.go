@@ -752,15 +752,17 @@ func (e *liveEndpoint) UpdateMetrics(*datalayer.Metrics)             {}
 func (e *liveEndpoint) String() string                               { return e.id }
 
 // liveEndpoint also implements AttributeMap.
-func (e *liveEndpoint) Get(key string) (datalayer.Cloneable, bool) {
-	if key == attrconcurrency.InFlightLoadDataKey.String() {
+func (e *liveEndpoint) Get(key fwkplugin.DataKey) (datalayer.Cloneable, bool) {
+	if key == attrconcurrency.InFlightLoadDataKey {
 		return e.reg.get(e.id), true
 	}
 	return nil, false
 }
-func (e *liveEndpoint) Put(string, datalayer.Cloneable) {}
-func (e *liveEndpoint) Keys() []string                  { return []string{attrconcurrency.InFlightLoadDataKey.String()} }
-func (e *liveEndpoint) Clone() datalayer.AttributeMap   { return e }
+func (e *liveEndpoint) Put(fwkplugin.DataKey, datalayer.Cloneable) {}
+func (e *liveEndpoint) Keys() []fwkplugin.DataKey {
+	return []fwkplugin.DataKey{attrconcurrency.InFlightLoadDataKey}
+}
+func (e *liveEndpoint) Clone() datalayer.AttributeMap { return e }
 
 func newFakeEndpoint(reg *localRegistry, name string) datalayer.Endpoint {
 	id := fullEndpointName(name)
@@ -788,15 +790,15 @@ func newStubSchedulingEndpoint(reg *localRegistry, name string) *liveSchedulingE
 }
 
 func (f *liveSchedulingEndpoint) GetMetadata() *datalayer.EndpointMetadata { return f.metadata }
-func (f *liveSchedulingEndpoint) Get(key string) (datalayer.Cloneable, bool) {
-	if key == attrconcurrency.InFlightLoadDataKey.String() {
+func (f *liveSchedulingEndpoint) Get(key fwkplugin.DataKey) (datalayer.Cloneable, bool) {
+	if key == attrconcurrency.InFlightLoadDataKey {
 		return f.reg.get(f.id), true
 	}
 	return nil, false
 }
-func (f *liveSchedulingEndpoint) Put(string, datalayer.Cloneable) {}
-func (f *liveSchedulingEndpoint) Keys() []string {
-	return []string{attrconcurrency.InFlightLoadDataKey.String()}
+func (f *liveSchedulingEndpoint) Put(fwkplugin.DataKey, datalayer.Cloneable) {}
+func (f *liveSchedulingEndpoint) Keys() []fwkplugin.DataKey {
+	return []fwkplugin.DataKey{attrconcurrency.InFlightLoadDataKey}
 }
 func (f *liveSchedulingEndpoint) String() string                { return f.id }
 func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
@@ -816,16 +818,16 @@ func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequ
 // has not been populated yet.
 type nilMetadataEndpoint struct{}
 
-func (e *nilMetadataEndpoint) GetMetadata() *datalayer.EndpointMetadata     { return nil }
-func (e *nilMetadataEndpoint) UpdateMetadata(m *datalayer.EndpointMetadata) {}
-func (e *nilMetadataEndpoint) GetAttributes() datalayer.AttributeMap        { return e }
-func (e *nilMetadataEndpoint) GetMetrics() *datalayer.Metrics               { return nil }
-func (e *nilMetadataEndpoint) UpdateMetrics(*datalayer.Metrics)             {}
-func (e *nilMetadataEndpoint) String() string                               { return "nil-metadata" }
-func (e *nilMetadataEndpoint) Get(string) (datalayer.Cloneable, bool)       { return nil, false }
-func (e *nilMetadataEndpoint) Put(string, datalayer.Cloneable)              {}
-func (e *nilMetadataEndpoint) Keys() []string                               { return nil }
-func (e *nilMetadataEndpoint) Clone() datalayer.AttributeMap                { return e }
+func (e *nilMetadataEndpoint) GetMetadata() *datalayer.EndpointMetadata          { return nil }
+func (e *nilMetadataEndpoint) UpdateMetadata(m *datalayer.EndpointMetadata)      {}
+func (e *nilMetadataEndpoint) GetAttributes() datalayer.AttributeMap             { return e }
+func (e *nilMetadataEndpoint) GetMetrics() *datalayer.Metrics                    { return nil }
+func (e *nilMetadataEndpoint) UpdateMetrics(*datalayer.Metrics)                  {}
+func (e *nilMetadataEndpoint) String() string                                    { return "nil-metadata" }
+func (e *nilMetadataEndpoint) Get(fwkplugin.DataKey) (datalayer.Cloneable, bool) { return nil, false }
+func (e *nilMetadataEndpoint) Put(fwkplugin.DataKey, datalayer.Cloneable)        {}
+func (e *nilMetadataEndpoint) Keys() []fwkplugin.DataKey                         { return nil }
+func (e *nilMetadataEndpoint) Clone() datalayer.AttributeMap                     { return e }
 
 func TestDetector_NilEndpointInList(t *testing.T) {
 	t.Parallel()
