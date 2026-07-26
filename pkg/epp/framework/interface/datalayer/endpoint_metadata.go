@@ -23,10 +23,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// EndpointMetadata represents the relevant Kubernetes Pod state of an inference server.
+// EndpointMetadata describes an inference endpoint.
 type EndpointMetadata struct {
 	NamespacedName types.NamespacedName
-	PodName        string
+	Name           string
 	Address        string
 	// NodeAddress is the node IP hosting this pod (pod.Status.HostIP).
 	// Empty for non-Kubernetes discovery sources (e.g. file discovery).
@@ -60,7 +60,7 @@ func (epm *EndpointMetadata) Clone() *EndpointMetadata {
 			Name:      epm.NamespacedName.Name,
 			Namespace: epm.NamespacedName.Namespace,
 		},
-		PodName:     epm.PodName,
+		Name:        epm.Name,
 		Address:     epm.Address,
 		NodeAddress: epm.NodeAddress,
 		Port:        epm.Port,
@@ -77,7 +77,7 @@ func (epm *EndpointMetadata) Equal(other *EndpointMetadata) bool {
 		return epm == other
 	}
 	return epm.NamespacedName == other.NamespacedName &&
-		epm.PodName == other.PodName &&
+		epm.Name == other.Name &&
 		epm.Address == other.Address &&
 		epm.NodeAddress == other.NodeAddress &&
 		epm.Port == other.Port &&

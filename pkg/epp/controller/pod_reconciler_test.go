@@ -219,7 +219,7 @@ func TestPodReconciler(t *testing.T) {
 				gotPods := make([]*corev1.Pod, len(podList))
 				for idx, pm := range podList {
 					gotPods[idx] = &corev1.Pod{
-						ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().PodName, Namespace: pm.GetMetadata().NamespacedName.Namespace},
+						ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().Name, Namespace: pm.GetMetadata().NamespacedName.Namespace},
 						Status:     corev1.PodStatus{PodIP: pm.GetMetadata().GetIPAddress()},
 					}
 				}

@@ -115,7 +115,7 @@ type DiscoveryNotifier interface {
 | Field | Type | Description |
 |---|---|---|
 | `NamespacedName` | `types.NamespacedName` | Unique identity of the endpoint. |
-| `PodName` | `string` | Logical name (used in metrics). |
+| `Name` | `string` | Name of the workload behind the endpoint. |
 | `Address` | `string` | IP address of the inference server. |
 | `Port` | `string` | Port as a string (e.g. `"8000"`). |
 | `MetricsHost` | `string` | `host:port` for metrics scraping. Defaults to `address:port` if empty. |
