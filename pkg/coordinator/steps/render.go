@@ -148,6 +148,10 @@ func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.Reque
 	}
 	reqCtx.TokenIDs = tokenIDs
 
+	if err := validateSamplingParams(reqCtx.Body); err != nil {
+		return fmt.Errorf("render: %w", err)
+	}
+
 	rawFeatures := reqCtx.Body["features"]
 	var features map[string]any
 	if rawFeatures != nil {
@@ -159,6 +163,13 @@ func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.Reque
 	}
 	entries, err := extractMultimodalEntries(features)
 	if err != nil {
+		return fmt.Errorf("render: %w", err)
+	}
+	// The client supplies placeholder geometry directly on this path, so bound
+	// every span to the prompt before EncodeStep allocates from length. Unlike
+	// checkPlaceholderLimit, this guard is unconditional: it does not depend on
+	// the optional max_total_placeholder_tokens knob.
+	if err := validatePlaceholderBounds(entries, len(tokenIDs)); err != nil {
 		return fmt.Errorf("render: %w", err)
 	}
 	if err := s.checkPlaceholderLimit(entries); err != nil {
@@ -356,9 +367,13 @@ func (s *RenderStep) checkPlaceholderLimit(entries []pipeline.MultimodalEntry) e
 	total := 0
 	for _, e := range entries {
 		total += e.Placeholder.Length
-	}
-	if total > s.maxTotalPlaceholderTokens {
-		return fmt.Errorf("too many placeholder tokens: got %d, max %d: %w", total, s.maxTotalPlaceholderTokens, pipeline.ErrBadRequest)
+		// total < 0 catches int overflow: lengths are non-negative, so a sum
+		// past MaxInt wraps negative and would otherwise slip past the
+		// total > max check, silently bypassing the limit. On the generate path
+		// lengths come straight from the client, so this must not be evadable.
+		if total < 0 || total > s.maxTotalPlaceholderTokens {
+			return fmt.Errorf("too many placeholder tokens: got %d, max %d: %w", total, s.maxTotalPlaceholderTokens, pipeline.ErrBadRequest)
+		}
 	}
 	return nil
 }

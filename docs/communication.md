@@ -607,7 +607,7 @@ EPP-Phase: prefill
 `kwargs_data` carries the same per-image base64 tensors from the render step (same values sent to the encode stage). Each blob is a msgpack-serialized `MultiModalKwargsItem` containing both `pixel_values` and `image_grid_thw` (and any other model-specific keys). The prefill worker needs `image_grid_thw` to compute mRoPE (multimodal Rotary Position Embedding) positional encodings for the visual tokens.
 
 > [!NOTE]
-> Due to a bug in the `/inference/v1/generate` implementation, top-level `kv_transfer_params` and `ec_transfer_params` are not propagated to the engine: the endpoint reads transfer parameters only from `sampling_params.extra_args` (the top-level `ec_transfer_params` is used solely to echo back in the response). The coordinator nests both under `extra_args`:
+> Due to a bug in the `/inference/v1/generate` implementation, top-level `kv_transfer_params` and `ec_transfer_params` are not propagated to the engine: the endpoint reads transfer parameters only from `sampling_params.extra_args`. The coordinator nests both under `extra_args`:
 
 ```
 POST <gateway>/inference/v1/generate
@@ -647,14 +647,26 @@ EPP-Phase: prefill
 ```json
 {
   "request_id": "generate-tokens-abc123",
-  "choices": [],
+  "choices": [
+    {"index": 0, "logprobs": null, "finish_reason": "length", "token_ids": [28715], "routed_experts": null}
+  ],
+  "prompt_logprobs": null,
   "kv_transfer_params": {
-    "block_id": "block-999",
-    "peer_host": "10.0.0.42",
-    "peer_port": 7777
-  }
+    "do_remote_prefill": true,
+    "do_remote_decode": false,
+    "remote_block_ids": [[1, 2, 4]],
+    "remote_engine_id": "e1101616-bf27-4687-bd0b-05970390868e",
+    "remote_request_id": "generate-tokens-abc123",
+    "remote_host": "10.0.0.42",
+    "remote_port": 5600,
+    "tp_size": 1,
+    "remote_num_tokens": 318
+  },
+  "ec_transfer_params": null
 }
 ```
+
+`kv_transfer_params` carries the remote-prefill handoff the decode worker needs to pull the KV cache (`remote_engine_id`, `remote_block_ids`, `remote_host`/`remote_port`, `remote_num_tokens`). `ec_transfer_params` is `null` in the prefill response.
 
 ---
 

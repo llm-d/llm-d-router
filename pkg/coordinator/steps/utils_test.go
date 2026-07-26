@@ -59,6 +59,8 @@ func TestExtractTokenIDs(t *testing.T) {
 		{name: "negative_token", input: []any{float64(-1)}, wantErr: true},
 		{name: "non_integer_token", input: []any{float64(1.5)}, wantErr: true},
 		{name: "overflow_float_token", input: []any{float64(1e19)}, wantErr: true},
+		{name: "string_element", input: []any{"abc"}, wantErr: true},
+		{name: "bool_element", input: []any{true}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -325,6 +327,135 @@ func TestExtractMultimodalEntries(t *testing.T) {
 			t.Errorf("expected ErrBadRequest, got %v", err)
 		}
 	})
+
+	// A wrong-typed element inside an otherwise well-formed parallel array must
+	// fail loudly, not be coerced. These exercise the per-element type asserts.
+	t.Run("mm_hashes_element_not_string", func(t *testing.T) {
+		features := map[string]any{
+			"mm_hashes": map[string]any{"image": []any{float64(42)}},
+			"mm_placeholders": map[string]any{"image": []any{
+				map[string]any{"offset": float64(1), "length": float64(3)},
+			}},
+		}
+		_, err := extractMultimodalEntries(features)
+		if !errors.Is(err, pipeline.ErrBadRequest) {
+			t.Errorf("expected ErrBadRequest, got %v", err)
+		}
+	})
+
+	t.Run("mm_placeholders_element_not_object", func(t *testing.T) {
+		features := map[string]any{
+			"mm_hashes":       map[string]any{"image": []any{testHash}},
+			"mm_placeholders": map[string]any{"image": []any{"not-an-object"}},
+		}
+		_, err := extractMultimodalEntries(features)
+		if !errors.Is(err, pipeline.ErrBadRequest) {
+			t.Errorf("expected ErrBadRequest, got %v", err)
+		}
+	})
+
+	// A negative offset or length must be rejected here: EncodeStep indexes
+	// token_ids[offset] and allocates make([]int, 1+length), so a negative value
+	// panics downstream. This guard is the only thing preventing that, so it is
+	// exercised directly. Do not weaken anyToNonNegativeInt to a plain int parse.
+	for _, tc := range []struct {
+		name   string
+		offset float64
+		length float64
+	}{
+		{"negative_offset", -1, 3},
+		{"negative_length", 1, -3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			features := map[string]any{
+				"mm_hashes": map[string]any{"image": []any{testHash}},
+				"mm_placeholders": map[string]any{"image": []any{
+					map[string]any{"offset": tc.offset, "length": tc.length},
+				}},
+			}
+			_, err := extractMultimodalEntries(features)
+			if !errors.Is(err, pipeline.ErrBadRequest) {
+				t.Errorf("expected ErrBadRequest, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateSamplingParams(t *testing.T) {
+	obj := func(m map[string]any) map[string]any { return m }
+	tests := []struct {
+		name    string
+		body    map[string]any
+		wantErr bool
+	}{
+		{name: "absent", body: map[string]any{}},
+		{name: "null", body: map[string]any{"sampling_params": nil}},
+		{name: "valid_object", body: map[string]any{"sampling_params": obj(map[string]any{"max_tokens": float64(16)})}},
+		{name: "valid_with_extra_args", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": obj(map[string]any{})})}},
+		{name: "extra_args_null", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": nil})}},
+		{name: "sampling_params_array", body: map[string]any{"sampling_params": []any{float64(1), float64(2)}}, wantErr: true},
+		{name: "sampling_params_string", body: map[string]any{"sampling_params": "greedy"}, wantErr: true},
+		{name: "extra_args_array", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": []any{float64(1)}})}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSamplingParams(tc.body)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !errors.Is(err, pipeline.ErrBadRequest) {
+					t.Errorf("expected ErrBadRequest, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidatePlaceholderBounds(t *testing.T) {
+	entry := func(offset, length int) pipeline.MultimodalEntry {
+		return pipeline.MultimodalEntry{
+			Placeholder: pipeline.PlaceholderRange{Offset: offset, Length: length},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		entries    []pipeline.MultimodalEntry
+		tokenCount int
+		wantErr    bool
+	}{
+		{name: "empty_entries", entries: nil, tokenCount: 4},
+		{name: "span_fills_prompt", entries: []pipeline.MultimodalEntry{entry(0, 4)}, tokenCount: 4},
+		{name: "boundary_offset_plus_length_equals_count", entries: []pipeline.MultimodalEntry{entry(1, 3)}, tokenCount: 4},
+		{name: "zero_length_in_range", entries: []pipeline.MultimodalEntry{entry(3, 0)}, tokenCount: 4},
+		{name: "offset_at_count", entries: []pipeline.MultimodalEntry{entry(4, 0)}, tokenCount: 4, wantErr: true},
+		{name: "offset_beyond_count", entries: []pipeline.MultimodalEntry{entry(5, 1)}, tokenCount: 4, wantErr: true},
+		{name: "span_one_past_end", entries: []pipeline.MultimodalEntry{entry(2, 3)}, tokenCount: 4, wantErr: true},
+		{name: "length_overflows_prompt", entries: []pipeline.MultimodalEntry{entry(0, 9007199254740992)}, tokenCount: 4, wantErr: true},
+		{name: "second_entry_out_of_range", entries: []pipeline.MultimodalEntry{entry(0, 2), entry(10, 1)}, tokenCount: 4, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePlaceholderBounds(tc.entries, tc.tokenCount)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !errors.Is(err, pipeline.ErrBadRequest) {
+					t.Errorf("expected ErrBadRequest, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
 }
 
 // mmImageKwargs extracts features["kwargs_data"].image as a []any, marshaling

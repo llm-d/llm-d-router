@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -394,6 +395,31 @@ func TestRenderStep_AllowsAtPlaceholderLimit(t *testing.T) {
 	}
 }
 
+func TestRenderStep_PlaceholderLimitOverflow(t *testing.T) {
+	step, err := NewRenderStep(nil, map[string]any{"max_total_placeholder_tokens": 5})
+	if err != nil {
+		t.Fatalf("NewRenderStep: %v", err)
+	}
+	rs := step.(*RenderStep)
+
+	// Two lengths whose sum overflows int and wraps negative. Without the
+	// overflow guard, total > max is false and the limit is silently bypassed.
+	entries := []pipeline.MultimodalEntry{
+		{Placeholder: pipeline.PlaceholderRange{Length: math.MaxInt}},
+		{Placeholder: pipeline.PlaceholderRange{Length: math.MaxInt}},
+	}
+	err = rs.checkPlaceholderLimit(entries)
+	if err == nil {
+		t.Fatal("expected error for overflowing placeholder length sum")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "too many placeholder tokens") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRenderStep_RejectsNegativeLimits(t *testing.T) {
 	if _, err := NewRenderStep(nil, map[string]any{"max_total_tokens": -1}); err == nil {
 		t.Fatal("expected error for negative max_total_tokens")
@@ -547,6 +573,71 @@ func TestRenderStep_GenerateFormat_MalformedFeatures(t *testing.T) {
 			err := step.Execute(context.Background(), reqCtx)
 			if err == nil {
 				t.Fatal("expected error for malformed features")
+			}
+			if !errors.Is(err, pipeline.ErrBadRequest) {
+				t.Errorf("expected ErrBadRequest, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRenderStep_GenerateFormat_PlaceholderOutOfBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		offset float64
+		length float64
+	}{
+		{"offset_out_of_range", 5, 1},
+		{"length_exceeds_prompt", 1, 9007199254740992},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step, _ := NewRenderStep(nil, map[string]any{})
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: gateway.DefaultGeneratePath,
+				Body: map[string]any{
+					"model":     "test-model",
+					"token_ids": []any{float64(1), float64(32000), float64(32000), float64(2)},
+					"features": map[string]any{
+						"mm_hashes": map[string]any{"image": []any{"abc123"}},
+						"mm_placeholders": map[string]any{"image": []any{
+							map[string]any{"offset": tc.offset, "length": tc.length},
+						}},
+						"kwargs_data": map[string]any{"image": []any{"dGVuc29y"}},
+					},
+				},
+			}
+			err := step.Execute(context.Background(), reqCtx)
+			if err == nil {
+				t.Fatal("expected error for out-of-bounds placeholder")
+			}
+			if !errors.Is(err, pipeline.ErrBadRequest) {
+				t.Errorf("expected ErrBadRequest, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRenderStep_GenerateFormat_InvalidSamplingParams(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		samplingParams any
+	}{
+		{"array", []any{float64(1), float64(2)}},
+		{"string", "greedy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step, _ := NewRenderStep(nil, map[string]any{})
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: gateway.DefaultGeneratePath,
+				Body: map[string]any{
+					"model":           "test-model",
+					"token_ids":       []any{float64(1), float64(2), float64(3)},
+					"sampling_params": tc.samplingParams,
+				},
+			}
+			err := step.Execute(context.Background(), reqCtx)
+			if err == nil {
+				t.Fatal("expected error for non-object sampling_params")
 			}
 			if !errors.Is(err, pipeline.ErrBadRequest) {
 				t.Errorf("expected ErrBadRequest, got %v", err)

@@ -25,6 +25,7 @@ import (
 	"github.com/go-logr/logr"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -117,6 +118,24 @@ func mmKwargsField(kwargs []string) map[string][]any {
 	return map[string][]any{ModalityImage: items}
 }
 
+// setGenerateTransferParams nests the kv/ec transfer params under
+// sampling_params.extra_args, the only place the /inference/v1/generate engine
+// reads them (top-level kv_transfer_params/ec_transfer_params are ignored on
+// input). It get-or-creates extra_args on the given sampling map so a client's
+// existing generation fields survive. ecParams may be empty, in which case
+// ec_transfer_params is left unset.
+func setGenerateTransferParams(sampling map[string]any, kvParams any, ecParams map[string]any) {
+	extraArgs, ok := sampling[reqcommon.FieldExtraArgs].(map[string]any)
+	if !ok {
+		extraArgs = map[string]any{}
+		sampling[reqcommon.FieldExtraArgs] = extraArgs
+	}
+	extraArgs[reqcommon.FieldKVTransferParams] = kvParams
+	if len(ecParams) > 0 {
+		extraArgs[reqcommon.FieldECTransferParams] = ecParams
+	}
+}
+
 // coerceParamsMap coerces a transfer-params value from an upstream response to a
 // map: a non-object value is logged at debug and skipped (returns nil) rather
 // than failing the request. A missing or null value is already nil; an empty map
@@ -137,7 +156,8 @@ func coerceParamsMap(logger logr.Logger, v any, label string) map[string]any {
 
 // toIntSlice converts a JSON-unmarshalled []any of numeric elements to []int.
 // Each element must be a non-negative integer represented as float64 or json.Number.
-// Callers wrap the returned error with their own field context.
+// The returned error identifies the offending element by index and wraps
+// pipeline.ErrBadRequest.
 func toIntSlice(values []any) ([]int, error) {
 	out := make([]int, 0, len(values))
 	for i, v := range values {
@@ -324,4 +344,58 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 		}
 	}
 	return entries, nil
+}
+
+// validateSamplingParams checks that sampling_params and its nested extra_args,
+// when present, are JSON objects. Both are optional. The decode step merges
+// kv_transfer_params into sampling_params.extra_args; a non-object at either
+// level would fall into its fallback branch and be silently replaced with an
+// empty map, discarding client-requested generation parameters with no error.
+// Validating once at ingestion keeps that path fail-loud, consistent with
+// token_ids and features.
+func validateSamplingParams(body map[string]any) error {
+	raw, ok := body[reqcommon.FieldSamplingParams]
+	if !ok || raw == nil {
+		return nil
+	}
+	sampling, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s must be an object, got %T: %w",
+			reqcommon.FieldSamplingParams, raw, pipeline.ErrBadRequest)
+	}
+	ea, ok := sampling[reqcommon.FieldExtraArgs]
+	if !ok || ea == nil {
+		return nil
+	}
+	if _, ok := ea.(map[string]any); !ok {
+		return fmt.Errorf("%s.%s must be an object, got %T: %w",
+			reqcommon.FieldSamplingParams, reqcommon.FieldExtraArgs, ea, pipeline.ErrBadRequest)
+	}
+	return nil
+}
+
+// validatePlaceholderBounds checks that every placeholder span [offset,
+// offset+length) lies within a prompt of tokenCount tokens. It guards the
+// generate path, where the client supplies placeholder geometry directly:
+// EncodeStep.buildEncodeTokenIDs indexes token_ids[offset] and allocates
+// make([]int, 1+length), so an out-of-range offset reads the wrong token and an
+// unbounded length (a tiny request can claim billions) is a memory-exhaustion
+// vector. vLLM declares offset/length as plain unbounded ints on the generate
+// endpoint and does not enforce this, so the coordinator does. offset and
+// length are already guaranteed non-negative by extractMultimodalEntries.
+func validatePlaceholderBounds(entries []pipeline.MultimodalEntry, tokenCount int) error {
+	for i, e := range entries {
+		off := e.Placeholder.Offset
+		length := e.Placeholder.Length
+		if off >= tokenCount {
+			return fmt.Errorf("mm_placeholders[%d].offset %d out of range for %d token_ids: %w",
+				i, off, tokenCount, pipeline.ErrBadRequest)
+		}
+		// off < tokenCount, so tokenCount-off is positive and cannot overflow.
+		if length > tokenCount-off {
+			return fmt.Errorf("mm_placeholders[%d] span (offset %d + length %d) exceeds %d token_ids: %w",
+				i, off, length, tokenCount, pipeline.ErrBadRequest)
+		}
+	}
+	return nil
 }
