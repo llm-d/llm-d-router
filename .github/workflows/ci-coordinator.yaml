@@ -42,6 +42,7 @@ jobs:
               - scripts/**
               - hack/**
               - test/**
+              - config/coordinator/**
               - .github/actions/docker-build-and-push/action.yml
               - .github/actions/e2e-runner-setup/action.yml
               - .github/workflows/ci-coordinator.yaml
@@ -133,6 +134,7 @@ jobs:
           push: 'false'
           buildx-outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image.archive }}.tar
           commit-sha: ${{ github.sha }}
+          build-ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Pull ${{ matrix.image.name }} image
         if: ${{ matrix.image.source == 'pull' }}

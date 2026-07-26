@@ -33,6 +33,10 @@ inputs:
     required: false
     description: Git commit SHA to embed via COMMIT_SHA build arg
     default: ''
+  build-ref:
+    required: false
+    description: Human-readable build ref embedded via BUILD_REF build arg. Falls back to tag when unset.
+    default: ''
   additional-tags:
     required: false
     description: Additional image tags to push
@@ -66,6 +70,6 @@ runs:
         build-args: |
           LDFLAGS=-s -w
           COMMIT_SHA=${{ inputs.commit-sha || 'unknown' }}
-          BUILD_REF=${{ inputs.tag || 'unknown' }}
+          BUILD_REF=${{ inputs.build-ref || inputs.tag || 'unknown' }}
         cache-from: type=gha,scope=${{ inputs.image-name }}
         cache-to: type=gha,mode=max,scope=${{ inputs.image-name }}

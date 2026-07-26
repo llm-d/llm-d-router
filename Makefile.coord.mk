@@ -196,7 +196,7 @@ test-unit: image-build-builder
 	$(BUILDER_RUN) "go test -v -race $(TEST_PACKAGES)"
 
 .PHONY: test-e2e-coordinator-run
-test-e2e-coordinator-run: image-pull ## Ensure images are present, then run coordinator e2e tests
+test-e2e-coordinator-run: image-pull ## Run coordinator e2e tests against pre-loaded builder/coordinator/epp images (CI entry point; use test-e2e-coordinator locally)
 	@printf "\033[33;1m==== Running Coordinator End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		$(BUILDER_IMAGE) test/coordinator/scripts/run_e2e_coordinator.sh
