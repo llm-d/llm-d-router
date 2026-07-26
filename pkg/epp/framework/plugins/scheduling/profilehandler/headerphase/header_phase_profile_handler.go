@@ -62,8 +62,8 @@ type parameters struct {
 	DefaultProfile string `json:"defaultProfile"`
 }
 
-// Factory defines the factory function for HeaderPhaseProfileHandler.
-func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+// HeaderPhaseProfileHandlerFactory defines the factory function for HeaderPhaseProfileHandler.
+func HeaderPhaseProfileHandlerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	params := parameters{}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&params); err != nil {
@@ -74,17 +74,10 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 	return NewHeaderPhaseProfileHandler(params.HeaderName, params.DefaultProfile).WithName(name), nil
 }
 
-// NewHeaderPhaseProfileHandler initializes a new HeaderPhaseProfileHandler and returns
-// its pointer.
-//
-// headerName is lowercased and trimmed, falling back to defaultHeaderName when that
-// leaves it empty: the EPP's request handler lowercases every incoming header name at
-// ingestion (pkg/epp/handlers/request.go), so the configured name must be normalized the
-// same way to match, and an empty header key would never match any request.
-//
-// defaultProfile is trimmed, falling back to defaultProfileName when that leaves it
-// empty. Unlike headerName, it is not case-normalized: it names a schedulingProfiles
-// entry, which (like the header value itself) is matched case-sensitively.
+// NewHeaderPhaseProfileHandler trims and defaults both arguments, additionally
+// lowercasing headerName to match how the EPP stores ingested header keys
+// (pkg/epp/handlers/request.go); defaultProfile stays case-sensitive since it names a
+// schedulingProfiles entry.
 func NewHeaderPhaseProfileHandler(headerName, defaultProfile string) *HeaderPhaseProfileHandler {
 	headerName = strings.ToLower(strings.TrimSpace(headerName))
 	if headerName == "" {
@@ -103,18 +96,10 @@ func NewHeaderPhaseProfileHandler(headerName, defaultProfile string) *HeaderPhas
 	}
 }
 
-// HeaderPhaseProfileHandler runs exactly one scheduling profile per request: the one
-// named by the value of a request header. This lets a single EPP instance serve several
-// phases of a disaggregated pipeline (e.g. encode, prefill, decode) whose caller already
-// knows, out of band, which phase each request is for - unlike the disagg profile
-// handler, which decides which profiles to run via decider plugins.
-//
-// Two fallbacks keep single-stage and header-less traffic working without a different
-// profile handler: with exactly one configured profile there is nothing to choose,
-// so that profile always runs regardless of the header (or its absence); with more than
-// one configured profile, a request whose header is missing or blank runs defaultProfile
-// instead of failing. A header naming a profile that isn't configured is still an error -
-// only the header's absence triggers the default, not an unrecognized value.
+// HeaderPhaseProfileHandler runs exactly one scheduling profile per request, named by a
+// request header, falling back to the sole configured profile or to defaultProfile when
+// there's nothing to choose or the header is missing/blank; an unrecognized header value
+// is still an error.
 type HeaderPhaseProfileHandler struct {
 	typedName      fwkplugin.TypedName
 	headerName     string
@@ -151,28 +136,13 @@ func (h *HeaderPhaseProfileHandler) noMatchError(phase string) error {
 	return fmt.Errorf("header-phase profile handler: no scheduling profile configured for %q header value %q", h.headerName, phase)
 }
 
-// defaultProfileNotConfiguredError explains that defaultProfile itself isn't a
-// configured scheduling profile. Distinct from noMatchError: this is a configuration
-// bug that fails every request whose phase header is missing or blank, not an ordinary
-// client-side unrecognized header value.
+// defaultProfileNotConfiguredError reports defaultProfile itself missing from
+// schedulingProfiles - a config bug, distinct from noMatchError's per-request issue.
 func (h *HeaderPhaseProfileHandler) defaultProfileNotConfiguredError() error {
 	return fmt.Errorf("header-phase profile handler: defaultProfile %q is not a configured scheduling profile", h.defaultProfile)
 }
 
-// Pick selects the single SchedulingProfile to run: the only configured profile when
-// there is just one, otherwise the one named by the request's phase header, falling
-// back to defaultProfile when the header is missing or blank. It returns an empty map
-// once that profile has run, or when no profile could be resolved. In the latter case
-// the scheduler's run loop (pkg/epp/scheduling.Scheduler.Schedule) stops without ever
-// calling ProcessResults, so the specific reason is logged here rather than returned
-// from ProcessResults, where it would be unreachable. The client never sees that
-// reason: it only gets the scheduler's generic "failed to run any scheduler profile"
-// error, which pkg/epp/requestcontrol/director.go maps to a 429 ResourceExhausted
-// response - misleading, since a malformed or missing header is a client error, not a
-// capacity problem. Surfacing the real reason to the client needs a
-// scheduler/ProfileHandler contract change and is out of scope here; the log is a
-// diagnostic aid for operators, not an equivalent substitute for what the caller
-// receives.
+// Pick implements fwksched.ProfileHandler.Pick; see README.md for behavior.
 func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.InferenceRequest, profiles map[string]fwksched.SchedulerProfile,
 	profileResults map[string]*fwksched.ProfileRunResult) map[string]fwksched.SchedulerProfile {
 	if len(profileResults) > 0 { // the selected profile has already run
@@ -196,19 +166,14 @@ func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.
 
 	profile, ok := profiles[resolvedPhase]
 	if !ok {
-		// A missing or unrecognized header value is a per-request client issue, not a
-		// system fault - log via Info, not Error, so it doesn't page anyone or drown out
-		// real errors. It's still a once-per-request operational signal an operator needs
-		// to see by default, so it's unguarded rather than gated behind a verbosity level
-		// that's off in production.
-		// A missing header whose defaultProfile substitute also fails to resolve is a
-		// distinct, config-time condition - it fails every header-less request, not just
-		// an occasional bad caller - so it gets its own message rather than being
-		// reported as an ordinary missing header.
 		err := h.noMatchError(phase)
 		if phase == "" {
 			err = h.defaultProfileNotConfiguredError()
 		}
+		// Logged here, not returned from ProcessResults (skipped when Pick returns empty),
+		// at Info, not Error, since a bad or missing header is a client issue an operator
+		// still needs to see by default.
+		// See README.md for why the client only gets a generic 429 instead of this reason.
 		log.FromContext(ctx).Info("no scheduling profile selected for request", "error", err)
 		return map[string]fwksched.SchedulerProfile{}
 	}

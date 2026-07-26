@@ -123,7 +123,7 @@ func TestHeaderPhaseProfileHandlerFactory(t *testing.T) {
 			// (DisallowUnknownFields), so use it here too rather than a plain decoder.
 			decoder := fwkplugin.StrictDecoder(json.RawMessage(tt.rawParameters))
 
-			plugin, err := Factory("custom-name", decoder, nil)
+			plugin, err := HeaderPhaseProfileHandlerFactory("custom-name", decoder, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("Factory() expected error, got nil")
