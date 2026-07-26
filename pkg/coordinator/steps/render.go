@@ -157,6 +157,7 @@ func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.Reque
 			return fmt.Errorf("render: features must be an object, got %T: %w", rawFeatures, pipeline.ErrBadRequest)
 		}
 	}
+	entries, err := extractMultimodalEntries(features)
 	if err != nil {
 		return fmt.Errorf("render: %w", err)
 	}

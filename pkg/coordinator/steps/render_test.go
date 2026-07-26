@@ -525,6 +525,54 @@ func TestRenderStep_GenerateFormat_MultipleImages(t *testing.T) {
 	}
 }
 
+func TestRenderStep_GenerateFormat_MalformedFeatures(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		features any
+	}{
+		{"string", "not-an-object"},
+		{"array", []any{"a", "b"}},
+		{"number", float64(42)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step, _ := NewRenderStep(nil, map[string]any{})
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: gateway.DefaultGeneratePath,
+				Body: map[string]any{
+					"model":     "test-model",
+					"token_ids": []any{float64(1), float64(2), float64(3)},
+					"features":  tc.features,
+				},
+			}
+			err := step.Execute(context.Background(), reqCtx)
+			if err == nil {
+				t.Fatal("expected error for malformed features")
+			}
+			if !errors.Is(err, pipeline.ErrBadRequest) {
+				t.Errorf("expected ErrBadRequest, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRenderStep_GenerateFormat_NullFeatures(t *testing.T) {
+	step, _ := NewRenderStep(nil, map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body: map[string]any{
+			"model":     "test-model",
+			"token_ids": []any{float64(1), float64(2), float64(3)},
+			"features":  nil,
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error for null features: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected no multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
 func TestRenderStep_GenerateFormat_MissingTokenIDs(t *testing.T) {
 	step, _ := NewRenderStep(nil, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
