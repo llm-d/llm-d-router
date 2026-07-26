@@ -43,7 +43,7 @@ func endpoint(p *Producer, name, address string, cachedBlocks int) scheduling.En
 		Address:        address,
 		Port:           "8080",
 	}, nil, nil)
-	e.Put(p.prefixMatchDataKey.String(),
+	e.Put(p.prefixMatchDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).WithCachedBlockCount(cachedBlocks))
 	return e
 }

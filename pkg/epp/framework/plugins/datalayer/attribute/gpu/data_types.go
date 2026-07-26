@@ -40,6 +40,6 @@ func (v GPUUtilization) Clone() fwkdl.Cloneable {
 }
 
 // ReadGPUUtilization retrieves GPU utilization from an endpoint's AttributeMap.
-func ReadGPUUtilization(attrs fwkdl.AttributeMap, key string) (GPUUtilization, bool) {
+func ReadGPUUtilization(attrs fwkdl.AttributeMap, key plugin.DataKey) (GPUUtilization, bool) {
 	return fwkdl.ReadAttribute[GPUUtilization](attrs, key)
 }

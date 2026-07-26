@@ -226,7 +226,7 @@ func TestLegacyProducer_TokensFlowToEndpointAttribute(t *testing.T) {
 
 	require.NoError(t, lp.Produce(ctx, req, []scheduling.Endpoint{endpoint}))
 
-	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("inner").String()
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("inner")
 	raw, ok := endpoint.Get(key)
 	require.True(t, ok, "endpoint should have PrefixCacheMatchInfo set")
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)

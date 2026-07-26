@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -79,9 +80,9 @@ type Endpoint interface {
 	GetMetadata() *fwkdl.EndpointMetadata
 	GetMetrics() *fwkdl.Metrics
 	String() string
-	Get(string) (fwkdl.Cloneable, bool)
-	Put(string, fwkdl.Cloneable)
-	Keys() []string
+	Get(fwkplugin.DataKey) (fwkdl.Cloneable, bool)
+	Put(fwkplugin.DataKey, fwkdl.Cloneable)
+	Keys() []fwkplugin.DataKey
 	Clone() fwkdl.AttributeMap
 }
 

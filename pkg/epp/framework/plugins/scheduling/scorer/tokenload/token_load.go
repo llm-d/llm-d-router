@@ -101,12 +101,12 @@ func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceReques
 		// Read both accumulated in-flight load and the projected impact of the
 		// request being scored, which are now carried on separate attributes.
 		var tokens int64
-		if val, ok := endpoint.Get(s.inFlightLoadDataKey.String()); ok {
+		if val, ok := endpoint.Get(s.inFlightLoadDataKey); ok {
 			if load, ok := val.(*attrconcurrency.InFlightLoad); ok && load != nil {
 				tokens += load.Tokens
 			}
 		}
-		if val, ok := endpoint.Get(s.uncachedRequestTokensDataKey.String()); ok {
+		if val, ok := endpoint.Get(s.uncachedRequestTokensDataKey); ok {
 			if uncached, ok := val.(*attrconcurrency.UncachedRequestTokens); ok && uncached != nil {
 				tokens += uncached.Tokens
 			}

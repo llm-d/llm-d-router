@@ -16,7 +16,16 @@ limitations under the License.
 
 package metrics
 
-import fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+import (
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+)
+
+const (
+	// MetricsExtractorType is the plugin type for the core metrics extractor,
+	// which publishes the custom scalar metric attributes.
+	MetricsExtractorType = "core-metrics-extractor"
+)
 
 // ScalarMetricValue is a numeric endpoint attribute extracted from a configured scalar metric.
 type ScalarMetricValue float64
@@ -25,6 +34,14 @@ func (v ScalarMetricValue) Clone() fwkdl.Cloneable {
 	return v
 }
 
-func ReadScalarMetricValue(attrs fwkdl.AttributeMap, key string) (ScalarMetricValue, bool) {
+// ScalarMetricDataKey returns the key under which the core metrics extractor
+// publishes the custom scalar metric configured as attributeKey. The data type
+// of a custom metric is chosen in configuration rather than in code, so the key
+// is derived at construction time instead of being declared as a package var.
+func ScalarMetricDataKey(attributeKey string) plugin.DataKey {
+	return plugin.NewDataKey(attributeKey, MetricsExtractorType)
+}
+
+func ReadScalarMetricValue(attrs fwkdl.AttributeMap, key plugin.DataKey) (ScalarMetricValue, bool) {
 	return fwkdl.ReadAttribute[ScalarMetricValue](attrs, key)
 }

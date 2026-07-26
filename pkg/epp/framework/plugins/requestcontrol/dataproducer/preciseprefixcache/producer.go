@@ -381,10 +381,9 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 				cachedBlocksByTier[tier] += count
 			}
 		}
-		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
-				WithCachedBlockCount(cachedBlocks).
-				WithCachedBlocksByTier(cachedBlocksByTier))
+		ep.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
+			WithCachedBlockCount(cachedBlocks).
+			WithCachedBlocksByTier(cachedBlocksByTier))
 	}
 
 	if p.speculativeEnabled {

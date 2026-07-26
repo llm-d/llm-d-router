@@ -178,7 +178,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
 			continue
 		}
-		ep.GetAttributes().Put(custom.AttributeKey, attrmetrics.ScalarMetricValue(extractValue(metric)))
+		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metric)))
 		updated = true
 	}
 

@@ -102,7 +102,7 @@ func (e *Extractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.
 	}
 
 	normalized := attrgpu.GPUUtilization(maxUtil / 100.0)
-	in.Endpoint.GetAttributes().Put(e.dk.String(), normalized)
+	in.Endpoint.GetAttributes().Put(e.dk, normalized)
 	return nil
 }
 

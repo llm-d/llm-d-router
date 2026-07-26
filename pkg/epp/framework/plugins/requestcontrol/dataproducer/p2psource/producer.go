@@ -219,7 +219,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 // cached-block count times the block size) from its PrefixCacheMatchInfo,
 // or 0 when absent.
 func (p *Producer) cachedTokenCount(ep scheduling.Endpoint) int {
-	raw, ok := ep.Get(p.prefixMatchDataKey.String())
+	raw, ok := ep.Get(p.prefixMatchDataKey)
 	if !ok {
 		return 0
 	}

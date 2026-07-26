@@ -25,10 +25,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 )
 
 const (
-	MetricsExtractorType = "core-metrics-extractor"
+	MetricsExtractorType = attrmetrics.MetricsExtractorType
 )
 
 // Configuration parameters for metrics data source and extractor.

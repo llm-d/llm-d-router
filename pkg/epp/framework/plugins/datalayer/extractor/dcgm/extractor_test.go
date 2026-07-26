@@ -87,7 +87,7 @@ func TestExtractorExtract(t *testing.T) {
 		t.Error("empty extractor name")
 	}
 
-	key := attrgpu.GPUUtilizationDataKey.WithNonEmptyProducerName(attrgpu.DCGMExtractorType).String()
+	key := attrgpu.GPUUtilizationDataKey.WithNonEmptyProducerName(attrgpu.DCGMExtractorType)
 	gaugeType := dto.MetricType_GAUGE
 
 	tests := []struct {

@@ -171,7 +171,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 			matchLen = total
 			matched = true
 		}
-		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, total, p.config.BlockSizeTokens))
+		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(matchLen, total, p.config.BlockSizeTokens))
 	}
 	if e.assigned != nil && !matched {
 		// The endpoint set changed between batching and release (rolling update or

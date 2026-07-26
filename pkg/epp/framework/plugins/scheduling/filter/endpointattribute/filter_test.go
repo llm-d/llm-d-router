@@ -108,7 +108,7 @@ func TestEndpointAttributeFilterFactory(t *testing.T) {
 
 func newEndpointWithValue(value float64) scheduling.Endpoint {
 	attrs := fwkdl.NewAttributes()
-	attrs.Put(testAttribute, attrmetrics.ScalarMetricValue(value))
+	attrs.Put(attrmetrics.ScalarMetricDataKey(testAttribute), attrmetrics.ScalarMetricValue(value))
 	return scheduling.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{}, attrs)
 }
 

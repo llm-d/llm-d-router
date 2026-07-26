@@ -218,7 +218,7 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	if hn == "" && rack == "" && zone == "" && region == "" {
 		return nil
 	}
-	event.Endpoint.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{
+	event.Endpoint.GetAttributes().Put(h.ext.dk, &attrtopology.Topology{
 		Hostname: hn,
 		Rack:     rack,
 		Zone:     zone,
@@ -288,14 +288,14 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 	for _, ep := range eps {
 		// Preserve rack/zone/region already set from the endpoint event.
 		topo := &attrtopology.Topology{Hostname: hostname}
-		if raw, ok := ep.GetAttributes().Get(h.ext.dk.String()); ok {
+		if raw, ok := ep.GetAttributes().Get(h.ext.dk); ok {
 			if existing, ok := raw.(*attrtopology.Topology); ok {
 				topo.Rack = existing.Rack
 				topo.Zone = existing.Zone
 				topo.Region = existing.Region
 			}
 		}
-		ep.GetAttributes().Put(h.ext.dk.String(), topo)
+		ep.GetAttributes().Put(h.ext.dk, topo)
 	}
 	return nil
 }

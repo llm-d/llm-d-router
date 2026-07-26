@@ -155,7 +155,7 @@ func (s *EndpointAttributeScorer) Score(_ context.Context, _ *fwksched.Inference
 func (s *EndpointAttributeScorer) scoreFixedRange(endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
-		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, s.attributeKey)
+		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, attrmetrics.ScalarMetricDataKey(s.attributeKey))
 		if !ok {
 			scores[endpoint] = 0.0
 			continue
@@ -180,7 +180,7 @@ func (s *EndpointAttributeScorer) scoreAdaptiveRange(endpoints []fwksched.Endpoi
 	maxValue := math.Inf(-1)
 
 	for _, endpoint := range endpoints {
-		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, s.attributeKey)
+		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, attrmetrics.ScalarMetricDataKey(s.attributeKey))
 		if !ok {
 			continue
 		}

@@ -50,7 +50,7 @@ func makeTestEndpointBase() scheduling.Endpoint {
 
 func makeTestEndpoint(cachedTokens int) scheduling.Endpoint {
 	ep := makeTestEndpointBase()
-	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(cachedTokens, testTotalTokens, testBlockSize))
 	return ep
 }
@@ -424,7 +424,7 @@ func TestDisaggregate_UsesUnweightedCachedBlockCount(t *testing.T) {
 
 	newEndpoint := func(info *attrprefix.PrefixCacheMatchInfo) scheduling.Endpoint {
 		ep := makeTestEndpointBase()
-		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), info)
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, info)
 		return ep
 	}
 	// Exact token count via the tokenized-prompt path the decider reads.
@@ -463,7 +463,7 @@ func TestDisaggregateWrongPrefixInfoType(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	ep := makeTestEndpointBase()
-	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), &notPrefixCacheMatchInfo{})
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, &notPrefixCacheMatchInfo{})
 
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 5})
 	require.NoError(t, err)

@@ -44,7 +44,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 	var prefixCacheScore float64
 	for _, endpoint := range endpoints {
 
-		if prefixCacheInfoRaw, ok := endpoint.Get(pl.prefixMatchDataKey.String()); ok {
+		if prefixCacheInfoRaw, ok := endpoint.Get(pl.prefixMatchDataKey); ok {
 			prefixCacheInfo := prefixCacheInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
 			prefixCacheScore = float64(prefixCacheInfo.MatchBlocks()) / float64(prefixCacheInfo.TotalBlocks())
 			if !math.IsNaN(prefixCacheScore) {
@@ -90,7 +90,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 					pred.TPOT,
 					pl.getEndpointRunningRequestCount(pred.Endpoint),
 				)
-				pred.Endpoint.Put(pl.latencyPredictionInfoDataKey.String(), latencyInfo)
+				pred.Endpoint.Put(pl.latencyPredictionInfoDataKey, latencyInfo)
 				logger.V(logutil.DEBUG).Info("Stored latency prediction in endpoint",
 					"pod", pred.Endpoint.GetMetadata().NamespacedName.Name,
 					"ttft", pred.TTFT,

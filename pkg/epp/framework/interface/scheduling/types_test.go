@@ -23,7 +23,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+)
+
+var (
+	testKeyK     = fwkplugin.NewDataKey("k", "test-producer")
+	testKeyK1    = fwkplugin.NewDataKey("k1", "test-producer")
+	testKeyExtra = fwkplugin.NewDataKey("extra", "test-producer")
 )
 
 type cloneableString string
@@ -71,7 +78,7 @@ func TestNewEndpoint_CopiesInputs(t *testing.T) {
 	meta := newTestMetadata("pod-a")
 	metrics := newTestMetrics()
 	attr := fwkdl.NewAttributes()
-	attr.Put("key", cloneableString("value"))
+	attr.Put(testKeyK, cloneableString("value"))
 
 	ep := NewEndpoint(meta, metrics, attr)
 	assert.NotNil(t, ep)
@@ -85,7 +92,7 @@ func TestNewEndpoint_CopiesInputs(t *testing.T) {
 	assert.Equal(t, 3, ep.GetMetrics().RunningRequestsSize)
 
 	// values from attribute map should be retrievable
-	v, ok := ep.Get("key")
+	v, ok := ep.Get(testKeyK)
 	assert.True(t, ok)
 	assert.Equal(t, cloneableString("value"), v)
 }
@@ -96,8 +103,8 @@ func TestNewEndpoint_NilAttributeUsesDefault(t *testing.T) {
 	assert.Empty(t, ep.Keys())
 
 	// Should still be safe to write into the default-allocated attribute map
-	ep.Put("k", cloneableString("v"))
-	v, ok := ep.Get("k")
+	ep.Put(testKeyK, cloneableString("v"))
+	v, ok := ep.Get(testKeyK)
 	assert.True(t, ok)
 	assert.Equal(t, cloneableString("v"), v)
 }
@@ -115,20 +122,20 @@ func TestEndpoint_StringContainsFields(t *testing.T) {
 
 func TestEndpoint_Clone(t *testing.T) {
 	attr := fwkdl.NewAttributes()
-	attr.Put("k", cloneableString("v"))
+	attr.Put(testKeyK, cloneableString("v"))
 	ep := NewEndpoint(newTestMetadata("pod-d"), newTestMetrics(), attr)
 
 	cloned := ep.Clone()
-	v, ok := cloned.Get("k")
+	v, ok := cloned.Get(testKeyK)
 	assert.True(t, ok)
 	assert.Equal(t, cloneableString("v"), v)
 }
 
 func TestEndpointComparer_Equal(t *testing.T) {
 	attrA := fwkdl.NewAttributes()
-	attrA.Put("k", cloneableString("v"))
+	attrA.Put(testKeyK, cloneableString("v"))
 	attrB := fwkdl.NewAttributes()
-	attrB.Put("k", cloneableString("v"))
+	attrB.Put(testKeyK, cloneableString("v"))
 
 	a := NewEndpoint(newTestMetadata("pod"), newTestMetrics(), attrA)
 	b := NewEndpoint(newTestMetadata("pod"), newTestMetrics(), attrB)
@@ -153,10 +160,10 @@ func TestEndpointComparer_DifferByMetrics(t *testing.T) {
 
 func TestEndpointComparer_DifferByAttributeKeys(t *testing.T) {
 	attrA := fwkdl.NewAttributes()
-	attrA.Put("k1", cloneableString("v"))
+	attrA.Put(testKeyK1, cloneableString("v"))
 	attrB := fwkdl.NewAttributes()
-	attrB.Put("k1", cloneableString("v"))
-	attrB.Put("extra", cloneableString("x"))
+	attrB.Put(testKeyK1, cloneableString("v"))
+	attrB.Put(testKeyExtra, cloneableString("x"))
 
 	a := NewEndpoint(newTestMetadata("pod"), newTestMetrics(), attrA)
 	b := NewEndpoint(newTestMetadata("pod"), newTestMetrics(), attrB)
@@ -166,9 +173,9 @@ func TestEndpointComparer_DifferByAttributeKeys(t *testing.T) {
 
 func TestEndpointComparer_DifferByAttributeValues(t *testing.T) {
 	attrA := fwkdl.NewAttributes()
-	attrA.Put("k", cloneableString("v1"))
+	attrA.Put(testKeyK, cloneableString("v1"))
 	attrB := fwkdl.NewAttributes()
-	attrB.Put("k", cloneableString("v2"))
+	attrB.Put(testKeyK, cloneableString("v2"))
 
 	a := NewEndpoint(newTestMetadata("pod"), newTestMetrics(), attrA)
 	b := NewEndpoint(newTestMetadata("pod"), newTestMetrics(), attrB)

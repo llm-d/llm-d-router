@@ -42,7 +42,7 @@ func tokenizedRequest(tokens []uint32) *fwksched.InferenceRequest {
 func (p *dataProducer) assignedReplica(t *testing.T, endpoints []fwksched.Endpoint) string {
 	t.Helper()
 	for _, ep := range endpoints {
-		v, ok := ep.Get(p.dk.String())
+		v, ok := ep.Get(p.dk)
 		require.True(t, ok, "PrefixCacheMatchInfo must be attached to every endpoint")
 		info, ok := v.(*attrprefix.PrefixCacheMatchInfo)
 		require.True(t, ok)
@@ -121,7 +121,7 @@ func TestProduce_CancelledContextBeforeSeal(t *testing.T) {
 	require.Error(t, err, "a context cancelled before seal must return an error")
 
 	for _, ep := range endpoints {
-		v, ok := ep.Get(p.dk.String())
+		v, ok := ep.Get(p.dk)
 		if !ok {
 			continue // no affinity attached is expected when Produce returns early
 		}
