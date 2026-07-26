@@ -53,7 +53,7 @@ func TestNewHeaderPhaseProfileHandler(t *testing.T) {
 }
 
 func TestNewHeaderPhaseProfileHandlerEmptyFallsBackToDefault(t *testing.T) {
-	// The constructor itself must uphold the "never empty" invariant, independent of
+	// The constructor itself must uphold the "never empty" invariant, independent of the
 	// Factory: an empty headerName/defaultProfile must not produce a handler that can
 	// never match any request (request.Headers[""] is always empty, and an empty
 	// defaultProfile could never name a real schedulingProfiles entry).
@@ -290,7 +290,7 @@ func TestHeaderPhasePick(t *testing.T) {
 		},
 		{
 			// With exactly one configured profile, it always runs -- even with no
-			// header at all -- since there is nothing else to disaggregate to. This is
+			// header at all -- since there is nothing else to choose. This is
 			// what makes a deployment scaled down to a single stage work without
 			// swapping to a different profile handler.
 			name:           "single configured profile runs with no header",
@@ -315,13 +315,8 @@ func TestHeaderPhasePick(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := handler.Pick(context.Background(), tt.request, tt.profiles, tt.profileResults)
-			if len(got) != len(tt.wantProfiles) {
-				t.Errorf("Pick() returned %d profiles, want %d", len(got), len(tt.wantProfiles))
-			}
-			for name := range tt.wantProfiles {
-				if _, ok := got[name]; !ok {
-					t.Errorf("Pick() missing expected profile %q", name)
-				}
+			if diff := cmp.Diff(tt.wantProfiles, got); diff != "" {
+				t.Errorf("Pick() returned unexpected profiles (-want +got): %s", diff)
 			}
 		})
 	}
@@ -360,13 +355,8 @@ func TestHeaderPhasePickCustomDefaultProfile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := handler.Pick(context.Background(), tt.request, profiles, map[string]*fwksched.ProfileRunResult{})
-			if len(got) != len(tt.wantProfiles) {
-				t.Errorf("Pick() returned %d profiles, want %d", len(got), len(tt.wantProfiles))
-			}
-			for name := range tt.wantProfiles {
-				if _, ok := got[name]; !ok {
-					t.Errorf("Pick() missing expected profile %q", name)
-				}
+			if diff := cmp.Diff(tt.wantProfiles, got); diff != "" {
+				t.Errorf("Pick() returned unexpected profiles (-want +got): %s", diff)
 			}
 		})
 	}

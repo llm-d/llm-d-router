@@ -24,7 +24,6 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -82,6 +81,9 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 func NewHeaderPhaseProfileHandler(headerName, defaultProfile string) *HeaderPhaseProfileHandler {
 	headerName = strings.ToLower(strings.TrimSpace(headerName))
 	if headerName == "" {
+		// defaultHeaderName is kept mixed-case for the README and for the tests that use
+		// it as a mixed-case constructor input, so it needs the same normalization here
+		// as any other headerName.
 		headerName = strings.ToLower(defaultHeaderName)
 	}
 
@@ -104,7 +106,7 @@ func NewHeaderPhaseProfileHandler(headerName, defaultProfile string) *HeaderPhas
 // handler, which decides which profiles to run via decider plugins.
 //
 // Two fallbacks keep single-stage and header-less traffic working without a different
-// profile handler: with exactly one configured profile there is nothing to disaggregate,
+// profile handler: with exactly one configured profile there is nothing to choose,
 // so that profile always runs regardless of the header (or its absence); with more than
 // one configured profile, a request whose header is missing or blank runs defaultProfile
 // instead of failing. A header naming a profile that isn't configured is still an error -
@@ -173,7 +175,7 @@ func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.
 		return map[string]fwksched.SchedulerProfile{}
 	}
 
-	// With exactly one configured profile there is nothing to disaggregate: always run
+	// With exactly one configured profile there is nothing to choose: always run
 	// it, so a deployment scaled down to a single stage works without swapping profile
 	// handlers or requiring every caller to send the header.
 	if len(profiles) == 1 {
@@ -191,9 +193,10 @@ func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.
 	profile, ok := profiles[resolvedPhase]
 	if !ok {
 		// A missing or unrecognized header value is a per-request client issue, not a
-		// system fault - log at DEBUG via Info, not Error, so it doesn't page anyone or
-		// drown out real errors: logr.Logger.Error always emits regardless of V-level,
-		// only Info is verbosity-gated.
+		// system fault - log via Info, not Error, so it doesn't page anyone or drown out
+		// real errors. It's still a once-per-request operational signal an operator needs
+		// to see by default, so it's unguarded rather than gated behind a verbosity level
+		// that's off in production.
 		// A missing header whose defaultProfile substitute also fails to resolve is a
 		// distinct, config-time condition - it fails every header-less request, not just
 		// an occasional bad caller - so it gets its own message rather than being
@@ -202,7 +205,7 @@ func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.
 		if phase == "" {
 			err = h.defaultProfileNotConfiguredError()
 		}
-		log.FromContext(ctx).V(logging.DEBUG).Info("no scheduling profile selected for request", "error", err)
+		log.FromContext(ctx).Info("no scheduling profile selected for request", "error", err)
 		return map[string]fwksched.SchedulerProfile{}
 	}
 

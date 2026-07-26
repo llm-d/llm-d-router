@@ -13,8 +13,8 @@ Reads the configured header from the incoming request and looks up the
 `schedulingProfiles` entry with that exact name:
 
 - With exactly one profile configured, that profile always runs, regardless of the
-  header (or its absence). There is nothing else to disaggregate to, so a deployment
-  scaled down to a single stage -- or one that never disaggregates at all -- works
+  header (or its absence). There is nothing else to choose, so a deployment
+  scaled down to a single stage -- or one that never chooses at all -- works
   without swapping to a different profile handler.
 - With more than one profile configured and a matching profile named by the header, it
   runs that profile alone.
