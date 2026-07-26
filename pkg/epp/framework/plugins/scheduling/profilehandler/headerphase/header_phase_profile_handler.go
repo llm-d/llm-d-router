@@ -33,12 +33,19 @@ const (
 	HeaderPhaseProfileHandlerType = "header-phase-profile-handler"
 
 	// defaultHeaderName is the request header read when parameters.HeaderName is empty.
+	// Kept mixed-case for the README and for tests that use it as a mixed-case
+	// constructor input; defaultHeaderNameLower is the form actually used as a header
+	// key.
 	defaultHeaderName = "EPP-Phase"
 
 	// defaultProfileName is the scheduling profile run when parameters.DefaultProfile is
 	// empty.
 	defaultProfileName = "decode"
 )
+
+// defaultHeaderNameLower is defaultHeaderName normalized once at init, the same way
+// NewHeaderPhaseProfileHandler normalizes any configured headerName.
+var defaultHeaderNameLower = strings.ToLower(defaultHeaderName)
 
 // compile-time type assertion
 var _ fwksched.ProfileHandler = &HeaderPhaseProfileHandler{}
@@ -81,10 +88,7 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 func NewHeaderPhaseProfileHandler(headerName, defaultProfile string) *HeaderPhaseProfileHandler {
 	headerName = strings.ToLower(strings.TrimSpace(headerName))
 	if headerName == "" {
-		// defaultHeaderName is kept mixed-case for the README and for the tests that use
-		// it as a mixed-case constructor input, so it needs the same normalization here
-		// as any other headerName.
-		headerName = strings.ToLower(defaultHeaderName)
+		headerName = defaultHeaderNameLower
 	}
 
 	defaultProfile = strings.TrimSpace(defaultProfile)
