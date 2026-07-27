@@ -102,28 +102,17 @@ per-request context held by the coordinator, not in a sidecar on the decode pod.
           |  one call per phase, tagged EPP-Profile: encode | prefill | decode
           |  (re-enters the same Inference Gateway)
           v
-     Inference Gateway
-          |  endpoint picker protocol
-          v
-          EPP                          (single endpoint picker, one scheduling
+     Inference Gateway  <-- endpoint picker protocol --> EPP
+          |                            (single endpoint picker, one scheduling
           |                             profile per phase, selected by EPP-Profile)
+          |
+          v
           +-------------------+-------------------+
           v                   v                   v
-      Encode vLLM         Prefill vLLM        Decode vLLM   (worker pools, one InferencePool)
-        pool                pool                pool
+      Encode vLLM         Prefill vLLM        Decode vLLM   (one InferencePool)
+        worker              workers              workers
 ```
 
-In short:
-
-```
-                                                  one request+response per phase (encode, prefill, decode)
-                                                  +------------------------------------------------------+
-                                                  |                                                      v
-Client  <-->  Inference Gateway  <-->  Coordinator  -->  Inference Gateway  -->  EPP -->  vLLM worker pool
-                                                  ^                                                      |
-                                                  +------------------------------------------------------+
-                                                                 response streamed/returned
-```
 
 The client opens a single connection through the Inference Gateway to the coordinator
 (the gateway's default route, taken when a request carries no `EPP-Profile` header).
@@ -138,7 +127,7 @@ steps are enabled and how they are parameterized); text-only requests need no me
 download or encode at all. Across phases the coordinator sequences the round-trips
 (prefill and decode are one each), threading state from each response into the next
 request. Each Gateway call routes it by the `EPP-Profile` header to the EPP, which runs
-the matching scheduling profile and picks a pod from that phase's pool.
+the matching scheduling profile and picks a pod matching that phase's role.
 
 Every call the Coordinator makes for a phase (`conditional-decode`, `encode`, `prefill`,
 `decode`) goes through the same Gateway and the same EPP, which picks the pod for that
@@ -285,7 +274,7 @@ it as the base header set, then stamp the request ID and `EPP-Profile`.
 ### EPP-Profile routing
 
 Every coordinator-to-worker call carries an `EPP-Profile` header (`encode`, `prefill`, or
-`decode`) so the gateway routes to the correct pool. The constants live in
+`decode`) so the EPP can run the matching scheduling profile and pick the correct pod. The constants live in
 [pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). The request path is either the client's
 original OpenAI path or the internal `/inference/v1/generate` path, depending on
 `use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)). Other

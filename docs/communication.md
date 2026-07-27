@@ -946,7 +946,7 @@ data: [DONE]
 
 ## EPP-Profile Header and Routing
 
-The coordinator uses the `EPP-Profile` HTTP header to identify the pipeline stage of each request sent to workers through the Inference Gateway. The gateway uses this header for routing to the correct worker pool.
+The coordinator uses the `EPP-Profile` HTTP header to identify the pipeline stage of each request sent to workers through the Inference Gateway. The gateway forwards the request to the EPP, which reads the header to run the matching scheduling profile and pick the correct pod.
 
 | Stage             | EPP-Profile Header Value | Request Path              |
 |-------------------|----------------------|---------------------------|
