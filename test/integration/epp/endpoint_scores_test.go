@@ -29,8 +29,8 @@ import (
 
 // TestEndpointScoresMetadata verifies the opt-in request-path dynamic metadata contract: with
 // --emit-endpoint-scores, the envoy.lb namespace carries an x-gateway-destination-endpoint-scores
-// struct mapping every endpoint listed in x-gateway-destination-endpoint to its scheduler score,
-// while the endpoint key itself is unchanged.
+// struct mapping every endpoint the scheduler scored to its score, including candidates the picker
+// did not select, while the endpoint key itself is unchanged.
 func TestEndpointScoresMetadata(t *testing.T) {
 	h := NewTestHarness(t.Context(), t, WithStandardMode(), WithEmitEndpointScores()).WithBaseResources()
 
@@ -47,12 +47,15 @@ func TestEndpointScoresMetadata(t *testing.T) {
 	scoresValue, ok := envoyLb.Fields[metadata.DestinationEndpointScoresKey]
 	require.True(t, ok, "expected destination endpoint scores in envoy.lb namespace")
 	scoreFields := scoresValue.GetStructValue().Fields
-	require.Len(t, scoreFields, len(endpoints), "expected exactly one score per destination endpoint")
+	require.Len(t, scoreFields, len(pods), "expected a score for every scored candidate endpoint")
 	for _, endpoint := range endpoints {
 		score, ok := scoreFields[endpoint]
 		require.True(t, ok, "expected a score for destination endpoint %s", endpoint)
 		require.GreaterOrEqual(t, score.GetNumberValue(), 0.0, "expected a non-negative score for endpoint %s", endpoint)
 	}
+	// The picker selects a subset of the candidates it scores, so the runner-up's score
+	// is present even though it is not a destination.
+	require.Greater(t, len(scoreFields), len(endpoints), "expected scores for candidates the picker did not select")
 }
 
 // TestEndpointScoresMetadataOffByDefault verifies that without --emit-endpoint-scores the
