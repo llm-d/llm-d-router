@@ -477,6 +477,56 @@ func TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T)
 	}
 }
 
+// TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens is a regression
+// test for the one coordinator path where a client-supplied min_tokens survives
+// into the capped body: chat-completions clones reqCtx.Body, so a client
+// min_tokens > 1 would leave min_tokens > max_tokens=1 and vLLM rejects the leg.
+// The generate and completions legs build fresh bodies that never carry it.
+func TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-5"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-chat-min-tokens",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        "test-model",
+		Body: map[string]any{
+			"model":      "test-model",
+			"min_tokens": 50,
+			"max_tokens": 200,
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hello"},
+			},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["max_tokens"] != float64(1) {
+		t.Fatalf("expected prefill request max_tokens=1, got %v", prefillBody["max_tokens"])
+	}
+	if _, ok := prefillBody["min_tokens"]; ok {
+		t.Fatalf("expected client min_tokens to be stripped, got %v", prefillBody["min_tokens"])
+	}
+}
+
 // TestSharedStorage_OmitsECTransferParams_InPrefillBody verifies that the
 // ec-shared-storage EC connector never emits an ec_transfer_params field on
 // the prefill body, in every prefill wire format (chat-completions,

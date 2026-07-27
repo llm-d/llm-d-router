@@ -147,9 +147,9 @@ func TestRedactBody(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got, ok := redactBody(body).(map[string]any)
+		got, ok := RedactBody(body).(map[string]any)
 		if !ok {
-			t.Fatalf("expected map[string]any, got %T", redactBody(body))
+			t.Fatalf("expected map[string]any, got %T", RedactBody(body))
 		}
 		if got["model"] != "m" {
 			t.Errorf("short value changed: %v", got["model"])
@@ -160,23 +160,23 @@ func TestRedactBody(t *testing.T) {
 	})
 
 	t.Run("non-JSON under max length returned verbatim", func(t *testing.T) {
-		if got := redactBody([]byte("not json")); got != "not json" {
+		if got := RedactBody([]byte("not json")); got != "not json" {
 			t.Errorf("redactBody = %v, want verbatim string", got)
 		}
 	})
 
 	t.Run("non-JSON exactly max length returned verbatim", func(t *testing.T) {
 		raw := strings.Repeat("q", maxRedactRawBodyLen)
-		if got := redactBody([]byte(raw)); got != raw {
+		if got := RedactBody([]byte(raw)); got != raw {
 			t.Errorf("redactBody = %v, want verbatim (boundary is > not >=)", got)
 		}
 	})
 
 	t.Run("non-JSON over max length truncated", func(t *testing.T) {
 		raw := strings.Repeat("q", maxRedactRawBodyLen+50)
-		got, ok := redactBody([]byte(raw)).(string)
+		got, ok := RedactBody([]byte(raw)).(string)
 		if !ok {
-			t.Fatalf("expected string, got %T", redactBody([]byte(raw)))
+			t.Fatalf("expected string, got %T", RedactBody([]byte(raw)))
 		}
 		if want := raw[:maxRedactRawBodyLen] + "..."; got != want {
 			t.Errorf("redactBody truncation = %q, want %q", got, want)
