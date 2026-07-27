@@ -82,14 +82,14 @@ func TestHeaderProfileHandlerFactory(t *testing.T) {
 		},
 		{
 			name:               "custom header name",
-			rawParameters:      `{"headerName": "x-phase"}`,
-			wantHeaderName:     "x-phase",
+			rawParameters:      `{"headerName": "x-profile"}`,
+			wantHeaderName:     "x-profile",
 			wantDefaultProfile: defaultProfileName,
 		},
 		{
 			name:               "custom header name with mixed case and padding is normalized",
-			rawParameters:      `{"headerName": "  X-Custom-Phase  "}`,
-			wantHeaderName:     "x-custom-phase",
+			rawParameters:      `{"headerName": "  X-Custom-Profile  "}`,
+			wantHeaderName:     "x-custom-profile",
 			wantDefaultProfile: defaultProfileName,
 		},
 		{
