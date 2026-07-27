@@ -6,7 +6,7 @@ This plugin filters candidate endpoints by the in-flight request count the EPP t
 
 ## What it does
 
-For each scheduling cycle, the plugin reads the in-flight load attribute produced by the `inflight-load-producer` data producer from each candidate endpoint and keeps only the endpoints whose in-flight request count is at most `maxRequests`. Endpoints without the attribute are treated as having zero in-flight requests and kept.
+For each scheduling cycle, the plugin reads the in-flight load attribute produced by the `inflight-load-producer` data producer from each candidate endpoint and keeps only the endpoints whose in-flight request count is at most `maxRequests`. The count covers every request the EPP has routed to the endpoint and not yet seen complete, so it includes both running and queued requests; the EPP does not distinguish the two. Endpoints without the attribute are treated as having zero in-flight requests and kept.
 
 When every endpoint is filtered out and `fallbackOnEmpty` is `true`, the original candidate list is returned unchanged, so the request can still be routed somewhere.
 
