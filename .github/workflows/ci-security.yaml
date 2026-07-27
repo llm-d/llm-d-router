@@ -35,13 +35,23 @@ jobs:
           args: -no-fail -fmt sarif -out gosec.sarif ./...
 
       # Fork PRs run with a read only GITHUB_TOKEN that cannot upload SARIF.
-      # The scan above still surfaces findings in the job log for those runs.
       - name: Upload Gosec SARIF
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@v4.35.4 # v4.35.4 68bde559dea0fdcac2102bfdf6230c5f70eb485e
+        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
         with:
           sarif_file: gosec.sarif
           category: gosec
+
+      # gosec writes only to the report file, so on runs that skip the upload
+      # above the artifact is the only way to reach the findings.
+      - name: Upload Gosec SARIF artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gosec-sarif
+          path: gosec.sarif
+          retention-days: 7
+          if-no-files-found: warn
 
   gitleaks:
     if: github.event_name != 'schedule'
@@ -71,10 +81,19 @@ jobs:
 
       - name: Upload Gitleaks SARIF
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@v4.35.4 # v4.35.4 68bde559dea0fdcac2102bfdf6230c5f70eb485e
+        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
         with:
           sarif_file: gitleaks.sarif
           category: gitleaks
+
+      - name: Upload Gitleaks SARIF artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gitleaks-sarif
+          path: gitleaks.sarif
+          retention-days: 7
+          if-no-files-found: warn
 
   codeql:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -98,12 +117,12 @@ jobs:
       # Go has no `none` build mode, so the database is only populated if the
       # source is compiled between init and analyze.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.35.4 # v4.35.4 68bde559dea0fdcac2102bfdf6230c5f70eb485e
+        uses: github/codeql-action/init@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
         with:
           languages: go
           build-mode: autobuild
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v4.35.4 # v4.35.4 68bde559dea0fdcac2102bfdf6230c5f70eb485e
+        uses: github/codeql-action/analyze@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
         with:
           category: /language:go
