@@ -2,7 +2,7 @@ name: Apply kind/area labels and milestone from issue body
 
 on:
   issues:
-    types: [opened, edited]
+    types: [opened, edited, reopened]
 
 jobs:
   kind-labels:
