@@ -147,6 +147,9 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	if samplingParams["max_tokens"] != float64(1) {
 		t.Fatalf("expected sampling_params.max_tokens=1, got %v", samplingParams["max_tokens"])
 	}
+	if _, ok := samplingParams["min_tokens"]; ok {
+		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
+	}
 	extraArgs, ok := samplingParams["extra_args"].(map[string]any)
 	if !ok {
 		t.Fatal("expected sampling_params.extra_args in generate format")
@@ -217,6 +220,14 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	}
 	if prefillBody["request_id"] != "req-compl" {
 		t.Fatalf("expected request_id, got %v", prefillBody["request_id"])
+	}
+	// Prefill leg caps output to a single token: max_tokens is pinned to 1 and
+	// min_tokens is stripped (it defaults to 0, keeping min_tokens <= max_tokens).
+	if prefillBody["max_tokens"] != float64(1) {
+		t.Fatalf("expected max_tokens=1, got %v", prefillBody["max_tokens"])
+	}
+	if _, ok := prefillBody["min_tokens"]; ok {
+		t.Fatalf("expected min_tokens to be stripped, got %v", prefillBody["min_tokens"])
 	}
 	// Completions format has top-level kv_transfer_params
 	kvParams, ok := prefillBody["kv_transfer_params"].(map[string]any)
