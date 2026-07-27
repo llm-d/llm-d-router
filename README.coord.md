@@ -307,6 +307,8 @@ make -f Makefile.coord.mk test-e2e-coordinator
 
 This creates a temporary Kind cluster named `e2e-coordinator-tests`, runs the coordinator e2e suite against it, and deletes the cluster on completion.
 
+`test-e2e-coordinator` is the local entry point: it builds the builder, coordinator, and epp images first. CI invokes `test-e2e-coordinator-run` instead, which expects those images to be already built and loaded into the container daemon (`image-pull` fetches only the simulator). Running `test-e2e-coordinator-run` directly without prebuilt images will use stale or missing ones.
+
 **Keeping the cluster on failure**
 
 Set `E2E_KEEP_CLUSTER_ON_FAILURE=true` to preserve the cluster when any test fails. This is useful for inspecting pod logs, events, or cluster state after a failure.
