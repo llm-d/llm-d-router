@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
@@ -143,7 +144,10 @@ func TestSchedulePlugins(t *testing.T) {
 				},
 			}
 
-			if diff := cmp.Diff(wantRes, got, cmp.Comparer(fwksched.EndpointComparer)); diff != "" {
+			// ScoredCandidates covers the whole candidate set in unspecified order and
+			// is asserted in TestSchedulerProfileScoredCandidates.
+			if diff := cmp.Diff(wantRes, got, cmp.Comparer(fwksched.EndpointComparer),
+				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
 			}
 			// Validate plugin execution counts dynamically
@@ -173,6 +177,53 @@ func TestSchedulePlugins(t *testing.T) {
 				t.Errorf("winner pod score %v, expected %v", tp.WinnerEndpointScore, test.targetEndpointScore)
 			}
 		})
+	}
+}
+
+// TestSchedulerProfileScoredCandidates asserts that a profile run records the score
+// of every endpoint it scored, not only the endpoints the picker selected.
+func TestSchedulerProfileScoredCandidates(t *testing.T) {
+	const scorerWeight = 1
+
+	// The picker selects pod2 alone; pod1 and pod3 are scored but not selected.
+	plugin := &testPlugin{
+		TypeRes:   "test",
+		ScoreRes:  0.5,
+		FilterRes: []k8stypes.NamespacedName{{Name: "pod1"}, {Name: "pod2"}, {Name: "pod3"}},
+		PickRes:   k8stypes.NamespacedName{Name: "pod2"},
+	}
+	profile := NewSchedulerProfile().
+		WithFilters(plugin).
+		WithScorers(NewWeightedScorer(plugin, scorerWeight)).
+		WithPicker(plugin)
+
+	input := []fwksched.Endpoint{
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod3"}}, nil, nil),
+	}
+	request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: uuid.NewString()}
+
+	got, err := profile.Run(context.Background(), request, input)
+	if err != nil {
+		t.Fatalf("Run returned unexpected error: %v", err)
+	}
+
+	if len(got.TargetEndpoints) != 1 {
+		t.Fatalf("Expected 1 target endpoint, got %d", len(got.TargetEndpoints))
+	}
+
+	wantScores := map[string]float64{
+		"/pod1": plugin.ScoreRes * scorerWeight,
+		"/pod2": plugin.ScoreRes * scorerWeight,
+		"/pod3": plugin.ScoreRes * scorerWeight,
+	}
+	gotScores := make(map[string]float64, len(got.ScoredCandidates))
+	for _, candidate := range got.ScoredCandidates {
+		gotScores[candidate.GetMetadata().NamespacedName.String()] = candidate.Score
+	}
+	if diff := cmp.Diff(wantScores, gotScores); diff != "" {
+		t.Errorf("Unexpected scored candidates (-want +got): %v", diff)
 	}
 }
 

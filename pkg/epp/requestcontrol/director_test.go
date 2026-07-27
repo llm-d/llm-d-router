@@ -383,11 +383,21 @@ func TestDirector_HandleRequest(t *testing.T) {
 		}, nil, nil),
 		Score: 0.74,
 	}
+	// Scored but not selected by the picker; its score is still surfaced.
+	scoredEndpoint3 := &fwksched.ScoredEndpoint{
+		Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			Address:        "192.168.3.100",
+			Port:           "8000",
+			MetricsHost:    "192.168.3.100:8000",
+			NamespacedName: types.NamespacedName{Name: "pod3", Namespace: "default"},
+		}, nil, nil),
+		Score: 0.12,
+	}
 	scoredScheduleResults := &fwksched.SchedulingResult{
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"testProfile": {
-				TargetEndpoints: []fwksched.Endpoint{scoredEndpoint1, scoredEndpoint2},
-				ScoredEndpoints: []*fwksched.ScoredEndpoint{scoredEndpoint1, scoredEndpoint2},
+				TargetEndpoints:  []fwksched.Endpoint{scoredEndpoint1, scoredEndpoint2},
+				ScoredCandidates: []fwksched.ScoredEndpoint{*scoredEndpoint1, *scoredEndpoint2, *scoredEndpoint3},
 			},
 		},
 		PrimaryProfileName: "testProfile",
@@ -465,6 +475,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpointScores: map[string]float64{
 					"192.168.1.100:8000": 0.91,
 					"192.168.2.100:8000": 0.74,
+					"192.168.3.100:8000": 0.12,
 				},
 			},
 			inferenceObjectiveName: objectiveName,

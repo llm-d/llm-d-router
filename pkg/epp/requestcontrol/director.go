@@ -482,9 +482,9 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	reqCtx.TargetPod = targetMetadatas[0]
 	reqCtx.TargetEndpoint = multiEndpointString
 
-	if len(primaryResult.ScoredEndpoints) > 0 {
-		scores := make(map[string]float64, len(primaryResult.ScoredEndpoints))
-		for _, scoredEndpoint := range primaryResult.ScoredEndpoints {
+	if len(primaryResult.ScoredCandidates) > 0 {
+		scores := make(map[string]float64, len(primaryResult.ScoredCandidates))
+		for _, scoredEndpoint := range primaryResult.ScoredCandidates {
 			curMetadata := scoredEndpoint.GetMetadata()
 			scores[net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())] = scoredEndpoint.Score
 		}

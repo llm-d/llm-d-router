@@ -255,6 +255,13 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	metrics.RecordPluginProcessingLatency(pickerExtensionPoint, p.picker.TypedName().Type, p.picker.TypedName().Name, time.Since(before))
 	logger.V(logutil.DEBUG).Info("Completed running picker plugin successfully", "plugin", p.picker.TypedName(), "result", result)
 
+	if result != nil {
+		// Record the complete candidate set, which pickers narrow to their
+		// selection. Pickers reorder and truncate the pointer slice, never the
+		// backing array, so storage still holds every scored candidate.
+		result.ScoredCandidates = storage
+	}
+
 	return result
 }
 

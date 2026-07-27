@@ -164,9 +164,11 @@ type ScoredEndpoint struct {
 // ProfileRunResult captures the profile run result.
 type ProfileRunResult struct {
 	TargetEndpoints []Endpoint
-	// ScoredEndpoints, when set, is parallel to TargetEndpoints and carries the
-	// picker's score for each. Pickers that do not score may leave it nil.
-	ScoredEndpoints []*ScoredEndpoint
+	// ScoredCandidates carries the weighted score of every endpoint the profile
+	// scored, including candidates the picker did not select. TargetEndpoints is
+	// a subset of these, so the two are not parallel. Ordering is unspecified;
+	// consumers key by endpoint. Nil when the profile ran no scorers.
+	ScoredCandidates []ScoredEndpoint
 }
 
 // SchedulingResult captures the result of the scheduling cycle.

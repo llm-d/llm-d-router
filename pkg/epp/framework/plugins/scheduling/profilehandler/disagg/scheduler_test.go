@@ -81,18 +81,12 @@ func TestPDSchedule(t *testing.T) {
 						Endpoint: endpoint2,
 					},
 				},
-				ScoredEndpoints: []*fwksched.ScoredEndpoint{
-					{Endpoint: endpoint2},
-				},
 			},
 			prefill: {
 				TargetEndpoints: []fwksched.Endpoint{
 					&fwksched.ScoredEndpoint{
 						Endpoint: endpoint1,
 					},
-				},
-				ScoredEndpoints: []*fwksched.ScoredEndpoint{
-					{Endpoint: endpoint1},
 				},
 			},
 		},
@@ -107,9 +101,6 @@ func TestPDSchedule(t *testing.T) {
 					&fwksched.ScoredEndpoint{
 						Endpoint: endpoint2,
 					},
-				},
-				ScoredEndpoints: []*fwksched.ScoredEndpoint{
-					{Endpoint: endpoint2},
 				},
 			},
 		},
@@ -197,18 +188,12 @@ func TestPDSchedule(t *testing.T) {
 								Endpoint: noRoleEndpoint1,
 							},
 						},
-						ScoredEndpoints: []*fwksched.ScoredEndpoint{
-							{Endpoint: noRoleEndpoint1},
-						},
 					},
 					prefill: {
 						TargetEndpoints: []fwksched.Endpoint{
 							&fwksched.ScoredEndpoint{
 								Endpoint: endpoint1,
 							},
-						},
-						ScoredEndpoints: []*fwksched.ScoredEndpoint{
-							{Endpoint: endpoint1},
 						},
 					},
 				},
@@ -275,7 +260,8 @@ func TestPDSchedule(t *testing.T) {
 				t.Errorf("Unexpected error, got %v, want %v", err, test.err)
 			}
 
-			if diff := cmp.Diff(test.wantRes, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score")); diff != "" {
+			if diff := cmp.Diff(test.wantRes, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
+				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
 			}
 			if test.wantRes2 != nil { // Checking the prefix match in the decode pod.
@@ -289,7 +275,8 @@ func TestPDSchedule(t *testing.T) {
 					t.Errorf("Unexpected error in schedule call, got %v, want %v", err, test.err)
 				}
 
-				if diff := cmp.Diff(test.wantRes2, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score")); diff != "" {
+				if diff := cmp.Diff(test.wantRes2, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
+					cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
 					t.Errorf("Unexpected output in subsequent schedule call (-want +got): %v", diff)
 				}
 			}
