@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package headerphase
+package headerprofile
 
 import (
 	"context"
@@ -32,7 +32,7 @@ import (
 // handler stores it (always lowercased, see pkg/epp/handlers/request.go). Handlers are
 // constructed with the mixed-case defaultHeaderName throughout these tests specifically
 // to exercise the constructor's normalization against this lowercase key.
-const ingestedHeaderKey = "epp-phase"
+const ingestedHeaderKey = "epp-profile"
 
 type fakeSchedulerProfile struct{}
 
@@ -40,24 +40,24 @@ func (f *fakeSchedulerProfile) Run(_ context.Context, _ *fwksched.InferenceReque
 	return &fwksched.ProfileRunResult{}, nil
 }
 
-func TestNewHeaderPhaseProfileHandler(t *testing.T) {
-	handler := NewHeaderPhaseProfileHandler(defaultHeaderName, defaultProfileName)
+func TestNewHeaderProfileHandler(t *testing.T) {
+	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
 
 	wantTypedName := fwkplugin.TypedName{
-		Type: HeaderPhaseProfileHandlerType,
-		Name: HeaderPhaseProfileHandlerType,
+		Type: HeaderProfileHandlerType,
+		Name: HeaderProfileHandlerType,
 	}
 	if diff := cmp.Diff(wantTypedName, handler.TypedName()); diff != "" {
 		t.Errorf("Unexpected TypedName (-want +got): %s", diff)
 	}
 }
 
-func TestNewHeaderPhaseProfileHandlerEmptyFallsBackToDefault(t *testing.T) {
+func TestNewHeaderProfileHandlerEmptyFallsBackToDefault(t *testing.T) {
 	// The constructor itself must uphold the "never empty" invariant, independent of the
 	// Factory: an empty headerName/defaultProfile must not produce a handler that can
 	// never match any request (request.Headers[""] is always empty, and an empty
 	// defaultProfile could never name a real schedulingProfiles entry).
-	handler := NewHeaderPhaseProfileHandler("", "")
+	handler := NewHeaderProfileHandler("", "")
 	if handler.headerName != ingestedHeaderKey {
 		t.Errorf("Expected headerName %q, got %q", ingestedHeaderKey, handler.headerName)
 	}
@@ -66,7 +66,7 @@ func TestNewHeaderPhaseProfileHandlerEmptyFallsBackToDefault(t *testing.T) {
 	}
 }
 
-func TestHeaderPhaseProfileHandlerFactory(t *testing.T) {
+func TestHeaderProfileHandlerFactory(t *testing.T) {
 	tests := []struct {
 		name               string
 		rawParameters      string
@@ -123,7 +123,7 @@ func TestHeaderPhaseProfileHandlerFactory(t *testing.T) {
 			// (DisallowUnknownFields), so use it here too rather than a plain decoder.
 			decoder := fwkplugin.StrictDecoder(json.RawMessage(tt.rawParameters))
 
-			plugin, err := HeaderPhaseProfileHandlerFactory("custom-name", decoder, nil)
+			plugin, err := HeaderProfileHandlerFactory("custom-name", decoder, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("Factory() expected error, got nil")
@@ -134,13 +134,13 @@ func TestHeaderPhaseProfileHandlerFactory(t *testing.T) {
 				t.Fatalf("Factory() returned unexpected error: %v", err)
 			}
 
-			handler, ok := plugin.(*HeaderPhaseProfileHandler)
+			handler, ok := plugin.(*HeaderProfileHandler)
 			if !ok {
-				t.Fatalf("Expected *HeaderPhaseProfileHandler, got %T", plugin)
+				t.Fatalf("Expected *HeaderProfileHandler, got %T", plugin)
 			}
 
 			wantTypedName := fwkplugin.TypedName{
-				Type: HeaderPhaseProfileHandlerType,
+				Type: HeaderProfileHandlerType,
 				Name: "custom-name",
 			}
 			if diff := cmp.Diff(wantTypedName, handler.TypedName()); diff != "" {
@@ -156,29 +156,29 @@ func TestHeaderPhaseProfileHandlerFactory(t *testing.T) {
 	}
 }
 
-func TestHeaderPhaseNoMatchError(t *testing.T) {
-	handler := NewHeaderPhaseProfileHandler(defaultHeaderName, defaultProfileName)
+func TestHeaderProfileNoMatchError(t *testing.T) {
+	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
 
 	tests := []struct {
 		name           string
-		phase          string
+		profileName    string
 		wantErrContain string
 	}{
 		{
-			name:           "empty phase reports missing header",
-			phase:          "",
-			wantErrContain: `missing "epp-phase" header`,
+			name:           "empty profile name reports missing header",
+			profileName:    "",
+			wantErrContain: `missing "epp-profile" header`,
 		},
 		{
-			name:           "non-empty phase reports the unconfigured value",
-			phase:          "prefill",
-			wantErrContain: `no scheduling profile configured for "epp-phase" header value "prefill"`,
+			name:           "non-empty profile name reports the unconfigured value",
+			profileName:    "prefill",
+			wantErrContain: `no scheduling profile configured for "epp-profile" header value "prefill"`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := handler.noMatchError(tt.phase)
+			err := handler.noMatchError(tt.profileName)
 			if err == nil {
 				t.Fatalf("noMatchError() returned nil, want an error")
 			}
@@ -189,8 +189,8 @@ func TestHeaderPhaseNoMatchError(t *testing.T) {
 	}
 }
 
-func TestHeaderPhaseDefaultProfileNotConfiguredError(t *testing.T) {
-	handler := NewHeaderPhaseProfileHandler(defaultHeaderName, "prefill")
+func TestHeaderProfileDefaultProfileNotConfiguredError(t *testing.T) {
+	handler := NewHeaderProfileHandler(defaultHeaderName, "prefill")
 
 	err := handler.defaultProfileNotConfiguredError()
 	if err == nil {
@@ -202,18 +202,18 @@ func TestHeaderPhaseDefaultProfileNotConfiguredError(t *testing.T) {
 	}
 }
 
-func TestHeaderPhaseWithName(t *testing.T) {
-	handler := NewHeaderPhaseProfileHandler(defaultHeaderName, defaultProfileName).WithName("renamed")
+func TestHeaderProfileWithName(t *testing.T) {
+	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName).WithName("renamed")
 
 	if handler.TypedName().Name != "renamed" {
 		t.Errorf("Expected Name to be %q, got %q", "renamed", handler.TypedName().Name)
 	}
-	if handler.TypedName().Type != HeaderPhaseProfileHandlerType {
-		t.Errorf("Expected Type to remain %q, got %q", HeaderPhaseProfileHandlerType, handler.TypedName().Type)
+	if handler.TypedName().Type != HeaderProfileHandlerType {
+		t.Errorf("Expected Type to remain %q, got %q", HeaderProfileHandlerType, handler.TypedName().Type)
 	}
 }
 
-func TestHeaderPhasePick(t *testing.T) {
+func TestHeaderProfilePick(t *testing.T) {
 	encodeProfile := &fakeSchedulerProfile{}
 	decodeProfile := &fakeSchedulerProfile{}
 	profiles := map[string]fwksched.SchedulerProfile{
@@ -301,8 +301,8 @@ func TestHeaderPhasePick(t *testing.T) {
 		},
 		{
 			// The single-profile shortcut is unconditional: even a header naming a
-			// phase that isn't configured doesn't stop the one configured profile from
-			// running.
+			// profile that isn't configured doesn't stop the one configured profile
+			// from running.
 			name:           "single configured profile runs even with an unrecognized header value",
 			request:        &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "prefill"}},
 			profiles:       map[string]fwksched.SchedulerProfile{"decode": decodeProfile},
@@ -311,7 +311,7 @@ func TestHeaderPhasePick(t *testing.T) {
 		},
 	}
 
-	handler := NewHeaderPhaseProfileHandler(defaultHeaderName, defaultProfileName)
+	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := handler.Pick(context.Background(), tt.request, tt.profiles, tt.profileResults)
@@ -322,7 +322,7 @@ func TestHeaderPhasePick(t *testing.T) {
 	}
 }
 
-func TestHeaderPhasePickCustomDefaultProfile(t *testing.T) {
+func TestHeaderProfilePickCustomDefaultProfile(t *testing.T) {
 	encodeProfile := &fakeSchedulerProfile{}
 	prefillProfile := &fakeSchedulerProfile{}
 	profiles := map[string]fwksched.SchedulerProfile{
@@ -351,7 +351,7 @@ func TestHeaderPhasePickCustomDefaultProfile(t *testing.T) {
 
 	// defaultProfile "prefill" is configured but is not itself named "decode", proving
 	// the fallback uses the configured value rather than the package default.
-	handler := NewHeaderPhaseProfileHandler(defaultHeaderName, "prefill")
+	handler := NewHeaderProfileHandler(defaultHeaderName, "prefill")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := handler.Pick(context.Background(), tt.request, profiles, map[string]*fwksched.ProfileRunResult{})
@@ -362,7 +362,7 @@ func TestHeaderPhasePickCustomDefaultProfile(t *testing.T) {
 	}
 }
 
-func TestHeaderPhasePickDefaultProfileNotConfiguredStillErrors(t *testing.T) {
+func TestHeaderProfilePickDefaultProfileNotConfiguredStillErrors(t *testing.T) {
 	// defaultProfile ("decode") names a profile that isn't in schedulingProfiles here;
 	// the fallback itself failing must not be mistaken for success, and the reported
 	// reason must still describe the real cause (the missing header), not the
@@ -371,7 +371,7 @@ func TestHeaderPhasePickDefaultProfileNotConfiguredStillErrors(t *testing.T) {
 		"encode":  &fakeSchedulerProfile{},
 		"prefill": &fakeSchedulerProfile{},
 	}
-	handler := NewHeaderPhaseProfileHandler(defaultHeaderName, defaultProfileName)
+	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
 	request := &fwksched.InferenceRequest{Headers: map[string]string{}}
 
 	got := handler.Pick(context.Background(), request, profiles, map[string]*fwksched.ProfileRunResult{})
@@ -383,12 +383,12 @@ func TestHeaderPhasePickDefaultProfileNotConfiguredStillErrors(t *testing.T) {
 	if err == nil {
 		t.Fatalf("ProcessResults() expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), `missing "epp-phase" header`) {
+	if !strings.Contains(err.Error(), `missing "epp-profile" header`) {
 		t.Errorf("ProcessResults() error = %q, want it to report the missing header, not the failed default", err.Error())
 	}
 }
 
-func TestHeaderPhaseProcessResults(t *testing.T) {
+func TestHeaderProfileProcessResults(t *testing.T) {
 	successResult := &fwksched.ProfileRunResult{
 		TargetEndpoints: nil,
 	}
@@ -418,21 +418,21 @@ func TestHeaderPhaseProcessResults(t *testing.T) {
 			request:         nil,
 			profileResults:  map[string]*fwksched.ProfileRunResult{},
 			wantErr:         true,
-			wantErrContains: `missing "epp-phase" header`,
+			wantErrContains: `missing "epp-profile" header`,
 		},
 		{
 			name:            "no profiles selected, empty header, reports missing header",
 			request:         &fwksched.InferenceRequest{Headers: map[string]string{}},
 			profileResults:  map[string]*fwksched.ProfileRunResult{},
 			wantErr:         true,
-			wantErrContains: `missing "epp-phase" header`,
+			wantErrContains: `missing "epp-profile" header`,
 		},
 		{
 			name:            "no profiles selected, unconfigured header value, reports the value",
 			request:         &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "prefill"}},
 			profileResults:  map[string]*fwksched.ProfileRunResult{},
 			wantErr:         true,
-			wantErrContains: `no scheduling profile configured for "epp-phase" header value "prefill"`,
+			wantErrContains: `no scheduling profile configured for "epp-profile" header value "prefill"`,
 		},
 		{
 			name: "multiple profiles returns error",
@@ -453,7 +453,7 @@ func TestHeaderPhaseProcessResults(t *testing.T) {
 		},
 	}
 
-	handler := NewHeaderPhaseProfileHandler(defaultHeaderName, defaultProfileName)
+	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := handler.ProcessResults(context.Background(), tt.request, tt.profileResults)

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package headerphase
+package headerprofile
 
 import (
 	"context"
@@ -29,14 +29,14 @@ import (
 )
 
 const (
-	// HeaderPhaseProfileHandlerType is the type of the HeaderPhaseProfileHandler.
-	HeaderPhaseProfileHandlerType = "header-phase-profile-handler"
+	// HeaderProfileHandlerType is the type of the HeaderProfileHandler.
+	HeaderProfileHandlerType = "header-profile-handler"
 
 	// defaultHeaderName is the request header read when parameters.HeaderName is empty.
 	// Kept mixed-case for the README and for tests that use it as a mixed-case
 	// constructor input; defaultHeaderNameLower is the form actually used as a header
 	// key.
-	defaultHeaderName = "EPP-Phase"
+	defaultHeaderName = "EPP-Profile"
 
 	// defaultProfileName is the scheduling profile run when parameters.DefaultProfile is
 	// empty.
@@ -44,13 +44,13 @@ const (
 )
 
 // defaultHeaderNameLower is defaultHeaderName normalized once at init, the same way
-// NewHeaderPhaseProfileHandler normalizes any configured headerName.
+// NewHeaderProfileHandler normalizes any configured headerName.
 var defaultHeaderNameLower = strings.ToLower(defaultHeaderName)
 
 // compile-time type assertion
-var _ fwksched.ProfileHandler = &HeaderPhaseProfileHandler{}
+var _ fwksched.ProfileHandler = &HeaderProfileHandler{}
 
-// parameters configures the HeaderPhaseProfileHandler.
+// parameters configures the HeaderProfileHandler.
 type parameters struct {
 	// HeaderName is the request header whose value names the scheduling profile to run.
 	// Defaults to defaultHeaderName when empty.
@@ -62,23 +62,23 @@ type parameters struct {
 	DefaultProfile string `json:"defaultProfile"`
 }
 
-// HeaderPhaseProfileHandlerFactory defines the factory function for HeaderPhaseProfileHandler.
-func HeaderPhaseProfileHandlerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+// HeaderProfileHandlerFactory defines the factory function for HeaderProfileHandler.
+func HeaderProfileHandlerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	params := parameters{}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&params); err != nil {
-			return nil, fmt.Errorf("failed to parse the parameters of the '%s' profile handler - %w", HeaderPhaseProfileHandlerType, err)
+			return nil, fmt.Errorf("failed to parse the parameters of the '%s' profile handler - %w", HeaderProfileHandlerType, err)
 		}
 	}
 
-	return NewHeaderPhaseProfileHandler(params.HeaderName, params.DefaultProfile).WithName(name), nil
+	return NewHeaderProfileHandler(params.HeaderName, params.DefaultProfile).WithName(name), nil
 }
 
-// NewHeaderPhaseProfileHandler trims and defaults both arguments, additionally
+// NewHeaderProfileHandler trims and defaults both arguments, additionally
 // lowercasing headerName to match how the EPP stores ingested header keys
 // (pkg/epp/handlers/request.go); defaultProfile stays case-sensitive since it names a
 // schedulingProfiles entry.
-func NewHeaderPhaseProfileHandler(headerName, defaultProfile string) *HeaderPhaseProfileHandler {
+func NewHeaderProfileHandler(headerName, defaultProfile string) *HeaderProfileHandler {
 	headerName = strings.ToLower(strings.TrimSpace(headerName))
 	if headerName == "" {
 		headerName = defaultHeaderNameLower
@@ -89,61 +89,61 @@ func NewHeaderPhaseProfileHandler(headerName, defaultProfile string) *HeaderPhas
 		defaultProfile = defaultProfileName
 	}
 
-	return &HeaderPhaseProfileHandler{
-		typedName:      fwkplugin.TypedName{Type: HeaderPhaseProfileHandlerType, Name: HeaderPhaseProfileHandlerType},
+	return &HeaderProfileHandler{
+		typedName:      fwkplugin.TypedName{Type: HeaderProfileHandlerType, Name: HeaderProfileHandlerType},
 		headerName:     headerName,
 		defaultProfile: defaultProfile,
 	}
 }
 
-// HeaderPhaseProfileHandler runs exactly one scheduling profile per request, named by a
+// HeaderProfileHandler runs exactly one scheduling profile per request, named by a
 // request header, falling back to the sole configured profile or to defaultProfile when
 // there's nothing to choose or the header is missing/blank; an unrecognized header value
 // is still an error.
-type HeaderPhaseProfileHandler struct {
+type HeaderProfileHandler struct {
 	typedName      fwkplugin.TypedName
 	headerName     string
 	defaultProfile string
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
-func (h *HeaderPhaseProfileHandler) TypedName() fwkplugin.TypedName {
+func (h *HeaderProfileHandler) TypedName() fwkplugin.TypedName {
 	return h.typedName
 }
 
 // WithName sets the name of the profile handler.
-func (h *HeaderPhaseProfileHandler) WithName(name string) *HeaderPhaseProfileHandler {
+func (h *HeaderProfileHandler) WithName(name string) *HeaderProfileHandler {
 	h.typedName.Name = name
 	return h
 }
 
-// phaseHeader returns the trimmed value of the phase header, or "" when request is
-// nil or the header is absent or blank. Trimming avoids surprising lookup failures
-// when the header carries incidental leading/trailing whitespace.
-func (h *HeaderPhaseProfileHandler) phaseHeader(request *fwksched.InferenceRequest) string {
+// profileHeader returns the trimmed value of the profile-selecting header, or "" when
+// request is nil or the header is absent or blank. Trimming avoids surprising lookup
+// failures when the header carries incidental leading/trailing whitespace.
+func (h *HeaderProfileHandler) profileHeader(request *fwksched.InferenceRequest) string {
 	if request == nil {
 		return ""
 	}
 	return strings.TrimSpace(request.Headers[h.headerName])
 }
 
-// noMatchError explains why no configured scheduling profile matches phase, the
-// already-trimmed value of the phase header.
-func (h *HeaderPhaseProfileHandler) noMatchError(phase string) error {
-	if phase == "" {
-		return fmt.Errorf("header-phase profile handler: missing %q header", h.headerName)
+// noMatchError explains why no configured scheduling profile matches profileName, the
+// already-trimmed value of the profile-selecting header.
+func (h *HeaderProfileHandler) noMatchError(profileName string) error {
+	if profileName == "" {
+		return fmt.Errorf("header profile handler: missing %q header", h.headerName)
 	}
-	return fmt.Errorf("header-phase profile handler: no scheduling profile configured for %q header value %q", h.headerName, phase)
+	return fmt.Errorf("header profile handler: no scheduling profile configured for %q header value %q", h.headerName, profileName)
 }
 
 // defaultProfileNotConfiguredError reports defaultProfile itself missing from
 // schedulingProfiles - a config bug, distinct from noMatchError's per-request issue.
-func (h *HeaderPhaseProfileHandler) defaultProfileNotConfiguredError() error {
-	return fmt.Errorf("header-phase profile handler: defaultProfile %q is not a configured scheduling profile", h.defaultProfile)
+func (h *HeaderProfileHandler) defaultProfileNotConfiguredError() error {
+	return fmt.Errorf("header profile handler: defaultProfile %q is not a configured scheduling profile", h.defaultProfile)
 }
 
 // Pick implements fwksched.ProfileHandler.Pick; see README.md for behavior.
-func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.InferenceRequest, profiles map[string]fwksched.SchedulerProfile,
+func (h *HeaderProfileHandler) Pick(ctx context.Context, request *fwksched.InferenceRequest, profiles map[string]fwksched.SchedulerProfile,
 	profileResults map[string]*fwksched.ProfileRunResult) map[string]fwksched.SchedulerProfile {
 	if len(profileResults) > 0 { // the selected profile has already run
 		return map[string]fwksched.SchedulerProfile{}
@@ -158,16 +158,16 @@ func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.
 		}
 	}
 
-	phase := h.phaseHeader(request)
-	resolvedPhase := phase
-	if resolvedPhase == "" {
-		resolvedPhase = h.defaultProfile
+	profileName := h.profileHeader(request)
+	resolvedProfileName := profileName
+	if resolvedProfileName == "" {
+		resolvedProfileName = h.defaultProfile
 	}
 
-	profile, ok := profiles[resolvedPhase]
+	profile, ok := profiles[resolvedProfileName]
 	if !ok {
-		err := h.noMatchError(phase)
-		if phase == "" {
+		err := h.noMatchError(profileName)
+		if profileName == "" {
 			err = h.defaultProfileNotConfiguredError()
 		}
 		// Logged here, not returned from ProcessResults (skipped when Pick returns empty),
@@ -178,21 +178,21 @@ func (h *HeaderPhaseProfileHandler) Pick(ctx context.Context, request *fwksched.
 		return map[string]fwksched.SchedulerProfile{}
 	}
 
-	return map[string]fwksched.SchedulerProfile{resolvedPhase: profile}
+	return map[string]fwksched.SchedulerProfile{resolvedProfileName: profile}
 }
 
 // ProcessResults handles the outcome of the single profile run selected by Pick.
 // It specifies in the SchedulingResult the key of the primary profile that should be
 // used to get the request's selected destination.
-func (h *HeaderPhaseProfileHandler) ProcessResults(_ context.Context, request *fwksched.InferenceRequest,
+func (h *HeaderProfileHandler) ProcessResults(_ context.Context, request *fwksched.InferenceRequest,
 	profileResults map[string]*fwksched.ProfileRunResult) (*fwksched.SchedulingResult, error) {
 	switch len(profileResults) {
 	case 0:
-		return nil, h.noMatchError(h.phaseHeader(request))
+		return nil, h.noMatchError(h.profileHeader(request))
 	case 1:
 		// exactly one profile ran, handled below
 	default:
-		return nil, fmt.Errorf("header-phase profile handler is intended to run a single profile per request, got %d", len(profileResults))
+		return nil, fmt.Errorf("header profile handler is intended to run a single profile per request, got %d", len(profileResults))
 	}
 
 	var profileName string
