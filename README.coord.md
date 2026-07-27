@@ -307,6 +307,8 @@ make -f Makefile.coord.mk test-e2e-coordinator
 
 This creates a temporary Kind cluster named `e2e-coordinator-tests`, runs the coordinator e2e suite against it, and deletes the cluster on completion.
 
+`test-e2e-coordinator` is the local entry point: it builds the builder, coordinator, and epp images first. CI invokes `test-e2e-coordinator-run` instead, which expects those images to be already built and loaded into the container daemon (`image-pull` fetches only the simulator). Running `test-e2e-coordinator-run` directly without prebuilt images will use stale or missing ones.
+
 **Keeping the cluster on failure**
 
 Set `E2E_KEEP_CLUSTER_ON_FAILURE=true` to preserve the cluster when any test fails. This is useful for inspecting pod logs, events, or cluster state after a failure.
@@ -341,7 +343,7 @@ kubectl --context kind-e2e-coordinator-tests get pods
 |---|---|---|
 | `E2E_KEEP_CLUSTER_ON_FAILURE` | `false` | Preserve the Kind cluster when the suite fails |
 | `E2E_GATEWAY_PORT` | `30080` | Host port mapped to the gateway NodePort |
-| `E2E_PRINT_COORDINATOR_LOGS` | `false` | Print coordinator pod logs during the run |
+| `E2E_PRINT_LOGS` | `false` | Print all pod logs (coordinator, EPPs, Envoy, workers) for every spec, not just on failure |
 | `CONTAINER_RUNTIME` | `docker` | Container runtime used to load images into Kind (`docker` or `podman`) |
 | `EPP_IMAGE` | `ghcr.io/llm-d/llm-d-router-endpoint-picker:dev` | EPP image loaded into the Kind cluster |
 | `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` | vLLM image loaded into the Kind cluster |

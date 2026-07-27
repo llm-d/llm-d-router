@@ -80,6 +80,18 @@ data:
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                     stat_prefix: http-8081
                     preserve_external_request_id: true
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                          log_format:
+                            text_format_source:
+                              inline_string: "[envoy] %START_TIME(%s.%3f)% %REQ(:METHOD)% %REQ(:PATH)% code=%RESPONSE_CODE% flags=%RESPONSE_FLAGS% cluster=%UPSTREAM_CLUSTER% upstream=%UPSTREAM_HOST% epp-phase=%REQ(EPP-PHASE)% id=%REQ(X-REQUEST-ID)% dur=%DURATION%\n"
+                    access_log_options:
+                      # Emit periodic access-log entries for in-flight streams so a
+                      # request that hangs (never terminates) is still recorded,
+                      # instead of only being logged on completion/disconnect.
+                      access_log_flush_interval: 5s
                     route_config:
                       name: vllm
                       virtual_hosts:
@@ -162,6 +174,14 @@ data:
                                 cluster: coordinator
                                 timeout: 86400s
                                 idle_timeout: 86400s
+                                # Retry a failed upstream connection on a fresh one so a
+                                # transient connect hiccup to the coordinator ClusterIP is
+                                # ridden out instead of hanging the request. connect-failure
+                                # is safe for the non-idempotent POST: the connect never
+                                # completed, so no bytes reached the coordinator.
+                                retry_policy:
+                                  retry_on: "connect-failure"
+                                  num_retries: 3
                                 upgrade_configs:
                                   - upgrade_type: websocket
                               typed_per_filter_config:
@@ -235,7 +255,10 @@ data:
         # the default (no EPP-Phase) route as the pipeline entry point.
         - name: coordinator
           type: STRICT_DNS
-          connect_timeout: 1000s
+          # Fail a stuck connect quickly (paired with the route retry_policy) so a
+          # transient inability to open a connection to the coordinator ClusterIP is
+          # retried on a fresh connection instead of hanging until the client times out.
+          connect_timeout: 5s
           lb_policy: LEAST_REQUEST
           load_assignment:
             cluster_name: coordinator

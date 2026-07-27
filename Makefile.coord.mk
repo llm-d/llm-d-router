@@ -4,7 +4,7 @@ SHELL := /usr/bin/env bash
 TARGETOS ?= $(shell command -v go >/dev/null 2>&1 && go env GOOS || uname -s | tr '[:upper:]' '[:lower:]')
 TARGETARCH ?= $(shell command -v go >/dev/null 2>&1 && go env GOARCH || uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/; s/armv7l/arm/')
 PROJECT_NAME ?= llm-d-coordinator
-BUILDER_IMAGE_NAME ?= llm-d-coordinator-builder
+BUILDER_IMAGE_NAME ?= llm-d-builder
 IMAGE_REGISTRY ?= ghcr.io/llm-d
 
 # Image tags
@@ -116,7 +116,7 @@ endif
 # Env vars forwarded into the e2e test container.
 E2E_ENV_VARS = COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE VLLM_RENDER_IMAGE VLLM_RENDER_PORT \
                E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE \
-               E2E_PRINT_COORDINATOR_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME
+               E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
@@ -196,7 +196,7 @@ test-unit: image-build-builder
 	$(BUILDER_RUN) "go test -v -race $(TEST_PACKAGES)"
 
 .PHONY: test-e2e-coordinator-run
-test-e2e-coordinator-run: image-pull ## Ensure images are present, then run coordinator e2e tests
+test-e2e-coordinator-run: image-pull ## Run coordinator e2e tests against pre-loaded builder/coordinator/epp images (CI entry point; use test-e2e-coordinator locally)
 	@printf "\033[33;1m==== Running Coordinator End to End Tests ====\033[0m\n"
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		$(BUILDER_IMAGE) test/coordinator/scripts/run_e2e_coordinator.sh
