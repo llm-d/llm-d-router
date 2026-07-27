@@ -32,6 +32,11 @@ Reads the configured header from the incoming request and looks up the
   extension-point signature change tracked for the conditional-decode gate in
   [llm-d/llm-d-router#1686](https://github.com/llm-d/llm-d-router/issues/1686).
 
+The header value is matched verbatim against `schedulingProfiles[].name`; keeping the
+phase values a caller sends in sync with the profiles actually configured is a
+deployment-time convention today, not something this plugin validates. Automatic
+validation (e.g. at plugin construction) is future work.
+
 ## How this differs from disagg-profile-handler
 
 Both are `scheduling.ProfileHandler` implementations, but they answer a different
