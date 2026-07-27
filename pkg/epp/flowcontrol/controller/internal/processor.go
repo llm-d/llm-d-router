@@ -446,7 +446,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	saturation := p.saturationDetector.Saturation(ctx, pool)
 
 	// Record pool saturation metric
-	metrics.RecordFlowControlPoolSaturation(p.poolName, saturation)
+	metrics.RecordFlowControlPoolSaturation(p.poolName, "global", saturation)
 
 	// Record capacity utilization ratios (the demand-side twin of saturation) from the same periodic sample.
 	p.recordCapacityUtilization()
