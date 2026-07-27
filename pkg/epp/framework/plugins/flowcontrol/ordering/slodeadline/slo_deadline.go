@@ -99,7 +99,7 @@ func calculateSLODeadline(item flowcontrol.QueueItemAccessor) time.Time {
 	// The bound on ms must be applied before scaling to a time.Duration: once
 	// time.Duration(ms)*time.Millisecond overflows int64 it wraps to an arbitrary
 	// value, so the overflow cannot be detected afterwards. A negative,
-	// unparseable, or out-of-range value is treated as invalid and assigned the
+	// unparsable, or out-of-range value is treated as invalid and assigned the
 	// far-future deadline.
 	if err != nil || ms < 0 || ms > math.MaxInt64/int64(time.Millisecond) {
 		return sloMaxDeadlineTime
