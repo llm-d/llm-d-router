@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -170,11 +172,14 @@ func (h *HeaderProfileHandler) Pick(ctx context.Context, request *fwksched.Infer
 		if profileName == "" {
 			err = h.defaultProfileNotConfiguredError()
 		}
+		registeredProfiles := slices.Sorted(maps.Keys(profiles))
 		// Logged here, not returned from ProcessResults (skipped when Pick returns empty),
 		// at Info, not Error, since a bad or missing header is a client issue an operator
-		// still needs to see by default.
+		// still needs to see by default. registeredProfiles is included to help spot typos
+		// or config/header misalignment.
 		// See README.md for why the client only gets a generic 429 instead of this reason.
-		log.FromContext(ctx).Info("no scheduling profile selected for request", "error", err)
+		log.FromContext(ctx).Info("no scheduling profile selected for request",
+			"error", err, "resolvedProfileName", resolvedProfileName, "registeredProfiles", registeredProfiles)
 		return map[string]fwksched.SchedulerProfile{}
 	}
 
