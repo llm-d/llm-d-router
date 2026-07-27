@@ -89,7 +89,7 @@ spec:
             cpu: '1'
             memory: 8Gi
       - name: zmq-proxy
-        image: quay.io/mayab/zmq-listener:latest
+        image: quay.io/mayab/zmq-listener@sha256:2427928648d25b1195dc2e226304d3774974058b8f3f6d45099b07d4814430b6
         imagePullPolicy: IfNotPresent
         command: ["python", "-c"]
         args:
