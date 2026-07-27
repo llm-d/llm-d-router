@@ -141,13 +141,13 @@ To remove a step, delete it from the list. To reorder, move entries up or down. 
 
 ### Gateway Routing
 
-The coordinator sends every sub-request to the same gateway address. It does not use phase-specific URL prefixes; instead it stamps an `EPP-Phase` header (`encode`, `prefill`, or `decode`) so the Endpoint Picker can route to the correct worker pool. The request path is chosen by the request format:
+The coordinator sends every sub-request to the same gateway address. It does not use phase-specific URL prefixes; instead it stamps an `EPP-Profile` header (`encode`, `prefill`, or `decode`) so the Endpoint Picker can route to the correct worker pool. The request path is chosen by the request format:
 
 | Phase | Header | Path |
 |-------|--------|------|
-| Encode | `EPP-Phase: encode` | `/v1/completions` for completions requests; otherwise `/inference/v1/generate`, or `/v1/chat/completions` when `use_openai_format` is set |
-| Prefill | `EPP-Phase: prefill` | same as encode |
-| Decode | `EPP-Phase: decode` | original client request path (`/v1/chat/completions` or `/v1/completions`) |
+| Encode | `EPP-Profile: encode` | `/v1/completions` for completions requests; otherwise `/inference/v1/generate`, or `/v1/chat/completions` when `use_openai_format` is set |
+| Prefill | `EPP-Profile: prefill` | same as encode |
+| Decode | `EPP-Profile: decode` | original client request path (`/v1/chat/completions` or `/v1/completions`) |
 
 The decode step preserves the original client request path so the gateway can route it to the correct OpenAI-compatible endpoint on the decode worker.
 

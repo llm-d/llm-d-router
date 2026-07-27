@@ -38,7 +38,7 @@ func TestECTransferParams_NotForwardedToDecodeBackend(t *testing.T) {
 	var decodeBody map[string]any
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(gateway.EPPPhaseHeader) == gateway.PhaseDecode {
+		if r.Header.Get(gateway.EPPProfileHeader) == gateway.PhaseDecode {
 			raw, _ := io.ReadAll(r.Body)
 			_ = json.Unmarshal(raw, &decodeBody)
 		}
@@ -93,7 +93,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	var decodeReceivedKVParams map[string]any
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPPhaseHeader)
+		phase := r.Header.Get(gateway.EPPProfileHeader)
 		switch phase {
 		case gateway.PhasePrefill:
 			_ = json.NewEncoder(w).Encode(map[string]any{

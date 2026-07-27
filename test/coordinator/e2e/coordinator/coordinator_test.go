@@ -199,7 +199,7 @@ func verifyCoordinatorSteps(nsName string, expectedSteps []string, expectedImage
 		// never sees, so the kv connector's "preparing decode kv params" trace,
 		// which always sets do_remote_prefill=true, is where the decode leg surfaces.
 		ginkgo.By("Verifying kv_transfer_params forwarded on the prefill request")
-		gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-phase":"prefill"`, `"kv_transfer_params"`)).To(gomega.BeTrue(),
+		gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-profile":"prefill"`, `"kv_transfer_params"`)).To(gomega.BeTrue(),
 			"coordinator logs have no prefill request body carrying kv_transfer_params")
 
 		ginkgo.By("Verifying kv_transfer_params in the prefill response")
@@ -227,7 +227,7 @@ func verifyCoordinatorSteps(nsName string, expectedSteps []string, expectedImage
 				"coordinator logs missing merged encode response with total=%d", expectedImages)
 
 			ginkgo.By("Verifying ec_transfer_params forwarded on the prefill request")
-			gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-phase":"prefill"`, `"ec_transfer_params"`)).To(gomega.BeTrue(),
+			gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-profile":"prefill"`, `"ec_transfer_params"`)).To(gomega.BeTrue(),
 				"coordinator logs have no prefill request body carrying ec_transfer_params")
 		}
 	}

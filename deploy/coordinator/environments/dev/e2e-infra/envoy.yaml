@@ -1,16 +1,16 @@
 # Hand-rolled Envoy manifest for the e-p-d-pool e2e test.
 #
 # Mirrors deploy/environments/dev/e2e-infra/envoy.yaml in shape but routes any
-# request carrying an EPP-Phase header (encode | prefill | decode) to the
+# request carrying an EPP-Profile header (encode | prefill | decode) to the
 # single EPP's ext_proc cluster; the EPP itself picks the scheduling profile
-# named by that header value (see header-phase-profile-handler). The chosen
+# named by that header value (see header-profile-handler). The chosen
 # EPP picks an endpoint and Envoy forwards the request to it via the
 # ORIGINAL_DST cluster (just like the single-pool e2e Envoy).
 #
-# A request without an EPP-Phase header is the external client request: it
+# A request without an EPP-Profile header is the external client request: it
 # matches the default route and is forwarded to the coordinator, the pipeline
 # entry point. The coordinator then re-enters the gateway once per phase with
-# the EPP-Phase header set, hitting the phase route above.
+# the EPP-Profile header set, hitting the phase route above.
 #
 # Placeholders ${NAMESPACE} and ${EPP_NAME} are substituted by the suite
 # before apply (mirrors single_pool/createEnvoy substitution pattern).
@@ -87,7 +87,7 @@ data:
                           "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
                           log_format:
                             text_format_source:
-                              inline_string: "[envoy] %START_TIME(%s.%3f)% %REQ(:METHOD)% %REQ(:PATH)% code=%RESPONSE_CODE% flags=%RESPONSE_FLAGS% cluster=%UPSTREAM_CLUSTER% upstream=%UPSTREAM_HOST% epp-phase=%REQ(EPP-PHASE)% id=%REQ(X-REQUEST-ID)% dur=%DURATION%\n"
+                              inline_string: "[envoy] %START_TIME(%s.%3f)% %REQ(:METHOD)% %REQ(:PATH)% code=%RESPONSE_CODE% flags=%RESPONSE_FLAGS% cluster=%UPSTREAM_CLUSTER% upstream=%UPSTREAM_HOST% epp-profile=%REQ(EPP-PROFILE)% id=%REQ(X-REQUEST-ID)% dur=%DURATION%\n"
                     access_log_options:
                       # Emit periodic access-log entries for in-flight streams so a
                       # request that hangs (never terminates) is still recorded,
@@ -99,12 +99,12 @@ data:
                         - name: vllm-${NAMESPACE}
                           domains: ["*"]
                           routes:
-                            # e-p-d pool — any EPP-Phase value. The single EPP picks the
+                            # e-p-d pool — any EPP-Profile value. The single EPP picks the
                             # scheduling profile named by the header (encode/prefill/decode).
                             - match:
                                 prefix: "/"
                                 headers:
-                                  - name: EPP-Phase
+                                  - name: EPP-Profile
                                     present_match: true
                               route:
                                 cluster: original_destination_cluster
@@ -121,7 +121,7 @@ data:
                                         cluster_name: ext_proc_epd
                                         authority: ${EPP_NAME}.${NAMESPACE}:9002
                                       timeout: 10s
-                            # default route — no EPP-Phase header — to the
+                            # default route — no EPP-Profile header — to the
                             # coordinator, the pipeline entry point. ext_proc is
                             # disabled here: the coordinator orchestrates the
                             # phase calls itself rather than being picked by an EPP.
@@ -150,8 +150,8 @@ data:
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
                           # Default ext_proc target — the per-route override above sends
-                          # every EPP-Phase request to the single EPP. A request without
-                          # an EPP-Phase header matches the default route to the
+                          # every EPP-Profile request to the single EPP. A request without
+                          # an EPP-Profile header matches the default route to the
                           # coordinator, which disables ext_proc, so this default is only
                           # used as a wiring fallback.
                           grpc_service:
@@ -210,7 +210,7 @@ data:
             use_http_header: true
             http_header_name: x-gateway-destination-endpoint
         # Coordinator backend — plain HTTP, resolved by Service DNS name. Serves
-        # the default (no EPP-Phase) route as the pipeline entry point.
+        # the default (no EPP-Profile) route as the pipeline entry point.
         - name: coordinator
           type: STRICT_DNS
           # Fail a stuck connect quickly (paired with the route retry_policy) so a

@@ -17,7 +17,7 @@ limitations under the License.
 // Package coordinate2e runs end-to-end tests for the coordinator service
 // against the e-p-d-pools topology: a single InferencePool covering the
 // encode, prefill, and decode worker pods, served by one EPP that runs the
-// scheduling profile named by each request's EPP-Phase header, behind a
+// scheduling profile named by each request's EPP-Profile header, behind a
 // hand-rolled standalone Envoy routing on that same header, and the
 // coordinator deployed as a pod. No Istio, no Gateway/HTTPRoute CRDs.
 package coordinate2e

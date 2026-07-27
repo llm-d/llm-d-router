@@ -57,7 +57,7 @@ pipeline:
 
 // eppConfig is the scheduling config for the single EPP that serves all three
 // phases. Each request runs exactly one scheduling profile, named by its
-// EPP-Phase header value (see header-phase-profile-handler); the role filters
+// EPP-Profile header value (see header-profile-handler); the role filters
 // narrow the combined encode+prefill+decode pod pool down to the profile's own
 // role, since the InferencePool now selects across all three roles at once.
 //
@@ -83,7 +83,7 @@ plugins:
       values: ["decode", "prefill-decode", "both", "encode-prefill-decode"]
 - type: queue-scorer
 - type: max-score-picker
-- type: header-phase-profile-handler
+- type: header-profile-handler
 requestHandler:
   parsers:
   - pluginRef: openai-parser
