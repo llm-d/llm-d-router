@@ -382,7 +382,7 @@ var (
 					"(fail-closed; see flow_control_stale_endpoints).",
 				compbasemetrics.ALPHA),
 		},
-		[]string{"inference_pool"},
+		[]string{"inference_pool", "stage"},
 	)
 
 	llmdFlowControlStaleEndpoints = prometheus.NewGaugeVec(

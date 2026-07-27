@@ -376,7 +376,7 @@ var (
 					"llm_d_epp_flow_control_stale_endpoints).",
 				compbasemetrics.ALPHA),
 		},
-		[]string{"inference_pool"},
+		[]string{"inference_pool", "stage"},
 	)
 )
 
@@ -918,10 +918,11 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 	llmdFlowControlQueueBytes.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Sub(float64(bytes))
 }
 
-// RecordFlowControlPoolSaturation records the current saturation level for an inference pool.
-func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
-	flowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
-	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
+// RecordFlowControlPoolSaturation records the current saturation level for an inference pool
+// partitioned by pipeline stage ("prefill", "decode", "interleaved", or "global").
+func RecordFlowControlPoolSaturation(inferencePool, stage string, saturation float64) {
+	flowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
+	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
 }
 
 // RecordFlowControlStaleEndpoints records how many candidate endpoints the given saturation
